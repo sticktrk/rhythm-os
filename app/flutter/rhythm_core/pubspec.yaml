@@ -1,0 +1,41 @@
+name: rhythm_core
+description: Shared Flutter package for Rhythm Lighting - contains FRB bindings, models, and utilities.
+publish_to: 'none'
+
+version: 1.0.0
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Rust FFI bridge for local brain calculations
+  flutter_rust_bridge: ^2.0.0
+
+  # HTTP client for REST API calls
+  http: ^1.2.0
+
+  # Multicast DNS for device discovery
+  multicast_dns: ^0.3.2
+
+  # Shared preferences for persistence
+  shared_preferences: ^2.2.0
+
+  # WebSocket for real-time HA connection
+  web_socket_channel: ^3.0.1
+
+  # Local storage with Hive (for Home/Hub models)
+  hive: ^2.2.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  ffigen: ^8.0.0
+  hive_generator: ^2.0.1
+  build_runner: ^2.4.0
+
+flutter:
+  uses-material-design: false

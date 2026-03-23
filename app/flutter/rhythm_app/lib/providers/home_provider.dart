@@ -1,0 +1,665 @@
+import 'dart:async';
+import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
+import 'package:rhythm_core/rhythm_core.dart';
+import '../data/local_data_source.dart';
+import '../repositories/home_repository.dart';
+import '../services/auth_service.dart';
+import '../services/settings_service.dart';
+import '../services/hue/hue_service_locator.dart';
+
+/// Resolved location with source indicator for debugging.
+typedef ResolvedLocation = ({
+  double latitude,
+  double longitude,
+  String timezone,
+  String source, // 'home', 'hue', 'ha', 'default'
+});
+
+/// Provider for Home and Hub state management.
+///
+/// Provides reactive state for UI to observe:
+/// - Current home and list of homes
+/// - Hubs for the current home
+///
+/// Uses HomeRepository for local data operations.
+class HomeProvider extends ChangeNotifier {
+  // Dependencies
+  late final LocalDataSource _localDataSource;
+  late final HomeRepository _repository;
+
+  // State
+  List<Home> _homes = [];
+  Home? _currentHome;
+  List<Hub> _currentHomeHubs = [];
+  bool _isLoading = true;
+  String? _error;
+
+  // Subscriptions
+  StreamSubscription<List<Home>>? _homesSubscription;
+  StreamSubscription<List<Hub>>? _hubsSubscription;
+
+  // Initialization tracking
+  Completer<void>? _initCompleter;
+
+  // Getters
+  List<Home> get homes => _homes;
+  Home? get currentHome => _currentHome;
+  List<Hub> get currentHomeHubs => _currentHomeHubs;
+  bool get isLoading => _isLoading;
+  String? get error => _error;
+  HomeRepository get repository => _repository;
+
+  /// Whether the provider has been initialized.
+  bool get isInitialized => !_isLoading && _error == null;
+
+  /// Whether there are any homes.
+  bool get hasHomes => _homes.isNotEmpty;
+
+  /// Get the current user ID from AuthService.
+  String? get currentUserId => AuthService().currentUserId;
+
+  HomeProvider();
+
+  /// Initialize the provider.
+  ///
+  /// Must be called before using the provider. This initializes:
+  /// - Local data source (Hive)
+  /// - Home repository
+  Future<void> initialize() async {
+    if (_initCompleter != null) {
+      return _initCompleter!.future;
+    }
+
+    _initCompleter = Completer<void>();
+
+    try {
+      debugPrint('HomeProvider: Initializing...');
+
+      // Initialize local data source
+      _localDataSource = LocalDataSource();
+      await _localDataSource.initialize();
+
+      // Initialize repository
+      _repository = HomeRepository(
+        localDataSource: _localDataSource,
+      );
+
+      // Load initial data
+      _loadHomes();
+
+      // On web, there's no onboarding flow to create a Home.
+      // Ensure a default one exists so hub pairing works.
+      if (kIsWeb && _homes.isEmpty) {
+        debugPrint('HomeProvider: Web platform with no homes, creating default');
+        final home = await _repository.createHome(
+          name: 'My Home',
+          ownerId: 'web-local',
+        );
+        _loadHomes();
+        _setCurrentHome(home);
+      }
+
+      // On web, auto-detect if we're served by a rhythm-server / HA addon.
+      // Use Uri.base so the health check goes through ingress when applicable.
+      if (kIsWeb && getFirstHubOfType(HubType.server) == null && _currentHome != null) {
+        try {
+          final base = Uri.base;
+          final baseUrl = base.toString();
+          final dio = Dio(BaseOptions(
+            baseUrl: baseUrl.endsWith('/') ? baseUrl : '$baseUrl/',
+            connectTimeout: const Duration(seconds: 2),
+            receiveTimeout: const Duration(seconds: 2),
+          ));
+          final resp = await dio.get('health');
+          if (resp.statusCode == 200) {
+            debugPrint('HomeProvider: Server detected at ${base.host}:${base.port}, auto-pairing');
+            await addServerHub(name: 'RhythmServer', host: base.host, port: base.port);
+          }
+        } catch (_) {
+          // Not served by a rhythm-server — user can pair manually
+        }
+      }
+
+      // Start watching for changes
+      _startWatching();
+
+      _isLoading = false;
+      _error = null;
+      notifyListeners();
+
+      debugPrint('HomeProvider: Initialized with ${_homes.length} homes');
+      _initCompleter!.complete();
+    } catch (e, stackTrace) {
+      debugPrint('HomeProvider: Initialization failed: $e');
+      debugPrint('$stackTrace');
+      _error = e.toString();
+      _isLoading = false;
+      notifyListeners();
+      _initCompleter!.completeError(e, stackTrace);
+    }
+  }
+
+  /// Wait for initialization to complete.
+  Future<void> ensureInitialized() async {
+    if (_initCompleter == null) {
+      await initialize();
+    } else {
+      await _initCompleter!.future;
+    }
+  }
+
+  void _loadHomes() {
+    _homes = _repository.getAllHomes();
+
+    // Set current home to first home if not set
+    if (_currentHome == null && _homes.isNotEmpty) {
+      _setCurrentHome(_homes.first);
+    } else if (_currentHome != null) {
+      // Refresh current home from local data
+      final refreshedHome = _repository.getHome(_currentHome!.id);
+      if (refreshedHome != null) {
+        _currentHome = refreshedHome;
+        _loadCurrentHomeHubs();
+      } else {
+        // Current home was deleted
+        _setCurrentHome(_homes.isNotEmpty ? _homes.first : null);
+      }
+    }
+  }
+
+  void _loadCurrentHomeHubs() {
+    if (_currentHome != null) {
+      _currentHomeHubs = _repository.getHubsForHome(_currentHome!.id);
+    } else {
+      _currentHomeHubs = [];
+    }
+  }
+
+  void _setCurrentHome(Home? home) {
+    _currentHome = home;
+    _loadCurrentHomeHubs();
+
+    // Update hubs subscription
+    _hubsSubscription?.cancel();
+    if (home != null) {
+      _hubsSubscription = _repository.watchHubsForHome(home.id).listen(
+        (hubs) {
+          _currentHomeHubs = hubs;
+          notifyListeners();
+        },
+        onError: (e) => debugPrint('HomeProvider: Hubs watch error: $e'),
+      );
+    }
+  }
+
+  void _startWatching() {
+    _homesSubscription?.cancel();
+    _homesSubscription = _repository.watchHomes().listen(
+      (homes) {
+        _homes = homes;
+        // Update current home if it changed
+        if (_currentHome != null) {
+          final updated = homes.firstWhere(
+            (h) => h.id == _currentHome!.id,
+            orElse: () => homes.isNotEmpty ? homes.first : _currentHome!,
+          );
+          if (updated.id != _currentHome!.id || !homes.any((h) => h.id == _currentHome!.id)) {
+            _setCurrentHome(homes.isNotEmpty ? homes.first : null);
+          } else {
+            _currentHome = updated;
+          }
+        } else if (homes.isNotEmpty) {
+          _setCurrentHome(homes.first);
+        }
+        notifyListeners();
+      },
+      onError: (e) => debugPrint('HomeProvider: Homes watch error: $e'),
+    );
+  }
+
+  // ============================================================
+  // Home Operations
+  // ============================================================
+
+  /// Create a new home.
+  Future<Home?> createHome({
+    required String name,
+    HomeLocation? location,
+    SleepSchedule? sleepSchedule,
+    CurveConfigDto? curveConfig,
+    String? timezone,
+  }) async {
+    final userId = currentUserId;
+    if (userId == null) {
+      _error = 'User not signed in';
+      notifyListeners();
+      return null;
+    }
+
+    try {
+      final home = await _repository.createHome(
+        name: name,
+        ownerId: userId,
+        location: location,
+        sleepSchedule: sleepSchedule,
+        curveConfig: curveConfig,
+        timezone: timezone,
+      );
+
+      _loadHomes();
+      _setCurrentHome(home);
+      notifyListeners();
+      return home;
+    } catch (e) {
+      _error = 'Failed to create home: $e';
+      notifyListeners();
+      return null;
+    }
+  }
+
+  /// Update the current home.
+  Future<bool> updateCurrentHome(Home home) async {
+    if (_currentHome == null || _currentHome!.id != home.id) {
+      return false;
+    }
+
+    try {
+      final updated = await _repository.updateHome(home);
+      _currentHome = updated;
+      _loadHomes();
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = 'Failed to update home: $e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// Delete a home.
+  Future<bool> deleteHome(String id) async {
+    try {
+      await _repository.deleteHome(id);
+
+      // If deleting current home, switch to another
+      if (_currentHome?.id == id) {
+        _loadHomes();
+        _setCurrentHome(_homes.isNotEmpty ? _homes.first : null);
+      } else {
+        _loadHomes();
+      }
+
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = 'Failed to delete home: $e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// Switch to a different home.
+  void switchHome(String homeId) {
+    final home = _repository.getHome(homeId);
+    if (home != null) {
+      _setCurrentHome(home);
+      notifyListeners();
+    }
+  }
+
+  /// Update location for the current home.
+  Future<bool> updateCurrentHomeLocation(HomeLocation location) async {
+    if (_currentHome == null) return false;
+
+    try {
+      final updated = await _repository.updateHomeLocation(_currentHome!.id, location);
+      if (updated != null) {
+        _currentHome = updated;
+        _loadHomes();
+        notifyListeners();
+        return true;
+      }
+      return false;
+    } catch (e) {
+      _error = 'Failed to update location: $e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// Resolve best available location with priority: Home > Hue > HA > defaults.
+  Future<ResolvedLocation> resolveLocation({
+    HueConfig? hueConfig,
+    HaWebSocketProvider? haWebSocket,
+  }) async {
+    // 1. Home location (always preferred)
+    final home = currentHome;
+    if (home?.location != null) {
+      return (
+        latitude: home!.location!.latitude,
+        longitude: home.location!.longitude,
+        timezone: home.timezone ?? 'America/New_York',
+        source: 'home',
+      );
+    }
+
+    // 2. Hue bridge geolocation
+    if (hueConfig != null) {
+      HueServiceLocator.realInstance.configure(hueConfig);
+      final hueGeo = await HueServiceLocator.instance.fetchGeolocation();
+      if (hueGeo != null) {
+        return (
+          latitude: hueGeo.$1,
+          longitude: hueGeo.$2,
+          timezone: home?.timezone ?? 'America/New_York',
+          source: 'hue',
+        );
+      }
+    }
+
+    // 3. HA config
+    if (haWebSocket != null && haWebSocket.isConnected) {
+      try {
+        final haConfig = await haWebSocket.getConfig();
+        final lat = (haConfig['latitude'] as num?)?.toDouble();
+        final lng = (haConfig['longitude'] as num?)?.toDouble();
+        if (lat != null && lng != null) {
+          return (
+            latitude: lat,
+            longitude: lng,
+            timezone: haConfig['time_zone'] as String? ?? 'America/New_York',
+            source: 'ha',
+          );
+        }
+      } catch (e) {
+        debugPrint('HomeProvider.resolveLocation: HA config fetch failed: $e');
+      }
+    }
+
+    // 4. Defaults
+    return (
+      latitude: 35.0,
+      longitude: -80.0,
+      timezone: 'America/New_York',
+      source: 'default',
+    );
+  }
+
+  /// Update sleep schedule for the current home.
+  Future<bool> updateCurrentHomeSleepSchedule(SleepSchedule schedule) async {
+    if (_currentHome == null) return false;
+
+    try {
+      final updated = await _repository.updateHomeSleepSchedule(_currentHome!.id, schedule);
+      if (updated != null) {
+        _currentHome = updated;
+        _loadHomes();
+        notifyListeners();
+        return true;
+      }
+      return false;
+    } catch (e) {
+      _error = 'Failed to update sleep schedule: $e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// Update curve config for the current home.
+  Future<bool> updateCurrentHomeCurveConfig(CurveConfigDto curveConfig) async {
+    if (_currentHome == null) return false;
+
+    try {
+      final updated = await _repository.updateHomeCurveConfig(_currentHome!.id, curveConfig);
+      if (updated != null) {
+        _currentHome = updated;
+        _loadHomes();
+        notifyListeners();
+        return true;
+      }
+      return false;
+    } catch (e) {
+      _error = 'Failed to update curve config: $e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  // ============================================================
+  // Hub Operations
+  // ============================================================
+
+  /// Add a Home Assistant hub to the current home.
+  Future<Hub?> addHomeAssistantHub({
+    required String name,
+    required String host,
+    int port = 8123,
+    bool useSsl = false,
+    required String token,
+  }) async {
+    if (_currentHome == null) {
+      _error = 'No home selected';
+      notifyListeners();
+      return null;
+    }
+
+    try {
+      final hub = await _repository.createHomeAssistantHub(
+        homeId: _currentHome!.id,
+        name: name,
+        host: host,
+        port: port,
+        useSsl: useSsl,
+        token: token,
+      );
+
+      _loadCurrentHomeHubs();
+      notifyListeners();
+      return hub;
+    } catch (e) {
+      _error = 'Failed to add Home Assistant hub: $e';
+      notifyListeners();
+      return null;
+    }
+  }
+
+  /// Add a Philips Hue hub to the current home.
+  Future<Hub?> addHueHub({
+    required String name,
+    required String bridgeIp,
+    required String appKey,
+  }) async {
+    if (_currentHome == null) {
+      _error = 'No home selected';
+      notifyListeners();
+      return null;
+    }
+
+    try {
+      final hub = await _repository.createHueHub(
+        homeId: _currentHome!.id,
+        name: name,
+        bridgeIp: bridgeIp,
+        appKey: appKey,
+      );
+
+      _loadCurrentHomeHubs();
+      notifyListeners();
+      return hub;
+    } catch (e) {
+      _error = 'Failed to add Hue hub: $e';
+      notifyListeners();
+      return null;
+    }
+  }
+
+  /// Add a server hub (rhythm-server, HA addon, or ESP32) to the current home.
+  Future<Hub?> addServerHub({
+    required String name,
+    required String host,
+    int port = 54448,
+  }) async {
+    if (_currentHome == null) {
+      _error = 'No home selected';
+      notifyListeners();
+      return null;
+    }
+
+    try {
+      final hub = await _repository.createServerHub(
+        homeId: _currentHome!.id,
+        name: name,
+        host: host,
+        port: port,
+      );
+
+      _loadCurrentHomeHubs();
+      notifyListeners();
+      return hub;
+    } catch (e) {
+      _error = 'Failed to add server hub: $e';
+      notifyListeners();
+      return null;
+    }
+  }
+
+  /// Update a hub.
+  Future<bool> updateHub(Hub hub) async {
+    try {
+      await _repository.updateHub(hub);
+      _loadCurrentHomeHubs();
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = 'Failed to update hub: $e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// Delete a hub.
+  Future<bool> deleteHub(String hubId) async {
+    try {
+      await _repository.deleteHub(hubId);
+      _loadCurrentHomeHubs();
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = 'Failed to delete hub: $e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// Mark a hub as connected.
+  Future<void> markHubConnected(String hubId) async {
+    await _repository.markHubConnected(hubId);
+    _loadCurrentHomeHubs();
+    notifyListeners();
+  }
+
+  /// Get hubs by type.
+  List<Hub> getHubsByType(HubType type) {
+    return _currentHomeHubs.where((h) => h.type == type).toList();
+  }
+
+  /// Get the first hub of a specific type, or null if none exist.
+  Hub? getFirstHubOfType(HubType type) {
+    final hubs = getHubsByType(type);
+    return hubs.isNotEmpty ? hubs.first : null;
+  }
+
+  // ============================================================
+  // Auth & Lifecycle
+  // ============================================================
+
+  /// Called when user signs in.
+  ///
+  /// Loads homes from local storage and creates one if empty.
+  Future<void> onUserSignIn() async {
+    debugPrint('HomeProvider.onUserSignIn: Starting...');
+
+    await ensureInitialized();
+
+    // Load homes from local storage
+    _loadHomes();
+    debugPrint('HomeProvider.onUserSignIn: Loaded ${_homes.length} homes');
+
+    // Create home if none exist
+    if (_homes.isEmpty && currentUserId != null) {
+      debugPrint('HomeProvider.onUserSignIn: No homes, creating from onboarding prefs...');
+      final prefs = SettingsService.instance.consumeOnboardingPreferences();
+      await _createHomeFromPreferences(prefs);
+    } else if (_homes.isNotEmpty) {
+      SettingsService.instance.consumeOnboardingPreferences();
+    }
+
+    debugPrint('HomeProvider.onUserSignIn: Complete. currentHome=${_currentHome?.id}');
+    notifyListeners();
+  }
+
+  /// Create a home from onboarding preferences.
+  Future<void> _createHomeFromPreferences(OnboardingPreferencesData? prefs) async {
+    // Location
+    HomeLocation? location;
+    if (prefs?.latitude != null && prefs?.longitude != null) {
+      location = HomeLocation(
+        latitude: prefs!.latitude!,
+        longitude: prefs.longitude!,
+        cityName: prefs.cityName,
+      );
+    }
+
+    // Sleep schedule (use defaults if no prefs)
+    final bedtimeHour = prefs?.bedtimeHour ?? 22;
+    final bedtimeMinute = prefs?.bedtimeMinute ?? 30;
+    final wakeTimeHour = prefs?.wakeTimeHour ?? 6;
+    final wakeTimeMinute = prefs?.wakeTimeMinute ?? 30;
+
+    // Convert to decimal hours for SleepSchedule
+    final bedtime = bedtimeHour + (bedtimeMinute / 60.0);
+    final wakeTime = wakeTimeHour + (wakeTimeMinute / 60.0);
+
+    final sleepSchedule = SleepSchedule(
+      bedtime: bedtime,
+      wakeTime: wakeTime,
+      enabled: true,
+    );
+
+    // Timezone and city name
+    final timezone = prefs?.timezone;
+    final cityName = prefs?.cityName;
+
+    // Create home with collected preferences
+    final home = await createHome(
+      name: cityName != null ? 'Home in $cityName' : 'My Home',
+      location: location,
+      sleepSchedule: sleepSchedule,
+      timezone: timezone,
+    );
+    debugPrint('HomeProvider._createHomeFromPreferences: Created home: ${home?.id}');
+  }
+
+  /// Called when user signs out.
+  Future<void> onUserSignOut() async {
+    await ensureInitialized();
+    _homes = [];
+    _currentHome = null;
+    _currentHomeHubs = [];
+    notifyListeners();
+  }
+
+  /// Clear any error state.
+  void clearError() {
+    _error = null;
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _homesSubscription?.cancel();
+    _hubsSubscription?.cancel();
+    super.dispose();
+  }
+}
