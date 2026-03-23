@@ -35,13 +35,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FLUTTER_APP="$PROJECT_ROOT/flutter/rhythm_app"
-# Rust FFI source (may be in a submodule)
-if [ -d "$PROJECT_ROOT/rhythm-lighting" ]; then
-    RUST_FFI="$PROJECT_ROOT/rhythm-lighting/rust/core/rhythm-core-ffi"
-else
-    RUST_FFI="$PROJECT_ROOT/rust/core/rhythm-core-ffi"
-fi
-WRAPPER_RUST="$FLUTTER_APP/rust"
+RUST_FFI="$FLUTTER_APP/rust"
 
 # Find flutter command (same as build-wasm.sh)
 find_flutter() {
@@ -254,14 +248,6 @@ if [ "$RUN_CODEGEN" = true ]; then
     fi
 
     (cd "$FLUTTER_APP" && PATH="$FLUTTER_BIN_DIR:$PATH" flutter_rust_bridge_codegen generate)
-    echo ""
-
-    # Sync FFI code from rhythm-core-ffi to wrapper crate
-    echo "Syncing FFI code to wrapper crate..."
-    rm -rf "$WRAPPER_RUST/src/api"
-    cp -r "$RUST_FFI/src/api" "$WRAPPER_RUST/src/"
-    cp "$RUST_FFI/src/frb_generated.rs" "$WRAPPER_RUST/src/"
-    echo "  -> Copied api/ directory and frb_generated.rs"
     echo ""
     echo "Codegen complete."
     exit 0

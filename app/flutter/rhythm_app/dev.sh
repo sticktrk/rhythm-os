@@ -120,11 +120,11 @@ if [ "$BUILD_WASM" = true ]; then
     fi
 
     "$DART_CMD" run flutter_rust_bridge build-web --release \
-        --rust-root ../../rust/core/rhythm-core-ffi \
+        --rust-root rust \
         --output web/pkg
 
     # Copy WASM files
-    RUST_FFI_DIR="$WORKSPACE_ROOT/rust/core/rhythm-core-ffi"
+    RUST_FFI_DIR="$SCRIPT_DIR/rust"
     WASM_SRC="$RUST_FFI_DIR/web/pkg/pkg"
     WASM_DEST="$SCRIPT_DIR/web/pkg"
     if [ -d "$WASM_SRC" ]; then

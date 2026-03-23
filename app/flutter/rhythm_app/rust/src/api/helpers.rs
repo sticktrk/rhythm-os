@@ -21,6 +21,7 @@ pub fn get_hue_switch_prefixes() -> Vec<String> {
 /// # Returns
 ///
 /// The Hue OUI prefix: "00:17:88:01:09"
+#[allow(deprecated)]
 pub fn get_hue_oui_prefix() -> String {
     rhythm_core::device::ieee::HUE_OUI_PREFIX.to_string()
 }

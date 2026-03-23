@@ -3,7 +3,7 @@
 
 # Rust crate configuration
 rust_input: crate::api
-rust_root: ../../rhythm-lighting/rust/core/rhythm-core-ffi/
+rust_root: rust/
 
 # Dart output configuration
 # Output to rhythm_core package for sharing between web and mobile

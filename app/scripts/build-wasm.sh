@@ -10,7 +10,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FLUTTER_APP="$PROJECT_ROOT/flutter/rhythm_app"
-RUST_FFI_DIR="$PROJECT_ROOT/rhythm-lighting/rust/core/rhythm-core-ffi"
+RUST_FFI_DIR="$FLUTTER_APP/rust"
 
 # Find flutter command
 find_flutter() {
@@ -75,7 +75,7 @@ echo "Regenerating flutter_rust_bridge bindings..."
 echo ""
 echo "Building WASM..."
 (cd "$FLUTTER_APP" && "$DART_CMD" run flutter_rust_bridge build-web --release \
-    --rust-root ../../rhythm-lighting/rust/core/rhythm-core-ffi \
+    --rust-root rust \
     --output web/pkg)
 
 # Sync Dart-side content hash with compiled WASM

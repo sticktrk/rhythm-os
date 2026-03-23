@@ -685,11 +685,20 @@ dependencies = [
  "chrono-tz",
  "libm",
  "log",
+ "rhythm-curve",
  "serde",
  "serde_json",
  "sunrise",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "rhythm-curve"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "serde",
 ]
 
 [[package]]
