@@ -1,0 +1,26 @@
+[Unit]
+Description=Rhythm OS Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rhythm-server --data-dir /var/lib/rhythm --log-level info
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rhythm-server
+
+# Security hardening (system install only)
+User=rhythm
+Group=rhythm
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/rhythm
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

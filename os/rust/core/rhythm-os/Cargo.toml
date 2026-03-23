@@ -1,0 +1,42 @@
+[package]
+name = "rhythm-os"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+description = "Platform-agnostic business logic for Rhythm OS controllers"
+
+# Feature flags:
+#   embedded  - ESP32/resource-constrained: blocking runtime only.
+#   desktop   - Server binaries: blocking + async + axum + mdns.
+#   blocking  - Blocking runtime (forwarded to rhythm-core/blocking).
+#               Activated by embedded and desktop; also valid standalone
+#               for integration test-support.
+[features]
+default = ["desktop"]
+blocking = ["rhythm-core/blocking"]
+embedded = ["blocking"]
+desktop = ["blocking", "rhythm-core/tokio", "dep:axum", "dep:tower-http", "dep:tower", "dep:tokio", "dep:mdns-sd", "dep:if-addrs", "dep:futures"]
+
+[dependencies]
+rhythm-core = { path = "../rhythm-core" }
+rhythm-curve = { path = "../rhythm-curve" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+log = "0.4"
+chrono = { workspace = true }
+
+# Optional: shared Axum router + mDNS (behind "desktop" feature)
+axum = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+mdns-sd = { workspace = true, optional = true }
+if-addrs = { version = "0.13", optional = true }
+futures = { workspace = true, optional = true }
+
+[dev-dependencies]
+tower = { version = "0.4", features = ["util"] }
+rhythm-core = { path = "../rhythm-core", features = ["test-support"] }
+rhythm-hue = { path = "../../integrations/rhythm-hue", features = ["test-support"] }
+rhythm-ha = { path = "../../integrations/rhythm-ha", features = ["test-support"] }

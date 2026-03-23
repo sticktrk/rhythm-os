@@ -1,0 +1,13 @@
+.env
+.data/
+.DS_Store
+**/.DS_Store
+*.log
+bin/
+rhythm_state.json
+.git
+.idea
+.vscode
+*.swp
+*.swo
+*~

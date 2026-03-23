@@ -1,0 +1,743 @@
+//! Server-driven room sync orchestrator.
+//!
+//! Discovers rooms and devices from the hub and diffs them against current
+//! state. Adds new rooms, updates changed ones, removes stale ones, and
+//! preserves user state (rhythm_enabled, offsets, etc.).
+
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+
+use anyhow::Result;
+use log::{info, warn};
+use rhythm_core::runtime::hub_registry::DeviceType;
+use rhythm_core::HubRegistry;
+
+use crate::canonical::identity::HubKey;
+use crate::canonical::registry::ResolveResult;
+use crate::canonical::triage::{
+    RoomBindingProposal, TriageDiscoveredDevice, TriageEntry, TriageKind, TriageStatus,
+};
+use crate::commands::{self, RoomParams};
+use crate::discovery::HubDiscovery;
+use crate::state::SharedState;
+use crate::topology::{DiscoveredTopologyRoom, SyncAction};
+
+/// Summary of what changed during a sync.
+pub struct SyncReport {
+    pub rooms_added: usize,
+    pub rooms_updated: usize,
+    pub rooms_removed: usize,
+    pub devices_synced: usize,
+}
+
+/// Discover rooms and devices from the hub and sync into engine + registry.
+///
+/// Preserves user state (rhythm_enabled, time_offset, brightness_offset,
+/// soft_off, disabled) for existing rooms. New rooms default to rhythm_enabled=true.
+pub fn sync_from_hub(state: &SharedState) -> Result<SyncReport> {
+    sync_from_hub_with_options(state, true)
+}
+
+/// Sync rooms and devices from ALL connected hubs.
+///
+/// Iterates each hub with discovery and runs `sync_with_discovery` for each.
+/// Returns a combined report. Errors from individual hubs are logged but don't
+/// prevent syncing from other hubs.
+pub fn sync_all_hubs(state: &SharedState) -> Result<SyncReport> {
+    let discover_devices = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.platform.full_device_discovery
+    };
+
+    let hub_discoveries: Vec<_> = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.hubs
+            .iter()
+            .filter_map(|(key, hub)| hub.discovery.as_ref().map(|d| (key.clone(), d.clone())))
+            .collect()
+    };
+
+    if hub_discoveries.is_empty() {
+        return Err(anyhow::anyhow!("No hub discovery available"));
+    }
+
+    let mut combined = SyncReport {
+        rooms_added: 0,
+        rooms_updated: 0,
+        rooms_removed: 0,
+        devices_synced: 0,
+    };
+
+    for (key, discovery) in &hub_discoveries {
+        match sync_with_discovery(state, Some(key), discovery.as_ref(), discover_devices) {
+            Ok(report) => {
+                info!(target: "room_sync", "Hub {} sync: +{} ~{} -{} devices={}",
+                    key, report.rooms_added, report.rooms_updated,
+                    report.rooms_removed, report.devices_synced);
+                combined.rooms_added += report.rooms_added;
+                combined.rooms_updated += report.rooms_updated;
+                combined.rooms_removed += report.rooms_removed;
+                combined.devices_synced += report.devices_synced;
+            }
+            Err(e) => {
+                warn!(target: "room_sync", "Hub {} sync failed: {}", key, e);
+            }
+        }
+    }
+
+    Ok(combined)
+}
+
+/// Like [`sync_from_hub`] but allows skipping device discovery.
+///
+/// On ESP32, the device endpoint response (~79 devices) can OOM the heap
+/// when SSE TLS is already active. Pass `discover_devices: false` to sync
+/// only rooms — the SSE stream will register devices organically.
+pub fn sync_from_hub_with_options(
+    state: &SharedState,
+    discover_devices: bool,
+) -> Result<SyncReport> {
+    // Extract discovery + hub key from active hub
+    let (hub_key, discovery) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.hubs
+            .iter()
+            .find_map(|(key, h)| h.discovery.as_ref().map(|d| (key.clone(), d.clone())))
+    }
+    .ok_or_else(|| anyhow::anyhow!("No hub discovery available"))?;
+
+    sync_with_discovery(state, Some(&hub_key), discovery.as_ref(), discover_devices)
+}
+
+/// Sync rooms and devices from a specific hub identified by key.
+///
+/// Like [`sync_from_hub_with_options`] but targets a specific hub rather than
+/// picking the first one. Used after `do_hub_credentials` to sync the newly
+/// configured hub.
+pub fn sync_from_hub_for_key(
+    state: &SharedState,
+    hub_key: &HubKey,
+    discover_devices: bool,
+) -> Result<SyncReport> {
+    let discovery = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.hubs
+            .get(hub_key)
+            .and_then(|h| h.discovery.as_ref().cloned())
+    }
+    .ok_or_else(|| anyhow::anyhow!("No hub discovery for {}", hub_key))?;
+
+    sync_with_discovery(state, Some(hub_key), discovery.as_ref(), discover_devices)
+}
+
+/// Internal sync implementation that takes a discovery reference directly.
+///
+/// Interleaved order to minimize peak memory on ESP32:
+/// 1. Discover rooms (builds device→room cache inside discovery impl)
+/// 2. Process rooms (first room triggers runtime creation — TLS deferred on embedded)
+/// 3. Discover devices (uses cached device→room mapping, skips rooms re-fetch)
+/// 4. Process devices
+/// 5. Persist state
+/// 6. Release discovery resources (drops discovery TLS)
+fn sync_with_discovery(
+    state: &SharedState,
+    hub_key: Option<&HubKey>,
+    discovery: &dyn HubDiscovery,
+    discover_devices: bool,
+) -> Result<SyncReport> {
+    // ========================================================================
+    // Phase 1: Discover rooms
+    // ========================================================================
+    let discovered_rooms = discovery.discover_rooms()?;
+    info!(target: "room_sync", "Discovered {} rooms from hub", discovered_rooms.len());
+
+    // ========================================================================
+    // Phase 2: Diff and apply rooms (first room triggers runtime creation)
+    // ========================================================================
+    let (mut current_snapshots, current_room_ids) = {
+        let runtime = {
+            let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            s.hub_runtime()
+        };
+
+        let snapshots: HashMap<String, _> = runtime
+            .as_ref()
+            .map(|rt| {
+                rt.engine_all_room_snapshots()
+                    .into_iter()
+                    .map(|snap| (snap.id.clone(), snap))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let registry = extract_registry_for(state, hub_key);
+        let room_ids: HashSet<String> = registry
+            .and_then(|r| {
+                r.lock()
+                    .ok()
+                    .map(|reg| reg.rooms().into_iter().map(|r| r.id).collect())
+            })
+            .unwrap_or_default();
+
+        (snapshots, room_ids)
+    };
+
+    let discovered_ids: HashSet<String> = discovered_rooms.iter().map(|r| r.id.clone()).collect();
+
+    let mut report = SyncReport {
+        rooms_added: 0,
+        rooms_updated: 0,
+        rooms_removed: 0,
+        devices_synced: 0,
+    };
+
+    for room in &discovered_rooms {
+        let is_new = !current_room_ids.contains(&room.id);
+
+        // Preserve user state from existing engine snapshot.
+        // Engine stores rooms under topology IDs, so translate the hub-native
+        // room ID through topology before looking up the snapshot.
+        let engine_id = hub_key
+            .and_then(|k| {
+                state.lock().ok().and_then(|s| {
+                    s.topology
+                        .translate_room_id(k, &room.id)
+                        .map(|s| s.to_string())
+                })
+            })
+            .unwrap_or_else(|| room.id.clone());
+        let (rhythm_enabled, disabled, soft_off) =
+            if let Some(snap) = current_snapshots.get(&engine_id) {
+                (snap.rhythm_enabled, snap.disabled, Some(snap.soft_off))
+            } else {
+                (true, false, None) // New rooms default to rhythm_enabled=true
+            };
+
+        let params = RoomParams {
+            id: room.id.clone(),
+            name: room.name.clone(),
+            grouped_light_id: room.grouped_light_id.clone(),
+            rhythm_enabled,
+            disabled,
+            soft_off,
+            device_ids: room.device_ids.clone(),
+        };
+
+        match commands::do_room_set(state, &params, hub_key, false) {
+            Ok(_) => {
+                // After the first do_room_set triggers runtime creation,
+                // re-capture engine snapshots so remaining rooms preserve
+                // their persisted preferences (rhythm_enabled, disabled, soft_off).
+                if current_snapshots.is_empty() {
+                    if let Some(runtime) = state.lock().ok().and_then(|s| s.hub_runtime()) {
+                        current_snapshots = runtime
+                            .engine_all_room_snapshots()
+                            .into_iter()
+                            .map(|snap| (snap.id.clone(), snap))
+                            .collect();
+                    }
+                }
+
+                if is_new {
+                    info!(target: "room_sync", "Added room '{}' ({})", room.name, room.id);
+                    report.rooms_added += 1;
+                } else {
+                    report.rooms_updated += 1;
+                }
+            }
+            Err(e) => {
+                warn!(target: "room_sync", "Failed to set room '{}': {}", room.name, e);
+            }
+        }
+    }
+
+    // Remove stale rooms (in registry but not discovered)
+    let stale_ids: Vec<String> = current_room_ids
+        .difference(&discovered_ids)
+        .cloned()
+        .collect();
+
+    for room_id in &stale_ids {
+        info!(target: "room_sync", "Removing stale room '{}'", room_id);
+        if let Err(e) = commands::do_room_remove(state, room_id) {
+            warn!(target: "room_sync", "Failed to remove room '{}': {}", room_id, e);
+        }
+        report.rooms_removed += 1;
+    }
+
+    // ========================================================================
+    // Phase 3+4: Discover and apply devices (buttons + motion sensors)
+    // ========================================================================
+    // Skippable on ESP32 where the device endpoint response can OOM the heap.
+    // The SSE stream registers devices organically as button/motion events arrive.
+    // Collect which device types were discovered so stale removal
+    // only affects types that the hub actually enumerates.
+    // E.g. HA discovers only Motion (not Buttons), so on-demand
+    // registered Buttons must not be removed as stale.
+    let mut discovered_types: HashSet<rhythm_core::runtime::hub_registry::DeviceType> =
+        HashSet::new();
+    let mut discovered_device_ids: HashSet<String> = HashSet::new();
+
+    if discover_devices {
+        let discovered_devices = match discovery.discover_devices() {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(target: "room_sync", "Device discovery failed: {}", e);
+                Vec::new()
+            }
+        };
+
+        discovered_types.extend(discovered_devices.iter().map(|d| d.device_type.clone()));
+        discovered_device_ids.extend(discovered_devices.iter().map(|d| d.device_id.clone()));
+
+        for device in &discovered_devices {
+            if let Err(e) = commands::do_device_set(
+                state,
+                &device.device_id,
+                &device.room_id,
+                &device.buttons,
+                device.device_type.clone(),
+                hub_key,
+                false,
+            ) {
+                warn!(target: "room_sync", "Failed to set device '{}': {}", device.device_id, e);
+            }
+            report.devices_synced += 1;
+        }
+    }
+
+    // ========================================================================
+    // Phase 4b: Canonical device resolution
+    // ========================================================================
+    // Discover full device identities (names, MAC addresses, manufacturer/model)
+    // and resolve each through the canonical registry. Only runs when device
+    // discovery is enabled (desktop only — ESP32 doesn't persist canonical).
+    if discover_devices {
+        // Use the hub_key passed to sync_with_discovery, falling back to first credential
+        let canonical_hub_key = hub_key.cloned().or_else(|| {
+            state
+                .lock()
+                .ok()
+                .and_then(|s| s.hub_credentials.keys().next().cloned())
+        });
+
+        if let Some(canonical_hub_key) = canonical_hub_key {
+            let identities = match discovery.discover_identities() {
+                Ok(ids) => ids,
+                Err(e) => {
+                    warn!(target: "room_sync", "Identity discovery failed: {}", e);
+                    Vec::new()
+                }
+            };
+
+            if !identities.is_empty() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                let mut canonical_room_devices: HashMap<String, Vec<String>> = HashMap::new();
+
+                {
+                    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+
+                    // Prune triage entries resolved more than 7 days ago
+                    let seven_days = 7 * 24 * 60 * 60;
+                    if now > seven_days {
+                        s.canonical_registry
+                            .triage_mut()
+                            .prune_resolved(now - seven_days);
+                    }
+
+                    // Dismiss pending DeviceMerge triage entries whose native_id
+                    // is no longer in the discovered identity set (e.g. HA virtual
+                    // group entities that are no longer produced).
+                    // RoomBinding entries are NOT checked here — they use
+                    // room_binding.hub_room_id, not discovered.native_id.
+                    let discovered_native_ids: HashSet<String> =
+                        identities.iter().map(|i| i.native_id.clone()).collect();
+                    let stale_triage: Vec<String> = s
+                        .canonical_registry
+                        .triage()
+                        .pending()
+                        .iter()
+                        .filter(|e| {
+                            e.hub_key == canonical_hub_key
+                                && e.kind == crate::canonical::triage::TriageKind::DeviceMerge
+                                && !discovered_native_ids.contains(&e.discovered.native_id)
+                        })
+                        .map(|e| e.id.clone())
+                        .collect();
+                    for entry_id in &stale_triage {
+                        s.canonical_registry.triage_mut().dismiss(entry_id, now);
+                        info!(target: "room_sync", "Dismissed stale triage entry '{}'", entry_id);
+                    }
+
+                    for identity in &identities {
+                        let result =
+                            s.canonical_registry
+                                .resolve(identity, &canonical_hub_key, now);
+                        let canonical_id = match result {
+                            ResolveResult::AlreadyKnown { canonical_id } => canonical_id,
+                            ResolveResult::ReApproved { canonical_id } => canonical_id,
+                            ResolveResult::Queued { .. } => continue,
+                            ResolveResult::Created { canonical_id } => canonical_id,
+                        };
+                        canonical_room_devices
+                            .entry(identity.room_id.clone())
+                            .or_default()
+                            .push(canonical_id);
+                    }
+
+                    // ============================================================
+                    // Phase 4c: Topology sync
+                    // ============================================================
+                    for room in &discovered_rooms {
+                        let canonical_device_ids = canonical_room_devices
+                            .get(&room.id)
+                            .cloned()
+                            .unwrap_or_default();
+
+                        let topo_room = DiscoveredTopologyRoom {
+                            hub_room_id: room.id.clone(),
+                            name: room.name.clone(),
+                            control_id: room.grouped_light_id.clone(),
+                            light_device_ids: room.device_ids.clone(),
+                            canonical_device_ids: canonical_device_ids.clone(),
+                        };
+                        let action = s.topology.sync_hub_room(&canonical_hub_key, &topo_room);
+
+                        // Queue room binding proposals for cross-hub name matches
+                        if let SyncAction::CreatedWithProposal {
+                            proposed_target_id,
+                            proposed_target_name,
+                            candidate_rooms,
+                            ..
+                        } = action
+                        {
+                            if !s
+                                .canonical_registry
+                                .triage()
+                                .has_room_binding(&canonical_hub_key, &room.id)
+                            {
+                                let entry = TriageEntry {
+                                    id: format!("room-triage-{}-{}", now, room.id),
+                                    kind: TriageKind::RoomBinding,
+                                    discovered: TriageDiscoveredDevice::default(),
+                                    hub_key: canonical_hub_key.clone(),
+                                    candidate_matches: vec![],
+                                    room_binding: Some(RoomBindingProposal {
+                                        hub_room_id: room.id.clone(),
+                                        hub_room_name: room.name.clone(),
+                                        control_id: room.grouped_light_id.clone(),
+                                        light_device_ids: room.device_ids.clone(),
+                                        canonical_device_ids,
+                                        target_rhythm_room_id: proposed_target_id,
+                                        target_rhythm_room_name: proposed_target_name,
+                                        candidate_rooms,
+                                    }),
+                                    confidence: 80,
+                                    status: TriageStatus::Pending,
+                                    resolved_by: None,
+                                    created_at: now,
+                                    resolved_at: None,
+                                };
+                                s.canonical_registry.triage_mut().add(entry);
+                                info!(target: "room_sync",
+                                    "Queued room binding proposal: hub room '{}' → candidates",
+                                    room.name
+                                );
+                            }
+                        }
+                    }
+
+                    let current_room_ids: Vec<String> =
+                        discovered_rooms.iter().map(|r| r.id.clone()).collect();
+                    s.topology
+                        .remove_stale_targets(&canonical_hub_key, &current_room_ids);
+
+                    // Persist canonical registry and topology
+                    commands::persist_canonical(&s);
+                    commands::persist_topology(&s);
+                }
+
+                info!(target: "room_sync",
+                    "Canonical resolution: {} identities processed, {} topology rooms synced",
+                    identities.len(), discovered_rooms.len());
+
+                // Phase 4d (engine remap) eliminated: do_room_set now uses
+                // translate_or_create to add rooms with topology IDs from the
+                // start, so no post-hoc remap is needed.
+            }
+        }
+    }
+
+    // ========================================================================
+    // Phase 5: Prefetch motion sensor state
+    // ========================================================================
+    // Some hubs (HA) don't replay current sensor state on event subscription.
+    // If motion was active before startup, the event loop won't see it.
+    // discover_motion_state() returns current sensor states so we can seed
+    // the motion timer system before the event loop starts.
+    match discovery.discover_motion_state() {
+        Ok(motion_states) if !motion_states.is_empty() => {
+            // Register all discovered motion sensors in the device registry
+            if let Some(registry) = extract_registry_for(state, hub_key) {
+                if let Ok(mut reg) = registry.lock() {
+                    for ms in &motion_states {
+                        reg.upsert_device(&ms.sensor_id, &ms.room_id, &[], DeviceType::Motion);
+                    }
+                }
+            }
+            // Track Phase 5 sensors so stale removal doesn't undo them
+            discovered_types.insert(DeviceType::Motion);
+            for ms in &motion_states {
+                discovered_device_ids.insert(ms.sensor_id.clone());
+            }
+            // Seed active sensors into AppState for the event loop to pick up.
+            // Translate hub-native room IDs to topology IDs so motion timers
+            // use the same ID space as the engine and AppState maps.
+            let active: Vec<(String, String)> = motion_states
+                .iter()
+                .filter(|ms| ms.is_active)
+                .map(|ms| {
+                    let topo_room_id = commands::resolve_room_id(state, &ms.room_id);
+                    (ms.sensor_id.clone(), topo_room_id)
+                })
+                .collect();
+            if !active.is_empty() {
+                if let Ok(mut s) = state.lock() {
+                    s.pending_motion_seed = active;
+                }
+            }
+            info!(target: "room_sync", "Motion prefetch: {} sensors, {} active",
+                motion_states.len(),
+                motion_states.iter().filter(|m| m.is_active).count());
+        }
+        Err(e) => {
+            warn!(target: "room_sync", "Motion state prefetch failed: {}", e);
+        }
+        _ => {} // Empty or Ok with no sensors
+    }
+
+    // ========================================================================
+    // Phase 6: Remove stale devices
+    // ========================================================================
+    // Runs after Phase 5 so motion sensors discovered via prefetch aren't
+    // falsely removed. Only removes device types that were actually discovered.
+    if discover_devices && !discovered_types.is_empty() {
+        let current_typed = get_all_typed_device_ids_with_types(state, hub_key);
+        for (device_id, device_type) in &current_typed {
+            if discovered_types.contains(device_type) && !discovered_device_ids.contains(device_id)
+            {
+                if let Err(e) = commands::do_device_remove(state, device_id, hub_key) {
+                    warn!(target: "room_sync", "Failed to remove stale device '{}': {}", device_id, e);
+                }
+            }
+        }
+    }
+
+    // Persist once after all changes
+    commands::persist_state(state);
+
+    // Update composite controller routing from topology
+    #[cfg(feature = "desktop")]
+    commands::rebuild_composite_routing(state);
+
+    // Release discovery transport's TLS connection now that sync is complete.
+    // On ESP32 this frees ~12KB of heap before the first periodic tick.
+    discovery.release_resources();
+
+    info!(target: "room_sync",
+        "Sync complete: {} added, {} updated, {} removed, {} devices",
+        report.rooms_added, report.rooms_updated, report.rooms_removed,
+        report.devices_synced
+    );
+
+    Ok(report)
+}
+
+/// Extract registry Arc from state (brief lock).
+fn extract_registry(state: &SharedState) -> Option<Arc<Mutex<dyn HubRegistry>>> {
+    state
+        .lock()
+        .ok()
+        .and_then(|s| s.hubs.values().find_map(|hub| hub.registry.clone()))
+}
+
+/// Extract registry for a specific hub, falling back to first hub if no key provided.
+fn extract_registry_for(
+    state: &SharedState,
+    hub_key: Option<&HubKey>,
+) -> Option<Arc<Mutex<dyn HubRegistry>>> {
+    hub_key
+        .and_then(|k| state.lock().ok().and_then(|s| s.hub_registry_for(k)))
+        .or_else(|| extract_registry(state))
+}
+
+/// Get all managed (typed) device IDs with their types from the registry.
+///
+/// Only returns devices with a `DeviceType` (Button, Motion) — not light
+/// entity IDs which are room children managed by `upsert_room`.
+/// When `hub_key` is provided, only returns devices from that hub's registry.
+fn get_all_typed_device_ids_with_types(
+    state: &SharedState,
+    hub_key: Option<&HubKey>,
+) -> Vec<(String, rhythm_core::runtime::hub_registry::DeviceType)> {
+    let registry = extract_registry_for(state, hub_key);
+    registry
+        .and_then(|r| {
+            r.lock().ok().map(|reg| {
+                let mut devices = Vec::new();
+                for room in reg.rooms() {
+                    for (device_id, dt) in reg.devices_for_room_typed(&room.id) {
+                        devices.push((device_id, dt));
+                    }
+                }
+                devices
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Poll the hub for each room's on/off state and populate `room_lights_on`.
+///
+/// Called after `sync_from_hub()` to fill in the initial light state so
+/// the UI shows correct on/off status immediately instead of waiting for
+/// the first periodic tick (~60s).
+pub fn poll_initial_light_state(state: &SharedState) {
+    let runtime = {
+        let Ok(s) = state.lock() else { return };
+        s.hub_runtime()
+    };
+    let Some(runtime) = runtime else { return };
+
+    let snapshots = runtime.engine_all_room_snapshots();
+    if snapshots.is_empty() {
+        return;
+    }
+
+    let mut on_count = 0usize;
+    for snap in &snapshots {
+        match runtime.any_lights_on(&snap.id) {
+            Ok(on) => {
+                if let Ok(mut s) = state.lock() {
+                    s.room_lights_on.insert(snap.id.clone(), on);
+                }
+                if on {
+                    on_count += 1;
+                }
+            }
+            Err(e) => {
+                warn!(target: "room_sync", "Failed to poll lights for '{}': {}", snap.id, e);
+            }
+        }
+    }
+
+    info!(
+        target: "room_sync",
+        "Initial light state: {}/{} rooms have lights on",
+        on_count, snapshots.len()
+    );
+
+    // Emit SSE so any already-connected clients get the initial state
+    #[cfg(feature = "desktop")]
+    {
+        let events: Vec<_> = snapshots
+            .iter()
+            .map(|s| crate::commands::build_room_state_event(state, s))
+            .collect();
+        if !events.is_empty() {
+            crate::state::emit_server_event(
+                state,
+                crate::server_event::ServerEvent::RoomState { rooms: events },
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::discovery::{DiscoveredDevice, DiscoveredRoom, HubDiscovery};
+    use rhythm_core::runtime::hub_registry::DeviceType;
+
+    struct MockDiscovery {
+        rooms: Vec<DiscoveredRoom>,
+        devices: Vec<DiscoveredDevice>,
+    }
+
+    impl HubDiscovery for MockDiscovery {
+        fn discover_rooms(&self) -> Result<Vec<DiscoveredRoom>> {
+            Ok(self
+                .rooms
+                .iter()
+                .map(|r| DiscoveredRoom {
+                    id: r.id.clone(),
+                    name: r.name.clone(),
+                    grouped_light_id: r.grouped_light_id.clone(),
+                    device_ids: r.device_ids.clone(),
+                })
+                .collect())
+        }
+
+        fn discover_devices(&self) -> Result<Vec<DiscoveredDevice>> {
+            Ok(self
+                .devices
+                .iter()
+                .map(|d| DiscoveredDevice {
+                    device_id: d.device_id.clone(),
+                    room_id: d.room_id.clone(),
+                    buttons: d.buttons.clone(),
+                    device_type: d.device_type.clone(),
+                })
+                .collect())
+        }
+    }
+
+    // Note: Full integration tests require a runtime + registry setup.
+    // These are basic struct / trait validation tests.
+
+    #[test]
+    fn test_mock_discovery_returns_rooms() {
+        let discovery = MockDiscovery {
+            rooms: vec![DiscoveredRoom {
+                id: "room-1".to_string(),
+                name: "Living Room".to_string(),
+                grouped_light_id: "gl-1".to_string(),
+                device_ids: vec![],
+            }],
+            devices: vec![],
+        };
+
+        let rooms = discovery.discover_rooms().unwrap();
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(rooms[0].name, "Living Room");
+    }
+
+    #[test]
+    fn test_mock_discovery_returns_typed_devices() {
+        let discovery = MockDiscovery {
+            rooms: vec![],
+            devices: vec![
+                DiscoveredDevice {
+                    device_id: "btn1".to_string(),
+                    room_id: "r1".to_string(),
+                    buttons: vec![("b1".to_string(), 1)],
+                    device_type: DeviceType::Button,
+                },
+                DiscoveredDevice {
+                    device_id: "ms1".to_string(),
+                    room_id: "r1".to_string(),
+                    buttons: vec![],
+                    device_type: DeviceType::Motion,
+                },
+            ],
+        };
+
+        let devices = discovery.discover_devices().unwrap();
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].device_type, DeviceType::Button);
+        assert_eq!(devices[1].device_type, DeviceType::Motion);
+    }
+}

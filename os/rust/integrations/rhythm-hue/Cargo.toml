@@ -1,0 +1,32 @@
+[package]
+name = "rhythm-hue"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+description = "Platform-agnostic Philips Hue integration for Rhythm OS"
+
+[features]
+default = []
+blocking = ["rhythm-core/blocking", "rhythm-os/blocking"]
+embedded = ["blocking"]
+desktop = ["blocking", "rhythm-os/desktop", "dep:reqwest", "dep:reqwest-eventsource", "dep:tokio", "dep:futures"]
+test-support = ["blocking", "rhythm-core/test-support"]
+
+[[test]]
+name = "integration_flow"
+required-features = ["test-support"]
+
+[dependencies]
+rhythm-core = { path = "../../core/rhythm-core" }
+rhythm-os = { path = "../../core/rhythm-os", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+async-trait = "0.1"
+log = "0.4"
+
+# Optional: reqwest-based transport for desktop targets
+reqwest = { workspace = true, optional = true }
+reqwest-eventsource = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }

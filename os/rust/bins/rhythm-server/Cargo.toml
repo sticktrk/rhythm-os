@@ -1,0 +1,48 @@
+[package]
+name = "rhythm-server"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+description = "macOS/Linux CLI server for Rhythm OS"
+default-run = "rhythm-server"
+
+[[bin]]
+name = "rhythm-server"
+
+[[bin]]
+name = "rhythm-cli"
+path = "src/cli.rs"
+
+[dependencies]
+rhythm-ha = { path = "../../integrations/rhythm-ha", features = ["desktop"] }
+rhythm-hue = { path = "../../integrations/rhythm-hue", features = ["desktop"] }
+rhythm-os = { path = "../../core/rhythm-os", features = ["desktop"] }
+
+# Workspace deps
+tokio = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+
+tower = { workspace = true }
+
+# Server-specific
+clap = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+
+# HTTP client (for self-update)
+reqwest = { workspace = true }
+
+# Logging
+log = "0.4"
+tracing = { workspace = true }
+
+# Platform (for service control)
+libc = "0.2"
+
+# mDNS (for discover endpoint)
+mdns-sd = { workspace = true }
+

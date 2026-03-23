@@ -1,0 +1,46 @@
+[package]
+name = "rhythm-esp32"
+version = "0.3.140"
+edition = "2021"
+authors = ["Tim K, @sticktrk"]
+description = "ESP32-C6 firmware for Rhythm OS adaptive lighting control"
+resolver = "2"
+
+[[bin]]
+name = "rhythm-esp32"
+harness = false
+
+[profile.release]
+opt-level = "s"
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+[dependencies]
+rhythm-core = { path = "../../core/rhythm-core", features = ["blocking"] }
+rhythm-hue = { path = "../../integrations/rhythm-hue", features = ["embedded"] }
+rhythm-os = { path = "../../core/rhythm-os", default-features = false, features = ["embedded"] }
+esp-idf-svc = "0.51"
+esp-idf-hal = { version = "0.45", features = ["rmt-legacy"] }
+embedded-svc = "0.28"
+enumset = "1.1"
+log = "0.4"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+async-trait = "0.1"
+
+[build-dependencies]
+embuild = "0.33"
+
+[patch.crates-io]
+esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal", branch = "master" }
+esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc", branch = "master" }
+esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys", branch = "master" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(esp_idf_mbedtls_certificate_bundle)'] }
+
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/mdns", version = "1.8" }

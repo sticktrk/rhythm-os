@@ -1,0 +1,50 @@
+#!/usr/bin/with-contenv bashio
+# ==============================================================================
+# Start the Rhythm OS Rust service
+# ==============================================================================
+
+# ---------------------------------------------------------------
+# 1. Detect mode and set up environment
+# ---------------------------------------------------------------
+if [ -z "${SUPERVISOR_TOKEN:-}" ] && [ -n "${SUPERVISOR_TOKEN_FILE:-}" ] && [ -f "${SUPERVISOR_TOKEN_FILE}" ]; then
+    SUPERVISOR_TOKEN="$(cat "${SUPERVISOR_TOKEN_FILE}")"
+fi
+
+if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
+    MODE="ADDON"
+    bashio::log.info "Running in addon mode (SUPERVISOR_TOKEN present)"
+
+    # In addon mode, use supervisor proxy URLs
+    export HA_WEBSOCKET_URL="ws://supervisor/core/api/websocket"
+    export HA_TOKEN="${SUPERVISOR_TOKEN}"
+    export HA_HOST="supervisor"
+    export HA_PORT="80"
+    export HA_USE_SSL="false"
+else
+    MODE="STANDALONE"
+    bashio::log.info "Running in standalone mode"
+
+    # Use environment variables
+    export HA_HOST="${HA_HOST:-localhost}"
+    export HA_PORT="${HA_PORT:-8123}"
+    export HA_USE_SSL="${HA_USE_SSL:-false}"
+fi
+
+# Check if token is set
+if [ -z "${HA_TOKEN:-}" ]; then
+    bashio::log.error "No Home Assistant token provided!"
+    bashio::log.info "Set HA_TOKEN environment variable"
+    exit 1
+fi
+
+# Log startup
+bashio::log.info "Starting Rhythm OS (Rust)..."
+bashio::log.info "Mode: ${MODE}"
+bashio::log.info "HA Host: ${HA_HOST}:${HA_PORT}"
+
+# Set API port
+export PORT="${PORT:-39821}"
+bashio::log.info "API port: ${PORT}"
+
+# Run the Rust binary
+exec /usr/local/bin/rhythm-addon

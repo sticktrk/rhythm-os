@@ -1,0 +1,16 @@
+# https://developers.home-assistant.io/docs/add-ons/configuration#add-on-config
+name: Rhythm OS
+version: "0.1.207"
+slug: rhythm
+description: Adaptive lighting that follows the sun
+url: "https://github.com/sticktrk/rhythm-os"
+arch:
+  - armv7
+  - aarch64
+  - amd64
+init: false
+auth_api: true
+homeassistant_api: true
+map:
+  - config:rw
+host_network: true

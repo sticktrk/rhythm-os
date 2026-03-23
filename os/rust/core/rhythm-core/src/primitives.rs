@@ -1,0 +1,1693 @@
+//! Service primitives for Rhythm OS.
+//!
+//! This module provides the `RhythmEngine` which implements the core
+//! service primitives (rhythm_on, rhythm_off, step_up, step_down, etc.)
+//! in a platform-agnostic way.
+//!
+//! The engine is generic over the `LightController` trait, allowing it
+//! to work with any backend (Home Assistant, Hue, ZigBee, etc.).
+
+extern crate alloc;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+
+use crate::config::CurveConfig;
+use crate::controller::{LightControlResult, LightController};
+use crate::curve_module::{CurveContext, CurveModuleRegistry, LightCurveModule};
+use crate::lighting::LightingCommand;
+use crate::room::RoomManager;
+use crate::solar::{SolarTime, SunTimes};
+use crate::steps::StepAction;
+
+/// Default transition time in milliseconds.
+const DEFAULT_TRANSITION_MS: u32 = 500;
+
+/// Default bulb fade (dynamics transition) duration in milliseconds.
+pub const DEFAULT_BULB_FADE_MS: u16 = 500;
+
+/// Default motion timeout in seconds.
+pub const DEFAULT_MOTION_TIMEOUT_SECS: u64 = 600;
+
+/// Default power save mode (false = lights dim to soft-off brightness instead of turning fully off).
+pub const DEFAULT_POWER_SAVE: bool = false;
+
+/// Default soft-off brightness percentage (1%).
+pub const DEFAULT_SOFT_OFF_BRIGHTNESS: u8 = 1;
+
+/// Result of a single-room periodic tick.
+pub enum PeriodicTickResult {
+    /// Room was updated with new adaptive lighting values.
+    Updated,
+    /// Room skipped (not rhythm-enabled, lights off, network error, etc.).
+    Skipped,
+    /// An error occurred during the tick.
+    Error(String),
+}
+
+/// Check if solar midnight was crossed between two time checks.
+///
+/// This handles edge cases around clock midnight (0:00) correctly.
+///
+/// # Arguments
+///
+/// * `last_hour` - Hour at the last check (0-24)
+/// * `current_hour` - Current hour (0-24)
+/// * `midnight_hour` - Solar midnight hour (0-24)
+///
+/// # Returns
+///
+/// `true` if solar midnight was crossed, `false` otherwise.
+pub fn crossed_solar_midnight(last_hour: f32, current_hour: f32, midnight_hour: f32) -> bool {
+    // Normal case: both hours on same side of clock midnight
+    if last_hour <= current_hour {
+        // Time moved forward within same day
+        last_hour < midnight_hour && current_hour >= midnight_hour
+    } else {
+        // We crossed clock midnight (e.g., 23:30 -> 0:30)
+        // Check if solar midnight is in the window we crossed
+        if midnight_hour > last_hour {
+            // Solar midnight is after last check (before clock midnight)
+            true
+        } else if midnight_hour <= current_hour {
+            // Solar midnight is at or before current time (after clock midnight)
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// The Rhythm OS engine.
+///
+/// This struct combines the curve module system with a light controller
+/// to provide the service primitives (rhythm_on, step_up, etc.).
+///
+/// # Type Parameters
+///
+/// * `C` - The light controller implementation
+///
+/// # Example
+///
+/// ```ignore
+/// use rhythm_core::primitives::RhythmEngine;
+/// use rhythm_core::controller::NoOpController;
+///
+/// let controller = NoOpController::new();
+/// let mut engine = RhythmEngine::new(controller);
+///
+/// engine.turn_on("living_room", 12.0).await.unwrap();
+/// ```
+pub struct RhythmEngine<C: LightController> {
+    /// The light controller for sending commands.
+    controller: C,
+
+    /// Registry of available curve modules.
+    module_registry: CurveModuleRegistry,
+
+    /// Solar time reference for coordinate-based calculations.
+    solar: SolarTime,
+
+    /// Sunrise/sunset times for dynamic midpoint resolution.
+    sun_times: Option<SunTimes>,
+
+    /// Room state manager.
+    rooms: RoomManager,
+
+    /// Default transition time in milliseconds.
+    transition_ms: u32,
+
+    /// Power save mode. When true, lights turn fully off.
+    /// When false (default), lights dim to soft-off brightness to maintain color temperature.
+    power_save: bool,
+
+    /// Brightness percentage used for soft-off (when power_save is disabled).
+    /// Lights dim to this level instead of turning fully off. Range: 1–100, default 1.
+    soft_off_brightness: u8,
+}
+
+impl<C: LightController> RhythmEngine<C> {
+    /// Create a new RhythmEngine with the given controller.
+    pub fn new(controller: C) -> Self {
+        Self {
+            controller,
+            module_registry: CurveModuleRegistry::new(),
+            solar: SolarTime::default(),
+            sun_times: None,
+            rooms: RoomManager::new(),
+            transition_ms: DEFAULT_TRANSITION_MS,
+            power_save: DEFAULT_POWER_SAVE,
+            soft_off_brightness: DEFAULT_SOFT_OFF_BRIGHTNESS,
+        }
+    }
+
+    /// Create a new RhythmEngine with custom configuration.
+    pub fn with_config(controller: C, config: CurveConfig, solar: SolarTime) -> Self {
+        Self {
+            controller,
+            module_registry: CurveModuleRegistry::with_config(config),
+            solar,
+            sun_times: None,
+            rooms: RoomManager::new(),
+            transition_ms: DEFAULT_TRANSITION_MS,
+            power_save: DEFAULT_POWER_SAVE,
+            soft_off_brightness: DEFAULT_SOFT_OFF_BRIGHTNESS,
+        }
+    }
+
+    /// Set the curve configuration for the rhythm module.
+    pub fn set_config(&mut self, config: CurveConfig) {
+        self.module_registry.update_rhythm_config(config);
+    }
+
+    /// Set the solar time reference.
+    pub fn set_solar(&mut self, solar: SolarTime) {
+        self.solar = solar;
+    }
+
+    /// Set the sunrise/sunset times for dynamic midpoint resolution.
+    pub fn set_sun_times(&mut self, sun_times: SunTimes) {
+        self.sun_times = Some(sun_times);
+    }
+
+    /// Clear the sunrise/sunset times (will use fallback values).
+    pub fn clear_sun_times(&mut self) {
+        self.sun_times = None;
+    }
+
+    /// Set the default transition time.
+    pub fn set_transition_ms(&mut self, ms: u32) {
+        self.transition_ms = ms;
+    }
+
+    /// Get a reference to the room manager.
+    pub fn rooms(&self) -> &RoomManager {
+        &self.rooms
+    }
+
+    /// Get a mutable reference to the room manager.
+    pub fn rooms_mut(&mut self) -> &mut RoomManager {
+        &mut self.rooms
+    }
+
+    /// Get a reference to the module registry.
+    pub fn module_registry(&self) -> &CurveModuleRegistry {
+        &self.module_registry
+    }
+
+    /// Get a mutable reference to the module registry.
+    pub fn module_registry_mut(&mut self) -> &mut CurveModuleRegistry {
+        &mut self.module_registry
+    }
+
+    /// Get the currently active curve module.
+    pub fn active_module(&self) -> Arc<dyn LightCurveModule> {
+        self.module_registry.active_module()
+    }
+
+    /// Set the active curve module by ID.
+    ///
+    /// Returns true if the module was found and set as active.
+    pub fn set_curve_module(&mut self, id: &str) -> bool {
+        self.module_registry.set_active_module(id)
+    }
+
+    /// Get a list of available curve modules as (id, name) pairs.
+    pub fn available_modules(&self) -> Vec<(&str, &str)> {
+        self.module_registry.available_modules()
+    }
+
+    /// Get a reference to the controller.
+    pub fn controller(&self) -> &C {
+        &self.controller
+    }
+
+    /// Get whether power save mode is enabled.
+    pub fn power_save(&self) -> bool {
+        self.power_save
+    }
+
+    /// Get the soft-off brightness percentage (1–100).
+    pub fn soft_off_brightness(&self) -> u8 {
+        self.soft_off_brightness
+    }
+
+    /// Set the soft-off brightness percentage (clamped to 1–100).
+    pub fn set_soft_off_brightness(&mut self, value: u8) {
+        self.soft_off_brightness = value.clamp(1, 100);
+    }
+
+    /// Set power save mode. Returns a list of room IDs that were in soft_off
+    /// state (caller must turn them truly off if switching to power_save ON).
+    pub fn set_power_save(&mut self, enabled: bool) -> Vec<String> {
+        let prev = self.power_save;
+        self.power_save = enabled;
+
+        if enabled && !prev {
+            // Switching from power_save OFF → ON: collect soft_off rooms
+            let soft_off_ids: Vec<String> = self
+                .rooms
+                .iter()
+                .filter(|r| r.soft_off)
+                .map(|r| r.id.clone())
+                .collect();
+            // Clear all soft_off flags
+            for room in self.rooms.iter_mut() {
+                room.soft_off = false;
+            }
+            soft_off_ids
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Create a curve context for the given hour.
+    fn create_context(&self, current_hour: f32) -> CurveContext {
+        CurveContext::new(current_hour, self.solar, self.sun_times)
+    }
+
+    // =========================================================================
+    // Service Primitives
+    // =========================================================================
+
+    /// Enable Rhythm timer participation (no light commands).
+    ///
+    /// This only enables Rhythm mode so the room participates in the
+    /// periodic 60s tick. It does NOT send any light commands.
+    ///
+    /// # Arguments
+    ///
+    /// * `room_id` - The ID of the room
+    pub async fn rhythm_on(&mut self, room_id: &str) -> LightControlResult<()> {
+        let room = self.rooms.get_or_create(room_id, room_id);
+        room.enable_rhythm();
+        Ok(())
+    }
+
+    /// Turn on lights with adaptive values and enable Rhythm.
+    ///
+    /// This is the primary "turn on lights" entry point. It enables Rhythm
+    /// mode, calculates the current adaptive values, and turns on the lights.
+    ///
+    /// # Arguments
+    ///
+    /// * `room_id` - The ID of the room
+    /// * `current_hour` - Current time in hours (0-24)
+    pub async fn turn_on(&mut self, room_id: &str, current_hour: f32) -> LightControlResult<()> {
+        // Get or create room and enable rhythm
+        let room = self.rooms.get_or_create(room_id, room_id);
+        room.enable_rhythm();
+        room.soft_off = false;
+
+        // Calculate lighting values with any stored offset
+        let offset_minutes = room.effective_time_offset();
+        let brightness_offset = room.effective_brightness_offset();
+
+        let ctx = self.create_context(current_hour);
+        let module = self.module_registry.active_module();
+        let values = module.calculate_with_offset(&ctx, offset_minutes);
+
+        // Apply brightness offset if any
+        let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
+
+        // Create command and send
+        let command =
+            LightingCommand::with_transition(brightness, values.kelvin, self.transition_ms);
+        self.controller.turn_on(room_id, command).await
+    }
+
+    /// Dim lights to a fraction of current adaptive brightness.
+    ///
+    /// Computes the current adaptive brightness (with offsets), multiplies
+    /// by `factor`, and sends the command. Does NOT modify room state
+    /// (no rhythm enable/disable, no offset changes). No-op if room
+    /// doesn't exist.
+    ///
+    /// # Arguments
+    ///
+    /// * `room_id` - The ID of the room
+    /// * `current_hour` - Current time in hours (0-24)
+    /// * `factor` - Brightness multiplier (0.0-1.0)
+    pub async fn dim_to_factor(
+        &mut self,
+        room_id: &str,
+        current_hour: f32,
+        factor: f32,
+    ) -> LightControlResult<()> {
+        let Some(room) = self.rooms.get_mut(room_id) else {
+            return Ok(());
+        };
+        room.soft_off = false;
+
+        let offset_minutes = room.effective_time_offset();
+        let brightness_offset = room.effective_brightness_offset();
+
+        let ctx = self.create_context(current_hour);
+        let module = self.module_registry.active_module();
+        let values = module.calculate_with_offset(&ctx, offset_minutes);
+
+        let brightness =
+            ((values.brightness as f32 + brightness_offset) * factor).clamp(1.0, 100.0) as u8;
+
+        let command =
+            LightingCommand::with_transition(brightness, values.kelvin, self.transition_ms);
+        self.controller.turn_on(room_id, command).await
+    }
+
+    /// Disable Rhythm mode (lights remain unchanged).
+    ///
+    /// This disables Rhythm mode for the room but does not turn off the lights.
+    /// The lights will stay at their current state but will no longer be
+    /// automatically adjusted.
+    ///
+    /// # Arguments
+    ///
+    /// * `room_id` - The ID of the room
+    pub async fn rhythm_off(&mut self, room_id: &str) -> LightControlResult<()> {
+        if let Some(room) = self.rooms.get_mut(room_id) {
+            room.disable_rhythm();
+        }
+        // Note: We don't turn off the lights, just disable rhythm mode
+        Ok(())
+    }
+
+    /// Toggle lights on/off (always adaptive).
+    ///
+    /// If any lights are on, turns them off (rhythm state unchanged).
+    /// If all lights are off, turns on with adaptive values and enables Rhythm.
+    ///
+    /// # Arguments
+    ///
+    /// * `room_id` - The ID of the room
+    /// * `current_hour` - Current time in hours (0-24)
+    ///
+    /// # Returns
+    ///
+    /// `true` if lights were turned on, `false` if turned off.
+    pub async fn toggle(&mut self, room_id: &str, current_hour: f32) -> LightControlResult<bool> {
+        // Determine if the room is effectively off
+        let effectively_off = if !self.power_save {
+            // When power_save is off, soft_off rooms are "logically off" at soft-off brightness
+            // — skip the HTTP round-trip to check Hue
+            if self.rooms.get(room_id).map(|r| r.soft_off).unwrap_or(false) {
+                true
+            } else {
+                !self.controller.any_lights_on(room_id).await?
+            }
+        } else {
+            !self.controller.any_lights_on(room_id).await?
+        };
+
+        if effectively_off {
+            // Room is off - turn on with adaptive lighting (auto-enables rhythm)
+            self.turn_on(room_id, current_hour).await?;
+            Ok(true)
+        } else {
+            // Room is on - turn off (rhythm state unchanged)
+            self.turn_off(room_id, current_hour).await?;
+            Ok(false)
+        }
+    }
+
+    /// Step up (brighten and cool) along the adaptive curve.
+    ///
+    /// This moves the lighting forward along the curve, making it brighter
+    /// and cooler (higher color temperature).
+    ///
+    /// # Arguments
+    ///
+    /// * `room_id` - The ID of the room
+    /// * `current_hour` - Current time in hours (0-24)
+    pub async fn step_up(&mut self, room_id: &str, current_hour: f32) -> LightControlResult<()> {
+        self.do_step(room_id, current_hour, StepAction::Brighten)
+            .await
+    }
+
+    /// Step down (dim and warm) along the adaptive curve.
+    ///
+    /// This moves the lighting backward along the curve, making it dimmer
+    /// and warmer (lower color temperature).
+    ///
+    /// # Arguments
+    ///
+    /// * `room_id` - The ID of the room
+    /// * `current_hour` - Current time in hours (0-24)
+    pub async fn step_down(&mut self, room_id: &str, current_hour: f32) -> LightControlResult<()> {
+        self.do_step(room_id, current_hour, StepAction::Dim).await
+    }
+
+    /// Internal helper for step operations.
+    async fn do_step(
+        &mut self,
+        room_id: &str,
+        current_hour: f32,
+        action: StepAction,
+    ) -> LightControlResult<()> {
+        // User is interacting — clear soft_off
+        if let Some(room) = self.rooms.get_mut(room_id) {
+            room.soft_off = false;
+        }
+
+        // Get the room's current time offset
+        let current_offset = self
+            .rooms
+            .get(room_id)
+            .map(|r| r.effective_time_offset())
+            .unwrap_or(0.0);
+
+        // Calculate effective current hour with offset
+        let effective_hour = (current_hour + current_offset / 60.0).rem_euclid(24.0);
+
+        // Calculate the step using the active module
+        let ctx = self.create_context(effective_hour);
+        let module = self.module_registry.active_module();
+        let step_result = module.calculate_step(&ctx, action);
+
+        // Update room offset (don't change rhythm mode state)
+        let room = self.rooms.get_or_create(room_id, room_id);
+        room.apply_time_offset(step_result.time_offset_minutes);
+
+        // Send command
+        let command =
+            LightingCommand::from_values_with_transition(&step_result.values, self.transition_ms);
+        self.controller.turn_on(room_id, command).await
+    }
+
+    /// Increase brightness without following the curve.
+    ///
+    /// This directly increases the brightness offset without changing
+    /// the time position on the curve.
+    ///
+    /// # Arguments
+    ///
+    /// * `room_id` - The ID of the room
+    /// * `current_hour` - Current time in hours (0-24)
+    /// * `amount` - Amount to increase brightness (default: 10%)
+    pub async fn dim_up(
+        &mut self,
+        room_id: &str,
+        current_hour: f32,
+        amount: Option<f32>,
+    ) -> LightControlResult<()> {
+        let amount = amount.unwrap_or(20.0);
+        self.do_dim(room_id, current_hour, amount).await
+    }
+
+    /// Decrease brightness without following the curve.
+    ///
+    /// This directly decreases the brightness offset without changing
+    /// the time position on the curve.
+    ///
+    /// # Arguments
+    ///
+    /// * `room_id` - The ID of the room
+    /// * `current_hour` - Current time in hours (0-24)
+    /// * `amount` - Amount to decrease brightness (default: 10%)
+    pub async fn dim_down(
+        &mut self,
+        room_id: &str,
+        current_hour: f32,
+        amount: Option<f32>,
+    ) -> LightControlResult<()> {
+        let amount = amount.unwrap_or(20.0);
+        self.do_dim(room_id, current_hour, -amount).await
+    }
+
+    /// Internal helper for dim operations.
+    async fn do_dim(
+        &mut self,
+        room_id: &str,
+        current_hour: f32,
+        amount: f32,
+    ) -> LightControlResult<()> {
+        // User is interacting — clear soft_off
+        let room = self.rooms.get_or_create(room_id, room_id);
+        room.soft_off = false;
+        room.apply_brightness_offset(amount);
+
+        // Calculate current values with time offset
+        let offset_minutes = room.effective_time_offset();
+        let brightness_offset = room.effective_brightness_offset();
+
+        let ctx = self.create_context(current_hour);
+        let module = self.module_registry.active_module();
+        let values = module.calculate_with_offset(&ctx, offset_minutes);
+
+        // Apply brightness offset
+        let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
+
+        // Send command
+        let command =
+            LightingCommand::with_transition(brightness, values.kelvin, self.transition_ms);
+        self.controller.turn_on(room_id, command).await
+    }
+
+    /// Set absolute brightness for a room.
+    ///
+    /// Computes the brightness offset needed so that the effective brightness
+    /// equals `target`. Rhythm stays enabled (only brightness is overridden,
+    /// color temperature continues tracking the curve).
+    ///
+    /// # Arguments
+    ///
+    /// * `room_id` - The ID of the room
+    /// * `current_hour` - Current time in hours (0-24)
+    /// * `target` - Desired brightness (1-100)
+    pub async fn set_brightness(
+        &mut self,
+        room_id: &str,
+        current_hour: f32,
+        target: u8,
+    ) -> LightControlResult<()> {
+        // First borrow: clear soft_off and extract time offset
+        let offset_minutes = {
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.soft_off = false;
+            room.effective_time_offset()
+        };
+
+        // Calculate curve values at current time
+        let ctx = self.create_context(current_hour);
+        let module = self.module_registry.active_module();
+        let values = module.calculate_with_offset(&ctx, offset_minutes);
+
+        // Second borrow: set offset so curve_brightness + offset = target
+        let room = self.rooms.get_or_create(room_id, room_id);
+        room.brightness_offset = target as f32 - values.brightness as f32;
+
+        let command = LightingCommand::with_transition(target, values.kelvin, self.transition_ms);
+        self.controller.turn_on(room_id, command).await
+    }
+
+    /// Set the time offset for a room directly.
+    ///
+    /// Sets `room.time_offset_minutes` to the given value (not additive).
+    /// If the room is on (rhythm_enabled and not soft_off), sends full
+    /// adaptive values at the new offset position, preserving brightness_offset.
+    /// If soft_off, sends soft-off brightness at the new color temp.
+    /// If off, just sets the offset without sending light commands.
+    ///
+    /// # Arguments
+    ///
+    /// * `room_id` - The ID of the room
+    /// * `current_hour` - Current time in hours (0-24)
+    /// * `offset_minutes` - The time offset in minutes (absolute, not additive)
+    pub async fn set_time_offset(
+        &mut self,
+        room_id: &str,
+        current_hour: f32,
+        offset_minutes: f32,
+    ) -> LightControlResult<()> {
+        let room = self.rooms.get_or_create(room_id, room_id);
+        room.time_offset_minutes = offset_minutes;
+
+        let rhythm_enabled = room.rhythm_enabled;
+        let soft_off = room.soft_off;
+        let brightness_offset = room.effective_brightness_offset();
+        let time_offset = room.effective_time_offset();
+
+        if !rhythm_enabled && !soft_off {
+            // Room is off — just set the offset, no light command
+            return Ok(());
+        }
+
+        let ctx = self.create_context(current_hour);
+        let module = self.module_registry.active_module();
+        let values = module.calculate_with_offset(&ctx, time_offset);
+
+        if soft_off && !self.power_save {
+            // Soft-off: send soft-off brightness at new color temp
+            let cmd = LightingCommand::with_transition(
+                self.soft_off_brightness,
+                values.kelvin,
+                self.transition_ms,
+            );
+            self.controller.turn_on(room_id, cmd).await
+        } else {
+            // On: send full adaptive values preserving brightness_offset
+            let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
+            let cmd =
+                LightingCommand::with_transition(brightness, values.kelvin, self.transition_ms);
+            self.controller.turn_on(room_id, cmd).await
+        }
+    }
+
+    /// Reset to current solar time (clear all offsets).
+    ///
+    /// This clears any time and brightness offsets, returning the room
+    /// to the current adaptive lighting values. Also enables rhythm mode.
+    ///
+    /// # Arguments
+    ///
+    /// * `room_id` - The ID of the room
+    /// * `current_hour` - Current time in hours (0-24)
+    pub async fn reset(&mut self, room_id: &str, current_hour: f32) -> LightControlResult<()> {
+        // Reset room offsets, clear soft_off, and enable rhythm mode
+        let room = self.rooms.get_or_create(room_id, room_id);
+        room.reset_offsets();
+        room.soft_off = false;
+        room.enable_rhythm();
+
+        // Apply current values using the active module
+        let ctx = self.create_context(current_hour);
+        let module = self.module_registry.active_module();
+        let values = module.calculate(&ctx);
+        let command = LightingCommand::from_values_with_transition(&values, self.transition_ms);
+        self.controller.turn_on(room_id, command).await
+    }
+
+    /// Turn off lights in a room (rhythm state unchanged).
+    ///
+    /// When power_save is disabled, lights dim to soft-off brightness with
+    /// adaptive color temperature instead of turning fully off. This
+    /// keeps bulbs warm and ready for instant response.
+    ///
+    /// # Arguments
+    ///
+    /// * `room_id` - The ID of the room
+    /// * `current_hour` - Current time in hours (0-24), used for adaptive
+    ///   color temperature when power_save is disabled
+    pub async fn turn_off(&mut self, room_id: &str, current_hour: f32) -> LightControlResult<()> {
+        if self.power_save {
+            self.controller.turn_off(room_id).await
+        } else {
+            // Dim to soft-off brightness with adaptive kelvin instead of turning off
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.soft_off = true;
+            let offset = room.effective_time_offset();
+
+            let ctx = self.create_context(current_hour);
+            let module = self.module_registry.active_module();
+            let values = module.calculate_with_offset(&ctx, offset);
+
+            let bri = self.soft_off_brightness;
+            let cmd = LightingCommand::with_transition(bri, values.kelvin, self.transition_ms);
+            self.controller.turn_on(room_id, cmd).await
+        }
+    }
+
+    /// Turn lights fully off, bypassing soft-off logic.
+    ///
+    /// Always calls `controller.turn_off()` regardless of power_save setting.
+    /// Also clears the `soft_off` flag on the room if it was set.
+    pub async fn lights_off(&mut self, room_id: &str) -> LightControlResult<()> {
+        let room = self.rooms.get_or_create(room_id, room_id);
+        room.soft_off = false;
+        self.controller.turn_off(room_id).await
+    }
+
+    // =========================================================================
+    // Periodic Update Methods
+    // =========================================================================
+
+    /// Perform a periodic tick for a single room.
+    ///
+    /// Consolidates the per-room logic: check rhythm_enabled, handle soft_off,
+    /// check any_lights_on (disabling rhythm if lights are off), and apply
+    /// adaptive lighting.
+    pub async fn periodic_tick_single_room(
+        &mut self,
+        room_id: &str,
+        current_hour: f32,
+    ) -> PeriodicTickResult {
+        let (rhythm_enabled, soft_off) = self
+            .rooms
+            .get(room_id)
+            .map(|r| (r.rhythm_enabled, r.soft_off))
+            .unwrap_or((false, false));
+
+        if !rhythm_enabled {
+            return PeriodicTickResult::Skipped;
+        }
+
+        // Soft-off rooms: update color temp at soft-off brightness
+        if soft_off && !self.power_save {
+            return match self.soft_off_tick(room_id, current_hour).await {
+                Ok(()) => PeriodicTickResult::Updated,
+                Err(e) => PeriodicTickResult::Error(format!("{}: {}", room_id, e)),
+            };
+        }
+
+        // Check if lights are still on — skip if off (don't disable rhythm)
+        match self.controller.any_lights_on(room_id).await {
+            Ok(false) => return PeriodicTickResult::Skipped,
+            Err(_) => return PeriodicTickResult::Skipped, // Network error — skip
+            Ok(true) => {}
+        }
+
+        // Apply adaptive lighting
+        match self.turn_on(room_id, current_hour).await {
+            Ok(()) => PeriodicTickResult::Updated,
+            Err(e) => PeriodicTickResult::Error(format!("{}: {}", room_id, e)),
+        }
+    }
+
+    /// Perform a periodic update of all rhythm-enabled rooms.
+    ///
+    /// This should be called every minute (or at your desired interval) to
+    /// keep lights in sync with the adaptive lighting curve.
+    ///
+    /// # Arguments
+    ///
+    /// * `current_hour` - Current time in hours (0-24)
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (updated, errors) room ID lists.
+    pub async fn periodic_update(&mut self, current_hour: f32) -> (Vec<String>, Vec<String>) {
+        let room_ids: Vec<String> = self
+            .rooms
+            .rhythm_enabled_rooms()
+            .iter()
+            .map(|r| r.id.clone())
+            .collect();
+
+        let mut updated = Vec::new();
+        let mut errors = Vec::new();
+
+        for room_id in room_ids {
+            match self.periodic_tick_single_room(&room_id, current_hour).await {
+                PeriodicTickResult::Updated => updated.push(room_id),
+                PeriodicTickResult::Error(e) => errors.push(e),
+                PeriodicTickResult::Skipped => {}
+            }
+        }
+
+        (updated, errors)
+    }
+
+    /// Send soft-off brightness with adaptive kelvin to a soft_off room.
+    ///
+    /// Called during periodic updates to keep the color temperature
+    /// transitioning smoothly even when lights are "logically off".
+    pub async fn soft_off_tick(
+        &mut self,
+        room_id: &str,
+        current_hour: f32,
+    ) -> LightControlResult<()> {
+        let offset = self
+            .rooms
+            .get(room_id)
+            .map(|r| r.effective_time_offset())
+            .unwrap_or(0.0);
+
+        let ctx = self.create_context(current_hour);
+        let module = self.module_registry.active_module();
+        let values = module.calculate_with_offset(&ctx, offset);
+
+        let bri = self.soft_off_brightness;
+        let cmd = LightingCommand::with_transition(bri, values.kelvin, self.transition_ms);
+        self.controller.turn_on(room_id, cmd).await
+    }
+
+    /// Check if solar midnight was crossed and reset all room offsets if so.
+    ///
+    /// Call this periodically (e.g., every minute) to automatically reset
+    /// room offsets at solar midnight, giving users a fresh start each day.
+    ///
+    /// # Arguments
+    ///
+    /// * `last_hour` - The hour at the last check (0-24)
+    /// * `current_hour` - Current hour (0-24)
+    /// * `solar_midnight_hour` - Solar midnight hour (typically solar_noon + 12, mod 24)
+    ///
+    /// # Returns
+    ///
+    /// `true` if midnight was crossed and offsets were reset, `false` otherwise.
+    pub fn check_solar_midnight_reset(
+        &mut self,
+        last_hour: f32,
+        current_hour: f32,
+        solar_midnight_hour: f32,
+    ) -> bool {
+        if crossed_solar_midnight(last_hour, current_hour, solar_midnight_hour) {
+            self.reset_all_offsets();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Reset time and brightness offsets for all rooms.
+    ///
+    /// This is called at solar midnight to give users a fresh start,
+    /// but can also be called manually if needed.
+    pub fn reset_all_offsets(&mut self) {
+        for room in self.rooms.iter_mut() {
+            room.reset_offsets();
+        }
+    }
+
+    /// Get the IDs of all rooms with rhythm mode enabled.
+    pub fn rhythm_enabled_room_ids(&self) -> Vec<String> {
+        self.rooms
+            .rhythm_enabled_rooms()
+            .iter()
+            .map(|r| r.id.clone())
+            .collect()
+    }
+
+    /// Sync rooms from the controller.
+    ///
+    /// This queries the light controller for available rooms and adds
+    /// them to the room manager.
+    pub async fn sync_rooms(&mut self) -> LightControlResult<()> {
+        let rooms = self.controller.get_rooms().await?;
+        for room in rooms {
+            if !self.rooms.contains(&room.id) {
+                self.rooms.add_room(room);
+            }
+        }
+        Ok(())
+    }
+
+    /// Get the current adaptive lighting values for a room.
+    ///
+    /// This calculates what the lighting should be based on the current
+    /// time and any stored offsets, without actually sending a command.
+    ///
+    /// # Arguments
+    ///
+    /// * `room_id` - The ID of the room
+    /// * `current_hour` - Current time in hours (0-24)
+    pub fn get_current_values(&self, room_id: &str, current_hour: f32) -> LightingCommand {
+        let (time_offset, brightness_offset) = self
+            .rooms
+            .get(room_id)
+            .map(|r| (r.effective_time_offset(), r.effective_brightness_offset()))
+            .unwrap_or((0.0, 0.0));
+
+        let ctx = self.create_context(current_hour);
+        let module = self.module_registry.active_module();
+        let values = module.calculate_with_offset(&ctx, time_offset);
+        let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
+
+        LightingCommand::new(brightness, values.kelvin)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::controller::NoOpController;
+
+    fn test_engine() -> RhythmEngine<NoOpController> {
+        RhythmEngine::new(NoOpController::new())
+    }
+
+    #[tokio::test]
+    async fn test_rhythm_on() {
+        let mut engine = test_engine();
+
+        // rhythm_on only enables rhythm, no light commands
+        let result = engine.rhythm_on("living_room").await;
+        assert!(result.is_ok());
+        assert!(engine.rooms.is_rhythm_enabled("living_room"));
+    }
+
+    #[tokio::test]
+    async fn test_turn_on() {
+        let mut engine = test_engine();
+
+        // turn_on enables rhythm AND sends light commands
+        let result = engine.turn_on("living_room", 12.0).await;
+        assert!(result.is_ok());
+        assert!(engine.rooms.is_rhythm_enabled("living_room"));
+    }
+
+    #[tokio::test]
+    async fn test_rhythm_off() {
+        let mut engine = test_engine();
+
+        engine.rhythm_on("living_room").await.unwrap();
+        assert!(engine.rooms.is_rhythm_enabled("living_room"));
+
+        engine.rhythm_off("living_room").await.unwrap();
+        assert!(!engine.rooms.is_rhythm_enabled("living_room"));
+    }
+
+    #[tokio::test]
+    async fn test_turn_off_preserves_rhythm() {
+        let mut engine = test_engine();
+
+        // Enable rhythm first
+        engine.rhythm_on("living_room").await.unwrap();
+        assert!(engine.rooms.is_rhythm_enabled("living_room"));
+
+        // turn_off should NOT disable rhythm
+        engine.turn_off("living_room", 12.0).await.unwrap();
+        assert!(engine.rooms.is_rhythm_enabled("living_room"));
+    }
+
+    #[tokio::test]
+    async fn test_toggle() {
+        let mut engine = test_engine();
+
+        // NoOpController returns false for any_lights_on, so toggle should turn lights on
+        let enabled = engine.toggle("living_room", 12.0).await.unwrap();
+        assert!(enabled); // Lights were turned on
+        assert!(engine.rooms.is_rhythm_enabled("living_room"));
+
+        // NoOpController still returns false (it doesn't track state), so toggle turns on again
+        // In real usage, the controller would report lights as on after turn_on
+        let enabled = engine.toggle("living_room", 12.0).await.unwrap();
+        assert!(enabled); // Still turns on because NoOpController always says lights are off
+    }
+
+    #[tokio::test]
+    async fn test_step_up() {
+        let mut engine = test_engine();
+
+        // Use hour 8.0 (morning, not at boundary)
+        engine.step_up("living_room", 8.0).await.unwrap();
+
+        let room = engine.rooms.get("living_room").unwrap();
+        // Step operations should NOT enable rhythm mode
+        assert!(!room.rhythm_enabled);
+        // Step up in morning should increase time offset (toward noon)
+        assert!(room.time_offset_minutes > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_step_down() {
+        let mut engine = test_engine();
+
+        // Use hour 8.0 (morning, not at boundary)
+        engine.step_down("living_room", 8.0).await.unwrap();
+
+        let room = engine.rooms.get("living_room").unwrap();
+        // Step operations should NOT enable rhythm mode
+        assert!(!room.rhythm_enabled);
+        // Step down in morning should decrease time offset (toward sunrise)
+        assert!(room.time_offset_minutes < 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_step_preserves_rhythm_mode() {
+        let mut engine = test_engine();
+
+        // Enable rhythm first
+        engine.rhythm_on("living_room").await.unwrap();
+        assert!(engine.rooms.is_rhythm_enabled("living_room"));
+
+        // Step up should preserve rhythm mode
+        engine.step_up("living_room", 8.0).await.unwrap();
+        assert!(engine.rooms.is_rhythm_enabled("living_room"));
+
+        // Step down should also preserve rhythm mode
+        engine.step_down("living_room", 8.0).await.unwrap();
+        assert!(engine.rooms.is_rhythm_enabled("living_room"));
+    }
+
+    #[tokio::test]
+    async fn test_reset() {
+        let mut engine = test_engine();
+
+        // Make some adjustments (use hour 8.0 for step testing)
+        engine.step_up("living_room", 8.0).await.unwrap();
+        engine.dim_up("living_room", 8.0, Some(10.0)).await.unwrap();
+
+        let room = engine.rooms.get("living_room").unwrap();
+        assert!(room.time_offset_minutes != 0.0 || room.brightness_offset != 0.0);
+
+        // Reset
+        engine.reset("living_room", 6.0).await.unwrap();
+
+        let room = engine.rooms.get("living_room").unwrap();
+        assert_eq!(room.time_offset_minutes, 0.0);
+        assert_eq!(room.brightness_offset, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_dim_up_down() {
+        let mut engine = test_engine();
+
+        engine
+            .dim_up("living_room", 12.0, Some(20.0))
+            .await
+            .unwrap();
+        let room = engine.rooms.get("living_room").unwrap();
+        assert_eq!(room.brightness_offset, 20.0);
+        // Dim operations should NOT enable rhythm mode
+        assert!(!room.rhythm_enabled);
+
+        engine
+            .dim_down("living_room", 12.0, Some(10.0))
+            .await
+            .unwrap();
+        let room = engine.rooms.get("living_room").unwrap();
+        assert_eq!(room.brightness_offset, 10.0);
+        assert!(!room.rhythm_enabled);
+    }
+
+    #[tokio::test]
+    async fn test_dim_preserves_rhythm_mode() {
+        let mut engine = test_engine();
+
+        // Enable rhythm first
+        engine.rhythm_on("living_room").await.unwrap();
+        assert!(engine.rooms.is_rhythm_enabled("living_room"));
+
+        // Dim up should preserve rhythm mode
+        engine
+            .dim_up("living_room", 12.0, Some(10.0))
+            .await
+            .unwrap();
+        assert!(engine.rooms.is_rhythm_enabled("living_room"));
+
+        // Dim down should also preserve rhythm mode
+        engine
+            .dim_down("living_room", 12.0, Some(5.0))
+            .await
+            .unwrap();
+        assert!(engine.rooms.is_rhythm_enabled("living_room"));
+    }
+
+    #[test]
+    fn test_get_current_values() {
+        let engine = test_engine();
+
+        let cmd = engine.get_current_values("living_room", 12.0);
+
+        // At noon, should be bright and cool
+        assert!(cmd.brightness > 90);
+        assert!(cmd.kelvin >= crate::config::DEFAULT_MAX_COLOR_TEMP - 100);
+    }
+
+    // =========================================================================
+    // Periodic Update Tests
+    // =========================================================================
+
+    #[test]
+    fn test_crossed_midnight_normal_day() {
+        use super::crossed_solar_midnight;
+
+        // Solar midnight at 0:30 (0.5)
+        // Time went from 0:00 to 1:00 -> should cross
+        assert!(crossed_solar_midnight(0.0, 1.0, 0.5));
+
+        // Time went from 1:00 to 2:00 -> should NOT cross
+        assert!(!crossed_solar_midnight(1.0, 2.0, 0.5));
+
+        // Time went from 22:00 to 23:00 -> should NOT cross
+        assert!(!crossed_solar_midnight(22.0, 23.0, 0.5));
+    }
+
+    #[test]
+    fn test_crossed_midnight_wrap_around() {
+        use super::crossed_solar_midnight;
+
+        // Solar midnight at 0:30 (0.5)
+        // Time went from 23:30 to 0:45 -> should cross
+        assert!(crossed_solar_midnight(23.5, 0.75, 0.5));
+
+        // Time went from 23:30 to 0:15 -> should NOT cross (haven't reached 0.5 yet)
+        assert!(!crossed_solar_midnight(23.5, 0.25, 0.5));
+    }
+
+    #[test]
+    fn test_crossed_midnight_late_evening() {
+        use super::crossed_solar_midnight;
+
+        // Solar midnight at 23:30 (23.5)
+        // Time went from 23:00 to 23:45 -> should cross
+        assert!(crossed_solar_midnight(23.0, 23.75, 23.5));
+
+        // Time went from 22:00 to 23:00 -> should NOT cross
+        assert!(!crossed_solar_midnight(22.0, 23.0, 23.5));
+    }
+
+    #[test]
+    fn test_crossed_midnight_late_evening_wrap() {
+        use super::crossed_solar_midnight;
+
+        // Solar midnight at 23:30 (23.5)
+        // Time went from 23:00 to 0:30 -> should cross (went past 23.5)
+        assert!(crossed_solar_midnight(23.0, 0.5, 23.5));
+    }
+
+    #[tokio::test]
+    async fn test_periodic_update_no_rooms() {
+        let mut engine = test_engine();
+
+        let (updated, errors) = engine.periodic_update(12.0).await;
+
+        assert!(updated.is_empty());
+        assert!(errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_periodic_update_with_rhythm_rooms() {
+        let mut engine = test_engine();
+
+        // Enable rhythm for two rooms
+        engine.rhythm_on("living_room").await.unwrap();
+        engine.rhythm_on("bedroom").await.unwrap();
+
+        // NoOpController.any_lights_on() returns false, so periodic_update
+        // skips these rooms (lights off) but keeps rhythm_enabled = true
+        let (updated, errors) = engine.periodic_update(12.0).await;
+
+        assert!(updated.is_empty());
+        assert!(errors.is_empty());
+        // Rhythm should still be enabled (lights off just means skip)
+        assert!(engine.rooms().is_rhythm_enabled("living_room"));
+        assert!(engine.rooms().is_rhythm_enabled("bedroom"));
+    }
+
+    #[test]
+    fn test_check_solar_midnight_reset() {
+        let mut engine = test_engine();
+
+        // Set up some offsets
+        engine
+            .rooms_mut()
+            .get_or_create("room1", "Room 1")
+            .apply_time_offset(60.0);
+        engine
+            .rooms_mut()
+            .get_or_create("room2", "Room 2")
+            .apply_brightness_offset(20.0);
+
+        // Not crossing midnight - should return false and not reset
+        let reset = engine.check_solar_midnight_reset(1.0, 2.0, 0.5);
+        assert!(!reset);
+        assert_eq!(
+            engine.rooms().get("room1").unwrap().time_offset_minutes,
+            60.0
+        );
+
+        // Crossing midnight - should return true and reset
+        let reset = engine.check_solar_midnight_reset(0.0, 1.0, 0.5);
+        assert!(reset);
+        assert_eq!(
+            engine.rooms().get("room1").unwrap().time_offset_minutes,
+            0.0
+        );
+        assert_eq!(engine.rooms().get("room2").unwrap().brightness_offset, 0.0);
+    }
+
+    #[test]
+    fn test_reset_all_offsets() {
+        let mut engine = test_engine();
+
+        // Set up offsets in multiple rooms
+        engine
+            .rooms_mut()
+            .get_or_create("room1", "Room 1")
+            .apply_time_offset(30.0);
+        engine
+            .rooms_mut()
+            .get_or_create("room1", "Room 1")
+            .apply_brightness_offset(10.0);
+        engine
+            .rooms_mut()
+            .get_or_create("room2", "Room 2")
+            .apply_time_offset(-45.0);
+
+        // Reset all
+        engine.reset_all_offsets();
+
+        assert_eq!(
+            engine.rooms().get("room1").unwrap().time_offset_minutes,
+            0.0
+        );
+        assert_eq!(engine.rooms().get("room1").unwrap().brightness_offset, 0.0);
+        assert_eq!(
+            engine.rooms().get("room2").unwrap().time_offset_minutes,
+            0.0
+        );
+    }
+
+    // =========================================================================
+    // Additional Periodic Update Tests
+    // =========================================================================
+
+    #[test]
+    fn test_crossed_midnight_exact_boundary() {
+        use super::crossed_solar_midnight;
+
+        // Exactly at the midnight hour boundary
+        assert!(crossed_solar_midnight(0.0, 0.5, 0.5)); // last < midnight, current == midnight
+        assert!(crossed_solar_midnight(0.4, 0.5, 0.5)); // just before to exactly at
+        assert!(!crossed_solar_midnight(0.5, 0.6, 0.5)); // at midnight to after (already crossed)
+    }
+
+    #[test]
+    fn test_crossed_midnight_same_hour() {
+        use super::crossed_solar_midnight;
+
+        // Same hour check - should not cross
+        assert!(!crossed_solar_midnight(12.0, 12.0, 0.5));
+        assert!(!crossed_solar_midnight(0.5, 0.5, 0.5));
+    }
+
+    #[test]
+    fn test_crossed_midnight_typical_values() {
+        use super::crossed_solar_midnight;
+
+        // Typical solar midnight around 0:00-1:00
+        // 60 second update interval: 23:59 to 0:00
+        assert!(crossed_solar_midnight(23.983, 0.017, 0.0)); // 23:59 to 0:01, midnight at 0:00
+
+        // Solar midnight at 0:30 (common in winter)
+        assert!(crossed_solar_midnight(0.4, 0.6, 0.5)); // 0:24 to 0:36
+        assert!(!crossed_solar_midnight(0.6, 0.8, 0.5)); // 0:36 to 0:48 (already passed)
+
+        // Solar midnight at 1:00 (summer DST)
+        assert!(crossed_solar_midnight(0.9, 1.1, 1.0));
+        assert!(!crossed_solar_midnight(1.1, 1.2, 1.0));
+    }
+
+    #[test]
+    fn test_crossed_midnight_large_gap() {
+        use super::crossed_solar_midnight;
+
+        // Large time gaps (e.g., system was suspended)
+        // Gap from 22:00 to 2:00 with midnight at 0:30
+        assert!(crossed_solar_midnight(22.0, 2.0, 0.5));
+
+        // Gap from 10:00 to 14:00 with midnight at 0:30 - should NOT cross
+        assert!(!crossed_solar_midnight(10.0, 14.0, 0.5));
+    }
+
+    #[tokio::test]
+    async fn test_periodic_update_only_rhythm_enabled() {
+        let mut engine = test_engine();
+
+        // Create rooms with mixed rhythm states
+        engine.rhythm_on("room1").await.unwrap();
+        engine.rooms_mut().get_or_create("room2", "Room 2"); // rhythm disabled
+        engine.rhythm_on("room3").await.unwrap();
+        engine.rhythm_off("room3").await.unwrap(); // explicitly disabled
+
+        // NoOpController.any_lights_on() returns false — room1 is skipped but stays enabled
+        let (updated, errors) = engine.periodic_update(12.0).await;
+
+        assert!(updated.is_empty());
+        assert!(errors.is_empty());
+        // room1 lights off → skipped, but rhythm stays enabled
+        assert!(engine.rooms().is_rhythm_enabled("room1"));
+        // room2 never had rhythm, room3 was explicitly off — neither affected
+        assert!(!engine.rooms().is_rhythm_enabled("room2"));
+        assert!(!engine.rooms().is_rhythm_enabled("room3"));
+    }
+
+    #[tokio::test]
+    async fn test_periodic_update_preserves_offsets() {
+        let mut engine = test_engine();
+
+        // Enable rhythm and set some offsets
+        engine.rhythm_on("living_room").await.unwrap();
+        engine
+            .rooms_mut()
+            .get_mut("living_room")
+            .unwrap()
+            .apply_time_offset(30.0);
+        engine
+            .rooms_mut()
+            .get_mut("living_room")
+            .unwrap()
+            .apply_brightness_offset(10.0);
+
+        // Periodic update: lights off → skipped, rhythm and offsets preserved
+        let (updated, _) = engine.periodic_update(14.0).await;
+
+        assert!(updated.is_empty());
+        let room = engine.rooms().get("living_room").unwrap();
+        assert_eq!(room.time_offset_minutes, 30.0);
+        assert_eq!(room.brightness_offset, 10.0);
+        // Rhythm stays enabled, offsets preserved
+        assert!(engine.rooms().is_rhythm_enabled("living_room"));
+    }
+
+    #[tokio::test]
+    async fn test_periodic_update_skips_on_lights_off() {
+        let mut engine = test_engine();
+
+        engine.rhythm_on("room1").await.unwrap();
+        assert!(engine.rooms().is_rhythm_enabled("room1"));
+
+        // First tick: lights off (NoOpController) → skipped, rhythm stays enabled
+        let (updated, _) = engine.periodic_update(9.0).await;
+        assert!(updated.is_empty());
+        assert!(engine.rooms().is_rhythm_enabled("room1"));
+
+        // Subsequent ticks: still skipped (lights still off), rhythm still enabled
+        let (updated, _) = engine.periodic_update(10.0).await;
+        assert!(updated.is_empty());
+        assert!(engine.rooms().is_rhythm_enabled("room1"));
+    }
+
+    #[tokio::test]
+    async fn test_periodic_update_different_times() {
+        let mut engine = test_engine();
+
+        // Update at different times — all skip (NoOpController: lights off),
+        // but rhythm stays enabled throughout
+        engine.rhythm_on("room1").await.unwrap();
+        let times = [0.0, 6.0, 12.0, 18.0, 23.5];
+        for time in times {
+            let (updated, errors) = engine.periodic_update(time).await;
+            assert!(
+                updated.is_empty(),
+                "Should skip at time {} (lights off)",
+                time
+            );
+            assert!(errors.is_empty(), "Errors at time {}: {:?}", time, errors);
+            assert!(
+                engine.rooms().is_rhythm_enabled("room1"),
+                "Rhythm should stay enabled at time {}",
+                time
+            );
+        }
+    }
+
+    #[test]
+    fn test_rhythm_enabled_room_ids() {
+        let mut engine = test_engine();
+
+        // No rooms initially
+        assert!(engine.rhythm_enabled_room_ids().is_empty());
+
+        // Add rooms with mixed states
+        engine
+            .rooms_mut()
+            .get_or_create("room1", "Room 1")
+            .enable_rhythm();
+        engine.rooms_mut().get_or_create("room2", "Room 2"); // disabled
+        engine
+            .rooms_mut()
+            .get_or_create("room3", "Room 3")
+            .enable_rhythm();
+
+        let ids = engine.rhythm_enabled_room_ids();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"room1".to_string()));
+        assert!(ids.contains(&"room3".to_string()));
+        assert!(!ids.contains(&"room2".to_string()));
+    }
+
+    #[test]
+    fn test_check_solar_midnight_preserves_rhythm_state() {
+        let mut engine = test_engine();
+
+        // Set up rooms with rhythm enabled and offsets
+        let room1 = engine.rooms_mut().get_or_create("room1", "Room 1");
+        room1.enable_rhythm();
+        room1.apply_time_offset(60.0);
+
+        let room2 = engine.rooms_mut().get_or_create("room2", "Room 2");
+        room2.enable_rhythm();
+        room2.apply_brightness_offset(20.0);
+
+        // Crossing midnight resets offsets but keeps rhythm enabled
+        let reset = engine.check_solar_midnight_reset(0.0, 1.0, 0.5);
+        assert!(reset);
+
+        // Offsets should be reset
+        assert_eq!(
+            engine.rooms().get("room1").unwrap().time_offset_minutes,
+            0.0
+        );
+        assert_eq!(engine.rooms().get("room2").unwrap().brightness_offset, 0.0);
+
+        // Rhythm should still be enabled
+        assert!(engine.rooms().is_rhythm_enabled("room1"));
+        assert!(engine.rooms().is_rhythm_enabled("room2"));
+    }
+
+    #[test]
+    fn test_reset_all_offsets_preserves_rhythm_state() {
+        let mut engine = test_engine();
+
+        // Set up rooms
+        let room = engine.rooms_mut().get_or_create("room1", "Room 1");
+        room.enable_rhythm();
+        room.apply_time_offset(120.0);
+        room.apply_brightness_offset(-15.0);
+
+        // Reset offsets
+        engine.reset_all_offsets();
+
+        // Rhythm should still be enabled
+        assert!(engine.rooms().is_rhythm_enabled("room1"));
+        // Offsets should be zero
+        assert_eq!(
+            engine.rooms().get("room1").unwrap().time_offset_minutes,
+            0.0
+        );
+        assert_eq!(engine.rooms().get("room1").unwrap().brightness_offset, 0.0);
+    }
+
+    #[test]
+    fn test_check_solar_midnight_no_double_reset() {
+        let mut engine = test_engine();
+
+        // Set up room with offset
+        engine
+            .rooms_mut()
+            .get_or_create("room1", "Room 1")
+            .apply_time_offset(60.0);
+
+        // First crossing resets
+        let reset1 = engine.check_solar_midnight_reset(0.0, 1.0, 0.5);
+        assert!(reset1);
+        assert_eq!(
+            engine.rooms().get("room1").unwrap().time_offset_minutes,
+            0.0
+        );
+
+        // Add new offset
+        engine
+            .rooms_mut()
+            .get_mut("room1")
+            .unwrap()
+            .apply_time_offset(30.0);
+
+        // Same time check again - should NOT reset (no crossing)
+        let reset2 = engine.check_solar_midnight_reset(1.0, 1.5, 0.5);
+        assert!(!reset2);
+        assert_eq!(
+            engine.rooms().get("room1").unwrap().time_offset_minutes,
+            30.0
+        );
+    }
+
+    // =========================================================================
+    // Edge Case Tests - Actions on Disabled Rooms
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_rhythm_on_disabled_room() {
+        let mut engine = test_engine();
+
+        // Create and disable room
+        engine
+            .rooms_mut()
+            .get_or_create("room1", "Room 1")
+            .set_disabled(true);
+
+        // rhythm_on should still work (disabled doesn't block manual actions)
+        let result = engine.rhythm_on("room1").await;
+        assert!(result.is_ok());
+        assert!(engine.rooms.is_rhythm_enabled("room1"));
+    }
+
+    #[tokio::test]
+    async fn test_periodic_update_includes_rhythm_enabled_rooms() {
+        let mut engine = test_engine();
+
+        // Create two rhythm-enabled rooms
+        engine.rhythm_on("room1").await.unwrap();
+        engine.rhythm_on("room2").await.unwrap();
+
+        // Disable rhythm on room2
+        engine.rhythm_off("room2").await.unwrap();
+
+        // Periodic update: room1 lights off → skipped (rhythm stays), room2 already off
+        let (updated, _) = engine.periodic_update(14.0).await;
+
+        assert!(updated.is_empty());
+        assert!(engine.rooms().is_rhythm_enabled("room1"));
+        assert!(!engine.rooms().is_rhythm_enabled("room2"));
+    }
+
+    #[tokio::test]
+    async fn test_disabled_room_with_rhythm_still_checked() {
+        let mut engine = test_engine();
+
+        // Note: disabled flag is separate from rhythm_enabled
+        // A disabled room with rhythm_enabled will still be checked in periodic_update
+        engine.rhythm_on("room1").await.unwrap();
+        engine
+            .rooms_mut()
+            .get_mut("room1")
+            .unwrap()
+            .set_disabled(true);
+
+        let (updated, _) = engine.periodic_update(14.0).await;
+
+        // NoOpController: lights off → skipped, but rhythm stays enabled
+        assert!(updated.is_empty());
+        assert!(engine.rooms().is_rhythm_enabled("room1"));
+    }
+
+    #[tokio::test]
+    async fn test_step_on_nonexistent_room() {
+        let mut engine = test_engine();
+
+        // Step on room that doesn't exist - should create it
+        let result = engine.step_up("new_room", 12.0).await;
+        assert!(result.is_ok());
+
+        // Room should now exist with an offset
+        let room = engine.rooms().get("new_room");
+        assert!(room.is_some());
+    }
+
+    // =========================================================================
+    // Edge Case Tests - Time Boundaries
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_turn_on_at_midnight() {
+        let mut engine = test_engine();
+
+        // Test at exactly midnight (0.0)
+        let result = engine.turn_on("room1", 0.0).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_turn_on_at_end_of_day() {
+        let mut engine = test_engine();
+
+        // Test at 23:59 (23.983...)
+        let result = engine.turn_on("room1", 23.983).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_get_current_values_at_boundaries() {
+        let engine = test_engine();
+
+        // At midnight - should be dim and warm
+        let cmd_midnight = engine.get_current_values("room1", 0.0);
+        assert!(cmd_midnight.brightness <= 50);
+        assert!(cmd_midnight.kelvin <= 3500);
+
+        // At noon - should be bright and cool
+        let cmd_noon = engine.get_current_values("room1", 12.0);
+        assert!(cmd_noon.brightness >= 90);
+        assert!(cmd_noon.kelvin >= crate::config::DEFAULT_MAX_COLOR_TEMP - 100);
+
+        // At end of day (23.99)
+        let cmd_late = engine.get_current_values("room1", 23.99);
+        assert!(cmd_late.brightness <= 50);
+        assert!(cmd_late.kelvin <= 3500);
+    }
+
+    #[test]
+    fn test_get_current_values_handles_hour_24() {
+        let engine = test_engine();
+
+        // Hour 24.0 should be treated as midnight (0.0)
+        let cmd_24 = engine.get_current_values("room1", 24.0);
+        let cmd_0 = engine.get_current_values("room1", 0.0);
+
+        // Values should be similar (allowing for floating point)
+        assert!((cmd_24.brightness as i32 - cmd_0.brightness as i32).abs() <= 1);
+    }
+
+    // =========================================================================
+    // Edge Case Tests - Offset Boundaries
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_multiple_step_ups_accumulate() {
+        let mut engine = test_engine();
+
+        // Multiple step ups should accumulate offset
+        for _ in 0..5 {
+            engine.step_up("room1", 8.0).await.unwrap();
+        }
+
+        let room = engine.rooms().get("room1").unwrap();
+        assert!(room.time_offset_minutes > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_step_up_then_step_down_changes_offset() {
+        let mut engine = test_engine();
+
+        // Step up a few times
+        for _ in 0..3 {
+            engine.step_up("room1", 8.0).await.unwrap();
+        }
+
+        let offset_after_up = engine.rooms().get("room1").unwrap().time_offset_minutes;
+        assert!(offset_after_up > 0.0, "Step up should increase offset");
+
+        // Step down same number of times
+        for _ in 0..3 {
+            engine.step_down("room1", 8.0).await.unwrap();
+        }
+
+        let offset_after_down = engine.rooms().get("room1").unwrap().time_offset_minutes;
+        // After stepping down, offset should decrease (may not be zero due to curve shape)
+        assert!(
+            offset_after_down < offset_after_up,
+            "Step down should decrease offset"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_brightness_offset_clamps_to_range() {
+        let mut engine = test_engine();
+
+        // Brightness offset is clamped to [-100, 100]
+        engine.dim_up("room1", 12.0, Some(200.0)).await.unwrap();
+        let room = engine.rooms().get("room1").unwrap();
+        // Offset should be clamped to 100
+        assert_eq!(room.brightness_offset, 100.0);
+
+        // Reset and test negative clamping
+        engine.rooms_mut().get_mut("room1").unwrap().reset_offsets();
+        engine.dim_down("room1", 12.0, Some(200.0)).await.unwrap();
+        let room = engine.rooms().get("room1").unwrap();
+        assert_eq!(room.brightness_offset, -100.0);
+    }
+
+    // =========================================================================
+    // Module and Config Tests
+    // =========================================================================
+
+    #[test]
+    fn test_available_modules() {
+        let engine = test_engine();
+        let modules = engine.available_modules();
+
+        // Should have at least the default "rhythm" module
+        assert!(!modules.is_empty());
+        assert!(modules.iter().any(|(id, _)| *id == "rhythm"));
+    }
+
+    #[test]
+    fn test_set_invalid_curve_module() {
+        let mut engine = test_engine();
+
+        // Setting a non-existent module should return false
+        let result = engine.set_curve_module("nonexistent");
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_set_valid_curve_module() {
+        let mut engine = test_engine();
+
+        // Setting the default module should work
+        let result = engine.set_curve_module("rhythm");
+        assert!(result);
+    }
+}

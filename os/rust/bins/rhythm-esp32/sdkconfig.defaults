@@ -1,0 +1,53 @@
+# WiFi
+CONFIG_ESP_WIFI_ENABLED=y
+CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=n
+
+# HTTP Server
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+CONFIG_HTTPD_MAX_URI_LEN=512
+
+# Flash size (8MB)
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+
+# Partition table (custom)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="/home/developer/PhpstormProjects/rhythm-os/rust/bins/rhythm-esp32/partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="/home/developer/PhpstormProjects/rhythm-os/rust/bins/rhythm-esp32/partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+CONFIG_PARTITION_TABLE_MD5=y
+
+# TLS — skip cert verification for Hue bridge (self-signed certs).
+# OTA does not use outbound TLS (firmware is pushed by the app over local HTTP).
+CONFIG_ESP_TLS_INSECURE=y
+CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
+
+# TLS buffer sizes — reduced from default 16384 to allow concurrent
+# connections (SSE stream + command requests) within ESP32 heap limits
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=8192
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
+
+# NVS
+CONFIG_NVS_ENCRYPTION=n
+
+# Logging
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# Stack size for main task (needs room for NVS buffers + JSON parsing + BLE init)
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# Enable SNTP for time sync
+CONFIG_LWIP_SNTP_MAX_SERVERS=3
+
+# ============================================================================
+# Bluetooth / Bluedroid Configuration
+# (Bluedroid required by esp-idf-svc Rust BLE wrapper)
+# ============================================================================
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLE_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
+CONFIG_BT_GATTS_ENABLE=y
+
+# OTA rollback — if new firmware crashes before marking valid, bootloader reverts
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

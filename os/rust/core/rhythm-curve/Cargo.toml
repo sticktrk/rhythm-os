@@ -1,0 +1,16 @@
+[package]
+name = "rhythm-curve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Pluggable lighting curve contract for Rhythm OS"
+
+[features]
+default = ["serde"]
+serde = ["dep:serde"]
+
+[dependencies]
+libm = { workspace = true }
+serde = { version = "1.0", optional = true, features = ["derive"] }

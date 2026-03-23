@@ -1,0 +1,74 @@
+[workspace]
+resolver = "2"
+members = [
+    "rust/core/rhythm-curve",
+    "rust/core/rhythm-core",
+    "rust/core/rhythm-os",
+    "rust/integrations/rhythm-hue",
+    "rust/integrations/rhythm-ha",
+    "rust/bins/rhythm-server",
+    "rust/bins/rhythm-addon",
+]
+exclude = [
+    "rust/bins/rhythm-esp32",      # ESP32 builds separately with esp-rs toolchain
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Tim Kijewski <3043754+sticktrk@users.noreply.github.com>"]
+repository = "https://github.com/sticktrk/rhythm-os"
+homepage = "https://rhythm.lighting"
+description = "Adaptive lighting that follows the sun"
+
+[workspace.dependencies]
+# Shared dependencies across workspace
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+
+# Async runtime (for addon)
+tokio = { version = "1.0", features = ["full"] }
+
+# HTTP server (for addon)
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# WebSocket (for addon)
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
+futures-util = "0.3"
+futures = "0.3"
+
+# Math for no_std (for core)
+libm = "0.2"
+
+# Async traits
+async-trait = "0.1"
+
+# Time (for runtime)
+chrono = "0.4"
+
+# CLI
+clap = { version = "4.0", features = ["derive"] }
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
+reqwest-eventsource = "0.6"
+
+# Error handling
+anyhow = "1.0"
+
+# Logging
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# mDNS (for server)
+mdns-sd = "0.11"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
