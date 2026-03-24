@@ -79,12 +79,12 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 1858767072;
+  int get rustContentHash => 470141064;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
     stem: 'rhythm_core_ffi',
-    ioDirectory: '../../rust/rhythm-core-ffi/target/release/',
+    ioDirectory: '../rhythm_app/rust/target/release/',
     webPrefix: 'pkg/',
   );
 }
@@ -110,17 +110,11 @@ abstract class RustLibApi extends BaseApi {
   int crateApiHueRegistryBehaviorTrackerDeviceCount(
       {required HueBehaviorTrackerDto tracker});
 
-  HueBehaviorTrackerDto? crateApiHueRegistryBehaviorTrackerFromJson(
-      {required String json});
-
   bool crateApiHueRegistryBehaviorTrackerIsConfigured(
       {required HueBehaviorTrackerDto tracker, required String deviceId});
 
   BehaviorRemoveResultDto crateApiHueRegistryBehaviorTrackerRemove(
       {required HueBehaviorTrackerDto tracker, required String behaviorId});
-
-  String crateApiHueRegistryBehaviorTrackerToJson(
-      {required HueBehaviorTrackerDto tracker});
 
   ActionResultDto crateApiRunnerCalculateActionResult(
       {required CurveConfigDto config,
@@ -193,8 +187,6 @@ abstract class RustLibApi extends BaseApi {
       required String timezone});
 
   String crateApiHelpersGetGroupPrefix();
-
-  String crateApiHelpersGetHueOuiPrefix();
 
   List<String> crateApiHelpersGetHueSwitchPrefixes();
 
@@ -316,10 +308,6 @@ abstract class RustLibApi extends BaseApi {
       required double timeOffsetMinutes});
 
   RunnerStateDto crateApiDtoRunnerRunnerStateDtoDefault();
-
-  RunnerStateDto? crateApiRunnerRunnerStateFromJson({required String json});
-
-  String crateApiRunnerRunnerStateToJson({required RunnerStateDto state});
 }
 
 class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
@@ -489,31 +477,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  HueBehaviorTrackerDto? crateApiHueRegistryBehaviorTrackerFromJson(
-      {required String json}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_String(json);
-        return wire
-            .wire__crate__api__hue_registry__behavior_tracker_from_json(arg0);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_opt_box_autoadd_hue_behavior_tracker_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiHueRegistryBehaviorTrackerFromJsonConstMeta,
-      argValues: [json],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiHueRegistryBehaviorTrackerFromJsonConstMeta =>
-      const TaskConstMeta(
-        debugName: "behavior_tracker_from_json",
-        argNames: ["json"],
-      );
-
-  @override
   bool crateApiHueRegistryBehaviorTrackerIsConfigured(
       {required HueBehaviorTrackerDto tracker, required String deviceId}) {
     return handler.executeSync(SyncTask(
@@ -564,31 +527,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(
         debugName: "behavior_tracker_remove",
         argNames: ["tracker", "behaviorId"],
-      );
-
-  @override
-  String crateApiHueRegistryBehaviorTrackerToJson(
-      {required HueBehaviorTrackerDto tracker}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_box_autoadd_hue_behavior_tracker_dto(tracker);
-        return wire
-            .wire__crate__api__hue_registry__behavior_tracker_to_json(arg0);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_String,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiHueRegistryBehaviorTrackerToJsonConstMeta,
-      argValues: [tracker],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiHueRegistryBehaviorTrackerToJsonConstMeta =>
-      const TaskConstMeta(
-        debugName: "behavior_tracker_to_json",
-        argNames: ["tracker"],
       );
 
   @override
@@ -1045,28 +983,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiHelpersGetGroupPrefixConstMeta =>
       const TaskConstMeta(
         debugName: "get_group_prefix",
-        argNames: [],
-      );
-
-  @override
-  String crateApiHelpersGetHueOuiPrefix() {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        return wire.wire__crate__api__helpers__get_hue_oui_prefix();
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_String,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiHelpersGetHueOuiPrefixConstMeta,
-      argValues: [],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiHelpersGetHueOuiPrefixConstMeta =>
-      const TaskConstMeta(
-        debugName: "get_hue_oui_prefix",
         argNames: [],
       );
 
@@ -1952,52 +1868,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         argNames: [],
       );
 
-  @override
-  RunnerStateDto? crateApiRunnerRunnerStateFromJson({required String json}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_String(json);
-        return wire.wire__crate__api__runner__runner_state_from_json(arg0);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_opt_box_autoadd_runner_state_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiRunnerRunnerStateFromJsonConstMeta,
-      argValues: [json],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiRunnerRunnerStateFromJsonConstMeta =>
-      const TaskConstMeta(
-        debugName: "runner_state_from_json",
-        argNames: ["json"],
-      );
-
-  @override
-  String crateApiRunnerRunnerStateToJson({required RunnerStateDto state}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_box_autoadd_runner_state_dto(state);
-        return wire.wire__crate__api__runner__runner_state_to_json(arg0);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_String,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiRunnerRunnerStateToJsonConstMeta,
-      argValues: [state],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiRunnerRunnerStateToJsonConstMeta =>
-      const TaskConstMeta(
-        debugName: "runner_state_to_json",
-        argNames: ["state"],
-      );
-
   @protected
   String dco_decode_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
@@ -2326,15 +2196,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  HueBehaviorTrackerDto? dco_decode_opt_box_autoadd_hue_behavior_tracker_dto(
-      dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw == null
-        ? null
-        : dco_decode_box_autoadd_hue_behavior_tracker_dto(raw);
-  }
-
-  @protected
   HueButtonEventTypeDto? dco_decode_opt_box_autoadd_hue_button_event_type_dto(
       dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
@@ -2366,12 +2227,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   RoomDto? dco_decode_opt_box_autoadd_room_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_room_dto(raw);
-  }
-
-  @protected
-  RunnerStateDto? dco_decode_opt_box_autoadd_runner_state_dto(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw == null ? null : dco_decode_box_autoadd_runner_state_dto(raw);
   }
 
   @protected
@@ -2964,18 +2819,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  HueBehaviorTrackerDto? sse_decode_opt_box_autoadd_hue_behavior_tracker_dto(
-      SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    if (sse_decode_bool(deserializer)) {
-      return (sse_decode_box_autoadd_hue_behavior_tracker_dto(deserializer));
-    } else {
-      return null;
-    }
-  }
-
-  @protected
   HueButtonEventTypeDto? sse_decode_opt_box_autoadd_hue_button_event_type_dto(
       SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -3028,18 +2871,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_room_dto(deserializer));
-    } else {
-      return null;
-    }
-  }
-
-  @protected
-  RunnerStateDto? sse_decode_opt_box_autoadd_runner_state_dto(
-      SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    if (sse_decode_bool(deserializer)) {
-      return (sse_decode_box_autoadd_runner_state_dto(deserializer));
     } else {
       return null;
     }
@@ -3618,17 +3449,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_opt_box_autoadd_hue_behavior_tracker_dto(
-      HueBehaviorTrackerDto? self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    sse_encode_bool(self != null, serializer);
-    if (self != null) {
-      sse_encode_box_autoadd_hue_behavior_tracker_dto(self, serializer);
-    }
-  }
-
-  @protected
   void sse_encode_opt_box_autoadd_hue_button_event_type_dto(
       HueButtonEventTypeDto? self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -3679,17 +3499,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_room_dto(self, serializer);
-    }
-  }
-
-  @protected
-  void sse_encode_opt_box_autoadd_runner_state_dto(
-      RunnerStateDto? self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    sse_encode_bool(self != null, serializer);
-    if (self != null) {
-      sse_encode_box_autoadd_runner_state_dto(self, serializer);
     }
   }
 

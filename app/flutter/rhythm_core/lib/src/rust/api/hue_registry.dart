@@ -7,8 +7,6 @@ import '../frb_generated.dart';
 import 'dto/hue_registry.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `escape_json_string`, `find_matching_bracket`, `find_string_end`, `parse_behavior_mappings`, `parse_behavior_tracker_json`, `parse_string_array`, `parse_string_tuple`, `unescape_json_string`
-
 /// Create a new empty behavior tracker.
 ///
 /// # Example (Dart)
@@ -129,44 +127,6 @@ HueBehaviorTrackerDto behaviorTrackerClear(
         {required HueBehaviorTrackerDto tracker}) =>
     RustLib.instance.api
         .crateApiHueRegistryBehaviorTrackerClear(tracker: tracker);
-
-/// Serialize behavior tracker to JSON string for persistence.
-///
-/// # Arguments
-///
-/// * `tracker` - Current tracker state
-///
-/// # Example (Dart)
-///
-/// ```dart
-/// final json = behaviorTrackerToJson(tracker: tracker);
-/// await prefs.setString('behavior_tracker', json);
-/// ```
-String behaviorTrackerToJson({required HueBehaviorTrackerDto tracker}) =>
-    RustLib.instance.api
-        .crateApiHueRegistryBehaviorTrackerToJson(tracker: tracker);
-
-/// Deserialize behavior tracker from JSON string.
-///
-/// Returns None if the JSON is invalid.
-///
-/// # Arguments
-///
-/// * `json` - JSON string from `behavior_tracker_to_json`
-///
-/// # Example (Dart)
-///
-/// ```dart
-/// final json = await prefs.getString('behavior_tracker');
-/// if (json != null) {
-///   final tracker = behaviorTrackerFromJson(json: json);
-///   if (tracker != null) {
-///     _behaviorTracker = tracker;
-///   }
-/// }
-/// ```
-HueBehaviorTrackerDto? behaviorTrackerFromJson({required String json}) =>
-    RustLib.instance.api.crateApiHueRegistryBehaviorTrackerFromJson(json: json);
 
 /// Create a new switch device DTO.
 HueSwitchDeviceDto createSwitchDevice(

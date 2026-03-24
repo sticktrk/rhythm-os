@@ -149,10 +149,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double? dco_decode_opt_box_autoadd_f_64(dynamic raw);
 
   @protected
-  HueBehaviorTrackerDto? dco_decode_opt_box_autoadd_hue_behavior_tracker_dto(
-      dynamic raw);
-
-  @protected
   HueButtonEventTypeDto? dco_decode_opt_box_autoadd_hue_button_event_type_dto(
       dynamic raw);
 
@@ -168,9 +164,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RoomDto? dco_decode_opt_box_autoadd_room_dto(dynamic raw);
-
-  @protected
-  RunnerStateDto? dco_decode_opt_box_autoadd_runner_state_dto(dynamic raw);
 
   @protected
   TwilightPhaseDto? dco_decode_opt_box_autoadd_twilight_phase_dto(dynamic raw);
@@ -359,10 +352,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double? sse_decode_opt_box_autoadd_f_64(SseDeserializer deserializer);
 
   @protected
-  HueBehaviorTrackerDto? sse_decode_opt_box_autoadd_hue_behavior_tracker_dto(
-      SseDeserializer deserializer);
-
-  @protected
   HueButtonEventTypeDto? sse_decode_opt_box_autoadd_hue_button_event_type_dto(
       SseDeserializer deserializer);
 
@@ -379,10 +368,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RoomDto? sse_decode_opt_box_autoadd_room_dto(SseDeserializer deserializer);
-
-  @protected
-  RunnerStateDto? sse_decode_opt_box_autoadd_runner_state_dto(
-      SseDeserializer deserializer);
 
   @protected
   TwilightPhaseDto? sse_decode_opt_box_autoadd_twilight_phase_dto(
@@ -638,16 +623,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
-  ffi.Pointer<wire_cst_hue_behavior_tracker_dto>
-      cst_encode_opt_box_autoadd_hue_behavior_tracker_dto(
-          HueBehaviorTrackerDto? raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw == null
-        ? ffi.nullptr
-        : cst_encode_box_autoadd_hue_behavior_tracker_dto(raw);
-  }
-
-  @protected
   ffi.Pointer<ffi.Int32> cst_encode_opt_box_autoadd_hue_button_event_type_dto(
       HueButtonEventTypeDto? raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
@@ -685,15 +660,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       RoomDto? raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return raw == null ? ffi.nullptr : cst_encode_box_autoadd_room_dto(raw);
-  }
-
-  @protected
-  ffi.Pointer<wire_cst_runner_state_dto>
-      cst_encode_opt_box_autoadd_runner_state_dto(RunnerStateDto? raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw == null
-        ? ffi.nullptr
-        : cst_encode_box_autoadd_runner_state_dto(raw);
   }
 
   @protected
@@ -1132,10 +1098,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_box_autoadd_f_64(double? self, SseSerializer serializer);
 
   @protected
-  void sse_encode_opt_box_autoadd_hue_behavior_tracker_dto(
-      HueBehaviorTrackerDto? self, SseSerializer serializer);
-
-  @protected
   void sse_encode_opt_box_autoadd_hue_button_event_type_dto(
       HueButtonEventTypeDto? self, SseSerializer serializer);
 
@@ -1153,10 +1115,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_room_dto(
       RoomDto? self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_opt_box_autoadd_runner_state_dto(
-      RunnerStateDto? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_twilight_phase_dto(
@@ -1396,27 +1354,6 @@ class RustLibWire implements BaseWire {
               )>();
 
   WireSyncRust2DartDco
-      wire__crate__api__hue_registry__behavior_tracker_from_json(
-    ffi.Pointer<wire_cst_list_prim_u_8_strict> json,
-  ) {
-    return _wire__crate__api__hue_registry__behavior_tracker_from_json(json);
-  }
-
-  late final _wire__crate__api__hue_registry__behavior_tracker_from_jsonPtr =
-      _lookup<
-          ffi.NativeFunction<
-              WireSyncRust2DartDco Function(
-                ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-              )>>(
-    'frbgen_rhythm_core_wire__crate__api__hue_registry__behavior_tracker_from_json',
-  );
-  late final _wire__crate__api__hue_registry__behavior_tracker_from_json =
-      _wire__crate__api__hue_registry__behavior_tracker_from_jsonPtr.asFunction<
-          WireSyncRust2DartDco Function(
-            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-          )>();
-
-  WireSyncRust2DartDco
       wire__crate__api__hue_registry__behavior_tracker_is_configured(
     ffi.Pointer<wire_cst_hue_behavior_tracker_dto> tracker,
     ffi.Pointer<wire_cst_list_prim_u_8_strict> device_id,
@@ -1468,26 +1405,6 @@ class RustLibWire implements BaseWire {
           WireSyncRust2DartDco Function(
             ffi.Pointer<wire_cst_hue_behavior_tracker_dto>,
             ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-          )>();
-
-  WireSyncRust2DartDco wire__crate__api__hue_registry__behavior_tracker_to_json(
-    ffi.Pointer<wire_cst_hue_behavior_tracker_dto> tracker,
-  ) {
-    return _wire__crate__api__hue_registry__behavior_tracker_to_json(tracker);
-  }
-
-  late final _wire__crate__api__hue_registry__behavior_tracker_to_jsonPtr =
-      _lookup<
-          ffi.NativeFunction<
-              WireSyncRust2DartDco Function(
-                ffi.Pointer<wire_cst_hue_behavior_tracker_dto>,
-              )>>(
-    'frbgen_rhythm_core_wire__crate__api__hue_registry__behavior_tracker_to_json',
-  );
-  late final _wire__crate__api__hue_registry__behavior_tracker_to_json =
-      _wire__crate__api__hue_registry__behavior_tracker_to_jsonPtr.asFunction<
-          WireSyncRust2DartDco Function(
-            ffi.Pointer<wire_cst_hue_behavior_tracker_dto>,
           )>();
 
   WireSyncRust2DartDco wire__crate__api__runner__calculate_action_result(
@@ -1885,18 +1802,6 @@ class RustLibWire implements BaseWire {
   );
   late final _wire__crate__api__helpers__get_group_prefix =
       _wire__crate__api__helpers__get_group_prefixPtr
-          .asFunction<WireSyncRust2DartDco Function()>();
-
-  WireSyncRust2DartDco wire__crate__api__helpers__get_hue_oui_prefix() {
-    return _wire__crate__api__helpers__get_hue_oui_prefix();
-  }
-
-  late final _wire__crate__api__helpers__get_hue_oui_prefixPtr =
-      _lookup<ffi.NativeFunction<WireSyncRust2DartDco Function()>>(
-    'frbgen_rhythm_core_wire__crate__api__helpers__get_hue_oui_prefix',
-  );
-  late final _wire__crate__api__helpers__get_hue_oui_prefix =
-      _wire__crate__api__helpers__get_hue_oui_prefixPtr
           .asFunction<WireSyncRust2DartDco Function()>();
 
   WireSyncRust2DartDco wire__crate__api__helpers__get_hue_switch_prefixes() {
@@ -2647,41 +2552,6 @@ class RustLibWire implements BaseWire {
   late final _wire__crate__api__dto__runner__runner_state_dto_default =
       _wire__crate__api__dto__runner__runner_state_dto_defaultPtr
           .asFunction<WireSyncRust2DartDco Function()>();
-
-  WireSyncRust2DartDco wire__crate__api__runner__runner_state_from_json(
-    ffi.Pointer<wire_cst_list_prim_u_8_strict> json,
-  ) {
-    return _wire__crate__api__runner__runner_state_from_json(json);
-  }
-
-  late final _wire__crate__api__runner__runner_state_from_jsonPtr = _lookup<
-          ffi.NativeFunction<
-              WireSyncRust2DartDco Function(
-                ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-              )>>(
-      'frbgen_rhythm_core_wire__crate__api__runner__runner_state_from_json');
-  late final _wire__crate__api__runner__runner_state_from_json =
-      _wire__crate__api__runner__runner_state_from_jsonPtr.asFunction<
-          WireSyncRust2DartDco Function(
-            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-          )>();
-
-  WireSyncRust2DartDco wire__crate__api__runner__runner_state_to_json(
-    ffi.Pointer<wire_cst_runner_state_dto> state,
-  ) {
-    return _wire__crate__api__runner__runner_state_to_json(state);
-  }
-
-  late final _wire__crate__api__runner__runner_state_to_jsonPtr = _lookup<
-          ffi.NativeFunction<
-              WireSyncRust2DartDco Function(
-                  ffi.Pointer<wire_cst_runner_state_dto>)>>(
-      'frbgen_rhythm_core_wire__crate__api__runner__runner_state_to_json');
-  late final _wire__crate__api__runner__runner_state_to_json =
-      _wire__crate__api__runner__runner_state_to_jsonPtr.asFunction<
-          WireSyncRust2DartDco Function(
-            ffi.Pointer<wire_cst_runner_state_dto>,
-          )>();
 
   ffi.Pointer<wire_cst_curve_config_dto>
       cst_new_box_autoadd_curve_config_dto() {

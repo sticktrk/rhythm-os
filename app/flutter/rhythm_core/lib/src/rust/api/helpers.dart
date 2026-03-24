@@ -16,16 +16,6 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 List<String> getHueSwitchPrefixes() =>
     RustLib.instance.api.crateApiHelpersGetHueSwitchPrefixes();
 
-/// Get the Philips Hue OUI prefix.
-///
-/// This prefix identifies Philips Hue devices by their IEEE address.
-///
-/// # Returns
-///
-/// The Hue OUI prefix: "00:17:88:01:09"
-String getHueOuiPrefix() =>
-    RustLib.instance.api.crateApiHelpersGetHueOuiPrefix();
-
 /// Get the Rhythm group prefix.
 ///
 /// Groups created by Rhythm use this prefix.

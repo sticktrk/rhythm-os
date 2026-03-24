@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_core/runner/runner_state_json.dart' as runner_json;
 import '../data/local_data_source.dart';
 
 /// Singleton service for device-specific settings.
@@ -251,7 +252,7 @@ class SettingsService {
     final json = _settings.runnerStateJson;
     if (json == null) return null;
     try {
-      return runnerStateFromJson(json: json);
+      return runner_json.runnerStateFromJson(json);
     } catch (e) {
       return null;
     }
@@ -259,7 +260,7 @@ class SettingsService {
 
   /// Save runner state.
   Future<void> saveRunnerState(RunnerStateDto state) async {
-    final json = runnerStateToJson(state: state);
+    final json = runner_json.runnerStateToJson(state);
     _settings = _settings.copyWith(runnerStateJson: json);
     await _save();
   }

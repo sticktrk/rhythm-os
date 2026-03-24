@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueNom,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1858767072;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 470141064;
 
 // Section: executor
 
@@ -175,26 +175,6 @@ fn wire__crate__api__hue_registry__behavior_tracker_device_count_impl(
         },
     )
 }
-fn wire__crate__api__hue_registry__behavior_tracker_from_json_impl(
-    json: impl CstDecode<String>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "behavior_tracker_from_json",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_json = json.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok = Result::<_, ()>::Ok(
-                    crate::api::hue_registry::behavior_tracker_from_json(api_json),
-                )?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
 fn wire__crate__api__hue_registry__behavior_tracker_is_configured_impl(
     tracker: impl CstDecode<crate::api::dto::hue_registry::HueBehaviorTrackerDto>,
     device_id: impl CstDecode<String>,
@@ -235,26 +215,6 @@ fn wire__crate__api__hue_registry__behavior_tracker_remove_impl(
             transform_result_dco::<_, _, ()>((move || {
                 let output_ok = Result::<_, ()>::Ok(
                     crate::api::hue_registry::behavior_tracker_remove(api_tracker, api_behavior_id),
-                )?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__hue_registry__behavior_tracker_to_json_impl(
-    tracker: impl CstDecode<crate::api::dto::hue_registry::HueBehaviorTrackerDto>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "behavior_tracker_to_json",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_tracker = tracker.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok = Result::<_, ()>::Ok(
-                    crate::api::hue_registry::behavior_tracker_to_json(api_tracker),
                 )?;
                 Ok(output_ok)
             })())
@@ -630,22 +590,6 @@ fn wire__crate__api__helpers__get_group_prefix_impl(
         move || {
             transform_result_dco::<_, _, ()>((move || {
                 let output_ok = Result::<_, ()>::Ok(crate::api::helpers::get_group_prefix())?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__helpers__get_hue_oui_prefix_impl(
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "get_hue_oui_prefix",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok = Result::<_, ()>::Ok(crate::api::helpers::get_hue_oui_prefix())?;
                 Ok(output_ok)
             })())
         },
@@ -1411,44 +1355,6 @@ fn wire__crate__api__dto__runner__runner_state_dto_default_impl(
         },
     )
 }
-fn wire__crate__api__runner__runner_state_from_json_impl(
-    json: impl CstDecode<String>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "runner_state_from_json",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_json = json.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok =
-                    Result::<_, ()>::Ok(crate::api::runner::runner_state_from_json(api_json))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__runner__runner_state_to_json_impl(
-    state: impl CstDecode<crate::api::dto::runner::RunnerStateDto>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "runner_state_to_json",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_state = state.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok =
-                    Result::<_, ()>::Ok(crate::api::runner::runner_state_to_json(api_state))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
 
 // Section: dart2rust
 
@@ -1907,19 +1813,6 @@ impl SseDecode for Option<f64> {
     }
 }
 
-impl SseDecode for Option<crate::api::dto::hue_registry::HueBehaviorTrackerDto> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        if (<bool>::sse_decode(deserializer)) {
-            return Some(
-                <crate::api::dto::hue_registry::HueBehaviorTrackerDto>::sse_decode(deserializer),
-            );
-        } else {
-            return None;
-        }
-    }
-}
-
 impl SseDecode for Option<crate::api::dto::hue::HueButtonEventTypeDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1975,19 +1868,6 @@ impl SseDecode for Option<crate::api::dto::runner::RoomDto> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<crate::api::dto::runner::RoomDto>::sse_decode(deserializer));
-        } else {
-            return None;
-        }
-    }
-}
-
-impl SseDecode for Option<crate::api::dto::runner::RunnerStateDto> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        if (<bool>::sse_decode(deserializer)) {
-            return Some(<crate::api::dto::runner::RunnerStateDto>::sse_decode(
-                deserializer,
-            ));
         } else {
             return None;
         }
@@ -3180,16 +3060,6 @@ impl SseEncode for Option<f64> {
     }
 }
 
-impl SseEncode for Option<crate::api::dto::hue_registry::HueBehaviorTrackerDto> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <bool>::sse_encode(self.is_some(), serializer);
-        if let Some(value) = self {
-            <crate::api::dto::hue_registry::HueBehaviorTrackerDto>::sse_encode(value, serializer);
-        }
-    }
-}
-
 impl SseEncode for Option<crate::api::dto::hue::HueButtonEventTypeDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -3236,16 +3106,6 @@ impl SseEncode for Option<crate::api::dto::runner::RoomDto> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::dto::runner::RoomDto>::sse_encode(value, serializer);
-        }
-    }
-}
-
-impl SseEncode for Option<crate::api::dto::runner::RunnerStateDto> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <bool>::sse_encode(self.is_some(), serializer);
-        if let Some(value) = self {
-            <crate::api::dto::runner::RunnerStateDto>::sse_encode(value, serializer);
         }
     }
 }
@@ -4274,13 +4134,6 @@ mod io {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__hue_registry__behavior_tracker_from_json(
-        json: *mut wire_cst_list_prim_u_8_strict,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__hue_registry__behavior_tracker_from_json_impl(json)
-    }
-
-    #[unsafe(no_mangle)]
     pub extern "C" fn frbgen_rhythm_core_wire__crate__api__hue_registry__behavior_tracker_is_configured(
         tracker: *mut wire_cst_hue_behavior_tracker_dto,
         device_id: *mut wire_cst_list_prim_u_8_strict,
@@ -4294,13 +4147,6 @@ mod io {
         behavior_id: *mut wire_cst_list_prim_u_8_strict,
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
         wire__crate__api__hue_registry__behavior_tracker_remove_impl(tracker, behavior_id)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__hue_registry__behavior_tracker_to_json(
-        tracker: *mut wire_cst_hue_behavior_tracker_dto,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__hue_registry__behavior_tracker_to_json_impl(tracker)
     }
 
     #[unsafe(no_mangle)]
@@ -4471,12 +4317,6 @@ mod io {
     pub extern "C" fn frbgen_rhythm_core_wire__crate__api__helpers__get_group_prefix(
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
         wire__crate__api__helpers__get_group_prefix_impl()
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__helpers__get_hue_oui_prefix(
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__helpers__get_hue_oui_prefix_impl()
     }
 
     #[unsafe(no_mangle)]
@@ -4768,20 +4608,6 @@ mod io {
     pub extern "C" fn frbgen_rhythm_core_wire__crate__api__dto__runner__runner_state_dto_default(
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
         wire__crate__api__dto__runner__runner_state_dto_default_impl()
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__runner__runner_state_from_json(
-        json: *mut wire_cst_list_prim_u_8_strict,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_state_from_json_impl(json)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__runner__runner_state_to_json(
-        state: *mut wire_cst_runner_state_dto,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_state_to_json_impl(state)
     }
 
     #[unsafe(no_mangle)]
@@ -5952,13 +5778,6 @@ mod web {
     }
 
     #[wasm_bindgen]
-    pub fn wire__crate__api__hue_registry__behavior_tracker_from_json(
-        json: String,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__hue_registry__behavior_tracker_from_json_impl(json)
-    }
-
-    #[wasm_bindgen]
     pub fn wire__crate__api__hue_registry__behavior_tracker_is_configured(
         tracker: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
         device_id: String,
@@ -5972,13 +5791,6 @@ mod web {
         behavior_id: String,
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
         wire__crate__api__hue_registry__behavior_tracker_remove_impl(tracker, behavior_id)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__hue_registry__behavior_tracker_to_json(
-        tracker: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__hue_registry__behavior_tracker_to_json_impl(tracker)
     }
 
     #[wasm_bindgen]
@@ -6149,12 +5961,6 @@ mod web {
     pub fn wire__crate__api__helpers__get_group_prefix(
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
         wire__crate__api__helpers__get_group_prefix_impl()
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__helpers__get_hue_oui_prefix(
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__helpers__get_hue_oui_prefix_impl()
     }
 
     #[wasm_bindgen]
@@ -6446,20 +6252,6 @@ mod web {
     pub fn wire__crate__api__dto__runner__runner_state_dto_default(
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
         wire__crate__api__dto__runner__runner_state_dto_default_impl()
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__runner__runner_state_from_json(
-        json: String,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_state_from_json_impl(json)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__runner__runner_state_to_json(
-        state: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_state_to_json_impl(state)
     }
 }
 #[cfg(target_family = "wasm")]

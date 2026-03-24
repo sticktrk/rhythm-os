@@ -1,32 +1,20 @@
 //! Runner state management functions.
 
-use rhythm_core::{CurveConfig, CurveContext, RhythmCurveModule, SolarTime, StepAction, LightCurveModule};
+use rhythm_core::{
+    kelvin_to_mireds, process_action, ActionResult, CurveConfig, RhythmCurveModule, RoomAction,
+    RoomActionState, SolarTime,
+};
 
-use super::curve::calculate_lighting;
 use super::dto::{
-    ActionResultDto, CurveConfigDto, LightCommandDto, LightCommandType, RhythmActionDto,
-    RoomDto, RoomSourceDto, RoomStateDto, RunnerActionResultDto, RunnerStateDto,
+    ActionResultDto, CurveConfigDto, LightCommandDto, LightCommandType, LightingValuesDto,
+    RgbDto, RhythmActionDto, RoomDto, RoomSourceDto, RoomStateDto, RunnerActionResultDto,
+    RunnerStateDto, XyDto,
 };
 
 /// Process an action and calculate the resulting lighting state.
 ///
-/// This is the main function for the RhythmRunner. It processes a button
-/// action given the current room state and returns the new lighting values
-/// and updated state.
-///
-/// # Arguments
-///
-/// * `config` - Curve configuration parameters
-/// * `solar_noon_hour` - Hour of solar noon (0-24, local time)
-/// * `latitude` - Latitude in degrees
-/// * `day_of_year` - Day of year (1-365)
-/// * `current_hour` - Current time in hours (0-24)
-/// * `action` - The action to process
-/// * `room_state` - Current state of the room
-///
-/// # Returns
-///
-/// ActionResultDto with new lighting values and updated room state.
+/// Delegates to the shared `process_action` kernel in rhythm-core,
+/// then converts the result to FFI-compatible DTOs.
 pub fn calculate_action_result(
     config: CurveConfigDto,
     solar_noon_hour: f64,
@@ -36,168 +24,58 @@ pub fn calculate_action_result(
     action: RhythmActionDto,
     room_state: RoomStateDto,
 ) -> ActionResultDto {
-    let config_rust: CurveConfig = config.clone().into();
+    let config_rust: CurveConfig = config.into();
     let solar = SolarTime::new(solar_noon_hour as f32, latitude as f32, day_of_year as u32);
     let module = RhythmCurveModule::new(config_rust);
 
-    // Calculate effective hour with current offset
-    let effective_hour = current_hour + (room_state.time_offset_minutes / 60.0);
-    let effective_hour = ((effective_hour % 24.0) + 24.0) % 24.0;
+    let core_action = match action {
+        RhythmActionDto::OnPress => RoomAction::OnPress,
+        RhythmActionDto::OffPress => RoomAction::OffPress,
+        RhythmActionDto::Reset => RoomAction::Reset,
+        RhythmActionDto::RhythmOn => RoomAction::RhythmOn,
+        RhythmActionDto::RhythmOff => RoomAction::RhythmOff,
+        RhythmActionDto::StepUp => RoomAction::StepUp,
+        RhythmActionDto::StepDown => RoomAction::StepDown,
+        RhythmActionDto::DimUp => RoomAction::DimUp,
+        RhythmActionDto::DimDown => RoomAction::DimDown,
+    };
 
-    match action {
-        RhythmActionDto::OnPress => {
-            // Toggle: if lights on, turn off. If lights off, turn on with rhythm.
-            if room_state.lights_on {
-                ActionResultDto {
-                    lighting: None,
-                    new_state: RoomStateDto {
-                        rhythm_enabled: room_state.rhythm_enabled,
-                        lights_on: false,
-                        time_offset_minutes: room_state.time_offset_minutes,
-                        brightness_offset: room_state.brightness_offset,
-                    },
-                    should_turn_off: true,
-                    should_turn_on: false,
-                    state_changed: true,
-                }
-            } else {
-                // Turn on with rhythm at current time (reset offset)
-                let values = calculate_lighting(config.clone(), solar_noon_hour, latitude, day_of_year, current_hour);
-                ActionResultDto {
-                    lighting: Some(values),
-                    new_state: RoomStateDto {
-                        rhythm_enabled: true,
-                        lights_on: true,
-                        time_offset_minutes: 0.0,
-                        brightness_offset: 0.0,
-                    },
-                    should_turn_off: false,
-                    should_turn_on: true,
-                    state_changed: true,
-                }
-            }
-        }
+    let core_state = RoomActionState {
+        rhythm_enabled: room_state.rhythm_enabled,
+        lights_on: room_state.lights_on,
+        time_offset_minutes: room_state.time_offset_minutes as f32,
+        brightness_offset: room_state.brightness_offset as f32,
+    };
 
-        RhythmActionDto::OffPress => {
-            // Turn off lights
-            ActionResultDto {
-                lighting: None,
-                new_state: RoomStateDto {
-                    rhythm_enabled: room_state.rhythm_enabled,
-                    lights_on: false,
-                    time_offset_minutes: room_state.time_offset_minutes,
-                    brightness_offset: room_state.brightness_offset,
-                },
-                should_turn_off: true,
-                should_turn_on: false,
-                state_changed: room_state.lights_on,
-            }
-        }
+    let result: ActionResult =
+        process_action(&module, solar, current_hour as f32, core_action, &core_state);
 
-        RhythmActionDto::Reset => {
-            // Reset to current time position (clear both offsets)
-            let values = calculate_lighting(config, solar_noon_hour, latitude, day_of_year, current_hour);
-            ActionResultDto {
-                lighting: Some(values),
-                new_state: RoomStateDto {
-                    rhythm_enabled: true,
-                    lights_on: true,
-                    time_offset_minutes: 0.0,
-                    brightness_offset: 0.0,
-                },
-                should_turn_off: false,
-                should_turn_on: true,
-                state_changed: true,
-            }
-        }
-
-        RhythmActionDto::RhythmOn => {
-            // Enable rhythm timer participation only (no light commands)
-            ActionResultDto {
-                lighting: None,
-                new_state: RoomStateDto {
-                    rhythm_enabled: true,
-                    lights_on: room_state.lights_on,
-                    time_offset_minutes: room_state.time_offset_minutes,
-                    brightness_offset: room_state.brightness_offset,
-                },
-                should_turn_off: false,
-                should_turn_on: false,
-                state_changed: !room_state.rhythm_enabled,
-            }
-        }
-
-        RhythmActionDto::RhythmOff => {
-            // Disable rhythm mode only (lights unchanged)
-            ActionResultDto {
-                lighting: None,
-                new_state: RoomStateDto {
-                    rhythm_enabled: false,
-                    lights_on: room_state.lights_on,
-                    time_offset_minutes: room_state.time_offset_minutes,
-                    brightness_offset: room_state.brightness_offset,
-                },
-                should_turn_off: false,
-                should_turn_on: false,
-                state_changed: room_state.rhythm_enabled,
-            }
-        }
-
-        RhythmActionDto::StepUp | RhythmActionDto::StepDown => {
-            // Calculate step along curve
-            let step_action = match action {
-                RhythmActionDto::StepUp => StepAction::Brighten,
-                _ => StepAction::Dim,
-            };
-
-            let ctx = CurveContext::new(effective_hour as f32, solar, None);
-            let step_result = module.calculate_step(&ctx, step_action);
-
-            // Calculate new time offset
-            let new_offset = room_state.time_offset_minutes + (step_result.time_offset_minutes as f64);
-
-            // Get lighting values at new position
-            let new_effective_hour = current_hour + (new_offset / 60.0);
-            let new_effective_hour = ((new_effective_hour % 24.0) + 24.0) % 24.0;
-            let values = calculate_lighting(config, solar_noon_hour, latitude, day_of_year, new_effective_hour);
-
-            ActionResultDto {
-                lighting: Some(values),
-                new_state: RoomStateDto {
-                    rhythm_enabled: room_state.rhythm_enabled,
-                    lights_on: true,
-                    time_offset_minutes: new_offset,
-                    brightness_offset: room_state.brightness_offset,
-                },
-                should_turn_off: false,
-                should_turn_on: true,
-                state_changed: true,
-            }
-        }
-
-        RhythmActionDto::DimUp | RhythmActionDto::DimDown => {
-            // Adjust brightness only (no color temp change)
-            let delta = if action == RhythmActionDto::DimUp { 10.0 } else { -10.0 };
-            let new_brightness_offset = (room_state.brightness_offset + delta).clamp(-100.0, 100.0);
-
-            // Get lighting values at current position, then apply brightness offset
-            let mut values = calculate_lighting(config, solar_noon_hour, latitude, day_of_year, effective_hour);
-            let adjusted_brightness = (values.brightness as f64 + new_brightness_offset).clamp(1.0, 100.0);
-            values.brightness = adjusted_brightness as i32;
-
-            ActionResultDto {
-                lighting: Some(values),
-                new_state: RoomStateDto {
-                    rhythm_enabled: room_state.rhythm_enabled,
-                    lights_on: true,
-                    time_offset_minutes: room_state.time_offset_minutes,
-                    brightness_offset: new_brightness_offset,
-                },
-                should_turn_off: false,
-                should_turn_on: true,
-                state_changed: true,
-            }
-        }
+    ActionResultDto {
+        lighting: result.lighting.map(|v| LightingValuesDto {
+            kelvin: v.kelvin as i32,
+            mireds: kelvin_to_mireds(v.kelvin) as i32,
+            brightness: v.brightness as i32,
+            rgb: RgbDto {
+                r: v.rgb.r as i32,
+                g: v.rgb.g as i32,
+                b: v.rgb.b as i32,
+            },
+            xy: XyDto {
+                x: v.xy.x as f64,
+                y: v.xy.y as f64,
+            },
+            solar_time: v.solar_time as f64,
+            sun_position: v.sun_position as f64,
+        }),
+        new_state: RoomStateDto {
+            rhythm_enabled: result.new_state.rhythm_enabled,
+            lights_on: result.new_state.lights_on,
+            time_offset_minutes: result.new_state.time_offset_minutes as f64,
+            brightness_offset: result.new_state.brightness_offset as f64,
+        },
+        should_turn_off: result.should_turn_off,
+        should_turn_on: result.should_turn_on,
+        state_changed: result.state_changed,
     }
 }
 
@@ -208,348 +86,6 @@ pub fn calculate_action_result(
 /// Create a new empty runner state.
 pub fn create_runner_state() -> RunnerStateDto {
     RunnerStateDto::default()
-}
-
-/// Serialize runner state to JSON string for persistence.
-pub fn runner_state_to_json(state: RunnerStateDto) -> String {
-    // Manual JSON serialization to avoid serde dependency issues with FRB
-    let rooms_json: Vec<String> = state.rooms.iter().map(|room| {
-        let device_ids_json: Vec<String> = room.device_ids.iter()
-            .map(|id| format!("\"{}\"", id.replace('\\', "\\\\").replace('"', "\\\"")))
-            .collect();
-        let source_str = room_source_to_string(room.source);
-        let curve_config_json = room.curve_config.as_ref()
-            .map(curve_config_to_json)
-            .unwrap_or_else(|| "null".to_string());
-        format!(
-            r#"{{"id":"{}","name":"{}","source":"{}","device_ids":[{}],"rhythm_enabled":{},"disabled":{},"lights_on":{},"time_offset_minutes":{},"brightness_offset":{},"curve_config":{}}}"#,
-            room.id.replace('\\', "\\\\").replace('"', "\\\""),
-            room.name.replace('\\', "\\\\").replace('"', "\\\""),
-            source_str,
-            device_ids_json.join(","),
-            room.rhythm_enabled,
-            room.disabled,
-            room.lights_on,
-            room.time_offset_minutes,
-            room.brightness_offset,
-            curve_config_json
-        )
-    }).collect();
-
-    format!(r#"{{"rooms":[{}]}}"#, rooms_json.join(","))
-}
-
-fn room_source_to_string(source: RoomSourceDto) -> &'static str {
-    match source {
-        RoomSourceDto::Unknown => "unknown",
-        RoomSourceDto::Hue => "hue",
-        RoomSourceDto::HomeAssistant => "home_assistant",
-        RoomSourceDto::Esp32 => "esp32",
-    }
-}
-
-fn room_source_from_string(s: &str) -> RoomSourceDto {
-    match s.to_lowercase().as_str() {
-        "hue" => RoomSourceDto::Hue,
-        "home_assistant" | "homeassistant" => RoomSourceDto::HomeAssistant,
-        "esp32" => RoomSourceDto::Esp32,
-        _ => RoomSourceDto::Unknown,
-    }
-}
-
-fn curve_config_to_json(config: &CurveConfigDto) -> String {
-    format!(
-        r#"{{"min_color_temp":{},"max_color_temp":{},"min_brightness":{},"max_brightness":{},"width_left_bri":{},"width_right_bri":{},"width_left_cct":{},"width_right_cct":{},"shape_p":{},"max_dim_steps":{}}}"#,
-        config.min_color_temp,
-        config.max_color_temp,
-        config.min_brightness,
-        config.max_brightness,
-        config.width_left_bri,
-        config.width_right_bri,
-        config.width_left_cct,
-        config.width_right_cct,
-        config.shape_p,
-        config.max_dim_steps
-    )
-}
-
-/// Deserialize runner state from JSON string.
-/// Returns None if the JSON is invalid.
-pub fn runner_state_from_json(json: String) -> Option<RunnerStateDto> {
-    // Simple JSON parsing - this is intentionally basic
-    // In production, you might want to use a proper JSON parser
-    parse_runner_state_json(&json)
-}
-
-// Simple JSON parser for RunnerStateDto
-fn parse_runner_state_json(json: &str) -> Option<RunnerStateDto> {
-    let json = json.trim();
-    if !json.starts_with('{') || !json.ends_with('}') {
-        return None;
-    }
-
-    // Find "rooms" array
-    let rooms_start = json.find("\"rooms\"")?;
-    let array_start = json[rooms_start..].find('[')? + rooms_start;
-    let array_end = find_matching_bracket(json, array_start)?;
-
-    let rooms_str = &json[array_start + 1..array_end];
-    let rooms = parse_rooms_array(rooms_str);
-
-    Some(RunnerStateDto { rooms })
-}
-
-fn find_matching_bracket(s: &str, start: usize) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let open = bytes[start];
-    let close = match open {
-        b'[' => b']',
-        b'{' => b'}',
-        _ => return None,
-    };
-
-    let mut depth = 1;
-    let mut i = start + 1;
-    let mut in_string = false;
-    let mut escape = false;
-
-    while i < bytes.len() && depth > 0 {
-        if escape {
-            escape = false;
-        } else if bytes[i] == b'\\' {
-            escape = true;
-        } else if bytes[i] == b'"' {
-            in_string = !in_string;
-        } else if !in_string {
-            if bytes[i] == open {
-                depth += 1;
-            } else if bytes[i] == close {
-                depth -= 1;
-            }
-        }
-        i += 1;
-    }
-
-    if depth == 0 { Some(i - 1) } else { None }
-}
-
-fn parse_rooms_array(s: &str) -> Vec<RoomDto> {
-    let mut rooms = Vec::new();
-    let s = s.trim();
-    if s.is_empty() {
-        return rooms;
-    }
-
-    let mut i = 0;
-    while i < s.len() {
-        // Find start of next object
-        if let Some(obj_start) = s[i..].find('{') {
-            let obj_start = i + obj_start;
-            if let Some(obj_end) = find_matching_bracket(s, obj_start) {
-                let obj_str = &s[obj_start..=obj_end];
-                if let Some(room) = parse_room_object(obj_str) {
-                    rooms.push(room);
-                }
-                i = obj_end + 1;
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-
-    rooms
-}
-
-fn parse_room_object(s: &str) -> Option<RoomDto> {
-    let id = extract_string_field(s, "id")?;
-    let name = extract_string_field(s, "name").unwrap_or_else(|| id.clone());
-    let source_str = extract_string_field(s, "source").unwrap_or_else(|| "unknown".to_string());
-    let source = room_source_from_string(&source_str);
-    let device_ids = extract_string_array_field(s, "device_ids").unwrap_or_default();
-    let rhythm_enabled = extract_bool_field(s, "rhythm_enabled").unwrap_or(false);
-    let disabled = extract_bool_field(s, "disabled").unwrap_or(false);
-    let lights_on = extract_bool_field(s, "lights_on").unwrap_or(false);
-    let time_offset_minutes = extract_number_field(s, "time_offset_minutes").unwrap_or(0.0);
-    let brightness_offset = extract_number_field(s, "brightness_offset").unwrap_or(0.0);
-    let curve_config = extract_curve_config_field(s, "curve_config");
-
-    Some(RoomDto {
-        id,
-        name,
-        source,
-        device_ids,
-        rhythm_enabled,
-        disabled,
-        lights_on,
-        time_offset_minutes,
-        brightness_offset,
-        curve_config,
-    })
-}
-
-fn extract_curve_config_field(s: &str, field: &str) -> Option<CurveConfigDto> {
-    let pattern = format!("\"{}\"", field);
-    let field_start = s.find(&pattern)?;
-    let after_field = &s[field_start + pattern.len()..];
-    let colon_pos = after_field.find(':')?;
-    let after_colon = after_field[colon_pos + 1..].trim_start();
-
-    // Check if it's null
-    if after_colon.starts_with("null") {
-        return None;
-    }
-
-    // Check if it's an object
-    if !after_colon.starts_with('{') {
-        return None;
-    }
-
-    let obj_start = field_start + pattern.len() + colon_pos + 1 + (after_field[colon_pos + 1..].len() - after_colon.len());
-    let obj_end = find_matching_bracket(s, obj_start)?;
-    let config_str = &s[obj_start..=obj_end];
-
-    parse_curve_config_object(config_str)
-}
-
-fn parse_curve_config_object(s: &str) -> Option<CurveConfigDto> {
-    // Use rhythm-core defaults for missing fields
-    let defaults = CurveConfigDto::default();
-    Some(CurveConfigDto {
-        min_color_temp: extract_number_field(s, "min_color_temp")
-            .map(|v| v as i32)
-            .unwrap_or(defaults.min_color_temp),
-        max_color_temp: extract_number_field(s, "max_color_temp")
-            .map(|v| v as i32)
-            .unwrap_or(defaults.max_color_temp),
-        min_brightness: extract_number_field(s, "min_brightness")
-            .map(|v| v as i32)
-            .unwrap_or(defaults.min_brightness),
-        max_brightness: extract_number_field(s, "max_brightness")
-            .map(|v| v as i32)
-            .unwrap_or(defaults.max_brightness),
-        width_left_bri: extract_number_field(s, "width_left_bri")
-            .unwrap_or(defaults.width_left_bri),
-        width_right_bri: extract_number_field(s, "width_right_bri")
-            .unwrap_or(defaults.width_right_bri),
-        width_left_cct: extract_number_field(s, "width_left_cct")
-            .unwrap_or(defaults.width_left_cct),
-        width_right_cct: extract_number_field(s, "width_right_cct")
-            .unwrap_or(defaults.width_right_cct),
-        shape_p: extract_number_field(s, "shape_p")
-            .unwrap_or(defaults.shape_p),
-        max_dim_steps: extract_number_field(s, "max_dim_steps")
-            .map(|v| v as i32)
-            .unwrap_or(defaults.max_dim_steps),
-    })
-}
-
-fn extract_string_field(s: &str, field: &str) -> Option<String> {
-    let pattern = format!("\"{}\"", field);
-    let field_start = s.find(&pattern)?;
-    let colon_pos = s[field_start + pattern.len()..].find(':')? + field_start + pattern.len();
-    let value_start = s[colon_pos + 1..].find('"')? + colon_pos + 2;
-    let value_end = find_string_end(s, value_start)?;
-    Some(unescape_json_string(&s[value_start..value_end]))
-}
-
-fn find_string_end(s: &str, start: usize) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut i = start;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' {
-            i += 2;
-        } else if bytes[i] == b'"' {
-            return Some(i);
-        } else {
-            i += 1;
-        }
-    }
-    None
-}
-
-fn unescape_json_string(s: &str) -> String {
-    let mut result = String::new();
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(&next) = chars.peek() {
-                chars.next();
-                match next {
-                    '"' => result.push('"'),
-                    '\\' => result.push('\\'),
-                    'n' => result.push('\n'),
-                    't' => result.push('\t'),
-                    'r' => result.push('\r'),
-                    _ => {
-                        result.push('\\');
-                        result.push(next);
-                    }
-                }
-            }
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
-
-fn extract_string_array_field(s: &str, field: &str) -> Option<Vec<String>> {
-    let pattern = format!("\"{}\"", field);
-    let field_start = s.find(&pattern)?;
-    let array_start = s[field_start..].find('[')? + field_start;
-    let array_end = find_matching_bracket(s, array_start)?;
-
-    let array_content = &s[array_start + 1..array_end];
-    let mut result = Vec::new();
-
-    let mut i = 0;
-    while i < array_content.len() {
-        if let Some(str_start) = array_content[i..].find('"') {
-            let str_start = i + str_start + 1;
-            if let Some(str_end) = find_string_end(array_content, str_start) {
-                result.push(unescape_json_string(&array_content[str_start..str_end]));
-                i = str_end + 1;
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-
-    Some(result)
-}
-
-fn extract_bool_field(s: &str, field: &str) -> Option<bool> {
-    let pattern = format!("\"{}\"", field);
-    let field_start = s.find(&pattern)?;
-    let after_colon = &s[field_start + pattern.len()..];
-    let colon_pos = after_colon.find(':')?;
-    let value_part = after_colon[colon_pos + 1..].trim_start();
-
-    if value_part.starts_with("true") {
-        Some(true)
-    } else if value_part.starts_with("false") {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-fn extract_number_field(s: &str, field: &str) -> Option<f64> {
-    let pattern = format!("\"{}\"", field);
-    let field_start = s.find(&pattern)?;
-    let after_colon = &s[field_start + pattern.len()..];
-    let colon_pos = after_colon.find(':')?;
-    let value_part = after_colon[colon_pos + 1..].trim_start();
-
-    // Find end of number
-    let end = value_part.find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-' && c != '+' && c != 'e' && c != 'E')
-        .unwrap_or(value_part.len());
-
-    value_part[..end].parse().ok()
 }
 
 /// Add a room to the runner state.

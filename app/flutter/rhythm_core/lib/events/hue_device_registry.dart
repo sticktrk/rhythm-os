@@ -11,6 +11,7 @@ import 'dart:io';
 import '../src/rust/api/hue_registry.dart' as rust_hue;
 import '../src/rust/api/dto/hue_registry.dart'
     show HueBehaviorTrackerDto, BehaviorMappingDto;
+import 'behavior_tracker_json.dart' as tracker_json;
 
 /// A Hue button resource from the V2 API.
 class HueButton {
@@ -474,9 +475,9 @@ class HueDeviceRegistry {
 
   /// Serialize registry state for persistence.
   Map<String, dynamic> toJson() {
-    // Serialize behavior tracker using Rust FFI
-    final behaviorTrackerJson = rust_hue.behaviorTrackerToJson(
-      tracker: _behaviorTracker,
+    // Serialize behavior tracker using Dart JSON
+    final behaviorTrackerJson = tracker_json.behaviorTrackerToJson(
+      _behaviorTracker,
     );
 
     return {
@@ -577,10 +578,10 @@ class HueDeviceRegistry {
       }
     }
 
-    // Load behavior tracker using Rust FFI
+    // Load behavior tracker from persisted JSON
     final behaviorTrackerJson = json['behaviorTracker'] as String?;
     if (behaviorTrackerJson != null) {
-      final tracker = rust_hue.behaviorTrackerFromJson(json: behaviorTrackerJson);
+      final tracker = tracker_json.behaviorTrackerFromJson(behaviorTrackerJson);
       if (tracker != null) {
         _behaviorTracker = tracker;
       }

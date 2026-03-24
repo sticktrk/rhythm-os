@@ -10,13 +10,13 @@ mod tests {
         get_sun_position, get_sun_times, generate_curve_data_with_sun_times,
         // Runner functions
         calculate_action_result,
-        create_runner_state, runner_state_to_json, runner_state_from_json,
+        create_runner_state,
         runner_add_room, runner_remove_room, runner_set_room_devices,
         runner_handle_action, runner_get_enabled_rooms,
         runner_get_rooms_by_source, runner_set_room_disabled,
         runner_set_room_curve_config,
         // Helper functions
-        get_hue_oui_prefix, get_group_prefix, normalize_ieee, is_hue_ieee,
+        get_group_prefix, normalize_ieee, is_hue_ieee,
         endpoint_for_manufacturer, normalize_area_id, area_ids_match,
         group_name_for_area, is_light_entity, is_rhythm_group,
         // Hue functions
@@ -305,76 +305,6 @@ mod tests {
     }
 
     #[test]
-    fn test_runner_state_json_roundtrip() {
-        let mut state = create_runner_state();
-
-        // Add some rooms with new fields
-        state = runner_add_room(state, RoomDto {
-            id: "living_room".to_string(),
-            name: "Living Room".to_string(),
-            source: RoomSourceDto::Hue,
-            device_ids: vec!["light.living_1".to_string(), "light.living_2".to_string()],
-            rhythm_enabled: true,
-            disabled: false,
-            lights_on: true,
-            time_offset_minutes: 30.0,
-            brightness_offset: 0.0,
-            curve_config: None,
-        });
-
-        state = runner_add_room(state, RoomDto {
-            id: "bedroom".to_string(),
-            name: "Bedroom".to_string(),
-            source: RoomSourceDto::HomeAssistant,
-            device_ids: vec!["light.bedroom_1".to_string()],
-            rhythm_enabled: false,
-            disabled: true,
-            lights_on: false,
-            time_offset_minutes: 0.0,
-            brightness_offset: 0.0,
-            curve_config: Some(CurveConfigDto {
-                min_color_temp: 2700,
-                max_color_temp: 6500,
-                min_brightness: 5,
-                max_brightness: 80,
-                ..Default::default()
-            }),
-        });
-
-        // Serialize to JSON
-        let json = runner_state_to_json(state.clone());
-        assert!(json.contains("living_room"));
-        assert!(json.contains("light.living_1"));
-        assert!(json.contains("\"source\":\"hue\""));
-        assert!(json.contains("\"disabled\":true"));
-
-        // Deserialize back
-        let restored = runner_state_from_json(json).expect("Should parse valid JSON");
-
-        assert_eq!(restored.rooms.len(), 2);
-
-        let living = restored.rooms.iter().find(|r| r.id == "living_room").unwrap();
-        assert_eq!(living.name, "Living Room");
-        assert_eq!(living.source, RoomSourceDto::Hue);
-        assert_eq!(living.device_ids.len(), 2);
-        assert!(living.rhythm_enabled);
-        assert!(!living.disabled);
-        assert!(living.lights_on);
-        assert_eq!(living.time_offset_minutes, 30.0);
-        assert!(living.curve_config.is_none());
-
-        let bedroom = restored.rooms.iter().find(|r| r.id == "bedroom").unwrap();
-        assert_eq!(bedroom.name, "Bedroom");
-        assert_eq!(bedroom.source, RoomSourceDto::HomeAssistant);
-        assert!(!bedroom.rhythm_enabled);
-        assert!(bedroom.disabled);
-        assert!(bedroom.curve_config.is_some());
-        let config = bedroom.curve_config.as_ref().unwrap();
-        assert_eq!(config.min_color_temp, 2700);
-        assert_eq!(config.max_brightness, 80);
-    }
-
-    #[test]
     fn test_runner_get_enabled_rooms() {
         let mut state = create_runner_state();
 
@@ -530,11 +460,6 @@ mod tests {
     // ========================================================================
     // Device Module Tests
     // ========================================================================
-
-    #[test]
-    fn test_get_hue_oui_prefix() {
-        assert_eq!(get_hue_oui_prefix(), "00:17:88:01:09");
-    }
 
     #[test]
     fn test_get_group_prefix() {

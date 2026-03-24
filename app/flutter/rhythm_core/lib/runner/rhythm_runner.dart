@@ -18,6 +18,7 @@ import '../src/rust/api/dto/curve.dart' show CurveConfigDto;
 import '../src/rust/api/dto/runner.dart';
 import '../src/rust/api/runner.dart';
 import 'provider_manager.dart';
+import 'runner_state_json.dart' as json_util;
 
 /// Configuration for the Rhythm Runner.
 class RhythmRunnerConfig {
@@ -136,7 +137,7 @@ class RhythmRunner {
     final json = prefs.getString(_stateKey);
 
     if (json != null) {
-      final loaded = runnerStateFromJson(json: json);
+      final loaded = json_util.runnerStateFromJson(json);
       if (loaded != null) {
         _state = loaded;
       }
@@ -146,7 +147,7 @@ class RhythmRunner {
   /// Save current state to SharedPreferences.
   Future<void> save() async {
     final prefs = await SharedPreferences.getInstance();
-    final json = runnerStateToJson(state: _state);
+    final json = json_util.runnerStateToJson(_state);
     await prefs.setString(_stateKey, json);
   }
 

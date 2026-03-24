@@ -40,8 +40,6 @@ pub use curve::{
 pub use runner::{
     calculate_action_result,
     create_runner_state,
-    runner_state_to_json,
-    runner_state_from_json,
     runner_add_room,
     runner_remove_room,
     runner_set_room_devices,
@@ -61,7 +59,6 @@ pub use runner::{
 // Helper functions
 pub use helpers::{
     get_hue_switch_prefixes,
-    get_hue_oui_prefix,
     get_group_prefix,
     normalize_ieee,
     is_hue_ieee,
@@ -89,8 +86,6 @@ pub use hue_registry::{
     behavior_tracker_behavior_count,
     behavior_tracker_device_count,
     behavior_tracker_clear,
-    behavior_tracker_to_json,
-    behavior_tracker_from_json,
     create_switch_device,
     create_button,
     create_room,

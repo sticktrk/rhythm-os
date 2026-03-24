@@ -10,8 +10,6 @@ import 'dto/curve.dart';
 import 'dto/runner.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `curve_config_to_json`, `extract_bool_field`, `extract_curve_config_field`, `extract_number_field`, `extract_string_array_field`, `extract_string_field`, `find_matching_bracket`, `find_string_end`, `parse_curve_config_object`, `parse_room_object`, `parse_rooms_array`, `parse_runner_state_json`, `room_source_from_string`, `room_source_to_string`, `unescape_json_string`
-
 /// Process an action and calculate the resulting lighting state.
 ///
 /// This is the main function for the RhythmRunner. It processes a button
@@ -51,15 +49,6 @@ ActionResultDto calculateActionResult(
 /// Create a new empty runner state.
 RunnerStateDto createRunnerState() =>
     RustLib.instance.api.crateApiRunnerCreateRunnerState();
-
-/// Serialize runner state to JSON string for persistence.
-String runnerStateToJson({required RunnerStateDto state}) =>
-    RustLib.instance.api.crateApiRunnerRunnerStateToJson(state: state);
-
-/// Deserialize runner state from JSON string.
-/// Returns None if the JSON is invalid.
-RunnerStateDto? runnerStateFromJson({required String json}) =>
-    RustLib.instance.api.crateApiRunnerRunnerStateFromJson(json: json);
 
 /// Add a room to the runner state.
 RunnerStateDto runnerAddRoom(

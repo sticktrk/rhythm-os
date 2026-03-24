@@ -366,6 +366,7 @@ class HueProvider implements LightProvider {
   /// Returns the username/application key if successful.
   static Future<String?> pair(
     String bridgeIp, {
+    // Keep 'rhythm_lighting' for backwards compat — changing breaks existing Hue pairings.
     String appName = 'rhythm_lighting',
     String deviceName = 'mobile_app',
   }) async {

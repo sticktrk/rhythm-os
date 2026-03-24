@@ -12,13 +12,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
-import '../src/rust/api/helpers.dart' as rust_api;
 import 'light_provider.dart';
-
-/// Philips/Hue OUI prefix for device identification.
-///
-/// This uses the shared constant from rhythm_core::device::ieee::HUE_OUI_PREFIX.
-String get hueIeeePrefix => rust_api.getHueOuiPrefix();
 
 /// A Home Assistant event from WebSocket subscription.
 class HaEvent {

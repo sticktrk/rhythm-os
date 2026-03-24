@@ -151,10 +151,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double? dco_decode_opt_box_autoadd_f_64(dynamic raw);
 
   @protected
-  HueBehaviorTrackerDto? dco_decode_opt_box_autoadd_hue_behavior_tracker_dto(
-      dynamic raw);
-
-  @protected
   HueButtonEventTypeDto? dco_decode_opt_box_autoadd_hue_button_event_type_dto(
       dynamic raw);
 
@@ -170,9 +166,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RoomDto? dco_decode_opt_box_autoadd_room_dto(dynamic raw);
-
-  @protected
-  RunnerStateDto? dco_decode_opt_box_autoadd_runner_state_dto(dynamic raw);
 
   @protected
   TwilightPhaseDto? dco_decode_opt_box_autoadd_twilight_phase_dto(dynamic raw);
@@ -361,10 +354,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double? sse_decode_opt_box_autoadd_f_64(SseDeserializer deserializer);
 
   @protected
-  HueBehaviorTrackerDto? sse_decode_opt_box_autoadd_hue_behavior_tracker_dto(
-      SseDeserializer deserializer);
-
-  @protected
   HueButtonEventTypeDto? sse_decode_opt_box_autoadd_hue_button_event_type_dto(
       SseDeserializer deserializer);
 
@@ -381,10 +370,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RoomDto? sse_decode_opt_box_autoadd_room_dto(SseDeserializer deserializer);
-
-  @protected
-  RunnerStateDto? sse_decode_opt_box_autoadd_runner_state_dto(
-      SseDeserializer deserializer);
 
   @protected
   TwilightPhaseDto? sse_decode_opt_box_autoadd_twilight_phase_dto(
@@ -699,15 +684,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
-  JSAny? cst_encode_opt_box_autoadd_hue_behavior_tracker_dto(
-      HueBehaviorTrackerDto? raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw == null
-        ? null
-        : cst_encode_box_autoadd_hue_behavior_tracker_dto(raw);
-  }
-
-  @protected
   int? cst_encode_opt_box_autoadd_hue_button_event_type_dto(
       HueButtonEventTypeDto? raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
@@ -739,12 +715,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   JSAny? cst_encode_opt_box_autoadd_room_dto(RoomDto? raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return raw == null ? null : cst_encode_box_autoadd_room_dto(raw);
-  }
-
-  @protected
-  JSAny? cst_encode_opt_box_autoadd_runner_state_dto(RunnerStateDto? raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw == null ? null : cst_encode_box_autoadd_runner_state_dto(raw);
   }
 
   @protected
@@ -1048,10 +1018,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_box_autoadd_f_64(double? self, SseSerializer serializer);
 
   @protected
-  void sse_encode_opt_box_autoadd_hue_behavior_tracker_dto(
-      HueBehaviorTrackerDto? self, SseSerializer serializer);
-
-  @protected
   void sse_encode_opt_box_autoadd_hue_button_event_type_dto(
       HueButtonEventTypeDto? self, SseSerializer serializer);
 
@@ -1069,10 +1035,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_room_dto(
       RoomDto? self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_opt_box_autoadd_runner_state_dto(
-      RunnerStateDto? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_twilight_phase_dto(
@@ -1177,11 +1139,6 @@ class RustLibWire implements BaseWire {
                   tracker);
 
   JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__hue_registry__behavior_tracker_from_json(String json) =>
-          wasmModule
-              .wire__crate__api__hue_registry__behavior_tracker_from_json(json);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__hue_registry__behavior_tracker_is_configured(
               JSAny tracker, String device_id) =>
           wasmModule
@@ -1193,11 +1150,6 @@ class RustLibWire implements BaseWire {
               JSAny tracker, String behavior_id) =>
           wasmModule.wire__crate__api__hue_registry__behavior_tracker_remove(
               tracker, behavior_id);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__hue_registry__behavior_tracker_to_json(JSAny tracker) =>
-          wasmModule.wire__crate__api__hue_registry__behavior_tracker_to_json(
-              tracker);
 
   JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__runner__calculate_action_result(
@@ -1308,10 +1260,6 @@ class RustLibWire implements BaseWire {
   JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__helpers__get_group_prefix() =>
           wasmModule.wire__crate__api__helpers__get_group_prefix();
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__helpers__get_hue_oui_prefix() =>
-          wasmModule.wire__crate__api__helpers__get_hue_oui_prefix();
 
   JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__helpers__get_hue_switch_prefixes() =>
@@ -1501,14 +1449,6 @@ class RustLibWire implements BaseWire {
   JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__dto__runner__runner_state_dto_default() =>
           wasmModule.wire__crate__api__dto__runner__runner_state_dto_default();
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_state_from_json(String json) =>
-          wasmModule.wire__crate__api__runner__runner_state_from_json(json);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_state_to_json(JSAny state) =>
-          wasmModule.wire__crate__api__runner__runner_state_to_json(state);
 }
 
 @JS('wasm_bindgen')
@@ -1541,18 +1481,12 @@ extension type RustLibWasmModule._(JSObject _) implements JSObject {
           JSAny tracker);
 
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__hue_registry__behavior_tracker_from_json(String json);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__hue_registry__behavior_tracker_is_configured(
           JSAny tracker, String device_id);
 
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__hue_registry__behavior_tracker_remove(
           JSAny tracker, String behavior_id);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__hue_registry__behavior_tracker_to_json(JSAny tracker);
 
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__runner__calculate_action_result(
@@ -1629,9 +1563,6 @@ extension type RustLibWasmModule._(JSObject _) implements JSObject {
 
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__helpers__get_group_prefix();
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__helpers__get_hue_oui_prefix();
 
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__helpers__get_hue_switch_prefixes();
@@ -1754,10 +1685,4 @@ extension type RustLibWasmModule._(JSObject _) implements JSObject {
 
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__dto__runner__runner_state_dto_default();
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_state_from_json(String json);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_state_to_json(JSAny state);
 }

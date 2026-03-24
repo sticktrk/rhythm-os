@@ -722,6 +722,7 @@ dependencies = [
  "chrono",
  "log",
  "rhythm-core",
+ "rhythm-curve",
  "serde",
  "serde_json",
 ]
