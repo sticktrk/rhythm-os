@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>A modular lighting operating system.</strong><br>
-  <a href="https://rhythm.lighting">rhythm.lighting</a>
+  <a href="https://rhythm.lighting/rhythm-os">rhythm.lighting/rhythm-os</a>
 </p>
 
 <p align="center">
@@ -141,8 +141,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions, code style, and h
 
 ## Community
 
-- [rhythm.lighting](https://rhythm.lighting) — Project homepage
-- [Discord](https://discord.gg/TUvSrtRt) — Help, setups, feature discussion
+- [rhythm.lighting/rhythm-os](https://rhythm.lighting/rhythm-os) — Project homepage
+- [Discord](https://discord.gg/8DXG3WjA) — Help, setups, feature discussion
 - [GitHub Issues](https://github.com/sticktrk/rhythm-os/issues) — Bugs and feature requests
 
 ## License
