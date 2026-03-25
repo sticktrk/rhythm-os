@@ -65,8 +65,8 @@ class OnboardingProvider extends ChangeNotifier {
   bool get isSignInMode => _isSignInMode;
 
   /// Total number of screens in the onboarding flow.
-  /// 2 pages when login disabled (Welcome, Location), 3 when enabled (+ Account).
-  int get totalPages => FeatureFlags.loginEnabled ? 3 : 2;
+  /// 2 pages when sign-in disabled (Welcome, Location), 3 when enabled (+ Account).
+  int get totalPages => FeatureFlags.onboardingSignIn ? 3 : 2;
 
   /// Navigate to next page.
   void nextPage() {
@@ -93,9 +93,9 @@ class OnboardingProvider extends ChangeNotifier {
   }
 
   /// Enable sign-in mode (skip to account screen).
-  /// No-op when login is disabled.
+  /// No-op when onboarding sign-in is disabled.
   void enableSignInMode() {
-    if (!FeatureFlags.loginEnabled) return;
+    if (!FeatureFlags.onboardingSignIn) return;
     _isSignInMode = true;
     _currentPage = 2; // Account screen
     notifyListeners();

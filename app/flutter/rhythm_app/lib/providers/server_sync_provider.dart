@@ -187,6 +187,50 @@ class ServerSyncProvider extends ChangeNotifier {
     return _helloRooms.where((r) => r.id == roomId).firstOrNull?.deviceSummary ?? '';
   }
 
+  /// All rooms grouped by hub type (for hub debug sections).
+  Map<String, List<ServerRoom>> get roomsByHubType {
+    final result = <String, List<ServerRoom>>{};
+    for (final room in _helloRooms) {
+      final key = room.hubType ?? 'unknown';
+      (result[key] ??= []).add(room);
+    }
+    return result;
+  }
+
+  /// All unique devices for a hub type, de-duplicated and sorted lights->buttons->motion.
+  List<TypedDevice> devicesForHub(String hubType) {
+    final seen = <String>{};
+    final devices = <TypedDevice>[];
+    for (final room in _helloRooms.where((r) => r.hubType == hubType)) {
+      for (final device in room.devices) {
+        if (seen.add(device.id)) {
+          devices.add(device);
+        }
+      }
+    }
+    devices.sort((a, b) {
+      const order = {ServerDeviceType.light: 0, ServerDeviceType.button: 1, ServerDeviceType.motion: 2};
+      return (order[a.type] ?? 3).compareTo(order[b.type] ?? 3);
+    });
+    return devices;
+  }
+
+  /// Summary string for a hub type (e.g. "12 lights, 4 buttons across 5 rooms").
+  String deviceSummaryForHub(String hubType) {
+    final devices = devicesForHub(hubType);
+    final rooms = roomsByHubType[hubType] ?? [];
+    final l = devices.where((d) => d.type == ServerDeviceType.light).length;
+    final b = devices.where((d) => d.type == ServerDeviceType.button).length;
+    final m = devices.where((d) => d.type == ServerDeviceType.motion).length;
+    final parts = <String>[];
+    if (l > 0) parts.add('$l light${l > 1 ? 's' : ''}');
+    if (b > 0) parts.add('$b button${b > 1 ? 's' : ''}');
+    if (m > 0) parts.add('$m sensor${m > 1 ? 's' : ''}');
+    if (parts.isEmpty) return 'No devices';
+    final roomCount = rooms.length;
+    return '${parts.join(', ')} across $roomCount room${roomCount > 1 ? 's' : ''}';
+  }
+
   /// The underlying HTTP client (for OTA service, diagnostics).
   ServerHttpClient get httpClient => _http;
 

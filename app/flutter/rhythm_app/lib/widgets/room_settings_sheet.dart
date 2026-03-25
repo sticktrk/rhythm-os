@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -76,18 +77,25 @@ class RoomSettingsSheet extends StatelessWidget {
               ),
             ),
             // Room orb preview with live CCT + light output
-            Selector<RoomProvider, (int?, int?, bool)>(
-              selector: (_, rp) => (
-                rp.getBrightness(room.id),
-                rp.getKelvin(room.id),
-                rp.getRoom(room.id)?.lightsOn ?? false,
-              ),
+            Selector<RoomProvider, (int?, int?, bool, bool)>(
+              selector: (_, rp) {
+                final r = rp.getRoom(room.id);
+                return (
+                  rp.getBrightness(room.id),
+                  rp.getKelvin(room.id),
+                  r?.lightsOn ?? false,
+                  r?.rhythmEnabled ?? false,
+                );
+              },
               builder: (context, data, _) {
-                final (brightness, kelvin, lightsOn) = data;
-                return _buildRoomPreview(
+                final (brightness, kelvin, lightsOn, rhythmEnabled) = data;
+                return _AnimatedRoomOrb(
+                  roomId: room.id,
+                  roomName: room.name,
                   brightness: brightness,
                   kelvin: kelvin,
                   lightsOn: lightsOn,
+                  rhythmEnabled: rhythmEnabled,
                 );
               },
             ),
@@ -258,69 +266,6 @@ class RoomSettingsSheet extends StatelessWidget {
           ],
         ),
       ),
-    );
-  }
-
-  Widget _buildRoomPreview({int? brightness, int? kelvin, bool lightsOn = false}) {
-    final effectiveBrightness = brightness ?? 0;
-    final effectiveKelvin = kelvin ?? 3000;
-    final cctColor = lightsOn
-        ? ColorUtils.cctToColor(effectiveKelvin)
-        : CelestialColors.textSecondary;
-    final glowAlpha = lightsOn ? 0.15 + (effectiveBrightness / 100.0) * 0.25 : 0.05;
-    final borderAlpha = lightsOn ? 0.4 + (effectiveBrightness / 100.0) * 0.4 : 0.2;
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 80,
-          height: 80,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: cctColor.withValues(alpha: glowAlpha),
-            border: Border.all(
-              color: cctColor.withValues(alpha: borderAlpha),
-              width: 2,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: cctColor.withValues(alpha: lightsOn ? 0.2 : 0.05),
-                blurRadius: 16,
-                spreadRadius: 2,
-              ),
-            ],
-          ),
-          child: Center(
-            child: Text(
-              room.name.isNotEmpty ? room.name[0].toUpperCase() : '?',
-              style: TextStyle(
-                color: cctColor,
-                fontSize: 28,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ),
-        ),
-        if (lightsOn) ...[
-          const SizedBox(height: 12),
-          LightOutputCompact(
-            brightness: effectiveBrightness,
-            kelvin: effectiveKelvin,
-          ),
-        ] else
-          Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: Text(
-              'Off',
-              style: TextStyle(
-                color: CelestialColors.textSecondary.withValues(alpha: 0.6),
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-      ],
     );
   }
 
@@ -760,4 +705,391 @@ class _ToggleSwitch extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Animated room orb with orbiting arcs when rhythm is active.
+///
+/// Tap to toggle rhythm on/off. Shows:
+/// - Active: rotating comet-tail arcs + breathing glow + "Rhythm" label
+/// - Paused: static orb + "Paused ▶" hint
+/// - Off: grey circle + "Off"
+class _AnimatedRoomOrb extends StatefulWidget {
+  final String roomId;
+  final String roomName;
+  final int? brightness;
+  final int? kelvin;
+  final bool lightsOn;
+  final bool rhythmEnabled;
+
+  const _AnimatedRoomOrb({
+    required this.roomId,
+    required this.roomName,
+    required this.brightness,
+    required this.kelvin,
+    required this.lightsOn,
+    required this.rhythmEnabled,
+  });
+
+  @override
+  State<_AnimatedRoomOrb> createState() => _AnimatedRoomOrbState();
+}
+
+class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb>
+    with TickerProviderStateMixin {
+  late AnimationController _rotationController;
+  late AnimationController _pulseController;
+  late AnimationController _activeController;
+  bool _pressed = false;
+
+  bool get _active => widget.rhythmEnabled && widget.lightsOn;
+
+  @override
+  void initState() {
+    super.initState();
+    _rotationController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 8),
+    );
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 3000),
+    );
+    _activeController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+      value: _active ? 1.0 : 0.0,
+    );
+    _activeController.addStatusListener(_onActiveStatus);
+    if (_active) {
+      _rotationController.repeat();
+      _pulseController.repeat(reverse: true);
+    }
+  }
+
+  void _onActiveStatus(AnimationStatus status) {
+    if (status == AnimationStatus.dismissed) {
+      _rotationController.stop();
+      _pulseController.stop();
+    }
+  }
+
+  @override
+  void didUpdateWidget(_AnimatedRoomOrb old) {
+    super.didUpdateWidget(old);
+    if (old.rhythmEnabled != widget.rhythmEnabled ||
+        old.lightsOn != widget.lightsOn) {
+      _syncAnimations();
+    }
+  }
+
+  void _syncAnimations() {
+    if (_active) {
+      if (!_rotationController.isAnimating) _rotationController.repeat();
+      if (!_pulseController.isAnimating) {
+        _pulseController.repeat(reverse: true);
+      }
+      _activeController.animateTo(1.0,
+          duration: const Duration(milliseconds: 500),
+          curve: Curves.easeOut);
+    } else {
+      _activeController.animateTo(0.0,
+          duration: const Duration(milliseconds: 600),
+          curve: Curves.easeIn);
+    }
+  }
+
+  void _onTap() {
+    HapticFeedback.lightImpact();
+    final newEnabled = !widget.rhythmEnabled;
+    final roomProvider = context.read<RoomProvider>();
+    roomProvider.setRoomRhythmEnabled(widget.roomId, newEnabled);
+    final serverSync = context.read<ServerSyncProvider>();
+    serverSync.pushRoomPreferences(widget.roomId, rhythmEnabled: newEnabled);
+  }
+
+  @override
+  void dispose() {
+    _activeController.removeStatusListener(_onActiveStatus);
+    _rotationController.dispose();
+    _pulseController.dispose();
+    _activeController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final effectiveBrightness = widget.brightness ?? 0;
+    final effectiveKelvin = widget.kelvin ?? 3000;
+    final cctColor = widget.lightsOn
+        ? ColorUtils.cctToColor(effectiveKelvin)
+        : CelestialColors.textSecondary;
+    final glowAlpha =
+        widget.lightsOn ? 0.15 + (effectiveBrightness / 100.0) * 0.25 : 0.05;
+    final borderAlpha =
+        widget.lightsOn ? 0.4 + (effectiveBrightness / 100.0) * 0.4 : 0.2;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: _onTap,
+          onTapDown: (_) => setState(() => _pressed = true),
+          onTapUp: (_) => setState(() => _pressed = false),
+          onTapCancel: () => setState(() => _pressed = false),
+          child: AnimatedScale(
+            scale: _pressed ? 0.93 : 1.0,
+            duration: const Duration(milliseconds: 100),
+            curve: Curves.easeInOut,
+            child: SizedBox(
+              width: 100,
+              height: 100,
+              child: AnimatedBuilder(
+                animation: Listenable.merge([
+                  _rotationController,
+                  _pulseController,
+                  _activeController,
+                ]),
+                builder: (context, child) {
+                  final activeT = _activeController.value;
+                  final pulse = _pulseController.value;
+                  final extraGlow = activeT * pulse * 0.12;
+                  final extraSpread = activeT * pulse * 3.0;
+
+                  return CustomPaint(
+                    painter: _OrbitArcPainter(
+                      rotation: _rotationController.value,
+                      color: cctColor,
+                      opacity: activeT * (0.5 + pulse * 0.4),
+                    ),
+                    child: Center(
+                      child: Container(
+                        width: 80,
+                        height: 80,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color:
+                              cctColor.withValues(alpha: glowAlpha + extraGlow),
+                          border: Border.all(
+                            color: cctColor.withValues(alpha: borderAlpha),
+                            width: 2,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: cctColor.withValues(
+                                alpha: (widget.lightsOn ? 0.2 : 0.05) +
+                                    extraGlow,
+                              ),
+                              blurRadius: 16 + extraSpread * 2,
+                              spreadRadius: 2 + extraSpread,
+                            ),
+                          ],
+                        ),
+                        child: child,
+                      ),
+                    ),
+                  );
+                },
+                child: Center(
+                  child: Text(
+                    widget.roomName.isNotEmpty
+                        ? widget.roomName[0].toUpperCase()
+                        : '?',
+                    style: TextStyle(
+                      color: cctColor,
+                      fontSize: 28,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        if (widget.lightsOn) ...[
+          const SizedBox(height: 12),
+          LightOutputCompact(
+            brightness: effectiveBrightness,
+            kelvin: effectiveKelvin,
+          ),
+          const SizedBox(height: 6),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _onTap,
+            child: _RhythmStatusLabel(
+              active: _active,
+              pulseAnimation: _pulseController,
+              color: cctColor,
+            ),
+          ),
+        ] else
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(
+              'Off',
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// Label below the orb showing rhythm state with visual hints.
+class _RhythmStatusLabel extends StatelessWidget {
+  final bool active;
+  final Animation<double> pulseAnimation;
+  final Color color;
+
+  const _RhythmStatusLabel({
+    required this.active,
+    required this.pulseAnimation,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 250),
+      child: active
+          ? Row(
+              key: const ValueKey(true),
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                AnimatedBuilder(
+                  animation: pulseAnimation,
+                  builder: (context, _) => Container(
+                    width: 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: color.withValues(
+                          alpha: 0.4 + pulseAnimation.value * 0.6),
+                      boxShadow: [
+                        BoxShadow(
+                          color: color.withValues(
+                              alpha: pulseAnimation.value * 0.4),
+                          blurRadius: 4,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  'Rhythm',
+                  style: TextStyle(
+                    color:
+                        CelestialColors.textSecondary.withValues(alpha: 0.8),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            )
+          : Row(
+              key: const ValueKey(false),
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.play_arrow_rounded,
+                  color:
+                      CelestialColors.textSecondary.withValues(alpha: 0.5),
+                  size: 14,
+                ),
+                const SizedBox(width: 2),
+                Text(
+                  'Paused',
+                  style: TextStyle(
+                    color:
+                        CelestialColors.textSecondary.withValues(alpha: 0.6),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+    );
+  }
+}
+
+/// Paints orbiting gradient arcs (comet tails) around the room orb.
+class _OrbitArcPainter extends CustomPainter {
+  final double rotation;
+  final Color color;
+  final double opacity;
+
+  static const _arcs = [
+    (offset: 0.0, sweepDeg: 80.0, widthFactor: 1.0, alphaFactor: 1.0),
+    (offset: 2.5, sweepDeg: 50.0, widthFactor: 0.8, alphaFactor: 0.55),
+    (offset: 4.3, sweepDeg: 30.0, widthFactor: 0.65, alphaFactor: 0.3),
+  ];
+
+  _OrbitArcPainter({
+    required this.rotation,
+    required this.color,
+    required this.opacity,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (opacity <= 0.01) return;
+
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width / 2 - 3;
+    final rect = Rect.fromCircle(center: center, radius: radius);
+    final baseAngle = rotation * 2 * math.pi;
+
+    for (final arc in _arcs) {
+      _drawFadingArc(
+        canvas,
+        rect,
+        baseAngle + arc.offset,
+        arc.sweepDeg,
+        2.5 * arc.widthFactor,
+        opacity * arc.alphaFactor,
+      );
+    }
+  }
+
+  void _drawFadingArc(
+    Canvas canvas,
+    Rect rect,
+    double startAngle,
+    double sweepDegrees,
+    double width,
+    double alpha,
+  ) {
+    const segments = 10;
+    final sweepRad = sweepDegrees * math.pi / 180;
+    final segmentSweep = sweepRad / segments;
+
+    for (int i = 0; i < segments; i++) {
+      final t = i / segments;
+      final segAlpha = (alpha * (1.0 - t * 0.85)).clamp(0.0, 1.0);
+      final paint = Paint()
+        ..color = color.withValues(alpha: segAlpha)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = width
+        ..strokeCap = StrokeCap.round;
+
+      canvas.drawArc(
+        rect,
+        startAngle + i * segmentSweep,
+        segmentSweep + 0.015,
+        false,
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_OrbitArcPainter old) =>
+      rotation != old.rotation ||
+      opacity != old.opacity ||
+      color != old.color;
 }

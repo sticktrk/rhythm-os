@@ -12,8 +12,8 @@ import '../../../services/app_state_refresh.dart';
 class SignInModal {
   /// Show the sign-in modal as a full-screen slide-up sheet.
   static void show(BuildContext context) {
-    // Guard: don't show modal when login is disabled
-    if (!FeatureFlags.loginEnabled) return;
+    // Guard: don't show modal when auxiliary sign-in is disabled
+    if (!FeatureFlags.auxSignIn) return;
 
     Navigator.of(context).push(
       PageRouteBuilder(

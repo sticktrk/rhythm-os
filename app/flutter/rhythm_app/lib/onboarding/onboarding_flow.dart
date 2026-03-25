@@ -69,11 +69,10 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
                   },
                   children: [
                     const WelcomeScreen(),
-                    // When login disabled, LocationScreen is the final screen
                     LocationScreen(
-                      onComplete: FeatureFlags.loginEnabled ? null : widget.onComplete,
+                      onComplete: FeatureFlags.onboardingSignIn ? null : widget.onComplete,
                     ),
-                    if (FeatureFlags.loginEnabled)
+                    if (FeatureFlags.onboardingSignIn)
                       AccountScreen(onComplete: widget.onComplete),
                   ],
                 ),

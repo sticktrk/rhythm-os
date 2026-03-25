@@ -426,6 +426,9 @@ class ServerHttpClient extends ChangeNotifier {
   static const Duration _sseWatchdogInterval = Duration(seconds: 15);
   static const Duration _sseStaleThreshold = Duration(seconds: 45);
 
+  // SSE event history for debug display.
+  final Map<String, ({String type, String summary, DateTime time})> _lastSseEvents = {};
+
   // Cached room states for diff detection.
   final Map<String, _CachedRoomState> _cachedRoomStates = {};
   bool? _cachedHubConnected;
@@ -471,6 +474,22 @@ class ServerHttpClient extends ChangeNotifier {
 
   /// Host (IP or hostname) of the connected device.
   String? get host => _host;
+
+  /// Whether SSE is currently connected (for debug display).
+  bool get sseConnected => _sseConnected;
+
+  /// Whether SSE is supported by this server (false for ESP32).
+  bool get sseSupported => _sseSupported;
+
+  /// Time of last SSE activity (for debug display).
+  DateTime get lastSseActivity => _lastSseActivity;
+
+  /// Number of SSE reconnect attempts (for debug display).
+  int get sseReconnectAttempts => _sseReconnectAttempts;
+
+  /// Last SSE events by type for debug display.
+  Map<String, ({String type, String summary, DateTime time})> get lastSseEvents =>
+      Map.unmodifiable(_lastSseEvents);
 
   // --------------------------------------------------------------------------
   // Connect / Disconnect
@@ -1604,6 +1623,11 @@ class ServerHttpClient extends ChangeNotifier {
 
   /// Handle a parsed SSE event.
   void _handleSseEvent(String eventType, String data) {
+    _lastSseEvents[eventType] = (
+      type: eventType,
+      summary: data.length > 100 ? '${data.substring(0, 100)}...' : data,
+      time: DateTime.now(),
+    );
     try {
       switch (eventType) {
         case 'room_state':

@@ -19,6 +19,7 @@ import 'widgets/bottom_nav_overlay.dart';
 import 'widgets/connect_hub_screen.dart';
 import 'widgets/hub_picker_screen.dart';
 import 'providers/server_sync_provider.dart';
+import 'screens/server_disconnected_screen.dart';
 import 'services/analytics_service.dart';
 import 'services/app_state_refresh.dart';
 import 'services/hue/hue_service_locator.dart';
@@ -40,6 +41,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   int _currentPage = 0;
   CurveData? _curveData;
   bool _isFixing = false;
+
+  /// Sticky flag: true once the server enters [ServerConnectionState.reconnecting],
+  /// cleared when [ServerConnectionState.connected] is reached.  Prevents flashing
+  /// the room grid during the brief `connecting` phase of a reconnect cycle.
+  bool _serverLostConnection = false;
 
   @override
   void initState() {
@@ -157,94 +163,128 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     // Mobile: All rooms constellation grid
     return Consumer3<RoomProvider, HomeProvider, ServerSyncProvider>(
       builder: (context, roomProvider, homeProvider, serverSync, child) {
-        // Server explicitly reports no hub configured — show hub picker
-        // regardless of whether rooms exist (they may be stale from a previous session).
-        // Use hasNoHubConfigured (not empty check) to avoid flashing during reconnect
-        // when hub info is temporarily cleared.
         final serverHub = homeProvider.getFirstHubOfType(HubType.server);
-        if (serverHub != null && serverSync.hasNoHubConfigured) {
-          return HubPickerScreen(
-            onSettingsTap: _openSettings,
-            onSunPositionTap: _openSunPosition,
-          );
+        final state = serverSync.connectionState;
+
+        // Track server connection loss across rebuild cycles.
+        if (state == ServerConnectionState.reconnecting) {
+          _serverLostConnection = true;
+        } else if (state == ServerConnectionState.connected) {
+          _serverLostConnection = false;
         }
 
-        if (!roomProvider.hasRooms) {
-          // Demo mode: show "Setting up..." while async room population completes
-          if (HueServiceLocator.isDemoMode) {
+        if (serverHub != null) {
+          // ── Server unreachable ──────────────────────────────────
+          // Show the disconnected screen once a reconnect cycle has
+          // started, and keep showing it through subsequent connecting
+          // attempts until the server is fully connected again.
+          if (_serverLostConnection) {
+            return ServerDisconnectedScreen(
+              serverHub: serverHub,
+              onSettingsTap: _openSettings,
+              onSunPositionTap: _openSunPosition,
+            );
+          }
+
+          // ── Server connected ────────────────────────────────────
+          if (state == ServerConnectionState.connected) {
+            // Server explicitly reports no hub configured — show hub picker.
+            if (serverSync.hasNoHubConfigured) {
+              return HubPickerScreen(
+                onSettingsTap: _openSettings,
+                onSunPositionTap: _openSunPosition,
+              );
+            }
+
+            if (roomProvider.hasRooms) {
+              return _buildRoomGrid(roomProvider);
+            }
+
+            // Connected but rooms still syncing from server.
             return _buildServerConnectingState();
           }
-          // Check if a server hub exists
-          if (serverHub != null) {
-            final state = serverSync.connectionState;
-            if (state == ServerConnectionState.connected ||
-                state == ServerConnectionState.connecting) {
-              // Hub configured, rooms still syncing
-              return _buildServerConnectingState();
-            }
-            return _buildServerDisconnectedState(homeProvider, serverHub);
+
+          // ── First connection attempt (connecting / initial disconnected) ─
+          if (!roomProvider.hasRooms) {
+            return _buildServerConnectingState();
+          }
+
+          // Has cached rooms and server is doing its first connect —
+          // show the room grid while the connection establishes.
+          return _buildRoomGrid(roomProvider);
+        }
+
+        // ── No server hub paired ───────────────────────────────────
+        if (!roomProvider.hasRooms) {
+          if (HueServiceLocator.isDemoMode) {
+            return _buildServerConnectingState();
           }
           return _buildNoRoomsLayout(roomProvider, ConnectHubMode.rhythmServer);
         }
 
-        return Scaffold(
-          backgroundColor: CelestialColors.backgroundDark,
-          body: Stack(
-            children: [
-              // Main content - all rooms grid
-              Consumer<ConfigModel>(
-                builder: (context, configModel, _) {
-                  return AllRoomsScreen(
-                    rooms: roomProvider.enabledRooms,
-                    globalConfig: configModel.config,
-                    curveData: _curveData,
-                  );
-                },
-              ),
-              // Bottom gradient fade + overlay
-              Positioned(
-                bottom: 0,
-                left: 0,
-                right: 0,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Gradient fade so cards dissolve into the bar
-                    Container(
-                      height: 40,
-                      decoration: const BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                          colors: [
-                            Color(0x00000000),
-                            Color(0x800D1117),
-                          ],
-                        ),
-                      ),
-                    ),
-                    // Solid bar behind controls
-                    Container(
-                      color: const Color(0x800D1117),
-                      child: SafeArea(
-                        top: false,
-                        child: BottomNavOverlay(
-                          currentPage: 0,
-                          totalPages: 1,
-                          onSettingsTap: _openSettings,
-                          onSunPositionTap: _openSunPosition,
-                          onFixMyLights: _fixMyLights,
-                          isFixing: _isFixing,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        );
+        return _buildRoomGrid(roomProvider);
       },
+    );
+  }
+
+  /// The main room constellation grid with bottom nav overlay.
+  Widget _buildRoomGrid(RoomProvider roomProvider) {
+    return Scaffold(
+      backgroundColor: CelestialColors.backgroundDark,
+      body: Stack(
+        children: [
+          // Main content - all rooms grid
+          Consumer<ConfigModel>(
+            builder: (context, configModel, _) {
+              return AllRoomsScreen(
+                rooms: roomProvider.enabledRooms,
+                globalConfig: configModel.config,
+                curveData: _curveData,
+              );
+            },
+          ),
+          // Bottom gradient fade + overlay
+          Positioned(
+            bottom: 0,
+            left: 0,
+            right: 0,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Gradient fade so cards dissolve into the bar
+                Container(
+                  height: 40,
+                  decoration: const BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        Color(0x00000000),
+                        Color(0x800D1117),
+                      ],
+                    ),
+                  ),
+                ),
+                // Solid bar behind controls
+                Container(
+                  color: const Color(0x800D1117),
+                  child: SafeArea(
+                    top: false,
+                    child: BottomNavOverlay(
+                      currentPage: 0,
+                      totalPages: 1,
+                      onSettingsTap: _openSettings,
+                      onSunPositionTap: _openSunPosition,
+                      onFixMyLights: _fixMyLights,
+                      isFixing: _isFixing,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -283,116 +323,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                         color: CelestialColors.textSecondary.withValues(alpha: 0.7),
                         fontSize: 15,
                         height: 1.5,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          // Bottom overlay
-          Positioned(
-            bottom: 0,
-            left: 0,
-            right: 0,
-            child: SafeArea(
-              child: BottomNavOverlay(
-                currentPage: 0,
-                totalPages: 1,
-                onSettingsTap: _openSettings,
-                onSunPositionTap: _openSunPosition,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// Server hub exists but is disconnected — show reconnecting state.
-  Widget _buildServerDisconnectedState(HomeProvider homeProvider, Hub serverHub) {
-    return Scaffold(
-      backgroundColor: CelestialColors.backgroundDark,
-      body: Stack(
-        children: [
-          SafeArea(
-            bottom: false,
-            child: Center(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 40),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _PulsingIcon(
-                      icon: Icons.developer_board,
-                      color: Colors.amber,
-                    ),
-                    const SizedBox(height: 24),
-                    Text(
-                      'Server Unreachable',
-                      style: TextStyle(
-                        color: CelestialColors.textPrimary,
-                        fontSize: 22,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    Text(
-                      'Reconnecting...',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: CelestialColors.textSecondary.withValues(alpha: 0.7),
-                        fontSize: 15,
-                        height: 1.5,
-                      ),
-                    ),
-                    const SizedBox(height: 32),
-                    GestureDetector(
-                      onTap: () {
-                        try {
-                          context.read<ServerHttpClient>().pingOrReconnect();
-                        } catch (_) {}
-                      },
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 14),
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(14),
-                          color: Colors.amber.withValues(alpha: 0.15),
-                          border: Border.all(
-                            color: Colors.amber.withValues(alpha: 0.3),
-                            width: 1,
-                          ),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.refresh, color: Colors.amber, size: 18),
-                            const SizedBox(width: 8),
-                            Text(
-                              'Retry Now',
-                              style: TextStyle(
-                                color: Colors.amber,
-                                fontSize: 15,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    GestureDetector(
-                      onTap: () async {
-                        await context.read<RoomProvider>().clearAllRooms();
-                        context.read<ServerSyncProvider>().httpClient.disconnect();
-                        await homeProvider.deleteHub(serverHub.id);
-                      },
-                      child: Text(
-                        'Forget Server',
-                        style: TextStyle(
-                          color: CelestialColors.textSecondary.withValues(alpha: 0.5),
-                          fontSize: 14,
-                        ),
                       ),
                     ),
                   ],

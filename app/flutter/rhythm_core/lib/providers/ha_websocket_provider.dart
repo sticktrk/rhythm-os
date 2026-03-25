@@ -12,6 +12,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../src/rust/api/helpers.dart' as rust_api;
 import 'light_provider.dart';
 
 /// A Home Assistant event from WebSocket subscription.

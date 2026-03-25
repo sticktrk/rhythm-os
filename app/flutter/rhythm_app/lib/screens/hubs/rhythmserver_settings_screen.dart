@@ -9,6 +9,7 @@ import '../../providers/home_provider.dart';
 import '../../providers/room_provider.dart';
 import '../../services/analytics_service.dart';
 import '../../services/ota_service.dart';
+import '../../widgets/device_detail_sheet.dart';
 import 'ha_configurator_screen.dart';
 import 'hue_configurator_screen.dart';
 
@@ -66,7 +67,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   bool _isRebooting = false;
   bool _isRefreshing = false;
   bool _isConfiguringHub = false;
-  int? _expandedHubIndex;
 
   late AnimationController _glowController;
   late Animation<double> _glowAnimation;
@@ -284,7 +284,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     const SizedBox(height: 16),
                     _buildConnectionStatusSection(http),
                     const SizedBox(height: 16),
-                    _buildHubPairingSection(),
+                    ..._buildPerHubSections(http),
+                    _buildHubPairingSuggestions(),
                     const SizedBox(height: 24),
                     _buildCheckStatusButton(),
                     const SizedBox(height: 12),
@@ -969,7 +970,137 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     );
   }
 
-  Widget _buildHubPairingSection() {
+  // ─── Per-Hub Sections ──────────────────────────────────────
+
+  List<Widget> _buildPerHubSections(ServerHttpClient http) {
+    final syncProvider = context.watch<ServerSyncProvider>();
+    final configuredHubs = syncProvider.serverHubInfos
+        .where((h) => h['type'] != null && h['type'] != 'none')
+        .toList();
+
+    if (configuredHubs.isEmpty) return [];
+
+    return [
+      _buildSection(
+        title: configuredHubs.length > 1 ? 'LIGHT HUBS' : 'LIGHT HUB',
+        children: [
+          Container(
+            decoration: BoxDecoration(
+              color: CelestialColors.backgroundCard,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+              ),
+            ),
+            child: Column(
+              children: [
+                for (final (index, hub) in configuredHubs.indexed) ...[
+                  if (index > 0)
+                    Divider(height: 1, color: CelestialColors.orbitRing.withValues(alpha: 0.3)),
+                  _buildHubRow(hub, syncProvider),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+      const SizedBox(height: 16),
+    ];
+  }
+
+  Widget _buildHubRow(Map<String, dynamic> hubInfo, ServerSyncProvider syncProvider) {
+    final type = hubInfo['type'] as String;
+    final connected = hubInfo['connected'] as bool? ?? false;
+    final label = _hubLabel(type);
+    final hubColor = _hubColor(type);
+    final deviceSummary = syncProvider.deviceSummaryForHub(type);
+
+    return GestureDetector(
+      onTap: () => _HubDetailScreen.show(context, hubInfo: hubInfo),
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            Icon(
+              _hubIcon(type),
+              color: hubColor.withValues(alpha: connected ? 1.0 : 0.5),
+              size: 20,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    style: const TextStyle(
+                      color: CelestialColors.textPrimary,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    deviceSummary,
+                    style: TextStyle(
+                      color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Container(
+              width: 8,
+              height: 8,
+              margin: const EdgeInsets.only(right: 8),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: connected ? const Color(0xFF22C55E) : Colors.amber,
+                boxShadow: !connected
+                    ? [
+                        BoxShadow(
+                          color: Colors.amber.withValues(alpha: 0.6),
+                          blurRadius: 6,
+                          spreadRadius: 1,
+                        ),
+                      ]
+                    : null,
+              ),
+            ),
+            Icon(
+              Icons.chevron_right,
+              color: CelestialColors.textSecondary.withValues(alpha: 0.4),
+              size: 20,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  static String _hubLabel(String type) => switch (type) {
+    'hue' => 'Philips Hue',
+    'homeassistant' || 'home_assistant' => 'Home Assistant',
+    _ => type,
+  };
+
+  static Color _hubColor(String type) => switch (type) {
+    'hue' => const Color(0xFFFFB900),
+    'homeassistant' || 'home_assistant' => const Color(0xFF42A5F5),
+    _ => _teal,
+  };
+
+  static IconData _hubIcon(String type) => switch (type) {
+    'hue' => Icons.lightbulb_outline,
+    'homeassistant' || 'home_assistant' => Icons.home_outlined,
+    _ => Icons.hub_outlined,
+  };
+
+  // ─── Hub Pairing Suggestions ─────────────────────────────
+
+  Widget _buildHubPairingSuggestions() {
     final syncProvider = context.watch<ServerSyncProvider>();
     final configuredTypes = syncProvider.configuredHubTypes;
     final configuredHubs = syncProvider.serverHubInfos
@@ -977,9 +1108,61 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
         .toList();
     final hasAnyHub = configuredHubs.isNotEmpty;
 
-    return _buildSection(
-      title: hasAnyHub && configuredHubs.length > 1 ? 'LIGHT HUBS' : 'LIGHT HUB',
-      children: [
+    final showHa = !configuredTypes.contains('homeassistant');
+    final showHue = !configuredTypes.contains('hue');
+
+    if (!showHa && !showHue && !hasAnyHub) return const SizedBox.shrink();
+
+    // If no hubs configured at all, show as "LIGHT HUB" section
+    if (!hasAnyHub) {
+      return _buildSection(
+        title: 'LIGHT HUB',
+        children: [
+          Container(
+            decoration: BoxDecoration(
+              color: CelestialColors.backgroundCard,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+              ),
+            ),
+            child: Column(
+              children: [
+                _buildConnectionRow(
+                  label: 'Status',
+                  statusText: 'Not paired',
+                  statusColor: CelestialColors.textSecondary,
+                ),
+                if (showHa) ...[
+                  Divider(height: 1, color: CelestialColors.orbitRing.withValues(alpha: 0.3)),
+                  _buildHubOptionRow(
+                    icon: Icons.home_outlined,
+                    label: 'Home Assistant',
+                    color: const Color(0xFF42A5F5),
+                    isLoading: _isConfiguringHub,
+                    onTap: _isConfiguringHub ? null : () => _pairHa(syncProvider),
+                  ),
+                ],
+                if (showHue) ...[
+                  Divider(height: 1, color: CelestialColors.orbitRing.withValues(alpha: 0.3)),
+                  _buildHubOptionRow(
+                    icon: Icons.lightbulb_outline,
+                    label: 'Philips Hue',
+                    color: const Color(0xFFFFB900),
+                    onTap: () => HueConfiguratorScreen.show(context),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      );
+    }
+
+    // Hubs exist — show add options + disconnect all (if multiple)
+    final children = <Widget>[];
+    if (showHa || showHue) {
+      children.add(
         Container(
           decoration: BoxDecoration(
             color: CelestialColors.backgroundCard,
@@ -990,70 +1173,26 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
           ),
           child: Column(
             children: [
-              // Per-hub status rows
-              if (!hasAnyHub)
-                _buildConnectionRow(
-                  label: 'Status',
-                  statusText: 'Not paired',
-                  statusColor: CelestialColors.textSecondary,
-                ),
-              for (final (index, hub) in configuredHubs.indexed) ...[
-                if (index > 0)
-                  Divider(
-                    height: 1,
-                    color: CelestialColors.orbitRing.withValues(alpha: 0.3),
-                  ),
-                _buildExpandableHubRow(hub, index),
-              ],
-              // HA pairing row (if not already configured)
-              if (!configuredTypes.contains('homeassistant')) ...[
-                Divider(
-                  height: 1,
-                  color: CelestialColors.orbitRing.withValues(alpha: 0.3),
-                ),
+              if (showHa)
                 _buildHubOptionRow(
                   icon: Icons.home_outlined,
-                  label: 'Home Assistant',
+                  label: 'Add Home Assistant',
                   color: const Color(0xFF42A5F5),
                   isLoading: _isConfiguringHub,
-                  onTap: _isConfiguringHub ? null : () async {
-                    if (_isHaAddon) {
-                      // Addon: one-tap auto-configure from SUPERVISOR_TOKEN
-                      setState(() => _isConfiguringHub = true);
-                      try {
-                        await syncProvider.configureAddonHaHub();
-                      } finally {
-                        if (mounted) setState(() => _isConfiguringHub = false);
-                      }
-                    } else {
-                      // Standalone server: manual token entry
-                      final result = await HAConfiguratorScreen.show(context);
-                      if (result == true && mounted) {
-                        syncProvider.pushHubCredentials(RoomSourceDto.homeAssistant);
-                      }
-                    }
-                  },
+                  onTap: _isConfiguringHub ? null : () => _pairHa(syncProvider),
                 ),
-              ],
-              // Hue pairing row (if not already configured)
-              if (!configuredTypes.contains('hue')) ...[
-                Divider(
-                  height: 1,
-                  color: CelestialColors.orbitRing.withValues(alpha: 0.3),
-                ),
+              if (showHa && showHue)
+                Divider(height: 1, color: CelestialColors.orbitRing.withValues(alpha: 0.3)),
+              if (showHue)
                 _buildHubOptionRow(
                   icon: Icons.lightbulb_outline,
-                  label: 'Philips Hue',
+                  label: 'Add Philips Hue',
                   color: const Color(0xFFFFB900),
                   onTap: () => HueConfiguratorScreen.show(context),
                 ),
-              ],
-              // Disconnect option
-              if (hasAnyHub) ...[
-                Divider(
-                  height: 1,
-                  color: CelestialColors.orbitRing.withValues(alpha: 0.3),
-                ),
+              // Disconnect All (only when multiple hubs)
+              if (configuredHubs.length > 1) ...[
+                Divider(height: 1, color: CelestialColors.orbitRing.withValues(alpha: 0.3)),
                 GestureDetector(
                   onTap: () async {
                     await syncProvider.disconnectHub();
@@ -1067,16 +1206,10 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(
-                          Icons.link_off_rounded,
-                          color: Colors.red.shade400,
-                          size: 16,
-                        ),
+                        Icon(Icons.link_off_rounded, color: Colors.red.shade400, size: 16),
                         const SizedBox(width: 8),
                         Text(
-                          configuredHubs.length > 1
-                              ? 'Disconnect All Hubs'
-                              : 'Disconnect Hub',
+                          'Disconnect All Hubs',
                           style: TextStyle(
                             color: Colors.red.shade400,
                             fontSize: 14,
@@ -1091,193 +1224,70 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
             ],
           ),
         ),
-      ],
-    );
-  }
-
-  Widget _buildExpandableHubRow(Map<String, dynamic> hub, int index) {
-    final type = hub['type'] as String;
-    final connected = hub['connected'] as bool? ?? false;
-    final address = hub['address'] as String?;
-    final isExpanded = _expandedHubIndex == index;
-    final label = switch (type) {
-      'hue' => 'Philips Hue',
-      'homeassistant' || 'home_assistant' => 'Home Assistant',
-      _ => type,
-    };
-
-    return GestureDetector(
-      onTap: () => setState(() {
-        _expandedHubIndex = isExpanded ? null : index;
-      }),
-      behavior: HitTestBehavior.opaque,
-      child: Column(
-        children: [
-          // Collapsed header row
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 80,
-                  child: Text(
-                    label,
+      );
+    } else if (configuredHubs.length > 1) {
+      // No pairing options to show but still need Disconnect All
+      children.add(
+        Container(
+          decoration: BoxDecoration(
+            color: CelestialColors.backgroundCard,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+            ),
+          ),
+          child: GestureDetector(
+            onTap: () async {
+              await syncProvider.disconnectHub();
+              if (mounted) {
+                context.read<RoomProvider>().clearAllRooms();
+                syncProvider.httpClient.reconnect();
+              }
+            },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.link_off_rounded, color: Colors.red.shade400, size: 16),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Disconnect All Hubs',
                     style: TextStyle(
-                      color: CelestialColors.textSecondary.withValues(alpha: 0.8),
-                      fontSize: 14,
-                    ),
-                  ),
-                ),
-                Container(
-                  width: 8,
-                  height: 8,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: connected ? const Color(0xFF22C55E) : Colors.amber,
-                    boxShadow: !connected
-                        ? [
-                            BoxShadow(
-                              color: Colors.amber.withValues(alpha: 0.6),
-                              blurRadius: 6,
-                              spreadRadius: 1,
-                            ),
-                          ]
-                        : null,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    connected ? 'Connected' : 'Connecting...',
-                    style: TextStyle(
-                      color: connected ? const Color(0xFF22C55E) : Colors.amber,
+                      color: Colors.red.shade400,
                       fontSize: 14,
                       fontWeight: FontWeight.w500,
                     ),
                   ),
-                ),
-                AnimatedRotation(
-                  turns: isExpanded ? 0.5 : 0.0,
-                  duration: const Duration(milliseconds: 200),
-                  child: Icon(
-                    Icons.expand_more,
-                    color: CelestialColors.textSecondary.withValues(alpha: 0.4),
-                    size: 20,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          // Expanded detail area
-          AnimatedSize(
-            duration: const Duration(milliseconds: 200),
-            curve: Curves.easeInOut,
-            alignment: Alignment.topCenter,
-            child: isExpanded
-                ? Padding(
-                    padding: const EdgeInsets.only(
-                      left: 16, right: 16, bottom: 12,
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (address != null && address.isNotEmpty)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 10),
-                            child: Text(
-                              address,
-                              style: TextStyle(
-                                color: CelestialColors.textSecondary,
-                                fontSize: 12,
-                                fontFamily: 'monospace',
-                              ),
-                            ),
-                          ),
-                        // Reconnect + disconnect side-by-side
-                        Row(
-                          children: [
-                            Expanded(
-                              child: _buildHubActionButton(
-                                icon: Icons.refresh_rounded,
-                                label: connected ? 'Reconnect' : 'Retry',
-                                color: _teal,
-                                onTap: () => _retryHub(type),
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: _buildHubActionButton(
-                                icon: Icons.link_off_rounded,
-                                label: 'Disconnect',
-                                color: Colors.red.shade400,
-                                onTap: () => _disconnectOneHub(type, address ?? ''),
-                              ),
-                            ),
-                          ],
-                          ),
-                      ],
-                    ),
-                  )
-                : const SizedBox.shrink(),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildHubActionButton({
-    required IconData icon,
-    required String label,
-    required Color color,
-    required VoidCallback onTap,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(
-            color: color.withValues(alpha: 0.3),
-          ),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, color: color, size: 15),
-            const SizedBox(width: 6),
-            Text(
-              label,
-              style: TextStyle(
-                color: color,
-                fontSize: 13,
-                fontWeight: FontWeight.w500,
+                ],
               ),
             ),
-          ],
+          ),
         ),
-      ),
+      );
+    }
+
+    if (children.isEmpty) return const SizedBox.shrink();
+
+    return _buildSection(
+      title: 'ADD HUB',
+      children: children,
     );
   }
 
-  void _disconnectOneHub(String hubType, String address) async {
-    final syncProvider = context.read<ServerSyncProvider>();
-    await syncProvider.disconnectOneHub(hubType, address);
-    if (mounted) {
-      setState(() => _expandedHubIndex = null);
-      syncProvider.httpClient.reconnect();
-    }
-  }
-
-  void _retryHub(String hubType) {
-    final syncProvider = context.read<ServerSyncProvider>();
-    final source = switch (hubType) {
-      'hue' => RoomSourceDto.hue,
-      'homeassistant' || 'home_assistant' => RoomSourceDto.homeAssistant,
-      _ => null,
-    };
-    if (source != null) {
-      syncProvider.pushHubCredentials(source);
+  Future<void> _pairHa(ServerSyncProvider syncProvider) async {
+    if (_isHaAddon) {
+      setState(() => _isConfiguringHub = true);
+      try {
+        await syncProvider.configureAddonHaHub();
+      } finally {
+        if (mounted) setState(() => _isConfiguringHub = false);
+      }
+    } else {
+      final result = await HAConfiguratorScreen.show(context);
+      if (result == true && mounted) {
+        syncProvider.pushHubCredentials(RoomSourceDto.homeAssistant);
+      }
     }
   }
 
@@ -3099,5 +3109,555 @@ class _RhythmServerDiagnosticsScreenState
         ],
       ),
     );
+  }
+}
+
+// =============================================================================
+// Hub Detail Screen — drill-down for a single light hub
+// =============================================================================
+
+class _HubDetailScreen extends StatefulWidget {
+  final Map<String, dynamic> hubInfo;
+
+  const _HubDetailScreen({required this.hubInfo});
+
+  static Future<void> show(BuildContext context, {required Map<String, dynamic> hubInfo}) {
+    return Navigator.of(context).push(
+      PageRouteBuilder(
+        opaque: false,
+        barrierColor: Colors.black54,
+        pageBuilder: (context, animation, secondaryAnimation) {
+          return _HubDetailScreen(hubInfo: hubInfo);
+        },
+        transitionsBuilder: (context, animation, secondaryAnimation, child) {
+          final curve = CurvedAnimation(
+            parent: animation,
+            curve: Curves.easeOutCubic,
+            reverseCurve: Curves.easeInCubic,
+          );
+          return SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(1, 0),
+              end: Offset.zero,
+            ).animate(curve),
+            child: child,
+          );
+        },
+        transitionDuration: const Duration(milliseconds: 300),
+        reverseTransitionDuration: const Duration(milliseconds: 250),
+      ),
+    );
+  }
+
+  @override
+  State<_HubDetailScreen> createState() => _HubDetailScreenState();
+}
+
+class _HubDetailScreenState extends State<_HubDetailScreen> {
+  static const _teal = Color(0xFF00BCD4);
+
+  String get _type => widget.hubInfo['type'] as String;
+  bool get _connected => widget.hubInfo['connected'] as bool? ?? false;
+  String? get _address => widget.hubInfo['address'] as String?;
+
+  @override
+  Widget build(BuildContext context) {
+    final syncProvider = context.watch<ServerSyncProvider>();
+    final http = context.watch<ServerHttpClient>();
+    final rooms = syncProvider.roomsByHubType[_type] ?? [];
+    final deviceSummary = syncProvider.deviceSummaryForHub(_type);
+    final label = _RhythmServerSettingsScreenState._hubLabel(_type);
+    final hubColor = _RhythmServerSettingsScreenState._hubColor(_type);
+    final hubIcon = _RhythmServerSettingsScreenState._hubIcon(_type);
+
+    return Scaffold(
+      backgroundColor: CelestialColors.backgroundDark,
+      body: SafeArea(
+        child: Column(
+          children: [
+            // Header
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              child: Row(
+                children: [
+                  GestureDetector(
+                    onTap: () => Navigator.of(context).pop(),
+                    child: Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: hubColor.withValues(alpha: 0.15),
+                        border: Border.all(
+                          color: hubColor.withValues(alpha: 0.3),
+                          width: 1,
+                        ),
+                      ),
+                      child: Icon(
+                        Icons.arrow_back,
+                        color: hubColor,
+                        size: 20,
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: Text(
+                      label,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 0.3,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 40),
+                ],
+              ),
+            ),
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const SizedBox(height: 8),
+                    // Hero
+                    Container(
+                      padding: const EdgeInsets.all(24),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(24),
+                        gradient: RadialGradient(
+                          center: Alignment.center,
+                          radius: 1.2,
+                          colors: [
+                            hubColor.withValues(alpha: _connected ? 0.08 : 0.03),
+                            CelestialColors.backgroundCard,
+                          ],
+                        ),
+                        border: Border.all(
+                          color: hubColor.withValues(alpha: _connected ? 0.2 : 0.1),
+                          width: 1,
+                        ),
+                      ),
+                      child: Column(
+                        children: [
+                          Container(
+                            width: 56,
+                            height: 56,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: hubColor.withValues(alpha: _connected ? 0.2 : 0.1),
+                            ),
+                            child: Icon(
+                              hubIcon,
+                              color: hubColor.withValues(alpha: _connected ? 1.0 : 0.5),
+                              size: 28,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Container(
+                                width: 8,
+                                height: 8,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: _connected ? const Color(0xFF22C55E) : Colors.amber,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                _connected ? 'Connected' : 'Connecting...',
+                                style: TextStyle(
+                                  color: _connected ? const Color(0xFF22C55E) : Colors.amber,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (_address != null && _address!.isNotEmpty) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              _address!,
+                              style: TextStyle(
+                                color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+                                fontSize: 13,
+                                fontFamily: 'monospace',
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 4),
+                          Text(
+                            deviceSummary,
+                            style: TextStyle(
+                              color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    // Devices section
+                    _buildSectionHeader('DEVICES'),
+                    const SizedBox(height: 8),
+                    _buildDevicesCard(rooms),
+                    const SizedBox(height: 20),
+                    // Debug section
+                    _buildSectionHeader('DEBUG'),
+                    const SizedBox(height: 8),
+                    _buildDebugCard(http),
+                    const SizedBox(height: 24),
+                    // Actions
+                    _buildActionButton(
+                      icon: Icons.refresh_rounded,
+                      label: _connected ? 'Reconnect' : 'Retry',
+                      color: _teal,
+                      onTap: () => _retryHub(),
+                    ),
+                    const SizedBox(height: 10),
+                    _buildActionButton(
+                      icon: Icons.link_off_rounded,
+                      label: 'Disconnect',
+                      color: Colors.red.shade400,
+                      onTap: () => _disconnectHub(),
+                    ),
+                    const SizedBox(height: 40),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ─── Devices Card ────────────────────────────────────────
+
+  Widget _buildDevicesCard(List<ServerRoom> rooms) {
+    return Container(
+      decoration: BoxDecoration(
+        color: CelestialColors.backgroundCard,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+        ),
+      ),
+      child: rooms.isEmpty
+          ? Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+              child: Center(
+                child: Text(
+                  'No devices discovered',
+                  style: TextStyle(
+                    color: CelestialColors.textSecondary.withValues(alpha: 0.5),
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+            )
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (final (index, room) in rooms.indexed) ...[
+                  if (index > 0)
+                    Divider(height: 1, color: CelestialColors.orbitRing.withValues(alpha: 0.2)),
+                  // Room header
+                  Padding(
+                    padding: const EdgeInsets.only(left: 16, right: 16, top: 12, bottom: 4),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.meeting_room_outlined,
+                          color: CelestialColors.textSecondary.withValues(alpha: 0.4),
+                          size: 14,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          room.name,
+                          style: TextStyle(
+                            color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.3,
+                          ),
+                        ),
+                        const Spacer(),
+                        Text(
+                          room.deviceSummary,
+                          style: TextStyle(
+                            color: CelestialColors.textSecondary.withValues(alpha: 0.4),
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  // Devices
+                  if (room.devices.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 36, bottom: 10),
+                      child: Text(
+                        '${room.deviceIds.length} device${room.deviceIds.length != 1 ? 's' : ''} (untyped)',
+                        style: TextStyle(
+                          color: CelestialColors.textSecondary.withValues(alpha: 0.4),
+                          fontSize: 12,
+                        ),
+                      ),
+                    )
+                  else
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Column(
+                        children: [
+                          for (final device in _sortDevices(room.devices))
+                            _buildDeviceRow(device, room.id),
+                        ],
+                      ),
+                    ),
+                ],
+              ],
+            ),
+    );
+  }
+
+  Widget _buildDeviceRow(TypedDevice device, String roomId) {
+    final (icon, iconColor) = _iconForDeviceType(device.type);
+    final typeLabel = switch (device.type) {
+      ServerDeviceType.light => 'Light',
+      ServerDeviceType.button => 'Button',
+      ServerDeviceType.motion => 'Motion',
+    };
+
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => DeviceDetailSheet.show(context, device, roomId),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        child: Row(
+          children: [
+            Icon(icon, color: iconColor, size: 18),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    device.displayName,
+                    style: const TextStyle(
+                      color: CelestialColors.textPrimary,
+                      fontSize: 13,
+                    ),
+                  ),
+                  if (device.productInfo != null)
+                    Text(
+                      device.productInfo!,
+                      style: TextStyle(
+                        color: CelestialColors.textSecondary.withValues(alpha: 0.5),
+                        fontSize: 11,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                ],
+              ),
+            ),
+            Text(
+              typeLabel,
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+                fontSize: 11,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ─── Debug Card ──────────────────────────────────────────
+
+  Widget _buildDebugCard(ServerHttpClient http) {
+    final sseEvents = http.lastSseEvents;
+    final now = DateTime.now();
+
+    return Container(
+      decoration: BoxDecoration(
+        color: CelestialColors.backgroundCard,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+        ),
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        children: [
+          _buildDebugRow('SSE', http.sseConnected ? 'Connected' : 'Disconnected',
+              color: http.sseConnected ? const Color(0xFF22C55E) : CelestialColors.textSecondary),
+          if (!http.sseSupported)
+            _buildDebugRow('SSE Supported', 'No',
+                color: CelestialColors.textSecondary),
+          _buildDebugRow('Last Activity', _relativeTime(http.lastSseActivity, now)),
+          if (http.sseReconnectAttempts > 0)
+            _buildDebugRow('Reconnects', '${http.sseReconnectAttempts}',
+                color: Colors.amber),
+          if (sseEvents.isNotEmpty) ...[
+            Padding(
+              padding: const EdgeInsets.only(top: 10, bottom: 4),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'RECENT EVENTS',
+                  style: TextStyle(
+                    color: CelestialColors.textSecondary.withValues(alpha: 0.4),
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.8,
+                  ),
+                ),
+              ),
+            ),
+            for (final entry in sseEvents.entries)
+              _buildDebugRow(
+                entry.value.type,
+                _relativeTime(entry.value.time, now),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDebugRow(String label, String value, {Color? color}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+              fontSize: 12,
+              fontFamily: 'monospace',
+            ),
+          ),
+          Text(
+            value,
+            style: TextStyle(
+              color: color ?? CelestialColors.textPrimary.withValues(alpha: 0.8),
+              fontSize: 12,
+              fontFamily: 'monospace',
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ─── Helpers ─────────────────────────────────────────────
+
+  Widget _buildSectionHeader(String title) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 4),
+      child: Text(
+        title,
+        style: TextStyle(
+          color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+          fontSize: 13,
+          fontWeight: FontWeight.w500,
+          letterSpacing: 0.8,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildActionButton({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(14),
+          color: color.withValues(alpha: 0.1),
+          border: Border.all(
+            color: color.withValues(alpha: 0.3),
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: color, size: 18),
+            const SizedBox(width: 10),
+            Text(
+              label,
+              style: TextStyle(
+                color: color,
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  List<TypedDevice> _sortDevices(List<TypedDevice> devices) {
+    return List<TypedDevice>.from(devices)
+      ..sort((a, b) {
+        const order = {
+          ServerDeviceType.light: 0,
+          ServerDeviceType.button: 1,
+          ServerDeviceType.motion: 2,
+        };
+        return (order[a.type] ?? 3).compareTo(order[b.type] ?? 3);
+      });
+  }
+
+  (IconData, Color) _iconForDeviceType(ServerDeviceType type) => switch (type) {
+    ServerDeviceType.light => (Icons.lightbulb_outline, const Color(0xFFFFB74D)),
+    ServerDeviceType.button => (Icons.touch_app_outlined, const Color(0xFF64B5F6)),
+    ServerDeviceType.motion => (Icons.sensors_outlined, const Color(0xFF81C784)),
+  };
+
+  String _relativeTime(DateTime time, DateTime now) {
+    if (time.millisecondsSinceEpoch == 0) return 'Never';
+    final diff = now.difference(time);
+    if (diff.inSeconds < 2) return 'Just now';
+    if (diff.inSeconds < 60) return '${diff.inSeconds}s ago';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
+    return '${diff.inHours}h ago';
+  }
+
+  void _retryHub() {
+    final syncProvider = context.read<ServerSyncProvider>();
+    final source = switch (_type) {
+      'hue' => RoomSourceDto.hue,
+      'homeassistant' || 'home_assistant' => RoomSourceDto.homeAssistant,
+      _ => null,
+    };
+    if (source != null) {
+      syncProvider.pushHubCredentials(source);
+    }
+  }
+
+  void _disconnectHub() async {
+    final syncProvider = context.read<ServerSyncProvider>();
+    await syncProvider.disconnectOneHub(_type, _address ?? '');
+    if (mounted) {
+      syncProvider.httpClient.reconnect();
+      Navigator.of(context).pop();
+    }
   }
 }

@@ -15,8 +15,8 @@ class AccountSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Hide entire section when login is disabled
-    if (!FeatureFlags.loginEnabled) {
+    // Hide entire section when auxiliary sign-in is disabled
+    if (!FeatureFlags.auxSignIn) {
       return const SizedBox.shrink();
     }
 

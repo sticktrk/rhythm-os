@@ -129,12 +129,12 @@ class _CompactRoomOrbState extends State<CompactRoomOrb> {
   void _onPlayPauseTap(RoomDto room) {
     HapticFeedback.lightImpact();
 
+    final newEnabled = !room.rhythmEnabled;
     final roomProvider = context.read<RoomProvider>();
-    roomProvider.setRoomRhythmEnabled(widget.roomId, !room.rhythmEnabled);
+    roomProvider.setRoomRhythmEnabled(widget.roomId, newEnabled);
 
     final serverSync = context.read<ServerSyncProvider>();
-    final action = room.rhythmEnabled ? 'rhythm_off' : 'rhythm_on';
-    serverSync.dispatchAction(widget.roomId, action);
+    serverSync.pushRoomPreferences(widget.roomId, rhythmEnabled: newEnabled);
   }
 
   Future<void> _resetToNow() async {

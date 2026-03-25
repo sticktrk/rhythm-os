@@ -5,9 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import '../providers/server_sync_provider.dart';
-import '../providers/home_provider.dart';
 import '../providers/room_provider.dart';
-import '../services/hue/hue_service_locator.dart';
 import 'room_settings_sheet.dart';
 import 'solar_orbit.dart'; // For CelestialColors
 
@@ -100,17 +98,6 @@ class _RoomCardState extends State<RoomCard> {
     setState(() {
       _sliderBrightness = null;
     });
-  }
-
-  void _onPlayPauseTap(RoomDto room) {
-    HapticFeedback.lightImpact();
-
-    final roomProvider = context.read<RoomProvider>();
-    roomProvider.setRoomRhythmEnabled(widget.roomId, !room.rhythmEnabled);
-
-    final serverSync = context.read<ServerSyncProvider>();
-    final action = room.rhythmEnabled ? 'rhythm_off' : 'rhythm_on';
-    serverSync.dispatchAction(widget.roomId, action);
   }
 
   void _onBrightnessSliderEnd() {
@@ -208,6 +195,9 @@ class _RoomCardState extends State<RoomCard> {
         };
 
         final sliderActive = mode == RoomMode.on;
+        final rhythmGlowActive = mode == RoomMode.on && room.rhythmEnabled;
+        // Warm amber on dark cards, contrast-aware dark tone on light cards
+        final glowColor = onLight ? iconColor : CelestialColors.sunWarm;
 
         return GestureDetector(
           onTap: () => RoomSettingsSheet.show(context, room),
@@ -286,24 +276,6 @@ class _RoomCardState extends State<RoomCard> {
                               ],
                             ),
                           ),
-                          // Center: mode-specific pill (server-dispatch or ESP32)
-                          if (mode == RoomMode.on &&
-                              (context.read<ServerSyncProvider>().canDispatchActions ||
-                               context.read<HomeProvider>().getFirstHubOfType(HubType.server) != null ||
-                               HueServiceLocator.isDemoMode))
-                            Padding(
-                              padding: const EdgeInsets.only(right: 8),
-                              child: _RhythmPill(
-                                rhythmEnabled: room.rhythmEnabled,
-                                onTap: () => _onPlayPauseTap(room),
-                                color: bgColor.computeLuminance() > 0.4
-                                    ? const Color(0xFF3A3A3A)
-                                    : Colors.white,
-                                bgColor: bgColor.computeLuminance() > 0.4
-                                    ? Colors.black.withValues(alpha: 0.08)
-                                    : Colors.white.withValues(alpha: 0.15),
-                              ),
-                            ),
                           if (mode == RoomMode.idle)
                             Padding(
                               padding: const EdgeInsets.only(right: 8),
@@ -373,6 +345,20 @@ class _RoomCardState extends State<RoomCard> {
                       ),
                     ),
                   ],
+                ),
+                // Rhythm-active horizon glow at bottom edge
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: IgnorePointer(
+                    child: AnimatedOpacity(
+                      opacity: rhythmGlowActive ? 1.0 : 0.0,
+                      duration: const Duration(milliseconds: 500),
+                      curve: Curves.easeInOut,
+                      child: _RhythmHorizonGlow(color: glowColor),
+                    ),
+                  ),
                 ),
               ],
             ),
@@ -503,59 +489,6 @@ class _CelestialToggle extends StatelessWidget {
               boxShadow: thumbShadow,
             ),
             child: null,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _RhythmPill extends StatelessWidget {
-  final bool rhythmEnabled;
-  final VoidCallback onTap;
-  final Color color;
-  final Color bgColor;
-
-  const _RhythmPill({
-    required this.rhythmEnabled,
-    required this.onTap,
-    required this.color,
-    required this.bgColor,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
-        decoration: BoxDecoration(
-          color: bgColor,
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: AnimatedSwitcher(
-          duration: const Duration(milliseconds: 150),
-          child: Row(
-            key: ValueKey(rhythmEnabled),
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                rhythmEnabled ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                color: color,
-                size: 20,
-              ),
-              const SizedBox(width: 4),
-              Text(
-                rhythmEnabled ? 'Rhythm' : 'Paused',
-                style: TextStyle(
-                  color: color,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
           ),
         ),
       ),
@@ -772,3 +705,88 @@ class _MiniCountdownPainter extends CustomPainter {
   bool shouldRepaint(_MiniCountdownPainter oldDelegate) =>
       oldDelegate.progress != progress || oldDelegate.color != color;
 }
+
+/// Horizon glow at the bottom of a room card when rhythm is active.
+///
+/// Two layers: a tall upward-fading gradient (the "glow") provides
+/// visual mass visible on any background, plus a bright 3px accent
+/// strip at the very bottom with a traveling shimmer highlight.
+class _RhythmHorizonGlow extends StatefulWidget {
+  final Color color;
+
+  const _RhythmHorizonGlow({required this.color});
+
+  @override
+  State<_RhythmHorizonGlow> createState() => _RhythmHorizonGlowState();
+}
+
+class _RhythmHorizonGlowState extends State<_RhythmHorizonGlow>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _shimmer;
+
+  @override
+  void initState() {
+    super.initState();
+    _shimmer = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 3000),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _shimmer.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _shimmer,
+      builder: (context, _) {
+        final t = _shimmer.value;
+        final center = -1.5 + t * 3.0;
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Upper fade: gradient bleeding upward into the card
+            Container(
+              height: 28,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Colors.transparent,
+                    widget.color.withValues(alpha: 0.15),
+                    widget.color.withValues(alpha: 0.45),
+                  ],
+                  stops: const [0.0, 0.5, 1.0],
+                ),
+              ),
+            ),
+            // Bottom accent strip with shimmer
+            Container(
+              height: 4,
+              decoration: BoxDecoration(
+                color: widget.color.withValues(alpha: 0.85),
+              ),
+              foregroundDecoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment(center - 0.5, 0),
+                  end: Alignment(center + 0.5, 0),
+                  colors: [
+                    Colors.transparent,
+                    Colors.white.withValues(alpha: 0.9),
+                    Colors.transparent,
+                  ],
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
