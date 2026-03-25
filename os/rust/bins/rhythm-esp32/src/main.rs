@@ -196,7 +196,9 @@ fn main() -> Result<()> {
     app_state.ensure_runtime_fn = Some(Arc::new(|state: &SharedState| {
         let bridge_ip = {
             let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-            s.hub_credentials.address.clone()
+            s.hub_credentials.values().next()
+                .map(|c| c.address.clone())
+                .ok_or_else(|| anyhow::anyhow!("No hub credentials configured"))?
         };
         let transport = platform::hue::client::HueClient::new(bridge_ip);
         rhythm_hue::embedded_lifecycle::ensure_runtime(state, transport)
@@ -275,7 +277,7 @@ fn main() -> Result<()> {
         // Spawn WiFi provisioning thread
         let prov_sysloop = sysloop.clone();
         let prov_nvs = nvs.clone();
-        thread::Builder::new()
+        if let Err(e) = thread::Builder::new()
             .name("wifi-prov".to_string())
             .stack_size(8 * 1024)
             .spawn(move || {
@@ -317,7 +319,10 @@ fn main() -> Result<()> {
                     }
                 }
             })
-            .expect("Failed to spawn wifi-prov thread");
+        {
+            warn!("Failed to spawn wifi-prov thread: {}", e);
+            return Err(anyhow::anyhow!("WiFi provisioning thread spawn failed"));
+        }
 
         let creds = ble_prov::run_provisioning(
             bt_modem,
@@ -351,7 +356,7 @@ fn main() -> Result<()> {
         }
     }
 
-    info!("Connecting to WiFi: {}", wifi_ssid);
+    info!("Connecting to WiFi: {}", &wifi_ssid);
     led.show(led::LedStatus::WifiConnecting);
 
     let _wifi = match wifi::connect_wifi(
@@ -501,13 +506,16 @@ fn main() -> Result<()> {
     // Physical button/motion events are processed inline on the main thread
     // (16KB stack, same as worker) for zero queue delay.
     let (work_tx, work_rx) = std::sync::mpsc::sync_channel::<WorkItem>(16);
-    {
-        let mut s = state.lock().unwrap();
-        s.work_tx = Some(work_tx);
+    match state.lock() {
+        Ok(mut s) => s.work_tx = Some(work_tx),
+        Err(_) => {
+            log::error!("State mutex poisoned during work_tx init — restarting");
+            unsafe { esp_idf_svc::sys::esp_restart() };
+        }
     }
 
     let worker_state = state.clone();
-    thread::Builder::new()
+    if let Err(e) = thread::Builder::new()
         .name("cmd-worker".to_string())
         .stack_size(16 * 1024)
         .spawn(move || {
@@ -522,16 +530,18 @@ fn main() -> Result<()> {
                 }
             }
         })
-        .expect("Failed to spawn cmd-worker thread");
+    {
+        log::error!("Failed to spawn cmd-worker thread: {} — restarting", e);
+        unsafe { esp_idf_svc::sys::esp_restart() };
+    }
 
     // =========================================================================
     // Phase 5: Initialize Hub (if configured)
     // =========================================================================
-    let mut hub_event_rx = {
-        let is_configured = {
-            let s = state.lock().unwrap();
-            s.hub_credentials.is_configured()
-        };
+    let mut hub_event_rx: Option<std::sync::mpsc::Receiver<HubEvent>> = {
+        let is_configured = state.lock()
+            .map(|s| s.hub_credentials.values().any(|c| c.is_configured()))
+            .unwrap_or(false);
 
         if is_configured {
             info!("Hub configured, connecting SSE...");
@@ -540,7 +550,7 @@ fn main() -> Result<()> {
             // Run SSE connect + runtime init in one thread (saves a 16KB stack allocation)
             let init_state = state.clone();
             let event_state = state.clone();
-            let init_result = thread::Builder::new()
+            let init_result = match thread::Builder::new()
                 .name("hub-init".to_string())
                 .stack_size(16 * 1024)
                 .spawn(move || -> Result<std::sync::mpsc::Receiver<HubEvent>> {
@@ -552,9 +562,14 @@ fn main() -> Result<()> {
                         },
                     )
                 })
-                .expect("Failed to spawn hub init thread")
-                .join()
-                .map_err(|_| anyhow::anyhow!("Hub init thread panicked"))?;
+            {
+                Ok(handle) => handle.join()
+                    .map_err(|_| anyhow::anyhow!("Hub init thread panicked"))?,
+                Err(e) => {
+                    warn!("Failed to spawn hub init thread: {} — continuing without hub", e);
+                    Err(anyhow::anyhow!("spawn failed"))
+                }
+            };
 
             match init_result {
                 Ok(event_rx) => {
@@ -562,13 +577,15 @@ fn main() -> Result<()> {
                     // correct on/off status instead of defaulting to all-off.
                     // Runs on a dedicated thread (TLS calls need 16KB stack).
                     let poll_state = state.clone();
-                    thread::Builder::new()
+                    if let Err(e) = thread::Builder::new()
                         .name("init-poll".to_string())
                         .stack_size(16 * 1024)
                         .spawn(move || {
                             rhythm_os::room_sync::poll_initial_light_state(&poll_state);
                         })
-                        .expect("Failed to spawn initial poll thread");
+                    {
+                        warn!("Failed to spawn init-poll thread: {} — skipping initial poll", e);
+                    }
                     Some(event_rx)
                 }
                 Err(e) => {
@@ -584,13 +601,16 @@ fn main() -> Result<()> {
 
     // Spawn periodic update thread with larger stack for float formatting
     let periodic_state = state.clone();
-    thread::Builder::new()
+    if let Err(e) = thread::Builder::new()
         .name("periodic".to_string())
         .stack_size(16 * 1024) // 16KB stack: periodic_tick makes HTTPS calls to Hue bridge
         .spawn(move || {
             rhythm_os::periodic::run_periodic_loop(periodic_state, Some(|| led::led_periodic()));
         })
-        .expect("Failed to spawn periodic update thread");
+    {
+        log::error!("Failed to spawn periodic thread: {} — restarting", e);
+        unsafe { esp_idf_svc::sys::esp_restart() };
+    }
 
     // Button state for BOOT button LED color cycling + factory reset
     let mut btn_was_pressed = false;

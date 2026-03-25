@@ -291,8 +291,8 @@ fn generate_uuid() -> String {
         .as_nanos();
 
     // Mix in thread ID + a counter for uniqueness within the same nanosecond
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
     let count = COUNTER.fetch_add(1, Ordering::Relaxed);
     let thread_id = std::thread::current().id();
     let thread_hash = format!("{:?}", thread_id).len() as u128;

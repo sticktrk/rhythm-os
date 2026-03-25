@@ -4,27 +4,225 @@
 //! in NVS. Hub-specific persistence (e.g., Hue registry snapshots) lives
 //! in the respective hub modules.
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
 use log::{info, warn};
-use rhythm_core::room::RoomManager;
+use serde::{Deserialize, Serialize};
+use rhythm_core::config::CurveConfig;
+use rhythm_core::room::{Room, RoomManager, RoomSource};
 
 use rhythm_os::hub::{HubCredentials, HubType};
 use rhythm_os::state::SharedState;
+
+// ============================================================================
+// Compact NVS Types — short field names for embedded storage
+// ============================================================================
+
+#[derive(Serialize, Deserialize)]
+struct NvsRoomManager {
+    #[serde(rename = "r")]
+    rooms: HashMap<String, NvsRoom>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct NvsRoom {
+    #[serde(rename = "i")]
+    id: String,
+    #[serde(rename = "n")]
+    name: String,
+    #[serde(rename = "s", default, skip_serializing_if = "nvs_source_is_default")]
+    source: NvsRoomSource,
+    #[serde(rename = "re")]
+    rhythm_enabled: bool,
+    #[serde(rename = "d", default, skip_serializing_if = "is_false")]
+    disabled: bool,
+    #[serde(rename = "to", default, skip_serializing_if = "is_zero_f32")]
+    time_offset_minutes: f32,
+    #[serde(rename = "bo", default, skip_serializing_if = "is_zero_f32")]
+    brightness_offset: f32,
+    #[serde(rename = "cc", default, skip_serializing_if = "Option::is_none")]
+    curve_config: Option<NvsCurveConfig>,
+    #[serde(rename = "so", default, skip_serializing_if = "is_false")]
+    soft_off: bool,
+}
+
+#[derive(Serialize, Deserialize, Default, PartialEq)]
+enum NvsRoomSource {
+    #[default]
+    #[serde(rename = "U")]
+    Unknown,
+    #[serde(rename = "H")]
+    Hue,
+    #[serde(rename = "HA")]
+    HomeAssistant,
+    #[serde(rename = "E")]
+    Esp32,
+    #[serde(untagged)]
+    Other(String),
+}
+
+#[derive(Serialize, Deserialize)]
+struct NvsCurveConfig {
+    #[serde(rename = "ct0")]
+    min_color_temp: u16,
+    #[serde(rename = "ct1")]
+    max_color_temp: u16,
+    #[serde(rename = "b0")]
+    min_brightness: u8,
+    #[serde(rename = "b1")]
+    max_brightness: u8,
+    #[serde(rename = "wlb")]
+    width_left_bri: f32,
+    #[serde(rename = "wrb")]
+    width_right_bri: f32,
+    #[serde(rename = "wlc")]
+    width_left_cct: f32,
+    #[serde(rename = "wrc")]
+    width_right_cct: f32,
+    #[serde(rename = "sp")]
+    shape_p: f32,
+    #[serde(rename = "ds")]
+    max_dim_steps: u8,
+}
+
+fn is_false(v: &bool) -> bool { !v }
+fn is_zero_f32(v: &f32) -> bool { *v == 0.0 }
+fn nvs_source_is_default(v: &NvsRoomSource) -> bool { *v == NvsRoomSource::Unknown }
+
+// --- Conversions ---
+
+impl From<&Room> for NvsRoom {
+    fn from(r: &Room) -> Self {
+        Self {
+            id: r.id.clone(),
+            name: r.name.clone(),
+            source: NvsRoomSource::from(&r.source),
+            rhythm_enabled: r.rhythm_enabled,
+            disabled: r.disabled,
+            time_offset_minutes: r.time_offset_minutes,
+            brightness_offset: r.brightness_offset,
+            curve_config: r.curve_config.as_ref().map(NvsCurveConfig::from),
+            soft_off: r.soft_off,
+        }
+    }
+}
+
+impl From<NvsRoom> for Room {
+    fn from(r: NvsRoom) -> Self {
+        Self {
+            id: r.id,
+            name: r.name,
+            source: RoomSource::from(r.source),
+            rhythm_enabled: r.rhythm_enabled,
+            disabled: r.disabled,
+            time_offset_minutes: r.time_offset_minutes,
+            brightness_offset: r.brightness_offset,
+            curve_config: r.curve_config.map(CurveConfig::from),
+            soft_off: r.soft_off,
+        }
+    }
+}
+
+impl From<&RoomSource> for NvsRoomSource {
+    fn from(s: &RoomSource) -> Self {
+        match s {
+            RoomSource::Unknown => Self::Unknown,
+            RoomSource::Hue => Self::Hue,
+            RoomSource::HomeAssistant => Self::HomeAssistant,
+            RoomSource::Esp32 => Self::Esp32,
+            RoomSource::Other(s) => Self::Other(s.clone()),
+        }
+    }
+}
+
+impl From<NvsRoomSource> for RoomSource {
+    fn from(s: NvsRoomSource) -> Self {
+        match s {
+            NvsRoomSource::Unknown => Self::Unknown,
+            NvsRoomSource::Hue => Self::Hue,
+            NvsRoomSource::HomeAssistant => Self::HomeAssistant,
+            NvsRoomSource::Esp32 => Self::Esp32,
+            NvsRoomSource::Other(s) => Self::Other(s),
+        }
+    }
+}
+
+impl From<&CurveConfig> for NvsCurveConfig {
+    fn from(c: &CurveConfig) -> Self {
+        Self {
+            min_color_temp: c.min_color_temp,
+            max_color_temp: c.max_color_temp,
+            min_brightness: c.min_brightness,
+            max_brightness: c.max_brightness,
+            width_left_bri: c.width_left_bri,
+            width_right_bri: c.width_right_bri,
+            width_left_cct: c.width_left_cct,
+            width_right_cct: c.width_right_cct,
+            shape_p: c.shape_p,
+            max_dim_steps: c.max_dim_steps,
+        }
+    }
+}
+
+impl From<NvsCurveConfig> for CurveConfig {
+    fn from(c: NvsCurveConfig) -> Self {
+        Self {
+            min_color_temp: c.min_color_temp,
+            max_color_temp: c.max_color_temp,
+            min_brightness: c.min_brightness,
+            max_brightness: c.max_brightness,
+            width_left_bri: c.width_left_bri,
+            width_right_bri: c.width_right_bri,
+            width_left_cct: c.width_left_cct,
+            width_right_cct: c.width_right_cct,
+            shape_p: c.shape_p,
+            max_dim_steps: c.max_dim_steps,
+        }
+    }
+}
+
+impl From<&RoomManager> for NvsRoomManager {
+    fn from(rm: &RoomManager) -> Self {
+        Self {
+            rooms: rm.iter().map(|r| (r.id.clone(), NvsRoom::from(r))).collect(),
+        }
+    }
+}
+
+impl From<NvsRoomManager> for RoomManager {
+    fn from(nvs: NvsRoomManager) -> Self {
+        let mut rm = RoomManager::new();
+        for (_id, nvs_room) in nvs.rooms {
+            rm.add_room(Room::from(nvs_room));
+        }
+        rm
+    }
+}
 
 // ============================================================================
 // Room State Storage (standalone — not tied to AppState)
 // ============================================================================
 
 /// Load persisted room state from NVS.
+///
+/// Tries compact format first, falls back to verbose (pre-migration) format.
 pub fn load_rooms(nvs: &EspDefaultNvsPartition) -> Result<RoomManager> {
     let nvs = EspNvs::new(nvs.clone(), NVS_NAMESPACE, true)?;
     let mut buf = [0u8; 4096];
     match nvs.get_str(KEY_ROOMS, &mut buf) {
         Ok(Some(json)) => {
+            // Try compact format first
+            if let Ok(nvs_rm) = serde_json::from_str::<NvsRoomManager>(json) {
+                let rooms = RoomManager::from(nvs_rm);
+                info!("Loaded {} rooms from NVS (compact)", rooms.len());
+                return Ok(rooms);
+            }
+            // Fall back to verbose format (migration)
             match serde_json::from_str::<RoomManager>(json) {
                 Ok(rooms) => {
-                    info!("Loaded {} rooms from NVS", rooms.len());
+                    info!("Loaded {} rooms from NVS (verbose, will compact on next save)", rooms.len());
                     return Ok(rooms);
                 }
                 Err(e) => warn!("Failed to parse rooms JSON from NVS: {}", e),
@@ -36,12 +234,13 @@ pub fn load_rooms(nvs: &EspDefaultNvsPartition) -> Result<RoomManager> {
     Ok(RoomManager::new())
 }
 
-/// Save room state to NVS.
+/// Save room state to NVS using compact format.
 pub fn save_rooms(nvs: &EspDefaultNvsPartition, rooms: &RoomManager) -> Result<()> {
     let nvs = EspNvs::new(nvs.clone(), NVS_NAMESPACE, true)?;
-    if let Ok(json) = serde_json::to_string(rooms) {
+    let compact = NvsRoomManager::from(rooms);
+    if let Ok(json) = serde_json::to_string(&compact) {
+        info!("Saving {} rooms to NVS ({} bytes)", rooms.len(), json.len());
         nvs.set_str(KEY_ROOMS, &json)?;
-        info!("Saved {} rooms to NVS", rooms.len());
     }
     Ok(())
 }
@@ -118,7 +317,12 @@ pub fn load_config(nvs: &EspDefaultNvsPartition, state: &SharedState) -> Result<
     }
 
     // Load hub credentials (hub_type key dispatches to per-hub keys)
-    state.hub_credentials = load_hub_credentials_inner(&nvs);
+    let creds = load_hub_credentials_inner(&nvs);
+    if creds.is_configured() {
+        if let Some(key) = creds.hub_key() {
+            state.hub_credentials.insert(key, creds);
+        }
+    }
 
     // Load location (stored as i32 * 10000 for precision)
     if let Ok(Some(val)) = nvs.get_i32(KEY_LATITUDE) {
@@ -183,8 +387,10 @@ pub fn save_config(nvs: &EspDefaultNvsPartition, state: &SharedState) -> Result<
     let utc_offset_encoded = (state.utc_offset_hours * 100.0) as i16;
     nvs.set_i16(KEY_UTC_OFFSET, utc_offset_encoded)?;
 
-    // Save hub credentials
-    save_hub_credentials_inner(&nvs, &state.hub_credentials)?;
+    // Save hub credentials (ESP32: single hub, save first configured)
+    if let Some(creds) = state.hub_credentials.values().next() {
+        save_hub_credentials_inner(&nvs, creds)?;
+    }
 
     // Save location (stored as i32 * 10000 for precision)
     if let Some(lat) = state.latitude {
@@ -618,6 +824,9 @@ fn save_hue_registry(nvs: &EspDefaultNvsPartition, snapshot: &HueRegistrySnapsho
             json.len()
         ));
     }
+    if json.len() > 14000 {
+        warn!("Hue registry approaching NVS limit: {} bytes", json.len());
+    }
 
     nvs.set_blob(KEY_HUE_REG, json.as_bytes())?;
     info!(
@@ -630,10 +839,12 @@ fn save_hue_registry(nvs: &EspDefaultNvsPartition, snapshot: &HueRegistrySnapsho
 }
 
 /// Load Hue registry snapshot from NVS.
+///
+/// Uses a heap-allocated buffer to handle registries up to the 60KB save limit.
 fn load_hue_registry(nvs: &EspDefaultNvsPartition) -> Result<Option<HueRegistrySnapshot>> {
     let nvs = EspNvs::new(nvs.clone(), NVS_NAMESPACE, true)?;
 
-    let mut buf = [0u8; 8192];
+    let mut buf = vec![0u8; 16384];
 
     // Try blob format first (new format)
     if let Ok(Some(blob)) = nvs.get_blob(KEY_HUE_REG, &mut buf) {
@@ -641,8 +852,9 @@ fn load_hue_registry(nvs: &EspDefaultNvsPartition) -> Result<Option<HueRegistryS
             match serde_json::from_str::<HueRegistrySnapshot>(json) {
                 Ok(snapshot) => {
                     info!(
-                        "Loaded Hue registry from NVS: {} rooms",
-                        snapshot.rooms.len()
+                        "Loaded Hue registry from NVS: {} rooms, {} bytes",
+                        snapshot.rooms.len(),
+                        blob.len()
                     );
                     return Ok(Some(snapshot));
                 }

@@ -145,6 +145,25 @@ pub fn start_server(
     })?;
 
     let s = state.clone();
+    server.fn_handler::<anyhow::Error, _>("/api/config/reset", Method::Post, move |req| {
+        write_api_response(req, &handlers::handle_reset_config(&s))
+    })?;
+
+    let s = state.clone();
+    server.fn_handler::<anyhow::Error, _>("/api/config/absorb-offset", Method::Post, move |mut req| {
+        let body = match read_json_body(&mut req) {
+            Ok(b) => b,
+            Err(e) => return write_api_response(req, &ApiResponse::bad_request(&e.to_string())),
+        };
+        write_api_response(req, &handlers::handle_absorb_time_offset(&s, &body))
+    })?;
+
+    let s = state.clone();
+    server.fn_handler::<anyhow::Error, _>("/api/curve/now", Method::Get, move |req| {
+        write_api_response(req, &handlers::handle_get_curve_now(&s, None))
+    })?;
+
+    let s = state.clone();
     server.fn_handler::<anyhow::Error, _>("/api/location", Method::Put, move |mut req| {
         let body = match read_json_body(&mut req) {
             Ok(b) => b,
@@ -234,7 +253,7 @@ pub fn start_server(
 
     let s = state.clone();
     server.fn_handler::<anyhow::Error, _>("/api/hub/credentials", Method::Delete, move |req| {
-        write_api_response(req, &handlers::handle_delete_hub(&s))
+        write_api_response(req, &handlers::handle_delete_hub(&s, None, None))
     })?;
 
     let s = state.clone();

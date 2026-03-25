@@ -12,8 +12,8 @@ CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
 
 # Partition table (custom)
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="/home/developer/PhpstormProjects/rhythm-os/rust/bins/rhythm-esp32/partitions.csv"
-CONFIG_PARTITION_TABLE_FILENAME="/home/developer/PhpstormProjects/rhythm-os/rust/bins/rhythm-esp32/partitions.csv"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="/home/developer/PhpstormProjects/rhythm-lighting/rust/bins/rhythm-esp32/partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="/home/developer/PhpstormProjects/rhythm-lighting/rust/bins/rhythm-esp32/partitions.csv"
 CONFIG_PARTITION_TABLE_OFFSET=0x8000
 CONFIG_PARTITION_TABLE_MD5=y
 

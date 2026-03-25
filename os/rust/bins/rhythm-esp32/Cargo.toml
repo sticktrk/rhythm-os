@@ -1,6 +1,6 @@
 [package]
 name = "rhythm-esp32"
-version = "0.3.140"
+version = "0.3.145"
 edition = "2021"
 authors = ["Tim K, @sticktrk"]
 description = "ESP32-C6 firmware for Rhythm OS adaptive lighting control"

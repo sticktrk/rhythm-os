@@ -1815,13 +1815,11 @@ pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
     info!(target: "cmd", "hub_disconnect: clearing all hubs, credentials, and rooms");
 
     // Capture hub keys before clearing for SSE notifications
-    let old_hub_keys: Vec<_>;
     let old_hubs;
 
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
-        old_hub_keys = s.hubs.keys().cloned().collect();
         old_hubs = std::mem::take(&mut s.hubs);
 
         s.hub_credentials.clear();
@@ -1840,6 +1838,10 @@ pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
     }
 
     persist_registry(state);
+
+    // Capture keys before old_hubs is moved into the drop thread
+    #[cfg(feature = "desktop")]
+    let old_hub_keys: Vec<_> = old_hubs.keys().cloned().collect();
 
     // Clear all controllers from the composite
     #[cfg(feature = "desktop")]

@@ -47,13 +47,15 @@ pub fn start_event_stream(
 
     // SSE reader thread (ESP32-specific: EspTls, small stack)
     let sse_shutdown = shutdown.clone();
-    std::thread::Builder::new()
+    if let Err(e) = std::thread::Builder::new()
         .name("hue-sse".to_string())
         .stack_size(16 * 1024)
         .spawn(move || {
             sse::run_hue_sse(sse_config, sse_tx, &sse_shutdown);
         })
-        .expect("Failed to spawn Hue SSE thread");
+    {
+        log::warn!("Failed to spawn Hue SSE thread: {} — events will not stream", e);
+    }
 
     // Build on-demand discovery closures for the translator thread.
     // Creates a persistent HueClient that reuses TLS across discoveries.
@@ -220,17 +222,17 @@ impl HubProvider for HueHubProvider {
         // Try starting runtime if rooms exist
         let has_rooms = {
             let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-            s.active_hub
-                .as_ref()
-                .and_then(|h| h.data::<rhythm_hue::hub_state::HueHubData>())
-                .and_then(|hue| hue.registry.lock().ok().map(|r| r.has_rooms()))
-                .unwrap_or(false)
+            s.all_hub_registries()
+                .iter()
+                .any(|reg| reg.lock().ok().map(|r| !r.rooms().is_empty()).unwrap_or(false))
         };
 
         if has_rooms {
             let bridge_ip = {
                 let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-                s.hub_credentials.address.clone()
+                s.hub_credentials.values().next()
+                    .map(|c| c.address.clone())
+                    .ok_or_else(|| anyhow::anyhow!("No hub credentials"))?
             };
             let transport = HueClient::new(bridge_ip);
             if let Err(e) = rhythm_hue::embedded_lifecycle::ensure_runtime(

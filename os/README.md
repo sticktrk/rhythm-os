@@ -16,13 +16,7 @@
 
 Rhythm OS is a headless, curve-driven lighting engine written in Rust. It continuously evaluates a lighting curve to produce the right **brightness** and **color temperature** for every moment of the day — then pushes those values to your lights. The default curve is a Gaussian shaped by solar position, but the curve engine is pluggable: implement the `LightCurveModule` trait and drop in any shape you want.
 
-The same core runs everywhere: on an **ESP32** microcontroller, a **macOS/Linux** server, or a **Home Assistant** add-on. Hub-agnostic — works with any lighting product that has an integration crate. The entire system is controlled through a REST API. Bring your own frontend, or use the [Rhythm Lighting](https://apps.apple.com/us/app/rhythm-lighting/id6758312802) app.
-
-> **[Rhythm Lighting](https://apps.apple.com/us/app/rhythm-lighting/id6758312802)** — the reference app for Rhythm OS.
->
-> An iOS app that connects to your Rhythm OS server and puts the full dashboard in your pocket — room control, device setup, hub connection, light tuning, and settings. Available on the [App Store](https://apps.apple.com/us/app/rhythm-lighting/id6758312802).
->
-> Rhythm OS works standalone via its REST API — the app is the easiest way to set up and manage everything. Learn more at [rhythm.lighting](https://rhythm.lighting).
+The same core runs everywhere: on an **ESP32** microcontroller, a **macOS/Linux** server, or a **Home Assistant** add-on. Hub-agnostic — works with any lighting product that has an integration crate. The entire system is controlled through a REST API. Bring your own frontend, or use the [Rhythm app](https://apps.apple.com/us/app/rhythm-lighting/id6758312802).
 
 ## How it works
 

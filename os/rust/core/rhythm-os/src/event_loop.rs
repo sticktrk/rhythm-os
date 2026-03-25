@@ -360,7 +360,10 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
 
         HubEvent::Disconnected {
             reason,
+            #[cfg(feature = "desktop")]
             ref hub_key,
+            #[cfg(not(feature = "desktop"))]
+                hub_key: _,
         } => {
             warn!(target: "conn", "Hub disconnected: {}", reason);
 

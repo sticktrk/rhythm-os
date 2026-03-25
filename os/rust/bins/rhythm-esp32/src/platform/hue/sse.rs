@@ -67,8 +67,9 @@ pub fn run_hue_sse(config: HueSseConfig, event_tx: SyncSender<HueSseEvent>, shut
 }
 
 /// Max consecutive 5s read timeouts before assuming the connection is dead.
-/// 60 timeouts × 5s SO_RCVTIMEO = ~5 minutes of silence.
-const MAX_CONSECUTIVE_TIMEOUTS: u32 = 60;
+/// 18 timeouts × 5s SO_RCVTIMEO = ~90 seconds of silence.
+/// The Hue bridge sends heartbeats every ~30-60s, so 90s is already abnormal.
+const MAX_CONSECUTIVE_TIMEOUTS: u32 = 18;
 
 /// Connect to the SSE endpoint and stream events using a raw TLS socket.
 ///
