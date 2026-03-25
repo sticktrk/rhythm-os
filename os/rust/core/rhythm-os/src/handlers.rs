@@ -614,6 +614,34 @@ pub fn handle_get_version(version: &str) -> ApiResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Device pairing handler
+// ---------------------------------------------------------------------------
+
+pub fn handle_pair_device(
+    state: &SharedState,
+    request: &crate::pairing::PairingRequest,
+) -> ApiResponse {
+    let start_pairing = {
+        let Ok(s) = state.lock() else {
+            return ApiResponse::server_error("lock");
+        };
+        s.start_pairing_fn.clone()
+    };
+
+    let Some(start_fn) = start_pairing else {
+        return ApiResponse::server_error("No pairing support configured");
+    };
+
+    match start_fn(state, &request.hub_type, &request.params) {
+        Ok(session) => match serde_json::to_string(&session) {
+            Ok(json) => ApiResponse::json_ok(json),
+            Err(e) => ApiResponse::server_error(e),
+        },
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Canonical device handlers
 // ---------------------------------------------------------------------------
 

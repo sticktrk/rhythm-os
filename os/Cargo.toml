@@ -7,6 +7,7 @@ members = [
     "rust/core/rhythm-os",
     "rust/integrations/rhythm-hue",
     "rust/integrations/rhythm-ha",
+    "rust/integrations/rhythm-matter",
     "rust/bins/rhythm-server",
     "rust/bins/rhythm-addon",
 ]

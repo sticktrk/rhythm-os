@@ -1,0 +1,25 @@
+[package]
+name = "rhythm-matter"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+description = "Matter integration for Rhythm OS — controls Matter-over-WiFi/Thread lights"
+
+[features]
+default = []
+blocking = ["rhythm-core/blocking", "rhythm-os/blocking"]
+embedded = ["blocking"]
+desktop = ["blocking", "rhythm-os/desktop", "dep:tokio"]
+test-support = ["blocking", "rhythm-core/test-support"]
+
+[dependencies]
+rhythm-core = { path = "../../core/rhythm-core" }
+rhythm-os = { path = "../../core/rhythm-os", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+async-trait = "0.1"
+log = "0.4"
+
+# Optional: desktop transport
+tokio = { workspace = true, optional = true }

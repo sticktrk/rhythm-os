@@ -1408,6 +1408,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhythm-matter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "log",
+ "rhythm-core",
+ "rhythm-os",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rhythm-os"
 version = "0.1.0"
 dependencies = [

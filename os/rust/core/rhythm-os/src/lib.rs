@@ -19,6 +19,7 @@ pub mod hub;
 pub mod hue_buttons;
 pub mod lifecycle;
 pub mod mdns;
+pub mod pairing;
 pub mod periodic;
 pub mod registry;
 pub mod room_sync;

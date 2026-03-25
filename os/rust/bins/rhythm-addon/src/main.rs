@@ -82,6 +82,7 @@ fn main() -> Result<()> {
         s.ensure_runtime_fn = Some(callbacks.ensure_runtime_fn);
         s.get_hub_provider_fn = Some(callbacks.get_hub_provider_fn);
         s.register_controller_fn = Some(callbacks.register_controller_fn);
+        s.start_pairing_fn = Some(callbacks.start_pairing_fn);
 
         // Credentials interceptor: delegates to integrations (e.g., HA auto-fills SUPERVISOR_TOKEN)
         s.hub_credentials_interceptor = Some(rhythm_os::hub::combined_credentials_interceptor(
