@@ -262,6 +262,10 @@ pub struct AppState {
     /// Deployment context: "ha_addon", "server", "embedded", etc.
     pub platform_context: &'static str,
 
+    /// Base data directory for persistence (set by binary crate).
+    /// Used by integrations that need filesystem paths (e.g., Matter fabric data).
+    pub data_dir: String,
+
     /// The port the HTTP server is listening on.
     /// Exposed in the state snapshot so web clients can connect directly
     /// (bypassing reverse proxies like HA ingress) for SSE.
@@ -320,6 +324,7 @@ impl Default for AppState {
             firmware_version: "0.0.0",
             platform_type: "desktop",
             platform_context: "server",
+            data_dir: String::new(),
             listen_port: None,
             platform: PlatformConfig::default(),
             #[cfg(feature = "desktop")]

@@ -77,6 +77,7 @@ fn main() -> Result<()> {
         s.event_tx = Some(event_tx);
         s.firmware_version = Box::leak(VERSION.to_string().into_boxed_str());
         s.listen_port = Some(args.port);
+        s.data_dir = data_dir.clone();
         s.storage = Some(Box::new(file_storage));
 
         // Load persisted state

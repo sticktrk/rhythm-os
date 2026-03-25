@@ -9,11 +9,16 @@ description = "Matter integration for Rhythm OS — controls Matter-over-WiFi/Th
 default = []
 blocking = ["rhythm-core/blocking", "rhythm-os/blocking"]
 embedded = ["blocking"]
-desktop = ["blocking", "rhythm-os/desktop", "dep:tokio"]
+desktop = ["blocking", "rhythm-os/desktop", "dep:tokio", "dep:matc"]
 test-support = ["blocking", "rhythm-core/test-support"]
+
+[[test]]
+name = "integration_flow"
+required-features = ["test-support"]
 
 [dependencies]
 rhythm-core = { path = "../../core/rhythm-core" }
+rhythm-devices = { path = "../../core/rhythm-devices" }
 rhythm-os = { path = "../../core/rhythm-os", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -21,5 +26,6 @@ anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
 
-# Optional: desktop transport
+# Optional: desktop transport (matc = rust Matter controller library)
 tokio = { workspace = true, optional = true }
+matc = { version = "0.1", optional = true }

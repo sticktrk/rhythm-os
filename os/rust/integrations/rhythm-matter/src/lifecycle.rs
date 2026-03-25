@@ -3,6 +3,7 @@
 //! Thin wrappers around `rhythm_os::lifecycle` helpers with Matter-specific
 //! configuration. The Matter fabric is the "hub" — `HubKey("matter", "local")`.
 
+use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
@@ -47,6 +48,10 @@ pub fn connect_matter<T: MatterTransport + 'static>(
 
     let commissioned_for_closure = commissioned.clone();
 
+    // Create event channel — tx is held by MatterHubData (keeps channel alive),
+    // rx goes to the event loop. Later, subscription handling can send real events.
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+
     rhythm_os::lifecycle::connect_hub(
         state,
         HubType::new("matter"),
@@ -60,17 +65,12 @@ pub fn connect_matter<T: MatterTransport + 'static>(
                 registry,
                 fabric_id: "default".to_string(),
                 commissioned: commissioned_for_closure,
+                device_caps: std::sync::Mutex::new(HashMap::new()),
+                event_tx,
             }))
         },
-        // start_event_stream: Matter uses subscriptions, not SSE
-        move |_registry, _shutdown| {
-            // Return a channel that receives no events until
-            // subscription-based event translation is implemented.
-            let (tx, rx) = std::sync::mpsc::channel();
-            // Keep tx alive so rx doesn't immediately report disconnect
-            std::mem::forget(tx);
-            rx
-        },
+        // start_event_stream: return pre-created rx (tx lives in MatterHubData)
+        move |_registry, _shutdown| event_rx,
     )
 }
 

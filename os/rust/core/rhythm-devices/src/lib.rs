@@ -23,12 +23,14 @@
 //! assert!(caps.supports_color_temp());
 //! ```
 
+pub mod adapt;
 pub mod capabilities;
 pub mod entry;
 pub mod gamut;
 pub mod lookup;
 pub mod quirks;
 
+pub use adapt::{adapt_command, AdaptedCommand};
 pub use capabilities::{ColorMode, LightCapabilities, LightType};
 pub use entry::DeviceEntry;
 pub use gamut::{GamutTriangle, XyPoint};

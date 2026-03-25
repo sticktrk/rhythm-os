@@ -25,6 +25,8 @@ pub enum LightType {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum ColorMode {
+    /// Hue and saturation control.
+    HueSaturation,
     /// Full CIE xy color gamut.
     Xy,
     /// Color temperature (mirek/kelvin range).

@@ -72,6 +72,7 @@ fn main() -> Result<()> {
         s.firmware_version = Box::leak(VERSION.to_string().into_boxed_str());
         s.platform_context = "ha_addon";
         s.listen_port = Some(port);
+        s.data_dir = data_dir.clone();
         s.storage = Some(Box::new(file_storage));
 
         // Load persisted state
