@@ -2,14 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../providers/server_sync_provider.dart';
-import '../services/server_http_client.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType, RhythmRoom;
 import 'solar_orbit.dart'; // For CelestialColors
 
 /// Bottom sheet showing canonical device details + connections.
 ///
 /// Opened by tapping a device row in [RoomSettingsSheet].
 class DeviceDetailSheet extends StatefulWidget {
-  final TypedDevice device;
+  final RhythmDevice device;
   final String roomId;
 
   const DeviceDetailSheet({
@@ -20,7 +20,7 @@ class DeviceDetailSheet extends StatefulWidget {
 
   static Future<void> show(
     BuildContext context,
-    TypedDevice device,
+    RhythmDevice device,
     String roomId,
   ) {
     HapticFeedback.lightImpact();
@@ -50,7 +50,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   }
 
   Future<void> _loadCanonicalData() async {
-    final http = context.read<ServerSyncProvider>().httpClient;
+    final http = context.read<ServerSyncProvider>().api;
     final data = await http.getCanonicalDevice(widget.device.id);
     if (mounted) {
       setState(() {
@@ -202,11 +202,11 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     );
   }
 
-  Widget _buildInfoSection(TypedDevice device) {
+  Widget _buildInfoSection(RhythmDevice device) {
     final typeLabel = switch (device.type) {
-      ServerDeviceType.light => 'Light',
-      ServerDeviceType.button => 'Button',
-      ServerDeviceType.motion => 'Motion Sensor',
+      RhythmDeviceType.light => 'Light',
+      RhythmDeviceType.button => 'Button',
+      RhythmDeviceType.motion => 'Motion Sensor',
     };
 
     final rhythmId = _canonicalData?['id'] as String?;
@@ -294,7 +294,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       return;
     }
 
-    final targetRoom = await showModalBottomSheet<ServerRoom>(
+    final targetRoom = await showModalBottomSheet<RhythmRoom>(
       context: context,
       backgroundColor: Colors.transparent,
       builder: (ctx) => Container(
@@ -343,7 +343,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
 
     if (targetRoom == null || !context.mounted) return;
 
-    final success = await syncProvider.httpClient.topologyMoveDevice(
+    final success = await syncProvider.api.topologyMoveDevice(
       deviceId: widget.device.id,
       fromRoomId: widget.roomId,
       toRoomId: targetRoom.id,
@@ -358,7 +358,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           ),
         );
         // Trigger re-sync to update state
-        syncProvider.httpClient.triggerSync();
+        syncProvider.api.triggerSync();
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Failed to move device')),
@@ -410,10 +410,10 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     );
   }
 
-  (IconData, Color) _iconForType(ServerDeviceType type) => switch (type) {
-    ServerDeviceType.light => (Icons.lightbulb_outline, const Color(0xFFFFB74D)),
-    ServerDeviceType.button => (Icons.touch_app_outlined, const Color(0xFF64B5F6)),
-    ServerDeviceType.motion => (Icons.sensors_outlined, const Color(0xFF81C784)),
+  (IconData, Color) _iconForType(RhythmDeviceType type) => switch (type) {
+    RhythmDeviceType.light => (Icons.lightbulb_outline, const Color(0xFFFFB74D)),
+    RhythmDeviceType.button => (Icons.touch_app_outlined, const Color(0xFF64B5F6)),
+    RhythmDeviceType.motion => (Icons.sensors_outlined, const Color(0xFF81C784)),
   };
 }
 

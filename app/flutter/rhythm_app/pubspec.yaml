@@ -15,6 +15,10 @@ dependencies:
   rhythm_core:
     path: ../rhythm_core
 
+  # Rhythm SDK for server communication
+  rhythm_sdk:
+    path: ../../../rhythm_sdk
+
   # State management
   provider: ^6.1.1
 

@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnection, RhythmConnectionState, RhythmDevice, RhythmDeviceType, RhythmDiagnosticsApi, RhythmRoom;
 import '../../widgets/solar_orbit.dart';
-import '../../services/server_http_client.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../providers/home_provider.dart';
 import '../../providers/room_provider.dart';
@@ -58,7 +58,7 @@ class RhythmServerSettingsScreen extends StatefulWidget {
 
 class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     with SingleTickerProviderStateMixin {
-  late final DeviceDiagClient _client;
+  late final RhythmDiagnosticsApi _client;
   final OtaService _otaService = OtaService();
 
   bool _isOnline = false;
@@ -96,7 +96,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   @override
   void initState() {
     super.initState();
-    _client = DeviceDiagClient(host: widget.hub.endpoint.host, port: widget.hub.endpoint.port);
+    _client = RhythmDiagnosticsApi(host: widget.hub.endpoint.host, port: widget.hub.endpoint.port);
 
     _glowController = AnimationController(
       duration: const Duration(milliseconds: 2000),
@@ -131,7 +131,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       // Force a full reconnect so the sync provider picks up the new
       // firmware version from GET /api/state (the poll endpoint doesn't
       // include version info).
-      context.read<ServerSyncProvider>().httpClient.reconnect();
+      context.read<ServerSyncProvider>().connection.reconnect();
     } else if (_otaService.state == OtaState.error) {
       AnalyticsService().logOtaUpdateFailed(
         _otaService.errorMessage ?? 'Unknown error',
@@ -209,7 +209,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
     // Disconnect the shared HTTP client via the sync provider
     if (mounted) {
-      context.read<ServerSyncProvider>().httpClient.disconnect();
+      context.read<ServerSyncProvider>().connection.disconnect();
     }
 
     // Delete hub from local storage + Supabase
@@ -230,27 +230,27 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
   // ─── Connection status helpers ───────────────────────────
 
-  String _connectionStatusText(ServerConnectionState state) {
+  String _connectionStatusText(RhythmConnectionState state) {
     switch (state) {
-      case ServerConnectionState.connected:
+      case RhythmConnectionState.connected:
         return 'Connected';
-      case ServerConnectionState.connecting:
+      case RhythmConnectionState.connecting:
         return 'Connecting';
-      case ServerConnectionState.reconnecting:
+      case RhythmConnectionState.reconnecting:
         return 'Reconnecting';
-      case ServerConnectionState.disconnected:
+      case RhythmConnectionState.disconnected:
         return 'Disconnected';
     }
   }
 
-  Color _connectionStatusColor(ServerConnectionState state) {
+  Color _connectionStatusColor(RhythmConnectionState state) {
     switch (state) {
-      case ServerConnectionState.connected:
+      case RhythmConnectionState.connected:
         return const Color(0xFF22C55E);
-      case ServerConnectionState.connecting:
-      case ServerConnectionState.reconnecting:
+      case RhythmConnectionState.connecting:
+      case RhythmConnectionState.reconnecting:
         return Colors.amber;
-      case ServerConnectionState.disconnected:
+      case RhythmConnectionState.disconnected:
         return CelestialColors.textSecondary;
     }
   }
@@ -259,9 +259,11 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
   @override
   Widget build(BuildContext context) {
-    final http = context.watch<ServerHttpClient>();
-    // Watch ServerSyncProvider so we rebuild when hello arrives with context.
+    // Watch ServerSyncProvider for rebuilds (hello, connection state, triage).
+    // Read the RhythmConnection for SSE debug info (not a ChangeNotifier,
+    // but rebuilt via ServerSyncProvider which listens to its streams).
     context.watch<ServerSyncProvider>();
+    final http = context.read<RhythmConnection>();
 
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,
@@ -350,7 +352,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     );
   }
 
-  Widget _buildHeroSection(ServerHttpClient http) {
+  Widget _buildHeroSection(RhythmConnection http) {
     final fullyOffline = !http.connected && !_isOnline;
 
     return AnimatedBuilder(
@@ -860,7 +862,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     );
   }
 
-  Widget _buildConnectionStatusSection(ServerHttpClient http) {
+  Widget _buildConnectionStatusSection(RhythmConnection http) {
     return _buildSection(
       title: 'CONNECTION',
       children: [
@@ -879,8 +881,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 statusText: _connectionStatusText(http.connectionState),
                 statusColor: _connectionStatusColor(http.connectionState),
                 isPulsing: http.connectionState ==
-                        ServerConnectionState.connecting ||
-                    http.connectionState == ServerConnectionState.reconnecting,
+                        RhythmConnectionState.connecting ||
+                    http.connectionState == RhythmConnectionState.reconnecting,
               ),
               Divider(
                 height: 1,
@@ -972,7 +974,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
   // ─── Per-Hub Sections ──────────────────────────────────────
 
-  List<Widget> _buildPerHubSections(ServerHttpClient http) {
+  List<Widget> _buildPerHubSections(RhythmConnection http) {
     final syncProvider = context.watch<ServerSyncProvider>();
     final configuredHubs = syncProvider.serverHubInfos
         .where((h) => h['type'] != null && h['type'] != 'none')
@@ -1198,7 +1200,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     await syncProvider.disconnectHub();
                     if (mounted) {
                       context.read<RoomProvider>().clearAllRooms();
-                      syncProvider.httpClient.reconnect();
+                      syncProvider.connection.reconnect();
                     }
                   },
                   child: Padding(
@@ -1241,7 +1243,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               await syncProvider.disconnectHub();
               if (mounted) {
                 context.read<RoomProvider>().clearAllRooms();
-                syncProvider.httpClient.reconnect();
+                syncProvider.connection.reconnect();
               }
             },
             child: Padding(
@@ -2166,12 +2168,12 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
 // =============================================================================
 
 class _RhythmServerDiagnosticsScreen extends StatefulWidget {
-  final DeviceDiagClient client;
+  final RhythmDiagnosticsApi client;
 
   const _RhythmServerDiagnosticsScreen({required this.client});
 
   static Future<void> show(BuildContext context,
-      {required DeviceDiagClient client}) {
+      {required RhythmDiagnosticsApi client}) {
     return Navigator.of(context).push(
       PageRouteBuilder(
         opaque: false,
@@ -3163,7 +3165,7 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
   @override
   Widget build(BuildContext context) {
     final syncProvider = context.watch<ServerSyncProvider>();
-    final http = context.watch<ServerHttpClient>();
+    final http = context.read<RhythmConnection>();
     final rooms = syncProvider.roomsByHubType[_type] ?? [];
     final deviceSummary = syncProvider.deviceSummaryForHub(_type);
     final label = _RhythmServerSettingsScreenState._hubLabel(_type);
@@ -3339,7 +3341,7 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
 
   // ─── Devices Card ────────────────────────────────────────
 
-  Widget _buildDevicesCard(List<ServerRoom> rooms) {
+  Widget _buildDevicesCard(List<RhythmRoom> rooms) {
     return Container(
       decoration: BoxDecoration(
         color: CelestialColors.backgroundCard,
@@ -3426,12 +3428,12 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
     );
   }
 
-  Widget _buildDeviceRow(TypedDevice device, String roomId) {
+  Widget _buildDeviceRow(RhythmDevice device, String roomId) {
     final (icon, iconColor) = _iconForDeviceType(device.type);
     final typeLabel = switch (device.type) {
-      ServerDeviceType.light => 'Light',
-      ServerDeviceType.button => 'Button',
-      ServerDeviceType.motion => 'Motion',
+      RhythmDeviceType.light => 'Light',
+      RhythmDeviceType.button => 'Button',
+      RhythmDeviceType.motion => 'Motion',
     };
 
     return GestureDetector(
@@ -3482,7 +3484,7 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
 
   // ─── Debug Card ──────────────────────────────────────────
 
-  Widget _buildDebugCard(ServerHttpClient http) {
+  Widget _buildDebugCard(RhythmConnection http) {
     final sseEvents = http.lastSseEvents;
     final now = DateTime.now();
 
@@ -3613,22 +3615,22 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
     );
   }
 
-  List<TypedDevice> _sortDevices(List<TypedDevice> devices) {
-    return List<TypedDevice>.from(devices)
+  List<RhythmDevice> _sortDevices(List<RhythmDevice> devices) {
+    return List<RhythmDevice>.from(devices)
       ..sort((a, b) {
         const order = {
-          ServerDeviceType.light: 0,
-          ServerDeviceType.button: 1,
-          ServerDeviceType.motion: 2,
+          RhythmDeviceType.light: 0,
+          RhythmDeviceType.button: 1,
+          RhythmDeviceType.motion: 2,
         };
         return (order[a.type] ?? 3).compareTo(order[b.type] ?? 3);
       });
   }
 
-  (IconData, Color) _iconForDeviceType(ServerDeviceType type) => switch (type) {
-    ServerDeviceType.light => (Icons.lightbulb_outline, const Color(0xFFFFB74D)),
-    ServerDeviceType.button => (Icons.touch_app_outlined, const Color(0xFF64B5F6)),
-    ServerDeviceType.motion => (Icons.sensors_outlined, const Color(0xFF81C784)),
+  (IconData, Color) _iconForDeviceType(RhythmDeviceType type) => switch (type) {
+    RhythmDeviceType.light => (Icons.lightbulb_outline, const Color(0xFFFFB74D)),
+    RhythmDeviceType.button => (Icons.touch_app_outlined, const Color(0xFF64B5F6)),
+    RhythmDeviceType.motion => (Icons.sensors_outlined, const Color(0xFF81C784)),
   };
 
   String _relativeTime(DateTime time, DateTime now) {
@@ -3656,7 +3658,7 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
     final syncProvider = context.read<ServerSyncProvider>();
     await syncProvider.disconnectOneHub(_type, _address ?? '');
     if (mounted) {
-      syncProvider.httpClient.reconnect();
+      syncProvider.connection.reconnect();
       Navigator.of(context).pop();
     }
   }

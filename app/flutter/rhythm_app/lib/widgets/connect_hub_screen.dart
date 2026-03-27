@@ -10,7 +10,7 @@ import 'package:rhythm_core/providers/hub_discovery.dart' show DiscoveredHub;
 import 'package:rhythm_core/models/hub.dart' show HubType;
 import 'solar_orbit.dart'; // For CelestialColors
 import 'success_modal.dart';
-import '../services/server_http_client.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDiagnosticsApi;
 import '../providers/home_provider.dart';
 import '../screens/hubs/hue_configurator_screen.dart';
 import '../services/analytics_service.dart';
@@ -287,7 +287,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     );
 
     // Verify device is actually reachable before showing it
-    final isHealthy = await DeviceDiagClient(host: ip, port: service.port).healthCheck();
+    final isHealthy = await RhythmDiagnosticsApi(host: ip, port: service.port).healthCheck();
     if (isHealthy && mounted) {
       found.add(hub);
       setState(() {
@@ -318,7 +318,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       _manualConnectError = null;
     });
 
-    final client = DeviceDiagClient(host: ip, port: port);
+    final client = RhythmDiagnosticsApi(host: ip, port: port);
     final isHealthy = await client.healthCheck();
 
     if (!mounted) return;
@@ -348,7 +348,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       _connectError = null;
     });
 
-    final client = DeviceDiagClient(host: hub.address, port: hub.port);
+    final client = RhythmDiagnosticsApi(host: hub.address, port: hub.port);
     final isHealthy = await client.healthCheck();
 
     if (!mounted) return;

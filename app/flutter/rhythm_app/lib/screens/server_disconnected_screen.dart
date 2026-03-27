@@ -8,7 +8,7 @@ import '../widgets/bottom_nav_overlay.dart';
 import '../providers/home_provider.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
-import '../services/server_http_client.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnection, RhythmConnectionState;
 
 /// Full-screen state shown when a paired rhythm-server is unreachable.
 ///
@@ -72,7 +72,7 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
   void _retry() {
     HapticFeedback.mediumImpact();
     try {
-      context.read<ServerHttpClient>().pingOrReconnect();
+      context.read<RhythmConnection>().pingOrReconnect();
     } catch (_) {}
   }
 
@@ -113,7 +113,7 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
     if (confirmed == true && mounted) {
       await context.read<RoomProvider>().clearAllRooms();
       if (!mounted) return;
-      context.read<ServerSyncProvider>().httpClient.disconnect();
+      context.read<ServerSyncProvider>().connection.disconnect();
       await context.read<HomeProvider>().deleteHub(widget.serverHub.id);
     }
   }
@@ -123,8 +123,8 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
     final serverSync = context.watch<ServerSyncProvider>();
     final state = serverSync.connectionState;
     final isActivelyReconnecting =
-        state == ServerConnectionState.reconnecting ||
-            state == ServerConnectionState.connecting;
+        state == RhythmConnectionState.reconnecting ||
+            state == RhythmConnectionState.connecting;
 
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,

@@ -974,6 +974,13 @@ packages:
       relative: true
     source: path
     version: "1.0.0"
+  rhythm_sdk:
+    dependency: "direct main"
+    description:
+      path: "../../../rhythm_sdk"
+      relative: true
+    source: path
+    version: "0.1.0"
   rust_lib_rhythm_app:
     dependency: "direct main"
     description:

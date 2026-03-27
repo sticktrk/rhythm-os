@@ -47,8 +47,9 @@ class _TriageScreenState extends State<TriageScreen> {
   Future<void> _loadEntries({bool sync = false}) async {
     debugPrint('TriageScreen: _loadEntries called (busy=$_busy, loading=$_loading, sync=$sync)');
     try {
-      final http = context.read<ServerSyncProvider>().httpClient;
-      debugPrint('TriageScreen: httpClient connected=${http.connected}');
+      final syncProvider = context.read<ServerSyncProvider>();
+      final http = syncProvider.api;
+      debugPrint('TriageScreen: connected=${syncProvider.synced}');
       if (sync) {
         debugPrint('TriageScreen: triggering sync...');
         await http.triggerSync();
@@ -315,7 +316,7 @@ class _TriageScreenState extends State<TriageScreen> {
     setState(() => _busy = true);
     try {
       final entryId = entry['id']?.toString() ?? '';
-      final http = context.read<ServerSyncProvider>().httpClient;
+      final http = context.read<ServerSyncProvider>().api;
       await http.resolveTriageMerge(entryId, canonicalId);
       if (mounted) await _loadEntries();
     } catch (e) {
@@ -336,7 +337,7 @@ class _TriageScreenState extends State<TriageScreen> {
     setState(() => _busy = true);
     try {
       final entryId = entry['id']?.toString() ?? '';
-      final http = context.read<ServerSyncProvider>().httpClient;
+      final http = context.read<ServerSyncProvider>().api;
       await http.resolveTriageNew(entryId);
       if (mounted) await _loadEntries();
     } catch (e) {
@@ -357,7 +358,7 @@ class _TriageScreenState extends State<TriageScreen> {
     setState(() => _busy = true);
     try {
       final entryId = entry['id']?.toString() ?? '';
-      final http = context.read<ServerSyncProvider>().httpClient;
+      final http = context.read<ServerSyncProvider>().api;
       await http.resolveTriageBind(entryId, targetRoomId: targetRoomId);
       if (mounted) await _loadEntries();
     } catch (e) {
@@ -378,7 +379,7 @@ class _TriageScreenState extends State<TriageScreen> {
     setState(() => _busy = true);
     try {
       final entryId = entry['id']?.toString() ?? '';
-      final http = context.read<ServerSyncProvider>().httpClient;
+      final http = context.read<ServerSyncProvider>().api;
       await http.resolveTriageDismiss(entryId);
       if (mounted) await _loadEntries();
     } catch (e) {

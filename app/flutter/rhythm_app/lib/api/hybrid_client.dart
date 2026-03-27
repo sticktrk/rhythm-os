@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:rhythm_core/rhythm_core.dart';
-import 'remote_client.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' as sdk;
 import '../services/settings_service.dart';
 import '../providers/home_provider.dart';
 
@@ -33,7 +33,7 @@ class HybridApiClient implements RhythmApi {
   /// If Rust brain initialization fails, falls back to remote-only mode.
   static Future<HybridApiClient> create({String? baseUrl}) async {
     final effectiveBaseUrl = baseUrl ?? _defaultBaseUrl();
-    final remote = RemoteApiClient(baseUrl: effectiveBaseUrl);
+    final remote = _SdkConfigAdapter(sdk.RhythmConfigApi(baseUrl: effectiveBaseUrl));
 
     NativeBrain? brain;
     try {
@@ -59,7 +59,7 @@ class HybridApiClient implements RhythmApi {
   /// Create a remote-only client (no local Rust calculations).
   static HybridApiClient remoteOnly({String? baseUrl}) {
     return HybridApiClient._(
-      remote: RemoteApiClient(baseUrl: baseUrl ?? _defaultBaseUrl()),
+      remote: _SdkConfigAdapter(sdk.RhythmConfigApi(baseUrl: baseUrl ?? _defaultBaseUrl())),
       brain: null,
     );
   }
@@ -362,6 +362,131 @@ class HybridApiClient implements RhythmApi {
     }
   }
 }
+
+/// Adapter wrapping [sdk.RhythmConfigApi] to implement [RhythmApi].
+class _SdkConfigAdapter implements RhythmApi {
+  final sdk.RhythmConfigApi _sdk;
+  _SdkConfigAdapter(this._sdk);
+
+  @override
+  Future<ConfigState> getConfigState() async {
+    final s = await _sdk.getConfigState();
+    return ConfigState(
+      config: _toRawConfig(s.config),
+      solar: SolarContext(
+        sunrise: s.solar.sunrise,
+        sunset: s.solar.sunset,
+        solarNoon: s.solar.solarNoon,
+        solarMidnight: s.solar.solarMidnight,
+        dayLength: s.solar.dayLength,
+      ),
+      latitude: s.latitude,
+      longitude: s.longitude,
+      timezone: s.timezone,
+    );
+  }
+
+  @override
+  Future<void> saveConfig(RawConfig config) =>
+      _sdk.saveConfig(_toSdkRawConfig(config));
+
+  @override
+  Future<CurveData> getCurveData({int? month, CurveConfigDto? overrides}) async {
+    final data = await _sdk.getCurveData(
+      month: month,
+      overrides: overrides != null ? _dtoToSdkCurveConfig(overrides) : null,
+    );
+    return CurveData(
+      hours: data.hours,
+      brightness: data.brightness,
+      kelvin: data.kelvin,
+      solar: _toSolarInfo(data.solar),
+    );
+  }
+
+  @override
+  Future<StepSequences> getStepSequences({
+    required double hour,
+    required int maxSteps,
+    CurveConfigDto? overrides,
+  }) async {
+    final data = await _sdk.getStepSequences(
+      hour: hour,
+      maxSteps: maxSteps,
+      overrides: overrides != null ? _dtoToSdkCurveConfig(overrides) : null,
+    );
+    return StepSequences(
+      stepUp: data.stepUp.map(_toStepPoint).toList(),
+      stepDown: data.stepDown.map(_toStepPoint).toList(),
+    );
+  }
+
+  @override
+  Future<TimeInfo> getTime() async {
+    final t = await _sdk.getTime();
+    return TimeInfo(
+      currentTime: t.currentTime,
+      currentHour: t.currentHour,
+      timezone: t.timezone,
+      brightness: t.brightness,
+      kelvin: t.kelvin,
+      solarPosition: t.solarPosition,
+    );
+  }
+
+  @override
+  Future<bool> healthCheck() => _sdk.healthCheck();
+
+  static RawConfig _toRawConfig(sdk.RhythmRawConfig c) => RawConfig(
+    minColorTemp: c.minColorTemp, maxColorTemp: c.maxColorTemp,
+    minBrightness: c.minBrightness, maxBrightness: c.maxBrightness,
+    widthLeftBri: c.widthLeftBri, widthRightBri: c.widthRightBri,
+    widthLeftCct: c.widthLeftCct, widthRightCct: c.widthRightCct,
+    shapeP: c.shapeP, maxDimSteps: c.maxDimSteps,
+  );
+
+  static sdk.RhythmRawConfig _toSdkRawConfig(RawConfig c) => sdk.RhythmRawConfig(
+    minColorTemp: c.minColorTemp, maxColorTemp: c.maxColorTemp,
+    minBrightness: c.minBrightness, maxBrightness: c.maxBrightness,
+    widthLeftBri: c.widthLeftBri, widthRightBri: c.widthRightBri,
+    widthLeftCct: c.widthLeftCct, widthRightCct: c.widthRightCct,
+    shapeP: c.shapeP, maxDimSteps: c.maxDimSteps,
+  );
+
+  static SolarInfo _toSolarInfo(sdk.RhythmSolarInfo s) => SolarInfo(
+    sunrise: s.sunrise, sunset: s.sunset,
+    solarNoon: s.solarNoon, solarMidnight: s.solarMidnight,
+    dayLength: s.dayLength,
+    dawn: s.dawn != null ? TwilightPhase(
+      civil: s.dawn!.civil, nautical: s.dawn!.nautical, astronomical: s.dawn!.astronomical,
+    ) : null,
+    dusk: s.dusk != null ? TwilightPhase(
+      civil: s.dusk!.civil, nautical: s.dusk!.nautical, astronomical: s.dusk!.astronomical,
+    ) : null,
+  );
+
+  static StepPoint _toStepPoint(sdk.RhythmStepPoint p) => StepPoint(
+    hour: p.hour, brightness: p.brightness, kelvin: p.kelvin, rgb: p.rgb,
+  );
+}
+
+/// Convert [CurveConfigDto] (Rust FFI) to [sdk.RhythmCurveConfig] (SDK).
+sdk.RhythmCurveConfig _dtoToSdkCurveConfig(CurveConfigDto c) => sdk.RhythmCurveConfig(
+  minColorTemp: c.minColorTemp, maxColorTemp: c.maxColorTemp,
+  minBrightness: c.minBrightness, maxBrightness: c.maxBrightness,
+  widthLeftBri: c.widthLeftBri, widthRightBri: c.widthRightBri,
+  widthLeftCct: c.widthLeftCct, widthRightCct: c.widthRightCct,
+  shapeP: c.shapeP, maxDimSteps: c.maxDimSteps,
+);
+
+/// Convert [sdk.RhythmCurveConfig] (SDK) to [CurveConfigDto] (Rust FFI).
+CurveConfigDto sdkCurveConfigToDto(sdk.RhythmCurveConfig c) => CurveConfigDto(
+  minColorTemp: c.minColorTemp, maxColorTemp: c.maxColorTemp,
+  minBrightness: c.minBrightness, maxBrightness: c.maxBrightness,
+  widthLeftBri: c.widthLeftBri, widthRightBri: c.widthRightBri,
+  widthLeftCct: c.widthLeftCct, widthRightCct: c.widthRightCct,
+  shapeP: c.shapeP, maxDimSteps: c.maxDimSteps,
+);
 
 /// Local-only API implementation with SettingsService (Hive) persistence.
 class _LocalOnlyApi implements RhythmApi {

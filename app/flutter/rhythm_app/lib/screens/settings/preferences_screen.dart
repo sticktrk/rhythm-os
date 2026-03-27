@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmCurveConfig;
 import '../../models/config_model.dart';
 import '../../providers/server_sync_provider.dart';
 
@@ -98,8 +99,7 @@ class _PreferencesScreenState extends State<PreferencesScreen>
 
   Future<void> _loadSettings() async {
     final syncProvider = context.read<ServerSyncProvider>();
-    final client = syncProvider.httpClient;
-    _connected = client.connected;
+    _connected = syncProvider.synced;
 
     if (!_connected) {
       setState(() => _loading = false);
@@ -107,7 +107,7 @@ class _PreferencesScreenState extends State<PreferencesScreen>
     }
 
     // Try fetching live settings; fall back to hello cache.
-    final settings = await client.getSettings();
+    final settings = await syncProvider.api.getSettings();
     if (settings != null) {
       _fadeMs = settings.bulbFadeMs.toDouble();
       _intervalSecs = settings.rhythmIntervalSecs.toDouble();
@@ -164,8 +164,7 @@ class _PreferencesScreenState extends State<PreferencesScreen>
     bool? powerSave,
     int? softOffBrightness,
   }) async {
-    final client = context.read<ServerSyncProvider>().httpClient;
-    await client.settingsSet(
+    await context.read<ServerSyncProvider>().api.settingsSet(
       bulbFadeMs: bulbFadeMs,
       rhythmIntervalSecs: rhythmIntervalSecs,
       defaultMotionTimeoutSecs: defaultMotionTimeoutSecs,
@@ -634,17 +633,17 @@ class _PreferencesScreenState extends State<PreferencesScreen>
   }
 
   Future<void> _resetToDefaults() async {
-    final client = context.read<ServerSyncProvider>().httpClient;
+    final api = context.read<ServerSyncProvider>().api;
 
     await Future.wait([
-      client.settingsSet(
+      api.settingsSet(
         bulbFadeMs: 500,
         rhythmIntervalSecs: 60,
         defaultMotionTimeoutSecs: 600,
         powerSave: true,
         softOffBrightness: 1,
       ),
-      client.configSet(CurveConfigDto.default_()),
+      api.configSet(const RhythmCurveConfig()),
     ]);
 
     setState(() {

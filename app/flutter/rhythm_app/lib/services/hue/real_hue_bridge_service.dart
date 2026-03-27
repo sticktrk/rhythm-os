@@ -610,13 +610,13 @@ class RealHueBridgeService implements HueBridgeService {
 
   /// Get all room-to-grouped-light mappings.
   ///
-  /// Used by [ServerHttpClient] to push grouped_light_ids with room_set.
+  /// Used to push grouped_light_ids with room_set.
   Map<String, String> get roomToGroupedLight =>
       Map.unmodifiable(_roomToGroupedLight);
 
   /// Get the device registry for reading device/button data.
   ///
-  /// Used by [ServerHttpClient] to push device_set messages.
+  /// Used to push device_set messages.
   HueDeviceRegistry? get deviceRegistry => _deviceRegistry;
 
   /// Fetch a v2 API resource type.

@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../widgets/solar_orbit.dart';
 import '../../providers/server_sync_provider.dart';
-import '../../services/server_http_client.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnectionState;
 
 /// Simple info screen for the HA addon's Home Assistant connection.
 class HaInfoScreen extends StatelessWidget {
@@ -91,7 +91,7 @@ class HaInfoScreen extends StatelessWidget {
                     Consumer<ServerSyncProvider>(
                       builder: (context, serverSync, _) {
                         final isConnected =
-                            serverSync.connectionState == ServerConnectionState.connected;
+                            serverSync.connectionState == RhythmConnectionState.connected;
                         return Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [

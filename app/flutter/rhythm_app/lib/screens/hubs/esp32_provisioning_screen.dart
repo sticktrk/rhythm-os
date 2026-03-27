@@ -10,7 +10,7 @@ import 'package:provider/provider.dart';
 import '../../providers/home_provider.dart';
 import '../../services/analytics_service.dart';
 import '../../services/ble_provisioning_service.dart';
-import '../../services/server_http_client.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnection, RhythmConnectionState;
 import '../../services/rhythm_accessory_service.dart';
 
 /// State machine for the ESP32 provisioning flow.
@@ -390,8 +390,8 @@ class _Esp32ProvisioningScreenState extends State<Esp32ProvisioningScreen>
 
       // Wait for HTTP connection (ESP32 is still booting)
       if (mounted) {
-        final httpClient = context.read<ServerHttpClient>();
-        final connected = await _waitForConnection(httpClient,
+        final conn = context.read<RhythmConnection>();
+        final connected = await _waitForConnection(conn,
             timeout: const Duration(seconds: 30));
 
         if (!mounted) return;
@@ -442,22 +442,20 @@ class _Esp32ProvisioningScreenState extends State<Esp32ProvisioningScreen>
     }
   }
 
-  /// Wait for the HTTP client to reach connected state.
+  /// Wait for the connection to reach connected state.
   Future<bool> _waitForConnection(
-    ServerHttpClient httpClient, {
+    RhythmConnection conn, {
     required Duration timeout,
   }) async {
-    if (httpClient.connected) return true;
+    if (conn.connected) return true;
 
     final completer = Completer<bool>();
 
-    void listener() {
-      if (httpClient.connected && !completer.isCompleted) {
+    final sub = conn.connectionStateStream.listen((state) {
+      if (state == RhythmConnectionState.connected && !completer.isCompleted) {
         completer.complete(true);
       }
-    }
-
-    httpClient.addListener(listener);
+    });
     final timer = Timer(timeout, () {
       if (!completer.isCompleted) {
         completer.complete(false);
@@ -467,7 +465,7 @@ class _Esp32ProvisioningScreenState extends State<Esp32ProvisioningScreen>
     try {
       return await completer.future;
     } finally {
-      httpClient.removeListener(listener);
+      sub.cancel();
       timer.cancel();
     }
   }

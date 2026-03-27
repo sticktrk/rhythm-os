@@ -8,7 +8,7 @@ import 'package:rhythm_core/rhythm_core.dart';
 import 'models/config_model.dart';
 import 'providers/room_provider.dart';
 import 'providers/home_provider.dart';
-import 'services/server_http_client.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnection, RhythmConnectionState;
 import 'screens/designer_screen.dart';
 import 'screens/mobile_designer_screen.dart';
 import 'screens/all_rooms_screen.dart';
@@ -42,8 +42,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   CurveData? _curveData;
   bool _isFixing = false;
 
-  /// Sticky flag: true once the server enters [ServerConnectionState.reconnecting],
-  /// cleared when [ServerConnectionState.connected] is reached.  Prevents flashing
+  /// Sticky flag: true once the server enters [RhythmConnectionState.reconnecting],
+  /// cleared when [RhythmConnectionState.connected] is reached.  Prevents flashing
   /// the room grid during the brief `connecting` phase of a reconnect cycle.
   bool _serverLostConnection = false;
 
@@ -71,8 +71,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   void _pingServer() {
     try {
-      final http = context.read<ServerHttpClient>();
-      http.pingOrReconnect();
+      final conn = context.read<RhythmConnection>();
+      conn.pingOrReconnect();
     } catch (e) {
       // Server not available, ignore
     }
@@ -167,9 +167,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         final state = serverSync.connectionState;
 
         // Track server connection loss across rebuild cycles.
-        if (state == ServerConnectionState.reconnecting) {
+        if (state == RhythmConnectionState.reconnecting) {
           _serverLostConnection = true;
-        } else if (state == ServerConnectionState.connected) {
+        } else if (state == RhythmConnectionState.connected) {
           _serverLostConnection = false;
         }
 
@@ -187,7 +187,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           }
 
           // ── Server connected ────────────────────────────────────
-          if (state == ServerConnectionState.connected) {
+          if (state == RhythmConnectionState.connected) {
             // Server explicitly reports no hub configured — show hub picker.
             if (serverSync.hasNoHubConfigured) {
               return HubPickerScreen(

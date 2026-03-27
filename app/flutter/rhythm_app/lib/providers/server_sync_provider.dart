@@ -1,4 +1,4 @@
-/// Server sync provider — bridges HTTP client with app providers.
+/// Server sync provider — bridges SDK connection with app providers.
 ///
 /// Handles:
 /// - Auto-connect to server when hub exists
@@ -13,8 +13,8 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart';
 
-import '../services/server_http_client.dart';
 import '../services/hue/hue_service_locator.dart';
 import 'home_provider.dart';
 import 'room_provider.dart';
@@ -23,9 +23,10 @@ import 'room_provider.dart';
 /// Abbreviations like "EST", "PST" don't handle DST transitions.
 bool _isIanaTimezone(String? tz) => tz != null && tz.contains('/');
 
-/// Syncs app state with a server (ESP32, rhythm-server, addon) via HTTP.
+/// Syncs app state with a server (ESP32, rhythm-server, addon) via
+/// [RhythmConnection] from the SDK.
 ///
-/// This provider is the glue between [ServerHttpClient], [RoomProvider],
+/// This provider is the glue between [RhythmConnection], [RoomProvider],
 /// and [HomeProvider]. It manages:
 ///
 /// 1. **Auto-connect**: When a server hub exists, connects the HTTP client.
@@ -36,17 +37,18 @@ bool _isIanaTimezone(String? tz) => tz != null && tz.contains('/');
 /// 4. **Rhythm state sync**: Listens for server rhythm_state events and updates
 ///    RoomProvider (server is authoritative for rhythm state).
 class ServerSyncProvider extends ChangeNotifier {
-  final ServerHttpClient _http;
+  final RhythmConnection _connection;
   final RoomProvider _roomProvider;
   final HomeProvider _homeProvider;
 
-  StreamSubscription<ServerHello>? _helloSub;
-  StreamSubscription<ServerRhythmState>? _rhythmStateSub;
+  StreamSubscription<RhythmHello>? _helloSub;
+  StreamSubscription<RhythmRoomState>? _rhythmStateSub;
   StreamSubscription<String>? _hubEventSub;
   StreamSubscription<RoomSourceDto>? _sourceChangedSub;
-  StreamSubscription<ServerMotionTimer>? _motionTimerSub;
+  StreamSubscription<RhythmMotionTimer>? _motionTimerSub;
   StreamSubscription<void>? _newRoomsSub;
   StreamSubscription<Map<String, dynamic>>? _triageChangedSub;
+  StreamSubscription<RhythmConnectionState>? _connectionStateSub;
 
   /// Suppresses push-back when receiving rhythm_state from server.
   bool _receivingFromServer = false;
@@ -68,11 +70,11 @@ class ServerSyncProvider extends ChangeNotifier {
   /// All hub infos from the last server hello: [{type, address, connected}, ...].
   List<Map<String, dynamic>> _lastHubInfos = [];
 
-  /// Cached rooms from the last ServerHello (includes typed devices from registry).
-  List<ServerRoom> _helloRooms = [];
+  /// Cached rooms from the last RhythmHello (includes typed devices from registry).
+  List<RhythmRoom> _helloRooms = [];
 
   /// Previous connection state for detecting transitions.
-  ServerConnectionState _previousConnectionState = ServerConnectionState.disconnected;
+  RhythmConnectionState _previousConnectionState = RhythmConnectionState.disconnected;
 
   /// Tracks the last poll time for debouncing [fullRefresh] and [pollNow].
   DateTime _lastPollTime = DateTime.fromMillisecondsSinceEpoch(0);
@@ -98,13 +100,13 @@ class ServerSyncProvider extends ChangeNotifier {
   int _triagePendingRooms = 0;
 
   /// Whether we're currently connected and synced.
-  bool get synced => _http.connected;
+  bool get synced => _connection.connected;
 
   /// Whether the server can dispatch room actions.
-  bool get canDispatchActions => _http.connected || HueServiceLocator.isDemoMode;
+  bool get canDispatchActions => _connection.connected || HueServiceLocator.isDemoMode;
 
-  /// Connection state of the underlying HTTP client.
-  ServerConnectionState get connectionState => _http.connectionState;
+  /// Connection state of the underlying connection.
+  RhythmConnectionState get connectionState => _connection.connectionState;
 
   /// Firmware version reported by server.
   String get firmwareVersion => _firmwareVersion;
@@ -170,7 +172,7 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   /// Rooms from the last server hello (with typed devices from the registry).
-  List<ServerRoom> get helloRooms => _helloRooms;
+  List<RhythmRoom> get helloRooms => _helloRooms;
 
   /// Number of typed lights for a room (0 until lights are typed in the backend).
   int lightCountForRoom(String roomId) {
@@ -178,7 +180,7 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   /// All typed devices for a room (lights, buttons, motion sensors).
-  List<TypedDevice> devicesForRoom(String roomId) {
+  List<RhythmDevice> devicesForRoom(String roomId) {
     return _helloRooms.where((r) => r.id == roomId).firstOrNull?.devices ?? [];
   }
 
@@ -188,8 +190,8 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   /// All rooms grouped by hub type (for hub debug sections).
-  Map<String, List<ServerRoom>> get roomsByHubType {
-    final result = <String, List<ServerRoom>>{};
+  Map<String, List<RhythmRoom>> get roomsByHubType {
+    final result = <String, List<RhythmRoom>>{};
     for (final room in _helloRooms) {
       final key = room.hubType ?? 'unknown';
       (result[key] ??= []).add(room);
@@ -198,9 +200,9 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   /// All unique devices for a hub type, de-duplicated and sorted lights->buttons->motion.
-  List<TypedDevice> devicesForHub(String hubType) {
+  List<RhythmDevice> devicesForHub(String hubType) {
     final seen = <String>{};
-    final devices = <TypedDevice>[];
+    final devices = <RhythmDevice>[];
     for (final room in _helloRooms.where((r) => r.hubType == hubType)) {
       for (final device in room.devices) {
         if (seen.add(device.id)) {
@@ -209,7 +211,7 @@ class ServerSyncProvider extends ChangeNotifier {
       }
     }
     devices.sort((a, b) {
-      const order = {ServerDeviceType.light: 0, ServerDeviceType.button: 1, ServerDeviceType.motion: 2};
+      const order = {RhythmDeviceType.light: 0, RhythmDeviceType.button: 1, RhythmDeviceType.motion: 2};
       return (order[a.type] ?? 3).compareTo(order[b.type] ?? 3);
     });
     return devices;
@@ -219,9 +221,9 @@ class ServerSyncProvider extends ChangeNotifier {
   String deviceSummaryForHub(String hubType) {
     final devices = devicesForHub(hubType);
     final rooms = roomsByHubType[hubType] ?? [];
-    final l = devices.where((d) => d.type == ServerDeviceType.light).length;
-    final b = devices.where((d) => d.type == ServerDeviceType.button).length;
-    final m = devices.where((d) => d.type == ServerDeviceType.motion).length;
+    final l = devices.where((d) => d.type == RhythmDeviceType.light).length;
+    final b = devices.where((d) => d.type == RhythmDeviceType.button).length;
+    final m = devices.where((d) => d.type == RhythmDeviceType.motion).length;
     final parts = <String>[];
     if (l > 0) parts.add('$l light${l > 1 ? 's' : ''}');
     if (b > 0) parts.add('$b button${b > 1 ? 's' : ''}');
@@ -231,30 +233,34 @@ class ServerSyncProvider extends ChangeNotifier {
     return '${parts.join(', ')} across $roomCount room${roomCount > 1 ? 's' : ''}';
   }
 
-  /// The underlying HTTP client (for OTA service, diagnostics).
-  ServerHttpClient get httpClient => _http;
+  /// The underlying SDK connection (for SSE debug props, ping, etc.).
+  RhythmConnection get connection => _connection;
+
+  /// The server API client (available after connect).
+  RhythmServerApi get api => _connection.api;
 
   ServerSyncProvider({
-    required ServerHttpClient http,
+    required RhythmConnection connection,
     required RoomProvider roomProvider,
     required HomeProvider homeProvider,
-  })  : _http = http,
+  })  : _connection = connection,
         _roomProvider = roomProvider,
         _homeProvider = homeProvider {
-    // Listen for HTTP client events
-    _helloSub = _http.helloEvents.listen(_onHello);
-    _rhythmStateSub = _http.rhythmStateEvents.listen(_onRhythmState);
-    _hubEventSub = _http.hubEvents.listen(_onHubEvent);
-    _motionTimerSub = _http.motionTimerEvents.listen(_onMotionTimer);
-    _newRoomsSub = _http.newRoomsDetected.listen(_onNewRoomsDetected);
-    _triageChangedSub = _http.triageChangedEvents.listen(_onTriageChanged);
+    // Listen for connection events
+    _helloSub = _connection.helloEvents.listen(_onHello);
+    _rhythmStateSub = _connection.rhythmStateEvents.listen(_onRhythmState);
+    _hubEventSub = _connection.hubEvents.listen(_onHubEvent);
+    _motionTimerSub = _connection.motionTimerEvents.listen(_onMotionTimer);
+    _newRoomsSub = _connection.newRoomsDetected.listen(_onNewRoomsDetected);
+    _triageChangedSub = _connection.triageChangedEvents.listen(_onTriageChanged);
 
     // Listen for room source changes (Hue pairing, re-sync, disconnect)
     _sourceChangedSub =
         _roomProvider.onSourceRoomsChanged.listen(_onSourceRoomsChanged);
 
     // Listen for connection state changes
-    _http.addListener(_onConnectionStateChanged);
+    _connectionStateSub =
+        _connection.connectionStateStream.listen(_onConnectionStateChanged);
   }
 
   /// Connect to server if a hub is available.
@@ -295,14 +301,14 @@ class ServerSyncProvider extends ChangeNotifier {
       final port = serverHub.endpoint.port;
       Future.microtask(() async {
         _roomProvider.clearTransientState();
-        _http.connect(host, port: port);
+        _connection.connect(host, port: port);
       });
     } else if (_serverHub != null) {
       debugPrint('ServerSync: connectIfAvailable — hub removed, disconnecting');
       _serverHub = null;
       Future.microtask(() async {
         await _roomProvider.clearAllRooms();
-        _http.disconnect();
+        _connection.disconnect();
       });
     }
   }
@@ -318,7 +324,7 @@ class ServerSyncProvider extends ChangeNotifier {
     final now = DateTime.now();
     if (now.difference(_lastPollTime).inSeconds < 2) return;
     _lastPollTime = now;
-    await _http.reconnect();
+    await _connection.reconnect();
   }
 
   /// Trigger an immediate lightweight poll (rooms/state only).
@@ -326,7 +332,7 @@ class ServerSyncProvider extends ChangeNotifier {
     final now = DateTime.now();
     if (now.difference(_lastPollTime).inSeconds < 2) return;
     _lastPollTime = now;
-    await _http.pollNow();
+    await _connection.pollNow();
   }
 
   // ============================================================================
@@ -334,7 +340,7 @@ class ServerSyncProvider extends ChangeNotifier {
   // ============================================================================
 
   /// Handle hello from server — accept rooms and reconcile config.
-  void _onHello(ServerHello hello) {
+  void _onHello(RhythmHello hello) {
     debugPrint('ServerSync: Hello received with ${hello.rooms.length} rooms, version=${hello.version}');
     debugPrint('ServerSync: Server global config: ${hello.config}');
     debugPrint('ServerSync: Server location: ${hello.location}');
@@ -378,7 +384,7 @@ class ServerSyncProvider extends ChangeNotifier {
     }
 
     // Fetch initial triage count (non-blocking).
-    _http.getTriageCount().then((data) {
+    _connection.api.getTriageCount().then((data) {
       if (data != null) _onTriageChanged(data);
     });
 
@@ -389,7 +395,7 @@ class ServerSyncProvider extends ChangeNotifier {
   ///
   /// The server discovers rooms from connected hubs. Each room carries its
   /// own `hub_type`, so we group by source and add each group atomically.
-  void _acceptServerRooms(List<ServerRoom> serverRooms, Map<String, dynamic> hubInfo) {
+  void _acceptServerRooms(List<RhythmRoom> serverRooms, Map<String, dynamic> hubInfo) {
     // Filter out empty rooms (e.g. from stale server-side rooms.json)
     final validRooms = serverRooms.where((r) => r.id.isNotEmpty).toList();
     if (validRooms.isEmpty) {
@@ -409,7 +415,7 @@ class ServerSyncProvider extends ChangeNotifier {
     };
 
     // Group rooms by their per-room hub_type (multi-hub aware).
-    final grouped = <RoomSourceDto, List<ServerRoom>>{};
+    final grouped = <RoomSourceDto, List<RhythmRoom>>{};
     for (final sr in validRooms) {
       final source = switch (sr.hubType) {
         'hue' => RoomSourceDto.hue,
@@ -448,7 +454,7 @@ class ServerSyncProvider extends ChangeNotifier {
           name: sr.name,
           source: source,
           deviceIds: sr.devices
-              .where((d) => d.type == ServerDeviceType.light)
+              .where((d) => d.type == RhythmDeviceType.light)
               .map((d) => d.id)
               .toList(),
           rhythmEnabled: sr.rhythmEnabled,
@@ -489,8 +495,8 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Hub credentials are only pushed via explicit user action (hub picker,
   /// configurator screens, server settings) — not automatically here.
   void _onSourceRoomsChanged(RoomSourceDto source) {
-    debugPrint('ServerSync: onSourceRoomsChanged($source), connected=${_http.connected}, processingHello=$_isProcessingHello, suppressSync=$_suppressNextSourceSync');
-    if (!_http.connected || _isProcessingHello) return;
+    debugPrint('ServerSync: onSourceRoomsChanged($source), connected=${_connection.connected}, processingHello=$_isProcessingHello, suppressSync=$_suppressNextSourceSync');
+    if (!_connection.connected || _isProcessingHello) return;
     if (_suppressNextSourceSync) {
       _suppressNextSourceSync = false;
       debugPrint('ServerSync: Suppressing source sync (hello just populated rooms)');
@@ -499,7 +505,7 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   /// Handle rhythm_state from server (button event, tick, poll diff).
-  void _onRhythmState(ServerRhythmState state) {
+  void _onRhythmState(RhythmRoomState state) {
     _receivingFromServer = true;
     try {
       if (_roomProvider.getRoom(state.roomId) == null) return;
@@ -519,7 +525,7 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   /// Handle motion timer updates from server.
-  void _onMotionTimer(ServerMotionTimer event) {
+  void _onMotionTimer(RhythmMotionTimer event) {
     // Any motion event (even clearing) means this room has a sensor.
     _roomProvider.markRoomHasSensor(event.roomId);
 
@@ -542,14 +548,9 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   /// Handle new rooms detected in poll — trigger a full re-hello.
-  ///
-  /// This covers the credential push gap: the app pushes credentials on hello
-  /// (fire-and-forget), the server discovers rooms, and the next poll picks
-  /// up room IDs the app doesn't know about. A re-hello fetches full room
-  /// data and runs the normal `_onHello` → `_acceptServerRooms` flow.
   void _onNewRoomsDetected(void _) {
     debugPrint('ServerSync: New rooms detected in poll — triggering re-hello');
-    _http.reconnect();
+    _connection.reconnect();
   }
 
   /// Handle hub lifecycle events from server.
@@ -570,7 +571,7 @@ class ServerSyncProvider extends ChangeNotifier {
     // A hub just connected — re-fetch full state to pick up new rooms.
     if (event == 'connected') {
       debugPrint('ServerSync: Hub connected — triggering re-hello for room sync');
-      _http.reconnect();
+      _connection.reconnect();
     }
   }
 
@@ -596,14 +597,13 @@ class ServerSyncProvider extends ChangeNotifier {
     }
   }
 
-  void _onConnectionStateChanged() {
-    final current = _http.connectionState;
+  void _onConnectionStateChanged(RhythmConnectionState current) {
     final previous = _previousConnectionState;
     _previousConnectionState = current;
 
     if (current != previous &&
-        (current == ServerConnectionState.disconnected ||
-         current == ServerConnectionState.reconnecting)) {
+        (current == RhythmConnectionState.disconnected ||
+         current == RhythmConnectionState.reconnecting)) {
       debugPrint('ServerSync: Connection lost ($previous → $current) — resetting metadata, keeping rooms');
       _firmwareVersion = '0.0.0';
       _serverPlatformType = 'desktop';
@@ -630,8 +630,8 @@ class ServerSyncProvider extends ChangeNotifier {
   /// On success, applies the server's response immediately for fast convergence.
   bool dispatchAction(String roomId, String action) {
     if (HueServiceLocator.isDemoMode) return true; // optimistic UI already applied
-    if (!_http.connected) return false;
-    _http.roomAction(roomId: roomId, action: action).then((serverState) {
+    if (!_connection.connected) return false;
+    _connection.api.roomAction(roomId: roomId, action: action).then((serverState) {
       if (serverState != null) _onRhythmState(serverState);
     });
     return true;
@@ -642,8 +642,8 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Returns true if dispatched to server, false if not connected.
   /// On success, applies each returned state for fast convergence.
   Future<bool> dispatchBatchActions(List<({String roomId, String action})> actions) async {
-    if (!_http.connected || actions.isEmpty) return false;
-    final states = await _http.roomActionBatch(actions);
+    if (!_connection.connected || actions.isEmpty) return false;
+    final states = await _connection.api.roomActionBatch(actions);
     for (final state in states) {
       _onRhythmState(state);
     }
@@ -667,17 +667,17 @@ class ServerSyncProvider extends ChangeNotifier {
       );
       return true;
     }
-    if (!_http.connected) return false;
-    _http.roomBrightness(roomId: roomId, brightness: brightness);
+    if (!_connection.connected) return false;
+    _connection.api.roomBrightness(roomId: roomId, brightness: brightness);
     return true;
   }
 
   /// Push room preferences to the server (user-state only, no topology).
   void pushRoomPreferences(String roomId, {bool? rhythmEnabled, bool? disabled, bool? softOff}) {
     if (HueServiceLocator.isDemoMode) return; // optimistic UI already applied
-    if (!_http.connected || _receivingFromServer) return;
+    if (!_connection.connected || _receivingFromServer) return;
     debugPrint('ServerSync: pushRoomPreferences $roomId rhythmEnabled=$rhythmEnabled disabled=$disabled softOff=$softOff');
-    _http.roomPreferencesSet(
+    _connection.api.roomPreferencesSet(
       roomId: roomId,
       rhythmEnabled: rhythmEnabled,
       disabled: disabled,
@@ -689,15 +689,15 @@ class ServerSyncProvider extends ChangeNotifier {
   ///
   /// Avoids per-room socket overhead on constrained servers (ESP32).
   void pushBatchRoomPreferences(List<Map<String, dynamic>> items) {
-    if (!_http.connected || _receivingFromServer || items.isEmpty) return;
+    if (!_connection.connected || _receivingFromServer || items.isEmpty) return;
     debugPrint('ServerSync: pushBatchRoomPreferences (${items.length} rooms)');
-    _http.roomPreferencesBatchSet(items);
+    _connection.api.roomPreferencesBatchSet(items);
   }
 
   /// Reset all on-rooms to their current adaptive curve position via server.
   ///
   /// Returns room states for immediate UI convergence.
-  Future<List<ServerRhythmState>> dispatchFixMyLights() async {
+  Future<List<RhythmRoomState>> dispatchFixMyLights() async {
     if (HueServiceLocator.isDemoMode) {
       // Reset all on-rooms locally
       for (final room in _roomProvider.rooms) {
@@ -717,8 +717,8 @@ class ServerSyncProvider extends ChangeNotifier {
       _roomProvider.bumpResetGeneration();
       return [];
     }
-    if (!_http.connected) return [];
-    final states = await _http.fixMyLights();
+    if (!_connection.connected) return [];
+    final states = await _connection.api.fixMyLights();
     for (final state in states) {
       _onRhythmState(state);
     }
@@ -732,10 +732,10 @@ class ServerSyncProvider extends ChangeNotifier {
   ///
   /// After sync completes, does a full refresh to pick up new rooms/devices.
   Future<void> triggerServerSync() async {
-    if (!_http.connected) return;
+    if (!_connection.connected) return;
     debugPrint('ServerSync: Triggering server-side sync');
-    await _http.triggerSync();
-    await _http.reconnect();
+    await _connection.api.triggerSync();
+    await _connection.reconnect();
   }
 
   /// Push location to the server.
@@ -745,14 +745,14 @@ class ServerSyncProvider extends ChangeNotifier {
     double? utcOffset,
     String? timezoneName,
   }) {
-    if (!_http.connected) return;
-    _http.locationSet(lat: lat, lon: lon, utcOffset: utcOffset, timezoneName: timezoneName);
+    if (!_connection.connected) return;
+    _connection.api.locationSet(lat: lat, lon: lon, utcOffset: utcOffset, timezoneName: timezoneName);
   }
 
   /// Push per-room motion timeout to the server.
   void pushMotionTimeout(String roomId, int timeoutSecs) {
-    if (!_http.connected) return;
-    _http.motionTimeoutSet(roomId: roomId, timeoutSecs: timeoutSecs);
+    if (!_connection.connected) return;
+    _connection.api.motionTimeoutSet(roomId: roomId, timeoutSecs: timeoutSecs);
   }
 
   // ============================================================================
@@ -764,36 +764,36 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Called after Hue pairing or other hub configuration changes so the
   /// server gets the credentials it needs to connect to the hub.
   void pushHubCredentials(RoomSourceDto source) {
-    if (!_http.connected) return;
+    if (!_connection.connected) return;
     _pushHubCredentialsForSource(source);
   }
 
   /// Tell the addon to auto-configure HA using its SUPERVISOR_TOKEN.
   /// Sends empty credentials — server fills them from its environment.
   Future<bool> configureAddonHaHub() async {
-    if (!_http.connected) return false;
-    await _http.hubCredentials(
+    if (!_connection.connected) return false;
+    await _connection.api.hubCredentials(
       hubType: 'homeassistant',
       address: '',
       credentials: {},
     );
-    _http.reconnect(); // Re-fetch state with new rooms
+    _connection.reconnect(); // Re-fetch state with new rooms
     return true;
   }
 
   /// Tell the server to disconnect ALL hubs — clears all credentials, runtimes,
   /// and rooms.
   Future<void> disconnectHub() async {
-    if (!_http.connected) return;
+    if (!_connection.connected) return;
     debugPrint('ServerSync: Sending hub disconnect to server');
-    await _http.hubDisconnect();
+    await _connection.api.hubDisconnect();
   }
 
   /// Disconnect a single hub by type + address.
   Future<void> disconnectOneHub(String hubType, String address) async {
-    if (!_http.connected) return;
+    if (!_connection.connected) return;
     debugPrint('ServerSync: Disconnecting hub $hubType @ $address');
-    await _http.hubDisconnectOne(hubType: hubType, address: address);
+    await _connection.api.hubDisconnectOne(hubType: hubType, address: address);
   }
 
   void _pushHubCredentialsForSource(RoomSourceDto source) {
@@ -809,7 +809,7 @@ class ServerSyncProvider extends ChangeNotifier {
         : {'username': hub.token};
 
     debugPrint('ServerSync: Pushing ${hub.typeName} credentials after source change');
-    _http.hubCredentials(
+    _connection.api.hubCredentials(
       hubType: _hubTypeWireName(hubType),
       address: '${hub.endpoint.host}:${hub.endpoint.port}',
       credentials: credentials,
@@ -895,13 +895,13 @@ class ServerSyncProvider extends ChangeNotifier {
   void _pushLocationWithIanaTimezone(HomeLocation loc) {
     final homeTz = _homeProvider.currentHome?.timezone;
     if (_isIanaTimezone(homeTz)) {
-      _http.locationSet(lat: loc.latitude, lon: loc.longitude, timezoneName: homeTz);
+      _connection.api.locationSet(lat: loc.latitude, lon: loc.longitude, timezoneName: homeTz);
     } else {
       // Resolve proper IANA name asynchronously.
       FlutterTimezone.getLocalTimezone().then((tz) {
         final ianaTz = tz.identifier;
         debugPrint('ServerSync: Resolved IANA timezone: $ianaTz (was: $homeTz)');
-        _http.locationSet(lat: loc.latitude, lon: loc.longitude, timezoneName: ianaTz);
+        _connection.api.locationSet(lat: loc.latitude, lon: loc.longitude, timezoneName: ianaTz);
 
         // Also fix the Home model so future syncs don't need this fallback.
         final home = _homeProvider.currentHome;
@@ -912,7 +912,7 @@ class ServerSyncProvider extends ChangeNotifier {
         }
       }).catchError((e) {
         debugPrint('ServerSync: FlutterTimezone failed: $e, using home timezone');
-        _http.locationSet(lat: loc.latitude, lon: loc.longitude, timezoneName: homeTz);
+        _connection.api.locationSet(lat: loc.latitude, lon: loc.longitude, timezoneName: homeTz);
       });
     }
   }
@@ -956,7 +956,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _motionTimerSub?.cancel();
     _newRoomsSub?.cancel();
     _triageChangedSub?.cancel();
-    _http.removeListener(_onConnectionStateChanged);
+    _connectionStateSub?.cancel();
     super.dispose();
   }
 }

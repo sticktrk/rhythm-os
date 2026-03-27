@@ -5,7 +5,7 @@ import '../../../widgets/settings_row.dart';
 import '../../../widgets/solar_orbit.dart';
 import '../../../providers/home_provider.dart';
 import '../../../providers/server_sync_provider.dart';
-import '../../../services/server_http_client.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnectionState;
 import '../../hubs/rhythmserver_settings_screen.dart';
 import '../../triage_screen.dart';
 import '../../../widgets/connect_hub_screen.dart';
@@ -29,9 +29,9 @@ class HubsSection extends StatelessWidget {
                   builder: (context) {
                     final esp32Hub = homeProvider.getFirstHubOfType(HubType.server);
                     final serverState = serverSync.connectionState;
-                    final isOnline = serverState == ServerConnectionState.connected;
-                    final isConnecting = serverState == ServerConnectionState.connecting ||
-                        serverState == ServerConnectionState.reconnecting;
+                    final isOnline = serverState == RhythmConnectionState.connected;
+                    final isConnecting = serverState == RhythmConnectionState.connecting ||
+                        serverState == RhythmConnectionState.reconnecting;
 
                     String? statusText;
                     Color? statusColor;

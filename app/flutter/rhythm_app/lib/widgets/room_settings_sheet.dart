@@ -6,7 +6,7 @@ import 'package:rhythm_core/rhythm_core.dart';
 import '../models/config_model.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
-import '../services/server_http_client.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType, RhythmRoom;
 import 'device_detail_sheet.dart';
 import 'light_output_display.dart';
 import 'solar_orbit.dart'; // For CelestialColors
@@ -366,7 +366,7 @@ class RoomSettingsSheet extends StatelessWidget {
     );
 
     if (newName != null && newName.isNotEmpty && newName != room.name && context.mounted) {
-      final http = context.read<ServerSyncProvider>().httpClient;
+      final http = context.read<ServerSyncProvider>().api;
       await http.topologyRenameRoom(room.id, newName);
       // Trigger re-sync so the name updates
       http.triggerSync();
@@ -388,7 +388,7 @@ class RoomSettingsSheet extends StatelessWidget {
       return;
     }
 
-    final targetRoom = await showModalBottomSheet<ServerRoom>(
+    final targetRoom = await showModalBottomSheet<RhythmRoom>(
       context: context,
       backgroundColor: Colors.transparent,
       builder: (ctx) => Container(
@@ -476,7 +476,7 @@ class RoomSettingsSheet extends StatelessWidget {
 
     if (confirmed != true || !context.mounted) return;
 
-    final http = context.read<ServerSyncProvider>().httpClient;
+    final http = context.read<ServerSyncProvider>().api;
     final success = await http.topologyMergeRooms(targetRoom.id, room.id);
     if (context.mounted) {
       if (success) {
@@ -511,12 +511,12 @@ class RoomSettingsSheet extends StatelessWidget {
     }
 
     // Sort: lights → buttons → motion
-    final sorted = List<TypedDevice>.from(devices)
+    final sorted = List<RhythmDevice>.from(devices)
       ..sort((a, b) {
         const order = {
-          ServerDeviceType.light: 0,
-          ServerDeviceType.button: 1,
-          ServerDeviceType.motion: 2,
+          RhythmDeviceType.light: 0,
+          RhythmDeviceType.button: 1,
+          RhythmDeviceType.motion: 2,
         };
         return (order[a.type] ?? 3).compareTo(order[b.type] ?? 3);
       });
@@ -589,7 +589,7 @@ class _SettingsRow extends StatelessWidget {
 
 /// A device row in the room settings Devices section.
 class _DeviceRow extends StatelessWidget {
-  final TypedDevice device;
+  final RhythmDevice device;
   final String roomId;
 
   const _DeviceRow({required this.device, required this.roomId});
@@ -598,9 +598,9 @@ class _DeviceRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final (icon, iconColor) = _iconForType(device.type);
     final typeLabel = switch (device.type) {
-      ServerDeviceType.light => 'Light',
-      ServerDeviceType.button => 'Button',
-      ServerDeviceType.motion => 'Motion',
+      RhythmDeviceType.light => 'Light',
+      RhythmDeviceType.button => 'Button',
+      RhythmDeviceType.motion => 'Motion',
     };
 
     return GestureDetector(
@@ -654,10 +654,10 @@ class _DeviceRow extends StatelessWidget {
     );
   }
 
-  (IconData, Color) _iconForType(ServerDeviceType type) => switch (type) {
-    ServerDeviceType.light => (Icons.lightbulb_outline, const Color(0xFFFFB74D)),
-    ServerDeviceType.button => (Icons.touch_app_outlined, const Color(0xFF64B5F6)),
-    ServerDeviceType.motion => (Icons.sensors_outlined, const Color(0xFF81C784)),
+  (IconData, Color) _iconForType(RhythmDeviceType type) => switch (type) {
+    RhythmDeviceType.light => (Icons.lightbulb_outline, const Color(0xFFFFB74D)),
+    RhythmDeviceType.button => (Icons.touch_app_outlined, const Color(0xFF64B5F6)),
+    RhythmDeviceType.motion => (Icons.sensors_outlined, const Color(0xFF81C784)),
   };
 }
 

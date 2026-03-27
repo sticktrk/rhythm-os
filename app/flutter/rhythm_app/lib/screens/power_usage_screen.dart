@@ -15,7 +15,7 @@ import '../models/config_model.dart';
 import '../providers/home_provider.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
-import '../services/server_http_client.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmRoom;
 import '../services/settings_service.dart';
 
 // =============================================================================
@@ -157,7 +157,7 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
         final providerRooms = roomProvider.rooms;
         // Convert RoomDto → lightweight records for the same code path
         serverRooms = providerRooms
-            .map((r) => ServerRoom(
+            .map((r) => RhythmRoom(
                   id: r.id,
                   name: r.name,
                   groupedLightId: '',

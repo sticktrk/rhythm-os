@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmCurveConfig;
 import '../../api/hybrid_client.dart';
 import '../../models/config_model.dart';
 import '../../providers/room_provider.dart';
@@ -106,8 +107,7 @@ class _LightTuningScreenState extends State<LightTuningScreen>
   Future<void> _loadConfig({bool checkConnection = true}) async {
     if (checkConnection) {
       final syncProvider = context.read<ServerSyncProvider>();
-      final client = syncProvider.httpClient;
-      _connected = client.connected;
+      _connected = syncProvider.synced;
 
       if (!_connected) {
         setState(() => _loading = false);
@@ -278,10 +278,10 @@ class _LightTuningScreenState extends State<LightTuningScreen>
   }
 
   void _sendTimeOffset() {
-    final client = context.read<ServerSyncProvider>().httpClient;
+    final api = context.read<ServerSyncProvider>().api;
     final rooms = context.read<RoomProvider>().rooms;
     if (rooms.isEmpty) return;
-    client.roomOffsetBatch([
+    api.roomOffsetBatch([
       for (final room in rooms)
         (roomId: room.id, timeOffset: _timeOffsetMinutes),
     ]);
@@ -297,11 +297,10 @@ class _LightTuningScreenState extends State<LightTuningScreen>
   }
 
   Future<void> _absorbTimeOffset() async {
-    final client = context.read<ServerSyncProvider>().httpClient;
-    final updatedConfig = await client.absorbTimeOffset(_timeOffsetMinutes);
+    final sdkConfig = await context.read<ServerSyncProvider>().api.absorbTimeOffset(_timeOffsetMinutes);
     if (!mounted) return;
-    if (updatedConfig != null) {
-      context.read<ConfigModel>().updateConfig(updatedConfig);
+    if (sdkConfig != null) {
+      context.read<ConfigModel>().updateConfig(sdkCurveConfigToDto(sdkConfig));
     }
     setState(() {
       _timeOffsetMinutes = 0;
@@ -345,11 +344,10 @@ class _LightTuningScreenState extends State<LightTuningScreen>
     );
     if (confirmed != true || !mounted) return;
 
-    final client = context.read<ServerSyncProvider>().httpClient;
-    final defaultConfig = await client.resetConfig();
+    final sdkConfig = await context.read<ServerSyncProvider>().api.resetConfig();
     if (!mounted) return;
-    if (defaultConfig != null) {
-      context.read<ConfigModel>().updateConfig(defaultConfig);
+    if (sdkConfig != null) {
+      context.read<ConfigModel>().updateConfig(sdkCurveConfigToDto(sdkConfig));
     }
     setState(() {
       _timeOffsetMinutes = 0;
@@ -1194,8 +1192,13 @@ class _LightTuningScreenState extends State<LightTuningScreen>
       maxDimSteps: _maxDimSteps.round(),
     );
 
-    final client = context.read<ServerSyncProvider>().httpClient;
-    await client.configSet(config);
+    await context.read<ServerSyncProvider>().api.configSet(RhythmCurveConfig(
+      minColorTemp: config.minColorTemp, maxColorTemp: config.maxColorTemp,
+      minBrightness: config.minBrightness, maxBrightness: config.maxBrightness,
+      widthLeftBri: config.widthLeftBri, widthRightBri: config.widthRightBri,
+      widthLeftCct: config.widthLeftCct, widthRightCct: config.widthRightCct,
+      shapeP: config.shapeP, maxDimSteps: config.maxDimSteps,
+    ));
 
     if (mounted) {
       context.read<ConfigModel>().updateConfig(config);

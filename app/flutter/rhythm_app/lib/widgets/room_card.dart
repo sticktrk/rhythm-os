@@ -346,17 +346,12 @@ class _RoomCardState extends State<RoomCard> {
                     ),
                   ],
                 ),
-                // Rhythm-active horizon glow at bottom edge
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
+                // Rhythm-active breathing border
+                Positioned.fill(
                   child: IgnorePointer(
-                    child: AnimatedOpacity(
-                      opacity: rhythmGlowActive ? 1.0 : 0.0,
-                      duration: const Duration(milliseconds: 500),
-                      curve: Curves.easeInOut,
-                      child: _RhythmHorizonGlow(color: glowColor),
+                    child: _RhythmBorderGlow(
+                      active: rhythmGlowActive,
+                      color: glowColor,
                     ),
                   ),
                 ),
@@ -706,84 +701,69 @@ class _MiniCountdownPainter extends CustomPainter {
       oldDelegate.progress != progress || oldDelegate.color != color;
 }
 
-/// Horizon glow at the bottom of a room card when rhythm is active.
+/// Breathing border around a room card when rhythm is active.
 ///
-/// Two layers: a tall upward-fading gradient (the "glow") provides
-/// visual mass visible on any background, plus a bright 3px accent
-/// strip at the very bottom with a traveling shimmer highlight.
-class _RhythmHorizonGlow extends StatefulWidget {
+/// A rounded rect stroke that gently pulses in opacity,
+/// signaling "alive" without implying loading.
+class _RhythmBorderGlow extends StatefulWidget {
+  final bool active;
   final Color color;
 
-  const _RhythmHorizonGlow({required this.color});
+  const _RhythmBorderGlow({required this.active, required this.color});
 
   @override
-  State<_RhythmHorizonGlow> createState() => _RhythmHorizonGlowState();
+  State<_RhythmBorderGlow> createState() => _RhythmBorderGlowState();
 }
 
-class _RhythmHorizonGlowState extends State<_RhythmHorizonGlow>
+class _RhythmBorderGlowState extends State<_RhythmBorderGlow>
     with SingleTickerProviderStateMixin {
-  late AnimationController _shimmer;
+  late AnimationController _pulse;
 
   @override
   void initState() {
     super.initState();
-    _shimmer = AnimationController(
+    _pulse = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 3000),
-    )..repeat();
+      duration: const Duration(milliseconds: 2500),
+    );
+    if (widget.active) _pulse.repeat(reverse: true);
+  }
+
+  @override
+  void didUpdateWidget(_RhythmBorderGlow old) {
+    super.didUpdateWidget(old);
+    if (old.active != widget.active) {
+      if (widget.active) {
+        _pulse.repeat(reverse: true);
+      } else {
+        _pulse.animateTo(0.0,
+            duration: const Duration(milliseconds: 500),
+            curve: Curves.easeOut);
+      }
+    }
   }
 
   @override
   void dispose() {
-    _shimmer.dispose();
+    _pulse.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: _shimmer,
+      animation: _pulse,
       builder: (context, _) {
-        final t = _shimmer.value;
-        final center = -1.5 + t * 3.0;
-        return Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Upper fade: gradient bleeding upward into the card
-            Container(
-              height: 28,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    Colors.transparent,
-                    widget.color.withValues(alpha: 0.15),
-                    widget.color.withValues(alpha: 0.45),
-                  ],
-                  stops: const [0.0, 0.5, 1.0],
-                ),
-              ),
+        final v = _pulse.value;
+        final alpha = 0.35 + v * 0.45; // breathes 0.35 → 0.80
+        return DecoratedBox(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+              color: widget.color.withValues(alpha: alpha),
+              width: 2,
             ),
-            // Bottom accent strip with shimmer
-            Container(
-              height: 4,
-              decoration: BoxDecoration(
-                color: widget.color.withValues(alpha: 0.85),
-              ),
-              foregroundDecoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment(center - 0.5, 0),
-                  end: Alignment(center + 0.5, 0),
-                  colors: [
-                    Colors.transparent,
-                    Colors.white.withValues(alpha: 0.9),
-                    Colors.transparent,
-                  ],
-                ),
-              ),
-            ),
-          ],
+          ),
         );
       },
     );
