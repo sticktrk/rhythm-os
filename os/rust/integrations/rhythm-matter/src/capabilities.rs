@@ -53,6 +53,30 @@ fn infer_light_type(color_modes: &[ColorMode]) -> LightType {
     }
 }
 
+/// Enrich Matter-probed capabilities with data from the device database.
+///
+/// Matter commissioning discovers color modes and kelvin range but not gamut
+/// or min_brightness. This looks up the device by (vendor_id, product_id) or
+/// (vendor_name, product_name) and fills in fields the DB knows about.
+pub fn enrich_from_db(
+    caps: &mut LightCapabilities,
+    device: &CommissionedDevice,
+    db: &rhythm_devices::DeviceDatabase,
+) {
+    let entry = db
+        .lookup_matter(device.vendor_id, device.product_id)
+        .or_else(|| db.lookup(&device.vendor_name, &device.product_name));
+
+    if let Some(entry) = entry {
+        if caps.gamut.is_none() {
+            caps.gamut = entry.gamut.clone();
+        }
+        if caps.min_brightness.is_none() {
+            caps.min_brightness = entry.min_brightness;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +177,84 @@ mod tests {
 
         let caps = capabilities_from_commissioned(&device);
         assert_eq!(caps.light_type, LightType::ExtendedColor);
+    }
+
+    #[test]
+    fn enrich_fills_db_fields() {
+        use rhythm_devices::{DeviceDatabase, DeviceEntry, GamutTriangle, XyPoint};
+
+        let device = CommissionedDevice {
+            node_id: 1,
+            vendor_name: "TestCo".to_string(),
+            product_name: "Color Bulb".to_string(),
+            vendor_id: 0,
+            product_id: 0,
+            serial_number: None,
+            light_endpoint: 1,
+            color_modes: vec![MatterColorMode::Xy, MatterColorMode::ColorTemperature],
+            min_kelvin: Some(2000),
+            max_kelvin: Some(7000),
+        };
+
+        let mut caps = capabilities_from_commissioned(&device);
+        assert_eq!(caps.gamut, None);
+        assert_eq!(caps.min_brightness, None);
+
+        let gamut = GamutTriangle {
+            red: XyPoint { x: 0.6915, y: 0.3083 },
+            green: XyPoint { x: 0.17, y: 0.7 },
+            blue: XyPoint { x: 0.1532, y: 0.0475 },
+        };
+        let entry = DeviceEntry {
+            manufacturer: "TestCo".to_string(),
+            model: "Color Bulb".to_string(),
+            name: "Test Color Bulb".to_string(),
+            light_type: LightType::ExtendedColor,
+            color_modes: vec![ColorMode::Xy, ColorMode::ColorTemperature],
+            min_kelvin: Some(2000),
+            max_kelvin: Some(7000),
+            gamut: Some(gamut.clone()),
+            min_brightness: Some(3),
+            supports_transition: true,
+            aliases: vec![],
+            zigbee: None,
+            hue_api: None,
+            matter: None,
+        };
+        let db = DeviceDatabase::from_entries(vec![entry]);
+
+        enrich_from_db(&mut caps, &device, &db);
+        assert_eq!(caps.gamut, Some(gamut));
+        assert_eq!(caps.min_brightness, Some(3));
+        // Probed values are NOT overwritten
+        assert_eq!(caps.min_kelvin, Some(2000));
+        assert_eq!(caps.max_kelvin, Some(7000));
+    }
+
+    #[test]
+    fn enrich_noop_for_unknown_device() {
+        use rhythm_devices::DeviceDatabase;
+
+        let device = CommissionedDevice {
+            node_id: 99,
+            vendor_name: "Unknown".to_string(),
+            product_name: "Mystery".to_string(),
+            vendor_id: 0xFFFF,
+            product_id: 0xFFFF,
+            serial_number: None,
+            light_endpoint: 1,
+            color_modes: vec![MatterColorMode::ColorTemperature],
+            min_kelvin: Some(2700),
+            max_kelvin: Some(5000),
+        };
+
+        let mut caps = capabilities_from_commissioned(&device);
+        let db = DeviceDatabase::from_entries(vec![]);
+
+        enrich_from_db(&mut caps, &device, &db);
+        // Nothing changed
+        assert_eq!(caps.gamut, None);
+        assert_eq!(caps.min_brightness, None);
+        assert_eq!(caps.min_kelvin, Some(2700));
     }
 }

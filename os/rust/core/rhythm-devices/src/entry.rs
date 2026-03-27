@@ -5,7 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::capabilities::{ColorMode, LightCapabilities, LightType};
 use crate::gamut::GamutTriangle;
-use crate::quirks::{HueApiData, ZigbeeDeviceData};
+use crate::quirks::{HueApiData, MatterDeviceData, ZigbeeDeviceData};
 
 /// A device entry from the device database.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +60,10 @@ pub struct DeviceEntry {
     /// Hue V2 API specific metadata.
     #[cfg_attr(feature = "serde", serde(default))]
     pub hue_api: Option<HueApiData>,
+
+    /// Matter-specific metadata.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub matter: Option<MatterDeviceData>,
 }
 
 fn default_true() -> bool {
@@ -164,6 +168,7 @@ mod tests {
             aliases: vec![],
             zigbee: None,
             hue_api: None,
+            matter: None,
         };
 
         let caps = entry.capabilities();

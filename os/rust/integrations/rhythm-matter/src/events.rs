@@ -33,7 +33,7 @@ pub fn translate_report(report: &MatterAttributeReport) -> Option<HubEvent> {
     match (report.cluster, report.attr_id) {
         (clusters::CLUSTER_ON_OFF, clusters::ATTR_ON_OFF) => {
             // On/Off state changed — this could indicate someone used a
-            // physical switch or another controller. We emit DevicePaired
+            // physical switch or another controller. No HubEvent emitted
             // for now; future work may add a DeviceStateChanged event.
             let is_on = report.value.first().copied().unwrap_or(0) != 0;
             log::debug!(

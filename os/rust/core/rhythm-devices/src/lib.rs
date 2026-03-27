@@ -35,7 +35,7 @@ pub use capabilities::{ColorMode, LightCapabilities, LightType};
 pub use entry::DeviceEntry;
 pub use gamut::{GamutTriangle, XyPoint};
 pub use lookup::DeviceDatabase;
-pub use quirks::{DeviceQuirk, HueApiData, ZigbeeDeviceData};
+pub use quirks::{DeviceQuirk, HueApiData, MatterDeviceData, ZigbeeDeviceData};
 
 use std::sync::OnceLock;
 

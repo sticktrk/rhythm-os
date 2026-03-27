@@ -181,8 +181,13 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
 
                 // Store device capabilities from commissioning data
                 {
-                    let caps =
+                    let mut caps =
                         crate::capabilities::capabilities_from_commissioned(&device);
+                    crate::capabilities::enrich_from_db(
+                        &mut caps,
+                        &device,
+                        rhythm_devices::builtin_db(),
+                    );
                     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
                     if let Some(hub) = s.hubs.get(&hub_key) {
                         if let Some(hub_data) = hub.data::<Arc<MatterHubData>>() {

@@ -490,5 +490,62 @@
       "mfr_code": "0x100B",
       "endpoint": 11
     }
+  },
+  {
+    "manufacturer": "Savant Systems, Inc.",
+    "model": "93128983",
+    "name": "GE Cync Full Color A19",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 7000,
+    "matter": {}
+  },
+  {
+    "manufacturer": "Savant Systems, Inc.",
+    "model": "93128984",
+    "name": "GE Cync Tunable White A19",
+    "light_type": "color_temperature",
+    "color_modes": ["color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 7000,
+    "matter": {}
+  },
+  {
+    "manufacturer": "Savant Systems, Inc.",
+    "model": "93128985",
+    "name": "GE Cync Soft White A19",
+    "light_type": "dimmable",
+    "color_modes": ["dimmable"],
+    "matter": {}
+  },
+  {
+    "manufacturer": "Savant Systems, Inc.",
+    "model": "93128982",
+    "name": "GE Cync Smart Plug",
+    "light_type": "on_off",
+    "color_modes": ["on_off"],
+    "supports_transition": false,
+    "matter": {}
+  },
+  {
+    "manufacturer": "Savant Systems, Inc.",
+    "model": "93129079",
+    "name": "GE Cync Full Color BR30",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 7000,
+    "matter": {}
+  },
+  {
+    "manufacturer": "Savant Systems, Inc.",
+    "model": "93129080",
+    "name": "GE Cync Tunable White BR30",
+    "light_type": "color_temperature",
+    "color_modes": ["color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 7000,
+    "matter": {}
   }
 ]

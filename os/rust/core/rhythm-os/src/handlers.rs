@@ -633,10 +633,29 @@ pub fn handle_pair_device(
     };
 
     match start_fn(state, &request.hub_type, &request.params) {
-        Ok(session) => match serde_json::to_string(&session) {
-            Ok(json) => ApiResponse::json_ok(json),
-            Err(e) => ApiResponse::server_error(e),
-        },
+        Ok(session) => {
+            if session.status == crate::pairing::PairingStatus::Complete {
+                // Persist canonical registry (resolve() was called during pairing)
+                if let Ok(s) = state.lock() {
+                    commands::persist_canonical(&s);
+                }
+                // Persist hub device registry (upsert_room was called during pairing)
+                commands::persist_registry(state);
+                // Notify SSE clients
+                #[cfg(feature = "desktop")]
+                {
+                    commands::emit_triage_changed(state);
+                    crate::state::emit_server_event(
+                        state,
+                        crate::server_event::ServerEvent::RoomsChanged,
+                    );
+                }
+            }
+            match serde_json::to_string(&session) {
+                Ok(json) => ApiResponse::json_ok(json),
+                Err(e) => ApiResponse::server_error(e),
+            }
+        }
         Err(e) => ApiResponse::server_error(e),
     }
 }

@@ -197,10 +197,12 @@ pub fn post_tick_room(state: &SharedState, runtime: &Arc<dyn RuntimeHandle>, roo
 
     #[cfg(feature = "desktop")]
     {
+        let mut event = crate::commands::build_room_state_event(state, &snap);
+        event.tick = true;
         crate::state::emit_server_event(
             state,
             crate::server_event::ServerEvent::RoomState {
-                rooms: vec![crate::commands::build_room_state_event(state, &snap)],
+                rooms: vec![event],
             },
         );
     }

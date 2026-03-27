@@ -54,6 +54,23 @@ pub struct HueApiData {
     pub grouped_light_delay_ms: Option<u32>,
 }
 
+/// Matter-specific device metadata.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct MatterDeviceData {
+    /// Matter vendor ID (from Basic Information cluster).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub vendor_id: Option<u16>,
+
+    /// Matter product ID (from Basic Information cluster).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub product_id: Option<u16>,
+
+    /// Matter-specific quirks.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub quirks: Vec<DeviceQuirk>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,6 +87,29 @@ mod tests {
             DeviceQuirk::CommandThrottleMs(100),
             DeviceQuirk::CommandThrottleMs(200)
         );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_matter_data_serde() {
+        let data = super::MatterDeviceData {
+            vendor_id: Some(0x1384),
+            product_id: Some(1),
+            quirks: vec![],
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let parsed: super::MatterDeviceData = serde_json::from_str(&json).unwrap();
+        assert_eq!(data, parsed);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_matter_data_empty_serde() {
+        let json = "{}";
+        let parsed: super::MatterDeviceData = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.vendor_id, None);
+        assert_eq!(parsed.product_id, None);
+        assert!(parsed.quirks.is_empty());
     }
 
     #[cfg(feature = "serde")]
