@@ -2,10 +2,12 @@
 resolver = "2"
 members = [
     "rust/core/rhythm-curve",
+    "rust/core/rhythm-devices",
     "rust/core/rhythm-core",
     "rust/core/rhythm-os",
     "rust/integrations/rhythm-hue",
     "rust/integrations/rhythm-ha",
+    "rust/integrations/rhythm-matter",
     "rust/bins/rhythm-server",
     "rust/bins/rhythm-addon",
 ]

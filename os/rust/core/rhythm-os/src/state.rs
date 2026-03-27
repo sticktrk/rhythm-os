@@ -228,6 +228,17 @@ pub struct AppState {
         Arc<dyn Fn(crate::hub::HubType) -> &'static (dyn crate::hub::HubProvider) + Send + Sync>,
     >,
 
+    /// Start a device pairing session (Matter, Zigbee, etc.).
+    /// Built from the integration registry by `integration_callbacks`.
+    #[allow(clippy::type_complexity)]
+    pub start_pairing_fn: Option<
+        Arc<
+            dyn Fn(&SharedState, &str, &serde_json::Value) -> anyhow::Result<crate::pairing::PairingSession>
+                + Send
+                + Sync,
+        >,
+    >,
+
     /// Optional pre-handler for hub credential requests.
     ///
     /// Returns `Some(Ok(json))` to respond with 200, `Some(Err(msg))` for 500,
@@ -250,6 +261,10 @@ pub struct AppState {
 
     /// Deployment context: "ha_addon", "server", "embedded", etc.
     pub platform_context: &'static str,
+
+    /// Base data directory for persistence (set by binary crate).
+    /// Used by integrations that need filesystem paths (e.g., Matter fabric data).
+    pub data_dir: String,
 
     /// The port the HTTP server is listening on.
     /// Exposed in the state snapshot so web clients can connect directly
@@ -304,10 +319,12 @@ impl Default for AppState {
             #[cfg(feature = "desktop")]
             register_controller_fn: None,
             get_hub_provider_fn: None,
+            start_pairing_fn: None,
             hub_credentials_interceptor: None,
             firmware_version: "0.0.0",
             platform_type: "desktop",
             platform_context: "server",
+            data_dir: String::new(),
             listen_port: None,
             platform: PlatformConfig::default(),
             #[cfg(feature = "desktop")]

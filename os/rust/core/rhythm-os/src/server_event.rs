@@ -58,6 +58,10 @@ pub struct RoomStateEvent {
     pub brightness: u8,
     /// Effective color temperature in Kelvin.
     pub kelvin: u16,
+    /// `true` when this event was triggered by the periodic rhythm tick.
+    /// Absent (or `false`) for user actions, polls, and other state changes.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub tick: bool,
 }
 
 impl RoomStateEvent {
@@ -77,6 +81,7 @@ impl RoomStateEvent {
             lights_on,
             brightness,
             kelvin,
+            tick: false,
         }
     }
 }

@@ -390,6 +390,15 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 cb();
             }
         }
+
+        HubEvent::DevicePaired {
+            ref device_id,
+            ref name,
+            ..
+        } => {
+            info!(target: "evt", "Device paired: {} ({})",
+                name, device_id);
+        }
     }
 }
 

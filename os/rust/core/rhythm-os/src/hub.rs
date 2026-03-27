@@ -54,6 +54,13 @@ pub enum HubEvent {
         hub_key: Option<HubKey>,
         reason: String,
     },
+    /// A new device was paired/commissioned (Matter, Zigbee direct, etc.).
+    DevicePaired {
+        hub_key: Option<HubKey>,
+        device_id: String,
+        name: String,
+        device_type: rhythm_core::runtime::hub_registry::DeviceType,
+    },
 }
 
 impl HubEvent {
@@ -64,6 +71,7 @@ impl HubEvent {
             HubEvent::Motion { hub_key, .. } => hub_key.as_ref(),
             HubEvent::Heartbeat { hub_key } => hub_key.as_ref(),
             HubEvent::Disconnected { hub_key, .. } => hub_key.as_ref(),
+            HubEvent::DevicePaired { hub_key, .. } => hub_key.as_ref(),
         }
     }
 
@@ -74,6 +82,7 @@ impl HubEvent {
             HubEvent::Motion { hub_key, .. } => *hub_key = Some(key),
             HubEvent::Heartbeat { hub_key } => *hub_key = Some(key),
             HubEvent::Disconnected { hub_key, .. } => *hub_key = Some(key),
+            HubEvent::DevicePaired { hub_key, .. } => *hub_key = Some(key),
         }
         self
     }
@@ -93,6 +102,7 @@ pub struct HubType(pub String);
 impl HubType {
     pub const HUE: &'static str = "hue";
     pub const HA: &'static str = "ha";
+    pub const MATTER: &'static str = "matter";
 
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
@@ -300,6 +310,22 @@ pub trait ExternalLightHubIntegration: Send + Sync {
     /// Default is a no-op — only integrations with rotating credentials
     /// (e.g., HA supervisor token) need to implement this.
     fn refresh_credentials(&self, _state: &SharedState, _key: &HubKey) {}
+
+    /// Start a device pairing session (Matter commissioning, Zigbee permit join).
+    ///
+    /// Default returns an error — hub-based integrations (Hue, HA) don't support
+    /// pairing individual devices. Direct-connection integrations (Matter, Zigbee)
+    /// override this.
+    fn start_pairing(
+        &self,
+        _state: &SharedState,
+        _params: &serde_json::Value,
+    ) -> Result<crate::pairing::PairingSession> {
+        Err(anyhow::anyhow!(
+            "Pairing not supported for {}",
+            self.hub_type()
+        ))
+    }
 }
 
 /// Look up an integration by hub type string.
@@ -342,6 +368,9 @@ pub struct IntegrationCallbacks {
     /// Create and register a per-hub controller with the composite (desktop only).
     #[cfg(feature = "desktop")]
     pub register_controller_fn: Arc<dyn Fn(&SharedState, &HubKey) -> Result<()> + Send + Sync>,
+    /// Start a device pairing session (delegates to integration's `start_pairing`).
+    pub start_pairing_fn:
+        Arc<dyn Fn(&SharedState, &str, &serde_json::Value) -> Result<crate::pairing::PairingSession> + Send + Sync>,
 }
 
 /// Build callbacks from a static integration registry.
@@ -410,11 +439,23 @@ pub fn integration_callbacks(
         Ok(())
     });
 
+    let start_pairing_fn = Arc::new(
+        move |state: &SharedState,
+              hub_type: &str,
+              params: &serde_json::Value|
+              -> Result<crate::pairing::PairingSession> {
+            let integration = find_integration(integrations, hub_type)
+                .ok_or_else(|| anyhow::anyhow!("No integration for hub type '{}'", hub_type))?;
+            integration.start_pairing(state, params)
+        },
+    );
+
     IntegrationCallbacks {
         ensure_runtime_fn,
         get_hub_provider_fn,
         #[cfg(feature = "desktop")]
         register_controller_fn,
+        start_pairing_fn,
     }
 }
 
