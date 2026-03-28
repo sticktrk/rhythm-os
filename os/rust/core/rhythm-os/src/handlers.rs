@@ -632,8 +632,11 @@ pub fn handle_pair_device(
         return ApiResponse::server_error("No pairing support configured");
     };
 
+    log::info!(target: "pair", "Pairing request: hub_type={}, params={}", request.hub_type, request.params);
+
     match start_fn(state, &request.hub_type, &request.params) {
         Ok(session) => {
+            log::info!(target: "pair", "Pairing result: status={:?}", session.status);
             if session.status == crate::pairing::PairingStatus::Complete {
                 // Persist canonical registry (resolve() was called during pairing)
                 if let Ok(s) = state.lock() {
@@ -656,7 +659,10 @@ pub fn handle_pair_device(
                 Err(e) => ApiResponse::server_error(e),
             }
         }
-        Err(e) => ApiResponse::server_error(e),
+        Err(e) => {
+            log::error!(target: "pair", "Pairing failed: {}", e);
+            ApiResponse::server_error(e)
+        }
     }
 }
 

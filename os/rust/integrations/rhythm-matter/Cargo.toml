@@ -9,7 +9,7 @@ description = "Matter integration for Rhythm OS — controls Matter-over-WiFi/Th
 default = []
 blocking = ["rhythm-core/blocking", "rhythm-os/blocking"]
 embedded = ["blocking"]
-desktop = ["blocking", "rhythm-os/desktop", "dep:tokio", "dep:matc"]
+desktop = ["blocking", "rhythm-os/desktop", "dep:tokio", "dep:matc", "dep:mdns-sd"]
 test-support = ["blocking", "rhythm-core/test-support"]
 
 [[test]]
@@ -29,3 +29,4 @@ log = "0.4"
 # Optional: desktop transport (matc = rust Matter controller library)
 tokio = { workspace = true, optional = true }
 matc = { version = "0.1", optional = true }
+mdns-sd = { workspace = true, optional = true }

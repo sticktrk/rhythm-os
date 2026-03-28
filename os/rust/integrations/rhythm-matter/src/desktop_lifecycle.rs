@@ -7,7 +7,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 use anyhow::Result;
-use log::info;
+use log::{info, warn};
 
 use rhythm_core::controller::LightController;
 use rhythm_os::canonical::identity::HubKey;
@@ -100,6 +100,123 @@ pub fn get_hub_provider() -> &'static dyn HubProvider {
 }
 
 // ============================================================================
+// Device probing
+// ============================================================================
+
+/// Probe a commissioned device's capabilities via transport read_attribute calls.
+///
+/// Reads Basic Information (0x0028) and Color Control (0x0300) clusters to
+/// reconstruct a `CommissionedDevice` with accurate capabilities.
+fn probe_device_caps(
+    transport: &dyn MatterTransport,
+    node_id: u64,
+    endpoint: u16,
+) -> Result<crate::transport::CommissionedDevice> {
+    use crate::transport::{CommissionedDevice, MatterColorMode};
+
+    let vendor_name = read_string_via_transport(transport, node_id, 0, 0x0028, 1)
+        .unwrap_or_default();
+    let product_name = read_string_via_transport(transport, node_id, 0, 0x0028, 2)
+        .unwrap_or_default();
+    let vendor_id = read_u16_via_transport(transport, node_id, 0, 0x0028, 4).unwrap_or(0);
+    let product_id = read_u16_via_transport(transport, node_id, 0, 0x0028, 5).unwrap_or(0);
+
+    // Probe Color Control capabilities
+    let capabilities_raw =
+        read_u16_via_transport(transport, node_id, endpoint, 0x0300, 0x400A).unwrap_or(0);
+
+    let mut color_modes = Vec::new();
+    if capabilities_raw & 0x01 != 0 {
+        color_modes.push(MatterColorMode::HueSaturation);
+    }
+    if capabilities_raw & 0x08 != 0 {
+        color_modes.push(MatterColorMode::Xy);
+    }
+    if capabilities_raw & 0x10 != 0 {
+        color_modes.push(MatterColorMode::ColorTemperature);
+    }
+
+    // Fallback: read ColorMode attribute if capabilities was 0
+    if color_modes.is_empty() {
+        let color_mode =
+            read_u8_via_transport(transport, node_id, endpoint, 0x0300, 0x0008).unwrap_or(2);
+        match color_mode {
+            0 => color_modes.push(MatterColorMode::HueSaturation),
+            1 => color_modes.push(MatterColorMode::Xy),
+            _ => color_modes.push(MatterColorMode::ColorTemperature),
+        }
+    }
+
+    // CT range in mireds → kelvin
+    let min_mireds = read_u16_via_transport(transport, node_id, endpoint, 0x0300, 0x400C).ok();
+    let max_mireds = read_u16_via_transport(transport, node_id, endpoint, 0x0300, 0x400D).ok();
+
+    let min_kelvin = max_mireds
+        .filter(|&m| m > 0)
+        .map(|m| (1_000_000u32 / m as u32) as u16);
+    let max_kelvin = min_mireds
+        .filter(|&m| m > 0)
+        .map(|m| (1_000_000u32 / m as u32) as u16);
+
+    Ok(CommissionedDevice {
+        node_id,
+        vendor_name,
+        product_name,
+        vendor_id,
+        product_id,
+        serial_number: None,
+        light_endpoint: endpoint,
+        color_modes,
+        min_kelvin,
+        max_kelvin,
+    })
+}
+
+/// Read a string attribute via `MatterTransport::read_attribute`.
+fn read_string_via_transport(
+    transport: &dyn MatterTransport,
+    node_id: u64,
+    endpoint: u16,
+    cluster: u16,
+    attr_id: u16,
+) -> Result<String> {
+    let data = transport.read_attribute(node_id, endpoint, cluster, attr_id)?;
+    Ok(String::from_utf8(data).unwrap_or_default())
+}
+
+/// Read a u16 attribute via `MatterTransport::read_attribute`.
+fn read_u16_via_transport(
+    transport: &dyn MatterTransport,
+    node_id: u64,
+    endpoint: u16,
+    cluster: u16,
+    attr_id: u16,
+) -> Result<u16> {
+    let data = transport.read_attribute(node_id, endpoint, cluster, attr_id)?;
+    if data.len() >= 2 {
+        Ok(u16::from_le_bytes([data[0], data[1]]))
+    } else if data.len() == 1 {
+        Ok(data[0] as u16)
+    } else {
+        Err(anyhow::anyhow!("Empty attribute response"))
+    }
+}
+
+/// Read a u8 attribute via `MatterTransport::read_attribute`.
+fn read_u8_via_transport(
+    transport: &dyn MatterTransport,
+    node_id: u64,
+    endpoint: u16,
+    cluster: u16,
+    attr_id: u16,
+) -> Result<u8> {
+    let data = transport.read_attribute(node_id, endpoint, cluster, attr_id)?;
+    data.first()
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("Empty attribute response"))
+}
+
+// ============================================================================
 // ExternalLightHubIntegration
 // ============================================================================
 
@@ -118,7 +235,7 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
         connect_and_start(state, key)
     }
 
-    fn ensure_runtime(&self, state: &SharedState) -> Result<()> {
+    fn ensure_runtime(&self, _state: &SharedState) -> Result<()> {
         // Runtime creation handled by ensure_composite_runtime in rhythm-os
         Ok(())
     }
@@ -129,6 +246,114 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
         key: &HubKey,
     ) -> Result<Arc<dyn LightController>> {
         create_controller(state, key)
+    }
+
+    fn post_connect(&self, state: &SharedState, _key: &HubKey) {
+        let hub_key = HubKey::new(HubType::new("matter"), "local");
+
+        let (hub_data, data_path) = {
+            let s = match state.lock() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let hd = s
+                .hubs
+                .get(&hub_key)
+                .and_then(|h| h.data::<Arc<MatterHubData>>())
+                .cloned();
+            let dp = if s.data_dir.is_empty() {
+                None
+            } else {
+                Some(format!("{}/matter", s.data_dir))
+            };
+            (hd, dp)
+        };
+
+        let (Some(hub_data), Some(data_path)) = (hub_data, data_path) else {
+            return;
+        };
+
+        let transport = match MatcTransport::load_or_create(&data_path) {
+            Ok(t) => Arc::new(t),
+            Err(e) => {
+                warn!(target: "sys", "Matter post_connect: failed to load transport: {}", e);
+                return;
+            }
+        };
+
+        // Probe capabilities for commissioned devices that don't have cached caps
+        let devices = hub_data.commissioned.clone();
+        let already_have: Vec<String> = hub_data
+            .device_caps
+            .lock()
+            .map(|dc| dc.keys().cloned().collect())
+            .unwrap_or_default();
+
+        let mut probed = 0u32;
+        for device in &devices {
+            let device_id = crate::lifecycle::format_device_id(device.node_id, 1);
+            if already_have.contains(&device_id) {
+                continue;
+            }
+
+            // Probe device via read_attribute calls
+            match probe_device_caps(&*transport, device.node_id, 1) {
+                Ok(commissioned) => {
+                    let mut caps =
+                        crate::capabilities::capabilities_from_commissioned(&commissioned);
+                    crate::capabilities::enrich_from_db(
+                        &mut caps,
+                        &commissioned,
+                        rhythm_devices::builtin_db(),
+                    );
+                    if let Ok(mut dc) = hub_data.device_caps.lock() {
+                        dc.insert(device_id.clone(), caps);
+                        probed += 1;
+                    }
+                }
+                Err(e) => {
+                    warn!(target: "sys", "Matter post_connect: failed to probe {}: {}", device_id, e);
+                }
+            }
+        }
+
+        if probed > 0 {
+            info!(target: "sys", "Matter post_connect: probed capabilities for {} device(s)", probed);
+        }
+    }
+
+    fn credentials_interceptor(
+        &self,
+        state: &SharedState,
+        body: &serde_json::Value,
+    ) -> Option<Result<String, String>> {
+        let hub_type = body.get("hub_type").and_then(|v| v.as_str())?;
+        if hub_type != "matter" {
+            return None;
+        }
+
+        // Only intercept when credentials are empty/null (auto-bootstrap request)
+        let creds_empty = body
+            .get("credentials")
+            .map(|v| v.is_null() || v.as_object().map(|o| o.is_empty()).unwrap_or(false))
+            .unwrap_or(true);
+        if !creds_empty {
+            return None;
+        }
+
+        let credentials = serde_json::json!({ "fabric_id": "default" });
+
+        match rhythm_os::commands::do_hub_credentials(state, "matter", "local", &credentials) {
+            Ok(()) => {
+                let hub_connected = state.lock().map(|s| s.has_any_hub()).unwrap_or(false);
+
+                let hub_key = HubKey::new(HubType::new("matter"), "local");
+                self.post_connect(state, &hub_key);
+
+                Some(Ok(format!(r#"{{"hub_connected":{}}}"#, hub_connected)))
+            }
+            Err(e) => Some(Err(e.to_string())),
+        }
     }
 
     fn start_pairing(
@@ -172,7 +397,7 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
                                 &device_id,
                                 &device_name,
                                 &device_id,
-                                &[device_id.clone()],
+                                std::slice::from_ref(&device_id),
                             );
                             reg.set_area_lights(&device_id, vec![device_id.clone()]);
                         }

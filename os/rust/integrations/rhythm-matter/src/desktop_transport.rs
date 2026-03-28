@@ -14,7 +14,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use log::{debug, info, warn};
+use log::{debug, info};
 use matc::tlv::TlvItemValue;
 
 use crate::transport::{
@@ -121,34 +121,8 @@ impl MatterTransport for MatcTransport {
         info!(target: "sys", "Matter: commissioning with passcode={} discriminator={}",
             onboarding.passcode, onboarding.discriminator);
 
-        // Discover commissionable devices via mDNS
-        let devices = block_on(matc::discover::discover_commissionable(Duration::from_secs(10)))
-            .context("mDNS discovery failed")?;
-
-        // Match by discriminator (string comparison — matc stores as Option<String>)
-        let disc_str = onboarding.discriminator.to_string();
-        let target = devices
-            .iter()
-            .find(|d| d.discriminator.as_deref() == Some(&disc_str))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No commissionable device found with discriminator {}. Found {} devices.",
-                    onboarding.discriminator,
-                    devices.len()
-                )
-            })?;
-
-        // Pick first IPv4 address (prefer v4 over v6 for simplicity)
-        let ip = target
-            .ips
-            .iter()
-            .find(|ip| matches!(ip, IpAddr::V4(_)))
-            .or_else(|| target.ips.first())
-            .ok_or_else(|| anyhow::anyhow!("Discovered device has no IP address"))?;
-
-        let port = target.port.unwrap_or(5540);
-        let addr = format!("{}:{}", ip, port);
-        let device_name = target.name.clone().unwrap_or_default();
+        // Discover commissionable devices via mdns-sd (replaces matc's broken mDNS)
+        let (addr, device_name) = discover_matter_device(onboarding.discriminator)?;
 
         info!(target: "sys", "Matter: discovered '{}' at {}", device_name, addr);
 
@@ -168,12 +142,8 @@ impl MatterTransport for MatcTransport {
         // Read Basic Information cluster (endpoint 0, cluster 0x0028) for device details
         let vendor_name = read_string_attr(&conn, 0, 0x0028, 1).unwrap_or_default();
         let product_name = read_string_attr(&conn, 0, 0x0028, 2).unwrap_or_default();
-        let vendor_id = read_u16_attr(&conn, 0, 0x0028, 4)
-            .or_else(|_| parse_opt_u16(&target.vendor_id))
-            .unwrap_or(0);
-        let product_id = read_u16_attr(&conn, 0, 0x0028, 5)
-            .or_else(|_| parse_opt_u16(&target.product_id))
-            .unwrap_or(0);
+        let vendor_id = read_u16_attr(&conn, 0, 0x0028, 4).unwrap_or(0);
+        let product_id = read_u16_attr(&conn, 0, 0x0028, 5).unwrap_or(0);
         let serial = read_string_attr(&conn, 0, 0x0028, 15).ok();
 
         // Probe Color Control cluster for capabilities
@@ -315,11 +285,77 @@ fn read_u16_attr(
     }
 }
 
-/// Parse an optional string as u16 (for mDNS vendor_id/product_id).
-fn parse_opt_u16(opt: &Option<String>) -> Result<u16> {
-    opt.as_deref()
-        .and_then(|s| s.parse::<u16>().ok())
-        .ok_or_else(|| anyhow::anyhow!("Not a u16"))
+
+/// Discover a commissionable Matter device via mdns-sd.
+///
+/// Browses `_matterc._udp.local.` for up to 15 seconds, matching by the
+/// discriminator from the setup code. Returns `(ip:port, device_name)`.
+/// Uses the `mdns-sd` crate (same one used for Hue bridge discovery and
+/// Rhythm service advertisement) instead of matc's built-in mDNS which
+/// fails in Docker containers and on some macOS configurations.
+fn discover_matter_device(discriminator: u16) -> Result<(String, String)> {
+    let daemon = mdns_sd::ServiceDaemon::new()
+        .context("Failed to start mDNS daemon")?;
+
+    let service_type = "_matterc._udp.local.";
+    let receiver = daemon.browse(service_type)
+        .context("Failed to browse for Matter devices")?;
+
+    let disc_str = discriminator.to_string();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+
+    info!(target: "sys", "Matter: scanning for commissionable device (discriminator={})...", discriminator);
+
+    let mut found = None;
+    while std::time::Instant::now() < deadline {
+        match receiver.recv_timeout(Duration::from_millis(200)) {
+            Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) => {
+                let txt_d = info.get_properties()
+                    .get("D")
+                    .map(|v| v.val_str().to_string());
+
+                info!(target: "sys", "Matter mDNS: resolved '{}' discriminator={:?} addrs={:?}",
+                    info.get_fullname(), txt_d, info.get_addresses());
+
+                if txt_d.as_deref() == Some(&disc_str) {
+                    // Match — extract IPv4 address
+                    let ip = info.get_addresses()
+                        .iter()
+                        .find(|a| matches!(a, IpAddr::V4(_)))
+                        .or_else(|| info.get_addresses().iter().next())
+                        .ok_or_else(|| anyhow::anyhow!("Matter device has no IP address"))?
+                        .to_string();
+
+                    let port = info.get_port();
+                    let name = info.get_properties()
+                        .get("DN")
+                        .map(|v| v.val_str().to_string())
+                        .unwrap_or_default();
+
+                    found = Some((format!("{}:{}", ip, port), name));
+                    break;
+                }
+            }
+            Ok(event) => {
+                info!(target: "sys", "Matter mDNS event: {:?}", event);
+            }
+            Err(_) => continue,
+        }
+    }
+
+    let _ = daemon.stop_browse(service_type);
+    let _ = daemon.shutdown();
+
+    match found {
+        Some(result) => {
+            info!(target: "sys", "Matter: discovered device at {}", result.0);
+            Ok(result)
+        }
+        None => Err(anyhow::anyhow!(
+            "No commissionable Matter device found with discriminator {} (scanned 15s)",
+            discriminator
+        )),
+    }
 }
 
 /// Probe Color Control cluster for supported capabilities.
