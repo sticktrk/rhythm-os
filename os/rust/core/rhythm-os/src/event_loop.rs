@@ -367,10 +367,10 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
         } => {
             warn!(target: "conn", "Hub disconnected: {}", reason);
 
-            // Clear motion timers - no point sending commands to a disconnected hub
-            motion.sensors.clear();
-            motion.motion_owned.clear();
-            motion.warning_active.clear();
+            // Motion timers are local state (Instant timestamps) — they keep
+            // counting regardless of hub connectivity.  Clearing them here
+            // means a transient SSE reconnection permanently prevents the
+            // timeout from firing, so lights never turn off.
 
             #[cfg(feature = "desktop")]
             crate::state::emit_server_event(
