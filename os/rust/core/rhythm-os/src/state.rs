@@ -159,6 +159,8 @@ pub struct AppState {
     pub motion_snapshots: HashMap<String, MotionSnapshot>,
     /// Last periodic update hour (for solar midnight detection).
     pub last_check_hour: Option<f32>,
+    /// Epoch milliseconds of the most recent periodic tick (for client bootstrap).
+    pub last_tick_epoch_ms: Option<u64>,
 
     // ---- Global settings ----
     /// Hue dynamics fade duration in milliseconds (default 500).
@@ -301,6 +303,7 @@ impl Default for AppState {
             motion_timeouts: HashMap::new(),
             motion_snapshots: HashMap::new(),
             last_check_hour: None,
+            last_tick_epoch_ms: None,
             bulb_fade_ms: DEFAULT_BULB_FADE_MS,
             bulb_fade_atomic,
             default_motion_timeout_secs: DEFAULT_MOTION_TIMEOUT_SECS,

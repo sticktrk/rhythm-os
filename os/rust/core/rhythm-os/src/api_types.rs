@@ -93,6 +93,9 @@ pub struct StateSnapshot {
     pub location: LocationDto,
     pub settings: SettingsDto,
     pub rooms: Vec<RoomFullState>,
+    /// Epoch milliseconds of the most recent periodic tick (for client bootstrap).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_tick_epoch_ms: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -602,11 +605,14 @@ mod tests {
                 soft_off_brightness: 1,
             },
             rooms: vec![],
+            last_tick_epoch_ms: None,
         };
         let json: Value = serde_json::to_value(&snap).unwrap();
         assert!(json.get("listen_port").is_none());
         // hubs omitted when empty
         assert!(json.get("hubs").is_none());
+        // last_tick_epoch_ms omitted when None
+        assert!(json.get("last_tick_epoch_ms").is_none());
         assert_eq!(json["version"], "1.0.0");
         assert_eq!(json["platform"], "desktop");
         assert_eq!(json["context"], "server");
@@ -652,11 +658,13 @@ mod tests {
                 device_ids: vec![],
                 devices: vec![],
             }],
+            last_tick_epoch_ms: Some(1700000000000),
         };
         let json: Value = serde_json::to_value(&snap).unwrap();
         assert_eq!(json["listen_port"], 8099);
         assert_eq!(json["rooms"].as_array().unwrap().len(), 1);
         assert_eq!(json["rooms"][0]["name"], "Office");
         assert_eq!(json["hub"]["type"], "hue");
+        assert_eq!(json["last_tick_epoch_ms"], 1700000000000u64);
     }
 }

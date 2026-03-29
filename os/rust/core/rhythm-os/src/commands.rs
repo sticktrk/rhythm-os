@@ -179,6 +179,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         listen_port,
         canonical_lookup,
         topo_map,
+        last_tick_epoch_ms,
     ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
@@ -284,6 +285,8 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             })
             .collect();
 
+        let last_tick_epoch_ms = s.last_tick_epoch_ms;
+
         (
             all_registries,
             runtime,
@@ -299,6 +302,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             listen_port,
             canonical_lookup,
             topo_map,
+            last_tick_epoch_ms,
         )
     };
     // AppState lock released
@@ -529,6 +533,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         location: location_dto,
         settings: settings_dto,
         rooms,
+        last_tick_epoch_ms,
     };
     serde_json::to_string(&snapshot).map_err(|e| anyhow::anyhow!("serialize: {}", e))
 }
