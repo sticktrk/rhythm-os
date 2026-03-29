@@ -448,6 +448,7 @@ class _SunPositionScreenState extends State<SunPositionScreen>
                     radius: arcRadius,
                     thresholdT: thr,
                     nearSunrise: nearSR,
+                    use24: MediaQuery.alwaysUse24HourFormatOf(context),
                   ),
                   size: Size.infinite,
                 ),
@@ -849,6 +850,7 @@ class _CelestialPainter extends CustomPainter {
   final double radius;
   final double thresholdT;
   final bool nearSunrise;
+  final bool use24;
 
   static List<_Star>? _stars;
   static List<_Shimmer>? _shimmer;
@@ -862,6 +864,7 @@ class _CelestialPainter extends CustomPainter {
     required this.radius,
     required this.thresholdT,
     required this.nearSunrise,
+    required this.use24,
   });
 
   @override
@@ -989,6 +992,36 @@ class _CelestialPainter extends CustomPainter {
     for (int i = 0; i < dashes; i++) {
       canvas.drawArc(rect, (i / dashes) * math.pi, math.pi / dashes * 0.4, false, paint);
     }
+
+    // Hour labels around the circle
+    const labels = [0, 3, 6, 9, 12, 15, 18, 21];
+    for (final h in labels) {
+      final a = _hourToAngle(h.toDouble());
+      final cos = math.cos(a);
+      final sin = math.sin(a);
+      final above = sin < 0; // upper semicircle
+      final label = use24
+          ? '${h.toString().padLeft(2, '0')}'
+          : h == 0 ? '12a' : h == 12 ? '12p' : h < 12 ? '${h}a' : '${h - 12}p';
+      final tp = TextPainter(
+        text: TextSpan(
+          text: label,
+          style: TextStyle(
+            color: Colors.white.withValues(alpha: above ? 0.30 : 0.18),
+            fontSize: 9,
+            fontWeight: FontWeight.w500,
+            letterSpacing: 0.5,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      final dist = radius + 18;
+      final pos = Offset(
+        center.dx + dist * cos - tp.width / 2,
+        center.dy + dist * sin - tp.height / 2,
+      );
+      tp.paint(canvas, pos);
+    }
   }
 
   // --------------------------------------------------------------------------
@@ -996,38 +1029,62 @@ class _CelestialPainter extends CustomPainter {
   // --------------------------------------------------------------------------
 
   void _drawEventMarkers(Canvas canvas) {
-    _marker(canvas, data.sunTimes.sunrise, const Color(0xFFF0A830));
-    _marker(canvas, data.sunTimes.sunset, const Color(0xFF7898D0));
+    const dawn = Color(0xFFF0A830);
+    const dusk = Color(0xFF7898D0);
+    final tw = data.twilightTimes;
+
+    // Astronomical (outermost / subtlest)
+    if (tw.dawn.astronomical != null) _twilightTick(canvas, tw.dawn.astronomical!, dawn, 0.25, 8, 1.2);
+    if (tw.dusk.astronomical != null) _twilightTick(canvas, tw.dusk.astronomical!, dusk, 0.25, 8, 1.2);
+    // Nautical
+    if (tw.dawn.nautical != null) _twilightTick(canvas, tw.dawn.nautical!, dawn, 0.45, 10, 1.5);
+    if (tw.dusk.nautical != null) _twilightTick(canvas, tw.dusk.nautical!, dusk, 0.45, 10, 1.5);
+    // Civil (closest to horizon / most visible)
+    if (tw.dawn.civil != null) _twilightTick(canvas, tw.dawn.civil!, dawn, 0.70, 12, 2.0);
+    if (tw.dusk.civil != null) _twilightTick(canvas, tw.dusk.civil!, dusk, 0.70, 12, 2.0);
+
+    // Solar noon — zenith marker
+    _drawSolarNoonMarker(canvas);
   }
 
-  void _marker(Canvas canvas, double eventHour, Color color) {
-    final a = _hourToAngle(eventHour);
+  void _twilightTick(Canvas canvas, double hour, Color color, double alpha, double extent, double stroke) {
+    final a = _hourToAngle(hour);
     final cos = math.cos(a);
     final sin = math.sin(a);
-
-    // Tick mark crossing the arc perpendicularly
-    const inward = 14.0;
-    const outward = 14.0;
-    final inner = Offset(
-      center.dx + (radius - inward) * cos,
-      center.dy + (radius - inward) * sin,
-    );
-    final outer = Offset(
-      center.dx + (radius + outward) * cos,
-      center.dy + (radius + outward) * sin,
-    );
+    final inner = Offset(center.dx + (radius - extent) * cos, center.dy + (radius - extent) * sin);
+    final outer = Offset(center.dx + (radius + extent) * cos, center.dy + (radius + extent) * sin);
 
     canvas.drawLine(inner, outer, Paint()
-      ..color = color
-      ..strokeWidth = 2.5
+      ..color = color.withValues(alpha: alpha)
+      ..strokeWidth = stroke
       ..strokeCap = StrokeCap.round);
 
-    // Subtle glow around the tick
+    // Glow — proportional to tick prominence
     canvas.drawLine(inner, outer, Paint()
-      ..color = color.withValues(alpha: 0.25)
-      ..strokeWidth = 8.0
+      ..color = color.withValues(alpha: alpha * 0.3)
+      ..strokeWidth = stroke * 3.0
       ..strokeCap = StrokeCap.round
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6));
+      ..maskFilter = MaskFilter.blur(BlurStyle.normal, stroke * 2.0));
+  }
+
+  void _drawSolarNoonMarker(Canvas canvas) {
+    final a = _hourToAngle(data.sunTimes.solarNoon);
+    final cos = math.cos(a);
+    final sin = math.sin(a);
+    const extent = 10.0;
+    final inner = Offset(center.dx + (radius - extent) * cos, center.dy + (radius - extent) * sin);
+    final outer = Offset(center.dx + (radius + extent) * cos, center.dy + (radius + extent) * sin);
+
+    const color = Color(0xFFE8D5A8);
+    canvas.drawLine(inner, outer, Paint()
+      ..color = color
+      ..strokeWidth = 2.0
+      ..strokeCap = StrokeCap.round);
+    canvas.drawLine(inner, outer, Paint()
+      ..color = color.withValues(alpha: 0.20)
+      ..strokeWidth = 6.0
+      ..strokeCap = StrokeCap.round
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4));
   }
 
   // --------------------------------------------------------------------------
@@ -1048,7 +1105,7 @@ class _CelestialPainter extends CustomPainter {
     final boost = 1.0 + thresholdT * 0.8;
 
     // Layer 1 — Atmospheric wash (tighter to keep centered on arc)
-    final washR = (200.0 + 50.0 * p) * power * boost;
+    final washR = (120.0 + 30.0 * p) * power * boost;
     canvas.drawCircle(pos, washR, Paint()
       ..shader = RadialGradient(
         colors: [
@@ -1060,7 +1117,7 @@ class _CelestialPainter extends CustomPainter {
       ).createShader(Rect.fromCircle(center: pos, radius: washR)));
 
     // Layer 2 — Outer bloom
-    final bloomR = (120.0 + 30.0 * p) * power * boost;
+    final bloomR = (72.0 + 18.0 * p) * power * boost;
     canvas.drawCircle(pos, bloomR, Paint()
       ..shader = RadialGradient(
         colors: [
@@ -1072,7 +1129,7 @@ class _CelestialPainter extends CustomPainter {
       ).createShader(Rect.fromCircle(center: pos, radius: bloomR)));
 
     // Layer 3 — Corona
-    final coronaR = (75.0 + 20.0 * p) * power * boost;
+    final coronaR = (45.0 + 12.0 * p) * power * boost;
     canvas.drawCircle(pos, coronaR, Paint()
       ..shader = RadialGradient(
         colors: [
@@ -1084,7 +1141,7 @@ class _CelestialPainter extends CustomPainter {
       ).createShader(Rect.fromCircle(center: pos, radius: coronaR)));
 
     // Layer 4 — Inner glow (less elevation-dependent for horizon visibility)
-    final glowR = 40.0 + 30.0 * power + 10.0 * p;
+    final glowR = 24.0 + 18.0 * power + 6.0 * p;
     canvas.drawCircle(pos, glowR, Paint()
       ..shader = RadialGradient(
         colors: [
@@ -1097,7 +1154,7 @@ class _CelestialPainter extends CustomPainter {
       ).createShader(Rect.fromCircle(center: pos, radius: glowR)));
 
     // Layer 5 — Disc (soft edge gradient instead of hard circle)
-    final discR = 18.0 + 28.0 * power;
+    final discR = 12.0 + 18.0 * power;
     canvas.drawCircle(pos, discR, Paint()
       ..shader = RadialGradient(
         colors: [

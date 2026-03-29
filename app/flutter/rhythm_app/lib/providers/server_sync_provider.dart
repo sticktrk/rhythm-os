@@ -94,6 +94,9 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Soft-off brightness percentage (1-50) from server settings.
   int _softOffBrightness = 1;
 
+  /// Rhythm update interval in seconds from server settings.
+  int _rhythmIntervalSecs = 60;
+
   /// Pending triage counts from SSE triage_changed events.
   int _triagePendingCount = 0;
   int _triagePendingDevices = 0;
@@ -131,6 +134,9 @@ class ServerSyncProvider extends ChangeNotifier {
       notifyListeners();
     }
   }
+
+  /// Rhythm update interval in seconds.
+  int get rhythmIntervalSecs => _rhythmIntervalSecs;
 
   /// Total pending triage entries (devices + rooms).
   int get triagePendingCount => _triagePendingCount;
@@ -352,8 +358,19 @@ class ServerSyncProvider extends ChangeNotifier {
     _serverPlatformContext = hello.platformContext;
     _powerSave = hello.settings?.powerSave ?? false;
     _softOffBrightness = hello.settings?.softOffBrightness ?? 1;
+    _rhythmIntervalSecs = hello.settings?.rhythmIntervalSecs ?? 60;
     _helloRooms = hello.rooms;
     _lastHubInfos = hello.hubs;
+
+    // Bootstrap countdown timer from server's last tick timestamp
+    if (hello.lastTickEpochMs != null) {
+      final lastTick = DateTime.fromMillisecondsSinceEpoch(hello.lastTickEpochMs!);
+      for (final room in hello.rooms) {
+        if (room.id.isNotEmpty && room.rhythmEnabled) {
+          _roomProvider.setLastTickTime(room.id, lastTick);
+        }
+      }
+    }
 
     _isProcessingHello = true;
     // Only suppress the next source-change event if we're actually going to
@@ -518,6 +535,7 @@ class ServerSyncProvider extends ChangeNotifier {
         lightsOn: state.lightsOn,
         brightness: state.brightness,
         kelvin: state.kelvin,
+        tick: state.tick,
       );
     } finally {
       _receivingFromServer = false;
@@ -612,6 +630,7 @@ class ServerSyncProvider extends ChangeNotifier {
       _helloRooms = [];
       _lastHubInfos = [];
       _softOffBrightness = 1;
+      _rhythmIntervalSecs = 60;
       _triagePendingCount = 0;
       _triagePendingDevices = 0;
       _triagePendingRooms = 0;

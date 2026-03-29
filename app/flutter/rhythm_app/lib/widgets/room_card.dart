@@ -701,71 +701,30 @@ class _MiniCountdownPainter extends CustomPainter {
       oldDelegate.progress != progress || oldDelegate.color != color;
 }
 
-/// Breathing border around a room card when rhythm is active.
+/// Solid border around a room card when rhythm is active.
 ///
-/// A rounded rect stroke that gently pulses in opacity,
-/// signaling "alive" without implying loading.
-class _RhythmBorderGlow extends StatefulWidget {
+/// Fades in/out smoothly when rhythm state changes.
+class _RhythmBorderGlow extends StatelessWidget {
   final bool active;
   final Color color;
 
   const _RhythmBorderGlow({required this.active, required this.color});
 
   @override
-  State<_RhythmBorderGlow> createState() => _RhythmBorderGlowState();
-}
-
-class _RhythmBorderGlowState extends State<_RhythmBorderGlow>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _pulse;
-
-  @override
-  void initState() {
-    super.initState();
-    _pulse = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 2500),
-    );
-    if (widget.active) _pulse.repeat(reverse: true);
-  }
-
-  @override
-  void didUpdateWidget(_RhythmBorderGlow old) {
-    super.didUpdateWidget(old);
-    if (old.active != widget.active) {
-      if (widget.active) {
-        _pulse.repeat(reverse: true);
-      } else {
-        _pulse.animateTo(0.0,
-            duration: const Duration(milliseconds: 500),
-            curve: Curves.easeOut);
-      }
-    }
-  }
-
-  @override
-  void dispose() {
-    _pulse.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _pulse,
-      builder: (context, _) {
-        final v = _pulse.value;
-        final alpha = 0.35 + v * 0.45; // breathes 0.35 → 0.80
-        return DecoratedBox(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(
-              color: widget.color.withValues(alpha: alpha),
-              width: 2,
-            ),
+    return AnimatedOpacity(
+      opacity: active ? 1.0 : 0.0,
+      duration: Duration(milliseconds: active ? 400 : 500),
+      curve: Curves.easeInOut,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: color.withValues(alpha: 0.6),
+            width: 2,
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 }

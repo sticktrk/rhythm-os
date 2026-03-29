@@ -157,6 +157,9 @@ class RoomProvider extends ChangeNotifier {
   /// Per-room kelvin from server (effective color temperature after offsets).
   final Map<String, int> _roomKelvin = {};
 
+  /// Per-room timestamp of the last rhythm tick from the server.
+  final Map<String, DateTime> _lastTickTime = {};
+
   /// Fires after rooms from a source are added or cleared.
   final StreamController<RoomSourceDto> _sourceChangedController =
       StreamController<RoomSourceDto>.broadcast();
@@ -191,6 +194,14 @@ class RoomProvider extends ChangeNotifier {
 
   /// Get server-computed kelvin for a room, or null if not available.
   int? getKelvin(String roomId) => _roomKelvin[roomId];
+
+  /// Get the timestamp of the last rhythm tick for a room.
+  DateTime? getLastTickTime(String roomId) => _lastTickTime[roomId];
+
+  /// Set the last tick time for a room (bootstrap from server hello).
+  void setLastTickTime(String roomId, DateTime time) {
+    _lastTickTime[roomId] = time;
+  }
 
   /// Whether lights are on in a room (falls back to room.lightsOn).
   bool isLightsOn(String roomId) {
@@ -428,10 +439,16 @@ class RoomProvider extends ChangeNotifier {
     bool? lightsOn,
     int? brightness,
     int? kelvin,
+    bool tick = false,
   }) async {
     bool changed = false;
     final room = getRoom(roomId);
     if (room == null) return;
+
+    if (tick) {
+      _lastTickTime[roomId] = DateTime.now();
+      changed = true;
+    }
 
     if (room.rhythmEnabled != rhythmEnabled) {
       _state = runnerSetRoomRhythmEnabled(state: _state, roomId: roomId, rhythmEnabled: rhythmEnabled);
@@ -636,6 +653,7 @@ class RoomProvider extends ChangeNotifier {
     _roomIdleState.clear();
     _roomBrightness.clear();
     _roomKelvin.clear();
+    _lastTickTime.clear();
     notifyListeners();
   }
 
@@ -656,6 +674,7 @@ class RoomProvider extends ChangeNotifier {
     _roomIdleState.clear();
     _roomBrightness.clear();
     _roomKelvin.clear();
+    _lastTickTime.clear();
     await _save();
     // Update room count analytics property
     AnalyticsService().setRoomCount(0);

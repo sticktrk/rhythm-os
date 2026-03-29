@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
@@ -77,7 +78,7 @@ class RoomSettingsSheet extends StatelessWidget {
               ),
             ),
             // Room orb preview with live CCT + light output
-            Selector<RoomProvider, (int?, int?, bool, bool)>(
+            Selector<RoomProvider, (int?, int?, bool, bool, DateTime?)>(
               selector: (_, rp) {
                 final r = rp.getRoom(room.id);
                 return (
@@ -85,10 +86,12 @@ class RoomSettingsSheet extends StatelessWidget {
                   rp.getKelvin(room.id),
                   r?.lightsOn ?? false,
                   r?.rhythmEnabled ?? false,
+                  rp.getLastTickTime(room.id),
                 );
               },
               builder: (context, data, _) {
-                final (brightness, kelvin, lightsOn, rhythmEnabled) = data;
+                final (brightness, kelvin, lightsOn, rhythmEnabled, lastTickTime) = data;
+                final intervalSecs = context.read<ServerSyncProvider>().rhythmIntervalSecs;
                 return _AnimatedRoomOrb(
                   roomId: room.id,
                   roomName: room.name,
@@ -96,6 +99,8 @@ class RoomSettingsSheet extends StatelessWidget {
                   kelvin: kelvin,
                   lightsOn: lightsOn,
                   rhythmEnabled: rhythmEnabled,
+                  rhythmIntervalSecs: intervalSecs,
+                  lastTickTime: lastTickTime,
                 );
               },
             ),
@@ -707,10 +712,10 @@ class _ToggleSwitch extends StatelessWidget {
   }
 }
 
-/// Animated room orb with orbiting arcs when rhythm is active.
+/// Animated room orb with countdown ring when rhythm is active.
 ///
 /// Tap to toggle rhythm on/off. Shows:
-/// - Active: rotating comet-tail arcs + breathing glow + "Rhythm" label
+/// - Active: depleting countdown ring + breathing glow + "Rhythm" label
 /// - Paused: static orb + "Paused ▶" hint
 /// - Off: grey circle + "Off"
 class _AnimatedRoomOrb extends StatefulWidget {
@@ -720,6 +725,8 @@ class _AnimatedRoomOrb extends StatefulWidget {
   final int? kelvin;
   final bool lightsOn;
   final bool rhythmEnabled;
+  final int rhythmIntervalSecs;
+  final DateTime? lastTickTime;
 
   const _AnimatedRoomOrb({
     required this.roomId,
@@ -728,6 +735,8 @@ class _AnimatedRoomOrb extends StatefulWidget {
     required this.kelvin,
     required this.lightsOn,
     required this.rhythmEnabled,
+    required this.rhythmIntervalSecs,
+    this.lastTickTime,
   });
 
   @override
@@ -736,20 +745,18 @@ class _AnimatedRoomOrb extends StatefulWidget {
 
 class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb>
     with TickerProviderStateMixin {
-  late AnimationController _rotationController;
+  late Ticker _ticker;
   late AnimationController _pulseController;
   late AnimationController _activeController;
   bool _pressed = false;
+  double _countdownProgress = 1.0;
 
   bool get _active => widget.rhythmEnabled && widget.lightsOn;
 
   @override
   void initState() {
     super.initState();
-    _rotationController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 8),
-    );
+    _ticker = createTicker(_onTick);
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 3000),
@@ -761,14 +768,31 @@ class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb>
     );
     _activeController.addStatusListener(_onActiveStatus);
     if (_active) {
-      _rotationController.repeat();
+      _ticker.start();
       _pulseController.repeat(reverse: true);
+    }
+  }
+
+  void _onTick(Duration elapsed) {
+    final lastTick = widget.lastTickTime;
+    if (lastTick == null || widget.rhythmIntervalSecs <= 0) {
+      if (_countdownProgress != 1.0) {
+        setState(() => _countdownProgress = 1.0);
+      }
+      return;
+    }
+    final elapsedSecs =
+        DateTime.now().difference(lastTick).inMilliseconds / 1000.0;
+    final progress =
+        (1.0 - elapsedSecs / widget.rhythmIntervalSecs).clamp(0.0, 1.0);
+    if ((_countdownProgress - progress).abs() > 0.001) {
+      setState(() => _countdownProgress = progress);
     }
   }
 
   void _onActiveStatus(AnimationStatus status) {
     if (status == AnimationStatus.dismissed) {
-      _rotationController.stop();
+      _ticker.stop();
       _pulseController.stop();
     }
   }
@@ -784,7 +808,7 @@ class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb>
 
   void _syncAnimations() {
     if (_active) {
-      if (!_rotationController.isAnimating) _rotationController.repeat();
+      if (!_ticker.isActive) _ticker.start();
       if (!_pulseController.isAnimating) {
         _pulseController.repeat(reverse: true);
       }
@@ -810,7 +834,7 @@ class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb>
   @override
   void dispose() {
     _activeController.removeStatusListener(_onActiveStatus);
-    _rotationController.dispose();
+    _ticker.dispose();
     _pulseController.dispose();
     _activeController.dispose();
     super.dispose();
@@ -846,7 +870,6 @@ class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb>
               height: 100,
               child: AnimatedBuilder(
                 animation: Listenable.merge([
-                  _rotationController,
                   _pulseController,
                   _activeController,
                 ]),
@@ -857,10 +880,10 @@ class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb>
                   final extraSpread = activeT * pulse * 3.0;
 
                   return CustomPaint(
-                    painter: _OrbitArcPainter(
-                      rotation: _rotationController.value,
+                    foregroundPainter: _CountdownRingPainter(
+                      progress: _countdownProgress,
                       color: cctColor,
-                      opacity: activeT * (0.5 + pulse * 0.4),
+                      opacity: activeT,
                     ),
                     child: Center(
                       child: Container(
@@ -1017,20 +1040,14 @@ class _RhythmStatusLabel extends StatelessWidget {
   }
 }
 
-/// Paints orbiting gradient arcs (comet tails) around the room orb.
-class _OrbitArcPainter extends CustomPainter {
-  final double rotation;
+/// Countdown ring that depletes over the rhythm interval.
+class _CountdownRingPainter extends CustomPainter {
+  final double progress; // 1.0 = full, 0.0 = empty
   final Color color;
   final double opacity;
 
-  static const _arcs = [
-    (offset: 0.0, sweepDeg: 80.0, widthFactor: 1.0, alphaFactor: 1.0),
-    (offset: 2.5, sweepDeg: 50.0, widthFactor: 0.8, alphaFactor: 0.55),
-    (offset: 4.3, sweepDeg: 30.0, widthFactor: 0.65, alphaFactor: 0.3),
-  ];
-
-  _OrbitArcPainter({
-    required this.rotation,
+  _CountdownRingPainter({
+    required this.progress,
     required this.color,
     required this.opacity,
   });
@@ -1041,55 +1058,37 @@ class _OrbitArcPainter extends CustomPainter {
 
     final center = Offset(size.width / 2, size.height / 2);
     final radius = size.width / 2 - 3;
-    final rect = Rect.fromCircle(center: center, radius: radius);
-    final baseAngle = rotation * 2 * math.pi;
+    const strokeWidth = 3.0;
 
-    for (final arc in _arcs) {
-      _drawFadingArc(
-        canvas,
-        rect,
-        baseAngle + arc.offset,
-        arc.sweepDeg,
-        2.5 * arc.widthFactor,
-        opacity * arc.alphaFactor,
-      );
-    }
-  }
-
-  void _drawFadingArc(
-    Canvas canvas,
-    Rect rect,
-    double startAngle,
-    double sweepDegrees,
-    double width,
-    double alpha,
-  ) {
-    const segments = 10;
-    final sweepRad = sweepDegrees * math.pi / 180;
-    final segmentSweep = sweepRad / segments;
-
-    for (int i = 0; i < segments; i++) {
-      final t = i / segments;
-      final segAlpha = (alpha * (1.0 - t * 0.85)).clamp(0.0, 1.0);
-      final paint = Paint()
-        ..color = color.withValues(alpha: segAlpha)
+    // Background track
+    canvas.drawCircle(
+      center,
+      radius,
+      Paint()
+        ..color = color.withValues(alpha: 0.15 * opacity)
         ..style = PaintingStyle.stroke
-        ..strokeWidth = width
-        ..strokeCap = StrokeCap.round;
+        ..strokeWidth = strokeWidth,
+    );
 
+    // Depleting arc — starts at 12-o'clock, sweeps clockwise
+    if (progress > 0.005) {
       canvas.drawArc(
-        rect,
-        startAngle + i * segmentSweep,
-        segmentSweep + 0.015,
+        Rect.fromCircle(center: center, radius: radius),
+        -math.pi / 2,
+        2 * math.pi * progress,
         false,
-        paint,
+        Paint()
+          ..color = color.withValues(alpha: 0.7 * opacity)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = strokeWidth
+          ..strokeCap = StrokeCap.round,
       );
     }
   }
 
   @override
-  bool shouldRepaint(_OrbitArcPainter old) =>
-      rotation != old.rotation ||
+  bool shouldRepaint(_CountdownRingPainter old) =>
+      progress != old.progress ||
       opacity != old.opacity ||
       color != old.color;
 }
