@@ -97,9 +97,13 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         path: "/api/ota/version",
         methods: &["GET"],
     },
-    // Device pairing
+    // Device pairing / unpairing
     SharedRoute {
         path: "/api/devices/pair",
+        methods: &["POST"],
+    },
+    SharedRoute {
+        path: "/api/devices/unpair",
         methods: &["POST"],
     },
     // Canonical device management

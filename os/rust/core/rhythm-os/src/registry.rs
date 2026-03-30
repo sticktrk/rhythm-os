@@ -5,12 +5,12 @@
 //! `DeviceRegistry` traits from rhythm-core.
 //!
 //! Replaces the per-hub registries (`HueDeviceRegistry`, `HaDeviceRegistry`)
-//! with a single concrete struct parameterized by `RoomSource`.
+//! with a single concrete struct.
 
 use std::collections::HashMap;
 
 use log::info;
-use rhythm_core::room::{Room, RoomSource};
+use rhythm_core::room::Room;
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::{DeviceRegistry, HubRegistry};
 use serde::{Deserialize, Serialize};
@@ -68,8 +68,7 @@ pub struct RegistrySnapshot {
 
 /// Unified registry mapping hub resources for event routing and light control.
 ///
-/// Works for all hub types (Hue, HA, etc.). The `room_source` field determines
-/// the `RoomSource` tag on rooms, and `default_grouped_light_to_room_id`
+/// Works for all hub types (Hue, HA, etc.). `default_grouped_light_to_room_id`
 /// controls whether `upsert_room` defaults the grouped_light_id to the room_id
 /// (true for HA where area_id serves as grouped_light_id).
 pub struct HubDeviceRegistry {
@@ -87,8 +86,6 @@ pub struct HubDeviceRegistry {
     motion_timeouts: HashMap<String, u64>,
     /// area_id -> list of light entity_ids (HA-specific, empty on Hue)
     area_lights: HashMap<String, Vec<String>>,
-    /// Room source tag for rhythm-core Room objects.
-    room_source: RoomSource,
     /// When true, `upsert_room` defaults grouped_light_id to room_id (HA behavior).
     /// When false, defaults to empty string (Hue behavior).
     default_grouped_light_to_room_id: bool,
@@ -97,8 +94,8 @@ pub struct HubDeviceRegistry {
 }
 
 impl HubDeviceRegistry {
-    /// Create a new empty registry with the given room source.
-    pub fn new(room_source: RoomSource) -> Self {
+    /// Create a new empty registry.
+    pub fn new() -> Self {
         Self {
             buttons: HashMap::new(),
             device_rooms: HashMap::new(),
@@ -107,15 +104,14 @@ impl HubDeviceRegistry {
             device_types: HashMap::new(),
             motion_timeouts: HashMap::new(),
             area_lights: HashMap::new(),
-            room_source,
             default_grouped_light_to_room_id: false,
             dirty: false,
         }
     }
 
     /// Create a new registry with options.
-    pub fn with_options(room_source: RoomSource, default_grouped_light_to_room_id: bool) -> Self {
-        let mut reg = Self::new(room_source);
+    pub fn with_options(default_grouped_light_to_room_id: bool) -> Self {
+        let mut reg = Self::new();
         reg.default_grouped_light_to_room_id = default_grouped_light_to_room_id;
         reg
     }
@@ -449,7 +445,7 @@ impl HubDeviceRegistry {
     pub fn rooms(&self) -> Vec<Room> {
         self.room_names
             .iter()
-            .map(|(id, name)| Room::with_source(id.clone(), name.clone(), self.room_source.clone()))
+            .map(|(id, name)| Room::new(id.clone(), name.clone()))
             .collect()
     }
 
@@ -539,7 +535,7 @@ impl HubDeviceRegistry {
 
 impl Default for HubDeviceRegistry {
     fn default() -> Self {
-        Self::new(RoomSource::Hue)
+        Self::new()
     }
 }
 
@@ -665,7 +661,6 @@ impl DeviceRegistry for HubDeviceRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rhythm_core::room::RoomSource;
     use rhythm_core::{DeviceRegistry, HubRegistry};
 
     // =========================================================================
@@ -674,7 +669,7 @@ mod tests {
 
     #[test]
     fn new_creates_empty_registry() {
-        let reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let reg = HubDeviceRegistry::new();
         assert!(!reg.has_rooms());
         assert!(reg.rooms().is_empty());
         assert_eq!(reg.buttons.len(), 0);
@@ -682,19 +677,18 @@ mod tests {
     }
 
     #[test]
-    fn default_uses_hue_source() {
+    fn default_creates_empty_registry() {
         let reg = HubDeviceRegistry::default();
-        // Upsert a room so we can inspect its source via rooms()
         let mut reg = reg;
         reg.upsert_room("r1", "Room 1", "gl1", &[]);
         let rooms = reg.rooms();
         assert_eq!(rooms.len(), 1);
-        assert_eq!(rooms[0].source, RoomSource::Hue);
+        assert_eq!(rooms[0].id, "r1");
     }
 
     #[test]
     fn with_options_ha_defaults_gl_to_room_id() {
-        let mut reg = HubDeviceRegistry::with_options(RoomSource::HomeAssistant, true);
+        let mut reg = HubDeviceRegistry::with_options(true);
         reg.upsert_room("area_kitchen", "Kitchen", "", &[]);
         // With default_grouped_light_to_room_id=true, empty gl should default to room_id
         assert_eq!(
@@ -709,7 +703,7 @@ mod tests {
 
     #[test]
     fn upsert_room_basic() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         let devices = vec!["light1".to_string(), "light2".to_string()];
         reg.upsert_room("r1", "Living Room", "gl_r1", &devices);
 
@@ -722,7 +716,7 @@ mod tests {
 
     #[test]
     fn upsert_room_update_name() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         reg.upsert_room("r1", "Old Name", "gl1", &[]);
         reg.upsert_room("r1", "New Name", "gl1", &[]);
         assert_eq!(reg.room_names.get("r1").unwrap(), "New Name");
@@ -730,7 +724,7 @@ mod tests {
 
     #[test]
     fn upsert_room_empty_gl_hue() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         reg.upsert_room("r1", "Room", "", &[]);
         // Hue mode: empty gl defaults to empty string, so get_grouped_light_id returns None
         assert_eq!(reg.get_grouped_light_id("r1"), None);
@@ -740,7 +734,7 @@ mod tests {
 
     #[test]
     fn upsert_room_empty_gl_ha() {
-        let mut reg = HubDeviceRegistry::with_options(RoomSource::HomeAssistant, true);
+        let mut reg = HubDeviceRegistry::with_options(true);
         reg.upsert_room("area1", "Area 1", "", &[]);
         // HA mode: empty gl defaults to room_id
         assert_eq!(reg.get_grouped_light_id("area1"), Some("area1".to_string()));
@@ -748,7 +742,7 @@ mod tests {
 
     #[test]
     fn upsert_room_preserves_existing_gl() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         reg.upsert_room("r1", "Room", "gl_original", &[]);
         // Re-upsert with empty gl should preserve existing
         reg.upsert_room("r1", "Room", "", &[]);
@@ -760,7 +754,7 @@ mod tests {
 
     #[test]
     fn upsert_room_replaces_device_mappings() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         let devices_v1 = vec!["light_a".to_string(), "light_b".to_string()];
         reg.upsert_room("r1", "Room", "gl1", &devices_v1);
 
@@ -776,7 +770,7 @@ mod tests {
 
     #[test]
     fn upsert_room_preserves_button_devices() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         let lights = vec!["light1".to_string()];
         reg.upsert_room("r1", "Room", "gl1", &lights);
 
@@ -795,7 +789,7 @@ mod tests {
 
     #[test]
     fn upsert_room_preserves_motion_devices() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         let lights = vec!["light1".to_string()];
         reg.upsert_room("r1", "Room", "gl1", &lights);
 
@@ -812,7 +806,7 @@ mod tests {
 
     #[test]
     fn upsert_room_syncs_area_lights() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         let devices = vec!["light1".to_string(), "light2".to_string()];
         reg.upsert_room("r1", "Room", "gl1", &devices);
 
@@ -828,7 +822,7 @@ mod tests {
 
     #[test]
     fn remove_room_clears_all() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         let devices = vec!["light1".to_string()];
         reg.upsert_room("r1", "Room", "gl1", &devices);
         reg.upsert_device("ms1", "r1", &[], DeviceType::Motion);
@@ -852,7 +846,7 @@ mod tests {
 
     #[test]
     fn upsert_device_with_buttons() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         let buttons = vec![("btn1".to_string(), 1u8), ("btn2".to_string(), 2u8)];
         reg.upsert_device("dev1", "r1", &buttons, DeviceType::Button);
 
@@ -864,7 +858,7 @@ mod tests {
 
     #[test]
     fn remove_device_clears_buttons_and_type() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         let buttons = vec![("btn1".to_string(), 1u8), ("btn2".to_string(), 2u8)];
         reg.upsert_device("dev1", "r1", &buttons, DeviceType::Button);
 
@@ -878,7 +872,7 @@ mod tests {
 
     #[test]
     fn upsert_device_replaces_buttons() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         let buttons_v1 = vec![("btn_old".to_string(), 1u8)];
         reg.upsert_device("dev1", "r1", &buttons_v1, DeviceType::Button);
 
@@ -902,7 +896,7 @@ mod tests {
 
     #[test]
     fn get_room_for_button_found() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         reg.upsert_device(
             "dev1",
             "r1",
@@ -915,13 +909,13 @@ mod tests {
 
     #[test]
     fn get_room_for_button_not_found() {
-        let reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let reg = HubDeviceRegistry::new();
         assert_eq!(reg.get_room_for_button("nonexistent"), None);
     }
 
     #[test]
     fn get_room_for_grouped_light_forward_reverse() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         reg.upsert_room("r1", "Room 1", "gl_abc", &[]);
 
         // Forward: room -> gl
@@ -935,7 +929,7 @@ mod tests {
 
     #[test]
     fn get_control_id() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         reg.upsert_device(
             "dev1",
             "r1",
@@ -949,7 +943,7 @@ mod tests {
 
     #[test]
     fn get_device_for_button() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         reg.upsert_device(
             "dev_xyz",
             "r1",
@@ -969,7 +963,7 @@ mod tests {
 
     #[test]
     fn motion_sensor_crud() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
 
         // Upsert as Motion device
         reg.upsert_device("ms1", "r1", &[], DeviceType::Motion);
@@ -991,7 +985,7 @@ mod tests {
 
     #[test]
     fn rooms_with_motion_sensors_deduplicates() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         reg.upsert_device("ms1", "r1", &[], DeviceType::Motion);
         reg.upsert_device("ms2", "r1", &[], DeviceType::Motion);
         reg.upsert_device("ms3", "r2", &[], DeviceType::Motion);
@@ -1004,7 +998,7 @@ mod tests {
 
     #[test]
     fn devices_for_room_typed() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         reg.upsert_device("btn1", "r1", &[("b1".to_string(), 1)], DeviceType::Button);
         reg.upsert_device("ms1", "r1", &[], DeviceType::Motion);
         reg.upsert_room("r1", "Room", "gl1", &["light1".to_string()]);
@@ -1025,7 +1019,7 @@ mod tests {
 
     #[test]
     fn motion_timeout_crud() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
 
         reg.upsert_motion_timeout("r1", 60);
         reg.upsert_motion_timeout("r2", 300);
@@ -1047,7 +1041,7 @@ mod tests {
 
     #[test]
     fn room_matches_exact() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         let devices = vec!["light1".to_string(), "light2".to_string()];
         reg.upsert_room("r1", "Living Room", "gl1", &devices);
 
@@ -1056,7 +1050,7 @@ mod tests {
 
     #[test]
     fn room_matches_different_name() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         let devices = vec!["light1".to_string()];
         reg.upsert_room("r1", "Living Room", "gl1", &devices);
 
@@ -1065,7 +1059,7 @@ mod tests {
 
     #[test]
     fn room_matches_excludes_managed_devices() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         let lights = vec!["light1".to_string()];
         reg.upsert_room("r1", "Room", "gl1", &lights);
         // Add a switch device with buttons
@@ -1084,7 +1078,7 @@ mod tests {
 
     #[test]
     fn device_matches_correct() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         let buttons = vec![("btn1".to_string(), 1u8), ("btn2".to_string(), 2u8)];
         reg.upsert_device("dev1", "r1", &buttons, DeviceType::Button);
 
@@ -1093,7 +1087,7 @@ mod tests {
 
     #[test]
     fn device_matches_wrong_room() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         let buttons = vec![("btn1".to_string(), 1u8)];
         reg.upsert_device("dev1", "r1", &buttons, DeviceType::Button);
 
@@ -1102,7 +1096,7 @@ mod tests {
 
     #[test]
     fn device_matches_wrong_type() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         reg.upsert_device("dev1", "r1", &[], DeviceType::Motion);
 
         assert!(!reg.device_matches("dev1", "r1", &[], &DeviceType::Button));
@@ -1115,7 +1109,7 @@ mod tests {
 
     #[test]
     fn snapshot_restore_roundtrip() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         reg.upsert_room("r1", "Living Room", "gl1", &["light1".to_string()]);
         reg.upsert_room("r2", "Bedroom", "gl2", &["light2".to_string()]);
         reg.upsert_device(
@@ -1130,7 +1124,7 @@ mod tests {
 
         let snapshot = reg.snapshot();
 
-        let mut restored = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut restored = HubDeviceRegistry::new();
         restored.restore_from_snapshot(snapshot);
 
         // Rooms
@@ -1167,7 +1161,7 @@ mod tests {
 
     #[test]
     fn snapshot_only_includes_typed_devices() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         reg.upsert_room(
             "r1",
             "Room",
@@ -1198,7 +1192,7 @@ mod tests {
 
     #[test]
     fn snapshot_json_via_hub_registry() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         reg.upsert_room("r1", "Test Room", "gl1", &[]);
 
         let json = HubRegistry::snapshot_json(&reg);
@@ -1220,7 +1214,7 @@ mod tests {
 
     #[test]
     fn device_registry_register_auto_creates_room() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         DeviceRegistry::register_device(&mut reg, "dev1", "auto_room");
 
         // register_device auto-creates room_names entry with room_id as name
@@ -1233,7 +1227,7 @@ mod tests {
 
     #[test]
     fn device_registry_unregister() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         DeviceRegistry::register_device(&mut reg, "dev1", "r1");
         assert!(DeviceRegistry::get_room_for_device(&reg, "dev1").is_some());
 
@@ -1243,7 +1237,7 @@ mod tests {
 
     #[test]
     fn device_registry_devices_for_room() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
         reg.upsert_room(
             "r1",
             "Room",
@@ -1266,7 +1260,7 @@ mod tests {
 
     #[test]
     fn has_rooms_and_rooms_list() {
-        let mut reg = HubDeviceRegistry::new(RoomSource::Hue);
+        let mut reg = HubDeviceRegistry::new();
 
         assert!(!reg.has_rooms());
         assert!(DeviceRegistry::list_rooms(&reg).is_empty());

@@ -808,11 +808,10 @@ impl DeviceEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rhythm_core::room::RoomSource;
 
     #[test]
     fn test_sync_areas_to_registry_creates_rooms() {
-        let mut registry = HaDeviceRegistry::with_options(RoomSource::HomeAssistant, true);
+        let mut registry = HaDeviceRegistry::with_options(true);
         let areas = vec![
             HaArea {
                 area_id: "living_room".to_string(),
@@ -841,7 +840,7 @@ mod tests {
 
     #[test]
     fn test_sync_areas_idempotent() {
-        let mut registry = HaDeviceRegistry::with_options(RoomSource::HomeAssistant, true);
+        let mut registry = HaDeviceRegistry::with_options(true);
         let areas = vec![HaArea {
             area_id: "kitchen".to_string(),
             name: "Kitchen".to_string(),
@@ -859,7 +858,7 @@ mod tests {
 
     #[test]
     fn test_sync_areas_updates_name() {
-        let mut registry = HaDeviceRegistry::with_options(RoomSource::HomeAssistant, true);
+        let mut registry = HaDeviceRegistry::with_options(true);
 
         // First sync
         let areas_v1 = vec![HaArea {

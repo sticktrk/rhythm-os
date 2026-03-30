@@ -26,8 +26,6 @@ use rhythm_os::hub::{ActiveHub, HubEvent, HubType};
 use rhythm_os::registry::RegistrySnapshot;
 use rhythm_os::state::SharedState;
 
-use rhythm_core::room::RoomSource;
-
 /// HA hub type constant.
 pub const HA_HUB_TYPE: &str = "homeassistant";
 
@@ -68,7 +66,6 @@ where
         state,
         HubType::new(HA_HUB_TYPE),
         hub_key,
-        RoomSource::HomeAssistant,
         true, // HA: grouped_light_id defaults to room_id (area_id)
         load_registry_snapshot,
         // hub_data_builder: create HaHubData from registry + cache

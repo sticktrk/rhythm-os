@@ -16,9 +16,9 @@ use serde::Serialize;
 #[derive(Clone, Debug, Serialize)]
 pub struct RoomRhythmState {
     pub id: String,
-    /// Which hub type this room belongs to (e.g. "hue", "homeassistant").
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hub_type: Option<String>,
+    /// Which hub types have lights in this room (e.g. ["hue"], ["hue", "matter"]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hub_types: Vec<String>,
     pub rhythm_enabled: bool,
     pub time_offset: f32,
     pub brightness_offset: f32,
@@ -281,7 +281,7 @@ mod tests {
     fn sample_rhythm_state() -> RoomRhythmState {
         RoomRhythmState {
             id: "room1".into(),
-            hub_type: Some("hue".into()),
+            hub_types: vec!["hue".into()],
             rhythm_enabled: true,
             time_offset: 5.0,
             brightness_offset: -10.0,

@@ -9,8 +9,6 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use log::info;
-use rhythm_core::room::RoomSource;
-
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::hub::{ActiveHub, HubEvent, HubType};
 use rhythm_os::registry::HubDeviceRegistry;
@@ -54,15 +52,16 @@ pub fn connect_matter<T: MatterTransport + 'static>(
         state,
         HubType::new("matter"),
         hub_key,
-        RoomSource::Other("matter".to_string()),
         true, // default_grouped_light_to_room_id: room_id IS the control target
         snapshot,
         // hub_data_builder: receives the registry Arc from connect_hub
         move |registry: Arc<Mutex<HubDeviceRegistry>>| -> Box<dyn std::any::Any + Send + Sync> {
             Box::new(Arc::new(MatterHubData {
+                #[cfg(feature = "desktop")]
+                transport: std::sync::OnceLock::new(),
                 registry,
                 fabric_id: "default".to_string(),
-                commissioned: commissioned_for_closure,
+                commissioned: std::sync::Mutex::new(commissioned_for_closure),
                 device_caps: std::sync::Mutex::new(HashMap::new()),
                 event_tx,
             }))
@@ -80,5 +79,55 @@ pub fn format_device_id(node_id: u64, endpoint: u16) -> String {
         format!("matter-{}", node_id)
     } else {
         format!("matter-{}-{}", node_id, endpoint)
+    }
+}
+
+/// Parse a device ID string back into `(node_id, endpoint)`.
+///
+/// Accepts `"matter-{node_id}"` (default endpoint 1) or
+/// `"matter-{node_id}-{endpoint}"`.
+pub fn parse_device_id(device_id: &str) -> Option<(u64, u16)> {
+    let rest = device_id.strip_prefix("matter-")?;
+    match rest.split_once('-') {
+        Some((node_str, ep_str)) => {
+            let node_id = node_str.parse::<u64>().ok()?;
+            let endpoint = ep_str.parse::<u16>().ok()?;
+            Some((node_id, endpoint))
+        }
+        None => {
+            let node_id = rest.parse::<u64>().ok()?;
+            Some((node_id, 1))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_simple_device_id() {
+        assert_eq!(parse_device_id("matter-100"), Some((100, 1)));
+    }
+
+    #[test]
+    fn parse_device_id_with_endpoint() {
+        assert_eq!(parse_device_id("matter-42-2"), Some((42, 2)));
+    }
+
+    #[test]
+    fn parse_invalid_prefix() {
+        assert_eq!(parse_device_id("hue-abc123"), None);
+    }
+
+    #[test]
+    fn parse_invalid_node_id() {
+        assert_eq!(parse_device_id("matter-abc"), None);
+    }
+
+    #[test]
+    fn roundtrip() {
+        assert_eq!(parse_device_id(&format_device_id(55, 1)), Some((55, 1)));
+        assert_eq!(parse_device_id(&format_device_id(55, 3)), Some((55, 3)));
     }
 }

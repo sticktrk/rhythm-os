@@ -326,6 +326,22 @@ pub trait ExternalLightHubIntegration: Send + Sync {
             self.hub_type()
         ))
     }
+
+    /// Unpair/decommission a device (Matter fabric removal, Zigbee leave).
+    ///
+    /// Default returns an error — hub-based integrations (Hue, HA) don't support
+    /// unpairing individual devices. Direct-connection integrations (Matter, Zigbee)
+    /// override this.
+    fn start_unpairing(
+        &self,
+        _state: &SharedState,
+        _params: &serde_json::Value,
+    ) -> Result<crate::pairing::UnpairingResult> {
+        Err(anyhow::anyhow!(
+            "Unpairing not supported for {}",
+            self.hub_type()
+        ))
+    }
 }
 
 /// Look up an integration by hub type string.
@@ -371,6 +387,12 @@ pub struct IntegrationCallbacks {
     /// Start a device pairing session (delegates to integration's `start_pairing`).
     pub start_pairing_fn: Arc<
         dyn Fn(&SharedState, &str, &serde_json::Value) -> Result<crate::pairing::PairingSession>
+            + Send
+            + Sync,
+    >,
+    /// Start a device unpairing session (delegates to integration's `start_unpairing`).
+    pub start_unpairing_fn: Arc<
+        dyn Fn(&SharedState, &str, &serde_json::Value) -> Result<crate::pairing::UnpairingResult>
             + Send
             + Sync,
     >,
@@ -453,12 +475,24 @@ pub fn integration_callbacks(
         },
     );
 
+    let start_unpairing_fn = Arc::new(
+        move |state: &SharedState,
+              hub_type: &str,
+              params: &serde_json::Value|
+              -> Result<crate::pairing::UnpairingResult> {
+            let integration = find_integration(integrations, hub_type)
+                .ok_or_else(|| anyhow::anyhow!("No integration for hub type '{}'", hub_type))?;
+            integration.start_unpairing(state, params)
+        },
+    );
+
     IntegrationCallbacks {
         ensure_runtime_fn,
         get_hub_provider_fn,
         #[cfg(feature = "desktop")]
         register_controller_fn,
         start_pairing_fn,
+        start_unpairing_fn,
     }
 }
 

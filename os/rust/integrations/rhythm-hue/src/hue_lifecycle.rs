@@ -19,8 +19,6 @@ use rhythm_os::hub::{ActiveHub, HubEvent, HubType};
 use rhythm_os::registry::{HubDeviceRegistry, RegistrySnapshot};
 use rhythm_os::state::SharedState;
 
-use rhythm_core::room::RoomSource;
-
 use crate::hub_state::HueHubData;
 
 // Re-export event functions for backward compatibility with callers
@@ -83,7 +81,6 @@ where
         state,
         HubType::new(HubType::HUE),
         hub_key,
-        RoomSource::Hue,
         false, // Hue: grouped_light_id does NOT default to room_id
         load_registry_snapshot,
         // hub_data_builder: create HueHubData from registry

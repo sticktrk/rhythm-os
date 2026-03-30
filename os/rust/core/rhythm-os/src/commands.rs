@@ -157,7 +157,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
     struct RoomInfo {
         topology_id: String, // stable Rhythm room ID (for engine + external API)
         name: String,
-        hub_type: Option<String>,
+        hub_types: Vec<String>,
         grouped_light_id: String,
         device_ids: Vec<String>,
         typed_devices: Vec<(String, DeviceType)>,
@@ -179,6 +179,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         listen_port,
         canonical_lookup,
         topo_map,
+        topo_hub_types,
         last_tick_epoch_ms,
     ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -285,6 +286,20 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             })
             .collect();
 
+        // Build topology_room_id → Vec<hub_type_string> for API responses.
+        let topo_hub_types: std::collections::HashMap<String, Vec<String>> = s
+            .topology
+            .rooms()
+            .map(|room| {
+                let types: Vec<String> = room
+                    .hub_targets
+                    .iter()
+                    .map(|t| t.hub_key.hub_type.as_str().to_string())
+                    .collect();
+                (room.id.clone(), types)
+            })
+            .collect();
+
         let last_tick_epoch_ms = s.last_tick_epoch_ms;
 
         (
@@ -302,6 +317,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             listen_port,
             canonical_lookup,
             topo_map,
+            topo_hub_types,
             last_tick_epoch_ms,
         )
     };
@@ -312,24 +328,20 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
     for reg_arc in &all_registries {
         if let Ok(reg) = reg_arc.lock() {
             for room in reg.rooms() {
-                let hub_type = match room.source {
-                    rhythm_core::room::RoomSource::Hue => Some("hue".to_string()),
-                    rhythm_core::room::RoomSource::HomeAssistant => {
-                        Some("homeassistant".to_string())
-                    }
-                    rhythm_core::room::RoomSource::Esp32 => Some("esp32".to_string()),
-                    _ => None,
-                };
                 // Translate hub-native room ID to topology ID for external API.
                 // Registry lookups above already used the hub-native ID.
                 let (topo_id, topo_name) = topo_map
                     .get(&room.id)
                     .map(|(id, name)| (id.clone(), name.clone()))
                     .unwrap_or_else(|| (room.id.clone(), room.name.clone()));
+                let hub_types = topo_hub_types
+                    .get(&topo_id)
+                    .cloned()
+                    .unwrap_or_default();
                 room_infos.push(RoomInfo {
                     topology_id: topo_id,
                     name: topo_name,
-                    hub_type,
+                    hub_types,
                     grouped_light_id: reg.get_grouped_light_id(&room.id).unwrap_or_default(),
                     device_ids: reg.devices_for_room(&room.id),
                     typed_devices: reg.devices_for_room_typed(&room.id),
@@ -347,7 +359,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
                 room_infos.push(RoomInfo {
                     topology_id: room.id.clone(),
                     name: room.name.clone(),
-                    hub_type: None,
+                    hub_types: vec![],
                     grouped_light_id: String::new(),
                     device_ids: Vec::new(),
                     typed_devices: Vec::new(),
@@ -505,7 +517,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         rooms.push(RoomFullState {
             rhythm: RoomRhythmState {
                 id: info.topology_id.clone(),
-                hub_type: info.hub_type.clone(),
+                hub_types: info.hub_types.clone(),
                 rhythm_enabled,
                 time_offset,
                 brightness_offset: bri_offset,
@@ -612,7 +624,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
             };
             let rhythm = RoomRhythmState {
                 id: snap.id.clone(),
-                hub_type: None, // poll endpoint doesn't include hub_type
+                hub_types: vec![],
                 rhythm_enabled: snap.rhythm_enabled,
                 time_offset: snap.time_offset_minutes,
                 brightness_offset: snap.brightness_offset,
@@ -667,7 +679,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
             rooms.push(RoomPollState {
                 rhythm: RoomRhythmState {
                     id: room.id.clone(),
-                    hub_type: None,
+                    hub_types: vec![],
                     rhythm_enabled: room.rhythm_enabled,
                     time_offset: room.time_offset_minutes,
                     brightness_offset: room.brightness_offset,
@@ -728,7 +740,7 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
 
     Ok(RoomRhythmState {
         id: snap.id.clone(),
-        hub_type: None, // single-room queries don't include hub_type
+        hub_types: vec![],
         rhythm_enabled: snap.rhythm_enabled,
         time_offset: snap.time_offset_minutes,
         brightness_offset: snap.brightness_offset,
@@ -1495,6 +1507,35 @@ pub fn do_device_remove(
 
     persist_state(state);
     Ok(())
+}
+
+/// Soft-remove a device from the canonical registry by its native ID.
+///
+/// Looks up the canonical device via native ID + hub key, marks it as
+/// soft-removed (preserves the tombstone for dedup), and persists.
+pub fn do_canonical_soft_remove(state: &SharedState, device_id: &str, hub_key: &HubKey) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut s = match state.lock() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    // Find canonical ID by native ID
+    let canonical_id = s
+        .canonical_registry
+        .find_by_native_id(hub_key, device_id)
+        .map(|d| d.id.clone());
+
+    if let Some(id) = canonical_id {
+        if s.canonical_registry.soft_remove(&id, now) {
+            info!(target: "cmd", "canonical_soft_remove: {} (native={})", id, device_id);
+        }
+        persist_canonical(&s);
+    }
 }
 
 /// Set per-room motion timeout.
@@ -2269,18 +2310,84 @@ pub fn build_canonical_device(state: &SharedState, id: &str) -> Result<String> {
 }
 
 /// Assign a canonical device to a Rhythm room (or unassign with None).
+///
+/// Updates the canonical registry AND the topology so the composite routing
+/// includes hub targets for the device's endpoints in the assigned room.
 pub fn do_canonical_assign_room(
     state: &SharedState,
     device_id: &str,
     room_id: Option<&str>,
 ) -> Result<()> {
+    use crate::topology::HubControlTarget;
+
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    if s.canonical_registry.assign_room(device_id, room_id) {
-        persist_canonical(&s);
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!("Device not found: {}", device_id))
+
+    // Snapshot endpoints, name, and old room before mutating.
+    let device = s
+        .canonical_registry
+        .get(device_id)
+        .ok_or_else(|| anyhow::anyhow!("Device not found: {}", device_id))?;
+    let endpoints: Vec<_> = device.endpoints.clone();
+    let device_name = device.name.clone();
+    let old_room_id = device.room_id.clone();
+
+    if !s.canonical_registry.assign_room(device_id, room_id) {
+        return Err(anyhow::anyhow!("Device not found: {}", device_id));
     }
+
+    // Remove hub targets from the old room (if any).
+    if let Some(old_id) = &old_room_id {
+        for ep in &endpoints {
+            if let Some(room) = s.topology.get_mut(old_id) {
+                room.remove_hub_target(&ep.hub_key, &ep.native_id);
+            }
+        }
+    }
+
+    // Add hub targets to the new room and update hub device registries.
+    if let Some(target_room_id) = room_id {
+        for ep in &endpoints {
+            if let Some(room) = s.topology.get_mut(target_room_id) {
+                let target = HubControlTarget {
+                    hub_key: ep.hub_key.clone(),
+                    hub_room_id: ep.native_id.clone(),
+                    control_id: ep.native_id.clone(),
+                    light_device_ids: vec![ep.native_id.clone()],
+                    topology_aligned: false, // per-device addressing
+                };
+                room.upsert_hub_target(target);
+            }
+
+            // Update the hub's device registry so the device appears in /api/state.
+            // The state builder maps hub-native room IDs to topology IDs via hub_targets,
+            // so putting the device in a room named after its native_id works correctly.
+            if let Some(hub) = s.hubs.get(&ep.hub_key) {
+                if let Some(reg) = &hub.registry {
+                    if let Ok(mut r) = reg.lock() {
+                        r.upsert_room(
+                            &ep.native_id,
+                            &device_name,
+                            &ep.native_id,
+                            &[ep.native_id.clone()],
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    persist_canonical(&s);
+    persist_topology(&s);
+    drop(s);
+
+    persist_registry(state);
+
+    #[cfg(feature = "desktop")]
+    {
+        rebuild_composite_routing(state);
+        emit_triage_changed(state);
+    }
+    Ok(())
 }
 
 /// Set the preferred endpoint for a canonical device.
@@ -2558,9 +2665,10 @@ pub fn build_triage_count(state: &SharedState) -> Result<String> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let triage = s.canonical_registry.triage();
     let json = format!(
-        r#"{{"devices":{},"rooms":{},"total":{}}}"#,
+        r#"{{"devices":{},"rooms":{},"unassigned":{},"total":{}}}"#,
         triage.pending_device_count(),
         triage.pending_room_count(),
+        triage.pending_unassigned_count(),
         triage.pending_count(),
     );
     Ok(json)
@@ -2576,15 +2684,17 @@ pub fn emit_triage_changed(state: &SharedState) {
             triage.pending_count(),
             triage.pending_device_count(),
             triage.pending_room_count(),
+            triage.pending_unassigned_count(),
         )
     });
-    if let Some((total, devices, rooms)) = counts {
+    if let Some((total, devices, rooms, unassigned)) = counts {
         crate::state::emit_server_event(
             state,
             crate::server_event::ServerEvent::TriageChanged {
                 pending_count: total,
                 pending_devices: devices,
                 pending_rooms: rooms,
+                pending_unassigned: unassigned,
             },
         );
     }
@@ -3164,7 +3274,7 @@ mod tests {
             make_snapshot("normal_room", false, false),
         ]));
         let mut registry =
-            crate::registry::HubDeviceRegistry::new(rhythm_core::room::RoomSource::HomeAssistant);
+            crate::registry::HubDeviceRegistry::new();
         registry.upsert_device("sensor1", "motion_room", &[], DeviceType::Motion);
         let registry: Arc<Mutex<dyn HubRegistry>> = Arc::new(Mutex::new(registry));
 
@@ -3610,7 +3720,7 @@ mod tests {
             make_snapshot("plain_room", false, false),
         ]));
         let mut registry =
-            crate::registry::HubDeviceRegistry::new(rhythm_core::room::RoomSource::HomeAssistant);
+            crate::registry::HubDeviceRegistry::new();
         registry.upsert_device("ms1", "sensor_room", &[], DeviceType::Motion);
         let registry: Arc<Mutex<dyn HubRegistry>> = Arc::new(Mutex::new(registry));
 

@@ -6,7 +6,6 @@
 use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex};
 
-use rhythm_core::room::RoomSource;
 use rhythm_core::runtime::handle::RuntimeHandle;
 use rhythm_core::runtime::orchestrator::RhythmRuntime;
 use rhythm_core::runtime::registry::SimpleDeviceRegistry;
@@ -29,15 +28,12 @@ fn make_ha_pipeline() -> (
     Arc<SpyHaTransport>,
 ) {
     let spy = Arc::new(SpyHaTransport::new());
-    let mut registry = HubDeviceRegistry::with_options(RoomSource::HomeAssistant, true);
+    let mut registry = HubDeviceRegistry::with_options(true);
 
     // Room (for HA, grouped_light_id defaults to room_id)
     registry.upsert_room("living_room", "Living Room", "living_room", &[]);
 
-    let controller_registry = Arc::new(Mutex::new(HubDeviceRegistry::with_options(
-        RoomSource::HomeAssistant,
-        true,
-    )));
+    let controller_registry = Arc::new(Mutex::new(HubDeviceRegistry::with_options(true)));
     controller_registry.lock().unwrap().upsert_room(
         "living_room",
         "Living Room",

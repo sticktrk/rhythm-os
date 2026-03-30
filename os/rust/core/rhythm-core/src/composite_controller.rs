@@ -29,6 +29,82 @@ use crate::controller::{LightControlError, LightControlResult, LightController};
 use crate::lighting::LightingCommand;
 use crate::room::Room;
 
+/// Block on a future from a non-async context (spawned OS threads).
+#[cfg(any(feature = "tokio", feature = "blocking"))]
+fn sync_block_on<F: std::future::Future>(f: F) -> F::Output {
+    futures::executor::block_on(f)
+}
+
+/// Minimal poll loop when no executor crate is available (tests).
+#[cfg(not(any(feature = "tokio", feature = "blocking")))]
+fn sync_block_on<F: std::future::Future>(f: F) -> F::Output {
+    let waker = std::task::Waker::noop();
+    let mut cx = std::task::Context::from_waker(&waker);
+    let mut f = std::pin::pin!(f);
+    loop {
+        match f.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(v) => return v,
+            std::task::Poll::Pending => std::thread::yield_now(),
+        }
+    }
+}
+
+/// Dispatch an operation to all hub targets in parallel on OS threads.
+///
+/// Uses `std::thread::scope` so each hub runs on its own thread — a slow hub
+/// (e.g. Matter with 10s connect timeout) doesn't block fast hubs (Hue, HA).
+/// Works from any context (tokio runtime, std::thread, etc.).
+///
+/// For single targets, runs inline without spawning a thread.
+fn dispatch_parallel<F>(
+    targets: &[(String, Arc<dyn LightController>, String)],
+    op: F,
+) -> bool
+where
+    F: Fn(Arc<dyn LightController>, &str) -> LightControlResult<()> + Sync + Send,
+{
+    if targets.len() <= 1 {
+        // Single target — no thread overhead needed
+        if let Some((key, controller, hub_room_id)) = targets.first() {
+            match op(controller.clone(), hub_room_id) {
+                Ok(()) => return true,
+                Err(e) => {
+                    warn!(target: "composite", "hub {} failed: {}", key, e);
+                    return false;
+                }
+            }
+        }
+        return false;
+    }
+
+    std::thread::scope(|s| {
+        let op = &op;
+        let handles: Vec<_> = targets
+            .iter()
+            .map(|(key, controller, hub_room_id)| {
+                let controller = controller.clone();
+                let key = key.as_str();
+                let hub_room_id = hub_room_id.as_str();
+                s.spawn(move || (key, op(controller, hub_room_id)))
+            })
+            .collect();
+
+        let mut any_ok = false;
+        for handle in handles {
+            match handle.join() {
+                Ok((_, Ok(()))) => any_ok = true,
+                Ok((key, Err(e))) => {
+                    warn!(target: "composite", "hub {} failed: {}", key, e);
+                }
+                Err(_) => {
+                    warn!(target: "composite", "hub dispatch thread panicked");
+                }
+            }
+        }
+        any_ok
+    })
+}
+
 /// A composite light controller that fans out commands to per-hub controllers.
 ///
 /// Interior mutability via [`RwLock`] allows adding/removing controllers
@@ -140,15 +216,9 @@ impl LightController for CompositeController {
             )));
         }
 
-        let mut any_ok = false;
-        for (key, controller, hub_room_id) in &targets {
-            match controller.turn_on(hub_room_id, command.clone()).await {
-                Ok(()) => any_ok = true,
-                Err(e) => {
-                    warn!(target: "composite", "turn_on '{}' via {}: {}", hub_room_id, key, e);
-                }
-            }
-        }
+        let any_ok = dispatch_parallel(&targets, |controller, hub_room_id| {
+            sync_block_on(controller.turn_on(hub_room_id, command.clone()))
+        });
 
         if any_ok {
             Ok(())
@@ -169,15 +239,9 @@ impl LightController for CompositeController {
             )));
         }
 
-        let mut any_ok = false;
-        for (key, controller, hub_room_id) in &targets {
-            match controller.turn_off(hub_room_id).await {
-                Ok(()) => any_ok = true,
-                Err(e) => {
-                    warn!(target: "composite", "turn_off '{}' via {}: {}", hub_room_id, key, e);
-                }
-            }
-        }
+        let any_ok = dispatch_parallel(&targets, |controller, hub_room_id| {
+            sync_block_on(controller.turn_off(hub_room_id))
+        });
 
         if any_ok {
             Ok(())
@@ -415,8 +479,8 @@ mod tests {
 
     // ── Single controller, single room ───────────────────────────────
 
-    #[test]
-    fn single_controller_turn_on() {
+    #[tokio::test]
+    async fn single_controller_turn_on() {
         let mock = Arc::new(MockController::new("hub_a"));
         let composite = CompositeController::new();
         composite.register_controller("hub_a", mock.clone());
@@ -426,12 +490,12 @@ mod tests {
         )]));
 
         let cmd = LightingCommand::new(80, 4000);
-        block_on(composite.turn_on("room1", cmd)).unwrap();
+        composite.turn_on("room1", cmd).await.unwrap();
         assert_eq!(mock.turn_on_count(), 1);
     }
 
-    #[test]
-    fn single_controller_turn_off() {
+    #[tokio::test]
+    async fn single_controller_turn_off() {
         let mock = Arc::new(MockController::new("hub_a"));
         let composite = CompositeController::new();
         composite.register_controller("hub_a", mock.clone());
@@ -440,14 +504,14 @@ mod tests {
             vec![("hub_a".to_string(), "room1".to_string())],
         )]));
 
-        block_on(composite.turn_off("room1")).unwrap();
+        composite.turn_off("room1").await.unwrap();
         assert_eq!(mock.turn_off_count(), 1);
     }
 
     // ── Cross-hub fan-out ────────────────────────────────────────────
 
-    #[test]
-    fn cross_hub_turn_on_fans_out() {
+    #[tokio::test]
+    async fn cross_hub_turn_on_fans_out() {
         let mock_a = Arc::new(MockController::new("hub_a"));
         let mock_b = Arc::new(MockController::new("hub_b"));
 
@@ -463,7 +527,7 @@ mod tests {
         )]));
 
         let cmd = LightingCommand::new(60, 3500);
-        block_on(composite.turn_on("hallway", cmd)).unwrap();
+        composite.turn_on("hallway", cmd).await.unwrap();
         assert_eq!(mock_a.turn_on_count(), 1);
         assert_eq!(mock_b.turn_on_count(), 1);
     }
@@ -518,8 +582,8 @@ mod tests {
 
     // ── Partial failure ──────────────────────────────────────────────
 
-    #[test]
-    fn partial_failure_still_succeeds() {
+    #[tokio::test]
+    async fn partial_failure_still_succeeds() {
         let mock_a = Arc::new(MockController::new("hub_a"));
         let mock_b = Arc::new(MockController::new("hub_b"));
         mock_a.set_fail(true); // hub_a will fail
@@ -537,13 +601,13 @@ mod tests {
 
         // Should succeed because hub_b works
         let cmd = LightingCommand::new(80, 4000);
-        block_on(composite.turn_on("room1", cmd)).unwrap();
+        composite.turn_on("room1", cmd).await.unwrap();
         assert_eq!(mock_a.turn_on_count(), 0); // failed
         assert_eq!(mock_b.turn_on_count(), 1); // succeeded
     }
 
-    #[test]
-    fn all_controllers_fail_returns_error() {
+    #[tokio::test]
+    async fn all_controllers_fail_returns_error() {
         let mock_a = Arc::new(MockController::new("hub_a"));
         mock_a.set_fail(true);
 
@@ -554,21 +618,21 @@ mod tests {
             vec![("hub_a".to_string(), "room1".to_string())],
         )]));
 
-        let result = block_on(composite.turn_on("room1", LightingCommand::new(50, 3000)));
+        let result = composite.turn_on("room1", LightingCommand::new(50, 3000)).await;
         assert!(result.is_err());
     }
 
     // ── Fallback: no routing entry → all controllers ─────────────────
 
-    #[test]
-    fn no_routing_entry_falls_back_to_all_controllers() {
+    #[tokio::test]
+    async fn no_routing_entry_falls_back_to_all_controllers() {
         let mock = Arc::new(MockController::new("hub_a"));
         let composite = CompositeController::new();
         composite.register_controller("hub_a", mock.clone());
         // No routing set — should fall back to all controllers
 
         let cmd = LightingCommand::new(80, 4000);
-        block_on(composite.turn_on("room1", cmd)).unwrap();
+        composite.turn_on("room1", cmd).await.unwrap();
         assert_eq!(mock.turn_on_count(), 1);
     }
 
@@ -576,18 +640,7 @@ mod tests {
 
     #[test]
     fn get_rooms_deduplicates() {
-        use crate::room::RoomSource;
-        let room = Room {
-            id: "room1".to_string(),
-            name: "Living Room".to_string(),
-            source: RoomSource::Hue,
-            rhythm_enabled: true,
-            disabled: false,
-            time_offset_minutes: 0.0,
-            brightness_offset: 0.0,
-            curve_config: None,
-            soft_off: false,
-        };
+        let room = Room::new("room1", "Living Room");
 
         let mock_a = Arc::new(MockController::with_rooms("hub_a", vec![room.clone()]));
         let mock_b = Arc::new(MockController::with_rooms("hub_b", vec![room]));

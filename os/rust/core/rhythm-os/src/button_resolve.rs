@@ -118,11 +118,10 @@ pub fn resolve_button_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rhythm_core::room::RoomSource;
     use rhythm_core::runtime::hub_registry::DeviceType;
 
     fn make_registry() -> Arc<Mutex<HubDeviceRegistry>> {
-        let mut reg = HubDeviceRegistry::with_options(RoomSource::Hue, false);
+        let mut reg = HubDeviceRegistry::with_options(false);
         reg.upsert_room("room-1", "Living Room", "gl-1", &[]);
         reg.upsert_device(
             "device-1",

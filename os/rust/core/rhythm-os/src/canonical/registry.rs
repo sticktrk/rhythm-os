@@ -185,6 +185,7 @@ impl CanonicalRegistry {
                             resolved_by: None,
                             created_at: now,
                             resolved_at: None,
+                            canonical_id: None,
                         };
                         self.triage.add(entry);
                         info!(target: "canonical",
@@ -217,6 +218,7 @@ impl CanonicalRegistry {
                     resolved_by: None,
                     created_at: now,
                     resolved_at: None,
+                    canonical_id: None,
                 };
                 self.triage.add(entry);
                 debug!(target: "canonical",
@@ -450,10 +452,56 @@ impl CanonicalRegistry {
     pub fn soft_remove(&mut self, device_id: &str, now: u64) -> bool {
         if let Some(device) = self.devices.get_mut(device_id) {
             device.removed_at = Some(now);
+            self.triage.resolve_unassigned_for_device(device_id, now);
             true
         } else {
             false
         }
+    }
+
+    /// Queue an UnassignedDevice triage entry for a device with no room.
+    ///
+    /// Call this when a device is known to have no room assignment and the user
+    /// should be prompted to assign one (e.g. after Matter commissioning).
+    /// No-op if the device already has a pending UnassignedDevice entry.
+    pub fn queue_unassigned(&mut self, device_id: &str, now: u64) {
+        if self.triage.has_unassigned_device(device_id) {
+            return;
+        }
+        let (name, device_type, hub_key, native_id) = match self.devices.get(device_id) {
+            Some(d) if !d.is_removed() => (
+                d.name.clone(),
+                d.device_type.clone(),
+                d.endpoints.first().map(|ep| ep.hub_key.clone()),
+                d.endpoints.first().map(|ep| ep.native_id.clone()),
+            ),
+            _ => return,
+        };
+        self.triage.add(super::triage::TriageEntry {
+            id: format!("unassigned-{}-{}", device_id, now),
+            kind: super::triage::TriageKind::UnassignedDevice,
+            discovered: super::triage::TriageDiscoveredDevice {
+                native_id: native_id.unwrap_or_default(),
+                name,
+                device_type,
+                room_id: String::new(),
+                room_name: String::new(),
+                manufacturer: None,
+                model: None,
+            },
+            hub_key: hub_key.unwrap_or_else(|| HubKey::new(
+                crate::hub::HubType::new("unknown"),
+                "unknown",
+            )),
+            candidate_matches: vec![],
+            room_binding: None,
+            confidence: 0,
+            status: super::triage::TriageStatus::Pending,
+            resolved_by: None,
+            created_at: now,
+            resolved_at: None,
+            canonical_id: Some(device_id.to_string()),
+        });
     }
 
     // ---- Query methods ----
@@ -510,13 +558,30 @@ impl CanonicalRegistry {
     }
 
     /// Assign a device to a room.
+    ///
+    /// When assigning to a room (`Some`), auto-resolves any pending
+    /// `UnassignedDevice` triage entry. When unassigning (`None`), queues
+    /// a new `UnassignedDevice` entry if one doesn't already exist.
     pub fn assign_room(&mut self, device_id: &str, room_id: Option<&str>) -> bool {
-        if let Some(device) = self.devices.get_mut(device_id) {
-            device.room_id = room_id.map(|s| s.to_string());
-            true
-        } else {
-            false
+        if !self.devices.contains_key(device_id) {
+            return false;
         }
+
+        let device = self.devices.get_mut(device_id).unwrap();
+        device.room_id = room_id.map(|s| s.to_string());
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        if room_id.is_some() {
+            self.triage.resolve_unassigned_for_device(device_id, now);
+        } else {
+            self.queue_unassigned(device_id, now);
+        }
+
+        true
     }
 
     /// Set the preferred endpoint for a device.
@@ -554,6 +619,13 @@ impl CanonicalRegistry {
     /// Remove a canonical device and clean up indices.
     pub fn remove_device(&mut self, device_id: &str) -> Option<CanonicalDevice> {
         if let Some(device) = self.devices.remove(device_id) {
+            // Auto-resolve any pending unassigned triage entry
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            self.triage.resolve_unassigned_for_device(device_id, now);
+
             // Clean up hw_index
             for hw_id in &device.hardware_ids {
                 self.hw_index.remove(hw_id.value());
@@ -566,6 +638,23 @@ impl CanonicalRegistry {
             Some(device)
         } else {
             None
+        }
+    }
+
+    /// Backfill UnassignedDevice triage entries for existing devices with no room.
+    ///
+    /// Called on startup after loading the registry to handle devices that
+    /// predate this feature.
+    pub fn backfill_unassigned_triage(&mut self, now: u64) {
+        let ids: Vec<_> = self
+            .devices
+            .values()
+            .filter(|d| d.room_id.is_none() && !d.is_removed())
+            .map(|d| d.id.clone())
+            .collect();
+
+        for id in ids {
+            self.queue_unassigned(&id, now);
         }
     }
 }
@@ -643,12 +732,12 @@ mod tests {
         assert!(matches!(result2, ResolveResult::Created { .. }));
         assert_eq!(reg.device_count(), 2);
 
-        // A high-confidence triage entry was queued
-        assert_eq!(reg.triage().pending_count(), 1);
-        let pending = reg.triage().pending();
-        assert_eq!(pending[0].confidence, 100);
-        assert_eq!(pending[0].kind, TriageKind::DeviceMerge);
-        assert!(pending[0].candidate_matches[0]
+        // A high-confidence device merge triage entry was queued
+        assert_eq!(reg.triage().pending_device_count(), 1);
+        let merges = reg.triage().pending_by_kind(TriageKind::DeviceMerge);
+        assert_eq!(merges[0].confidence, 100);
+        assert_eq!(merges[0].kind, TriageKind::DeviceMerge);
+        assert!(merges[0].candidate_matches[0]
             .reasons
             .contains(&MatchReason::ExactHardware));
     }
@@ -698,10 +787,10 @@ mod tests {
         };
 
         let result = reg.resolve(&identity2, &ha_key(), 2000);
-        // Creates silo device and queues triage
+        // Creates silo device and queues heuristic triage
         assert!(matches!(result, ResolveResult::Created { .. }));
         assert_eq!(reg.device_count(), 2);
-        assert_eq!(reg.triage().pending_count(), 1);
+        assert_eq!(reg.triage().pending_device_count(), 1);
     }
 
     #[test]
@@ -753,14 +842,14 @@ mod tests {
         let ha_identity = make_identity("light.kitchen_spot_1", "Kitchen Spot 1", vec![mac]);
         let result = reg.resolve(&ha_identity, &ha_key(), 2000);
 
-        // Should silently re-apply (not queue triage)
+        // Should silently re-apply (not queue merge triage)
         assert!(
             matches!(result, ResolveResult::ReApproved { canonical_id: ref id } if id == &canonical_id),
             "Expected ReApproved, got {:?}",
             result
         );
         assert_eq!(reg.device_count(), 1);
-        assert_eq!(reg.triage().pending_count(), 0);
+        assert_eq!(reg.triage().pending_device_count(), 0);
 
         // Device now has two endpoints
         let device = reg.get(&canonical_id).unwrap();
@@ -808,6 +897,7 @@ mod tests {
             resolved_by: None,
             created_at: 2000,
             resolved_at: None,
+            canonical_id: None,
         };
         reg.triage_mut().add(entry);
 
@@ -854,6 +944,7 @@ mod tests {
             resolved_by: None,
             created_at: 2000,
             resolved_at: None,
+            canonical_id: None,
         };
         reg.triage_mut().add(entry);
 
@@ -1035,10 +1126,10 @@ mod tests {
         let ha_identity = make_room_identity("light.office", "Office", "Office", vec![]);
         let result = reg.resolve(&ha_identity, &ha_key(), 2000);
 
-        // Creates silo device + queues triage
+        // Creates silo device + queues merge triage
         assert!(matches!(result, ResolveResult::Created { .. }));
         assert_eq!(reg.device_count(), 2); // two separate devices
-        assert_eq!(reg.triage().pending_count(), 1);
+        assert_eq!(reg.triage().pending_device_count(), 1);
     }
 
     #[test]
@@ -1051,9 +1142,9 @@ mod tests {
         let ha_identity = make_room_identity("light.kitchen_go", "Kitchen Go", "Kitchen", vec![]);
         let result = reg.resolve(&ha_identity, &ha_key(), 2000);
 
-        // Creates silo device + queues triage
+        // Creates silo device + queues merge triage
         assert!(matches!(result, ResolveResult::Created { .. }));
-        assert_eq!(reg.triage().pending_count(), 1);
+        assert_eq!(reg.triage().pending_device_count(), 1);
     }
 
     #[test]
@@ -1067,7 +1158,7 @@ mod tests {
         let result = reg.resolve(&ha_identity, &ha_key(), 2000);
 
         assert!(matches!(result, ResolveResult::Created { .. }));
-        assert_eq!(reg.triage().pending_count(), 1);
+        assert_eq!(reg.triage().pending_device_count(), 1);
     }
 
     #[test]
@@ -1084,7 +1175,7 @@ mod tests {
         let result = reg.resolve(&ha_identity, &ha_key(), 2000);
 
         assert!(matches!(result, ResolveResult::Created { .. }));
-        assert_eq!(reg.triage().pending_count(), 1);
+        assert_eq!(reg.triage().pending_device_count(), 1);
     }
 
     #[test]
@@ -1106,7 +1197,7 @@ mod tests {
             "Expected Created (no auto-merge), got {:?}",
             result
         );
-        assert_eq!(reg.triage().pending_count(), 1);
+        assert_eq!(reg.triage().pending_device_count(), 1);
     }
 
     #[test]
@@ -1140,6 +1231,6 @@ mod tests {
 
         // Score = 3 (SameRoom only) → meets threshold → queued
         assert!(matches!(result, ResolveResult::Created { .. }));
-        assert_eq!(reg.triage().pending_count(), 1);
+        assert_eq!(reg.triage().pending_device_count(), 1);
     }
 }

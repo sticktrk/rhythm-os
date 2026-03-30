@@ -18,6 +18,8 @@ pub enum TriageKind {
     DeviceMerge,
     /// Cross-hub room binding: "Should this hub's room merge into an existing Rhythm room?"
     RoomBinding,
+    /// Device has no room assignment and needs one.
+    UnassignedDevice,
 }
 
 /// Why a candidate was matched (for triage evidence).
@@ -106,6 +108,9 @@ pub struct TriageEntry {
     /// When this entry was resolved (Unix timestamp seconds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_at: Option<u64>,
+    /// Canonical device ID (for UnassignedDevice entries).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_id: Option<String>,
 }
 
 /// Serializable subset of DiscoveredIdentity for triage persistence.
@@ -310,6 +315,40 @@ impl TriageQueue {
             .count()
     }
 
+    /// Number of pending unassigned device entries.
+    pub fn pending_unassigned_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| e.status == TriageStatus::Pending && e.kind == TriageKind::UnassignedDevice)
+            .count()
+    }
+
+    /// Check if a pending UnassignedDevice entry exists for a canonical device.
+    pub fn has_unassigned_device(&self, canonical_id: &str) -> bool {
+        self.entries.iter().any(|e| {
+            e.status == TriageStatus::Pending
+                && e.kind == TriageKind::UnassignedDevice
+                && e.canonical_id.as_deref() == Some(canonical_id)
+        })
+    }
+
+    /// Auto-resolve any pending UnassignedDevice entry for a device (e.g. when assigned a room).
+    pub fn resolve_unassigned_for_device(&mut self, canonical_id: &str, now: u64) -> bool {
+        let mut resolved = false;
+        for entry in &mut self.entries {
+            if entry.status == TriageStatus::Pending
+                && entry.kind == TriageKind::UnassignedDevice
+                && entry.canonical_id.as_deref() == Some(canonical_id)
+            {
+                entry.status = TriageStatus::Confirmed;
+                entry.resolved_by = Some("auto".to_string());
+                entry.resolved_at = Some(now);
+                resolved = true;
+            }
+        }
+        resolved
+    }
+
     /// Check if a room binding proposal already exists for a hub room.
     ///
     /// Only matches `Pending` entries so dismissed proposals can re-enter triage.
@@ -354,6 +393,7 @@ mod tests {
             resolved_by: None,
             created_at: 1000,
             resolved_at: None,
+            canonical_id: None,
         }
     }
 
@@ -379,6 +419,32 @@ mod tests {
             resolved_by: None,
             created_at: 1000,
             resolved_at: None,
+            canonical_id: None,
+        }
+    }
+
+    fn make_unassigned_entry(id: &str, canonical_id: &str) -> TriageEntry {
+        TriageEntry {
+            id: id.to_string(),
+            kind: TriageKind::UnassignedDevice,
+            discovered: TriageDiscoveredDevice {
+                native_id: format!("native-{}", id),
+                name: format!("Device {}", id),
+                device_type: DeviceType::Light,
+                room_id: String::new(),
+                room_name: String::new(),
+                manufacturer: None,
+                model: None,
+            },
+            hub_key: HubKey::new(HubType::new("matter"), "local"),
+            candidate_matches: vec![],
+            room_binding: None,
+            confidence: 0,
+            status: TriageStatus::Pending,
+            resolved_by: None,
+            created_at: 1000,
+            resolved_at: None,
+            canonical_id: Some(canonical_id.to_string()),
         }
     }
 
@@ -511,5 +577,62 @@ mod tests {
 
         // Dismissed binding should not block re-triage
         assert!(!q.has_room_binding(&ha_key, "ha-area-1"));
+    }
+
+    #[test]
+    fn unassigned_device_tracking() {
+        let mut q = TriageQueue::new();
+        q.add(make_unassigned_entry("u1", "canonical-abc"));
+
+        assert!(q.has_unassigned_device("canonical-abc"));
+        assert!(!q.has_unassigned_device("canonical-xyz"));
+        assert_eq!(q.pending_unassigned_count(), 1);
+        assert_eq!(q.pending_count(), 1);
+    }
+
+    #[test]
+    fn resolve_unassigned_on_room_assign() {
+        let mut q = TriageQueue::new();
+        q.add(make_unassigned_entry("u1", "canonical-abc"));
+        q.add(make_entry("e1", TriageStatus::Pending));
+
+        assert!(q.resolve_unassigned_for_device("canonical-abc", 2000));
+        assert_eq!(q.pending_unassigned_count(), 0);
+        // Other entries unaffected
+        assert_eq!(q.pending_count(), 1);
+        let entry = q.get("u1").unwrap();
+        assert_eq!(entry.status, TriageStatus::Confirmed);
+        assert_eq!(entry.resolved_by.as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn resolve_unassigned_returns_false_when_not_found() {
+        let mut q = TriageQueue::new();
+        q.add(make_entry("e1", TriageStatus::Pending));
+        assert!(!q.resolve_unassigned_for_device("canonical-xyz", 2000));
+    }
+
+    #[test]
+    fn dismissed_unassigned_allows_re_triage() {
+        let mut q = TriageQueue::new();
+        q.add(make_unassigned_entry("u1", "canonical-abc"));
+        q.dismiss("u1", 2000);
+
+        // Dismissed entry should not block new triage
+        assert!(!q.has_unassigned_device("canonical-abc"));
+    }
+
+    #[test]
+    fn pending_by_kind_includes_unassigned() {
+        let mut q = TriageQueue::new();
+        q.add(make_entry("e1", TriageStatus::Pending));
+        q.add(make_unassigned_entry("u1", "canonical-abc"));
+        q.add(make_room_binding_entry("rb1", "ha-area-1", "rhythm-room-1"));
+
+        assert_eq!(q.pending_by_kind(TriageKind::UnassignedDevice).len(), 1);
+        assert_eq!(q.pending_unassigned_count(), 1);
+        assert_eq!(q.pending_device_count(), 1);
+        assert_eq!(q.pending_room_count(), 1);
+        assert_eq!(q.pending_count(), 3);
     }
 }

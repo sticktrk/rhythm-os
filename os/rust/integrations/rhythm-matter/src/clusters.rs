@@ -28,6 +28,7 @@ pub const CLUSTER_COLOR_CONTROL: u16 = 0x0300;
 pub const CMD_OFF: u8 = 0x00;
 pub const CMD_ON: u8 = 0x01;
 pub const CMD_MOVE_TO_LEVEL_WITH_ON_OFF: u8 = 0x04;
+pub const CMD_MOVE_TO_COLOR: u8 = 0x07;
 pub const CMD_MOVE_TO_COLOR_TEMPERATURE: u8 = 0x0A;
 
 // ============================================================================
@@ -122,6 +123,58 @@ pub fn send_level<T: MatterTransport>(
         CMD_MOVE_TO_LEVEL_WITH_ON_OFF,
         &payload,
     )
+}
+
+/// Build MoveToColor (XY) TLV payload.
+#[cfg(feature = "desktop")]
+pub fn build_color_xy_payload(color_x: u16, color_y: u16, transition_tenths: u16) -> Result<Vec<u8>> {
+    matc::clusters::codec::color_control::encode_move_to_color(
+        color_x,
+        color_y,
+        transition_tenths,
+        0,
+        0,
+    )
+}
+
+/// Build MoveToColor (XY) TLV payload (manual fallback for embedded/test).
+#[cfg(not(feature = "desktop"))]
+pub fn build_color_xy_payload(color_x: u16, color_y: u16, transition_tenths: u16) -> Result<Vec<u8>> {
+    let mut payload = Vec::with_capacity(8);
+    payload.extend_from_slice(&color_x.to_le_bytes());
+    payload.extend_from_slice(&color_y.to_le_bytes());
+    payload.extend_from_slice(&transition_tenths.to_le_bytes());
+    payload.push(0x00); // options mask
+    payload.push(0x00); // options override
+    Ok(payload)
+}
+
+/// Send MoveToColor (XY) command.
+///
+/// `color_x` and `color_y` are CIE xy coordinates as 16-bit fixed point
+/// (multiply float 0.0–1.0 by 65535).
+/// `transition_tenths` is in tenths of a second.
+pub fn send_color_xy<T: MatterTransport>(
+    transport: &T,
+    node_id: u64,
+    endpoint: u16,
+    color_x: u16,
+    color_y: u16,
+    transition_tenths: u16,
+) -> Result<()> {
+    let payload = build_color_xy_payload(color_x, color_y, transition_tenths)?;
+    transport.send_cluster_cmd(
+        node_id,
+        endpoint,
+        CLUSTER_COLOR_CONTROL,
+        CMD_MOVE_TO_COLOR,
+        &payload,
+    )
+}
+
+/// Convert float xy (0.0–1.0) to Matter's 16-bit fixed point.
+pub fn xy_to_matter(xy: f32) -> u16 {
+    (xy.clamp(0.0, 1.0) * 65535.0) as u16
 }
 
 /// Send MoveToColorTemperature command.

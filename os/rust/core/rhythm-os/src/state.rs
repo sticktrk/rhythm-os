@@ -245,6 +245,21 @@ pub struct AppState {
         >,
     >,
 
+    /// Start a device unpairing/decommission session (Matter, Zigbee, etc.).
+    /// Built from the integration registry by `integration_callbacks`.
+    #[allow(clippy::type_complexity)]
+    pub start_unpairing_fn: Option<
+        Arc<
+            dyn Fn(
+                    &SharedState,
+                    &str,
+                    &serde_json::Value,
+                ) -> anyhow::Result<crate::pairing::UnpairingResult>
+                + Send
+                + Sync,
+        >,
+    >,
+
     /// Optional pre-handler for hub credential requests.
     ///
     /// Returns `Some(Ok(json))` to respond with 200, `Some(Err(msg))` for 500,
@@ -327,6 +342,7 @@ impl Default for AppState {
             register_controller_fn: None,
             get_hub_provider_fn: None,
             start_pairing_fn: None,
+            start_unpairing_fn: None,
             hub_credentials_interceptor: None,
             firmware_version: "0.0.0",
             platform_type: "desktop",

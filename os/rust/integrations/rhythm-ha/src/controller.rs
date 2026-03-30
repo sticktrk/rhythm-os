@@ -149,7 +149,6 @@ mod tests {
     use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
     use crate::test_support::SpyHaTransport;
-    use rhythm_core::room::RoomSource;
 
     // Minimal block_on for synchronous futures (no real I/O in mocks).
     fn block_on<F: Future>(mut f: F) -> F::Output {
@@ -178,10 +177,7 @@ mod tests {
         Arc<Mutex<HaDeviceRegistry>>,
     ) {
         let spy = SpyHaTransport::new();
-        let registry = Arc::new(Mutex::new(HaDeviceRegistry::with_options(
-            RoomSource::HomeAssistant,
-            true,
-        )));
+        let registry = Arc::new(Mutex::new(HaDeviceRegistry::with_options(true)));
         registry
             .lock()
             .unwrap()

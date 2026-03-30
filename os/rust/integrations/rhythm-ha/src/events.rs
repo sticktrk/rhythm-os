@@ -524,7 +524,6 @@ pub fn translate_ws_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rhythm_core::room::RoomSource;
     use serde_json::json;
 
     use rhythm_core::runtime::hub_registry::DeviceType;
@@ -534,7 +533,7 @@ mod tests {
         Arc<Mutex<HaDeviceRegistry>>,
         Arc<Mutex<HashMap<String, String>>>,
     ) {
-        let mut reg = HaDeviceRegistry::with_options(RoomSource::HomeAssistant, true);
+        let mut reg = HaDeviceRegistry::with_options(true);
         reg.upsert_room("living_room", "Living Room", "living_room", &[]);
         let registry = Arc::new(Mutex::new(reg));
         let cache = Arc::new(Mutex::new(HashMap::new()));

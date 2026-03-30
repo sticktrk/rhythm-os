@@ -21,7 +21,6 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use rhythm_core::controller::NoOpController;
-use rhythm_core::room::RoomSource;
 use rhythm_core::runtime::handle::{RoomSnapshot, RuntimeHandle};
 use rhythm_core::runtime::orchestrator::RhythmRuntime;
 use rhythm_core::runtime::registry::SimpleDeviceRegistry;
@@ -77,7 +76,7 @@ impl TestHarness {
         let hub_type = HubType::new("mock");
         let hub_key = HubKey::new(hub_type.clone(), "192.168.1.100");
 
-        let registry = HubDeviceRegistry::new(RoomSource::Other("mock".to_string()));
+        let registry = HubDeviceRegistry::new();
         let registry: Arc<Mutex<dyn HubRegistry>> = Arc::new(Mutex::new(registry));
 
         let mut app = AppState {
@@ -144,7 +143,7 @@ impl TestHarness {
         let hub_type = HubType::new("mock");
         let hub_key = HubKey::new(hub_type.clone(), "192.168.1.100");
 
-        let registry = HubDeviceRegistry::new(RoomSource::Other("mock".to_string()));
+        let registry = HubDeviceRegistry::new();
         let registry: Arc<Mutex<dyn HubRegistry>> = Arc::new(Mutex::new(registry));
 
         let mut app = AppState {
@@ -343,7 +342,7 @@ impl TestHarness {
         let hub_type = HubType::new(hub_type_str);
         let hub_key = HubKey::new(hub_type.clone(), address);
 
-        let registry = HubDeviceRegistry::new(RoomSource::Other(hub_type_str.to_string()));
+        let registry = HubDeviceRegistry::new();
         let registry: Arc<Mutex<dyn HubRegistry>> = Arc::new(Mutex::new(registry));
 
         let mut s = self.state.lock().unwrap();

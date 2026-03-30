@@ -7,62 +7,40 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use rhythm_core::runtime::hub_registry::DeviceType;
 
 use rhythm_os::discovery::{DiscoveredDevice, DiscoveredRoom, HubDiscovery};
 
-use crate::lifecycle::format_device_id;
 use crate::transport::MatterTransport;
 
-/// Matter hub discovery — enumerates commissioned devices.
+/// Matter hub discovery — returns empty.
+///
+/// Matter devices are tracked via the canonical registry (created during
+/// pairing), not via hub sync discovery. Both rooms and devices return
+/// empty to prevent phantom self-roomed entries.
 pub struct MatterDiscovery<T: MatterTransport> {
-    transport: Arc<T>,
+    _transport: Arc<T>,
 }
 
 impl<T: MatterTransport> MatterDiscovery<T> {
     pub fn new(transport: Arc<T>) -> Self {
-        Self { transport }
+        Self { _transport: transport }
     }
 }
 
 impl<T: MatterTransport + 'static> HubDiscovery for MatterDiscovery<T> {
     fn discover_rooms(&self) -> Result<Vec<DiscoveredRoom>> {
-        // Matter has no native room concept. Each commissioned device
-        // is returned as its own synthetic "room" (named after the device).
-        // The user organizes them into Rhythm rooms via the topology system.
-        let devices = self.transport.commissioned_devices()?;
-        let rooms: Vec<DiscoveredRoom> = devices
-            .iter()
-            .map(|d| {
-                let device_id = format_device_id(d.node_id, 1);
-                DiscoveredRoom {
-                    id: device_id.clone(),
-                    name: format!("{} {}", d.vendor_name, d.product_name),
-                    // For Matter, grouped_light_id == room_id (per-device addressing)
-                    grouped_light_id: device_id.clone(),
-                    device_ids: vec![device_id],
-                }
-            })
-            .collect();
-
-        Ok(rooms)
+        // Matter has no native room concept. Rooms are created during
+        // explicit pairing via start_pairing(), not during sync discovery.
+        // Returning empty here prevents phantom rooms from appearing for
+        // every commissioned device in the fabric.
+        Ok(Vec::new())
     }
 
     fn discover_devices(&self) -> Result<Vec<DiscoveredDevice>> {
-        let devices = self.transport.commissioned_devices()?;
-        let discovered: Vec<DiscoveredDevice> = devices
-            .iter()
-            .map(|d| {
-                let device_id = format_device_id(d.node_id, 1);
-                DiscoveredDevice {
-                    device_id: device_id.clone(),
-                    room_id: device_id, // Self-roomed until user assigns
-                    buttons: Vec::new(),
-                    device_type: DeviceType::Light,
-                }
-            })
-            .collect();
-
-        Ok(discovered)
+        // Matter devices are tracked via the canonical registry (created during
+        // pairing), not via hub sync discovery. Returning empty here prevents
+        // phantom self-roomed entries (device_id == room_id) in the hub registry.
+        // The user assigns Matter devices to rooms via the canonical assign_room API.
+        Ok(Vec::new())
     }
 }

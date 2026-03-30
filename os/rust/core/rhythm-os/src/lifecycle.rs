@@ -16,8 +16,6 @@ use crate::hub::{ActiveHub, HubCredentials, HubEvent, HubType};
 use crate::registry::{HubDeviceRegistry, RegistrySnapshot};
 use crate::state::SharedState;
 
-use rhythm_core::room::RoomSource;
-
 // ============================================================================
 // connect_hub — replaces connect_hue_sse() and connect_ha()
 // ============================================================================
@@ -26,7 +24,6 @@ use rhythm_core::room::RoomSource;
 ///
 /// Generic over hub type. The caller provides:
 /// - `hub_type`: identifier for this hub
-/// - `room_source`: tag for rooms created from this hub
 /// - `default_grouped_light_to_room_id`: HA sets true, Hue sets false
 /// - `load_registry_snapshot`: optional snapshot to restore
 /// - `hub_data_builder`: closure that creates hub-specific data from the registry
@@ -39,7 +36,6 @@ pub fn connect_hub<D, F>(
     state: &SharedState,
     hub_type: HubType,
     hub_key: HubKey,
-    room_source: RoomSource,
     default_grouped_light_to_room_id: bool,
     load_registry_snapshot: Option<RegistrySnapshot>,
     hub_data_builder: D,
@@ -50,8 +46,7 @@ where
     F: FnOnce(Arc<Mutex<HubDeviceRegistry>>, Arc<AtomicBool>) -> Receiver<HubEvent>,
 {
     // Build device registry (restore from snapshot if available)
-    let mut registry =
-        HubDeviceRegistry::with_options(room_source, default_grouped_light_to_room_id);
+    let mut registry = HubDeviceRegistry::with_options(default_grouped_light_to_room_id);
     if let Some(snapshot) = load_registry_snapshot {
         info!(target: "sys", "Restoring registry from snapshot...");
         registry.restore_from_snapshot(snapshot);

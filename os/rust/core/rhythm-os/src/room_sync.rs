@@ -251,18 +251,22 @@ fn sync_with_discovery(
         }
     }
 
-    // Remove stale rooms (in registry but not discovered)
-    let stale_ids: Vec<String> = current_room_ids
-        .difference(&discovered_ids)
-        .cloned()
-        .collect();
+    // Remove stale rooms (in registry but not discovered).
+    // Skip when discovery returned 0 rooms — the hub doesn't do room discovery
+    // (e.g. Matter, where rooms are managed via canonical assign_room).
+    if !discovered_ids.is_empty() {
+        let stale_ids: Vec<String> = current_room_ids
+            .difference(&discovered_ids)
+            .cloned()
+            .collect();
 
-    for room_id in &stale_ids {
-        info!(target: "room_sync", "Removing stale room '{}'", room_id);
-        if let Err(e) = commands::do_room_remove(state, room_id) {
-            warn!(target: "room_sync", "Failed to remove room '{}': {}", room_id, e);
+        for room_id in &stale_ids {
+            info!(target: "room_sync", "Removing stale room '{}'", room_id);
+            if let Err(e) = commands::do_room_remove(state, room_id) {
+                warn!(target: "room_sync", "Failed to remove room '{}': {}", room_id, e);
+            }
+            report.rooms_removed += 1;
         }
-        report.rooms_removed += 1;
     }
 
     // ========================================================================
@@ -441,6 +445,7 @@ fn sync_with_discovery(
                                     resolved_by: None,
                                     created_at: now,
                                     resolved_at: None,
+                                    canonical_id: None,
                                 };
                                 s.canonical_registry.triage_mut().add(entry);
                                 info!(target: "room_sync",

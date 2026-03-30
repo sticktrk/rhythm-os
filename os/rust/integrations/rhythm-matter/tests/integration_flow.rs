@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex};
 
-use rhythm_core::room::RoomSource;
 use rhythm_core::runtime::handle::RuntimeHandle;
 use rhythm_core::runtime::orchestrator::RhythmRuntime;
 use rhythm_core::runtime::registry::SimpleDeviceRegistry;
@@ -31,10 +30,7 @@ fn make_matter_pipeline() -> (
     Arc<SpyTransport>,
 ) {
     let spy = Arc::new(SpyTransport::new());
-    let registry = Arc::new(Mutex::new(HubDeviceRegistry::with_options(
-        RoomSource::Other("matter".to_string()),
-        true,
-    )));
+    let registry = Arc::new(Mutex::new(HubDeviceRegistry::with_options(true)));
 
     // Room with Matter light devices
     registry
@@ -49,9 +45,11 @@ fn make_matter_pipeline() -> (
     let (event_tx, _event_rx) = std::sync::mpsc::channel::<HubEvent>();
 
     let hub_data = Arc::new(MatterHubData {
+        #[cfg(feature = "desktop")]
+        transport: std::sync::OnceLock::new(),
         registry: registry.clone(),
         fabric_id: "test".to_string(),
-        commissioned: Vec::new(),
+        commissioned: std::sync::Mutex::new(Vec::new()),
         device_caps: std::sync::Mutex::new(std::collections::HashMap::new()),
         event_tx,
     });
@@ -148,10 +146,7 @@ fn engine_reset_sends_adaptive_values() {
 #[test]
 fn multiple_devices_in_room_all_receive_commands() {
     let spy = Arc::new(SpyTransport::new());
-    let registry = Arc::new(Mutex::new(HubDeviceRegistry::with_options(
-        RoomSource::Other("matter".to_string()),
-        true,
-    )));
+    let registry = Arc::new(Mutex::new(HubDeviceRegistry::with_options(true)));
 
     // Room with 3 Matter devices
     let device_ids = vec![
@@ -170,9 +165,11 @@ fn multiple_devices_in_room_all_receive_commands() {
 
     let (event_tx, _) = std::sync::mpsc::channel();
     let hub_data = Arc::new(MatterHubData {
+        #[cfg(feature = "desktop")]
+        transport: std::sync::OnceLock::new(),
         registry: registry.clone(),
         fabric_id: "test".to_string(),
-        commissioned: Vec::new(),
+        commissioned: std::sync::Mutex::new(Vec::new()),
         device_caps: std::sync::Mutex::new(std::collections::HashMap::new()),
         event_tx,
     });
@@ -211,10 +208,7 @@ fn make_pipeline_with_caps(
     devices: &[(&str, LightCapabilities)],
 ) -> (Arc<dyn RuntimeHandle>, Arc<SpyTransport>) {
     let spy = Arc::new(SpyTransport::new());
-    let registry = Arc::new(Mutex::new(HubDeviceRegistry::with_options(
-        RoomSource::Other("matter".to_string()),
-        true,
-    )));
+    let registry = Arc::new(Mutex::new(HubDeviceRegistry::with_options(true)));
 
     let device_ids: Vec<String> = devices.iter().map(|(id, _)| id.to_string()).collect();
     registry
@@ -235,7 +229,7 @@ fn make_pipeline_with_caps(
     let hub_data = Arc::new(MatterHubData {
         registry: registry.clone(),
         fabric_id: "test".to_string(),
-        commissioned: Vec::new(),
+        commissioned: std::sync::Mutex::new(Vec::new()),
         device_caps: Mutex::new(caps_map),
         event_tx,
     });
@@ -356,10 +350,7 @@ fn on_off_device_gets_on_command_only() {
 fn unknown_device_falls_back_to_extended_color() {
     // No caps registered for this device — should fall back to ExtendedColor defaults
     let spy = Arc::new(SpyTransport::new());
-    let registry = Arc::new(Mutex::new(HubDeviceRegistry::with_options(
-        RoomSource::Other("matter".to_string()),
-        true,
-    )));
+    let registry = Arc::new(Mutex::new(HubDeviceRegistry::with_options(true)));
     registry
         .lock()
         .unwrap()
@@ -373,7 +364,7 @@ fn unknown_device_falls_back_to_extended_color() {
     let hub_data = Arc::new(MatterHubData {
         registry: registry.clone(),
         fabric_id: "test".to_string(),
-        commissioned: Vec::new(),
+        commissioned: std::sync::Mutex::new(Vec::new()),
         device_caps: Mutex::new(HashMap::new()), // Empty — no caps known
         event_tx,
     });

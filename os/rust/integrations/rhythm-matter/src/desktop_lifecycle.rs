@@ -7,7 +7,9 @@ use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 use anyhow::Result;
-use log::{info, warn};
+use log::info;
+#[allow(unused_imports)]
+use log::warn;
 
 use rhythm_core::controller::LightController;
 use rhythm_os::canonical::identity::HubKey;
@@ -29,6 +31,24 @@ fn matter_data_path(state: &SharedState) -> Result<String> {
     Ok(format!("{}/matter", s.data_dir))
 }
 
+/// Get the shared transport from the hub's MatterHubData.
+fn get_transport(state: &SharedState) -> Result<Arc<MatcTransport>> {
+    let hub_key = HubKey::new(HubType::new("matter"), "local");
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let hub = s
+        .hubs
+        .get(&hub_key)
+        .ok_or_else(|| anyhow::anyhow!("Matter hub not connected"))?;
+    let hub_data = hub
+        .data::<Arc<MatterHubData>>()
+        .ok_or_else(|| anyhow::anyhow!("Matter hub data missing"))?;
+    hub_data
+        .transport
+        .get()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Matter transport not initialized"))
+}
+
 /// Connect to the local Matter fabric and store the hub in state.
 ///
 /// Loads or creates the Matter fabric in `{data_dir}/matter/`.
@@ -37,6 +57,11 @@ pub fn connect_and_start(state: SharedState, _key: &HubKey) -> Result<Receiver<H
     let data_path = matter_data_path(&state)?;
     let transport = Arc::new(MatcTransport::load_or_create(&data_path)?);
     let (mut hub, event_rx) = crate::lifecycle::connect_matter(&state, transport.clone())?;
+
+    // Store the shared transport in hub_data so all code paths use one DM
+    if let Some(hub_data) = hub.data::<Arc<MatterHubData>>() {
+        let _ = hub_data.transport.set(transport.clone());
+    }
 
     // Wire discovery so POST /api/sync discovers Matter devices
     hub.discovery = Some(Arc::new(crate::discovery::MatterDiscovery::new(transport)));
@@ -51,9 +76,11 @@ pub fn connect_and_start(state: SharedState, _key: &HubKey) -> Result<Receiver<H
 }
 
 /// Create a `MatterLightController` for the composite controller.
+///
+/// Uses the shared transport from `MatterHubData` instead of creating a new
+/// DeviceManager (which would conflict on port 5555).
 pub fn create_controller(state: &SharedState, _key: &HubKey) -> Result<Arc<dyn LightController>> {
-    let data_path = matter_data_path(state)?;
-    let transport = Arc::new(MatcTransport::load_or_create(&data_path)?);
+    let transport = get_transport(state)?;
 
     let hub_data = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -90,7 +117,14 @@ impl HubProvider for MatterHubProvider {
         crate::provider::configure_matter_hub(address, credentials_json, state, |state| {
             let data_path = matter_data_path(state)?;
             let transport = Arc::new(MatcTransport::load_or_create(&data_path)?);
-            crate::lifecycle::connect_matter(state, transport)
+            let (hub, rx) = crate::lifecycle::connect_matter(state, transport.clone())?;
+
+            // Store transport in hub_data
+            if let Some(hub_data) = hub.data::<Arc<MatterHubData>>() {
+                let _ = hub_data.transport.set(transport);
+            }
+
+            Ok((hub, rx))
         })
     }
 }
@@ -109,6 +143,7 @@ pub fn get_hub_provider() -> &'static dyn HubProvider {
 ///
 /// Reads Basic Information (0x0028) and Color Control (0x0300) clusters to
 /// reconstruct a `CommissionedDevice` with accurate capabilities.
+#[allow(dead_code)]
 fn probe_device_caps(
     transport: &dyn MatterTransport,
     node_id: u64,
@@ -175,6 +210,7 @@ fn probe_device_caps(
 }
 
 /// Read a string attribute via `MatterTransport::read_attribute`.
+#[allow(dead_code)]
 fn read_string_via_transport(
     transport: &dyn MatterTransport,
     node_id: u64,
@@ -187,6 +223,7 @@ fn read_string_via_transport(
 }
 
 /// Read a u16 attribute via `MatterTransport::read_attribute`.
+#[allow(dead_code)]
 fn read_u16_via_transport(
     transport: &dyn MatterTransport,
     node_id: u64,
@@ -205,6 +242,7 @@ fn read_u16_via_transport(
 }
 
 /// Read a u8 attribute via `MatterTransport::read_attribute`.
+#[allow(dead_code)]
 fn read_u8_via_transport(
     transport: &dyn MatterTransport,
     node_id: u64,
@@ -250,78 +288,11 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
         create_controller(state, key)
     }
 
-    fn post_connect(&self, state: &SharedState, _key: &HubKey) {
-        let hub_key = HubKey::new(HubType::new("matter"), "local");
-
-        let (hub_data, data_path) = {
-            let s = match state.lock() {
-                Ok(s) => s,
-                Err(_) => return,
-            };
-            let hd = s
-                .hubs
-                .get(&hub_key)
-                .and_then(|h| h.data::<Arc<MatterHubData>>())
-                .cloned();
-            let dp = if s.data_dir.is_empty() {
-                None
-            } else {
-                Some(format!("{}/matter", s.data_dir))
-            };
-            (hd, dp)
-        };
-
-        let (Some(hub_data), Some(data_path)) = (hub_data, data_path) else {
-            return;
-        };
-
-        let transport = match MatcTransport::load_or_create(&data_path) {
-            Ok(t) => Arc::new(t),
-            Err(e) => {
-                warn!(target: "sys", "Matter post_connect: failed to load transport: {}", e);
-                return;
-            }
-        };
-
-        // Probe capabilities for commissioned devices that don't have cached caps
-        let devices = hub_data.commissioned.clone();
-        let already_have: Vec<String> = hub_data
-            .device_caps
-            .lock()
-            .map(|dc| dc.keys().cloned().collect())
-            .unwrap_or_default();
-
-        let mut probed = 0u32;
-        for device in &devices {
-            let device_id = crate::lifecycle::format_device_id(device.node_id, 1);
-            if already_have.contains(&device_id) {
-                continue;
-            }
-
-            // Probe device via read_attribute calls
-            match probe_device_caps(&*transport, device.node_id, 1) {
-                Ok(commissioned) => {
-                    let mut caps =
-                        crate::capabilities::capabilities_from_commissioned(&commissioned);
-                    crate::capabilities::enrich_from_db(
-                        &mut caps,
-                        &commissioned,
-                        rhythm_devices::builtin_db(),
-                    );
-                    if let Ok(mut dc) = hub_data.device_caps.lock() {
-                        dc.insert(device_id.clone(), caps);
-                        probed += 1;
-                    }
-                }
-                Err(e) => {
-                    warn!(target: "sys", "Matter post_connect: failed to probe {}: {}", device_id, e);
-                }
-            }
-        }
-
-        if probed > 0 {
-            info!(target: "sys", "Matter post_connect: probed capabilities for {} device(s)", probed);
-        }
+    fn post_connect(&self, _state: &SharedState, _key: &HubKey) {
+        // Capability probing skipped on startup — the controller falls back
+        // to ExtendedColor defaults for devices without cached caps.
+        // Caps are populated during pairing (commission_device) and don't
+        // need to be re-probed on every restart.
     }
 
     fn credentials_interceptor(
@@ -372,10 +343,53 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'setup_code' in pairing params"))?;
 
-        let data_path = matter_data_path(state)?;
-        let transport = MatcTransport::load_or_create(&data_path)?;
+        // Ensure the Matter hub is connected before commissioning.
+        // If not already connected, store credentials and connect so the
+        // device registry and capabilities are available after pairing.
+        {
+            let hub_key = HubKey::new(HubType::new("matter"), "local");
+            let already_connected = state
+                .lock()
+                .map(|s| s.hubs.contains_key(&hub_key))
+                .unwrap_or(false);
+            if !already_connected {
+                info!(target: "pair", "Matter hub not connected, auto-bootstrapping...");
+                let credentials = serde_json::json!({ "fabric_id": "default" });
+                rhythm_os::commands::do_hub_credentials(state, "matter", "local", &credentials)?;
+            }
+        }
 
-        match transport.commission(setup_code) {
+        // Get the shared transport and derive next node ID from commissioned devices.
+        // Using the shared transport avoids creating a second DeviceManager that
+        // would conflict on port 5555.
+        let (transport, next_node_id) = {
+            let hub_key = HubKey::new(HubType::new("matter"), "local");
+            let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            if let Some(hub) = s.hubs.get(&hub_key) {
+                if let Some(hub_data) = hub.data::<Arc<MatterHubData>>() {
+                    let tr = hub_data
+                        .transport
+                        .get()
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("Matter transport not initialized"))?;
+                    let max = hub_data
+                        .commissioned
+                        .lock()
+                        .map(|c| c.iter().map(|d| d.node_id).max().unwrap_or(99))
+                        .unwrap_or(99);
+                    (tr, max + 1)
+                } else {
+                    return Err(anyhow::anyhow!("Matter hub data missing"));
+                }
+            } else {
+                return Err(anyhow::anyhow!("Matter hub not connected"));
+            }
+        };
+
+        // Commission using the shared transport's drop-and-recreate flow.
+        // This temporarily drops the existing DM to free port 5555, commissions
+        // on a dedicated thread, then reloads the DM.
+        match transport.commission_device(setup_code, next_node_id) {
             Ok(device) => {
                 let device_id =
                     crate::lifecycle::format_device_id(device.node_id, device.light_endpoint);
@@ -384,27 +398,10 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
                 info!(target: "sys", "Matter: paired {} (node {}, id={})",
                     device_name, device.node_id, device_id);
 
-                // Register device in HubDeviceRegistry (self-roomed synthetic room)
-                // and store capabilities for capability-aware command adaptation
+                // Store device capabilities from commissioning data.
+                // No room is created here — the user assigns Matter devices
+                // to rooms via the app's topology system.
                 let hub_key = HubKey::new(HubType::new("matter"), "local");
-                {
-                    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-                    if let Some(hub) = s.hubs.get(&hub_key) {
-                        if let Some(hub_data) = hub.data::<Arc<MatterHubData>>() {
-                            let mut reg = hub_data
-                                .registry
-                                .lock()
-                                .map_err(|e| anyhow::anyhow!("{}", e))?;
-                            reg.upsert_room(
-                                &device_id,
-                                &device_name,
-                                &device_id,
-                                std::slice::from_ref(&device_id),
-                            );
-                            reg.set_area_lights(&device_id, vec![device_id.clone()]);
-                        }
-                    }
-                }
 
                 // Store device capabilities from commissioning data
                 {
@@ -463,12 +460,82 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
                     error: None,
                 })
             }
-            Err(e) => Ok(PairingSession {
-                hub_type: "matter".to_string(),
-                status: PairingStatus::Failed,
-                device: None,
-                error: Some(e.to_string()),
-            }),
+            Err(e) => {
+                log::error!(target: "pair", "Matter commissioning error: {:#}", e);
+                Ok(PairingSession {
+                    hub_type: "matter".to_string(),
+                    status: PairingStatus::Failed,
+                    device: None,
+                    error: Some(format!("{:#}", e)),
+                })
+            }
+        }
+    }
+
+    fn start_unpairing(
+        &self,
+        state: &SharedState,
+        params: &serde_json::Value,
+    ) -> Result<rhythm_os::pairing::UnpairingResult> {
+        use rhythm_os::pairing::{PairingStatus, UnpairingResult};
+
+        let device_id = params
+            .get("device_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing 'device_id' in unpairing params"))?;
+        let force = params
+            .get("force")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let (node_id, _endpoint) = crate::lifecycle::parse_device_id(device_id)
+            .ok_or_else(|| anyhow::anyhow!("Invalid Matter device ID: {}", device_id))?;
+
+        let hub_key = HubKey::new(HubType::new("matter"), "local");
+
+        // Get transport + hub_data from the connected hub
+        let (transport, hub_data) = {
+            let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            let hub = s
+                .hubs
+                .get(&hub_key)
+                .ok_or_else(|| anyhow::anyhow!("Matter hub not connected"))?;
+            let hd = hub
+                .data::<Arc<MatterHubData>>()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Matter hub data missing"))?;
+            let tr = hd
+                .transport
+                .get()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Matter transport not initialized"))?;
+            (tr, hd)
+        };
+
+        // Protocol-specific: decommission from fabric
+        match transport.decommission_device(node_id, force) {
+            Ok(ota_ok) => {
+                info!(target: "sys", "Matter: decommissioned node {} (ota={})", node_id, ota_ok);
+
+                // Integration-specific: clean up MatterHubData
+                hub_data.remove_device(node_id);
+
+                Ok(UnpairingResult {
+                    hub_type: "matter".to_string(),
+                    status: PairingStatus::Complete,
+                    device_id: Some(device_id.to_string()),
+                    error: None,
+                })
+            }
+            Err(e) => {
+                log::error!(target: "pair", "Matter decommission error: {:#}", e);
+                Ok(UnpairingResult {
+                    hub_type: "matter".to_string(),
+                    status: PairingStatus::Failed,
+                    device_id: Some(device_id.to_string()),
+                    error: Some(format!("{:#}", e)),
+                })
+            }
         }
     }
 }

@@ -9,7 +9,6 @@ use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex};
 
 use rhythm_core::composite_controller::CompositeController;
-use rhythm_core::room::RoomSource;
 use rhythm_core::runtime::handle::RuntimeHandle;
 use rhythm_core::runtime::orchestrator::RhythmRuntime;
 use rhythm_core::runtime::registry::SimpleDeviceRegistry;
@@ -39,19 +38,14 @@ fn make_composite_pipeline() -> (
     let ha_spy = Arc::new(SpyHaTransport::new());
 
     // Hue registry: room "hue-kitchen" with grouped_light_id "gl-kitchen"
-    let hue_registry = Arc::new(Mutex::new(HubDeviceRegistry::new(RoomSource::Other(
-        "hue".to_string(),
-    ))));
+    let hue_registry = Arc::new(Mutex::new(HubDeviceRegistry::new()));
     hue_registry
         .lock()
         .unwrap()
         .upsert_room("hue-kitchen", "Kitchen", "gl-kitchen", &[]);
 
     // HA registry: room "ha-kitchen" (area_id targeting)
-    let ha_registry = Arc::new(Mutex::new(HubDeviceRegistry::with_options(
-        RoomSource::HomeAssistant,
-        true,
-    )));
+    let ha_registry = Arc::new(Mutex::new(HubDeviceRegistry::with_options(true)));
     ha_registry
         .lock()
         .unwrap()

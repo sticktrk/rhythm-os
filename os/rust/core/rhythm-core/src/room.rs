@@ -11,27 +11,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::CurveConfig;
 
-/// Source/provider for the room (where it was imported from).
-///
-/// When adding a new hub type, prefer using `Other(String)` to avoid
-/// modifying this core enum. Only add a named variant if the source
-/// is used extensively across multiple crates.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub enum RoomSource {
-    /// Unknown source (backwards compatibility with existing stored rooms)
-    #[default]
-    Unknown,
-    /// Philips Hue bridge
-    Hue,
-    /// Home Assistant via WebSocket
-    HomeAssistant,
-    /// ESP32 standalone controller
-    Esp32,
-    /// Other hub type (e.g., "lifx", "zigbee2mqtt")
-    Other(String),
-}
-
 /// A room or area that can have Rhythm lighting enabled.
 ///
 /// Each room tracks its Rhythm state and any time/brightness offsets
@@ -44,10 +23,6 @@ pub struct Room {
 
     /// Human-readable name
     pub name: String,
-
-    /// Source/provider for this room
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub source: RoomSource,
 
     /// Whether Rhythm mode is enabled for this room
     pub rhythm_enabled: bool,
@@ -81,22 +56,6 @@ impl Room {
         Self {
             id: id.into(),
             name: name.into(),
-            source: RoomSource::Unknown,
-            rhythm_enabled: false,
-            disabled: false,
-            time_offset_minutes: 0.0,
-            brightness_offset: 0.0,
-            curve_config: None,
-            soft_off: false,
-        }
-    }
-
-    /// Create a new room with a specified source.
-    pub fn with_source(id: impl Into<String>, name: impl Into<String>, source: RoomSource) -> Self {
-        Self {
-            id: id.into(),
-            name: name.into(),
-            source,
             rhythm_enabled: false,
             disabled: false,
             time_offset_minutes: 0.0,
@@ -165,11 +124,6 @@ impl Room {
         self.curve_config = config;
     }
 
-    /// Get the source of this room.
-    pub fn source(&self) -> &RoomSource {
-        &self.source
-    }
-
     /// Check if this room is disabled.
     pub fn is_disabled(&self) -> bool {
         self.disabled
@@ -181,7 +135,6 @@ impl Default for Room {
         Self {
             id: "default".to_string(),
             name: "Default Room".to_string(),
-            source: RoomSource::Unknown,
             rhythm_enabled: false,
             disabled: false,
             time_offset_minutes: 0.0,
@@ -330,28 +283,6 @@ impl RoomManager {
         self.rooms.values().filter(|r| !r.disabled).collect()
     }
 
-    /// Get all rooms from a specific source.
-    pub fn rooms_by_source(&self, source: RoomSource) -> Vec<&Room> {
-        self.rooms.values().filter(|r| r.source == source).collect()
-    }
-
-    /// Remove all rooms from a specific source.
-    ///
-    /// Returns the number of rooms removed.
-    pub fn remove_by_source(&mut self, source: RoomSource) -> usize {
-        let ids_to_remove: Vec<String> = self
-            .rooms
-            .values()
-            .filter(|r| r.source == source)
-            .map(|r| r.id.clone())
-            .collect();
-
-        let count = ids_to_remove.len();
-        for id in ids_to_remove {
-            self.rooms.remove(&id);
-        }
-        count
-    }
 }
 
 #[cfg(test)]
@@ -363,22 +294,11 @@ mod tests {
         let room = Room::new("living_room", "Living Room");
         assert_eq!(room.id, "living_room");
         assert_eq!(room.name, "Living Room");
-        assert_eq!(room.source, RoomSource::Unknown);
         assert!(!room.rhythm_enabled);
         assert!(!room.disabled);
         assert_eq!(room.time_offset_minutes, 0.0);
         assert_eq!(room.brightness_offset, 0.0);
         assert!(room.curve_config.is_none());
-    }
-
-    #[test]
-    fn test_room_with_source() {
-        let room = Room::with_source("hue_room", "Hue Living Room", RoomSource::Hue);
-        assert_eq!(room.id, "hue_room");
-        assert_eq!(room.name, "Hue Living Room");
-        assert_eq!(room.source, RoomSource::Hue);
-        assert!(!room.rhythm_enabled);
-        assert!(!room.disabled);
     }
 
     #[test]
@@ -503,46 +423,6 @@ mod tests {
         assert!(enabled.iter().all(|r| r.id != "room2"));
     }
 
-    #[test]
-    fn test_room_manager_rooms_by_source() {
-        let mut manager = RoomManager::new();
-        manager.add_room(Room::with_source("hue1", "Hue Room 1", RoomSource::Hue));
-        manager.add_room(Room::with_source("hue2", "Hue Room 2", RoomSource::Hue));
-        manager.add_room(Room::with_source(
-            "ha1",
-            "HA Room 1",
-            RoomSource::HomeAssistant,
-        ));
-
-        let hue_rooms = manager.rooms_by_source(RoomSource::Hue);
-        assert_eq!(hue_rooms.len(), 2);
-
-        let ha_rooms = manager.rooms_by_source(RoomSource::HomeAssistant);
-        assert_eq!(ha_rooms.len(), 1);
-
-        let esp_rooms = manager.rooms_by_source(RoomSource::Esp32);
-        assert_eq!(esp_rooms.len(), 0);
-    }
-
-    #[test]
-    fn test_room_manager_remove_by_source() {
-        let mut manager = RoomManager::new();
-        manager.add_room(Room::with_source("hue1", "Hue Room 1", RoomSource::Hue));
-        manager.add_room(Room::with_source("hue2", "Hue Room 2", RoomSource::Hue));
-        manager.add_room(Room::with_source(
-            "ha1",
-            "HA Room 1",
-            RoomSource::HomeAssistant,
-        ));
-
-        assert_eq!(manager.len(), 3);
-
-        let removed = manager.remove_by_source(RoomSource::Hue);
-        assert_eq!(removed, 2);
-        assert_eq!(manager.len(), 1);
-        assert!(manager.get("ha1").is_some());
-    }
-
     // =========================================================================
     // Serialization Tests
     // =========================================================================
@@ -553,13 +433,12 @@ mod tests {
 
         #[test]
         fn test_room_serialize_deserialize() {
-            let room = Room::with_source("room1", "Living Room", RoomSource::Hue);
+            let room = Room::new("room1", "Living Room");
             let json = serde_json::to_string(&room).unwrap();
             let deserialized: Room = serde_json::from_str(&json).unwrap();
 
             assert_eq!(deserialized.id, "room1");
             assert_eq!(deserialized.name, "Living Room");
-            assert_eq!(deserialized.source, RoomSource::Hue);
         }
 
         #[test]
@@ -579,7 +458,7 @@ mod tests {
 
         #[test]
         fn test_room_deserialize_missing_optional_fields() {
-            // JSON without optional fields (disabled, source, curve_config)
+            // JSON without optional fields (disabled, curve_config)
             let json = r#"{
                 "id": "room1",
                 "name": "Test Room",
@@ -591,32 +470,31 @@ mod tests {
             let room: Room = serde_json::from_str(json).unwrap();
             assert_eq!(room.id, "room1");
             assert!(!room.disabled); // default
-            assert_eq!(room.source, RoomSource::Unknown); // default
             assert!(room.curve_config.is_none()); // default
         }
 
         #[test]
-        fn test_room_source_serialize() {
-            assert_eq!(serde_json::to_string(&RoomSource::Hue).unwrap(), "\"Hue\"");
-            assert_eq!(
-                serde_json::to_string(&RoomSource::HomeAssistant).unwrap(),
-                "\"HomeAssistant\""
-            );
-            assert_eq!(
-                serde_json::to_string(&RoomSource::Esp32).unwrap(),
-                "\"Esp32\""
-            );
+        fn test_room_deserialize_ignores_legacy_source_field() {
+            // Old rooms.json may contain a "source" field — serde should ignore it
+            let json = r#"{
+                "id": "room1",
+                "name": "Test Room",
+                "source": "Hue",
+                "rhythm_enabled": true,
+                "time_offset_minutes": 0.0,
+                "brightness_offset": 0.0
+            }"#;
+
+            let room: Room = serde_json::from_str(json).unwrap();
+            assert_eq!(room.id, "room1");
+            assert!(room.rhythm_enabled);
         }
 
         #[test]
         fn test_room_manager_serialize_deserialize() {
             let mut manager = RoomManager::new();
-            manager.add_room(Room::with_source("room1", "Room 1", RoomSource::Hue));
-            manager.add_room(Room::with_source(
-                "room2",
-                "Room 2",
-                RoomSource::HomeAssistant,
-            ));
+            manager.add_room(Room::new("room1", "Room 1"));
+            manager.add_room(Room::new("room2", "Room 2"));
             manager.get_mut("room1").unwrap().enable_rhythm();
 
             let json = serde_json::to_string(&manager).unwrap();
@@ -629,7 +507,7 @@ mod tests {
 
         #[test]
         fn test_room_roundtrip_preserves_all_fields() {
-            let mut room = Room::with_source("room1", "Test", RoomSource::Esp32);
+            let mut room = Room::new("room1", "Test");
             room.rhythm_enabled = true;
             room.disabled = true;
             room.time_offset_minutes = -45.0;
@@ -674,7 +552,7 @@ mod tests {
 
     #[test]
     fn test_room_reset_preserves_identity() {
-        let mut room = Room::with_source("room1", "Living Room", RoomSource::Hue);
+        let mut room = Room::new("room1", "Living Room");
         room.rhythm_enabled = true;
         room.time_offset_minutes = 60.0;
         room.brightness_offset = 20.0;
@@ -684,7 +562,6 @@ mod tests {
         // Identity preserved
         assert_eq!(room.id, "room1");
         assert_eq!(room.name, "Living Room");
-        assert_eq!(room.source, RoomSource::Hue);
         // Rhythm state preserved
         assert!(room.rhythm_enabled);
         // Offsets reset

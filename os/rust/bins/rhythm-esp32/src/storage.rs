@@ -11,7 +11,7 @@ use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use rhythm_core::config::CurveConfig;
-use rhythm_core::room::{Room, RoomManager, RoomSource};
+use rhythm_core::room::{Room, RoomManager};
 
 use rhythm_os::hub::{HubCredentials, HubType};
 use rhythm_os::state::SharedState;
@@ -32,8 +32,6 @@ struct NvsRoom {
     id: String,
     #[serde(rename = "n")]
     name: String,
-    #[serde(rename = "s", default, skip_serializing_if = "nvs_source_is_default")]
-    source: NvsRoomSource,
     #[serde(rename = "re")]
     rhythm_enabled: bool,
     #[serde(rename = "d", default, skip_serializing_if = "is_false")]
@@ -46,21 +44,6 @@ struct NvsRoom {
     curve_config: Option<NvsCurveConfig>,
     #[serde(rename = "so", default, skip_serializing_if = "is_false")]
     soft_off: bool,
-}
-
-#[derive(Serialize, Deserialize, Default, PartialEq)]
-enum NvsRoomSource {
-    #[default]
-    #[serde(rename = "U")]
-    Unknown,
-    #[serde(rename = "H")]
-    Hue,
-    #[serde(rename = "HA")]
-    HomeAssistant,
-    #[serde(rename = "E")]
-    Esp32,
-    #[serde(untagged)]
-    Other(String),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -89,7 +72,6 @@ struct NvsCurveConfig {
 
 fn is_false(v: &bool) -> bool { !v }
 fn is_zero_f32(v: &f32) -> bool { *v == 0.0 }
-fn nvs_source_is_default(v: &NvsRoomSource) -> bool { *v == NvsRoomSource::Unknown }
 
 // --- Conversions ---
 
@@ -98,7 +80,6 @@ impl From<&Room> for NvsRoom {
         Self {
             id: r.id.clone(),
             name: r.name.clone(),
-            source: NvsRoomSource::from(&r.source),
             rhythm_enabled: r.rhythm_enabled,
             disabled: r.disabled,
             time_offset_minutes: r.time_offset_minutes,
@@ -114,37 +95,12 @@ impl From<NvsRoom> for Room {
         Self {
             id: r.id,
             name: r.name,
-            source: RoomSource::from(r.source),
             rhythm_enabled: r.rhythm_enabled,
             disabled: r.disabled,
             time_offset_minutes: r.time_offset_minutes,
             brightness_offset: r.brightness_offset,
             curve_config: r.curve_config.map(CurveConfig::from),
             soft_off: r.soft_off,
-        }
-    }
-}
-
-impl From<&RoomSource> for NvsRoomSource {
-    fn from(s: &RoomSource) -> Self {
-        match s {
-            RoomSource::Unknown => Self::Unknown,
-            RoomSource::Hue => Self::Hue,
-            RoomSource::HomeAssistant => Self::HomeAssistant,
-            RoomSource::Esp32 => Self::Esp32,
-            RoomSource::Other(s) => Self::Other(s.clone()),
-        }
-    }
-}
-
-impl From<NvsRoomSource> for RoomSource {
-    fn from(s: NvsRoomSource) -> Self {
-        match s {
-            NvsRoomSource::Unknown => Self::Unknown,
-            NvsRoomSource::Hue => Self::Hue,
-            NvsRoomSource::HomeAssistant => Self::HomeAssistant,
-            NvsRoomSource::Esp32 => Self::Esp32,
-            NvsRoomSource::Other(s) => Self::Other(s),
         }
     }
 }

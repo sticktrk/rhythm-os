@@ -6,7 +6,6 @@
 use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex};
 
-use rhythm_core::room::RoomSource;
 use rhythm_core::runtime::handle::RuntimeHandle;
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::runtime::orchestrator::RhythmRuntime;
@@ -31,9 +30,7 @@ fn make_hue_pipeline() -> (
     Arc<SpyHueTransport>,
 ) {
     let spy = Arc::new(SpyHueTransport::new());
-    let registry = Arc::new(Mutex::new(HubDeviceRegistry::new(RoomSource::Other(
-        "hue".to_string(),
-    ))));
+    let registry = Arc::new(Mutex::new(HubDeviceRegistry::new()));
 
     // Room with grouped_light_id
     registry

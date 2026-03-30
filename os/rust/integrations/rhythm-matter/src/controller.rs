@@ -130,17 +130,21 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
                 }
             }
 
-            // Send color temperature if device supports it
-            if let Some(kelvin) = adapted.kelvin {
-                let mireds = clusters::kelvin_to_mireds(kelvin);
-                if let Err(e) = clusters::send_color_temperature(
+            // Always use XY color for Matter devices — produces better results
+            // than native CT on most bulbs. The engine pre-computes xy from the
+            // target kelvin via blackbody curve, so command.xy matches command.kelvin.
+            if adapted.kelvin.is_some() || adapted.xy.is_some() {
+                let cx = clusters::xy_to_matter(command.xy.x);
+                let cy = clusters::xy_to_matter(command.xy.y);
+                if let Err(e) = clusters::send_color_xy(
                     &*self.transport,
                     node_id,
                     endpoint,
-                    mireds,
+                    cx,
+                    cy,
                     transition_tenths,
                 ) {
-                    warn!(target: "cmd", "Matter: color temp command failed for node {}: {}", node_id, e);
+                    warn!(target: "cmd", "Matter: color xy command failed for node {}: {}", node_id, e);
                 }
             }
         }
@@ -235,8 +239,6 @@ mod tests {
     use std::sync::Mutex;
     use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
-    use rhythm_core::room::RoomSource;
-
     use crate::test_support::SpyTransport;
 
     // Minimal block_on for synchronous futures (no real I/O in mocks).
@@ -266,10 +268,7 @@ mod tests {
         Arc<Mutex<MatterDeviceRegistry>>,
     ) {
         let spy = Arc::new(SpyTransport::new());
-        let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(
-            RoomSource::Other("matter".to_string()),
-            true,
-        )));
+        let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
 
         // Register room with two Matter devices
         registry.lock().unwrap().upsert_room(
@@ -285,9 +284,11 @@ mod tests {
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
+            #[cfg(feature = "desktop")]
+            transport: std::sync::OnceLock::new(),
             registry: registry.clone(),
             fabric_id: "test".to_string(),
-            commissioned: Vec::new(),
+            commissioned: std::sync::Mutex::new(Vec::new()),
             device_caps: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
@@ -436,10 +437,7 @@ mod tests {
     #[test]
     fn transition_time_from_fade_ms() {
         let spy = Arc::new(SpyTransport::new());
-        let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(
-            RoomSource::Other("matter".to_string()),
-            true,
-        )));
+        let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
         registry
             .lock()
             .unwrap()
@@ -451,9 +449,11 @@ mod tests {
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
+            #[cfg(feature = "desktop")]
+            transport: std::sync::OnceLock::new(),
             registry: registry.clone(),
             fabric_id: "test".to_string(),
-            commissioned: Vec::new(),
+            commissioned: std::sync::Mutex::new(Vec::new()),
             device_caps: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });

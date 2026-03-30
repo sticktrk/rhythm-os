@@ -67,3 +67,34 @@ pub struct PairingSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Unpairing (decommission)
+// ---------------------------------------------------------------------------
+
+/// Request to unpair/decommission a device.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnpairingRequest {
+    /// Which integration handles this unpairing (e.g., "matter").
+    pub hub_type: String,
+    /// Protocol-specific parameters.
+    ///
+    /// Matter: `{ "device_id": "matter-100", "force": false }`
+    #[serde(default)]
+    pub params: serde_json::Value,
+}
+
+/// Result of an unpairing operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnpairingResult {
+    /// Which integration handled this unpairing.
+    pub hub_type: String,
+    /// Outcome status (Complete or Failed).
+    pub status: PairingStatus,
+    /// Device ID that was unpaired (populated on completion).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    /// Error message (populated on failure).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}

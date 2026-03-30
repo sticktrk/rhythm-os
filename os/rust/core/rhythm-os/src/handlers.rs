@@ -636,7 +636,7 @@ pub fn handle_pair_device(
 
     match start_fn(state, &request.hub_type, &request.params) {
         Ok(session) => {
-            log::info!(target: "pair", "Pairing result: status={:?}", session.status);
+            log::info!(target: "pair", "Pairing result: status={:?} error={:?}", session.status, session.error);
             if session.status == crate::pairing::PairingStatus::Complete {
                 // Persist canonical registry (resolve() was called during pairing)
                 if let Ok(s) = state.lock() {
@@ -661,6 +661,68 @@ pub fn handle_pair_device(
         }
         Err(e) => {
             log::error!(target: "pair", "Pairing failed: {}", e);
+            ApiResponse::server_error(e)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Device unpairing handler
+// ---------------------------------------------------------------------------
+
+pub fn handle_unpair_device(
+    state: &SharedState,
+    request: &crate::pairing::UnpairingRequest,
+) -> ApiResponse {
+    let start_unpairing = {
+        let Ok(s) = state.lock() else {
+            return ApiResponse::server_error("lock");
+        };
+        s.start_unpairing_fn.clone()
+    };
+
+    let Some(start_fn) = start_unpairing else {
+        return ApiResponse::server_error("No unpairing support configured");
+    };
+
+    log::info!(target: "pair", "Unpairing request: hub_type={}, params={}", request.hub_type, request.params);
+
+    match start_fn(state, &request.hub_type, &request.params) {
+        Ok(result) => {
+            log::info!(target: "pair", "Unpairing result: status={:?} error={:?}", result.status, result.error);
+            if result.status == crate::pairing::PairingStatus::Complete {
+                if let Some(device_id) = &result.device_id {
+                    // Remove from hub device registry
+                    let hub_key = crate::canonical::identity::HubKey::new(
+                        crate::hub::HubType::new(&request.hub_type),
+                        "local",
+                    );
+                    let _ = commands::do_device_remove(state, device_id, Some(&hub_key));
+
+                    // Soft-remove from canonical registry
+                    commands::do_canonical_soft_remove(state, device_id, &hub_key);
+                }
+
+                // Persist registries
+                commands::persist_registry(state);
+
+                // Notify SSE clients
+                #[cfg(feature = "desktop")]
+                {
+                    commands::emit_triage_changed(state);
+                    crate::state::emit_server_event(
+                        state,
+                        crate::server_event::ServerEvent::RoomsChanged,
+                    );
+                }
+            }
+            match serde_json::to_string(&result) {
+                Ok(json) => ApiResponse::json_ok(json),
+                Err(e) => ApiResponse::server_error(e),
+            }
+        }
+        Err(e) => {
+            log::error!(target: "pair", "Unpairing failed: {}", e);
             ApiResponse::server_error(e)
         }
     }
