@@ -97,15 +97,69 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         path: "/api/ota/version",
         methods: &["GET"],
     },
+    // Device pairing
+    SharedRoute {
+        path: "/api/devices/pair",
+        methods: &["POST"],
+    },
     // Canonical device management
     SharedRoute {
         path: "/api/devices/canonical",
         methods: &["GET"],
     },
+    SharedRoute {
+        path: "/api/devices/canonical/:id",
+        methods: &["GET"],
+    },
+    SharedRoute {
+        path: "/api/devices/canonical/:id/room",
+        methods: &["PUT"],
+    },
+    SharedRoute {
+        path: "/api/devices/canonical/:id/preferred",
+        methods: &["PUT"],
+    },
     // Triage queue
+    SharedRoute {
+        path: "/api/triage",
+        methods: &["GET"],
+    },
+    SharedRoute {
+        path: "/api/triage/count",
+        methods: &["GET"],
+    },
+    SharedRoute {
+        path: "/api/triage/:id/merge",
+        methods: &["PUT"],
+    },
+    SharedRoute {
+        path: "/api/triage/:id/new",
+        methods: &["PUT"],
+    },
+    SharedRoute {
+        path: "/api/triage/:id/dismiss",
+        methods: &["PUT"],
+    },
+    SharedRoute {
+        path: "/api/triage/:id/bind",
+        methods: &["PUT"],
+    },
+    // Triage queue (legacy paths)
     SharedRoute {
         path: "/api/devices/triage",
         methods: &["GET"],
+    },
+    SharedRoute {
+        path: "/api/devices/triage/:id/merge",
+        methods: &["PUT"],
+    },
+    SharedRoute {
+        path: "/api/devices/triage/:id/new",
+        methods: &["PUT"],
+    },
+    SharedRoute {
+        path: "/api/devices/triage/:id/dismiss",
+        methods: &["PUT"],
     },
     // Topology room management
     SharedRoute {

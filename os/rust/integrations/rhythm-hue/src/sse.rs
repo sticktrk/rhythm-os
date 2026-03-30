@@ -354,6 +354,10 @@ fn parse_sse_data(data: &str, event_tx: &SyncSender<HueSseEvent>, state: &mut Ss
                             .insert(id.clone(), updated.clone());
                     }
 
+                    info!(target: "sse",
+                        "SSE: Button event passed (button={}, type={}, age={}s)",
+                        id, event_type, age.unwrap_or(0));
+
                     if let Err(e) = event_tx.try_send(HueSseEvent::ButtonEvent {
                         button_id: id.clone(),
                         event_type: event_type.clone(),

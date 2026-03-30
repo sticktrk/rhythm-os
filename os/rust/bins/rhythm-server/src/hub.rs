@@ -9,4 +9,5 @@ pub use rhythm_os::hub::*;
 pub static INTEGRATIONS: &[&dyn ExternalLightHubIntegration] = &[
     &rhythm_hue::reqwest_lifecycle::INTEGRATION,
     &rhythm_ha::desktop_lifecycle::INTEGRATION,
+    &rhythm_matter::desktop_lifecycle::INTEGRATION,
 ];

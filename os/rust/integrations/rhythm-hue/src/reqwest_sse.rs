@@ -10,14 +10,15 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use log::{info, warn};
+use reqwest_eventsource::retry;
 use reqwest_eventsource::{Event, EventSource};
 
 use crate::sse::{process_sse_line, HueSseConfig, HueSseEvent, SseParseState};
 
 /// Maximum seconds without any SSE data (including heartbeats) before
 /// assuming the connection is stalled and reconnecting. Hue bridges send
-/// heartbeat comments every ~10s, so 90s = 9 missed heartbeats.
-const SSE_IDLE_TIMEOUT_SECS: u64 = 90;
+/// heartbeat comments every ~10s, so 45s ≈ 4 missed heartbeats.
+const SSE_IDLE_TIMEOUT_SECS: u64 = 45;
 
 /// Log an "SSE alive" message at this interval during idle periods.
 const ALIVE_LOG_INTERVAL_SECS: u64 = 300;
@@ -69,9 +70,11 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(60);
     let mut parse_state = SseParseState::new();
+    let mut connect_count: u32 = 0;
 
     while !shutdown.load(Ordering::Relaxed) {
-        info!(target: "sse", "Connecting SSE to {}...", url);
+        connect_count += 1;
+        info!(target: "sse", "Connecting SSE to {} (conn #{})...", url, connect_count);
 
         let request = client
             .get(&url)
@@ -79,6 +82,11 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
             .header("Accept", "text/event-stream");
 
         let mut es = EventSource::new(request).unwrap();
+        // Disable auto-reconnection. The library would send Last-Event-ID
+        // on retry, causing the bridge to replay missed events — which is
+        // the root cause of button-press bundling after idle. Our outer
+        // loop handles reconnection with fresh EventSource instances.
+        es.set_retry_policy(Box::new(retry::Never));
 
         let mut connected = false;
         let mut last_data_event = Instant::now();
@@ -111,7 +119,7 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
 
             match event {
                 Ok(Event::Open) => {
-                    info!(target: "sse", "SSE connected");
+                    info!(target: "sse", "SSE connected (conn #{})", connect_count);
                     connected = true;
                     backoff = Duration::from_secs(1);
                     last_data_event = Instant::now();

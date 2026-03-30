@@ -72,6 +72,7 @@ fn main() -> Result<()> {
         s.firmware_version = Box::leak(VERSION.to_string().into_boxed_str());
         s.platform_context = "ha_addon";
         s.listen_port = Some(port);
+        s.data_dir = data_dir.clone();
         s.storage = Some(Box::new(file_storage));
 
         // Load persisted state
@@ -82,6 +83,7 @@ fn main() -> Result<()> {
         s.ensure_runtime_fn = Some(callbacks.ensure_runtime_fn);
         s.get_hub_provider_fn = Some(callbacks.get_hub_provider_fn);
         s.register_controller_fn = Some(callbacks.register_controller_fn);
+        s.start_pairing_fn = Some(callbacks.start_pairing_fn);
 
         // Credentials interceptor: delegates to integrations (e.g., HA auto-fills SUPERVISOR_TOKEN)
         s.hub_credentials_interceptor = Some(rhythm_os::hub::combined_credentials_interceptor(

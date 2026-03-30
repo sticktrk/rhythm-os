@@ -1,0 +1,551 @@
+[
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LCT001",
+    "name": "Hue White and Color Ambiance A19/E26 gen 1",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 6500,
+    "gamut": "A",
+    "aliases": ["9290002579A"],
+    "zigbee": {
+      "model_id": "LCT001",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LCT007",
+    "name": "Hue White and Color Ambiance A19/E26 gen 2",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 6500,
+    "gamut": "A",
+    "zigbee": {
+      "model_id": "LCT007",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LCT010",
+    "name": "Hue White and Color Ambiance A19/E26 gen 3",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 6500,
+    "gamut": "B",
+    "zigbee": {
+      "model_id": "LCT010",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LCT014",
+    "name": "Hue White and Color Ambiance A19/E26",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 6500,
+    "gamut": "B",
+    "zigbee": {
+      "model_id": "LCT014",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LCT015",
+    "name": "Hue White and Color Ambiance A19/E26",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 6500,
+    "gamut": "B",
+    "zigbee": {
+      "model_id": "LCT015",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LCT016",
+    "name": "Hue White and Color Ambiance A19/E26 gen 4",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 6500,
+    "gamut": "C",
+    "aliases": ["9290012573A"],
+    "zigbee": {
+      "model_id": "LCT016",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LCA001",
+    "name": "Hue White and Color Ambiance A19/E26 (Bluetooth)",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 6500,
+    "gamut": "C",
+    "zigbee": {
+      "model_id": "LCA001",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LCA003",
+    "name": "Hue White and Color Ambiance A21/E26",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 6500,
+    "gamut": "C",
+    "zigbee": {
+      "model_id": "LCA003",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LCT024",
+    "name": "Hue Play Light Bar",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 6500,
+    "gamut": "C",
+    "zigbee": {
+      "model_id": "LCT024",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LST002",
+    "name": "Hue Lightstrip Plus",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 6500,
+    "gamut": "B",
+    "zigbee": {
+      "model_id": "LST002",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LCL001",
+    "name": "Hue Lightstrip Plus V4",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 6500,
+    "gamut": "C",
+    "zigbee": {
+      "model_id": "LCL001",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LCG002",
+    "name": "Hue White and Color Ambiance GU10",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 6500,
+    "gamut": "C",
+    "zigbee": {
+      "model_id": "LCG002",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LCF002",
+    "name": "Hue White and Color Ambiance BR30",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 6500,
+    "gamut": "C",
+    "zigbee": {
+      "model_id": "LCF002",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LTW015",
+    "name": "Hue White Ambiance A19/E26",
+    "light_type": "color_temperature",
+    "color_modes": ["color_temperature"],
+    "min_kelvin": 2200,
+    "max_kelvin": 6500,
+    "zigbee": {
+      "model_id": "LTW015",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LTA001",
+    "name": "Hue White Ambiance A19/E26 (Bluetooth)",
+    "light_type": "color_temperature",
+    "color_modes": ["color_temperature"],
+    "min_kelvin": 2200,
+    "max_kelvin": 6500,
+    "zigbee": {
+      "model_id": "LTA001",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LTA004",
+    "name": "Hue White Ambiance A21/E26",
+    "light_type": "color_temperature",
+    "color_modes": ["color_temperature"],
+    "min_kelvin": 2200,
+    "max_kelvin": 6500,
+    "zigbee": {
+      "model_id": "LTA004",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LTG002",
+    "name": "Hue White Ambiance GU10",
+    "light_type": "color_temperature",
+    "color_modes": ["color_temperature"],
+    "min_kelvin": 2200,
+    "max_kelvin": 6500,
+    "zigbee": {
+      "model_id": "LTG002",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LWB010",
+    "name": "Hue White A19/E26",
+    "light_type": "dimmable",
+    "color_modes": ["dimmable"],
+    "zigbee": {
+      "model_id": "LWB010",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LWA001",
+    "name": "Hue White A19/E26 (Bluetooth)",
+    "light_type": "dimmable",
+    "color_modes": ["dimmable"],
+    "zigbee": {
+      "model_id": "LWA001",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LOM001",
+    "name": "Hue Smart Plug",
+    "light_type": "on_off",
+    "color_modes": ["on_off"],
+    "supports_transition": false,
+    "zigbee": {
+      "model_id": "LOM001",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "IKEA of Sweden",
+    "model": "LED1545G12",
+    "name": "TRADFRI bulb E26/E27 WS opal 980lm",
+    "light_type": "color_temperature",
+    "color_modes": ["color_temperature"],
+    "min_kelvin": 2200,
+    "max_kelvin": 4000,
+    "zigbee": {
+      "model_id": "LED1545G12",
+      "endpoint": 1
+    }
+  },
+  {
+    "manufacturer": "IKEA of Sweden",
+    "model": "LED1546G12",
+    "name": "TRADFRI bulb E26/E27 WS clear 950lm",
+    "light_type": "color_temperature",
+    "color_modes": ["color_temperature"],
+    "min_kelvin": 2200,
+    "max_kelvin": 4000,
+    "zigbee": {
+      "model_id": "LED1546G12",
+      "endpoint": 1
+    }
+  },
+  {
+    "manufacturer": "IKEA of Sweden",
+    "model": "LED1624G9",
+    "name": "TRADFRI bulb E14/E26/E27 CWS 470/600lm",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 1780,
+    "max_kelvin": 4000,
+    "gamut": {
+      "red": { "x": 0.68, "y": 0.31 },
+      "green": { "x": 0.11, "y": 0.82 },
+      "blue": { "x": 0.13, "y": 0.04 }
+    },
+    "zigbee": {
+      "model_id": "LED1624G9",
+      "endpoint": 1
+    }
+  },
+  {
+    "manufacturer": "IKEA of Sweden",
+    "model": "LED1623G12",
+    "name": "TRADFRI bulb E26/E27 opal 1000lm",
+    "light_type": "dimmable",
+    "color_modes": ["dimmable"],
+    "zigbee": {
+      "model_id": "LED1623G12",
+      "endpoint": 1
+    }
+  },
+  {
+    "manufacturer": "IKEA of Sweden",
+    "model": "LED2101G4",
+    "name": "TRADFRI bulb E12/E14 WS candle 450lm",
+    "light_type": "color_temperature",
+    "color_modes": ["color_temperature"],
+    "min_kelvin": 2200,
+    "max_kelvin": 4000,
+    "zigbee": {
+      "model_id": "LED2101G4",
+      "endpoint": 1
+    }
+  },
+  {
+    "manufacturer": "IKEA of Sweden",
+    "model": "LED2002G5",
+    "name": "TRADFRI bulb E26/E27 WS opal 1055lm gen 2",
+    "light_type": "color_temperature",
+    "color_modes": ["color_temperature"],
+    "min_kelvin": 2200,
+    "max_kelvin": 4000,
+    "zigbee": {
+      "model_id": "LED2002G5",
+      "endpoint": 1
+    }
+  },
+  {
+    "manufacturer": "innr",
+    "model": "RB 285 C",
+    "name": "Innr Smart Bulb Colour",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 6500,
+    "gamut": "C",
+    "zigbee": {
+      "model_id": "RB 285 C",
+      "endpoint": 1
+    }
+  },
+  {
+    "manufacturer": "innr",
+    "model": "RB 278 T",
+    "name": "Innr Smart Bulb Tunable White",
+    "light_type": "color_temperature",
+    "color_modes": ["color_temperature"],
+    "min_kelvin": 2200,
+    "max_kelvin": 5000,
+    "zigbee": {
+      "model_id": "RB 278 T",
+      "endpoint": 1
+    }
+  },
+  {
+    "manufacturer": "innr",
+    "model": "RB 265",
+    "name": "Innr Smart Bulb White",
+    "light_type": "dimmable",
+    "color_modes": ["dimmable"],
+    "zigbee": {
+      "model_id": "RB 265",
+      "endpoint": 1
+    }
+  },
+  {
+    "manufacturer": "innr",
+    "model": "RS 230 C",
+    "name": "Innr Smart Spot Colour",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 6500,
+    "gamut": "C",
+    "zigbee": {
+      "model_id": "RS 230 C",
+      "endpoint": 1
+    }
+  },
+  {
+    "manufacturer": "LUMI",
+    "model": "lumi.light.aqcn02",
+    "name": "Aqara LED Light Bulb (Tunable White)",
+    "light_type": "color_temperature",
+    "color_modes": ["color_temperature"],
+    "min_kelvin": 2700,
+    "max_kelvin": 6500,
+    "zigbee": {
+      "model_id": "lumi.light.aqcn02",
+      "endpoint": 1
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LCE002",
+    "name": "Hue White and Color Ambiance E12/E14 Candle",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 6500,
+    "gamut": "C",
+    "zigbee": {
+      "model_id": "LCE002",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LCA007",
+    "name": "Hue White and Color Ambiance A19/E26 gen 5",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 6500,
+    "gamut": "C",
+    "zigbee": {
+      "model_id": "LCA007",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LWA004",
+    "name": "Hue White A19/E26 gen 2 (Bluetooth)",
+    "light_type": "dimmable",
+    "color_modes": ["dimmable"],
+    "zigbee": {
+      "model_id": "LWA004",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LTA012",
+    "name": "Hue White Ambiance A19/E26 gen 2",
+    "light_type": "color_temperature",
+    "color_modes": ["color_temperature"],
+    "min_kelvin": 2200,
+    "max_kelvin": 6500,
+    "zigbee": {
+      "model_id": "LTA012",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Savant Systems, Inc.",
+    "model": "93128983",
+    "name": "GE Cync Full Color A19",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 7000,
+    "matter": {}
+  },
+  {
+    "manufacturer": "Savant Systems, Inc.",
+    "model": "93128984",
+    "name": "GE Cync Tunable White A19",
+    "light_type": "color_temperature",
+    "color_modes": ["color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 7000,
+    "matter": {}
+  },
+  {
+    "manufacturer": "Savant Systems, Inc.",
+    "model": "93128985",
+    "name": "GE Cync Soft White A19",
+    "light_type": "dimmable",
+    "color_modes": ["dimmable"],
+    "matter": {}
+  },
+  {
+    "manufacturer": "Savant Systems, Inc.",
+    "model": "93128982",
+    "name": "GE Cync Smart Plug",
+    "light_type": "on_off",
+    "color_modes": ["on_off"],
+    "supports_transition": false,
+    "matter": {}
+  },
+  {
+    "manufacturer": "Savant Systems, Inc.",
+    "model": "93129079",
+    "name": "GE Cync Full Color BR30",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 7000,
+    "matter": {}
+  },
+  {
+    "manufacturer": "Savant Systems, Inc.",
+    "model": "93129080",
+    "name": "GE Cync Tunable White BR30",
+    "light_type": "color_temperature",
+    "color_modes": ["color_temperature"],
+    "min_kelvin": 2000,
+    "max_kelvin": 7000,
+    "matter": {}
+  }
+]
