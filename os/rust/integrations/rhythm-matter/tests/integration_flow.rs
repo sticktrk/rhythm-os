@@ -4,7 +4,6 @@
 //! Verifies Matter-specific formatting (node IDs, cluster commands, level/mireds).
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex};
 
 use rhythm_core::runtime::handle::RuntimeHandle;
@@ -54,8 +53,7 @@ fn make_matter_pipeline() -> (
         event_tx,
     });
 
-    let fade_ms = Arc::new(AtomicU16::new(500));
-    let controller = MatterLightController::new(spy.clone(), hub_data, fade_ms);
+    let controller = MatterLightController::new(spy.clone(), hub_data);
 
     let runtime = RhythmRuntime::new(
         controller,
@@ -132,15 +130,12 @@ fn engine_reset_sends_adaptive_values() {
         "Expected MoveToLevelWithOnOff (0x04)"
     );
 
-    // Color temp command should be MoveToColorTemperature (0x0A)
-    let ct_cmd = calls
+    // Color XY command should be MoveToColor (0x07)
+    let color_cmd = calls
         .iter()
         .find(|c| c.cluster == 0x0300)
         .expect("Expected Color Control command");
-    assert_eq!(
-        ct_cmd.cmd_id, 0x0A,
-        "Expected MoveToColorTemperature (0x0A)"
-    );
+    assert_eq!(color_cmd.cmd_id, 0x07, "Expected MoveToColor (0x07)");
 }
 
 #[test]
@@ -174,8 +169,7 @@ fn multiple_devices_in_room_all_receive_commands() {
         event_tx,
     });
 
-    let fade_ms = Arc::new(AtomicU16::new(0));
-    let controller = MatterLightController::new(spy.clone(), hub_data, fade_ms);
+    let controller = MatterLightController::new(spy.clone(), hub_data);
 
     let runtime = RhythmRuntime::new(
         controller,
@@ -234,8 +228,7 @@ fn make_pipeline_with_caps(
         event_tx,
     });
 
-    let fade_ms = Arc::new(AtomicU16::new(500));
-    let controller = MatterLightController::new(spy.clone(), hub_data, fade_ms);
+    let controller = MatterLightController::new(spy.clone(), hub_data);
 
     let runtime = RhythmRuntime::new(
         controller,
@@ -369,8 +362,7 @@ fn unknown_device_falls_back_to_extended_color() {
         event_tx,
     });
 
-    let fade_ms = Arc::new(AtomicU16::new(500));
-    let controller = MatterLightController::new(spy.clone(), hub_data, fade_ms);
+    let controller = MatterLightController::new(spy.clone(), hub_data);
 
     let runtime = RhythmRuntime::new(
         controller,

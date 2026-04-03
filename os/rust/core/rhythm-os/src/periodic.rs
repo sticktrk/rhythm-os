@@ -55,8 +55,6 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
         initial_interval.as_secs()
     );
 
-    thread::sleep(initial_interval);
-
     loop {
         let (utc_offset, config, solar_noon, lat, lon, update_interval, timezone_name) = {
             let Ok(s) = state.lock() else {
@@ -145,14 +143,14 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             );
         }
 
-        // Record tick timestamp for client bootstrap
+        // Record tick timestamp and sync curve-computed motion timeout
         if let Ok(mut s) = state.lock() {
-            s.last_tick_epoch_ms = Some(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
-            );
+            s.last_tick_epoch_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            s.default_motion_timeout_secs = values.motion_timeout_secs as u64;
+            s.default_fade_ms = values.transition_ms;
         }
 
         if let Some(ref cb) = on_tick {
@@ -193,7 +191,12 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
 
         check_solar_midnight(&state, current_hour);
 
-        thread::sleep(update_interval);
+        // Use curve-suggested tick interval if available, otherwise configured default
+        let sleep_duration = values
+            .suggested_tick_interval_secs
+            .map(|s| Duration::from_secs(s as u64))
+            .unwrap_or(update_interval);
+        thread::sleep(sleep_duration);
     }
 }
 
@@ -597,7 +600,9 @@ mod tests {
             fn set_room_time_offset(&self, _: &str, _: f32) -> anyhow::Result<()> {
                 Ok(())
             }
-            fn set_soft_off_brightness(&self, _: u8) {}
+            fn idle_brightness(&self) -> u8 {
+                1
+            }
             fn soft_off_tick_room(&self, _: &str) -> anyhow::Result<()> {
                 Ok(())
             }

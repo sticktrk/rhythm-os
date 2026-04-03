@@ -79,6 +79,10 @@ pub struct RoomsPollResponse {
 /// Full state snapshot for `GET /api/state`.
 #[derive(Debug, Serialize)]
 pub struct StateSnapshot {
+    /// Current server time as ISO 8601 UTC string.
+    pub current_time: String,
+    /// Epoch milliseconds of the most recent periodic tick (for client bootstrap).
+    pub last_tick_epoch_ms: u64,
     pub version: String,
     pub platform: String,
     pub context: String,
@@ -90,12 +94,13 @@ pub struct StateSnapshot {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hubs: Vec<HubDto>,
     pub config: serde_json::Value,
+    /// Current curve-computed fade duration (ms), regardless of auto/manual mode.
+    pub effective_fade_ms: u32,
+    /// Current curve-computed motion timeout (secs), regardless of auto/manual mode.
+    pub effective_motion_timeout_secs: u64,
     pub location: LocationDto,
     pub settings: SettingsDto,
     pub rooms: Vec<RoomFullState>,
-    /// Epoch milliseconds of the most recent periodic tick (for client bootstrap).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_tick_epoch_ms: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -125,11 +130,8 @@ pub struct LocationDto {
 /// Settings in state snapshot and `GET /api/settings`.
 #[derive(Debug, Serialize)]
 pub struct SettingsDto {
-    pub bulb_fade_ms: u16,
     pub rhythm_interval_secs: u64,
-    pub default_motion_timeout_secs: u64,
     pub power_save: bool,
-    pub soft_off_brightness: u8,
 }
 
 /// A typed device entry.
@@ -435,18 +437,12 @@ mod tests {
     #[test]
     fn settings_dto_serializes() {
         let dto = SettingsDto {
-            bulb_fade_ms: 500,
             rhythm_interval_secs: 60,
-            default_motion_timeout_secs: 300,
             power_save: true,
-            soft_off_brightness: 5,
         };
         let json: Value = serde_json::to_value(&dto).unwrap();
-        assert_eq!(json["bulb_fade_ms"], 500);
         assert_eq!(json["rhythm_interval_secs"], 60);
-        assert_eq!(json["default_motion_timeout_secs"], 300);
         assert_eq!(json["power_save"], true);
-        assert_eq!(json["soft_off_brightness"], 5);
     }
 
     // ---- HubDto ----
@@ -591,6 +587,8 @@ mod tests {
             },
             hubs: vec![],
             config: serde_json::json!({}),
+            effective_fade_ms: 500,
+            effective_motion_timeout_secs: 1200,
             location: LocationDto {
                 latitude: None,
                 longitude: None,
@@ -598,25 +596,23 @@ mod tests {
                 timezone_name: None,
             },
             settings: SettingsDto {
-                bulb_fade_ms: 500,
                 rhythm_interval_secs: 60,
-                default_motion_timeout_secs: 300,
                 power_save: false,
-                soft_off_brightness: 1,
             },
             rooms: vec![],
-            last_tick_epoch_ms: None,
+            last_tick_epoch_ms: 1700000000000,
+            current_time: "2024-01-01T00:00:00Z".into(),
         };
         let json: Value = serde_json::to_value(&snap).unwrap();
         assert!(json.get("listen_port").is_none());
         // hubs omitted when empty
         assert!(json.get("hubs").is_none());
-        // last_tick_epoch_ms omitted when None
-        assert!(json.get("last_tick_epoch_ms").is_none());
+        assert_eq!(json["last_tick_epoch_ms"], 1700000000000u64);
         assert_eq!(json["version"], "1.0.0");
         assert_eq!(json["platform"], "desktop");
         assert_eq!(json["context"], "server");
         assert!(json["rooms"].as_array().unwrap().is_empty());
+        assert!(json["current_time"].is_string());
     }
 
     #[test]
@@ -637,6 +633,8 @@ mod tests {
                 connected: true,
             }],
             config: serde_json::json!({"min_brightness": 1}),
+            effective_fade_ms: 500,
+            effective_motion_timeout_secs: 300,
             location: LocationDto {
                 latitude: Some(35.0),
                 longitude: Some(-97.0),
@@ -644,11 +642,8 @@ mod tests {
                 timezone_name: Some("America/Chicago".into()),
             },
             settings: SettingsDto {
-                bulb_fade_ms: 500,
                 rhythm_interval_secs: 60,
-                default_motion_timeout_secs: 300,
                 power_save: false,
-                soft_off_brightness: 1,
             },
             rooms: vec![RoomFullState {
                 rhythm: sample_rhythm_state(),
@@ -658,7 +653,8 @@ mod tests {
                 device_ids: vec![],
                 devices: vec![],
             }],
-            last_tick_epoch_ms: Some(1700000000000),
+            last_tick_epoch_ms: 1700000000000,
+            current_time: "2024-01-01T00:00:00Z".into(),
         };
         let json: Value = serde_json::to_value(&snap).unwrap();
         assert_eq!(json["listen_port"], 8099);

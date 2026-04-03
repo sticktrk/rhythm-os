@@ -127,7 +127,11 @@ pub fn send_level<T: MatterTransport>(
 
 /// Build MoveToColor (XY) TLV payload.
 #[cfg(feature = "desktop")]
-pub fn build_color_xy_payload(color_x: u16, color_y: u16, transition_tenths: u16) -> Result<Vec<u8>> {
+pub fn build_color_xy_payload(
+    color_x: u16,
+    color_y: u16,
+    transition_tenths: u16,
+) -> Result<Vec<u8>> {
     matc::clusters::codec::color_control::encode_move_to_color(
         color_x,
         color_y,
@@ -139,7 +143,11 @@ pub fn build_color_xy_payload(color_x: u16, color_y: u16, transition_tenths: u16
 
 /// Build MoveToColor (XY) TLV payload (manual fallback for embedded/test).
 #[cfg(not(feature = "desktop"))]
-pub fn build_color_xy_payload(color_x: u16, color_y: u16, transition_tenths: u16) -> Result<Vec<u8>> {
+pub fn build_color_xy_payload(
+    color_x: u16,
+    color_y: u16,
+    transition_tenths: u16,
+) -> Result<Vec<u8>> {
     let mut payload = Vec::with_capacity(8);
     payload.extend_from_slice(&color_x.to_le_bytes());
     payload.extend_from_slice(&color_y.to_le_bytes());

@@ -92,14 +92,7 @@ pub fn create_controller(state: &SharedState, _key: &HubKey) -> Result<Arc<dyn L
             .ok_or_else(|| anyhow::anyhow!("Matter hub not connected"))?
     };
 
-    let fade_ms = {
-        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.bulb_fade_atomic.clone()
-    };
-
-    Ok(Arc::new(MatterLightController::new(
-        transport, hub_data, fade_ms,
-    )))
+    Ok(Arc::new(MatterLightController::new(transport, hub_data)))
 }
 
 // ============================================================================

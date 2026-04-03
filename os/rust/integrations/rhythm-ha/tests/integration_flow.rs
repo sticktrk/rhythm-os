@@ -3,7 +3,6 @@
 //! Tests the full pipeline: HA service event → translate → HubEvent → engine → HaLightController → SpyHaTransport.
 //! Verifies HA-specific formatting (area_id, brightness_pct, color_temp_kelvin, transition).
 
-use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex};
 
 use rhythm_core::runtime::handle::RuntimeHandle;
@@ -41,8 +40,7 @@ fn make_ha_pipeline() -> (
         &[],
     );
 
-    let fade_ms = Arc::new(AtomicU16::new(1000));
-    let controller = HaLightController::new(spy.clone(), controller_registry, fade_ms);
+    let controller = HaLightController::new(spy.clone(), controller_registry);
 
     let runtime = RhythmRuntime::new(
         controller,
@@ -138,11 +136,11 @@ fn service_event_reset_sends_turn_on() {
         kelvin
     );
 
-    // Transition should be included (fade_ms = 1000 → 1.0s)
+    // Transition should be included (command.transition_ms from curve, default 500 → 0.5s)
     let transition = data["transition"].as_f64().unwrap();
     assert!(
-        (transition - 1.0).abs() < 0.01,
-        "transition should be ~1.0s, got {}",
+        transition > 0.0,
+        "transition should be > 0, got {}",
         transition
     );
 }

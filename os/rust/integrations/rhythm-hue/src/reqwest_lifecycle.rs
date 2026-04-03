@@ -107,7 +107,7 @@ pub fn create_hue_controller(
     use crate::controller::HueLightController;
     use crate::hub_state::HueHubData;
 
-    let (bridge_ip, username, registry, fade_atomic) = {
+    let (bridge_ip, username, registry) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
         let creds = s
@@ -133,11 +133,11 @@ pub fn create_hue_controller(
             .map(|hue| hue.registry.clone())
             .ok_or_else(|| anyhow::anyhow!("Hue hub not active for {}", key))?;
 
-        (bridge_ip, username, reg, s.bulb_fade_atomic.clone())
+        (bridge_ip, username, reg)
     };
 
     let transport = ReqwestHueTransport::new(&bridge_ip)?;
-    let controller = HueLightController::new(transport, username, registry, fade_atomic);
+    let controller = HueLightController::new(transport, username, registry);
     Ok(std::sync::Arc::new(controller))
 }
 

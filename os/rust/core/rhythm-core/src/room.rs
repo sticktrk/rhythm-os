@@ -282,7 +282,6 @@ impl RoomManager {
     pub fn enabled_rooms(&self) -> Vec<&Room> {
         self.rooms.values().filter(|r| !r.disabled).collect()
     }
-
 }
 
 #[cfg(test)]

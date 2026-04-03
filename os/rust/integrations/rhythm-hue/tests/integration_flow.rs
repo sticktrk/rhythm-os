@@ -3,7 +3,6 @@
 //! Tests the full pipeline: SSE event → translate → HubEvent → engine → HueLightController → SpyHueTransport.
 //! Verifies Hue-specific formatting (grouped_light_id, username, kelvin, fade_ms).
 
-use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex};
 
 use rhythm_core::runtime::handle::RuntimeHandle;
@@ -46,13 +45,7 @@ fn make_hue_pipeline() -> (
         DeviceType::Button,
     );
 
-    let fade_ms = Arc::new(AtomicU16::new(500));
-    let controller = HueLightController::new(
-        spy.clone(),
-        "testuser".to_string(),
-        registry.clone(),
-        fade_ms,
-    );
+    let controller = HueLightController::new(spy.clone(), "testuser".to_string(), registry.clone());
 
     let runtime = RhythmRuntime::new(
         controller,
@@ -109,6 +102,7 @@ fn sse_button_press_produces_correct_transport_call() {
             on,
             brightness,
             kelvin,
+            xy: _,
             fade_ms,
         } => {
             assert_eq!(grouped_light_id, "gl-room1");

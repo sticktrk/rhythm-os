@@ -32,7 +32,7 @@ fn main() -> Result<()> {
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|p| p.parse().ok())
-        .unwrap_or(39821);
+        .unwrap_or(54448);
 
     let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
 

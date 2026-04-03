@@ -3,7 +3,6 @@
 //! Implements `rhythm_core::controller::LightController` using HA service calls
 //! via any `HaTransport` implementation. Controls rooms through area_id targeting.
 
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -23,18 +22,12 @@ use crate::transport::HaTransport;
 pub struct HaLightController<H: HaTransport> {
     client: H,
     registry: Arc<Mutex<HaDeviceRegistry>>,
-    /// Shared atomic for fade duration (ms). Updated via settings API.
-    fade_ms: Arc<AtomicU16>,
 }
 
 impl<H: HaTransport> HaLightController<H> {
     /// Create a new HA light controller.
-    pub fn new(client: H, registry: Arc<Mutex<HaDeviceRegistry>>, fade_ms: Arc<AtomicU16>) -> Self {
-        Self {
-            client,
-            registry,
-            fade_ms,
-        }
+    pub fn new(client: H, registry: Arc<Mutex<HaDeviceRegistry>>) -> Self {
+        Self { client, registry }
     }
 }
 
@@ -44,15 +37,20 @@ impl<H: HaTransport + 'static> LightController for HaLightController<H> {
         // Verify room exists in registry (for HA, target == room_id == area_id)
         let area_id = rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
 
-        let fade_ms = self.fade_ms.load(Ordering::Relaxed);
+        let fade_ms = command.transition_ms.unwrap_or(0) as u16;
 
         // Build service data targeting area_id
-        // Note: HA 2026.3 removed `color_temp` (mireds) — use `color_temp_kelvin` instead
         let mut data = serde_json::json!({
             "area_id": area_id,
             "brightness_pct": command.brightness,
-            "color_temp_kelvin": command.kelvin,
         });
+
+        // Direct color: send xy_color. Otherwise: send color_temp_kelvin.
+        if command.is_direct_color {
+            data["xy_color"] = serde_json::json!([command.xy.x, command.xy.y]);
+        } else {
+            data["color_temp_kelvin"] = serde_json::json!(command.kelvin);
+        }
 
         // Add transition if fade is set (HA uses seconds)
         if fade_ms > 0 {
@@ -70,10 +68,17 @@ impl<H: HaTransport + 'static> LightController for HaLightController<H> {
                 ))
             })?;
 
-        info!(target: "cmd",
-            "HA turn_on: room={} bri={} kelvin={}",
-            room_id, command.brightness, command.kelvin
-        );
+        if command.is_direct_color {
+            info!(target: "cmd",
+                "HA turn_on: room={} bri={} xy=({:.3},{:.3})",
+                room_id, command.brightness, command.xy.x, command.xy.y
+            );
+        } else {
+            info!(target: "cmd",
+                "HA turn_on: room={} bri={} kelvin={}",
+                room_id, command.brightness, command.kelvin
+            );
+        }
 
         Ok(())
     }
@@ -182,8 +187,7 @@ mod tests {
             .lock()
             .unwrap()
             .upsert_room("living_room", "Living Room", "living_room", &[]);
-        let fade_ms = Arc::new(AtomicU16::new(1000));
-        let controller = HaLightController::new(spy, registry.clone(), fade_ms);
+        let controller = HaLightController::new(spy, registry.clone());
         (controller, registry)
     }
 
@@ -216,8 +220,7 @@ mod tests {
     #[test]
     fn transition_included_when_fade_set() {
         let (controller, _) = make_controller();
-        // fade_ms is 1000 from make_controller
-        let cmd = LightingCommand::new(50, 3500);
+        let cmd = LightingCommand::with_transition(50, 3500, 1000);
         block_on(controller.turn_on("living_room", cmd)).unwrap();
 
         let calls = controller.client.calls();
@@ -264,6 +267,30 @@ mod tests {
         // No light entities registered — should return false
         let result = block_on(controller.any_lights_on("living_room")).unwrap();
         assert!(!result);
+    }
+
+    #[test]
+    fn turn_on_direct_color_sends_xy_not_kelvin() {
+        let (controller, _) = make_controller();
+        let rgb = rhythm_core::color::Rgb::new(255, 40, 150);
+        let xy = rhythm_core::color::XyColor { x: 0.45, y: 0.25 };
+        let cmd = LightingCommand::from_color(5, rgb, xy, Some(500));
+        block_on(controller.turn_on("living_room", cmd)).unwrap();
+
+        let calls = controller.client.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].data.get("xy_color").is_some(),
+            "direct color should send xy_color"
+        );
+        assert!(
+            calls[0].data.get("color_temp_kelvin").is_none(),
+            "direct color should not send kelvin"
+        );
+        let xy_arr = calls[0].data["xy_color"].as_array().unwrap();
+        assert!((xy_arr[0].as_f64().unwrap() - 0.45).abs() < 0.001);
+        assert!((xy_arr[1].as_f64().unwrap() - 0.25).abs() < 0.001);
+        assert_eq!(calls[0].data["brightness_pct"], 5);
     }
 
     #[test]

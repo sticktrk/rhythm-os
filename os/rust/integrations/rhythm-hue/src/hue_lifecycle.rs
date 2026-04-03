@@ -116,7 +116,7 @@ pub fn ensure_hue_runtime<H: crate::transport::HueTransport + 'static>(
     use crate::controller::HueLightController;
     use log::warn;
 
-    let (username, registry, bulb_fade_atomic) = {
+    let (username, registry) = {
         let s = state
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
@@ -136,11 +136,10 @@ pub fn ensure_hue_runtime<H: crate::transport::HueTransport + 'static>(
             .map(|hue| hue.registry.clone())
             .ok_or_else(|| anyhow::anyhow!("Hue hub not active (call connect_sse first)"))?;
 
-        (user, reg, s.bulb_fade_atomic.clone())
+        (user, reg)
     };
 
-    let controller =
-        HueLightController::new(transport, username, registry.clone(), bulb_fade_atomic);
+    let controller = HueLightController::new(transport, username, registry.clone());
 
     rhythm_os::lifecycle::ensure_hub_runtime(
         state,

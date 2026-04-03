@@ -489,10 +489,8 @@ impl CanonicalRegistry {
                 manufacturer: None,
                 model: None,
             },
-            hub_key: hub_key.unwrap_or_else(|| HubKey::new(
-                crate::hub::HubType::new("unknown"),
-                "unknown",
-            )),
+            hub_key: hub_key
+                .unwrap_or_else(|| HubKey::new(crate::hub::HubType::new("unknown"), "unknown")),
             candidate_matches: vec![],
             room_binding: None,
             confidence: 0,

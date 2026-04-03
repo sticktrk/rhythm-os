@@ -301,7 +301,9 @@ fn io_thread_main(
     {
         Ok(rt) => rt,
         Err(e) => {
-            let _ = init_tx.send(Err(anyhow::anyhow!(e).context("Failed to create Matter I/O runtime")));
+            let _ = init_tx.send(Err(
+                anyhow::anyhow!(e).context("Failed to create Matter I/O runtime")
+            ));
             return;
         }
     };
@@ -344,7 +346,8 @@ fn io_thread_main(
                 payload,
                 reply,
             } => {
-                let result = handle_send_cmd(&dm, &rt, node_id, endpoint, cluster, cmd_id, &payload);
+                let result =
+                    handle_send_cmd(&dm, &rt, node_id, endpoint, cluster, cmd_id, &payload);
                 let _ = reply.send(result);
             }
             IoRequest::ReadAttribute {
@@ -539,7 +542,8 @@ fn connect_with_drain(
         }
         Err(e) => Err(anyhow::anyhow!(
             "Failed to connect to Matter node {}: {:#}",
-            node_id, e
+            node_id,
+            e
         )),
     }
 }
@@ -676,8 +680,7 @@ fn handle_commission(
     };
 
     // Read device info (works for both fresh and existing commissions)
-    let (vendor_name, product_name, vendor_id, product_id, serial) =
-        read_basic_info(rt, &conn);
+    let (vendor_name, product_name, vendor_id, product_id, serial) = read_basic_info(rt, &conn);
     let (color_modes, min_kelvin, max_kelvin) = probe_color_capabilities_rt(rt, &conn, 1);
 
     info!(target: "sys",
@@ -712,9 +715,9 @@ fn handle_decommission(
     if !force {
         // Best-effort OTA: connect and send RemoveFabric so the device forgets us
         match (|| -> Result<()> {
-            let conn = rt
-                .block_on(dm.connect(node_id))
-                .with_context(|| format!("Failed to connect to node {} for decommission", node_id))?;
+            let conn = rt.block_on(dm.connect(node_id)).with_context(|| {
+                format!("Failed to connect to node {} for decommission", node_id)
+            })?;
 
             // Read CurrentFabricIndex (Operational Credentials cluster 0x003E, attr 0x0005, endpoint 0)
             let fabric_index = rt

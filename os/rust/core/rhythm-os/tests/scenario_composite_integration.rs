@@ -5,7 +5,6 @@
 //! to test the full multi-hub fan-out with real integration controllers.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex};
 
 use rhythm_core::composite_controller::CompositeController;
@@ -52,17 +51,14 @@ fn make_composite_pipeline() -> (
         .upsert_room("ha-kitchen", "Kitchen", "ha-kitchen", &[]);
 
     // Build controllers
-    let hue_fade = Arc::new(AtomicU16::new(500));
     let hue_controller: Arc<dyn rhythm_core::LightController> = Arc::new(HueLightController::new(
         hue_spy.clone(),
         "testuser".to_string(),
         hue_registry,
-        hue_fade,
     ));
 
-    let ha_fade = Arc::new(AtomicU16::new(1000));
     let ha_controller: Arc<dyn rhythm_core::LightController> =
-        Arc::new(HaLightController::new(ha_spy.clone(), ha_registry, ha_fade));
+        Arc::new(HaLightController::new(ha_spy.clone(), ha_registry));
 
     // Composite controller with routing
     let composite = Arc::new(CompositeController::new());

@@ -548,23 +548,9 @@ impl TestHarness {
     /// Update global settings (mirrors "Settings → Preferences" screen).
     ///
     /// Pass `None` for any field to leave it unchanged.
-    pub fn set_settings(
-        &self,
-        fade_ms: Option<u16>,
-        update_interval: Option<u64>,
-        motion_timeout: Option<u64>,
-        power_save: Option<bool>,
-        soft_off_brightness: Option<u8>,
-    ) -> String {
-        commands::do_settings_set(
-            &self.state,
-            fade_ms,
-            update_interval,
-            motion_timeout,
-            power_save,
-            soft_off_brightness,
-        )
-        .expect("do_settings_set failed")
+    pub fn set_settings(&self, update_interval: Option<u64>, power_save: Option<bool>) -> String {
+        commands::do_settings_set(&self.state, update_interval, power_save)
+            .expect("do_settings_set failed")
     }
 
     /// Push a new CurveConfig to the engine (mirrors "Designer → Save").

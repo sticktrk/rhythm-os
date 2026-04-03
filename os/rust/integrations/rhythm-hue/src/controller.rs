@@ -4,7 +4,6 @@
 //! via any `HueTransport` implementation. Controls rooms through grouped_light
 //! resources with color_temperature.mirek (no xy conversion needed).
 
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -25,8 +24,6 @@ pub struct HueLightController<H: HueTransport> {
     client: H,
     username: String,
     registry: Arc<Mutex<HueDeviceRegistry>>,
-    /// Shared atomic for Hue dynamics fade duration (ms). Updated via settings API.
-    fade_ms: Arc<AtomicU16>,
 }
 
 impl<H: HueTransport> HueLightController<H> {
@@ -37,18 +34,11 @@ impl<H: HueTransport> HueLightController<H> {
     /// * `client` - Transport implementation for Hue bridge communication
     /// * `username` - Hue application key (from push-link pairing)
     /// * `registry` - Shared device registry for room -> grouped_light lookup
-    /// * `fade_ms` - Shared atomic for dynamics fade duration (ms)
-    pub fn new(
-        client: H,
-        username: String,
-        registry: Arc<Mutex<HueDeviceRegistry>>,
-        fade_ms: Arc<AtomicU16>,
-    ) -> Self {
+    pub fn new(client: H, username: String, registry: Arc<Mutex<HueDeviceRegistry>>) -> Self {
         Self {
             client,
             username,
             registry,
-            fade_ms,
         }
     }
 
@@ -65,14 +55,23 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
         let grouped_light_id =
             rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
 
-        let dynamics = self.fade_ms.load(Ordering::Relaxed);
+        let dynamics = command.transition_ms.unwrap_or(0) as u16;
+
+        // Direct color: send XY coordinates. Otherwise: send kelvin as mirek.
+        let (kelvin, xy) = if command.is_direct_color {
+            (None, Some((command.xy.x, command.xy.y)))
+        } else {
+            (Some(command.kelvin), None)
+        };
+
         self.client
             .set_grouped_light(
                 &self.username,
                 &grouped_light_id,
                 true,
                 Some(command.brightness),
-                Some(command.kelvin),
+                kelvin,
+                xy,
                 if dynamics > 0 { Some(dynamics) } else { None },
             )
             .map_err(|e| {
@@ -83,10 +82,17 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
                 ))
             })?;
 
-        info!(target: "cmd",
-            "Hue turn_on: room={} grouped_light={} bri={} kelvin={}",
-            room_id, grouped_light_id, command.brightness, command.kelvin
-        );
+        if command.is_direct_color {
+            info!(target: "cmd",
+                "Hue turn_on: room={} grouped_light={} bri={} xy=({:.3},{:.3})",
+                room_id, grouped_light_id, command.brightness, command.xy.x, command.xy.y
+            );
+        } else {
+            info!(target: "cmd",
+                "Hue turn_on: room={} grouped_light={} bri={} kelvin={}",
+                room_id, grouped_light_id, command.brightness, command.kelvin
+            );
+        }
 
         Ok(())
     }
@@ -96,7 +102,15 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
             rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
 
         self.client
-            .set_grouped_light(&self.username, &grouped_light_id, false, None, None, None)
+            .set_grouped_light(
+                &self.username,
+                &grouped_light_id,
+                false,
+                None,
+                None,
+                None,
+                None,
+            )
             .map_err(|e| {
                 log::warn!(target: "cmd", "Hue turn_off failed: room={} err={}", room_id, e);
                 LightControlError::CommandFailed(format!(
@@ -181,16 +195,14 @@ mod tests {
             .lock()
             .unwrap()
             .upsert_room("room1", "Living Room", "gl1", &[]);
-        let fade_ms = Arc::new(AtomicU16::new(500));
-        let controller =
-            HueLightController::new(spy, "testuser".to_string(), registry.clone(), fade_ms);
+        let controller = HueLightController::new(spy, "testuser".to_string(), registry.clone());
         (controller, registry)
     }
 
     #[test]
     fn turn_on_sends_correct_params() {
         let (controller, _) = make_spy_controller();
-        let cmd = LightingCommand::new(80, 4000);
+        let cmd = LightingCommand::with_transition(80, 4000, 500);
         block_on(controller.turn_on("room1", cmd)).unwrap();
 
         let calls = controller.client.set_grouped_light_calls();
@@ -201,6 +213,7 @@ mod tests {
                 on,
                 brightness,
                 kelvin,
+                xy: _,
                 fade_ms,
             } => {
                 assert_eq!(grouped_light_id, "gl1");
@@ -226,6 +239,7 @@ mod tests {
                 on,
                 brightness,
                 kelvin,
+                xy: _,
                 fade_ms,
             } => {
                 assert_eq!(grouped_light_id, "gl1");
@@ -283,16 +297,10 @@ mod tests {
     }
 
     #[test]
-    fn no_dynamics_when_fade_zero() {
-        let spy = SpyHueTransport::new();
-        let registry = Arc::new(Mutex::new(HueDeviceRegistry::default()));
-        registry
-            .lock()
-            .unwrap()
-            .upsert_room("room1", "Living Room", "gl1", &[]);
-        let fade_ms = Arc::new(AtomicU16::new(0));
-        let controller = HueLightController::new(spy, "testuser".to_string(), registry, fade_ms);
+    fn no_dynamics_when_no_transition() {
+        let (controller, _) = make_spy_controller();
 
+        // LightingCommand::new sets transition_ms = None
         let cmd = LightingCommand::new(50, 3000);
         block_on(controller.turn_on("room1", cmd)).unwrap();
 
@@ -301,6 +309,34 @@ mod tests {
         match &calls[0] {
             HueTransportCall::SetGroupedLight { fade_ms, .. } => {
                 assert_eq!(*fade_ms, None);
+            }
+            other => panic!("Expected SetGroupedLight, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn turn_on_direct_color_sends_xy_not_kelvin() {
+        let (controller, _) = make_spy_controller();
+        let rgb = rhythm_core::color::Rgb::new(255, 40, 150);
+        let xy = rhythm_core::color::XyColor { x: 0.45, y: 0.25 };
+        let cmd = LightingCommand::from_color(5, rgb, xy, Some(500));
+        block_on(controller.turn_on("room1", cmd)).unwrap();
+
+        let calls = controller.client.set_grouped_light_calls();
+        assert_eq!(calls.len(), 1);
+        match &calls[0] {
+            HueTransportCall::SetGroupedLight {
+                kelvin,
+                xy,
+                brightness,
+                ..
+            } => {
+                assert_eq!(*kelvin, None, "direct color should not send kelvin");
+                assert!(xy.is_some(), "direct color should send xy");
+                let (x, y) = xy.unwrap();
+                assert!((x - 0.45).abs() < 0.001);
+                assert!((y - 0.25).abs() < 0.001);
+                assert_eq!(*brightness, Some(5));
             }
             other => panic!("Expected SetGroupedLight, got {:?}", other),
         }

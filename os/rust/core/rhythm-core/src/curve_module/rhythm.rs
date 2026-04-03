@@ -9,12 +9,15 @@ extern crate alloc;
 use tracing::{debug, info};
 
 use crate::adaptive::LightingValues;
-use crate::config::{CurveConfig, FALLBACK_SUNRISE_HOUR, FALLBACK_SUNSET_HOUR};
+use crate::config::{
+    CurveConfig, DEFAULT_FADE_MS, DEFAULT_MOTION_TIMEOUT_SECS, FALLBACK_SUNRISE_HOUR,
+    FALLBACK_SUNSET_HOUR,
+};
 use crate::curves::{inverse_super_gaussian, map_super_gaussian};
 use crate::solar::SunTimes;
 use crate::steps::{StepAction, StepResult};
 
-use super::{CurveContext, LightCurveModule};
+use super::{CurveContext, IdleCurveModule, LightCurveModule};
 
 /// Rhythm curve module using super-Gaussian adaptive lighting algorithm.
 ///
@@ -31,6 +34,7 @@ use super::{CurveContext, LightCurveModule};
 #[derive(Debug, Clone)]
 pub struct RhythmCurveModule {
     config: CurveConfig,
+    idle: IdleCurveModule,
 }
 
 impl RhythmCurveModule {
@@ -42,7 +46,10 @@ impl RhythmCurveModule {
 
     /// Create a new RhythmCurveModule with the given configuration.
     pub fn new(config: CurveConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            idle: IdleCurveModule::with_defaults(),
+        }
     }
 
     /// Create with default configuration.
@@ -85,6 +92,47 @@ impl RhythmCurveModule {
         sun_times
             .map(|st| st.sunset)
             .unwrap_or(FALLBACK_SUNSET_HOUR)
+    }
+
+    /// Calculate motion timeout based on time of day.
+    ///
+    /// The config value (`motion_timeout_secs`) is the "long" timeout (default 20 min).
+    /// Morning and evening get the full value (getting ready, winding down).
+    /// Midday and night get 1/4 (passing through rooms, brief trips — default 5 min).
+    ///
+    /// Periods (solar time):
+    ///   sunrise → sunrise+3h : morning (long)
+    ///   sunrise+3h → sunset-3h : midday (short)
+    ///   sunset-3h → sunset+1h : evening (long)
+    ///   sunset+1h → sunrise : night (short)
+    fn calculate_motion_timeout(&self, ctx: &CurveContext) -> u16 {
+        // Manual override: return the user's fixed value
+        if let Some(manual) = self.config.motion_timeout_secs {
+            return manual;
+        }
+
+        // Auto mode: vary by time of day using internal baseline
+        let sun_times_ref = ctx.sun_times.as_ref();
+        let sunrise = self.get_sunrise(sun_times_ref);
+        let sunset = self.get_sunset(sun_times_ref);
+        let hour = ctx.current_hour;
+
+        let long = DEFAULT_MOTION_TIMEOUT_SECS;
+        let short = long / 4;
+
+        let morning_end = sunrise + 3.0;
+        let evening_start = sunset - 3.0;
+        let night_start = sunset + 1.0;
+
+        if hour >= sunrise && hour < morning_end {
+            long // morning: getting ready
+        } else if hour >= morning_end && hour < evening_start {
+            short // midday: passing through
+        } else if hour >= evening_start && hour < night_start {
+            long // evening: winding down
+        } else {
+            short // night: brief trips
+        }
     }
 
     /// Find the hour that produces a target brightness.
@@ -149,7 +197,18 @@ impl LightCurveModule for RhythmCurveModule {
             ctx.current_hour, solar_time, sun_position, brightness, kelvin
         );
 
-        LightingValues::new(kelvin, brightness, solar_time, sun_position)
+        let motion_timeout = self.calculate_motion_timeout(ctx);
+        let fade = self.config.fade_ms.unwrap_or(DEFAULT_FADE_MS) as u32;
+        let mut values = LightingValues::new(
+            kelvin,
+            brightness,
+            solar_time,
+            sun_position,
+            fade,
+            motion_timeout,
+        );
+        values.suggested_tick_interval_secs = self.suggested_tick_interval(ctx);
+        values
     }
 
     fn calculate_brightness(&self, ctx: &CurveContext) -> u8 {
@@ -340,6 +399,52 @@ impl LightCurveModule for RhythmCurveModule {
 
     fn max_color_temp(&self) -> u16 {
         self.config.max_color_temp
+    }
+
+    fn suggested_tick_interval(&self, ctx: &CurveContext) -> Option<u16> {
+        // Compute rate of change (brightness per minute) via numerical differentiation
+        let delta = 1.0 / 60.0; // 1 minute in hours
+        let ctx_ahead = CurveContext::new(
+            (ctx.current_hour + delta).rem_euclid(24.0),
+            ctx.solar,
+            ctx.sun_times,
+        );
+
+        let bri_now = self.calculate_brightness(ctx) as f32;
+        let bri_ahead = self.calculate_brightness(&ctx_ahead) as f32;
+        let rate = (bri_ahead - bri_now).abs(); // brightness change per minute
+
+        // Map rate to interval:
+        //   rate < 0.01  → 180s (plateau, barely changing)
+        //   rate < 0.1   → 120s (gentle slope)
+        //   rate < 0.3   →  60s (moderate transition)
+        //   rate < 0.5   →  30s (active ramp)
+        //   rate >= 0.5  →  15s (steep sunrise/sunset)
+        let secs = if rate < 0.01 {
+            180
+        } else if rate < 0.1 {
+            120
+        } else if rate < 0.3 {
+            60
+        } else if rate < 0.5 {
+            30
+        } else {
+            15
+        };
+
+        Some(secs)
+    }
+
+    fn calculate_idle(&self, ctx: &CurveContext) -> LightingValues {
+        let mut values = self.idle.calculate(ctx);
+        // Inherit from the main curve when idle config doesn't override
+        if self.idle.config().fade_ms.is_none() {
+            values.transition_ms = self.config.fade_ms.unwrap_or(DEFAULT_FADE_MS) as u32;
+        }
+        if self.idle.config().motion_timeout_secs.is_none() {
+            values.motion_timeout_secs = self.calculate_motion_timeout(ctx);
+        }
+        values
     }
 }
 
@@ -710,5 +815,107 @@ mod tests {
             flat_bri,
             round_bri
         );
+    }
+
+    #[test]
+    fn test_suggested_tick_interval_plateau_vs_ramp() {
+        let module = test_module();
+
+        // At noon (plateau) — brightness barely changes, should get long interval
+        let ctx_noon = test_context(12.0);
+        let interval_noon = module.suggested_tick_interval(&ctx_noon).unwrap();
+        assert!(
+            interval_noon >= 120,
+            "At noon plateau, expected >= 120s, got {}",
+            interval_noon
+        );
+
+        // Near sunrise (steep ramp) — brightness changing fast, should get short interval
+        let ctx_sunrise = test_context(7.0);
+        let interval_sunrise = module.suggested_tick_interval(&ctx_sunrise).unwrap();
+        assert!(
+            interval_sunrise <= 60,
+            "Near sunrise ramp, expected <= 60s, got {}",
+            interval_sunrise
+        );
+
+        // Sunrise interval should be shorter than noon interval
+        assert!(
+            interval_sunrise < interval_noon,
+            "Ramp interval ({}) should be shorter than plateau interval ({})",
+            interval_sunrise,
+            interval_noon
+        );
+    }
+
+    #[test]
+    fn test_suggested_tick_interval_midnight_is_long() {
+        let module = test_module();
+        let ctx = test_context(0.0);
+        let interval = module.suggested_tick_interval(&ctx).unwrap();
+        assert!(
+            interval >= 120,
+            "At midnight, expected >= 120s, got {}",
+            interval
+        );
+    }
+
+    #[test]
+    fn test_calculate_includes_suggested_tick() {
+        let module = test_module();
+        let ctx = test_context(12.0);
+        let values = module.calculate(&ctx);
+        assert!(
+            values.suggested_tick_interval_secs.is_some(),
+            "RhythmCurveModule should always provide a suggested tick interval"
+        );
+    }
+
+    #[test]
+    fn test_motion_timeout_auto_varies_by_time() {
+        let mut config = test_config();
+        config.motion_timeout_secs = None; // auto mode
+        let module = RhythmCurveModule::new(config);
+
+        // Morning (7am, sunrise=6) → long timeout (20 min)
+        let morning = module.calculate(&test_context(7.0));
+        assert_eq!(
+            morning.motion_timeout_secs, 1200,
+            "morning should get full timeout"
+        );
+
+        // Midday (12pm) → short timeout (5 min)
+        let midday = module.calculate(&test_context(12.0));
+        assert_eq!(
+            midday.motion_timeout_secs, 300,
+            "midday should get 1/4 timeout"
+        );
+
+        // Evening (16pm, sunset=18) → long timeout (20 min)
+        let evening = module.calculate(&test_context(16.0));
+        assert_eq!(
+            evening.motion_timeout_secs, 1200,
+            "evening should get full timeout"
+        );
+
+        // Night (23pm) → short timeout (5 min)
+        let night = module.calculate(&test_context(23.0));
+        assert_eq!(
+            night.motion_timeout_secs, 300,
+            "night should get 1/4 timeout"
+        );
+    }
+
+    #[test]
+    fn test_motion_timeout_manual_fixed() {
+        let mut config = test_config();
+        config.motion_timeout_secs = Some(600); // manual 10 min
+        let module = RhythmCurveModule::new(config);
+
+        // Manual value returned at all times of day
+        assert_eq!(module.calculate(&test_context(7.0)).motion_timeout_secs, 600);
+        assert_eq!(module.calculate(&test_context(12.0)).motion_timeout_secs, 600);
+        assert_eq!(module.calculate(&test_context(16.0)).motion_timeout_secs, 600);
+        assert_eq!(module.calculate(&test_context(23.0)).motion_timeout_secs, 600);
     }
 }

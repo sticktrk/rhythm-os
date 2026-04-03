@@ -23,7 +23,9 @@ pub struct MatterDiscovery<T: MatterTransport> {
 
 impl<T: MatterTransport> MatterDiscovery<T> {
     pub fn new(transport: Arc<T>) -> Self {
-        Self { _transport: transport }
+        Self {
+            _transport: transport,
+        }
     }
 }
 

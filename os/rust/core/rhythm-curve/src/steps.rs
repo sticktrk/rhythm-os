@@ -70,7 +70,7 @@ mod tests {
 
     #[test]
     fn test_step_result_creation() {
-        let values = LightingValues::new(4000, 80, 10.0, 0.5);
+        let values = LightingValues::new(4000, 80, 10.0, 0.5, 500, 600);
         let result = StepResult {
             values,
             time_offset_minutes: 30.0,
@@ -96,7 +96,7 @@ mod tests {
 
     #[test]
     fn test_step_result_at_boundary() {
-        let values = LightingValues::new(5500, 100, 12.0, 1.0);
+        let values = LightingValues::new(5500, 100, 12.0, 1.0, 500, 600);
         let result = StepResult {
             values,
             time_offset_minutes: 0.0,
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn test_step_result_clone_eq() {
-        let values = LightingValues::new(3000, 60, 9.0, 0.3);
+        let values = LightingValues::new(3000, 60, 9.0, 0.3, 500, 600);
         let result = StepResult {
             values,
             time_offset_minutes: 45.0,

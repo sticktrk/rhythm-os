@@ -189,7 +189,7 @@ mod tests {
         }
 
         fn calculate(&self, ctx: &CurveContext) -> LightingValues {
-            LightingValues::new(4000, 80, ctx.solar_time(), 0.0)
+            LightingValues::new(4000, 80, ctx.solar_time(), 0.0, 500, 600)
         }
 
         fn calculate_brightness(&self, _ctx: &CurveContext) -> u8 {

@@ -334,28 +334,10 @@ pub fn handle_get_settings(state: &SharedState) -> ApiResponse {
 }
 
 pub fn handle_put_settings(state: &SharedState, body: &Value) -> ApiResponse {
-    let fade_ms = body
-        .get("bulb_fade_ms")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u16);
     let interval = body.get("rhythm_interval_secs").and_then(|v| v.as_u64());
-    let motion_timeout = body
-        .get("default_motion_timeout_secs")
-        .and_then(|v| v.as_u64());
     let power_save = body.get("power_save").and_then(|v| v.as_bool());
-    let soft_off_bri = body
-        .get("soft_off_brightness")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u8);
 
-    match commands::do_settings_set(
-        state,
-        fade_ms,
-        interval,
-        motion_timeout,
-        power_save,
-        soft_off_bri,
-    ) {
+    match commands::do_settings_set(state, interval, power_save) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
     }
@@ -1112,7 +1094,9 @@ mod tests {
             fn set_room_time_offset(&self, _: &str, _: f32) -> anyhow::Result<()> {
                 Ok(())
             }
-            fn set_soft_off_brightness(&self, _: u8) {}
+            fn idle_brightness(&self) -> u8 {
+                1
+            }
             fn soft_off_tick_room(&self, _: &str) -> anyhow::Result<()> {
                 Ok(())
             }
@@ -1329,10 +1313,9 @@ mod tests {
     #[test]
     fn put_settings_returns_raw_settings() {
         let state = handler_state_with_runtime();
-        let r = handle_put_settings(&state, &json!({"bulb_fade_ms": 300}));
+        let r = handle_put_settings(&state, &json!({"rhythm_interval_secs": 120}));
         assert_eq!(r.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
-        assert_eq!(parsed["bulb_fade_ms"], 300);
         assert!(parsed["rhythm_interval_secs"].is_number());
         assert!(parsed.get("status").is_none());
     }
@@ -1343,7 +1326,7 @@ mod tests {
         let r = handle_get_settings(&state);
         assert_eq!(r.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
-        assert!(parsed["bulb_fade_ms"].is_number());
+        assert!(parsed["rhythm_interval_secs"].is_number());
         assert!(parsed.get("status").is_none());
     }
 

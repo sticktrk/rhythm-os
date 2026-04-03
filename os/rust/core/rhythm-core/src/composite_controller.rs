@@ -56,10 +56,7 @@ fn sync_block_on<F: std::future::Future>(f: F) -> F::Output {
 /// Works from any context (tokio runtime, std::thread, etc.).
 ///
 /// For single targets, runs inline without spawning a thread.
-fn dispatch_parallel<F>(
-    targets: &[(String, Arc<dyn LightController>, String)],
-    op: F,
-) -> bool
+fn dispatch_parallel<F>(targets: &[(String, Arc<dyn LightController>, String)], op: F) -> bool
 where
     F: Fn(Arc<dyn LightController>, &str) -> LightControlResult<()> + Sync + Send,
 {
@@ -640,7 +637,9 @@ mod tests {
             vec![("hub_a".to_string(), "room1".to_string())],
         )]));
 
-        let result = composite.turn_on("room1", LightingCommand::new(50, 3000)).await;
+        let result = composite
+            .turn_on("room1", LightingCommand::new(50, 3000))
+            .await;
         assert!(result.is_err());
     }
 

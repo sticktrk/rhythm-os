@@ -19,7 +19,7 @@
 //!     fn name(&self) -> &str { "My Custom Curve" }
 //!     fn calculate(&self, ctx: &CurveContext) -> LightingValues {
 //!         // Your math here
-//!         LightingValues::new(4000, 80, ctx.solar_time(), 0.0)
+//!         LightingValues::new(4000, 80, ctx.solar_time(), 0.0, 500, 600)
 //!     }
 //!     // ... implement other required methods
 //! }

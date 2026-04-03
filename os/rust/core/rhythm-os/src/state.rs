@@ -3,7 +3,6 @@
 //! Platform-agnostic `AppState` with `dyn Storage` instead of NVS.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex};
 
 use rhythm_core::CurveConfig;
@@ -160,20 +159,16 @@ pub struct AppState {
     /// Last periodic update hour (for solar midnight detection).
     pub last_check_hour: Option<f32>,
     /// Epoch milliseconds of the most recent periodic tick (for client bootstrap).
-    pub last_tick_epoch_ms: Option<u64>,
+    pub last_tick_epoch_ms: u64,
 
     // ---- Global settings ----
-    /// Hue dynamics fade duration in milliseconds (default 500).
-    pub bulb_fade_ms: u16,
-    /// Atomic copy of `bulb_fade_ms` shared with HueLightController.
-    pub bulb_fade_atomic: Arc<AtomicU16>,
     /// Default motion timeout in seconds when no per-room value is configured.
     pub default_motion_timeout_secs: u64,
+    /// Current curve-computed fade/transition time in milliseconds.
+    pub default_fade_ms: u32,
     /// Power save mode. When false, lights dim to soft-off brightness
     /// instead of turning fully off.
     pub power_save: bool,
-    /// Soft-off brightness percentage (1-100).
-    pub soft_off_brightness: u8,
 
     // ---- Storage ----
     /// Platform-specific storage backend.
@@ -302,13 +297,11 @@ pub struct AppState {
 
 impl Default for AppState {
     fn default() -> Self {
-        use rhythm_core::primitives::{
-            DEFAULT_BULB_FADE_MS, DEFAULT_MOTION_TIMEOUT_SECS, DEFAULT_SOFT_OFF_BRIGHTNESS,
-        };
-
-        let bulb_fade_atomic = Arc::new(AtomicU16::new(DEFAULT_BULB_FADE_MS));
+        let config = CurveConfig::default();
+        let default_motion_timeout = rhythm_core::config::DEFAULT_MOTION_TIMEOUT_SECS as u64;
+        let default_fade = rhythm_core::config::DEFAULT_FADE_MS as u32;
         Self {
-            config: CurveConfig::default(),
+            config,
             runtime_config: RuntimeConfig::default().with_solar_noon(12.5),
             utc_offset_hours: 0.0,
             latitude: None,
@@ -322,12 +315,13 @@ impl Default for AppState {
             motion_timeouts: HashMap::new(),
             motion_snapshots: HashMap::new(),
             last_check_hour: None,
-            last_tick_epoch_ms: None,
-            bulb_fade_ms: DEFAULT_BULB_FADE_MS,
-            bulb_fade_atomic,
-            default_motion_timeout_secs: DEFAULT_MOTION_TIMEOUT_SECS,
+            last_tick_epoch_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            default_motion_timeout_secs: default_motion_timeout,
+            default_fade_ms: default_fade,
             power_save: false,
-            soft_off_brightness: DEFAULT_SOFT_OFF_BRIGHTNESS,
             storage: None,
             work_tx: None,
             pending_hub_event_rxs: Vec::new(),
@@ -431,6 +425,7 @@ impl AppState {
     pub fn solar_midnight_hour(&self) -> f32 {
         self.runtime_config.solar_midnight_hour()
     }
+
 }
 
 #[cfg(feature = "desktop")]
@@ -474,20 +469,16 @@ pub fn rooms_from_engine(runtime: &dyn RuntimeHandle) -> rhythm_core::room::Room
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rhythm_core::primitives::{
-        DEFAULT_BULB_FADE_MS, DEFAULT_MOTION_TIMEOUT_SECS, DEFAULT_SOFT_OFF_BRIGHTNESS,
-    };
+    use rhythm_core::config::DEFAULT_MOTION_TIMEOUT_SECS;
     use rhythm_core::runtime::RoomSnapshot;
 
     #[test]
     fn app_state_default_has_sensible_values() {
         let state = AppState::default();
-        assert_eq!(state.bulb_fade_ms, DEFAULT_BULB_FADE_MS);
         assert_eq!(
             state.default_motion_timeout_secs,
-            DEFAULT_MOTION_TIMEOUT_SECS
+            DEFAULT_MOTION_TIMEOUT_SECS as u64
         );
-        assert_eq!(state.soft_off_brightness, DEFAULT_SOFT_OFF_BRIGHTNESS);
         assert!(!state.power_save);
         assert!(state.hubs.is_empty());
         assert!(state.latitude.is_none());
@@ -597,7 +588,9 @@ mod tests {
             fn set_room_time_offset(&self, _: &str, _: f32) -> anyhow::Result<()> {
                 Ok(())
             }
-            fn set_soft_off_brightness(&self, _: u8) {}
+            fn idle_brightness(&self) -> u8 {
+                1
+            }
             fn soft_off_tick_room(&self, _: &str) -> anyhow::Result<()> {
                 Ok(())
             }

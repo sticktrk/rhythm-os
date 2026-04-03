@@ -4,7 +4,6 @@
 //! commands via any `MatterTransport` implementation. Controls rooms through
 //! per-device fan-out (Matter has no native room grouping).
 
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -33,17 +32,14 @@ pub type MatterDeviceRegistry = rhythm_os::registry::HubDeviceRegistry;
 pub struct MatterLightController<T: MatterTransport> {
     transport: Arc<T>,
     hub_data: Arc<MatterHubData>,
-    /// Shared atomic for fade duration (ms). Updated via settings API.
-    fade_ms: Arc<AtomicU16>,
 }
 
 impl<T: MatterTransport> MatterLightController<T> {
     /// Create a new Matter light controller.
-    pub fn new(transport: Arc<T>, hub_data: Arc<MatterHubData>, fade_ms: Arc<AtomicU16>) -> Self {
+    pub fn new(transport: Arc<T>, hub_data: Arc<MatterHubData>) -> Self {
         Self {
             transport,
             hub_data,
-            fade_ms,
         }
     }
 
@@ -69,7 +65,7 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
         let _target =
             rhythm_os::controller_helpers::resolve_room_target(&self.hub_data.registry, room_id)?;
 
-        let fade_ms = self.fade_ms.load(Ordering::Relaxed);
+        let fade_ms = command.transition_ms.unwrap_or(0) as u16;
         let transition_ms = if fade_ms > 0 {
             Some(fade_ms as u32)
         } else {
@@ -293,8 +289,7 @@ mod tests {
             event_tx: tx,
         });
 
-        let fade_ms = Arc::new(std::sync::atomic::AtomicU16::new(1000));
-        let controller = MatterLightController::new(spy.clone(), hub_data, fade_ms);
+        let controller = MatterLightController::new(spy.clone(), hub_data);
 
         (controller, spy, registry)
     }
@@ -342,10 +337,10 @@ mod tests {
         assert_eq!(calls[0].cluster, clusters::CLUSTER_LEVEL_CONTROL);
         assert_eq!(calls[0].cmd_id, clusters::CMD_MOVE_TO_LEVEL_WITH_ON_OFF);
 
-        // First device: color temp command (cluster 0x0300, cmd 0x0A)
+        // First device: color XY command (cluster 0x0300, cmd 0x07)
         assert_eq!(calls[1].node_id, 42);
         assert_eq!(calls[1].cluster, clusters::CLUSTER_COLOR_CONTROL);
-        assert_eq!(calls[1].cmd_id, clusters::CMD_MOVE_TO_COLOR_TEMPERATURE);
+        assert_eq!(calls[1].cmd_id, clusters::CMD_MOVE_TO_COLOR);
 
         // Second device also gets both commands
         assert_eq!(calls[2].node_id, 43);
@@ -458,9 +453,7 @@ mod tests {
             event_tx: tx,
         });
 
-        // 2000ms fade → transition_tenths = 20
-        let fade_ms = Arc::new(std::sync::atomic::AtomicU16::new(2000));
-        let controller = MatterLightController::new(spy.clone(), hub_data, fade_ms);
+        let controller = MatterLightController::new(spy.clone(), hub_data);
 
         let cmd = LightingCommand::new(100, 4000);
         block_on(controller.turn_on("r1", cmd)).unwrap();

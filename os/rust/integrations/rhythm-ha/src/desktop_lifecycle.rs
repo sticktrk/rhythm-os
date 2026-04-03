@@ -291,7 +291,7 @@ pub fn create_ha_controller(
     use crate::controller::HaLightController;
     use crate::hub_state::HaHubData;
 
-    let (config, registry, fade_atomic) = {
+    let (config, registry) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
         let ha_creds = s
@@ -316,11 +316,11 @@ pub fn create_ha_controller(
             .map(|ha| ha.registry.clone())
             .ok_or_else(|| anyhow::anyhow!("HA hub not active for {}", key))?;
 
-        (config, reg, s.bulb_fade_atomic.clone())
+        (config, reg)
     };
 
     let transport = ReqwestHaTransport::new(config)?;
-    let controller = HaLightController::new(transport, registry, fade_atomic);
+    let controller = HaLightController::new(transport, registry);
     Ok(std::sync::Arc::new(controller))
 }
 

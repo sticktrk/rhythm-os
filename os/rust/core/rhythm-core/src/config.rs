@@ -26,6 +26,12 @@ pub const DEFAULT_WIDTH_RIGHT_CCT: f32 = 1.15;
 /// Default shape exponent (2 = round top, 6 = flat plateau)
 pub const DEFAULT_SHAPE_P: f32 = 6.0;
 
+/// Default fade duration in milliseconds.
+pub const DEFAULT_FADE_MS: u16 = 500;
+
+/// Default motion timeout in seconds (20 minutes).
+pub const DEFAULT_MOTION_TIMEOUT_SECS: u16 = 1200;
+
 /// Fallback value for sunrise if sun times unavailable
 pub const FALLBACK_SUNRISE_HOUR: f32 = 6.0;
 
@@ -75,6 +81,17 @@ pub struct CurveConfig {
     // Dimming steps
     #[cfg_attr(feature = "serde", serde(default = "default_max_dim_steps"))]
     pub max_dim_steps: u8,
+
+    /// Light transition fade duration in milliseconds.
+    /// `None` = auto (curve decides, default 500ms). `Some(v)` = manual override.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub fade_ms: Option<u16>,
+
+    /// Motion timeout in seconds.
+    /// `None` = auto (curve varies by time of day). `Some(v)` = manual override.
+    /// Per-room overrides take precedence over this value.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub motion_timeout_secs: Option<u16>,
 }
 
 impl Default for CurveConfig {
@@ -98,6 +115,8 @@ impl Default for CurveConfig {
             width_right_cct: DEFAULT_WIDTH_RIGHT_CCT,
             shape_p: DEFAULT_SHAPE_P,
             max_dim_steps: DEFAULT_MAX_DIM_STEPS,
+            fade_ms: None,
+            motion_timeout_secs: None,
         }
     }
 }
@@ -499,6 +518,8 @@ mod tests {
                 width_right_cct: 1.1,
                 shape_p: 4.0,
                 max_dim_steps: 8,
+                fade_ms: Some(300),
+                motion_timeout_secs: Some(300),
             };
 
             let json = serde_json::to_string(&config).unwrap();

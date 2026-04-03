@@ -137,7 +137,6 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
         utc_offset,
         latitude,
         longitude,
-        _bulb_fade_atomic,
         scheduler_stack,
         eager_warmup,
         timezone_name,
@@ -158,7 +157,6 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
             s.utc_offset_hours,
             s.latitude,
             s.longitude,
-            s.bulb_fade_atomic.clone(),
             s.platform.scheduler_stack,
             s.platform.eager_tls_warmup,
             s.timezone_name.clone(),
@@ -316,14 +314,13 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
 
     let runtime = Arc::new(runtime);
 
-    // Push power_save and soft_off_brightness settings to engine
+    // Push power_save setting to engine
     {
         let s = state
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
         runtime.set_power_save(s.power_save);
-        runtime.set_soft_off_brightness(s.soft_off_brightness);
-        info!(target: "sys", "Power save: {}, soft_off_brightness: {}", s.power_save, s.soft_off_brightness);
+        info!(target: "sys", "Power save: {}", s.power_save);
     }
 
     // Store runtime in ActiveHub and update runtime_config
@@ -421,16 +418,7 @@ pub fn ensure_composite_runtime(
         RhythmRuntime, RuntimeConfig, RuntimeHandle, TimeProvider,
     };
 
-    let (
-        config,
-        runtime_config,
-        utc_offset,
-        latitude,
-        longitude,
-        _bulb_fade_atomic,
-        scheduler_stack,
-        timezone_name,
-    ) = {
+    let (config, runtime_config, utc_offset, latitude, longitude, scheduler_stack, timezone_name) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
         // Check if runtime already exists
@@ -445,7 +433,6 @@ pub fn ensure_composite_runtime(
             s.utc_offset_hours,
             s.latitude,
             s.longitude,
-            s.bulb_fade_atomic.clone(),
             s.platform.scheduler_stack,
             s.timezone_name.clone(),
         )
@@ -632,7 +619,6 @@ pub fn ensure_composite_runtime(
     {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         runtime.set_power_save(s.power_save);
-        runtime.set_soft_off_brightness(s.soft_off_brightness);
     }
 
     // Store runtime and composite controller

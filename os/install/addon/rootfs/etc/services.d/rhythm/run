@@ -43,7 +43,7 @@ bashio::log.info "Mode: ${MODE}"
 bashio::log.info "HA Host: ${HA_HOST}:${HA_PORT}"
 
 # Set API port
-export PORT="${PORT:-39821}"
+export PORT="${PORT:-54448}"
 bashio::log.info "API port: ${PORT}"
 
 # Run the Rust binary

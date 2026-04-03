@@ -23,7 +23,7 @@ use crate::values::LightingValues;
 ///     fn id(&self) -> &str { "constant" }
 ///     fn name(&self) -> &str { "Constant Output" }
 ///     fn calculate(&self, ctx: &CurveContext) -> LightingValues {
-///         LightingValues::new(self.kelvin, self.brightness, ctx.solar_time(), 0.0)
+///         LightingValues::new(self.kelvin, self.brightness, ctx.solar_time(), 0.0, 500, 600)
 ///     }
 ///     // ... implement other methods
 /// }
@@ -82,6 +82,25 @@ pub trait LightCurveModule: Send + Sync {
 
     /// Get the maximum color temperature for this module.
     fn max_color_temp(&self) -> u16;
+
+    /// Suggest a tick interval in seconds based on current curve rate of change.
+    ///
+    /// Returns `None` to use the configured default interval.
+    /// Curve modules that know their own rate of change can return `Some(secs)`
+    /// to make the periodic loop tick faster during transitions and slower
+    /// during plateaus.
+    fn suggested_tick_interval(&self, _ctx: &CurveContext) -> Option<u16> {
+        None
+    }
+
+    /// Calculate values for idle (soft_off) mode.
+    ///
+    /// The returned brightness is authoritative (e.g. 1% for soft-off).
+    ///
+    /// Default: returns the same as `calculate()` (normal curve values).
+    fn calculate_idle(&self, ctx: &CurveContext) -> LightingValues {
+        self.calculate(ctx)
+    }
 }
 
 #[cfg(test)]
@@ -108,7 +127,14 @@ mod tests {
         }
 
         fn calculate(&self, ctx: &CurveContext) -> LightingValues {
-            LightingValues::new(self.kelvin, self.brightness, ctx.solar_time(), 0.0)
+            LightingValues::new(
+                self.kelvin,
+                self.brightness,
+                ctx.solar_time(),
+                0.0,
+                500,
+                600,
+            )
         }
 
         fn calculate_brightness(&self, _ctx: &CurveContext) -> u8 {

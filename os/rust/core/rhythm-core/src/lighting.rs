@@ -20,18 +20,22 @@ pub struct LightingCommand {
     /// Brightness percentage (1-100)
     pub brightness: u8,
 
-    /// Color temperature in Kelvin
+    /// Color temperature in Kelvin (0 when is_direct_color is true)
     pub kelvin: u16,
 
-    /// RGB color representation (derived from kelvin)
+    /// RGB color representation
     pub rgb: Rgb,
 
-    /// CIE xy color coordinates (derived from kelvin)
+    /// CIE xy color coordinates
     pub xy: XyColor,
 
     /// Transition time in milliseconds (optional)
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub transition_ms: Option<u32>,
+
+    /// When true, rgb/xy are authoritative (not derived from kelvin).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub is_direct_color: bool,
 }
 
 impl LightingCommand {
@@ -45,6 +49,7 @@ impl LightingCommand {
             rgb: kelvin_to_rgb(kelvin),
             xy: kelvin_to_xy(kelvin),
             transition_ms: None,
+            is_direct_color: false,
         }
     }
 
@@ -56,6 +61,19 @@ impl LightingCommand {
             rgb: kelvin_to_rgb(kelvin),
             xy: kelvin_to_xy(kelvin),
             transition_ms: Some(transition_ms),
+            is_direct_color: false,
+        }
+    }
+
+    /// Create a lighting command with direct color (not kelvin-derived).
+    pub fn from_color(brightness: u8, rgb: Rgb, xy: XyColor, transition_ms: Option<u32>) -> Self {
+        Self {
+            brightness,
+            kelvin: 0,
+            rgb,
+            xy,
+            transition_ms,
+            is_direct_color: true,
         }
     }
 
@@ -69,18 +87,8 @@ impl LightingCommand {
             kelvin: values.kelvin,
             rgb: values.rgb,
             xy: values.xy,
-            transition_ms: None,
-        }
-    }
-
-    /// Create a lighting command from lighting values with a transition.
-    pub fn from_values_with_transition(values: &LightingValues, transition_ms: u32) -> Self {
-        Self {
-            brightness: values.brightness,
-            kelvin: values.kelvin,
-            rgb: values.rgb,
-            xy: values.xy,
-            transition_ms: Some(transition_ms),
+            transition_ms: Some(values.transition_ms),
+            is_direct_color: values.is_direct_color,
         }
     }
 
@@ -103,7 +111,7 @@ impl LightingCommand {
 
     /// Create a command that turns off the light (brightness 0).
     pub fn off() -> Self {
-        Self::new(0, 2700) // Warm white, but will be off anyway
+        Self::new(0, 2700)
     }
 }
 
@@ -141,7 +149,7 @@ mod tests {
 
     #[test]
     fn test_from_values() {
-        let values = LightingValues::new(4000, 80, 10.0, 0.5);
+        let values = LightingValues::new(4000, 80, 10.0, 0.5, 500, 600);
         let cmd = LightingCommand::from_values(&values);
         assert_eq!(cmd.brightness, 80);
         assert_eq!(cmd.kelvin, 4000);
@@ -184,8 +192,22 @@ mod tests {
     }
 
     #[test]
+    fn test_from_color() {
+        let rgb = Rgb::new(200, 30, 120);
+        let xy = XyColor { x: 0.45, y: 0.25 };
+        let cmd = LightingCommand::from_color(50, rgb, xy, Some(500));
+
+        assert!(cmd.is_direct_color);
+        assert_eq!(cmd.kelvin, 0);
+        assert_eq!(cmd.brightness, 50);
+        assert_eq!(cmd.rgb, rgb);
+        assert_eq!(cmd.xy, xy);
+        assert_eq!(cmd.transition_ms, Some(500));
+    }
+
+    #[test]
     fn test_from_trait() {
-        let values = LightingValues::new(4000, 80, 10.0, 0.5);
+        let values = LightingValues::new(4000, 80, 10.0, 0.5, 500, 600);
         let cmd: LightingCommand = values.into();
         assert_eq!(cmd.brightness, 80);
         assert_eq!(cmd.kelvin, 4000);

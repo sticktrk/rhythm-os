@@ -25,7 +25,7 @@ if [ -z "${HA_TOKEN:-}" ]; then
     exit 1
 fi
 
-export PORT="${PORT:-39821}"
+export PORT="${PORT:-54448}"
 echo "[rhythm] Starting Rhythm OS — HA=${HA_HOST}:${HA_PORT} port=${PORT}"
 
 exec /usr/local/bin/rhythm-addon

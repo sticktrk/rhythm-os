@@ -85,10 +85,10 @@ pub trait RuntimeHandle: Send + Sync {
     /// Set the time offset for a room directly (not additive).
     fn set_room_time_offset(&self, room_id: &str, offset_minutes: f32) -> Result<()>;
 
-    /// Set the soft-off brightness percentage on the engine.
-    fn set_soft_off_brightness(&self, value: u8);
+    /// Get the idle brightness from the active curve module.
+    fn idle_brightness(&self) -> u8;
 
-    /// Send a soft-off tick to a room: adaptive color temp at soft-off brightness.
+    /// Send a soft-off tick to a room: idle curve color at idle brightness.
     /// Used when `soft_off` preference is toggled on for immediate visual feedback.
     fn soft_off_tick_room(&self, room_id: &str) -> Result<()>;
 
@@ -292,10 +292,12 @@ where
         .map_err(|e| anyhow::anyhow!("set_time_offset failed: {}", e))
     }
 
-    fn set_soft_off_brightness(&self, value: u8) {
-        if let Ok(mut engine) = self.engine().write() {
-            engine.set_soft_off_brightness(value);
-        }
+    fn idle_brightness(&self) -> u8 {
+        let hour = self.current_hour();
+        self.engine()
+            .read()
+            .map(|e| e.idle_brightness(hour))
+            .unwrap_or(1)
     }
 
     fn soft_off_tick_room(&self, room_id: &str) -> Result<()> {
@@ -455,14 +457,6 @@ mod tests {
         assert!(!handle.is_power_save());
         handle.set_power_save(true);
         assert!(handle.is_power_save());
-    }
-
-    #[test]
-    fn set_soft_off_brightness() {
-        let rt = test_runtime();
-        let handle = as_handle(&rt);
-        // Should not panic
-        handle.set_soft_off_brightness(25);
     }
 
     #[cfg(feature = "tokio")]

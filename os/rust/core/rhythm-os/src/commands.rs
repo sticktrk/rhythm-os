@@ -6,7 +6,6 @@
 //! a result that the transport layer can format into a response.
 
 use std::collections::HashSet;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -80,9 +79,8 @@ pub fn build_room_state_event(
             snap.time_offset_minutes,
             snap.brightness_offset,
         );
-        // Soft-off rooms display at soft_off_brightness, not the curve value
         let brightness = if snap.soft_off && !s.power_save {
-            s.soft_off_brightness
+            s.hub_runtime().map(|r| r.idle_brightness()).unwrap_or(1)
         } else {
             curve_brightness
         };
@@ -171,6 +169,8 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         hub_dto,
         hubs_dto,
         config_value,
+        effective_fade_ms,
+        effective_motion_timeout_secs,
         location_dto,
         settings_dto,
         firmware_version,
@@ -225,6 +225,8 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
 
         let config_value = serde_json::to_value(&s.config)
             .unwrap_or(serde_json::Value::Object(Default::default()));
+        let effective_fade_ms = s.default_fade_ms;
+        let effective_motion_timeout_secs = s.default_motion_timeout_secs;
 
         let location_dto = LocationDto {
             latitude: s.latitude,
@@ -234,11 +236,8 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         };
 
         let settings_dto = SettingsDto {
-            bulb_fade_ms: s.bulb_fade_ms,
             rhythm_interval_secs: s.runtime_config.update_interval_secs,
-            default_motion_timeout_secs: s.default_motion_timeout_secs,
             power_save: s.power_save,
-            soft_off_brightness: s.soft_off_brightness,
         };
 
         let fw_version = s.firmware_version;
@@ -309,6 +308,8 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             hub_dto,
             hubs_dto,
             config_value,
+            effective_fade_ms,
+            effective_motion_timeout_secs,
             location_dto,
             settings_dto,
             fw_version,
@@ -334,10 +335,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
                     .get(&room.id)
                     .map(|(id, name)| (id.clone(), name.clone()))
                     .unwrap_or_else(|| (room.id.clone(), room.name.clone()));
-                let hub_types = topo_hub_types
-                    .get(&topo_id)
-                    .cloned()
-                    .unwrap_or_default();
+                let hub_types = topo_hub_types.get(&topo_id).cloned().unwrap_or_default();
                 room_infos.push(RoomInfo {
                     topology_id: topo_id,
                     name: topo_name,
@@ -387,15 +385,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
 
     // Phase 2: query engine snapshots without state lock
     // Grab display context for computing brightness/kelvin
-    let (
-        disp_config,
-        disp_solar,
-        disp_lat,
-        disp_utc,
-        disp_lights,
-        disp_power_save,
-        disp_soft_off_bri,
-    ) = {
+    let (disp_config, disp_solar, disp_lat, disp_utc, disp_lights, disp_power_save) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             s.config.clone(),
@@ -404,9 +394,9 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             s.utc_offset_hours,
             s.room_lights_on.clone(),
             s.power_save,
-            s.soft_off_brightness,
         )
     };
+    let idle_bri = runtime.as_ref().map(|r| r.idle_brightness()).unwrap_or(1);
 
     let mut rooms = Vec::with_capacity(room_infos.len());
     for info in &room_infos {
@@ -449,7 +439,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             bri_offset,
         );
         let brightness = if soft_off && !disp_power_save {
-            disp_soft_off_bri
+            idle_bri
         } else {
             curve_brightness
         };
@@ -534,6 +524,15 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         });
     }
 
+    let current_time = {
+        let offset_secs = (location_dto.utc_offset_hours * 3600.0) as i32;
+        let tz = chrono::FixedOffset::east_opt(offset_secs)
+            .unwrap_or(chrono::FixedOffset::east_opt(0).unwrap());
+        chrono::Utc::now()
+            .with_timezone(&tz)
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    };
+
     let snapshot = StateSnapshot {
         version: firmware_version.to_string(),
         platform: platform_type.to_string(),
@@ -542,10 +541,13 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         hub: hub_dto,
         hubs: hubs_dto,
         config: config_value,
+        effective_fade_ms,
+        effective_motion_timeout_secs,
         location: location_dto,
         settings: settings_dto,
         rooms,
         last_tick_epoch_ms,
+        current_time,
     };
     serde_json::to_string(&snapshot).map_err(|e| anyhow::anyhow!("serialize: {}", e))
 }
@@ -563,7 +565,6 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
         latitude,
         utc_offset,
         power_save,
-        soft_off_bri,
         rooms_with_sensors,
         motion_timeouts,
         default_motion_timeout,
@@ -591,12 +592,12 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
             s.latitude.unwrap_or(35.0),
             s.utc_offset_hours,
             s.power_save,
-            s.soft_off_brightness,
             sensor_rooms,
             mt,
             dmt,
         )
     };
+    let idle_bri = runtime.as_ref().map(|r| r.idle_brightness()).unwrap_or(1);
 
     let snapshots = if let Some(ref rt) = runtime {
         rt.engine_all_room_snapshots()
@@ -618,7 +619,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                 snap.brightness_offset,
             );
             let brightness = if snap.soft_off && !power_save {
-                soft_off_bri
+                idle_bri
             } else {
                 curve_brightness
             };
@@ -672,7 +673,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                 room.brightness_offset,
             );
             let brightness = if room.soft_off && !power_save {
-                soft_off_bri
+                idle_bri
             } else {
                 curve_brightness
             };
@@ -706,7 +707,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
 
 /// Build a `RoomRhythmState` for a single room from engine state.
 pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<RoomRhythmState> {
-    let (runtime, lights_on, config, solar_noon, latitude, utc_offset, power_save, soft_off_bri) = {
+    let (runtime, lights_on, config, solar_noon, latitude, utc_offset, power_save) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             s.hub_runtime(),
@@ -716,7 +717,6 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
             s.latitude.unwrap_or(35.0),
             s.utc_offset_hours,
             s.power_save,
-            s.soft_off_brightness,
         )
     };
 
@@ -733,7 +733,7 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
         snap.brightness_offset,
     );
     let brightness = if snap.soft_off && !power_save {
-        soft_off_bri
+        runtime.idle_brightness()
     } else {
         curve_brightness
     };
@@ -758,7 +758,8 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
 /// Build the current curve config as a JSON string.
 pub fn build_config(state: &SharedState) -> Result<String> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    serde_json::to_string(&s.config).map_err(|e| anyhow::anyhow!("serialize config: {}", e))
+    serde_json::to_string(&s.config)
+        .map_err(|e| anyhow::anyhow!("serialize config: {}", e))
 }
 
 // ============================================================================
@@ -769,11 +770,8 @@ pub fn build_config(state: &SharedState) -> Result<String> {
 pub fn build_settings_dto(state: &SharedState) -> Result<SettingsDto> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     Ok(SettingsDto {
-        bulb_fade_ms: s.bulb_fade_ms,
         rhythm_interval_secs: s.runtime_config.update_interval_secs,
-        default_motion_timeout_secs: s.default_motion_timeout_secs,
         power_save: s.power_save,
-        soft_off_brightness: s.soft_off_brightness,
     })
 }
 
@@ -788,32 +786,18 @@ pub fn build_settings(state: &SharedState) -> Result<String> {
 /// Persists to storage and updates the atomic for dynamics duration.
 pub fn do_settings_set(
     state: &SharedState,
-    fade_ms: Option<u16>,
     update_interval: Option<u64>,
-    motion_timeout: Option<u64>,
     power_save: Option<bool>,
-    soft_off_brightness: Option<u8>,
 ) -> Result<String> {
     let mut rooms_to_off = Vec::new();
 
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
-        if let Some(ms) = fade_ms {
-            s.bulb_fade_ms = ms;
-            s.bulb_fade_atomic.store(ms, Ordering::Relaxed);
-            info!(target: "cmd", "settings: bulb_fade_ms={}", ms);
-        }
-
         if let Some(interval) = update_interval {
             let clamped = interval.max(10);
             s.runtime_config.update_interval_secs = clamped;
             info!(target: "cmd", "settings: rhythm_interval_secs={}", clamped);
-        }
-
-        if let Some(timeout) = motion_timeout {
-            s.default_motion_timeout_secs = timeout;
-            info!(target: "cmd", "settings: default_motion_timeout_secs={}", timeout);
         }
 
         if let Some(ps) = power_save {
@@ -825,24 +809,11 @@ pub fn do_settings_set(
             }
         }
 
-        if let Some(sob) = soft_off_brightness {
-            let clamped = sob.clamp(1, 100);
-            s.soft_off_brightness = clamped;
-            info!(target: "cmd", "settings: soft_off_brightness={}", clamped);
-
-            if let Some(runtime) = s.hub_runtime() {
-                runtime.set_soft_off_brightness(clamped);
-            }
-        }
-
         // Persist settings
         if let Some(ref storage) = s.storage {
             let stored = StoredSettings {
-                bulb_fade_ms: s.bulb_fade_ms,
                 rhythm_interval_secs: s.runtime_config.update_interval_secs,
-                default_motion_timeout_secs: s.default_motion_timeout_secs,
                 power_save: s.power_save,
-                soft_off_brightness: s.soft_off_brightness,
             };
             if let Err(e) = storage.save_settings(&stored) {
                 warn!(target: "cmd", "Failed to save settings: {}", e);
@@ -1282,7 +1253,7 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
 
     // OffPress → engine.turn_off() which respects power_save:
     //   power_save=true  → fully off
-    //   power_save=false → soft-off (dim to soft_off_brightness with adaptive color)
+    //   power_save=false → soft-off (dim to idle curve brightness with idle color)
     let mut motion_off_ids = Vec::new();
     for snap in &motion_rooms {
         let event = InputEvent::new(&snap.id, ButtonAction::OffPress);
@@ -3100,7 +3071,9 @@ mod tests {
         fn set_room_time_offset(&self, _: &str, _: f32) -> anyhow::Result<()> {
             Ok(())
         }
-        fn set_soft_off_brightness(&self, _: u8) {}
+        fn idle_brightness(&self) -> u8 {
+            1
+        }
         fn soft_off_tick_room(&self, _: &str) -> anyhow::Result<()> {
             Ok(())
         }
@@ -3273,8 +3246,7 @@ mod tests {
             make_snapshot("motion_room", false, false),
             make_snapshot("normal_room", false, false),
         ]));
-        let mut registry =
-            crate::registry::HubDeviceRegistry::new();
+        let mut registry = crate::registry::HubDeviceRegistry::new();
         registry.upsert_device("sensor1", "motion_room", &[], DeviceType::Motion);
         let registry: Arc<Mutex<dyn HubRegistry>> = Arc::new(Mutex::new(registry));
 
@@ -3413,18 +3385,9 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn settings_fade_ms() {
-        let (state, _runtime) = setup_state(vec![]);
-        do_settings_set(&state, Some(300), None, None, None, None).unwrap();
-        let s = state.lock().unwrap();
-        assert_eq!(s.bulb_fade_ms, 300);
-        assert_eq!(s.bulb_fade_atomic.load(Ordering::Relaxed), 300);
-    }
-
-    #[test]
     fn settings_interval_clamped() {
         let (state, _runtime) = setup_state(vec![]);
-        do_settings_set(&state, None, Some(5), None, None, None).unwrap();
+        do_settings_set(&state, Some(5), None).unwrap();
         let s = state.lock().unwrap();
         assert_eq!(s.runtime_config.update_interval_secs, 10);
     }
@@ -3434,34 +3397,17 @@ mod tests {
         let (state, _runtime) = setup_state(vec![]);
 
         // Record original values
-        let (orig_interval, orig_motion) = {
+        let orig_motion = {
             let s = state.lock().unwrap();
-            (
-                s.runtime_config.update_interval_secs,
-                s.default_motion_timeout_secs,
-            )
+            s.default_motion_timeout_secs
         };
 
-        // Only update fade_ms
-        do_settings_set(&state, Some(500), None, None, None, None).unwrap();
+        // Only update interval
+        do_settings_set(&state, Some(120), None).unwrap();
 
         let s = state.lock().unwrap();
-        assert_eq!(s.bulb_fade_ms, 500);
-        assert_eq!(s.runtime_config.update_interval_secs, orig_interval);
+        assert_eq!(s.runtime_config.update_interval_secs, 120);
         assert_eq!(s.default_motion_timeout_secs, orig_motion);
-    }
-
-    #[test]
-    fn settings_soft_off_brightness_clamped() {
-        let (state, _runtime) = setup_state(vec![]);
-
-        // Value > 100 should be clamped to 100
-        do_settings_set(&state, None, None, None, None, Some(200)).unwrap();
-        assert_eq!(state.lock().unwrap().soft_off_brightness, 100);
-
-        // Value < 1 should be clamped to 1
-        do_settings_set(&state, None, None, None, None, Some(0)).unwrap();
-        assert_eq!(state.lock().unwrap().soft_off_brightness, 1);
     }
 
     // ========================================================================
@@ -3621,12 +3567,10 @@ mod tests {
     #[test]
     fn settings_response_is_valid_settings_json() {
         let (state, _rt) = setup_state(vec![]);
-        let result = do_settings_set(&state, Some(400), None, None, None, None).unwrap();
+        let result = do_settings_set(&state, Some(120), None).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["bulb_fade_ms"], 400);
         assert!(parsed["rhythm_interval_secs"].is_number());
         assert!(parsed["power_save"].is_boolean());
-        assert!(parsed["soft_off_brightness"].is_number());
         // No status wrapper
         assert!(parsed.get("status").is_none());
     }
@@ -3636,18 +3580,12 @@ mod tests {
         let (state, _rt) = setup_state(vec![]);
         {
             let mut s = state.lock().unwrap();
-            s.bulb_fade_ms = 250;
             s.runtime_config.update_interval_secs = 30;
-            s.default_motion_timeout_secs = 120;
             s.power_save = true;
-            s.soft_off_brightness = 10;
         }
         let dto = build_settings_dto(&state).unwrap();
-        assert_eq!(dto.bulb_fade_ms, 250);
         assert_eq!(dto.rhythm_interval_secs, 30);
-        assert_eq!(dto.default_motion_timeout_secs, 120);
         assert!(dto.power_save);
-        assert_eq!(dto.soft_off_brightness, 10);
     }
 
     #[test]
@@ -3719,8 +3657,7 @@ mod tests {
             make_snapshot("sensor_room", false, false),
             make_snapshot("plain_room", false, false),
         ]));
-        let mut registry =
-            crate::registry::HubDeviceRegistry::new();
+        let mut registry = crate::registry::HubDeviceRegistry::new();
         registry.upsert_device("ms1", "sensor_room", &[], DeviceType::Motion);
         let registry: Arc<Mutex<dyn HubRegistry>> = Arc::new(Mutex::new(registry));
 
@@ -3793,12 +3730,10 @@ mod tests {
         let (state, _rt) = setup_state(vec![]);
         {
             let mut s = state.lock().unwrap();
-            s.bulb_fade_ms = 700;
             s.power_save = true;
         }
         let result = build_state_snapshot(&state).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["settings"]["bulb_fade_ms"], 700);
         assert_eq!(parsed["settings"]["power_save"], true);
     }
 
@@ -3974,25 +3909,18 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn settings_motion_timeout() {
-        let (state, _rt) = setup_state(vec![]);
-        do_settings_set(&state, None, None, Some(180), None, None).unwrap();
-        assert_eq!(state.lock().unwrap().default_motion_timeout_secs, 180);
-    }
-
-    #[test]
     fn settings_power_save() {
         let (state, _rt) = setup_state(vec![]);
-        do_settings_set(&state, None, None, None, Some(true), None).unwrap();
+        do_settings_set(&state, None, Some(true)).unwrap();
         assert!(state.lock().unwrap().power_save);
-        do_settings_set(&state, None, None, None, Some(false), None).unwrap();
+        do_settings_set(&state, None, Some(false)).unwrap();
         assert!(!state.lock().unwrap().power_save);
     }
 
     #[test]
     fn settings_interval_valid() {
         let (state, _rt) = setup_state(vec![]);
-        do_settings_set(&state, None, Some(120), None, None, None).unwrap();
+        do_settings_set(&state, Some(120), None).unwrap();
         assert_eq!(
             state.lock().unwrap().runtime_config.update_interval_secs,
             120

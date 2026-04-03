@@ -20,20 +20,8 @@ use crate::room::RoomManager;
 use crate::solar::{SolarTime, SunTimes};
 use crate::steps::StepAction;
 
-/// Default transition time in milliseconds.
-const DEFAULT_TRANSITION_MS: u32 = 500;
-
-/// Default bulb fade (dynamics transition) duration in milliseconds.
-pub const DEFAULT_BULB_FADE_MS: u16 = 500;
-
-/// Default motion timeout in seconds.
-pub const DEFAULT_MOTION_TIMEOUT_SECS: u64 = 600;
-
 /// Default power save mode (false = lights dim to soft-off brightness instead of turning fully off).
 pub const DEFAULT_POWER_SAVE: bool = false;
-
-/// Default soft-off brightness percentage (1%).
-pub const DEFAULT_SOFT_OFF_BRIGHTNESS: u8 = 1;
 
 /// Result of a single-room periodic tick.
 pub enum PeriodicTickResult {
@@ -114,16 +102,9 @@ pub struct RhythmEngine<C: LightController> {
     /// Room state manager.
     rooms: RoomManager,
 
-    /// Default transition time in milliseconds.
-    transition_ms: u32,
-
     /// Power save mode. When true, lights turn fully off.
     /// When false (default), lights dim to soft-off brightness to maintain color temperature.
     power_save: bool,
-
-    /// Brightness percentage used for soft-off (when power_save is disabled).
-    /// Lights dim to this level instead of turning fully off. Range: 1–100, default 1.
-    soft_off_brightness: u8,
 }
 
 impl<C: LightController> RhythmEngine<C> {
@@ -135,9 +116,7 @@ impl<C: LightController> RhythmEngine<C> {
             solar: SolarTime::default(),
             sun_times: None,
             rooms: RoomManager::new(),
-            transition_ms: DEFAULT_TRANSITION_MS,
             power_save: DEFAULT_POWER_SAVE,
-            soft_off_brightness: DEFAULT_SOFT_OFF_BRIGHTNESS,
         }
     }
 
@@ -149,9 +128,7 @@ impl<C: LightController> RhythmEngine<C> {
             solar,
             sun_times: None,
             rooms: RoomManager::new(),
-            transition_ms: DEFAULT_TRANSITION_MS,
             power_save: DEFAULT_POWER_SAVE,
-            soft_off_brightness: DEFAULT_SOFT_OFF_BRIGHTNESS,
         }
     }
 
@@ -173,11 +150,6 @@ impl<C: LightController> RhythmEngine<C> {
     /// Clear the sunrise/sunset times (will use fallback values).
     pub fn clear_sun_times(&mut self) {
         self.sun_times = None;
-    }
-
-    /// Set the default transition time.
-    pub fn set_transition_ms(&mut self, ms: u32) {
-        self.transition_ms = ms;
     }
 
     /// Get a reference to the room manager.
@@ -227,14 +199,13 @@ impl<C: LightController> RhythmEngine<C> {
         self.power_save
     }
 
-    /// Get the soft-off brightness percentage (1–100).
-    pub fn soft_off_brightness(&self) -> u8 {
-        self.soft_off_brightness
-    }
-
-    /// Set the soft-off brightness percentage (clamped to 1–100).
-    pub fn set_soft_off_brightness(&mut self, value: u8) {
-        self.soft_off_brightness = value.clamp(1, 100);
+    /// Get the idle brightness from the active curve module.
+    pub fn idle_brightness(&self, current_hour: f32) -> u8 {
+        let ctx = self.create_context(current_hour);
+        self.module_registry
+            .active_module()
+            .calculate_idle(&ctx)
+            .brightness
     }
 
     /// Set power save mode. Returns a list of room IDs that were in soft_off
@@ -312,7 +283,7 @@ impl<C: LightController> RhythmEngine<C> {
 
         // Create command and send
         let command =
-            LightingCommand::with_transition(brightness, values.kelvin, self.transition_ms);
+            LightingCommand::with_transition(brightness, values.kelvin, values.transition_ms);
         self.controller.turn_on(room_id, command).await
     }
 
@@ -350,7 +321,7 @@ impl<C: LightController> RhythmEngine<C> {
             ((values.brightness as f32 + brightness_offset) * factor).clamp(1.0, 100.0) as u8;
 
         let command =
-            LightingCommand::with_transition(brightness, values.kelvin, self.transition_ms);
+            LightingCommand::with_transition(brightness, values.kelvin, values.transition_ms);
         self.controller.turn_on(room_id, command).await
     }
 
@@ -468,8 +439,7 @@ impl<C: LightController> RhythmEngine<C> {
         room.apply_time_offset(step_result.time_offset_minutes);
 
         // Send command
-        let command =
-            LightingCommand::from_values_with_transition(&step_result.values, self.transition_ms);
+        let command = LightingCommand::from_values(&step_result.values);
         self.controller.turn_on(room_id, command).await
     }
 
@@ -538,7 +508,7 @@ impl<C: LightController> RhythmEngine<C> {
 
         // Send command
         let command =
-            LightingCommand::with_transition(brightness, values.kelvin, self.transition_ms);
+            LightingCommand::with_transition(brightness, values.kelvin, values.transition_ms);
         self.controller.turn_on(room_id, command).await
     }
 
@@ -575,7 +545,7 @@ impl<C: LightController> RhythmEngine<C> {
         let room = self.rooms.get_or_create(room_id, room_id);
         room.brightness_offset = target as f32 - values.brightness as f32;
 
-        let command = LightingCommand::with_transition(target, values.kelvin, self.transition_ms);
+        let command = LightingCommand::with_transition(target, values.kelvin, values.transition_ms);
         self.controller.turn_on(room_id, command).await
     }
 
@@ -616,18 +586,15 @@ impl<C: LightController> RhythmEngine<C> {
         let values = module.calculate_with_offset(&ctx, time_offset);
 
         if soft_off && !self.power_save {
-            // Soft-off: send soft-off brightness at new color temp
-            let cmd = LightingCommand::with_transition(
-                self.soft_off_brightness,
-                values.kelvin,
-                self.transition_ms,
-            );
+            // Soft-off: use idle curve values (brightness + color)
+            let idle_values = module.calculate_idle(&ctx);
+            let cmd = self.idle_command(&idle_values);
             self.controller.turn_on(room_id, cmd).await
         } else {
             // On: send full adaptive values preserving brightness_offset
             let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
             let cmd =
-                LightingCommand::with_transition(brightness, values.kelvin, self.transition_ms);
+                LightingCommand::with_transition(brightness, values.kelvin, values.transition_ms);
             self.controller.turn_on(room_id, cmd).await
         }
     }
@@ -652,7 +619,7 @@ impl<C: LightController> RhythmEngine<C> {
         let ctx = self.create_context(current_hour);
         let module = self.module_registry.active_module();
         let values = module.calculate(&ctx);
-        let command = LightingCommand::from_values_with_transition(&values, self.transition_ms);
+        let command = LightingCommand::from_values(&values);
         self.controller.turn_on(room_id, command).await
     }
 
@@ -671,17 +638,16 @@ impl<C: LightController> RhythmEngine<C> {
         if self.power_save {
             self.controller.turn_off(room_id).await
         } else {
-            // Dim to soft-off brightness with adaptive kelvin instead of turning off
+            // Dim to soft-off brightness with idle curve color instead of turning off
             let room = self.rooms.get_or_create(room_id, room_id);
             room.soft_off = true;
             let offset = room.effective_time_offset();
 
             let ctx = self.create_context(current_hour);
             let module = self.module_registry.active_module();
-            let values = module.calculate_with_offset(&ctx, offset);
+            let values = module.calculate_idle(&ctx.with_offset(offset));
 
-            let bri = self.soft_off_brightness;
-            let cmd = LightingCommand::with_transition(bri, values.kelvin, self.transition_ms);
+            let cmd = self.idle_command(&values);
             self.controller.turn_on(room_id, cmd).await
         }
     }
@@ -776,9 +742,21 @@ impl<C: LightController> RhythmEngine<C> {
         (updated, errors)
     }
 
-    /// Send soft-off brightness with adaptive kelvin to a soft_off room.
+    /// Build a LightingCommand for idle mode from curve values.
     ///
-    /// Called during periodic updates to keep the color temperature
+    /// The idle curve's brightness is authoritative (e.g. 1% for soft-off).
+    fn idle_command(&self, values: &crate::adaptive::LightingValues) -> LightingCommand {
+        let bri = values.brightness;
+        if values.is_direct_color {
+            LightingCommand::from_color(bri, values.rgb, values.xy, Some(values.transition_ms))
+        } else {
+            LightingCommand::with_transition(bri, values.kelvin, values.transition_ms)
+        }
+    }
+
+    /// Send soft-off brightness with idle curve color to a soft_off room.
+    ///
+    /// Called during periodic updates to keep the color
     /// transitioning smoothly even when lights are "logically off".
     pub async fn soft_off_tick(
         &mut self,
@@ -793,10 +771,9 @@ impl<C: LightController> RhythmEngine<C> {
 
         let ctx = self.create_context(current_hour);
         let module = self.module_registry.active_module();
-        let values = module.calculate_with_offset(&ctx, offset);
+        let values = module.calculate_idle(&ctx.with_offset(offset));
 
-        let bri = self.soft_off_brightness;
-        let cmd = LightingCommand::with_transition(bri, values.kelvin, self.transition_ms);
+        let cmd = self.idle_command(&values);
         self.controller.turn_on(room_id, cmd).await
     }
 
@@ -890,9 +867,20 @@ impl<C: LightController> RhythmEngine<C> {
 mod tests {
     use super::*;
     use crate::controller::NoOpController;
+    use crate::spy_controller::SpyLightController;
+    use std::sync::Arc;
 
     fn test_engine() -> RhythmEngine<NoOpController> {
         RhythmEngine::new(NoOpController::new())
+    }
+
+    fn spy_engine() -> (
+        RhythmEngine<Arc<SpyLightController>>,
+        Arc<SpyLightController>,
+    ) {
+        let spy = Arc::new(SpyLightController::new());
+        let engine = RhythmEngine::new(spy.clone());
+        (engine, spy)
     }
 
     #[tokio::test]
@@ -1689,5 +1677,76 @@ mod tests {
         // Setting the default module should work
         let result = engine.set_curve_module("rhythm");
         assert!(result);
+    }
+
+    // =========================================================================
+    // Idle Curve Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_turn_off_uses_idle_curve_from_active_module() {
+        let (mut engine, spy) = spy_engine();
+
+        engine.rhythm_on("room1").await.unwrap();
+        engine.turn_off("room1", 12.0).await.unwrap();
+
+        let calls = spy.turn_on_calls();
+        assert_eq!(calls.len(), 1, "soft-off should send turn_on");
+        let (_, cmd) = &calls[0];
+        // RhythmCurveModule composes IdleCurveModule, so calculate_idle() returns direct color
+        assert!(
+            cmd.is_direct_color,
+            "idle curve should produce direct color"
+        );
+        assert_eq!(cmd.brightness, 1);
+        assert_eq!(cmd.kelvin, 0);
+        assert!(cmd.xy.x > 0.0);
+        assert!(cmd.xy.y > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_soft_off_tick_uses_idle_curve() {
+        let (mut engine, spy) = spy_engine();
+
+        // Put room into soft_off state
+        engine.rhythm_on("room1").await.unwrap();
+        engine.turn_off("room1", 12.0).await.unwrap();
+
+        spy.reset();
+        engine.soft_off_tick("room1", 14.0).await.unwrap();
+
+        let calls = spy.turn_on_calls();
+        assert_eq!(calls.len(), 1);
+        let (_, cmd) = &calls[0];
+        assert!(cmd.is_direct_color, "soft_off_tick should use idle curve");
+        assert_eq!(cmd.brightness, 1);
+    }
+
+    #[tokio::test]
+    async fn test_idle_brightness_returns_curve_value() {
+        let (engine, _spy) = spy_engine();
+        // IdleCurveModule always returns brightness=1
+        assert_eq!(engine.idle_brightness(12.0), 1);
+        assert_eq!(engine.idle_brightness(0.0), 1);
+        assert_eq!(engine.idle_brightness(23.5), 1);
+    }
+
+    #[tokio::test]
+    async fn test_set_time_offset_soft_off_uses_idle_curve() {
+        let (mut engine, spy) = spy_engine();
+
+        // Put room into soft_off state
+        engine.rhythm_on("room1").await.unwrap();
+        engine.turn_off("room1", 12.0).await.unwrap();
+
+        // Changing the time offset on a soft-off room should use idle curve
+        spy.reset();
+        engine.set_time_offset("room1", 14.0, 30.0).await.unwrap();
+
+        let calls = spy.turn_on_calls();
+        assert_eq!(calls.len(), 1, "soft-off time offset should send turn_on");
+        let (_, cmd) = &calls[0];
+        assert!(cmd.is_direct_color, "should use idle curve for soft-off");
+        assert_eq!(cmd.brightness, 1, "brightness from idle curve");
     }
 }

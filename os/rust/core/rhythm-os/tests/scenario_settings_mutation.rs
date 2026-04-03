@@ -1,6 +1,6 @@
 //! Scenario: Settings mutations — "Settings → Preferences" screen.
 //!
-//! Tests that changing global settings (power_save, soft_off_brightness)
+//! Tests that changing global settings (power_save, etc.)
 //! correctly propagates to active rooms via the engine. The Settings screen
 //! is used by every user and these mutations had zero test coverage.
 //!
@@ -41,7 +41,7 @@ fn power_save_on_turns_off_soft_off_rooms() {
 
     // -- Action: enable power_save --
     spy.reset();
-    harness.set_settings(None, None, None, Some(true), None);
+    harness.set_settings(None, Some(true));
 
     // -- Assert: kitchen was turned truly off --
     let off_calls = spy.turn_off_calls();
@@ -79,7 +79,7 @@ fn power_save_off_enables_soft_off_behavior() {
     harness.sync();
 
     // Enable power_save — "off" should be a hard off
-    harness.set_settings(None, None, None, Some(true), None);
+    harness.set_settings(None, Some(true));
     harness.action("kitchen", "on").unwrap();
     spy.reset();
     harness.action("kitchen", "off").unwrap();
@@ -96,7 +96,7 @@ fn power_save_off_enables_soft_off_behavior() {
     assert!(!snap.soft_off, "power_save ON: should not enter soft_off");
 
     // Now disable power_save — "off" should be soft-off (turn_on at low brightness)
-    harness.set_settings(None, None, None, Some(false), None);
+    harness.set_settings(None, Some(false));
     harness.action("kitchen", "on").unwrap();
     spy.reset();
     harness.action("kitchen", "off").unwrap();
@@ -106,39 +106,6 @@ fn power_save_off_enables_soft_off_behavior() {
     );
     let snap = harness.snapshot("kitchen").unwrap();
     assert!(snap.soft_off, "power_save OFF: should enter soft_off state");
-}
-
-// ============================================================================
-// Scenario: soft_off_brightness change is applied to engine
-// ============================================================================
-
-/// Changing soft_off_brightness via settings should affect subsequent
-/// soft-off commands dispatched by the engine.
-#[test]
-fn soft_off_brightness_change_applied() {
-    let (harness, spy) = TestHarness::with_spy_controller();
-    let harness = harness.with_discovery(vec![room("kitchen", "Kitchen")], vec![]);
-    harness.sync();
-
-    // Turn on, then off (enters soft-off since power_save defaults false)
-    harness.action("kitchen", "on").unwrap();
-    harness.action("kitchen", "off").unwrap();
-    let snap = harness.snapshot("kitchen").unwrap();
-    assert!(snap.soft_off, "should be in soft-off");
-
-    // -- Action: change soft_off_brightness --
-    harness.set_settings(None, None, None, None, Some(25));
-
-    // Turn on again and off to get a fresh soft-off command with new brightness
-    harness.action("kitchen", "on").unwrap();
-    spy.reset();
-    harness.action("kitchen", "off").unwrap();
-
-    // -- Assert: the soft-off turn_on uses the new brightness --
-    let on_calls = spy.turn_on_calls();
-    assert!(!on_calls.is_empty(), "soft-off should send turn_on");
-    let (_, cmd) = &on_calls[0];
-    assert_eq!(cmd.brightness, 25, "soft-off brightness should be 25");
 }
 
 // ============================================================================
@@ -161,7 +128,7 @@ fn settings_change_preserves_room_state() {
     );
 
     // -- Action: change unrelated settings --
-    harness.set_settings(Some(800), Some(120), None, None, None);
+    harness.set_settings(Some(120), None);
 
     // -- Assert: room state unchanged --
     let after = harness.snapshot("kitchen").unwrap();
@@ -201,7 +168,7 @@ fn power_save_toggle_no_soft_off_rooms_safe() {
     let bedroom_before = harness.snapshot("bedroom").unwrap();
 
     // -- Action: toggle power_save on --
-    harness.set_settings(None, None, None, Some(true), None);
+    harness.set_settings(None, Some(true));
 
     // -- Assert: no state change --
     let kitchen_after = harness.snapshot("kitchen").unwrap();
@@ -210,4 +177,37 @@ fn power_save_toggle_no_soft_off_rooms_safe() {
     assert_eq!(bedroom_before.rhythm_enabled, bedroom_after.rhythm_enabled);
     assert!(harness.lights_on("kitchen"), "kitchen should still be on");
     assert!(harness.lights_on("bedroom"), "bedroom should still be on");
+}
+
+// ============================================================================
+// Scenario: soft-off uses idle curve from active module
+// ============================================================================
+
+/// The active curve module (RhythmCurveModule) composes an IdleCurveModule,
+/// so soft-off always uses direct color from the idle palette.
+#[test]
+fn soft_off_uses_idle_curve_from_active_module() {
+    let (harness, spy) = TestHarness::with_spy_controller();
+    let harness = harness.with_discovery(vec![room("kitchen", "Kitchen")], vec![]);
+    harness.sync();
+
+    // Turn on, then off — idle curve is built into the active module
+    harness.action("kitchen", "on").unwrap();
+    spy.reset();
+    harness.action("kitchen", "off").unwrap();
+
+    let on_calls = spy.turn_on_calls();
+    assert!(!on_calls.is_empty(), "soft-off should send turn_on");
+    let (_, cmd) = &on_calls[0];
+    assert!(
+        cmd.is_direct_color,
+        "soft-off should use idle curve (direct color)"
+    );
+    assert_eq!(
+        cmd.brightness, 1,
+        "soft-off brightness comes from idle curve (1%)"
+    );
+    assert_eq!(cmd.kelvin, 0, "direct color has kelvin=0");
+    assert!(cmd.xy.x > 0.0, "should have valid xy coordinates");
+    assert!(cmd.xy.y > 0.0);
 }

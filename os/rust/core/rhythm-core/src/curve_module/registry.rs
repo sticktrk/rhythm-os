@@ -49,7 +49,7 @@ impl CurveModuleRegistry {
             active_module_id: RhythmCurveModule::ID.into(),
         };
 
-        // Register the default rhythm module
+        // Register built-in modules
         registry.register(Arc::new(RhythmCurveModule::with_defaults()));
 
         registry
@@ -63,7 +63,7 @@ impl CurveModuleRegistry {
             active_module_id: RhythmCurveModule::ID.into(),
         };
 
-        // Register rhythm module with custom config
+        // Register built-in modules
         registry.register(Arc::new(RhythmCurveModule::new(config)));
 
         registry
@@ -275,7 +275,7 @@ mod tests {
                 &self,
                 _ctx: &super::super::CurveContext,
             ) -> crate::adaptive::LightingValues {
-                crate::adaptive::LightingValues::new(3000, 50, 12.0, 0.0)
+                crate::adaptive::LightingValues::new(3000, 50, 12.0, 0.0, 500, 600)
             }
             fn calculate_brightness(&self, _ctx: &super::super::CurveContext) -> u8 {
                 50
@@ -315,7 +315,7 @@ mod tests {
         }
 
         registry.register(Arc::new(TestModule));
-        assert_eq!(registry.module_count(), 2);
+        assert_eq!(registry.module_count(), 2); // rhythm + test
         assert!(registry.contains("test"));
 
         // Set test as active
@@ -348,7 +348,7 @@ mod tests {
                 &self,
                 _ctx: &super::super::CurveContext,
             ) -> crate::adaptive::LightingValues {
-                crate::adaptive::LightingValues::new(3000, 50, 12.0, 0.0)
+                crate::adaptive::LightingValues::new(3000, 50, 12.0, 0.0, 500, 600)
             }
             fn calculate_brightness(&self, _ctx: &super::super::CurveContext) -> u8 {
                 50

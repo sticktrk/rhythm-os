@@ -77,6 +77,7 @@ impl HueTransport for ReqwestHueTransport {
         on: bool,
         brightness: Option<u8>,
         kelvin: Option<u16>,
+        xy: Option<(f32, f32)>,
         fade_ms: Option<u16>,
     ) -> Result<()> {
         let url = format!(
@@ -95,7 +96,10 @@ impl HueTransport for ReqwestHueTransport {
                 body["dimming"] = serde_json::json!({ "brightness": bri_pct });
             }
 
-            if let Some(k) = kelvin {
+            if let Some((x, y)) = xy {
+                // Direct color via CIE xy coordinates (takes precedence over kelvin)
+                body["color"] = serde_json::json!({ "xy": { "x": x, "y": y } });
+            } else if let Some(k) = kelvin {
                 let mirek = ((1_000_000.0_f32 / k as f32).round() as u32).clamp(153, 500);
                 body["color_temperature"] = serde_json::json!({ "mirek": mirek });
             }

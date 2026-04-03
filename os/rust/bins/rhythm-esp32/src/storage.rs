@@ -292,30 +292,14 @@ pub fn load_config(nvs: &EspDefaultNvsPartition, state: &SharedState) -> Result<
     }
 
     // Load global settings
-    if let Ok(Some(val)) = nvs.get_u16(KEY_BULB_FADE_MS) {
-        state.bulb_fade_ms = val;
-        state.bulb_fade_atomic.store(val, std::sync::atomic::Ordering::Relaxed);
-        info!("Loaded bulb_fade_ms: {}", val);
-    }
-
     if let Ok(Some(val)) = nvs.get_u16(KEY_RHYTHM_INTV) {
         state.runtime_config.update_interval_secs = val as u64;
         info!("Loaded rhythm_interval_secs: {}", val);
     }
 
-    if let Ok(Some(val)) = nvs.get_u16(KEY_DFL_MOT_TOUT) {
-        state.default_motion_timeout_secs = val as u64;
-        info!("Loaded default_motion_timeout_secs: {}", val);
-    }
-
     if let Ok(Some(val)) = nvs.get_u8(KEY_PWR_SAVE) {
         state.power_save = val != 0;
         info!("Loaded power_save: {}", state.power_save);
-    }
-
-    if let Ok(Some(val)) = nvs.get_u8(KEY_SOB) {
-        state.soft_off_brightness = val.clamp(1, 100);
-        info!("Loaded soft_off_brightness: {}", state.soft_off_brightness);
     }
 
     Ok(())
@@ -368,11 +352,8 @@ pub fn save_settings(nvs: &EspDefaultNvsPartition, state: &SharedState) -> Resul
         .lock()
         .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
 
-    nvs.set_u16(KEY_BULB_FADE_MS, state.bulb_fade_ms)?;
     nvs.set_u16(KEY_RHYTHM_INTV, state.runtime_config.update_interval_secs as u16)?;
-    nvs.set_u16(KEY_DFL_MOT_TOUT, state.default_motion_timeout_secs as u16)?;
     nvs.set_u8(KEY_PWR_SAVE, if state.power_save { 1 } else { 0 })?;
-    nvs.set_u8(KEY_SOB, state.soft_off_brightness)?;
 
     info!("Settings saved to NVS");
     Ok(())
@@ -717,24 +698,16 @@ impl rhythm_os::storage::Storage for NvsStorage {
     fn load_settings(&self) -> Result<rhythm_os::storage::StoredSettings> {
         let nvs_handle = EspNvs::new(self.nvs.clone(), NVS_NAMESPACE, true)?;
 
-        use rhythm_core::primitives::{DEFAULT_BULB_FADE_MS, DEFAULT_MOTION_TIMEOUT_SECS, DEFAULT_SOFT_OFF_BRIGHTNESS};
-
         Ok(rhythm_os::storage::StoredSettings {
-            bulb_fade_ms: nvs_handle.get_u16(KEY_BULB_FADE_MS).ok().flatten().unwrap_or(DEFAULT_BULB_FADE_MS),
             rhythm_interval_secs: nvs_handle.get_u16(KEY_RHYTHM_INTV).ok().flatten().unwrap_or(60) as u64,
-            default_motion_timeout_secs: nvs_handle.get_u16(KEY_DFL_MOT_TOUT).ok().flatten().unwrap_or(DEFAULT_MOTION_TIMEOUT_SECS as u16) as u64,
             power_save: nvs_handle.get_u8(KEY_PWR_SAVE).ok().flatten().unwrap_or(0) != 0,
-            soft_off_brightness: nvs_handle.get_u8(KEY_SOB).ok().flatten().unwrap_or(DEFAULT_SOFT_OFF_BRIGHTNESS).clamp(1, 100),
         })
     }
 
     fn save_settings(&self, settings: &rhythm_os::storage::StoredSettings) -> Result<()> {
         let nvs_handle = EspNvs::new(self.nvs.clone(), NVS_NAMESPACE, true)?;
-        nvs_handle.set_u16(KEY_BULB_FADE_MS, settings.bulb_fade_ms)?;
         nvs_handle.set_u16(KEY_RHYTHM_INTV, settings.rhythm_interval_secs as u16)?;
-        nvs_handle.set_u16(KEY_DFL_MOT_TOUT, settings.default_motion_timeout_secs as u16)?;
         nvs_handle.set_u8(KEY_PWR_SAVE, if settings.power_save { 1 } else { 0 })?;
-        nvs_handle.set_u8(KEY_SOB, settings.soft_off_brightness)?;
         info!("Settings saved to NVS");
         Ok(())
     }

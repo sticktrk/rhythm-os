@@ -116,6 +116,10 @@ pub struct StoredConfig {
     pub shape_p: f32,
     #[serde(default = "default_max_dim_steps")]
     pub max_dim_steps: u8,
+    #[serde(default, deserialize_with = "deserialize_fade_ms")]
+    pub fade_ms: Option<u16>,
+    #[serde(default, deserialize_with = "deserialize_motion_timeout_secs")]
+    pub motion_timeout_secs: Option<u16>,
 }
 
 fn default_width_left_bri() -> f32 {
@@ -136,6 +140,21 @@ fn default_shape_p() -> f32 {
 fn default_max_dim_steps() -> u8 {
     rhythm_core::config::DEFAULT_MAX_DIM_STEPS
 }
+/// Migrate old stored `fade_ms: 500` (the old default) to `None` (auto).
+/// Accepts both integer (old format) and null/missing (new format).
+fn deserialize_fade_ms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u16>, D::Error> {
+    let v: Option<u16> = Option::deserialize(d)?;
+    Ok(v.filter(|&x| x != rhythm_core::config::DEFAULT_FADE_MS))
+}
+
+/// Migrate old stored `motion_timeout_secs: 1200` (the old default) to `None` (auto).
+/// Accepts both integer (old format) and null/missing (new format).
+fn deserialize_motion_timeout_secs<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<u16>, D::Error> {
+    let v: Option<u16> = Option::deserialize(d)?;
+    Ok(v.filter(|&x| x != rhythm_core::config::DEFAULT_MOTION_TIMEOUT_SECS))
+}
 
 impl StoredConfig {
     pub fn from_state(config: &CurveConfig, runtime_config: &RuntimeConfig) -> Self {
@@ -151,6 +170,8 @@ impl StoredConfig {
             width_right_cct: config.width_right_cct,
             shape_p: config.shape_p,
             max_dim_steps: config.max_dim_steps,
+            fade_ms: config.fade_ms,
+            motion_timeout_secs: config.motion_timeout_secs,
         }
     }
 
@@ -165,6 +186,8 @@ impl StoredConfig {
         config.width_right_cct = self.width_right_cct;
         config.shape_p = self.shape_p;
         config.max_dim_steps = self.max_dim_steps;
+        config.fade_ms = self.fade_ms;
+        config.motion_timeout_secs = self.motion_timeout_secs;
         runtime_config.solar_noon_hour = self.solar_noon_hour;
     }
 }
@@ -218,11 +241,8 @@ impl StoredLocation {
 /// Global settings for persistence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredSettings {
-    pub bulb_fade_ms: u16,
     pub rhythm_interval_secs: u64,
-    pub default_motion_timeout_secs: u64,
     pub power_save: bool,
-    pub soft_off_brightness: u8,
 }
 
 // ---------------------------------------------------------------------------
@@ -423,8 +443,6 @@ fn sanitize_hub_key(key: &HubKey) -> String {
 /// Loads config, location, settings, and hub credentials from the
 /// configured [`Storage`] backend. Safe to call on any platform.
 pub fn load_persisted_state(s: &mut crate::state::AppState) {
-    use std::sync::atomic::Ordering;
-
     let storage = match s.storage.as_ref() {
         Some(st) => st,
         None => return,
@@ -432,6 +450,10 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
 
     if let Ok(config) = storage.load_config() {
         config.apply_to_state(&mut s.config, &mut s.runtime_config);
+        // Sync curve-provided motion timeout as the baseline default.
+        // StoredSettings load below may override this if the user set it explicitly.
+        s.default_motion_timeout_secs =
+            s.config.motion_timeout_secs.unwrap_or(rhythm_core::config::DEFAULT_MOTION_TIMEOUT_SECS) as u64;
         let c = &s.config;
         info!(target: "sys", "Loaded config: bri={}–{}%, cct={}–{}K, width_bri=L{}/R{}, width_cct=L{}/R{}, shape_p={}, solar_noon={}",
             c.min_brightness, c.max_brightness,
@@ -452,14 +474,9 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
     }
 
     if let Ok(settings) = storage.load_settings() {
-        s.bulb_fade_ms = settings.bulb_fade_ms;
-        s.bulb_fade_atomic
-            .store(settings.bulb_fade_ms, Ordering::Relaxed);
         s.runtime_config.update_interval_secs = settings.rhythm_interval_secs;
-        s.default_motion_timeout_secs = settings.default_motion_timeout_secs;
         s.power_save = settings.power_save;
-        s.soft_off_brightness = settings.soft_off_brightness;
-        info!(target: "sys", "Loaded settings: fade={}ms, interval={}s", s.bulb_fade_ms, s.runtime_config.update_interval_secs);
+        info!(target: "sys", "Loaded settings: interval={}s", s.runtime_config.update_interval_secs);
     }
 
     // Load hub credentials
@@ -536,6 +553,8 @@ mod tests {
             width_right_cct: 1.1,
             shape_p: 4.0,
             max_dim_steps: 8,
+            fade_ms: None,
+            motion_timeout_secs: Some(300),
         };
         let runtime_config = rhythm_core::RuntimeConfig::default().with_solar_noon(12.8);
 
@@ -549,6 +568,8 @@ mod tests {
         assert!((stored.width_right_bri - 1.3).abs() < 0.001);
         assert!((stored.shape_p - 4.0).abs() < 0.001);
         assert_eq!(stored.max_dim_steps, 8);
+        assert_eq!(stored.fade_ms, None);
+        assert_eq!(stored.motion_timeout_secs, Some(300));
 
         let mut config2 = rhythm_core::CurveConfig::default();
         let mut runtime_config2 = rhythm_core::RuntimeConfig::default();
@@ -614,6 +635,8 @@ mod tests {
                 width_right_cct: 1.1,
                 shape_p: 4.0,
                 max_dim_steps: 8,
+                fade_ms: Some(300),
+                motion_timeout_secs: Some(300),
             };
             storage.save_config(&config).unwrap();
             let loaded = storage.load_config().unwrap();
@@ -625,6 +648,8 @@ mod tests {
             assert!((loaded.width_left_bri - 0.7).abs() < 0.001);
             assert!((loaded.width_right_bri - 1.2).abs() < 0.001);
             assert!((loaded.shape_p - 4.0).abs() < 0.001);
+            assert_eq!(loaded.fade_ms, Some(300));
+            assert_eq!(loaded.motion_timeout_secs, Some(300));
             assert_eq!(loaded.max_dim_steps, 8);
             cleanup(&path);
         }
@@ -676,19 +701,13 @@ mod tests {
         fn settings_save_load_roundtrip() {
             let (storage, path) = temp_storage();
             let settings = StoredSettings {
-                bulb_fade_ms: 500,
                 rhythm_interval_secs: 120,
-                default_motion_timeout_secs: 300,
                 power_save: true,
-                soft_off_brightness: 15,
             };
             storage.save_settings(&settings).unwrap();
             let loaded = storage.load_settings().unwrap();
-            assert_eq!(loaded.bulb_fade_ms, 500);
             assert_eq!(loaded.rhythm_interval_secs, 120);
-            assert_eq!(loaded.default_motion_timeout_secs, 300);
             assert!(loaded.power_save);
-            assert_eq!(loaded.soft_off_brightness, 15);
             cleanup(&path);
         }
 

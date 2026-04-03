@@ -26,9 +26,18 @@ impl HueTransport for Arc<SpyHueTransport> {
         on: bool,
         brightness: Option<u8>,
         kelvin: Option<u16>,
+        xy: Option<(f32, f32)>,
         fade_ms: Option<u16>,
     ) -> anyhow::Result<()> {
-        (**self).set_grouped_light(username, grouped_light_id, on, brightness, kelvin, fade_ms)
+        (**self).set_grouped_light(
+            username,
+            grouped_light_id,
+            on,
+            brightness,
+            kelvin,
+            xy,
+            fade_ms,
+        )
     }
     fn is_grouped_light_on(&self, username: &str, grouped_light_id: &str) -> anyhow::Result<bool> {
         (**self).is_grouped_light_on(username, grouped_light_id)
@@ -50,6 +59,7 @@ pub enum HueTransportCall {
         on: bool,
         brightness: Option<u8>,
         kelvin: Option<u16>,
+        xy: Option<(f32, f32)>,
         fade_ms: Option<u16>,
     },
     IsGroupedLightOn {
@@ -154,6 +164,7 @@ impl HueTransport for SpyHueTransport {
         on: bool,
         brightness: Option<u8>,
         kelvin: Option<u16>,
+        xy: Option<(f32, f32)>,
         fade_ms: Option<u16>,
     ) -> anyhow::Result<()> {
         if self.should_fail.load(Ordering::Relaxed) {
@@ -167,6 +178,7 @@ impl HueTransport for SpyHueTransport {
                 on,
                 brightness,
                 kelvin,
+                xy,
                 fade_ms,
             });
         Ok(())
@@ -210,7 +222,7 @@ mod tests {
     #[test]
     fn records_set_grouped_light() {
         let spy = SpyHueTransport::new();
-        spy.set_grouped_light("user", "gl1", true, Some(80), Some(4000), Some(500))
+        spy.set_grouped_light("user", "gl1", true, Some(80), Some(4000), None, Some(500))
             .unwrap();
 
         let calls = spy.set_grouped_light_calls();
@@ -221,6 +233,7 @@ mod tests {
                 on,
                 brightness,
                 kelvin,
+                xy: _,
                 fade_ms,
             } => {
                 assert_eq!(grouped_light_id, "gl1");
@@ -238,7 +251,7 @@ mod tests {
         let spy = SpyHueTransport::new();
         spy.set_should_fail(true);
         assert!(spy
-            .set_grouped_light("user", "gl1", true, None, None, None)
+            .set_grouped_light("user", "gl1", true, None, None, None, None)
             .is_err());
     }
 
@@ -253,7 +266,7 @@ mod tests {
     #[test]
     fn reset_clears_calls() {
         let spy = SpyHueTransport::new();
-        spy.set_grouped_light("user", "gl1", true, None, None, None)
+        spy.set_grouped_light("user", "gl1", true, None, None, None, None)
             .unwrap();
         assert_eq!(spy.set_grouped_light_count(), 1);
         spy.reset();

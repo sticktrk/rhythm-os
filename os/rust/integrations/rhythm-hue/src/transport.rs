@@ -19,8 +19,10 @@ pub trait HueTransport: Send + Sync {
 
     /// Control a grouped_light (room-level control) via V2 API.
     ///
-    /// Uses `color_temperature.mirek` for color temp.
+    /// Uses `color_temperature.mirek` for color temp, or `color.xy` for direct color.
     /// Brightness is 0-100 (V2 API percentage via `dimming.brightness`).
+    /// When `xy` is Some, sends xy color instead of color temperature.
+    #[allow(clippy::too_many_arguments)]
     fn set_grouped_light(
         &self,
         username: &str,
@@ -28,6 +30,7 @@ pub trait HueTransport: Send + Sync {
         on: bool,
         brightness: Option<u8>,
         kelvin: Option<u16>,
+        xy: Option<(f32, f32)>,
         fade_ms: Option<u16>,
     ) -> anyhow::Result<()>;
 

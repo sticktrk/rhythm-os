@@ -12,10 +12,12 @@
 //! - `RhythmCurveModule`: Default implementation using existing algorithm
 
 mod config;
+mod idle;
 mod registry;
 mod rhythm;
 
 pub use config::CurveModuleConfig;
+pub use idle::{IdleCurveConfig, IdleCurveModule};
 pub use registry::CurveModuleRegistry;
 pub use rhythm::RhythmCurveModule;
 
