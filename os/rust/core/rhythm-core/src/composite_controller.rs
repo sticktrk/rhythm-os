@@ -216,6 +216,18 @@ impl LightController for CompositeController {
             )));
         }
 
+        // Single target: await directly — avoids nested LocalPool executor on
+        // periodic/event-loop std::threads where the outer executor::block_on
+        // already created a LocalPool.
+        if targets.len() == 1 {
+            let (key, controller, hub_room_id) = &targets[0];
+            return controller.turn_on(hub_room_id, command).await.map_err(|e| {
+                warn!(target: "composite", "hub {} failed: {}", key, e);
+                e
+            });
+        }
+
+        // Multi-target: fan out to OS threads (thread::scope = fresh thread-locals, safe)
         let any_ok = dispatch_parallel(&targets, |controller, hub_room_id| {
             sync_block_on(controller.turn_on(hub_room_id, command.clone()))
         });
@@ -239,6 +251,16 @@ impl LightController for CompositeController {
             )));
         }
 
+        // Single target: await directly (same reasoning as turn_on)
+        if targets.len() == 1 {
+            let (key, controller, hub_room_id) = &targets[0];
+            return controller.turn_off(hub_room_id).await.map_err(|e| {
+                warn!(target: "composite", "hub {} failed: {}", key, e);
+                e
+            });
+        }
+
+        // Multi-target: fan out to OS threads
         let any_ok = dispatch_parallel(&targets, |controller, hub_room_id| {
             sync_block_on(controller.turn_off(hub_room_id))
         });
