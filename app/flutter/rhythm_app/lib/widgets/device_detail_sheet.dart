@@ -42,6 +42,7 @@ class DeviceDetailSheet extends StatefulWidget {
 class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   Map<String, dynamic>? _canonicalData;
   bool _loading = true;
+  bool _removing = false;
 
   @override
   void initState() {
@@ -162,6 +163,10 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                     _buildConnectionsSection(),
                     const SizedBox(height: 16),
                     _buildMoveButton(context),
+                    if (_matterNativeId != null) ...[
+                      const SizedBox(height: 12),
+                      _buildRemoveButton(context),
+                    ],
                   ],
                   const SizedBox(height: 16),
                 ],
@@ -279,6 +284,148 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
         ),
       ),
     );
+  }
+
+  /// The matter native ID from the canonical endpoints, or null if not a matter device.
+  String? get _matterNativeId {
+    final endpoints = _canonicalData?['endpoints'] as List<dynamic>? ?? [];
+    for (final ep in endpoints) {
+      final nativeId = (ep as Map<String, dynamic>)['native_id'] as String? ?? '';
+      if (nativeId.startsWith('matter-')) return nativeId;
+    }
+    return null;
+  }
+
+  Widget _buildRemoveButton(BuildContext context) {
+    return GestureDetector(
+      onTap: _removing ? null : () => _confirmRemoveDevice(context),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: Colors.red.shade900.withValues(alpha: 0.3),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: Colors.red.shade400.withValues(alpha: 0.4),
+          ),
+        ),
+        child: Row(
+          children: [
+            if (_removing)
+              SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.red.shade300,
+                ),
+              )
+            else
+              Icon(
+                Icons.delete_outline,
+                color: Colors.red.shade300,
+                size: 20,
+              ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                _removing ? 'Removing...' : 'Remove Device',
+                style: TextStyle(
+                  color: Colors.red.shade300,
+                  fontSize: 15,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _confirmRemoveDevice(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: CelestialColors.backgroundCard,
+        title: const Text(
+          'Remove Device?',
+          style: TextStyle(color: CelestialColors.textPrimary),
+        ),
+        content: Text(
+          'This will decommission "${widget.device.displayName}" and remove it from your system. The device can be re-paired afterwards.',
+          style: const TextStyle(color: CelestialColors.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text('Remove', style: TextStyle(color: Colors.red.shade300)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !context.mounted) return;
+    await _removeDevice(context, force: true);
+  }
+
+  Future<void> _removeDevice(BuildContext context, {required bool force}) async {
+    final nativeId = _matterNativeId;
+    if (nativeId == null) return;
+
+    setState(() => _removing = true);
+
+    final syncProvider = context.read<ServerSyncProvider>();
+    final result = await syncProvider.api.unpairDevice(
+      hubType: 'matter',
+      deviceId: nativeId,
+      force: force,
+    );
+
+    if (!context.mounted) return;
+
+    final status = result?['status'] as String?;
+    if (status == 'complete') {
+      Navigator.of(context).pop();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Removed ${widget.device.displayName}')),
+      );
+      syncProvider.connection.reconnect();
+    } else {
+      final error = result?['error'] as String? ?? 'Unknown error';
+      setState(() => _removing = false);
+      if (!context.mounted) return;
+      // Offer force-remove if the device is unreachable.
+      final forceRemove = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: CelestialColors.backgroundCard,
+          title: const Text(
+            'Removal Failed',
+            style: TextStyle(color: CelestialColors.textPrimary),
+          ),
+          content: Text(
+            '$error\n\nForce remove? This cleans up local state without contacting the device.',
+            style: const TextStyle(color: CelestialColors.textSecondary),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: Text('Force Remove', style: TextStyle(color: Colors.red.shade300)),
+            ),
+          ],
+        ),
+      );
+      if (forceRemove == true && context.mounted) {
+        await _removeDevice(context, force: true);
+      }
+    }
   }
 
   Future<void> _showMoveDialog(BuildContext context) async {
@@ -464,13 +611,12 @@ class _ConnectionRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hubType = (hubKey['hub_type'] as Map<String, dynamic>?)?['0'] as String?
-        ?? hubKey['hub_type']?.toString()
-        ?? 'unknown';
+    final hubType = hubKey['hub_type']?.toString() ?? 'unknown';
     final address = hubKey['address'] as String? ?? '';
     final displayHub = switch (hubType) {
       'hue' => 'Hue Bridge',
-      'ha' => 'Home Assistant',
+      'ha' || 'homeassistant' || 'home_assistant' => 'Home Assistant',
+      'matter' => 'Matter',
       _ => hubType,
     };
 
@@ -479,7 +625,11 @@ class _ConnectionRow extends StatelessWidget {
       child: Row(
         children: [
           Icon(
-            hubType == 'hue' ? Icons.lightbulb : Icons.home,
+            switch (hubType) {
+              'hue' => Icons.lightbulb,
+              'matter' => Icons.memory_outlined,
+              _ => Icons.home,
+            },
             color: CelestialColors.sunWarm.withValues(alpha: 0.7),
             size: 18,
           ),

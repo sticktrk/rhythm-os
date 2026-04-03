@@ -69,6 +69,9 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   bool _isRefreshing = false;
   bool _isConfiguringHub = false;
 
+  // Per-hub-type device summaries from /api/devices/canonical
+  Map<String, String> _hubSummaries = {};
+
   late AnimationController _glowController;
   late Animation<double> _glowAnimation;
 
@@ -110,6 +113,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
     _otaService.addListener(_onOtaStateChanged);
     _checkHealth();
+    _fetchHubSummaries();
 
     AnalyticsService().logScreenView('rhythmserver_settings');
   }
@@ -152,6 +156,44 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     }
   }
 
+  Future<void> _fetchHubSummaries() async {
+    final http = context.read<RhythmConnection>();
+    final devices = await http.api.getCanonicalDevices();
+    if (!mounted) return;
+    if (devices == null) return;
+
+    // Count devices per hub type from canonical endpoints.
+    final counts = <String, _DeviceCounts>{};
+    for (final d in devices) {
+      final dtype = d['device_type'] as String? ?? 'light';
+      final endpoints = d['endpoints'] as List<dynamic>? ?? [];
+      final hubTypes = <String>{};
+      for (final ep in endpoints) {
+        final hubKey = (ep as Map<String, dynamic>)['hub_key'] as Map<String, dynamic>? ?? {};
+        final ht = hubKey['hub_type']?.toString();
+        if (ht != null) hubTypes.add(ht);
+      }
+      for (final ht in hubTypes) {
+        final c = counts[ht] ??= _DeviceCounts();
+        if (dtype == 'light') { c.lights++; }
+        else if (dtype == 'button') { c.buttons++; }
+        else if (dtype == 'motion') { c.motion++; }
+      }
+    }
+
+    final summaries = <String, String>{};
+    for (final entry in counts.entries) {
+      final c = entry.value;
+      final parts = <String>[];
+      if (c.lights > 0) parts.add('${c.lights} light${c.lights > 1 ? 's' : ''}');
+      if (c.buttons > 0) parts.add('${c.buttons} button${c.buttons > 1 ? 's' : ''}');
+      if (c.motion > 0) parts.add('${c.motion} sensor${c.motion > 1 ? 's' : ''}');
+      summaries[entry.key] = parts.isEmpty ? 'No devices' : parts.join(', ');
+    }
+
+    setState(() => _hubSummaries = summaries);
+  }
+
   Future<void> _handleRefresh() async {
     if (_isRefreshing) return;
     setState(() {
@@ -159,7 +201,16 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       _checkingHealth = true;
     });
 
-    await _checkHealth();
+    // Refresh everything in parallel: health, server state, matter devices.
+    await Future.wait([
+      _checkHealth(),
+      _fetchHubSummaries(),
+      () async {
+        // Force SSE reconnect to re-fetch /api/state (rooms, hubs, settings).
+        final sync = context.read<ServerSyncProvider>();
+        sync.connection.reconnect();
+      }(),
+    ]);
 
     if (mounted) {
       setState(() => _isRefreshing = false);
@@ -273,36 +324,38 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
           children: [
             _buildHeader(),
             Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 24),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    const SizedBox(height: 8),
-                    _buildHeroSection(http),
-                    const SizedBox(height: 24),
-                    ..._buildPerHubSections(http),
-                    _buildHubPairingSuggestions(),
-                    const SizedBox(height: 16),
-                    _buildDevicesSection(),
-                    const SizedBox(height: 16),
-                    _buildDeviceInfoSection(),
-                    const SizedBox(height: 16),
-                    _buildVersionSection(),
-                    const SizedBox(height: 16),
-                    _buildConnectionStatusSection(http),
-                    const SizedBox(height: 24),
-                    _buildCheckStatusButton(),
-                    const SizedBox(height: 12),
-                    if (_isEmbedded) ...[
-                      _buildDiagnosticsButton(),
-                      const SizedBox(height: 12),
-                      _buildRebootButton(),
-                      const SizedBox(height: 12),
+              child: RefreshIndicator(
+                onRefresh: _handleRefresh,
+                color: _teal,
+                backgroundColor: CelestialColors.backgroundCard,
+                child: SingleChildScrollView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const SizedBox(height: 8),
+                      _buildHeroSection(http),
+                      const SizedBox(height: 24),
+                      ..._buildPerHubSections(http),
+                      _buildHubPairingSuggestions(),
+                      const SizedBox(height: 16),
+                      _buildDeviceInfoSection(),
+                      const SizedBox(height: 16),
+                      _buildVersionSection(),
+                      const SizedBox(height: 16),
+                      _buildConnectionStatusSection(http),
+                      const SizedBox(height: 24),
+                      if (_isEmbedded) ...[
+                        _buildDiagnosticsButton(),
+                        const SizedBox(height: 12),
+                        _buildRebootButton(),
+                        const SizedBox(height: 12),
+                      ],
+                      _buildResetButton(),
+                      const SizedBox(height: 40),
                     ],
-                    _buildResetButton(),
-                    const SizedBox(height: 40),
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -1002,7 +1055,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 for (final (index, hub) in configuredHubs.indexed) ...[
                   if (index > 0)
                     Divider(height: 1, color: CelestialColors.orbitRing.withValues(alpha: 0.3)),
-                  _buildHubRow(hub, syncProvider),
+                  _buildHubRow(hub),
                 ],
               ],
             ),
@@ -1013,12 +1066,12 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     ];
   }
 
-  Widget _buildHubRow(Map<String, dynamic> hubInfo, ServerSyncProvider syncProvider) {
+  Widget _buildHubRow(Map<String, dynamic> hubInfo) {
     final type = hubInfo['type'] as String;
     final connected = hubInfo['connected'] as bool? ?? false;
     final label = _hubLabel(type);
     final hubColor = _hubColor(type);
-    final deviceSummary = syncProvider.deviceSummaryForHub(type);
+    final deviceSummary = _hubSummaries[type] ?? 'Loading...';
 
     return GestureDetector(
       onTap: () => _HubDetailScreen.show(context, hubInfo: hubInfo),
@@ -1088,18 +1141,21 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   static String _hubLabel(String type) => switch (type) {
     'hue' => 'Philips Hue',
     'homeassistant' || 'home_assistant' => 'Home Assistant',
+    'matter' => 'Matter',
     _ => type,
   };
 
   static Color _hubColor(String type) => switch (type) {
     'hue' => const Color(0xFFFFB900),
     'homeassistant' || 'home_assistant' => const Color(0xFF42A5F5),
+    'matter' => const Color(0xFF26A69A),
     _ => _teal,
   };
 
   static IconData _hubIcon(String type) => switch (type) {
     'hue' => Icons.lightbulb_outline,
     'homeassistant' || 'home_assistant' => Icons.home_outlined,
+    'matter' => Icons.memory_outlined,
     _ => Icons.hub_outlined,
   };
 
@@ -1115,8 +1171,9 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
     final showHa = !configuredTypes.contains('homeassistant');
     final showHue = !configuredTypes.contains('hue');
+    final showMatter = !configuredTypes.contains('matter');
 
-    if (!showHa && !showHue && !hasAnyHub) return const SizedBox.shrink();
+    if (!showHa && !showHue && !showMatter && !hasAnyHub) return const SizedBox.shrink();
 
     // If no hubs configured at all, show as "LIGHT HUB" section
     if (!hasAnyHub) {
@@ -1157,6 +1214,15 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     onTap: () => HueConfiguratorScreen.show(context),
                   ),
                 ],
+                if (showMatter) ...[
+                  Divider(height: 1, color: CelestialColors.orbitRing.withValues(alpha: 0.3)),
+                  _buildHubOptionRow(
+                    icon: Icons.memory_outlined,
+                    label: 'Matter',
+                    color: const Color(0xFF26A69A),
+                    onTap: () => MatterDeviceAddScreen.show(context),
+                  ),
+                ],
               ],
             ),
           ),
@@ -1166,7 +1232,35 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
     // Hubs exist — show add options + disconnect all (if multiple)
     final children = <Widget>[];
-    if (showHa || showHue) {
+    if (showHa || showHue || showMatter) {
+      final options = <Widget>[];
+      if (showHa) {
+        options.add(_buildHubOptionRow(
+          icon: Icons.home_outlined,
+          label: 'Add Home Assistant',
+          color: const Color(0xFF42A5F5),
+          isLoading: _isConfiguringHub,
+          onTap: _isConfiguringHub ? null : () => _pairHa(syncProvider),
+        ));
+      }
+      if (showHue) {
+        if (options.isNotEmpty) options.add(Divider(height: 1, color: CelestialColors.orbitRing.withValues(alpha: 0.3)));
+        options.add(_buildHubOptionRow(
+          icon: Icons.lightbulb_outline,
+          label: 'Add Philips Hue',
+          color: const Color(0xFFFFB900),
+          onTap: () => HueConfiguratorScreen.show(context),
+        ));
+      }
+      if (showMatter) {
+        if (options.isNotEmpty) options.add(Divider(height: 1, color: CelestialColors.orbitRing.withValues(alpha: 0.3)));
+        options.add(_buildHubOptionRow(
+          icon: Icons.memory_outlined,
+          label: 'Add Matter Device',
+          color: const Color(0xFF26A69A),
+          onTap: () => MatterDeviceAddScreen.show(context),
+        ));
+      }
       children.add(
         Container(
           decoration: BoxDecoration(
@@ -1176,27 +1270,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               color: CelestialColors.orbitRing.withValues(alpha: 0.5),
             ),
           ),
-          child: Column(
-            children: [
-              if (showHa)
-                _buildHubOptionRow(
-                  icon: Icons.home_outlined,
-                  label: 'Add Home Assistant',
-                  color: const Color(0xFF42A5F5),
-                  isLoading: _isConfiguringHub,
-                  onTap: _isConfiguringHub ? null : () => _pairHa(syncProvider),
-                ),
-              if (showHa && showHue)
-                Divider(height: 1, color: CelestialColors.orbitRing.withValues(alpha: 0.3)),
-              if (showHue)
-                _buildHubOptionRow(
-                  icon: Icons.lightbulb_outline,
-                  label: 'Add Philips Hue',
-                  color: const Color(0xFFFFB900),
-                  onTap: () => HueConfiguratorScreen.show(context),
-                ),
-            ],
-          ),
+          child: Column(children: options),
         ),
       );
     }
@@ -1223,201 +1297,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
         syncProvider.pushHubCredentials(RoomSourceDto.homeAssistant);
       }
     }
-  }
-
-  // ─── Devices Section (Matter) ─────────────────────────────
-
-  Widget _buildDevicesSection() {
-    final syncProvider = context.watch<ServerSyncProvider>();
-    final matterDevices = syncProvider.devicesForHub('matter');
-    final matterRooms = syncProvider.roomsByHubType['matter'] ?? [];
-
-    // Build device-id → room lookups.
-    final deviceRoomName = <String, String>{};
-    final deviceRoomId = <String, String>{};
-    for (final room in matterRooms) {
-      for (final did in room.deviceIds) {
-        deviceRoomName[did] = room.name;
-        deviceRoomId[did] = room.id;
-      }
-    }
-
-    return _buildSection(
-      title: matterDevices.length == 1 ? 'DEVICE' : 'DEVICES',
-      children: [
-        Container(
-          decoration: BoxDecoration(
-            color: CelestialColors.backgroundCard,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: CelestialColors.orbitRing.withValues(alpha: 0.5),
-            ),
-          ),
-          child: Column(
-            children: [
-              for (final (index, device) in matterDevices.indexed) ...[
-                if (index > 0)
-                  Divider(
-                      height: 1,
-                      color:
-                          CelestialColors.orbitRing.withValues(alpha: 0.3)),
-                _buildMatterDeviceRow(
-                    device, deviceRoomName[device.id], deviceRoomId[device.id]),
-              ],
-              if (matterDevices.isNotEmpty)
-                Divider(
-                    height: 1,
-                    color: CelestialColors.orbitRing.withValues(alpha: 0.3)),
-              _buildAddDeviceRow(matterDevices.isEmpty),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildMatterDeviceRow(
-      RhythmDevice device, String? roomName, String? roomId) {
-    return GestureDetector(
-      onTap: () => DeviceDetailSheet.show(context, device, roomId ?? ''),
-      behavior: HitTestBehavior.opaque,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        child: Row(
-          children: [
-            Icon(
-              Icons.lightbulb_outline,
-              color: _teal.withValues(alpha: 0.8),
-              size: 20,
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    device.displayName,
-                    style: const TextStyle(
-                      color: CelestialColors.textPrimary,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  if (device.productInfo != null) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      device.productInfo!,
-                      style: TextStyle(
-                        color: CelestialColors.textSecondary
-                            .withValues(alpha: 0.6),
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            if (roomName != null)
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                margin: const EdgeInsets.only(right: 8),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(6),
-                  color: _teal.withValues(alpha: 0.12),
-                ),
-                child: Text(
-                  roomName,
-                  style: TextStyle(
-                    color: _teal.withValues(alpha: 0.9),
-                    fontSize: 11,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              )
-            else
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                margin: const EdgeInsets.only(right: 8),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(6),
-                  color: Colors.amber.withValues(alpha: 0.12),
-                ),
-                child: Text(
-                  'Unassigned',
-                  style: TextStyle(
-                    color: Colors.amber.withValues(alpha: 0.9),
-                    fontSize: 11,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ),
-            const Icon(
-              Icons.chevron_right,
-              color: CelestialColors.textSecondary,
-              size: 18,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildAddDeviceRow(bool isEmpty) {
-    return GestureDetector(
-      onTap: () async {
-        await MatterDeviceAddScreen.show(context);
-        if (mounted) {
-          context.read<ServerSyncProvider>().connection.reconnect();
-        }
-      },
-      behavior: HitTestBehavior.opaque,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        child: Row(
-          children: [
-            Icon(
-              Icons.add_circle_outline,
-              color: _teal.withValues(alpha: 0.7),
-              size: 20,
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Add Device',
-                    style: TextStyle(
-                      color: CelestialColors.textPrimary,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  if (isEmpty) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      'Commission Matter lights directly',
-                      style: TextStyle(
-                        color: CelestialColors.textSecondary
-                            .withValues(alpha: 0.6),
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            const Icon(
-              Icons.chevron_right,
-              color: CelestialColors.textSecondary,
-              size: 18,
-            ),
-          ],
-        ),
-      ),
-    );
   }
 
   Widget _buildHubOptionRow({
@@ -1481,51 +1360,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 color: CelestialColors.textSecondary.withValues(alpha: 0.4),
                 size: 20,
               ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildCheckStatusButton() {
-    return GestureDetector(
-      onTap: _isRefreshing ? null : _handleRefresh,
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 14),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(14),
-          color: _teal.withValues(alpha: 0.1),
-          border: Border.all(
-            color: _teal.withValues(alpha: 0.3),
-          ),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            if (_isRefreshing)
-              const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  valueColor: AlwaysStoppedAnimation(_teal),
-                ),
-              )
-            else
-              const Icon(
-                Icons.refresh_rounded,
-                color: _teal,
-                size: 20,
-              ),
-            const SizedBox(width: 10),
-            Text(
-              _isRefreshing ? 'Checking...' : 'Check Status',
-              style: const TextStyle(
-                color: _teal,
-                fontSize: 15,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
           ],
         ),
       ),
@@ -1793,6 +1627,12 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       ),
     );
   }
+}
+
+class _DeviceCounts {
+  int lights = 0;
+  int buttons = 0;
+  int motion = 0;
 }
 
 // =============================================================================
@@ -3289,12 +3129,105 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
   bool get _connected => widget.hubInfo['connected'] as bool? ?? false;
   String? get _address => widget.hubInfo['address'] as String?;
 
+  // Canonical devices grouped into rooms for this hub type.
+  List<RhythmRoom>? _canonicalRooms;
+  String? _canonicalSummary;
+  bool _canonicalLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchCanonicalDevices();
+  }
+
+  Future<void> _fetchCanonicalDevices() async {
+    setState(() => _canonicalLoading = true);
+    final http = context.read<RhythmConnection>();
+    final devices = await http.api.getCanonicalDevices();
+    if (!mounted) return;
+
+    if (devices == null) {
+      setState(() {
+        _canonicalRooms = [];
+        _canonicalSummary = 'No devices';
+        _canonicalLoading = false;
+      });
+      return;
+    }
+
+    // Filter to devices that have an endpoint matching this hub type.
+    final hubDevices = devices.where((d) {
+      final endpoints = d['endpoints'] as List<dynamic>? ?? [];
+      return endpoints.any((ep) {
+        final hubKey = (ep as Map<String, dynamic>)['hub_key'] as Map<String, dynamic>? ?? {};
+        return hubKey['hub_type']?.toString() == _type;
+      });
+    }).toList();
+
+    // Build room_id → room_name lookup from hello rooms.
+    final syncProvider = context.read<ServerSyncProvider>();
+    final roomNames = <String, String>{};
+    for (final r in syncProvider.helloRooms) {
+      if (r.id.isNotEmpty) roomNames[r.id] = r.name;
+    }
+
+    // Group by room_id → build RhythmRoom objects.
+    final byRoom = <String?, List<Map<String, dynamic>>>{};
+    for (final d in hubDevices) {
+      final roomId = d['room_id'] as String?;
+      (byRoom[roomId] ??= []).add(d);
+    }
+
+    final parsedRooms = <RhythmRoom>[];
+    for (final entry in byRoom.entries) {
+      final roomDevices = entry.value.map((d) => RhythmDevice(
+        id: d['id'] as String? ?? '',
+        type: RhythmDeviceType.fromString(d['device_type'] as String? ?? 'light'),
+        name: d['name'] as String?,
+        manufacturer: d['manufacturer'] as String?,
+        model: d['model'] as String?,
+      )).toList();
+      final roomId = entry.key;
+      parsedRooms.add(RhythmRoom(
+        id: roomId ?? '',
+        name: (roomId != null ? roomNames[roomId] : null) ?? 'Unassigned',
+        groupedLightId: '',
+        rhythmEnabled: false,
+        disabled: false,
+        timeOffset: 0,
+        brightnessOffset: 0,
+        softOff: false,
+        hubTypes: [_type],
+        devices: roomDevices,
+      ));
+    }
+
+    // Summary
+    final lights = hubDevices.where((d) => (d['device_type'] as String? ?? 'light') == 'light').length;
+    final buttons = hubDevices.where((d) => d['device_type'] == 'button').length;
+    final motion = hubDevices.where((d) => d['device_type'] == 'motion').length;
+    final parts = <String>[];
+    if (lights > 0) parts.add('$lights light${lights > 1 ? 's' : ''}');
+    if (buttons > 0) parts.add('$buttons button${buttons > 1 ? 's' : ''}');
+    if (motion > 0) parts.add('$motion sensor${motion > 1 ? 's' : ''}');
+    final roomCount = parsedRooms.length;
+    final summary = parts.isEmpty
+        ? 'No devices'
+        : '${parts.join(', ')} across $roomCount room${roomCount != 1 ? 's' : ''}';
+
+    setState(() {
+      _canonicalRooms = parsedRooms;
+      _canonicalSummary = summary;
+      _canonicalLoading = false;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
-    final syncProvider = context.watch<ServerSyncProvider>();
+    context.watch<ServerSyncProvider>();
     final http = context.read<RhythmConnection>();
-    final rooms = syncProvider.roomsByHubType[_type] ?? [];
-    final deviceSummary = syncProvider.deviceSummaryForHub(_type);
+    final rooms = _canonicalRooms ?? [];
+    final deviceSummary = _canonicalLoading ? 'Loading...' : (_canonicalSummary ?? 'No devices');
     final label = _RhythmServerSettingsScreenState._hubLabel(_type);
     final hubColor = _RhythmServerSettingsScreenState._hubColor(_type);
     final hubIcon = _RhythmServerSettingsScreenState._hubIcon(_type);
@@ -3435,26 +3368,45 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                     _buildSectionHeader('DEVICES'),
                     const SizedBox(height: 8),
                     _buildDevicesCard(rooms),
-                    const SizedBox(height: 20),
-                    // Debug section
-                    _buildSectionHeader('DEBUG'),
-                    const SizedBox(height: 8),
-                    _buildDebugCard(http),
-                    const SizedBox(height: 24),
-                    // Actions
-                    _buildActionButton(
-                      icon: Icons.refresh_rounded,
-                      label: _connected ? 'Reconnect' : 'Retry',
-                      color: _teal,
-                      onTap: () => _retryHub(),
-                    ),
-                    const SizedBox(height: 10),
-                    _buildActionButton(
-                      icon: Icons.link_off_rounded,
-                      label: 'Disconnect',
-                      color: Colors.red.shade400,
-                      onTap: () => _disconnectHub(),
-                    ),
+                    if (_type == 'matter') ...[
+                      const SizedBox(height: 10),
+                      _buildActionButton(
+                        icon: Icons.add_circle_outline,
+                        label: 'Add Device',
+                        color: const Color(0xFF26A69A),
+                        onTap: () async {
+                          await MatterDeviceAddScreen.show(context);
+                          if (mounted) {
+                            context.read<ServerSyncProvider>().connection.reconnect();
+                            _fetchCanonicalDevices();
+                          }
+                        },
+                      ),
+                    ],
+                    if (_type != 'matter') ...[
+                      const SizedBox(height: 20),
+                      // Debug section
+                      _buildSectionHeader('DEBUG'),
+                      const SizedBox(height: 8),
+                      _buildDebugCard(http),
+                    ],
+                    if (_type != 'matter') ...[
+                      const SizedBox(height: 24),
+                      // Actions
+                      _buildActionButton(
+                        icon: Icons.refresh_rounded,
+                        label: _connected ? 'Reconnect' : 'Retry',
+                        color: _teal,
+                        onTap: () => _retryHub(),
+                      ),
+                      const SizedBox(height: 10),
+                      _buildActionButton(
+                        icon: Icons.link_off_rounded,
+                        label: 'Disconnect',
+                        color: Colors.red.shade400,
+                        onTap: () => _disconnectHub(),
+                      ),
+                    ],
                     const SizedBox(height: 40),
                   ],
                 ),
@@ -3778,10 +3730,34 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
     };
     if (source != null) {
       syncProvider.pushHubCredentials(source);
+    } else {
+      syncProvider.connection.reconnect();
     }
   }
 
   void _disconnectHub() async {
+    if (_type == 'matter') {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: CelestialColors.backgroundCard,
+          title: const Text('Remove Matter Hub?', style: TextStyle(color: CelestialColors.textPrimary)),
+          content: const Text(
+            'This will remove all commissioned Matter devices. You will need to re-pair them to use them again.',
+            style: TextStyle(color: CelestialColors.textSecondary),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text('Remove', style: TextStyle(color: Colors.red.shade400)),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
+
     final syncProvider = context.read<ServerSyncProvider>();
     await syncProvider.disconnectOneHub(_type, _address ?? '');
     if (mounted) {

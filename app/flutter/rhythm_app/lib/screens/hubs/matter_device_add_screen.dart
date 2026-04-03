@@ -64,6 +64,8 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   final _codeControllers = List.generate(3, (_) => TextEditingController());
   final _codeFocuses = List.generate(3, (_) => FocusNode());
   static const _segmentLengths = [4, 3, 4]; // XXXX-XXX-XXXX
+  final _prevLengths = [0, 0, 0];
+  late final List<VoidCallback> _segmentListeners;
 
   // ─── Phase 2: Commissioning ────────────────────────────────
   String _statusText = '';
@@ -89,9 +91,27 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       duration: const Duration(milliseconds: 2000),
     )..repeat(reverse: true);
 
-    // Auto-advance between segments.
+    // Store listeners so they can be properly removed/re-added.
+    _segmentListeners = List.generate(3, (i) => () => _onSegmentChanged(i));
     for (int i = 0; i < 3; i++) {
-      _codeControllers[i].addListener(() => _onSegmentChanged(i));
+      _codeControllers[i].addListener(_segmentListeners[i]);
+    }
+
+    // Backspace in empty field → navigate to previous segment.
+    for (int i = 1; i < 3; i++) {
+      _codeFocuses[i].onKeyEvent = (node, event) {
+        if (event is KeyDownEvent &&
+            event.logicalKey == LogicalKeyboardKey.backspace &&
+            _codeControllers[i].text.isEmpty) {
+          _codeFocuses[i - 1].requestFocus();
+          final prev = _codeControllers[i - 1];
+          if (prev.text.isNotEmpty) {
+            prev.text = prev.text.substring(0, prev.text.length - 1);
+          }
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      };
     }
   }
 
@@ -111,37 +131,64 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
 
   void _onSegmentChanged(int segment) {
     final text = _codeControllers[segment].text;
+    final prevLen = _prevLengths[segment];
+    _prevLengths[segment] = text.length;
 
-    // Detect paste: strip dashes/spaces, then distribute across all segments.
-    final stripped = text.replaceAll(RegExp(r'[\s\-]'), '');
-    if (stripped.length > _segmentLengths[segment]) {
-      _distributeCode(stripped);
+    // Paste: multiple chars added at once, exceeding segment capacity.
+    if (text.length > _segmentLengths[segment] && text.length - prevLen > 1) {
+      _distributeCode(text);
       return;
     }
 
-    // Normal typing: auto-advance when segment is full.
-    if (text.length >= _segmentLengths[segment] && segment < 2) {
+    // Single char overflow (typed in a full field): truncate.
+    if (text.length > _segmentLengths[segment]) {
+      _removeSegmentListeners();
       _codeControllers[segment].text =
           text.substring(0, _segmentLengths[segment]);
+      _prevLengths[segment] = _segmentLengths[segment];
+      _addSegmentListeners();
+      if (segment < 2) _codeFocuses[segment + 1].requestFocus();
+      setState(() {});
+      return;
+    }
+
+    // Auto-advance: segment just filled (was shorter, now full).
+    if (text.length == _segmentLengths[segment] &&
+        prevLen < _segmentLengths[segment] &&
+        segment < 2) {
       _codeFocuses[segment + 1].requestFocus();
+    }
+
+    // Auto-back: segment just emptied.
+    if (text.isEmpty && prevLen > 0 && segment > 0) {
+      _codeFocuses[segment - 1].requestFocus();
+    }
+  }
+
+  void _removeSegmentListeners() {
+    for (int i = 0; i < 3; i++) {
+      _codeControllers[i].removeListener(_segmentListeners[i]);
+    }
+  }
+
+  void _addSegmentListeners() {
+    for (int i = 0; i < 3; i++) {
+      _codeControllers[i].addListener(_segmentListeners[i]);
     }
   }
 
   /// Distribute a raw digit string (e.g. from paste) across all three segments.
   void _distributeCode(String digits) {
-    // Keep only digits.
     final clean = digits.replaceAll(RegExp(r'\D'), '');
+    _removeSegmentListeners();
     int offset = 0;
     for (int i = 0; i < 3; i++) {
-      _codeControllers[i].removeListener(() => _onSegmentChanged(i));
       final end = (offset + _segmentLengths[i]).clamp(0, clean.length);
       _codeControllers[i].text = clean.substring(offset, end);
+      _prevLengths[i] = _codeControllers[i].text.length;
       offset = end;
     }
-    // Re-attach listeners.
-    for (int i = 0; i < 3; i++) {
-      _codeControllers[i].addListener(() => _onSegmentChanged(i));
-    }
+    _addSegmentListeners();
     // Focus the last non-full segment, or the last one.
     for (int i = 0; i < 3; i++) {
       if (_codeControllers[i].text.length < _segmentLengths[i]) {
@@ -258,11 +305,17 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       }
 
       if (devices != null) {
-        // Look for a new matter device.
+        // Look for a new matter device by checking endpoints for a
+        // matter native ID.  The canonical device list uses `id` for the
+        // stable UUID; native IDs live inside `endpoints[].native_id`.
         for (final d in devices) {
-          final id = d['device_id'] as String? ?? '';
-          if (id.startsWith('matter-') &&
-              (_pairedDeviceId == null || id == _pairedDeviceId)) {
+          final endpoints = d['endpoints'] as List<dynamic>? ?? [];
+          final hasMatter = endpoints.any((ep) {
+            final nativeId = (ep as Map<String, dynamic>)['native_id'] as String? ?? '';
+            return nativeId.startsWith('matter-') &&
+                (_pairedDeviceId == null || nativeId == _pairedDeviceId);
+          });
+          if (hasMatter) {
             timer.cancel();
             _onPairingComplete(d);
             return;
@@ -275,8 +328,15 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   void _onPairingComplete(Map<String, dynamic> device) {
     _pollTimer?.cancel();
     HapticFeedback.heavyImpact();
+
+    // Canonical devices from the registry have `id` (the stable UUID).
+    // PairedDeviceInfo from the pairing response has `device_id` (native).
+    // assignDeviceRoom needs the canonical UUID, so prefer `id`.
+    final canonicalId = device['id'] as String?;
+    final nativeId = device['device_id'] as String?;
+
     setState(() {
-      _pairedDeviceId = device['device_id'] as String? ?? device['id'] as String?;
+      _pairedDeviceId = canonicalId ?? nativeId;
       _pairedDeviceName =
           device['name'] as String? ?? device['product_name'] as String?;
       _pairedManufacturer =
@@ -284,6 +344,34 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       _pairedModel = device['model'] as String?;
       _phase = _PairingPhase.roomAssignment;
     });
+
+    // If we only have the native ID (immediate pairing result), resolve the
+    // canonical UUID so assignDeviceRoom uses the correct identifier.
+    if (canonicalId == null && nativeId != null) {
+      _resolveCanonicalId(nativeId);
+    }
+  }
+
+  /// Fetch canonical devices and resolve the native ID to a canonical UUID.
+  Future<void> _resolveCanonicalId(String nativeId) async {
+    final http = context.read<RhythmConnection>();
+    // Retry a few times — the canonical device may not be registered yet.
+    for (int i = 0; i < 5; i++) {
+      final devices = await http.api.getCanonicalDevices();
+      if (!mounted) return;
+      if (devices != null) {
+        for (final d in devices) {
+          final endpoints = d['endpoints'] as List<dynamic>? ?? [];
+          final match = endpoints.any((ep) =>
+              (ep as Map<String, dynamic>)['native_id'] == nativeId);
+          if (match) {
+            setState(() => _pairedDeviceId = d['id'] as String?);
+            return;
+          }
+        }
+      }
+      await Future.delayed(const Duration(seconds: 1));
+    }
   }
 
   // ─── Room assignment ───────────────────────────────────────
@@ -534,7 +622,6 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         focusNode: _codeFocuses[index],
         keyboardType: TextInputType.number,
         textAlign: TextAlign.center,
-        maxLength: maxLength,
         style: const TextStyle(
           color: CelestialColors.textPrimary,
           fontSize: 16,

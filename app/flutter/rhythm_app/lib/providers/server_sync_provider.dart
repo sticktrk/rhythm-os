@@ -196,11 +196,17 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   /// All rooms grouped by hub type (for hub debug sections).
+  /// Multi-hub rooms appear under each of their hub types.
   Map<String, List<RhythmRoom>> get roomsByHubType {
     final result = <String, List<RhythmRoom>>{};
     for (final room in _helloRooms) {
-      final key = room.hubType ?? 'unknown';
-      (result[key] ??= []).add(room);
+      if (room.hubTypes.isNotEmpty) {
+        for (final key in room.hubTypes) {
+          (result[key] ??= []).add(room);
+        }
+      } else {
+        (result['unknown'] ??= []).add(room);
+      }
     }
     return result;
   }
@@ -209,7 +215,7 @@ class ServerSyncProvider extends ChangeNotifier {
   List<RhythmDevice> devicesForHub(String hubType) {
     final seen = <String>{};
     final devices = <RhythmDevice>[];
-    for (final room in _helloRooms.where((r) => r.hubType == hubType)) {
+    for (final room in _helloRooms.where((r) => r.hubTypes.contains(hubType))) {
       for (final device in room.devices) {
         if (seen.add(device.id)) {
           devices.add(device);
@@ -411,7 +417,7 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Accept rooms from the server as the authoritative source.
   ///
   /// The server discovers rooms from connected hubs. Each room carries its
-  /// own `hub_type`, so we group by source and add each group atomically.
+  /// own `hub_types`, so we group by source and add each group atomically.
   void _acceptServerRooms(List<RhythmRoom> serverRooms, Map<String, dynamic> hubInfo) {
     // Filter out empty rooms (e.g. from stale server-side rooms.json)
     final validRooms = serverRooms.where((r) => r.id.isNotEmpty).toList();
@@ -422,7 +428,7 @@ class ServerSyncProvider extends ChangeNotifier {
     }
 
     // Fallback source from the primary hub (backward compat for rooms
-    // without per-room hub_type).
+    // without per-room hub_types).
     final fallbackHubType = hubInfo['type'] as String?;
     final fallbackSource = switch (fallbackHubType) {
       'hue' => RoomSourceDto.hue,
@@ -431,10 +437,11 @@ class ServerSyncProvider extends ChangeNotifier {
       _ => RoomSourceDto.unknown,
     };
 
-    // Group rooms by their per-room hub_type (multi-hub aware).
+    // Group rooms by their primary hub type (first entry in hub_types).
     final grouped = <RoomSourceDto, List<RhythmRoom>>{};
     for (final sr in validRooms) {
-      final source = switch (sr.hubType) {
+      final primaryType = sr.hubTypes.isNotEmpty ? sr.hubTypes.first : null;
+      final source = switch (primaryType) {
         'hue' => RoomSourceDto.hue,
         'homeassistant' || 'home_assistant' => RoomSourceDto.homeAssistant,
         'esp32' => RoomSourceDto.esp32,
