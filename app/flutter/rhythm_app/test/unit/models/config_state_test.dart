@@ -13,6 +13,8 @@ RawConfig _createTestRawConfig({
   double widthRightCct = 1.0,
   double shapeP = 4.0,
   int maxDimSteps = 10,
+  int fadeMs = 500,
+  int motionTimeoutSecs = 600,
 }) {
   return RawConfig(
     minColorTemp: minColorTemp,
@@ -25,6 +27,8 @@ RawConfig _createTestRawConfig({
     widthRightCct: widthRightCct,
     shapeP: shapeP,
     maxDimSteps: maxDimSteps,
+    fadeMs: fadeMs,
+    motionTimeoutSecs: motionTimeoutSecs,
   );
 }
 
@@ -225,6 +229,8 @@ void main() {
           widthRightCct: 1.1,
           shapeP: 6.0,
           maxDimSteps: 15,
+          fadeMs: 500,
+          motionTimeoutSecs: 600,
         );
 
         final dto = ConfigState.rawConfigToDto(raw);

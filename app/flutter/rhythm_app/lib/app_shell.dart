@@ -8,9 +8,11 @@ import 'package:rhythm_core/rhythm_core.dart';
 import 'models/config_model.dart';
 import 'providers/room_provider.dart';
 import 'providers/home_provider.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnection, RhythmConnectionState;
+import 'package:rhythm_sdk/rhythm_sdk.dart'
+    show RhythmConnection, RhythmConnectionState;
 import 'screens/designer_screen.dart';
 import 'screens/mobile_designer_screen.dart';
+import 'providers/room_page_provider.dart';
 import 'screens/all_rooms_screen.dart';
 import 'screens/sun_position_screen.dart';
 import 'screens/settings/settings_screen.dart';
@@ -41,6 +43,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   int _currentPage = 0;
   CurveData? _curveData;
   bool _isFixing = false;
+  final PageController _roomPageController = PageController();
+  int _currentRoomPage = 0;
 
   /// Sticky flag: true once the server enters [RhythmConnectionState.reconnecting],
   /// cleared when [RhythmConnectionState.connected] is reached.  Prevents flashing
@@ -59,6 +63,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _roomPageController.dispose();
     super.dispose();
   }
 
@@ -106,9 +111,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     // (HA addon has no WASM brain, but still needs to fetch rooms from backend)
     try {
       if (mounted) {
-        await AppStateRefresh.sync(context, options: const SyncOptions(
-          rooms: true,
-        ));
+        await AppStateRefresh.sync(context,
+            options: const SyncOptions(
+              rooms: true,
+            ));
       }
     } catch (e) {
       debugPrint('AppShell: Sync failed: $e');
@@ -229,6 +235,22 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   /// The main room constellation grid with bottom nav overlay.
   Widget _buildRoomGrid(RoomProvider roomProvider) {
+    final roomPageProvider = context.watch<RoomPageProvider>();
+    final enabledRooms = roomProvider.enabledRooms;
+    final pageCount = roomPageProvider.pageCount;
+    // Clamp current page if page count decreased
+    if (_currentRoomPage >= pageCount) {
+      _currentRoomPage = (pageCount - 1).clamp(0, pageCount - 1);
+    }
+
+    // Reconcile page assignments after frame to avoid notifying during build
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      context.read<RoomPageProvider>().reconcileRooms(
+            enabledRooms,
+          );
+    });
+
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,
       body: Stack(
@@ -237,9 +259,13 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           Consumer<ConfigModel>(
             builder: (context, configModel, _) {
               return AllRoomsScreen(
-                rooms: roomProvider.enabledRooms,
+                rooms: enabledRooms,
                 globalConfig: configModel.config,
                 curveData: _curveData,
+                pageController: _roomPageController,
+                onPageChanged: (page) {
+                  setState(() => _currentRoomPage = page);
+                },
               );
             },
           ),
@@ -271,8 +297,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                   child: SafeArea(
                     top: false,
                     child: BottomNavOverlay(
-                      currentPage: 0,
-                      totalPages: 1,
+                      currentPage: _currentRoomPage,
+                      totalPages: pageCount,
+                      editMode: roomPageProvider.editMode,
+                      pageController: _roomPageController,
                       onSettingsTap: _openSettings,
                       onSunPositionTap: _openSunPosition,
                       onFixMyLights: _fixMyLights,
@@ -320,7 +348,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                       'Connecting to your lights',
                       textAlign: TextAlign.center,
                       style: TextStyle(
-                        color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+                        color: CelestialColors.textSecondary
+                            .withValues(alpha: 0.7),
                         fontSize: 15,
                         height: 1.5,
                       ),

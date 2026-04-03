@@ -32,6 +32,7 @@ class _FanItemAnimations {
 class BottomNavOverlay extends StatefulWidget {
   final int currentPage;
   final int totalPages;
+  final bool editMode;
   final VoidCallback onSettingsTap;
   final PageController? pageController;
   /// Sun position callback routed to gear fan menu.
@@ -47,6 +48,7 @@ class BottomNavOverlay extends StatefulWidget {
     super.key,
     required this.currentPage,
     required this.totalPages,
+    this.editMode = false,
     required this.onSettingsTap,
     this.pageController,
     this.onSunPositionTap,
@@ -62,6 +64,14 @@ class BottomNavOverlay extends StatefulWidget {
 class _BottomNavOverlayState extends State<BottomNavOverlay> {
   final _fanMenuKey = GlobalKey<_GearFanMenuState>();
   bool _fanExpanded = false;
+
+  @override
+  void didUpdateWidget(covariant BottomNavOverlay oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.editMode && !oldWidget.editMode) {
+      _collapseFanMenu();
+    }
+  }
 
   void _collapseFanMenu() {
     _fanMenuKey.currentState?.collapse();
@@ -80,10 +90,11 @@ class _BottomNavOverlayState extends State<BottomNavOverlay> {
       clipBehavior: Clip.none,
       children: [
         // Dismiss barrier
-        _FanMenuBarrier(
-          fanMenuKey: _fanMenuKey,
-          onTap: _collapseFanMenu,
-        ),
+        if (!widget.editMode)
+          _FanMenuBarrier(
+            fanMenuKey: _fanMenuKey,
+            onTap: _collapseFanMenu,
+          ),
         // Nav bar content
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
@@ -91,7 +102,7 @@ class _BottomNavOverlayState extends State<BottomNavOverlay> {
             alignment: Alignment.centerLeft,
             children: [
               // Fix My Lights pill (right-aligned)
-              if (widget.onFixMyLights != null)
+              if (!widget.editMode && widget.onFixMyLights != null)
                 Align(
                   alignment: Alignment.centerRight,
                   child: _FixMyLightsPill(
@@ -99,13 +110,23 @@ class _BottomNavOverlayState extends State<BottomNavOverlay> {
                     isFixing: widget.isFixing,
                   ),
                 ),
+              // Page dots (centered)
+              if (widget.totalPages > 1)
+                Center(
+                  child: _PageDots(
+                    currentPage: widget.currentPage,
+                    totalPages: widget.totalPages,
+                    pageController: widget.pageController,
+                  ),
+                ),
               // Gear fan menu (left)
-              _GearFanMenu(
-                key: _fanMenuKey,
-                onSettingsTap: widget.onSettingsTap,
-                onSunPositionTap: widget.onSunPositionTap,
-                onExpandedChanged: _onFanExpandedChanged,
-              ),
+              if (!widget.editMode)
+                _GearFanMenu(
+                  key: _fanMenuKey,
+                  onSettingsTap: widget.onSettingsTap,
+                  onSunPositionTap: widget.onSunPositionTap,
+                  onExpandedChanged: _onFanExpandedChanged,
+                ),
             ],
           ),
         ),
@@ -616,3 +637,49 @@ class _OrbitalSpinnerPainter extends CustomPainter {
       progress != oldDelegate.progress;
 }
 
+/// Page indicator dots for multi-screen room layout.
+class _PageDots extends StatelessWidget {
+  final int currentPage;
+  final int totalPages;
+  final PageController? pageController;
+
+  const _PageDots({
+    required this.currentPage,
+    required this.totalPages,
+    this.pageController,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(totalPages, (index) {
+        final isActive = index == currentPage;
+        return GestureDetector(
+          onTap: () {
+            pageController?.animateToPage(
+              index,
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeInOut,
+            );
+          },
+          behavior: HitTestBehavior.opaque,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
+              width: isActive ? 8 : 6,
+              height: isActive ? 8 : 6,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: isActive
+                    ? CelestialColors.textPrimary
+                    : CelestialColors.textSecondary.withValues(alpha: 0.4),
+              ),
+            ),
+          ),
+        );
+      }),
+    );
+  }
+}

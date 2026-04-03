@@ -1,7 +1,7 @@
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' as sdk;
 import '../api/hybrid_client.dart';
 import '../config/platform_context.dart';
 import '../providers/home_provider.dart';
@@ -168,31 +168,19 @@ class AppStateRefresh {
     try {
       final baseUrl = Uri.base.toString();
       debugPrint('AppStateRefresh: Addon sync baseUrl=$baseUrl');
-      final dio = Dio(BaseOptions(
-        baseUrl: baseUrl,
-        connectTimeout: const Duration(seconds: 5),
-        receiveTimeout: const Duration(seconds: 5),
-      ));
-      final response = await dio.get('api/state');
-      debugPrint('AppStateRefresh: Addon /api/state status=${response.statusCode}');
-      final data = response.data;
-      debugPrint('AppStateRefresh: Addon /api/state data type=${data.runtimeType}');
-      if (data is! Map) return 0;
+      final api = sdk.RhythmConfigApi(baseUrl: baseUrl);
+      final hello = await api.getState();
+      debugPrint('AppStateRefresh: Addon /api/state returned ${hello.rooms.length} rooms');
 
-      final roomsJson = data['rooms'];
-      if (roomsJson is! List || roomsJson.isEmpty) return 0;
+      if (hello.rooms.isEmpty) return 0;
 
       if (!context.mounted) return 0;
       final roomProvider = Provider.of<RoomProvider>(context, listen: false);
 
-      final rooms = <RoomDto>[];
-      for (final r in roomsJson) {
-        if (r is! Map) continue;
-        final id = r['id'] as String?;
-        final name = r['name'] as String?;
-        if (id == null || name == null) continue;
-        rooms.add(RoomDto.withSource(id: id, name: name, source: RoomSourceDto.homeAssistant));
-      }
+      final rooms = hello.rooms
+          .where((r) => r.id.isNotEmpty && r.name.isNotEmpty)
+          .map((r) => RoomDto.withSource(id: r.id, name: r.name, source: RoomSourceDto.homeAssistant))
+          .toList();
 
       if (rooms.isNotEmpty) {
         await roomProvider.addRoomsFromSource(RoomSourceDto.homeAssistant, rooms);

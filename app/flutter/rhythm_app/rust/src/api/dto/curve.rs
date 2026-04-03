@@ -8,6 +8,7 @@ use rhythm_core::{
         DEFAULT_WIDTH_LEFT_BRI, DEFAULT_WIDTH_RIGHT_BRI,
         DEFAULT_WIDTH_LEFT_CCT, DEFAULT_WIDTH_RIGHT_CCT,
         DEFAULT_SHAPE_P, DEFAULT_MAX_DIM_STEPS,
+        DEFAULT_FADE_MS, DEFAULT_MOTION_TIMEOUT_SECS,
     },
 };
 
@@ -35,6 +36,10 @@ pub struct CurveConfigDto {
     /// Shape exponent for super-Gaussian curve (2 = round, 6 = flat plateau)
     pub shape_p: f64,
     pub max_dim_steps: i32,
+    /// Light transition fade duration in milliseconds (default 500).
+    pub fade_ms: i32,
+    /// Default motion timeout in seconds (default 600 = 10 minutes).
+    pub motion_timeout_secs: i32,
 }
 
 impl Default for CurveConfigDto {
@@ -50,6 +55,8 @@ impl Default for CurveConfigDto {
             width_right_cct: DEFAULT_WIDTH_RIGHT_CCT as f64,
             shape_p: DEFAULT_SHAPE_P as f64,
             max_dim_steps: DEFAULT_MAX_DIM_STEPS as i32,
+            fade_ms: DEFAULT_FADE_MS as i32,
+            motion_timeout_secs: DEFAULT_MOTION_TIMEOUT_SECS as i32,
         }
     }
 }
@@ -67,6 +74,8 @@ impl From<CurveConfigDto> for CurveConfig {
             width_right_cct: dto.width_right_cct as f32,
             shape_p: dto.shape_p as f32,
             max_dim_steps: dto.max_dim_steps as u8,
+            fade_ms: Some(dto.fade_ms as u16),
+            motion_timeout_secs: Some(dto.motion_timeout_secs as u16),
         }
     }
 }

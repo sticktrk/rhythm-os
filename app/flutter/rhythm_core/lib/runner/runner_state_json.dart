@@ -104,6 +104,8 @@ Map<String, dynamic> _curveConfigToMap(CurveConfigDto config) {
     'width_right_cct': config.widthRightCct,
     'shape_p': config.shapeP,
     'max_dim_steps': config.maxDimSteps,
+    'fade_ms': config.fadeMs,
+    'motion_timeout_secs': config.motionTimeoutSecs,
   };
 }
 
@@ -127,5 +129,7 @@ CurveConfigDto _curveConfigFromMap(Map<String, dynamic> map) {
         (map['width_right_cct'] as num?)?.toDouble() ?? d.widthRightCct,
     shapeP: (map['shape_p'] as num?)?.toDouble() ?? d.shapeP,
     maxDimSteps: (map['max_dim_steps'] as num?)?.toInt() ?? d.maxDimSteps,
+    fadeMs: (map['fade_ms'] as num?)?.toInt() ?? d.fadeMs,
+    motionTimeoutSecs: (map['motion_timeout_secs'] as num?)?.toInt() ?? d.motionTimeoutSecs,
   );
 }

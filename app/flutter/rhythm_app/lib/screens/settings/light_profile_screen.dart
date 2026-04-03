@@ -9,12 +9,12 @@ import '../../models/config_model.dart';
 import '../../providers/room_provider.dart';
 import '../../providers/server_sync_provider.dart';
 
-/// Full-screen modal for tuning the light curve parameters.
+/// Full-screen modal for configuring the light profile.
 ///
 /// Features a compressed color spectrum slider that emphasizes the dawn/dusk
 /// ramps where color changes rapidly, compressing flat night/day regions.
-class LightTuningScreen extends StatefulWidget {
-  const LightTuningScreen({super.key});
+class LightProfileScreen extends StatefulWidget {
+  const LightProfileScreen({super.key});
 
   static Future<void> show(BuildContext context) {
     return Navigator.of(context).push(
@@ -22,7 +22,7 @@ class LightTuningScreen extends StatefulWidget {
         opaque: false,
         barrierColor: Colors.black54,
         pageBuilder: (context, animation, secondaryAnimation) {
-          return const LightTuningScreen();
+          return const LightProfileScreen();
         },
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
           final curve = CurvedAnimation(
@@ -45,11 +45,14 @@ class LightTuningScreen extends StatefulWidget {
   }
 
   @override
-  State<LightTuningScreen> createState() => _LightTuningScreenState();
+  State<LightProfileScreen> createState() => _LightProfileScreenState();
 }
 
-class _LightTuningScreenState extends State<LightTuningScreen>
+class _LightProfileScreenState extends State<LightProfileScreen>
     with SingleTickerProviderStateMixin {
+  // Light transition duration (from server settings).
+  double _fadeMs = 500;
+
   // Curve parameters.
   bool _advancedOpen = false;
   bool _curveConfigDirty = false;
@@ -63,6 +66,7 @@ class _LightTuningScreenState extends State<LightTuningScreen>
   double _widthRightCct = 1.15;
   double _shapeP = 6.0;
   double _maxDimSteps = 6;
+  int _motionTimeoutSecs = 600;
 
   bool _loading = true;
   bool _connected = false;
@@ -127,6 +131,13 @@ class _LightTuningScreenState extends State<LightTuningScreen>
     _widthRightCct = curveConfig.widthRightCct;
     _shapeP = curveConfig.shapeP;
     _maxDimSteps = curveConfig.maxDimSteps.toDouble();
+    // Use effective values from server (auto-computed) when available,
+    // otherwise fall back to curve config values.
+    final syncProvider = context.read<ServerSyncProvider>();
+    _fadeMs = syncProvider.effectiveFadeMs?.toDouble()
+        ?? curveConfig.fadeMs.toDouble();
+    _motionTimeoutSecs = syncProvider.effectiveMotionTimeoutSecs
+        ?? curveConfig.motionTimeoutSecs;
 
     if (mounted) setState(() => _loading = false);
 
@@ -148,7 +159,7 @@ class _LightTuningScreenState extends State<LightTuningScreen>
         });
       }
     } catch (e) {
-      debugPrint('LightTuning: Failed to load curve data: $e');
+      debugPrint('LightProfile: Failed to load curve data: $e');
     }
   }
 
@@ -344,12 +355,18 @@ class _LightTuningScreenState extends State<LightTuningScreen>
     );
     if (confirmed != true || !mounted) return;
 
-    final sdkConfig = await context.read<ServerSyncProvider>().api.resetConfig();
+    final api = context.read<ServerSyncProvider>().api;
+    final results = await Future.wait([
+      api.resetConfig(),
+      api.settingsSet(bulbFadeMs: 500),
+    ]);
     if (!mounted) return;
+    final sdkConfig = results[0] as RhythmCurveConfig?;
     if (sdkConfig != null) {
       context.read<ConfigModel>().updateConfig(sdkCurveConfigToDto(sdkConfig));
     }
     setState(() {
+      _fadeMs = 500;
       _timeOffsetMinutes = 0;
       _sliderFraction = _hourToNowFraction();
       _curveConfigDirty = false;
@@ -421,7 +438,7 @@ class _LightTuningScreenState extends State<LightTuningScreen>
           ),
           const Expanded(
             child: Text(
-              'Light Tuning',
+              'Light Profile',
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: _Palette.textPrimary,
@@ -468,7 +485,7 @@ class _LightTuningScreenState extends State<LightTuningScreen>
             ),
             const SizedBox(height: 8),
             Text(
-              'Connect to a Rhythm Server to tune the light curve.',
+              'Connect to a Rhythm Server to configure the light profile.',
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: _Palette.textSecondary.withValues(alpha: 0.7),
@@ -482,6 +499,17 @@ class _LightTuningScreenState extends State<LightTuningScreen>
     );
   }
 
+  String _formatFade(double ms) {
+    if (ms == 0) return '0s';
+    return '${(ms / 1000).toStringAsFixed(1)}s';
+  }
+
+  String _formatMotionTimeout(int secs) {
+    if (secs == 0) return 'Off';
+    if (secs >= 60) return '${(secs / 60).round()}m';
+    return '${secs}s';
+  }
+
   Widget _buildContent() {
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 40),
@@ -489,12 +517,132 @@ class _LightTuningScreenState extends State<LightTuningScreen>
         children: [
           _buildHeroIcon(),
           const SizedBox(height: 24),
+          _buildAutoSettingCard(
+            icon: Icons.blur_on_rounded,
+            color: _Palette.amber,
+            title: 'Light Transition',
+            subtitle: 'How quickly lights fade between brightness levels',
+            value: _formatFade(_fadeMs),
+          ),
+          const SizedBox(height: 14),
+          _buildAutoSettingCard(
+            icon: Icons.motion_photos_on_rounded,
+            color: _Palette.teal,
+            title: 'Motion Timeout',
+            subtitle: 'How long lights stay on after motion stops',
+            value: _formatMotionTimeout(_motionTimeoutSecs),
+          ),
+          const SizedBox(height: 24),
           _buildTimeSimulator(),
           const SizedBox(height: 32),
           _buildAdvancedToggle(),
           _buildAdvancedSection(),
           const SizedBox(height: 32),
           _buildResetToDefaultsButton(),
+        ],
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Auto-managed setting card (read-only)
+  // ---------------------------------------------------------------------------
+
+  Widget _buildAutoSettingCard({
+    required IconData icon,
+    required Color color,
+    required String title,
+    required String subtitle,
+    required String value,
+  }) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 18, 18, 16),
+      decoration: BoxDecoration(
+        color: _Palette.card,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: _Palette.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: color.withValues(alpha: 0.12),
+                ),
+                child: Icon(icon, color: color, size: 18),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    color: _Palette.textPrimary,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: -0.1,
+                  ),
+                ),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: color.withValues(alpha: 0.25),
+                  ),
+                ),
+                child: Text(
+                  'Auto',
+                  style: TextStyle(
+                    color: color,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.3,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: color.withValues(alpha: 0.12),
+                  ),
+                ),
+                child: Text(
+                  value,
+                  style: TextStyle(
+                    color: color.withValues(alpha: 0.7),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Padding(
+            padding: const EdgeInsets.only(left: 48),
+            child: Text(
+              subtitle,
+              style: TextStyle(
+                color: _Palette.textSecondary.withValues(alpha: 0.45),
+                fontSize: 12,
+                height: 1.3,
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -1190,6 +1338,8 @@ class _LightTuningScreenState extends State<LightTuningScreen>
       widthRightCct: _widthRightCct,
       shapeP: _shapeP,
       maxDimSteps: _maxDimSteps.round(),
+      fadeMs: _fadeMs.round(),
+      motionTimeoutSecs: _motionTimeoutSecs,
     );
 
     await context.read<ServerSyncProvider>().api.configSet(RhythmCurveConfig(
@@ -1198,6 +1348,7 @@ class _LightTuningScreenState extends State<LightTuningScreen>
       widthLeftBri: config.widthLeftBri, widthRightBri: config.widthRightBri,
       widthLeftCct: config.widthLeftCct, widthRightCct: config.widthRightCct,
       shapeP: config.shapeP, maxDimSteps: config.maxDimSteps,
+      fadeMs: config.fadeMs, motionTimeoutSecs: config.motionTimeoutSecs,
     ));
 
     if (mounted) {

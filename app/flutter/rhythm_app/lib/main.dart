@@ -14,6 +14,7 @@ import 'services/settings_service.dart';
 import 'services/app_state_refresh.dart';
 import 'providers/hub_connection_provider.dart';
 import 'providers/room_provider.dart';
+import 'providers/room_page_provider.dart';
 import 'providers/home_provider.dart';
 import 'providers/server_sync_provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnection;
@@ -166,6 +167,8 @@ class RhythmApp extends StatelessWidget {
         ),
         // Room management (syncs rooms from Hue, HA, ESP32)
         ChangeNotifierProvider(create: (_) => RoomProvider()..initialize()),
+        // Room page assignments (multi-screen room organization)
+        ChangeNotifierProvider(create: (_) => RoomPageProvider()..initialize()),
         // Server connection (transport layer — SDK)
         Provider(create: (_) => RhythmConnection(), dispose: (_, c) => c.dispose()),
         // Server sync provider (bridges SDK connection with app state)

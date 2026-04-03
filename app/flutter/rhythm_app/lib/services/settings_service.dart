@@ -272,6 +272,36 @@ class SettingsService {
   }
 
   // ============================================================
+  // Room Page Layout
+  // ============================================================
+
+  /// Get room page layout as ordered lists of room IDs per page.
+  List<List<String>>? getRoomPageLayout() {
+    final json = _settings.roomPageAssignmentsJson;
+    if (json == null) return null;
+    try {
+      final decoded = jsonDecode(json) as List<dynamic>;
+      return decoded
+          .map((page) => (page as List<dynamic>).cast<String>().toList())
+          .toList();
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /// Save room page layout.
+  Future<void> saveRoomPageLayout(List<List<String>> pages) async {
+    _settings = _settings.copyWith(roomPageAssignmentsJson: jsonEncode(pages));
+    await _save();
+  }
+
+  /// Clear room page layout.
+  Future<void> clearRoomPageAssignments() async {
+    _settings = _settings.clearField(clearRoomPageAssignmentsJson: true);
+    await _save();
+  }
+
+  // ============================================================
   // Time Formatting Helper
   // ============================================================
 

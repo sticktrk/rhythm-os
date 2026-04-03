@@ -443,6 +443,7 @@ class _SdkConfigAdapter implements RhythmApi {
     widthLeftBri: c.widthLeftBri, widthRightBri: c.widthRightBri,
     widthLeftCct: c.widthLeftCct, widthRightCct: c.widthRightCct,
     shapeP: c.shapeP, maxDimSteps: c.maxDimSteps,
+    fadeMs: c.fadeMs, motionTimeoutSecs: c.motionTimeoutSecs,
   );
 
   static sdk.RhythmRawConfig _toSdkRawConfig(RawConfig c) => sdk.RhythmRawConfig(
@@ -451,6 +452,7 @@ class _SdkConfigAdapter implements RhythmApi {
     widthLeftBri: c.widthLeftBri, widthRightBri: c.widthRightBri,
     widthLeftCct: c.widthLeftCct, widthRightCct: c.widthRightCct,
     shapeP: c.shapeP, maxDimSteps: c.maxDimSteps,
+    fadeMs: c.fadeMs, motionTimeoutSecs: c.motionTimeoutSecs,
   );
 
   static SolarInfo _toSolarInfo(sdk.RhythmSolarInfo s) => SolarInfo(
@@ -477,6 +479,7 @@ sdk.RhythmCurveConfig _dtoToSdkCurveConfig(CurveConfigDto c) => sdk.RhythmCurveC
   widthLeftBri: c.widthLeftBri, widthRightBri: c.widthRightBri,
   widthLeftCct: c.widthLeftCct, widthRightCct: c.widthRightCct,
   shapeP: c.shapeP, maxDimSteps: c.maxDimSteps,
+  fadeMs: c.fadeMs, motionTimeoutSecs: c.motionTimeoutSecs,
 );
 
 /// Convert [sdk.RhythmCurveConfig] (SDK) to [CurveConfigDto] (Rust FFI).
@@ -486,6 +489,7 @@ CurveConfigDto sdkCurveConfigToDto(sdk.RhythmCurveConfig c) => CurveConfigDto(
   widthLeftBri: c.widthLeftBri, widthRightBri: c.widthRightBri,
   widthLeftCct: c.widthLeftCct, widthRightCct: c.widthRightCct,
   shapeP: c.shapeP, maxDimSteps: c.maxDimSteps,
+  fadeMs: c.fadeMs, motionTimeoutSecs: c.motionTimeoutSecs,
 );
 
 /// Local-only API implementation with SettingsService (Hive) persistence.

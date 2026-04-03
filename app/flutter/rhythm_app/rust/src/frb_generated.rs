@@ -1506,6 +1506,8 @@ impl SseDecode for crate::api::dto::curve::CurveConfigDto {
         let mut var_widthRightCct = <f64>::sse_decode(deserializer);
         let mut var_shapeP = <f64>::sse_decode(deserializer);
         let mut var_maxDimSteps = <i32>::sse_decode(deserializer);
+        let mut var_fadeMs = <i32>::sse_decode(deserializer);
+        let mut var_motionTimeoutSecs = <i32>::sse_decode(deserializer);
         return crate::api::dto::curve::CurveConfigDto {
             min_color_temp: var_minColorTemp,
             max_color_temp: var_maxColorTemp,
@@ -1517,6 +1519,8 @@ impl SseDecode for crate::api::dto::curve::CurveConfigDto {
             width_right_cct: var_widthRightCct,
             shape_p: var_shapeP,
             max_dim_steps: var_maxDimSteps,
+            fade_ms: var_fadeMs,
+            motion_timeout_secs: var_motionTimeoutSecs,
         };
     }
 }
@@ -2227,6 +2231,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::dto::curve::CurveConfigDto {
             self.width_right_cct.into_into_dart().into_dart(),
             self.shape_p.into_into_dart().into_dart(),
             self.max_dim_steps.into_into_dart().into_dart(),
+            self.fade_ms.into_into_dart().into_dart(),
+            self.motion_timeout_secs.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -2825,6 +2831,8 @@ impl SseEncode for crate::api::dto::curve::CurveConfigDto {
         <f64>::sse_encode(self.width_right_cct, serializer);
         <f64>::sse_encode(self.shape_p, serializer);
         <i32>::sse_encode(self.max_dim_steps, serializer);
+        <i32>::sse_encode(self.fade_ms, serializer);
+        <i32>::sse_encode(self.motion_timeout_secs, serializer);
     }
 }
 
@@ -3444,6 +3452,8 @@ mod io {
                 width_right_cct: self.width_right_cct.cst_decode(),
                 shape_p: self.shape_p.cst_decode(),
                 max_dim_steps: self.max_dim_steps.cst_decode(),
+                fade_ms: self.fade_ms.cst_decode(),
+                motion_timeout_secs: self.motion_timeout_secs.cst_decode(),
             }
         }
     }
@@ -3796,6 +3806,8 @@ mod io {
                 width_right_cct: Default::default(),
                 shape_p: Default::default(),
                 max_dim_steps: Default::default(),
+                fade_ms: Default::default(),
+                motion_timeout_secs: Default::default(),
             }
         }
     }
@@ -4824,6 +4836,8 @@ mod io {
         width_right_cct: f64,
         shape_p: f64,
         max_dim_steps: i32,
+        fade_ms: i32,
+        motion_timeout_secs: i32,
     }
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -5129,8 +5143,8 @@ mod web {
                 .unwrap();
             assert_eq!(
                 self_.length(),
-                10,
-                "Expected 10 elements, got {}",
+                12,
+                "Expected 12 elements, got {}",
                 self_.length()
             );
             crate::api::dto::curve::CurveConfigDto {
@@ -5144,6 +5158,8 @@ mod web {
                 width_right_cct: self_.get(7).cst_decode(),
                 shape_p: self_.get(8).cst_decode(),
                 max_dim_steps: self_.get(9).cst_decode(),
+                fade_ms: self_.get(10).cst_decode(),
+                motion_timeout_secs: self_.get(11).cst_decode(),
             }
         }
     }

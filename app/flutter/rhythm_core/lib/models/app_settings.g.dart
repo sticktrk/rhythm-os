@@ -27,13 +27,14 @@ class AppSettingsAdapter extends TypeAdapter<AppSettings> {
       rhythmWarningDismissed: fields[7] as bool? ?? false,
       hueGroupedLightMapJson: fields[8] as String?,
       electricityRate: fields[9] as double?,
+      roomPageAssignmentsJson: fields[10] as String?,
     );
   }
 
   @override
   void write(BinaryWriter writer, AppSettings obj) {
     writer
-      ..writeByte(10)
+      ..writeByte(11)
       ..writeByte(0)
       ..write(obj.use24HourFormat)
       ..writeByte(1)
@@ -53,7 +54,9 @@ class AppSettingsAdapter extends TypeAdapter<AppSettings> {
       ..writeByte(8)
       ..write(obj.hueGroupedLightMapJson)
       ..writeByte(9)
-      ..write(obj.electricityRate);
+      ..write(obj.electricityRate)
+      ..writeByte(10)
+      ..write(obj.roomPageAssignmentsJson);
   }
 
   @override

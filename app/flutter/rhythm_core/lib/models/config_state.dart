@@ -68,6 +68,8 @@ class RawConfig {
   /// Shape exponent for super-Gaussian curve (2 = round, 6 = flat plateau)
   final double shapeP;
   final int maxDimSteps;
+  final int fadeMs;
+  final int motionTimeoutSecs;
 
   const RawConfig({
     required this.minColorTemp,
@@ -80,6 +82,8 @@ class RawConfig {
     required this.widthRightCct,
     required this.shapeP,
     required this.maxDimSteps,
+    required this.fadeMs,
+    required this.motionTimeoutSecs,
   });
 
   factory RawConfig.fromJson(Map<String, dynamic> json) {
@@ -96,6 +100,8 @@ class RawConfig {
       widthRightCct: (json['width_right_cct'] as num?)?.toDouble() ?? d.widthRightCct,
       shapeP: (json['shape_p'] as num?)?.toDouble() ?? d.shapeP,
       maxDimSteps: (json['max_dim_steps'] as num?)?.toInt() ?? d.maxDimSteps,
+      fadeMs: (json['fade_ms'] as num?)?.toInt() ?? d.fadeMs,
+      motionTimeoutSecs: (json['motion_timeout_secs'] as num?)?.toInt() ?? d.motionTimeoutSecs,
     );
   }
 
@@ -113,6 +119,8 @@ class RawConfig {
       widthRightCct: d.widthRightCct,
       shapeP: d.shapeP,
       maxDimSteps: d.maxDimSteps,
+      fadeMs: d.fadeMs,
+      motionTimeoutSecs: d.motionTimeoutSecs,
     );
   }
 
@@ -128,6 +136,8 @@ class RawConfig {
       'width_right_cct': widthRightCct,
       'shape_p': shapeP,
       'max_dim_steps': maxDimSteps,
+      'fade_ms': fadeMs,
+      'motion_timeout_secs': motionTimeoutSecs,
     };
   }
 
@@ -143,6 +153,8 @@ class RawConfig {
     double? widthRightCct,
     double? shapeP,
     int? maxDimSteps,
+    int? fadeMs,
+    int? motionTimeoutSecs,
   }) {
     return RawConfig(
       minColorTemp: minColorTemp ?? this.minColorTemp,
@@ -155,6 +167,8 @@ class RawConfig {
       widthRightCct: widthRightCct ?? this.widthRightCct,
       shapeP: shapeP ?? this.shapeP,
       maxDimSteps: maxDimSteps ?? this.maxDimSteps,
+      fadeMs: fadeMs ?? this.fadeMs,
+      motionTimeoutSecs: motionTimeoutSecs ?? this.motionTimeoutSecs,
     );
   }
 }
@@ -231,6 +245,8 @@ class ConfigState {
       widthRightCct: config.widthRightCct,
       shapeP: config.shapeP,
       maxDimSteps: config.maxDimSteps,
+      fadeMs: config.fadeMs,
+      motionTimeoutSecs: config.motionTimeoutSecs,
     );
   }
 }

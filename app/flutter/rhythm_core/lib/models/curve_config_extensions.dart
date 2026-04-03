@@ -17,6 +17,8 @@ extension CurveConfigDtoX on CurveConfigDto {
     double? widthRightCct,
     double? shapeP,
     int? maxDimSteps,
+    int? fadeMs,
+    int? motionTimeoutSecs,
   }) {
     return CurveConfigDto(
       minColorTemp: minColorTemp ?? this.minColorTemp,
@@ -29,6 +31,8 @@ extension CurveConfigDtoX on CurveConfigDto {
       widthRightCct: widthRightCct ?? this.widthRightCct,
       shapeP: shapeP ?? this.shapeP,
       maxDimSteps: maxDimSteps ?? this.maxDimSteps,
+      fadeMs: fadeMs ?? this.fadeMs,
+      motionTimeoutSecs: motionTimeoutSecs ?? this.motionTimeoutSecs,
     );
   }
 
@@ -45,6 +49,8 @@ extension CurveConfigDtoX on CurveConfigDto {
       'width_right_cct': widthRightCct,
       'shape_p': shapeP,
       'max_dim_steps': maxDimSteps,
+      'fade_ms': fadeMs,
+      'motion_timeout_secs': motionTimeoutSecs,
     };
   }
 
@@ -78,6 +84,8 @@ extension CurveConfigDtoX on CurveConfigDto {
       widthRightCct: (json['width_right_cct'] as num?)?.toDouble() ?? d.widthRightCct,
       shapeP: (json['shape_p'] as num?)?.toDouble() ?? d.shapeP,
       maxDimSteps: (json['max_dim_steps'] as num?)?.toInt() ?? d.maxDimSteps,
+      fadeMs: (json['fade_ms'] as num?)?.toInt() ?? d.fadeMs,
+      motionTimeoutSecs: (json['motion_timeout_secs'] as num?)?.toInt() ?? d.motionTimeoutSecs,
     );
   }
 }

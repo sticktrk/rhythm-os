@@ -1,7 +1,7 @@
 import 'dart:async';
-import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' as sdk;
 import '../data/local_data_source.dart';
 import '../repositories/home_repository.dart';
 import '../services/auth_service.dart';
@@ -106,13 +106,10 @@ class HomeProvider extends ChangeNotifier {
         try {
           final base = Uri.base;
           final baseUrl = base.toString();
-          final dio = Dio(BaseOptions(
+          final ok = await sdk.RhythmConfigApi(
             baseUrl: baseUrl.endsWith('/') ? baseUrl : '$baseUrl/',
-            connectTimeout: const Duration(seconds: 2),
-            receiveTimeout: const Duration(seconds: 2),
-          ));
-          final resp = await dio.get('health');
-          if (resp.statusCode == 200) {
+          ).healthCheck();
+          if (ok) {
             debugPrint('HomeProvider: Server detected at ${base.host}:${base.port}, auto-pairing');
             await addServerHub(name: 'RhythmServer', host: base.host, port: base.port);
           }

@@ -1991,8 +1991,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   CurveConfigDto dco_decode_curve_config_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 10)
-      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
+    if (arr.length != 12)
+      throw Exception('unexpected arr length: expect 12 but see ${arr.length}');
     return CurveConfigDto(
       minColorTemp: dco_decode_i_32(arr[0]),
       maxColorTemp: dco_decode_i_32(arr[1]),
@@ -2004,6 +2004,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       widthRightCct: dco_decode_f_64(arr[7]),
       shapeP: dco_decode_f_64(arr[8]),
       maxDimSteps: dco_decode_i_32(arr[9]),
+      fadeMs: dco_decode_i_32(arr[10]),
+      motionTimeoutSecs: dco_decode_i_32(arr[11]),
     );
   }
 
@@ -2562,6 +2564,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_widthRightCct = sse_decode_f_64(deserializer);
     var var_shapeP = sse_decode_f_64(deserializer);
     var var_maxDimSteps = sse_decode_i_32(deserializer);
+    var var_fadeMs = sse_decode_i_32(deserializer);
+    var var_motionTimeoutSecs = sse_decode_i_32(deserializer);
     return CurveConfigDto(
         minColorTemp: var_minColorTemp,
         maxColorTemp: var_maxColorTemp,
@@ -2572,7 +2576,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         widthLeftCct: var_widthLeftCct,
         widthRightCct: var_widthRightCct,
         shapeP: var_shapeP,
-        maxDimSteps: var_maxDimSteps);
+        maxDimSteps: var_maxDimSteps,
+        fadeMs: var_fadeMs,
+        motionTimeoutSecs: var_motionTimeoutSecs);
   }
 
   @protected
@@ -3250,6 +3256,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_f_64(self.widthRightCct, serializer);
     sse_encode_f_64(self.shapeP, serializer);
     sse_encode_i_32(self.maxDimSteps, serializer);
+    sse_encode_i_32(self.fadeMs, serializer);
+    sse_encode_i_32(self.motionTimeoutSecs, serializer);
   }
 
   @protected

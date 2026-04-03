@@ -91,11 +91,14 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Whether power-save mode is active on the server.
   bool _powerSave = false;
 
-  /// Soft-off brightness percentage (1-50) from server settings.
-  int _softOffBrightness = 1;
-
   /// Rhythm update interval in seconds from server settings.
   int _rhythmIntervalSecs = 60;
+
+  /// Effective fade duration from server (auto-computed, always present).
+  int? _effectiveFadeMs;
+
+  /// Effective motion timeout from server (auto-computed, always present).
+  int? _effectiveMotionTimeoutSecs;
 
   /// Pending triage counts from SSE triage_changed events.
   int _triagePendingCount = 0;
@@ -126,17 +129,14 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Whether power-save mode is active on the server.
   bool get powerSave => _powerSave;
 
-  /// Soft-off brightness percentage (1-50).
-  int get softOffBrightness => _softOffBrightness;
-  set softOffBrightness(int value) {
-    if (_softOffBrightness != value) {
-      _softOffBrightness = value;
-      notifyListeners();
-    }
-  }
-
   /// Rhythm update interval in seconds.
   int get rhythmIntervalSecs => _rhythmIntervalSecs;
+
+  /// Effective fade duration from server (auto-computed).
+  int? get effectiveFadeMs => _effectiveFadeMs;
+
+  /// Effective motion timeout from server (auto-computed).
+  int? get effectiveMotionTimeoutSecs => _effectiveMotionTimeoutSecs;
 
   /// Total pending triage entries (devices + rooms).
   int get triagePendingCount => _triagePendingCount;
@@ -363,8 +363,9 @@ class ServerSyncProvider extends ChangeNotifier {
     _serverPlatformType = hello.platformType;
     _serverPlatformContext = hello.platformContext;
     _powerSave = hello.settings?.powerSave ?? false;
-    _softOffBrightness = hello.settings?.softOffBrightness ?? 1;
     _rhythmIntervalSecs = hello.settings?.rhythmIntervalSecs ?? 60;
+    _effectiveFadeMs = hello.effectiveFadeMs;
+    _effectiveMotionTimeoutSecs = hello.effectiveMotionTimeoutSecs;
     _helloRooms = hello.rooms;
     _lastHubInfos = hello.hubs;
 
@@ -636,8 +637,9 @@ class ServerSyncProvider extends ChangeNotifier {
       _powerSave = false;
       _helloRooms = [];
       _lastHubInfos = [];
-      _softOffBrightness = 1;
       _rhythmIntervalSecs = 60;
+      _effectiveFadeMs = null;
+      _effectiveMotionTimeoutSecs = null;
       _triagePendingCount = 0;
       _triagePendingDevices = 0;
       _triagePendingRooms = 0;
@@ -718,6 +720,31 @@ class ServerSyncProvider extends ChangeNotifier {
     if (!_connection.connected || _receivingFromServer || items.isEmpty) return;
     debugPrint('ServerSync: pushBatchRoomPreferences (${items.length} rooms)');
     _connection.api.roomPreferencesBatchSet(items);
+  }
+
+  /// Reset a single room to its current adaptive curve position.
+  ///
+  /// Per-room equivalent of [dispatchFixMyLights].
+  void dispatchResetRoom(String roomId) {
+    if (HueServiceLocator.isDemoMode) {
+      _roomProvider.applyServerRoomState(
+        roomId,
+        rhythmEnabled: _roomProvider.getRoom(roomId)?.rhythmEnabled ?? true,
+        timeOffset: 0,
+        brightnessOffset: 0,
+        softOff: false,
+        lightsOn: true,
+        brightness: 75,
+        kelvin: _roomProvider.getKelvin(roomId) ?? 3200,
+      );
+      _roomProvider.bumpResetGeneration();
+      return;
+    }
+    if (!_connection.connected) return;
+    _connection.api.roomAction(roomId: roomId, action: 'reset').then((serverState) {
+      if (serverState != null) _onRhythmState(serverState);
+      _roomProvider.bumpResetGeneration();
+    });
   }
 
   /// Reset all on-rooms to their current adaptive curve position via server.
@@ -857,6 +884,8 @@ class ServerSyncProvider extends ChangeNotifier {
     final srvWrCct = (serverConfig['width_right_cct'] as num?)?.toDouble();
     final srvShapeP = (serverConfig['shape_p'] as num?)?.toDouble();
     final srvMaxDim = serverConfig['max_dim_steps'] as int?;
+    final srvFadeMs = (serverConfig['fade_ms'] as num?)?.toInt();
+    final srvMotionTimeout = (serverConfig['motion_timeout_secs'] as num?)?.toInt();
 
     if (srvMinBri == null || srvMaxBri == null ||
         srvMinCct == null || srvMaxCct == null ||
@@ -878,6 +907,8 @@ class ServerSyncProvider extends ChangeNotifier {
       widthRightCct: srvWrCct,
       shapeP: srvShapeP,
       maxDimSteps: srvMaxDim,
+      fadeMs: srvFadeMs ?? CurveConfigDto.default_().fadeMs,
+      motionTimeoutSecs: srvMotionTimeout ?? CurveConfigDto.default_().motionTimeoutSecs,
     );
 
     final appConfig = _homeProvider.currentHome?.curveConfig;

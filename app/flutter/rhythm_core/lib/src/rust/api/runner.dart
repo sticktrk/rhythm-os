@@ -12,23 +12,8 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 /// Process an action and calculate the resulting lighting state.
 ///
-/// This is the main function for the RhythmRunner. It processes a button
-/// action given the current room state and returns the new lighting values
-/// and updated state.
-///
-/// # Arguments
-///
-/// * `config` - Curve configuration parameters
-/// * `solar_noon_hour` - Hour of solar noon (0-24, local time)
-/// * `latitude` - Latitude in degrees
-/// * `day_of_year` - Day of year (1-365)
-/// * `current_hour` - Current time in hours (0-24)
-/// * `action` - The action to process
-/// * `room_state` - Current state of the room
-///
-/// # Returns
-///
-/// ActionResultDto with new lighting values and updated room state.
+/// Delegates to the shared `process_action` kernel in rhythm-core,
+/// then converts the result to FFI-compatible DTOs.
 ActionResultDto calculateActionResult(
         {required CurveConfigDto config,
         required double solarNoonHour,

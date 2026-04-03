@@ -36,6 +36,12 @@ class CurveConfigDto {
   final double shapeP;
   final int maxDimSteps;
 
+  /// Light transition fade duration in milliseconds (default 500).
+  final int fadeMs;
+
+  /// Default motion timeout in seconds (default 600 = 10 minutes).
+  final int motionTimeoutSecs;
+
   const CurveConfigDto({
     required this.minColorTemp,
     required this.maxColorTemp,
@@ -47,6 +53,8 @@ class CurveConfigDto {
     required this.widthRightCct,
     required this.shapeP,
     required this.maxDimSteps,
+    required this.fadeMs,
+    required this.motionTimeoutSecs,
   });
 
   static CurveConfigDto default_() =>
@@ -63,7 +71,9 @@ class CurveConfigDto {
       widthLeftCct.hashCode ^
       widthRightCct.hashCode ^
       shapeP.hashCode ^
-      maxDimSteps.hashCode;
+      maxDimSteps.hashCode ^
+      fadeMs.hashCode ^
+      motionTimeoutSecs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -79,7 +89,9 @@ class CurveConfigDto {
           widthLeftCct == other.widthLeftCct &&
           widthRightCct == other.widthRightCct &&
           shapeP == other.shapeP &&
-          maxDimSteps == other.maxDimSteps;
+          maxDimSteps == other.maxDimSteps &&
+          fadeMs == other.fadeMs &&
+          motionTimeoutSecs == other.motionTimeoutSecs;
 }
 
 /// Curve data for visualization.

@@ -168,6 +168,8 @@ class TestDataFactory {
     double widthRightCct = 1.0,
     double shapeP = 4.0,
     int maxDimSteps = 10,
+    int fadeMs = 500,
+    int motionTimeoutSecs = 600,
   }) {
     return RawConfig(
       minColorTemp: minColorTemp,
@@ -180,6 +182,8 @@ class TestDataFactory {
       widthRightCct: widthRightCct,
       shapeP: shapeP,
       maxDimSteps: maxDimSteps,
+      fadeMs: fadeMs,
+      motionTimeoutSecs: motionTimeoutSecs,
     );
   }
 

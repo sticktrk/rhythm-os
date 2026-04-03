@@ -49,6 +49,10 @@ class AppSettings {
   @HiveField(9)
   final double? electricityRate;
 
+  /// Room page assignments JSON: ordered room IDs per page.
+  @HiveField(10)
+  final String? roomPageAssignmentsJson;
+
   const AppSettings({
     this.use24HourFormat = false,
     this.onboardingComplete = false,
@@ -60,6 +64,7 @@ class AppSettings {
     this.rhythmWarningDismissed = false,
     this.hueGroupedLightMapJson,
     this.electricityRate,
+    this.roomPageAssignmentsJson,
   });
 
   /// Create default settings.
@@ -78,18 +83,24 @@ class AppSettings {
     bool? rhythmWarningDismissed,
     String? hueGroupedLightMapJson,
     double? electricityRate,
+    String? roomPageAssignmentsJson,
   }) {
     return AppSettings(
       use24HourFormat: use24HourFormat ?? this.use24HourFormat,
       onboardingComplete: onboardingComplete ?? this.onboardingComplete,
       notificationsEnabled: notificationsEnabled ?? this.notificationsEnabled,
       hueSseEnabled: hueSseEnabled ?? this.hueSseEnabled,
-      hueDeviceRegistryJson: hueDeviceRegistryJson ?? this.hueDeviceRegistryJson,
+      hueDeviceRegistryJson:
+          hueDeviceRegistryJson ?? this.hueDeviceRegistryJson,
       curveConfigJson: curveConfigJson ?? this.curveConfigJson,
       runnerStateJson: runnerStateJson ?? this.runnerStateJson,
-      rhythmWarningDismissed: rhythmWarningDismissed ?? this.rhythmWarningDismissed,
-      hueGroupedLightMapJson: hueGroupedLightMapJson ?? this.hueGroupedLightMapJson,
+      rhythmWarningDismissed:
+          rhythmWarningDismissed ?? this.rhythmWarningDismissed,
+      hueGroupedLightMapJson:
+          hueGroupedLightMapJson ?? this.hueGroupedLightMapJson,
       electricityRate: electricityRate ?? this.electricityRate,
+      roomPageAssignmentsJson:
+          roomPageAssignmentsJson ?? this.roomPageAssignmentsJson,
     );
   }
 
@@ -99,18 +110,23 @@ class AppSettings {
     bool clearCurveConfigJson = false,
     bool clearRunnerStateJson = false,
     bool clearHueGroupedLightMapJson = false,
+    bool clearRoomPageAssignmentsJson = false,
   }) {
     return AppSettings(
       use24HourFormat: use24HourFormat,
       onboardingComplete: onboardingComplete,
       notificationsEnabled: notificationsEnabled,
       hueSseEnabled: hueSseEnabled,
-      hueDeviceRegistryJson: clearHueDeviceRegistryJson ? null : hueDeviceRegistryJson,
+      hueDeviceRegistryJson:
+          clearHueDeviceRegistryJson ? null : hueDeviceRegistryJson,
       curveConfigJson: clearCurveConfigJson ? null : curveConfigJson,
       runnerStateJson: clearRunnerStateJson ? null : runnerStateJson,
       rhythmWarningDismissed: rhythmWarningDismissed,
-      hueGroupedLightMapJson: clearHueGroupedLightMapJson ? null : hueGroupedLightMapJson,
+      hueGroupedLightMapJson:
+          clearHueGroupedLightMapJson ? null : hueGroupedLightMapJson,
       electricityRate: electricityRate,
+      roomPageAssignmentsJson:
+          clearRoomPageAssignmentsJson ? null : roomPageAssignmentsJson,
     );
   }
 }

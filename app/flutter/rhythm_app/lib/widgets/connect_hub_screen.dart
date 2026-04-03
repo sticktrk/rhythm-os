@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io' show InternetAddress;
 import 'package:bonsoir/bonsoir.dart';
-import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -10,7 +9,7 @@ import 'package:rhythm_core/providers/hub_discovery.dart' show DiscoveredHub;
 import 'package:rhythm_core/models/hub.dart' show HubType;
 import 'solar_orbit.dart'; // For CelestialColors
 import 'success_modal.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDiagnosticsApi;
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConfigApi, RhythmDiagnosticsApi;
 import '../providers/home_provider.dart';
 import '../screens/hubs/hue_configurator_screen.dart';
 import '../services/analytics_service.dart';
@@ -191,13 +190,8 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   Future<void> _scanViaWebApi(List<DiscoveredHub> found) async {
     try {
       final base = Uri.base.toString();
-      final dio = Dio(BaseOptions(
-        baseUrl: base.endsWith('/') ? base : '$base/',
-        connectTimeout: const Duration(seconds: 5),
-        receiveTimeout: const Duration(seconds: 5),
-      ));
-      final response = await dio.get('api/discover');
-      final List<dynamic> devices = response.data is List ? response.data : [];
+      final baseUrl = base.endsWith('/') ? base : '$base/';
+      final devices = await RhythmConfigApi(baseUrl: baseUrl).discover();
       for (final device in devices) {
         final hub = DiscoveredHub(
           host: device['host'] as String? ?? '',

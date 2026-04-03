@@ -756,6 +756,8 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     wireObj.width_right_cct = cst_encode_f_64(apiObj.widthRightCct);
     wireObj.shape_p = cst_encode_f_64(apiObj.shapeP);
     wireObj.max_dim_steps = cst_encode_i_32(apiObj.maxDimSteps);
+    wireObj.fade_ms = cst_encode_i_32(apiObj.fadeMs);
+    wireObj.motion_timeout_secs = cst_encode_i_32(apiObj.motionTimeoutSecs);
   }
 
   @protected
@@ -2870,6 +2872,12 @@ final class wire_cst_curve_config_dto extends ffi.Struct {
 
   @ffi.Int32()
   external int max_dim_steps;
+
+  @ffi.Int32()
+  external int fade_ms;
+
+  @ffi.Int32()
+  external int motion_timeout_secs;
 }
 
 final class wire_cst_room_state_dto extends ffi.Struct {

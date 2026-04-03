@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmCurveConfig;
 import '../../models/config_model.dart';
 import '../../providers/server_sync_provider.dart';
@@ -10,11 +9,8 @@ import '../../providers/server_sync_provider.dart';
 /// Full-screen modal for global device preferences.
 ///
 /// Exposes behavioural settings:
-/// - Light Fade (bulb_fade_ms) — Hue dynamics transition duration
 /// - Update Interval (rhythm_interval_secs) — rhythm recalculation period
-/// - Motion Timeout (default_motion_timeout_secs) — auto-off after motion clears
 /// - Power Save — turn off lights when idle
-/// - Idle Brightness — brightness when soft-off
 class PreferencesScreen extends StatefulWidget {
   const PreferencesScreen({super.key});
 
@@ -53,20 +49,14 @@ class PreferencesScreen extends StatefulWidget {
 class _PreferencesScreenState extends State<PreferencesScreen>
     with SingleTickerProviderStateMixin {
   // Current slider values.
-  double _fadeMs = 500;
   double _intervalSecs = 60;
-  double _motionTimeoutSecs = 600;
-  double _softOffBrightness = 1;
   bool _powerSave = false;
 
   bool _loading = true;
   bool _connected = false;
 
   // Debounce timers per setting.
-  Timer? _fadeDebounce;
   Timer? _intervalDebounce;
-  Timer? _motionDebounce;
-  Timer? _softOffDebounce;
 
   // Glow animation for the header icon.
   late AnimationController _glowController;
@@ -89,10 +79,7 @@ class _PreferencesScreenState extends State<PreferencesScreen>
 
   @override
   void dispose() {
-    _fadeDebounce?.cancel();
     _intervalDebounce?.cancel();
-    _motionDebounce?.cancel();
-    _softOffDebounce?.cancel();
     _glowController.dispose();
     super.dispose();
   }
@@ -109,22 +96,11 @@ class _PreferencesScreenState extends State<PreferencesScreen>
     // Try fetching live settings; fall back to hello cache.
     final settings = await syncProvider.api.getSettings();
     if (settings != null) {
-      _fadeMs = settings.bulbFadeMs.toDouble();
       _intervalSecs = settings.rhythmIntervalSecs.toDouble();
-      _motionTimeoutSecs = settings.defaultMotionTimeoutSecs.toDouble();
-      _softOffBrightness = settings.softOffBrightness.toDouble();
       _powerSave = settings.powerSave;
     }
 
     if (mounted) setState(() => _loading = false);
-  }
-
-  void _onFadeChanged(double value) {
-    setState(() => _fadeMs = value);
-    _fadeDebounce?.cancel();
-    _fadeDebounce = Timer(const Duration(milliseconds: 500), () {
-      _pushSetting(bulbFadeMs: value.round());
-    });
   }
 
   void _onIntervalChanged(double value) {
@@ -135,41 +111,18 @@ class _PreferencesScreenState extends State<PreferencesScreen>
     });
   }
 
-  void _onMotionTimeoutChanged(double value) {
-    setState(() => _motionTimeoutSecs = value);
-    _motionDebounce?.cancel();
-    _motionDebounce = Timer(const Duration(milliseconds: 500), () {
-      _pushSetting(defaultMotionTimeoutSecs: value.round());
-    });
-  }
-
-  void _onSoftOffBrightnessChanged(double value) {
-    setState(() => _softOffBrightness = value);
-    context.read<ServerSyncProvider>().softOffBrightness = value.round();
-    _softOffDebounce?.cancel();
-    _softOffDebounce = Timer(const Duration(milliseconds: 500), () {
-      _pushSetting(softOffBrightness: value.round());
-    });
-  }
-
   void _onPowerSaveChanged(bool value) {
     setState(() => _powerSave = value);
     _pushSetting(powerSave: value);
   }
 
   Future<void> _pushSetting({
-    int? bulbFadeMs,
     int? rhythmIntervalSecs,
-    int? defaultMotionTimeoutSecs,
     bool? powerSave,
-    int? softOffBrightness,
   }) async {
     await context.read<ServerSyncProvider>().api.settingsSet(
-      bulbFadeMs: bulbFadeMs,
       rhythmIntervalSecs: rhythmIntervalSecs,
-      defaultMotionTimeoutSecs: defaultMotionTimeoutSecs,
       powerSave: powerSave,
-      softOffBrightness: softOffBrightness,
     );
   }
 
@@ -295,18 +248,6 @@ class _PreferencesScreenState extends State<PreferencesScreen>
           _buildHeroIcon(),
           const SizedBox(height: 28),
           _buildSettingCard(
-            icon: Icons.blur_on_rounded,
-            color: _Palette.amber,
-            title: 'Light Transition Duration',
-            value: _fadeMs,
-            min: 0,
-            max: 2000,
-            divisions: 20,
-            formatValue: _formatFade,
-            onChanged: _onFadeChanged,
-          ),
-          const SizedBox(height: 14),
-          _buildSettingCard(
             icon: Icons.update_rounded,
             color: _Palette.blue,
             title: 'Background Light Interval',
@@ -318,18 +259,6 @@ class _PreferencesScreenState extends State<PreferencesScreen>
             onChanged: _onIntervalChanged,
           ),
           const SizedBox(height: 14),
-          _buildSettingCard(
-            icon: Icons.motion_photos_on_rounded,
-            color: _Palette.teal,
-            title: 'Motion Timeout',
-            value: _motionTimeoutSecs,
-            min: 0,
-            max: 1800,
-            divisions: 36,
-            formatValue: _formatMotionTimeout,
-            onChanged: _onMotionTimeoutChanged,
-          ),
-          const SizedBox(height: 14),
           _buildToggleCard(
             icon: Icons.eco_rounded,
             color: _Palette.green,
@@ -337,20 +266,6 @@ class _PreferencesScreenState extends State<PreferencesScreen>
             value: _powerSave,
             onChanged: _onPowerSaveChanged,
           ),
-          if (!_powerSave) ...[
-            const SizedBox(height: 14),
-            _buildSettingCard(
-              icon: Icons.brightness_low_rounded,
-              color: _Palette.purple,
-              title: 'Idle Brightness',
-              value: _softOffBrightness,
-              min: 1,
-              max: 50,
-              divisions: 49,
-              formatValue: _formatPercent,
-              onChanged: _onSoftOffBrightnessChanged,
-            ),
-          ],
           const SizedBox(height: 28),
           _buildResetButton(),
         ],
@@ -637,21 +552,15 @@ class _PreferencesScreenState extends State<PreferencesScreen>
 
     await Future.wait([
       api.settingsSet(
-        bulbFadeMs: 500,
         rhythmIntervalSecs: 60,
-        defaultMotionTimeoutSecs: 600,
         powerSave: true,
-        softOffBrightness: 1,
       ),
       api.configSet(const RhythmCurveConfig()),
     ]);
 
     setState(() {
-      _fadeMs = 500;
       _intervalSecs = 60;
-      _motionTimeoutSecs = 600;
       _powerSave = true;
-      _softOffBrightness = 1;
     });
 
     // Update ConfigModel so the designer reflects the change.
@@ -664,25 +573,11 @@ class _PreferencesScreenState extends State<PreferencesScreen>
   // Formatters
   // ---------------------------------------------------------------------------
 
-  String _formatFade(double ms) {
-    if (ms == 0) return '0s';
-    return '${(ms / 1000).toStringAsFixed(1)}s';
-  }
-
   String _formatInterval(double secs) {
     if (secs >= 60 && secs % 60 == 0) return '${(secs / 60).round()}m';
     return '${secs.round()}s';
   }
 
-  String _formatMotionTimeout(double secs) {
-    if (secs == 0) return 'Off';
-    if (secs >= 60) return '${(secs / 60).round()}m';
-    return '${secs.round()}s';
-  }
-
-  String _formatPercent(double value) {
-    return '${value.round()}%';
-  }
 }
 
 // -----------------------------------------------------------------------------
@@ -697,7 +592,5 @@ class _Palette {
   static const textSecondary = Color(0xFF8A919C);
   static const amber = Color(0xFFF9A825);
   static const blue = Color(0xFF58A6FF);
-  static const teal = Color(0xFF4ADE80);
   static const green = Color(0xFF22C55E);
-  static const purple = Color(0xFFA78BFA);
 }

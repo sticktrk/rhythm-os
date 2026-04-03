@@ -365,6 +365,8 @@ Map<String, dynamic> _curveConfigToJson(CurveConfigDto config) {
     'width_right_cct': config.widthRightCct,
     'shape_p': config.shapeP,
     'max_dim_steps': config.maxDimSteps,
+    'fade_ms': config.fadeMs,
+    'motion_timeout_secs': config.motionTimeoutSecs,
   };
 }
 
@@ -382,5 +384,7 @@ CurveConfigDto _curveConfigFromJson(Map<String, dynamic> json) {
     widthRightCct: (json['width_right_cct'] as num?)?.toDouble() ?? d.widthRightCct,
     shapeP: (json['shape_p'] as num?)?.toDouble() ?? d.shapeP,
     maxDimSteps: (json['max_dim_steps'] as num?)?.toInt() ?? d.maxDimSteps,
+    fadeMs: (json['fade_ms'] as num?)?.toInt() ?? d.fadeMs,
+    motionTimeoutSecs: (json['motion_timeout_secs'] as num?)?.toInt() ?? d.motionTimeoutSecs,
   );
 }

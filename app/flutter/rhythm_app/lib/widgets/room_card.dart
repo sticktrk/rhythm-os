@@ -22,7 +22,6 @@ class RoomCard extends StatefulWidget {
   final CurveConfigDto globalConfig;
   final CurveData? curveData;
   final bool powerSave;
-  final int softOffBrightness;
 
   const RoomCard({
     super.key,
@@ -30,7 +29,6 @@ class RoomCard extends StatefulWidget {
     required this.globalConfig,
     this.curveData,
     this.powerSave = false,
-    this.softOffBrightness = _kDefaultIdleBrightness,
   });
 
   @override
@@ -106,6 +104,16 @@ class _RoomCardState extends State<RoomCard> {
     serverSync.dispatchBrightness(widget.roomId, _sliderBrightness!);
   }
 
+  /// Reset this room to its adaptive curve position (per-room fix-my-lights).
+  void _resetRoom() {
+    HapticFeedback.mediumImpact();
+    final serverSync = context.read<ServerSyncProvider>();
+    serverSync.dispatchResetRoom(widget.roomId);
+    setState(() {
+      _sliderBrightness = null;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return Selector<RoomProvider, (RoomDto?, int, MotionTimerInfo?, bool, int?, int?, bool)>(
@@ -142,7 +150,7 @@ class _RoomCardState extends State<RoomCard> {
         // Display brightness depends on mode
         final displayBrightness = switch (mode) {
           RoomMode.on => _sliderBrightness ?? brightness,
-          RoomMode.idle => widget.softOffBrightness,
+          RoomMode.idle => _kDefaultIdleBrightness,
           RoomMode.off => _sliderBrightness ?? brightness,
         };
 
@@ -194,6 +202,10 @@ class _RoomCardState extends State<RoomCard> {
           RoomMode.off => CelestialColors.textSecondary,
         };
 
+        // Room is "off curve" when brightness or time has been manually adjusted
+        final offCurve = mode == RoomMode.on &&
+            (room.brightnessOffset != 0 || room.timeOffsetMinutes != 0);
+
         final sliderActive = mode == RoomMode.on;
         final rhythmGlowActive = mode == RoomMode.on && room.rhythmEnabled;
         // Warm amber on dark cards, contrast-aware dark tone on light cards
@@ -201,6 +213,8 @@ class _RoomCardState extends State<RoomCard> {
 
         return GestureDetector(
           onTap: () => RoomSettingsSheet.show(context, room),
+          // Only register double-tap when off-curve to avoid tap delay on normal cards
+          onDoubleTap: offCurve ? _resetRoom : null,
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 400),
             curve: Curves.easeInOut,
@@ -289,6 +303,7 @@ class _RoomCardState extends State<RoomCard> {
                             mode: mode,
                             onModeChanged: _onModeChanged,
                             powerSave: widget.powerSave,
+                            offCurve: offCurve,
                           ),
                         ],
                       ),
@@ -378,11 +393,13 @@ class _CelestialToggle extends StatelessWidget {
   final RoomMode mode;
   final ValueChanged<RoomMode> onModeChanged;
   final bool powerSave;
+  final bool offCurve;
 
   const _CelestialToggle({
     required this.mode,
     required this.onModeChanged,
     this.powerSave = false,
+    this.offCurve = false,
   });
 
   void _onTap() {
@@ -418,7 +435,7 @@ class _CelestialToggle extends StatelessWidget {
       RoomMode.on => Alignment.centerRight,
     };
 
-    // Track gradient: dark → dim warm → warm amber
+    // Track gradient: dark → dim warm → warm amber (desaturated when off-curve)
     final trackGradient = switch (mode) {
       RoomMode.off => const LinearGradient(
           colors: [Color(0xFF2A2F38), Color(0xFF30363D)],
@@ -426,25 +443,31 @@ class _CelestialToggle extends StatelessWidget {
       RoomMode.idle => const LinearGradient(
           colors: [Color(0xFF221C14), Color(0xFF2E2518)],
         ),
-      RoomMode.on => const LinearGradient(
-          colors: [Color(0xFF8B6B20), Color(0xFFD4A020)],
-        ),
+      RoomMode.on => offCurve
+          ? const LinearGradient(
+              colors: [Color(0xFF6B5A30), Color(0xFF9A8040)],
+            )
+          : const LinearGradient(
+              colors: [Color(0xFF8B6B20), Color(0xFFD4A020)],
+            ),
     };
 
-    // Thumb colors: void → dim warm → bright
+    // Thumb colors: void → dim warm → bright (muted warm when off-curve)
     final thumbColor = switch (mode) {
       RoomMode.off => CelestialColors.textSecondary,
       RoomMode.idle => const Color(0xFFCDBFAA), // dim warm
-      RoomMode.on => Colors.white,
+      RoomMode.on => offCurve ? const Color(0xFFE8D5B0) : Colors.white,
     };
 
-    // Thumb glow per state
+    // Thumb glow per state (subtler when off-curve)
     final thumbShadow = switch (mode) {
       RoomMode.on => [
           BoxShadow(
-            color: CelestialColors.sunWarm.withValues(alpha: 0.4),
-            blurRadius: 8,
-            spreadRadius: 1,
+            color: offCurve
+                ? const Color(0xFFD4A574).withValues(alpha: 0.25)
+                : CelestialColors.sunWarm.withValues(alpha: 0.4),
+            blurRadius: offCurve ? 6 : 8,
+            spreadRadius: offCurve ? 0 : 1,
           ),
         ],
       RoomMode.idle => [

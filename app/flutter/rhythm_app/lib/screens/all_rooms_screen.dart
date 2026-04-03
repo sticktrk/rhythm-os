@@ -1,28 +1,37 @@
 import 'dart:math' as math;
 import 'dart:async';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import '../providers/room_page_provider.dart';
 import '../providers/server_sync_provider.dart';
+import '../widgets/editable_room_card.dart';
 import '../widgets/room_card.dart';
 import '../widgets/solar_orbit.dart'; // For CelestialColors
 
-/// All Rooms screen - a vertically scrollable list of Hue-style room cards.
+/// All Rooms screen — horizontally paged room cards with edit-mode drag support.
 ///
 /// Features:
-/// - Dynamic grid that fits all orbs on one page
+/// - Multiple swipeable pages of room cards
+/// - Long-press to enter edit mode (wiggle + drag between pages)
 /// - Deep space background with optional starfield
-/// - Batch-fetches all room states on load (one-shot)
+/// - Pull-to-refresh on each page
 class AllRoomsScreen extends StatefulWidget {
   final List<RoomDto> rooms;
   final CurveConfigDto globalConfig;
   final CurveData? curveData;
+  final PageController pageController;
+  final ValueChanged<int> onPageChanged;
 
   const AllRoomsScreen({
     super.key,
     required this.rooms,
     required this.globalConfig,
     this.curveData,
+    required this.pageController,
+    required this.onPageChanged,
   });
 
   @override
@@ -30,9 +39,287 @@ class AllRoomsScreen extends StatefulWidget {
 }
 
 class _AllRoomsScreenState extends State<AllRoomsScreen> {
+  Timer? _edgeScrollTimer;
+  static const _edgeScrollZone = 28.0;
+  static const _edgeScrollIntentThreshold = 16.0;
+  static const _edgeScrollDelay = Duration(milliseconds: 375);
+
+  // Overlay-based drag state
+  OverlayEntry? _dragOverlay;
+  String? _draggingRoomId;
+  int? _activeDragPointer;
+  Offset _dragPosition = Offset.zero;
+  Offset _dragStartOffset = Offset.zero;
+  Offset _edgeScrollReferencePosition = Offset.zero;
+  Size _dragCardSize = Size.zero;
+
+  /// Track the page we're auto-scrolling to, so drops during animation land correctly.
+  int? _edgeScrollTargetPage;
+  int? _dragSourcePage;
+  int? _hoverPage;
+  int? _hoverIndex;
+  bool _isEdgeScrollAnimating = false;
+
+  /// Keys for each card so we can find their positions for drop targeting.
+  final Map<String, GlobalKey> _cardKeys = {};
+
+  @override
+  void dispose() {
+    _edgeScrollTimer?.cancel();
+    _removeTrackedPointerRoute();
+    _dragOverlay?.remove();
+    super.dispose();
+  }
+
   Future<void> _onRefresh() async {
     final serverSync = context.read<ServerSyncProvider>();
     await serverSync.fullRefresh();
+  }
+
+  // -- Drag handle callbacks --------------------------------------------------
+
+  void _onHandleDragStart(String roomId, int pointer, Offset globalPosition) {
+    _removeTrackedPointerRoute();
+    _activeDragPointer = pointer;
+    GestureBinding.instance.pointerRouter.addRoute(pointer, _handleTrackedPointerEvent);
+
+    final pageProvider = context.read<RoomPageProvider>();
+    final currentPage = pageProvider.getPage(roomId);
+    final currentRooms =
+        pageProvider.getRoomsForPage(currentPage, widget.rooms);
+    final dragStartIndex = currentRooms.indexWhere((room) => room.id == roomId);
+
+    // Find the card's render box to compute the offset from touch to card origin
+    final key = _cardKeys[roomId];
+    final box = key?.currentContext?.findRenderObject() as RenderBox?;
+    if (box != null) {
+      final cardTopLeft = box.localToGlobal(Offset.zero);
+      _dragStartOffset = globalPosition - cardTopLeft;
+      _dragCardSize = box.size;
+    } else {
+      _dragStartOffset = const Offset(0, 40);
+      _dragCardSize = Size(MediaQuery.of(context).size.width - 32, 112);
+    }
+
+    setState(() {
+      _draggingRoomId = roomId;
+      _dragSourcePage = currentPage;
+      _hoverPage = currentPage;
+      _hoverIndex = dragStartIndex == -1 ? currentRooms.length : dragStartIndex;
+    });
+    _dragPosition = globalPosition;
+    _edgeScrollReferencePosition = globalPosition;
+    _edgeScrollTargetPage = null;
+
+    _dragOverlay = OverlayEntry(builder: (_) {
+      return Positioned(
+        left: _dragPosition.dx - _dragStartOffset.dx,
+        top: _dragPosition.dy - _dragStartOffset.dy,
+        width: _dragCardSize.width,
+        child: IgnorePointer(
+          child: Material(
+            type: MaterialType.transparency,
+            child: Transform.scale(
+              scale: 1.06,
+              child: Opacity(
+                opacity: 0.9,
+                child: RoomCard(
+                  roomId: roomId,
+                  globalConfig: widget.globalConfig,
+                  curveData: widget.curveData,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    });
+    Overlay.of(context).insert(_dragOverlay!);
+  }
+
+  void _onHandleDragUpdate(Offset globalPosition) {
+    _dragPosition = globalPosition;
+    _dragOverlay?.markNeedsBuild();
+    _checkEdgeScroll(globalPosition);
+    _updateHoverTarget();
+  }
+
+  void _handleTrackedPointerEvent(PointerEvent event) {
+    if (event.pointer != _activeDragPointer) return;
+
+    if (event is PointerMoveEvent) {
+      _onHandleDragUpdate(event.position);
+      return;
+    }
+
+    if (event is PointerUpEvent || event is PointerCancelEvent) {
+      _onHandleDragEnd();
+    }
+  }
+
+  void _removeTrackedPointerRoute() {
+    final pointer = _activeDragPointer;
+    if (pointer == null) return;
+    GestureBinding.instance.pointerRouter.removeRoute(
+      pointer,
+      _handleTrackedPointerEvent,
+    );
+    _activeDragPointer = null;
+  }
+
+  void _onHandleDragEnd() {
+    _removeTrackedPointerRoute();
+    _edgeScrollTimer?.cancel();
+    _edgeScrollTimer = null;
+    _dragOverlay?.remove();
+    _dragOverlay = null;
+
+    final draggedId = _draggingRoomId;
+    if (draggedId == null) {
+      setState(() {
+        _dragSourcePage = null;
+        _hoverPage = null;
+        _hoverIndex = null;
+        _dragCardSize = Size.zero;
+      });
+      _edgeScrollReferencePosition = Offset.zero;
+      return;
+    }
+
+    final pageProvider = context.read<RoomPageProvider>();
+    final currentPage = _hoverPage ?? _resolvedDropPage(pageProvider);
+    final dropIndex = _hoverIndex ??
+        _computeDropIndex(
+          pageProvider: pageProvider,
+          pageIndex: currentPage,
+          draggedId: draggedId,
+        );
+    _edgeScrollTargetPage = null;
+
+    final fromPage = pageProvider.getPage(draggedId);
+    if (fromPage != currentPage) {
+      pageProvider.moveRoom(draggedId, currentPage, insertIndex: dropIndex);
+    } else {
+      pageProvider.reorderInPage(draggedId, currentPage, dropIndex);
+    }
+
+    HapticFeedback.selectionClick();
+    setState(() {
+      _draggingRoomId = null;
+      _dragSourcePage = null;
+      _hoverPage = null;
+      _hoverIndex = null;
+      _dragCardSize = Size.zero;
+    });
+    _edgeScrollReferencePosition = Offset.zero;
+  }
+
+  void _checkEdgeScroll(Offset globalPosition) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final dx = globalPosition.dx;
+    final pageProvider = context.read<RoomPageProvider>();
+    final currentPage = _resolvedDropPage(pageProvider);
+    final horizontalIntent = dx - _edgeScrollReferencePosition.dx;
+
+    if (dx < _edgeScrollZone &&
+        horizontalIntent <= -_edgeScrollIntentThreshold &&
+        currentPage > 0) {
+      _startEdgeScroll(-1, pageProvider.pageCount);
+    } else if (dx > screenWidth - _edgeScrollZone &&
+        horizontalIntent >= _edgeScrollIntentThreshold &&
+        currentPage < pageProvider.pageCount - 1) {
+      _startEdgeScroll(1, pageProvider.pageCount);
+    } else {
+      _edgeScrollTimer?.cancel();
+      _edgeScrollTimer = null;
+      if (!_isEdgeScrollAnimating) {
+        _edgeScrollTargetPage = null;
+      }
+    }
+  }
+
+  void _startEdgeScroll(int direction, int pageCount) {
+    if (_edgeScrollTimer != null || _isEdgeScrollAnimating) return;
+    _edgeScrollTimer = Timer(_edgeScrollDelay, () async {
+      _edgeScrollTimer = null;
+      final pageProvider = context.read<RoomPageProvider>();
+      final currentPage = _resolvedDropPage(pageProvider);
+      final targetPage = (currentPage + direction).clamp(0, pageCount - 1);
+      if (targetPage != currentPage) {
+        _edgeScrollTargetPage = targetPage;
+        _isEdgeScrollAnimating = true;
+        _updateHoverTarget();
+        try {
+          await widget.pageController.animateToPage(
+            targetPage,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeInOut,
+          );
+        } finally {
+          _isEdgeScrollAnimating = false;
+          if (_edgeScrollTargetPage == targetPage) {
+            _edgeScrollTargetPage = null;
+          }
+        }
+        if (!mounted) return;
+        _edgeScrollReferencePosition = _dragPosition;
+        _checkEdgeScroll(_dragPosition);
+        _updateHoverTarget();
+      }
+    });
+  }
+
+  int _resolvedDropPage(RoomPageProvider pageProvider) {
+    if (_edgeScrollTargetPage != null) return _edgeScrollTargetPage!;
+    if (!widget.pageController.hasClients) {
+      return widget.pageController.initialPage;
+    }
+    return widget.pageController.page?.round() ??
+        widget.pageController.initialPage;
+  }
+
+  int _computeDropIndex({
+    required RoomPageProvider pageProvider,
+    required int pageIndex,
+    required String draggedId,
+  }) {
+    final pageRooms = pageProvider
+        .getRoomsForPage(pageIndex, widget.rooms)
+        .where((room) => room.id != draggedId)
+        .toList();
+
+    for (var i = 0; i < pageRooms.length; i++) {
+      final room = pageRooms[i];
+      final key = _cardKeys[room.id];
+      final box = key?.currentContext?.findRenderObject() as RenderBox?;
+      if (box == null) continue;
+      final cardTop = box.localToGlobal(Offset.zero).dy;
+      final cardHeight = box.size.height;
+      if (_dragPosition.dy < cardTop + cardHeight / 2) {
+        return i;
+      }
+    }
+
+    return pageRooms.length;
+  }
+
+  void _updateHoverTarget() {
+    final draggedId = _draggingRoomId;
+    if (draggedId == null) return;
+
+    final pageProvider = context.read<RoomPageProvider>();
+    final pageIndex = _resolvedDropPage(pageProvider);
+    final dropIndex = _computeDropIndex(
+      pageProvider: pageProvider,
+      pageIndex: pageIndex,
+      draggedId: draggedId,
+    );
+
+    if (pageIndex == _hoverPage && dropIndex == _hoverIndex) return;
+    setState(() {
+      _hoverPage = pageIndex;
+      _hoverIndex = dropIndex;
+    });
   }
 
   @override
@@ -40,55 +327,45 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     final isLandscape =
         MediaQuery.of(context).orientation == Orientation.landscape;
     final bottomSafeArea = MediaQuery.of(context).padding.bottom;
-    // Reserve space for bottom nav overlay (12 + 70 pill + 12 = 94dp) + safe area
     final bottomPad = bottomSafeArea + 104.0;
+    final pageProvider = context.watch<RoomPageProvider>();
 
     return Stack(
       children: [
-        // Celestial background (adapts to sunrise/sunset times)
         _CelestialBackground(curveData: widget.curveData),
-
-        // Main content
         SafeArea(
           bottom: false,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Header
-              _buildHeader(isLandscape),
-              // Room cards list
+              _buildHeader(isLandscape, pageProvider.editMode),
               Expanded(
-                child: RefreshIndicator(
-                        onRefresh: _onRefresh,
-                        color: CelestialColors.accentBlue,
-                        backgroundColor: const Color(0xFF1A2E45),
-                        child: Selector<ServerSyncProvider, (bool, int)>(
-                          selector: (_, p) => (p.powerSave, p.softOffBrightness),
-                          builder: (context, data, _) {
-                            final (powerSave, softOffBrightness) = data;
-                            final sortedRooms = List.of(widget.rooms)
-                              ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-                            return ListView.builder(
-                              padding: EdgeInsets.fromLTRB(16, 4, 16, bottomPad),
-                              itemCount: sortedRooms.length,
-                              itemBuilder: (context, index) {
-                                final room = sortedRooms[index];
-                                return Padding(
-                                  padding: const EdgeInsets.only(bottom: 12),
-                                  child: RoomCard(
-                                    key: ValueKey(room.id),
-                                    roomId: room.id,
-                                    globalConfig: widget.globalConfig,
-                                    curveData: widget.curveData,
-                                    powerSave: powerSave,
-                                    softOffBrightness: softOffBrightness,
-                                  ),
-                                );
-                              },
-                            );
-                          },
-                        ),
-                      ),
+                child: Selector<ServerSyncProvider, bool>(
+                  selector: (_, p) => p.powerSave,
+                  builder: (context, powerSave, _) {
+                    return PageView.builder(
+                      controller: widget.pageController,
+                      onPageChanged: widget.onPageChanged,
+                      physics: _draggingRoomId != null
+                          ? const NeverScrollableScrollPhysics()
+                          : null,
+                      itemCount: pageProvider.pageCount,
+                      itemBuilder: (context, pageIndex) {
+                        final pageRooms = pageProvider.getRoomsForPage(
+                          pageIndex,
+                          widget.rooms,
+                        );
+                        return _buildPageContent(
+                          pageIndex: pageIndex,
+                          rooms: pageRooms,
+                          powerSave: powerSave,
+                          bottomPad: bottomPad,
+                          editMode: pageProvider.editMode,
+                        );
+                      },
+                    );
+                  },
+                ),
               ),
             ],
           ),
@@ -97,19 +374,177 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     );
   }
 
-  Widget _buildHeader(bool isLandscape) {
+  Widget _buildPageContent({
+    required int pageIndex,
+    required List<RoomDto> rooms,
+    required bool powerSave,
+    required double bottomPad,
+    required bool editMode,
+  }) {
+    if (rooms.isEmpty && editMode && pageIndex != _hoverPage) {
+      return Center(
+        child: Text(
+          'Drag rooms here',
+          style: TextStyle(
+            color: CelestialColors.textSecondary.withValues(alpha: 0.5),
+            fontSize: 16,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      );
+    }
+
+    if (rooms.isEmpty && !editMode) return const SizedBox.shrink();
+
+    if (!editMode) {
+      return RefreshIndicator(
+        onRefresh: _onRefresh,
+        color: CelestialColors.accentBlue,
+        backgroundColor: const Color(0xFF1A2E45),
+        child: ListView.builder(
+          padding: EdgeInsets.fromLTRB(16, 4, 16, bottomPad),
+          itemCount: rooms.length,
+          itemBuilder: (context, index) {
+            final room = rooms[index];
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: EditableRoomCard(
+                key: ValueKey(room.id),
+                roomId: room.id,
+                globalConfig: widget.globalConfig,
+                curveData: widget.curveData,
+                powerSave: powerSave,
+                editMode: false,
+                onEnterEditMode: () {
+                  final pageProvider = context.read<RoomPageProvider>();
+                  pageProvider.reconcileRooms(widget.rooms);
+                  pageProvider.enterEditMode();
+                },
+              ),
+            );
+          },
+        ),
+      );
+    }
+
+    // Edit mode: keep the dragged card mounted so its gesture stream survives,
+    // but collapse it in-place while a separate placeholder marks the drop slot.
+    final draggedIndex = _draggingRoomId == null
+        ? -1
+        : rooms.indexWhere((room) => room.id == _draggingRoomId);
+    final nonDraggedCount = draggedIndex == -1 ? rooms.length : rooms.length - 1;
+    final rawPlaceholderIndex = pageIndex == _hoverPage
+        ? (_hoverIndex ?? nonDraggedCount).clamp(0, nonDraggedCount)
+        : null;
+    final placeholderIndex = rawPlaceholderIndex == null
+        ? null
+        : draggedIndex != -1 && rawPlaceholderIndex > draggedIndex
+            ? rawPlaceholderIndex + 1
+            : rawPlaceholderIndex;
+
+    return ListView.builder(
+      padding: EdgeInsets.fromLTRB(16, 4, 16, bottomPad),
+      itemCount: rooms.length + (placeholderIndex == null ? 0 : 1),
+      itemBuilder: (context, index) {
+        if (placeholderIndex != null && index == placeholderIndex) {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: _buildDropPlaceholder(),
+          );
+        }
+
+        final roomIndex = placeholderIndex != null && index > placeholderIndex
+            ? index - 1
+            : index;
+        final room = rooms[roomIndex];
+        final key = _cardKeys.putIfAbsent(room.id, () => GlobalKey());
+        final isDraggedRoom =
+            room.id == _draggingRoomId && pageIndex == _dragSourcePage;
+        return Padding(
+          key: key,
+          padding: const EdgeInsets.only(bottom: 12),
+          child: EditableRoomCard(
+            roomId: room.id,
+            globalConfig: widget.globalConfig,
+            curveData: widget.curveData,
+            powerSave: powerSave,
+            editMode: true,
+            onEnterEditMode: () {},
+            isDragging: isDraggedRoom,
+            collapseWhileDragging: isDraggedRoom,
+            onDragStart: _onHandleDragStart,
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildDropPlaceholder() {
+    final height = _dragCardSize.height > 0 ? _dragCardSize.height : 112.0;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 160),
+      curve: Curves.easeOut,
+      height: height,
+      decoration: BoxDecoration(
+        color: CelestialColors.accentBlue.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: CelestialColors.accentBlue.withValues(alpha: 0.45),
+          width: 1.5,
+        ),
+      ),
+      child: Center(
+        child: Icon(
+          Icons.add_rounded,
+          color: CelestialColors.accentBlue.withValues(alpha: 0.7),
+          size: 24,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeader(bool isLandscape, bool editMode) {
     final vPad = isLandscape ? 4.0 : 10.0;
 
     return Padding(
       padding: EdgeInsets.fromLTRB(20, vPad, 20, vPad),
-      child: Text(
-        'All Rooms',
-        style: TextStyle(
-          color: CelestialColors.textPrimary,
-          fontSize: isLandscape ? 16 : 20,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.3,
-        ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              editMode ? 'Edit Rooms' : 'All Rooms',
+              style: TextStyle(
+                color: CelestialColors.textPrimary,
+                fontSize: isLandscape ? 16 : 20,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.3,
+              ),
+            ),
+          ),
+          if (editMode)
+            GestureDetector(
+              onTap: () {
+                HapticFeedback.lightImpact();
+                context.read<RoomPageProvider>().exitEditMode();
+              },
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                decoration: BoxDecoration(
+                  color: CelestialColors.accentBlue.withValues(alpha: 0.2),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Text(
+                  'Done',
+                  style: TextStyle(
+                    color: CelestialColors.accentBlue,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -123,14 +558,19 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
 class _SkyPalette {
   /// Top-to-bottom gradient colors.
   final List<Color> colors;
+
   /// Gradient stops (must match colors length).
   final List<double> stops;
+
   /// Star visibility (0 = invisible, 1 = full).
   final double starOpacity;
+
   /// Sun/horizon glow intensity.
   final double glowIntensity;
+
   /// Color of the horizon glow.
   final Color glowColor;
+
   /// Vertical position of glow center (0 = top, 1 = bottom).
   final double glowY;
 
@@ -577,8 +1017,7 @@ class _CelestialPainter extends CustomPainter {
         animationValue * 2 * math.pi * star.twinkleSpeed + star.twinkleOffset,
       );
       // Base twinkle range scaled by palette's star opacity
-      final opacity =
-          (0.3 + (twinkle + 1) / 2 * 0.5) * palette.starOpacity;
+      final opacity = (0.3 + (twinkle + 1) / 2 * 0.5) * palette.starOpacity;
 
       paint.color = CelestialColors.textPrimary.withValues(alpha: opacity);
 
@@ -596,8 +1035,7 @@ class _CelestialPainter extends CustomPainter {
     final glowRadius = size.width * 1.2;
 
     // Subtle breathing animation on the glow
-    final breathe =
-        0.85 + math.sin(animationValue * 2 * math.pi * 0.3) * 0.15;
+    final breathe = 0.85 + math.sin(animationValue * 2 * math.pi * 0.3) * 0.15;
     final intensity = palette.glowIntensity * breathe;
 
     paint.shader = RadialGradient(

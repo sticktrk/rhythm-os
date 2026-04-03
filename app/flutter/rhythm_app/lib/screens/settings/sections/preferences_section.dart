@@ -5,7 +5,7 @@ import '../../../widgets/settings_row.dart';
 import '../../../providers/settings_provider.dart';
 import '../../location_settings_screen.dart';
 import '../preferences_screen.dart';
-import '../light_tuning_screen.dart';
+import '../light_profile_screen.dart';
 
 /// Preferences section for location, light settings, etc.
 class PreferencesSection extends StatelessWidget {
@@ -31,8 +31,8 @@ class PreferencesSection extends StatelessWidget {
                 SettingsRow(
                   icon: Icons.lightbulb_outline,
                   iconColor: const Color(0xFFA78BFA),
-                  label: 'Light Tuning',
-                  onTap: () => LightTuningScreen.show(context),
+                  label: 'Light Profile',
+                  onTap: () => LightProfileScreen.show(context),
                 ),
                 if (caps.hasLocationSetup)
                   SettingsRow(

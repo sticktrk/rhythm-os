@@ -539,7 +539,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       cst_encode_f_64(raw.widthLeftCct),
       cst_encode_f_64(raw.widthRightCct),
       cst_encode_f_64(raw.shapeP),
-      cst_encode_i_32(raw.maxDimSteps)
+      cst_encode_i_32(raw.maxDimSteps),
+      cst_encode_i_32(raw.fadeMs),
+      cst_encode_i_32(raw.motionTimeoutSecs)
     ].jsify()!;
   }
 
