@@ -157,6 +157,17 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     }
   }
 
+  /// Toggle sleep/wake mode on the server.
+  Future<void> _toggleSleep() async {
+    HapticFeedback.mediumImpact();
+    final serverSync = context.read<ServerSyncProvider>();
+    if (serverSync.sleepMode) {
+      await serverSync.dispatchWake();
+    } else {
+      await serverSync.dispatchSleep();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final showSliders = _isLargeScreen(context);
@@ -235,6 +246,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   /// The main room constellation grid with bottom nav overlay.
   Widget _buildRoomGrid(RoomProvider roomProvider) {
+    final serverSync = context.watch<ServerSyncProvider>();
     final roomPageProvider = context.watch<RoomPageProvider>();
     final enabledRooms = roomProvider.enabledRooms;
     final pageCount = roomPageProvider.pageCount;
@@ -305,6 +317,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                       onSunPositionTap: _openSunPosition,
                       onFixMyLights: _fixMyLights,
                       isFixing: _isFixing,
+                      sleepMode: serverSync.sleepMode,
+                      onSleepToggle: _toggleSleep,
                     ),
                   ),
                 ),

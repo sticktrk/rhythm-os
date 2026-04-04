@@ -91,6 +91,9 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Whether power-save mode is active on the server.
   bool _powerSave = false;
 
+  /// Whether sleep mode is active on the server.
+  bool _sleepMode = false;
+
   /// Rhythm update interval in seconds from server settings.
   int _rhythmIntervalSecs = 60;
 
@@ -128,6 +131,9 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Whether power-save mode is active on the server.
   bool get powerSave => _powerSave;
+
+  /// Whether sleep mode is active on the server.
+  bool get sleepMode => _sleepMode;
 
   /// Rhythm update interval in seconds.
   int get rhythmIntervalSecs => _rhythmIntervalSecs;
@@ -363,6 +369,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _serverPlatformType = hello.platformType;
     _serverPlatformContext = hello.platformContext;
     _powerSave = hello.settings?.powerSave ?? false;
+    _sleepMode = hello.settings?.sleepMode ?? false;
     _rhythmIntervalSecs = hello.settings?.rhythmIntervalSecs ?? 60;
     _effectiveFadeMs = hello.effectiveFadeMs;
     _effectiveMotionTimeoutSecs = hello.effectiveMotionTimeoutSecs;
@@ -635,6 +642,7 @@ class ServerSyncProvider extends ChangeNotifier {
       _serverPlatformType = 'desktop';
       _serverPlatformContext = 'server';
       _powerSave = false;
+      _sleepMode = false;
       _helloRooms = [];
       _lastHubInfos = [];
       _rhythmIntervalSecs = 60;
@@ -779,6 +787,22 @@ class ServerSyncProvider extends ChangeNotifier {
       _roomProvider.bumpResetGeneration();
     }
     return states;
+  }
+
+  /// Activate sleep mode on the server.
+  Future<void> dispatchSleep() async {
+    if (!_connection.connected) return;
+    _sleepMode = true;
+    notifyListeners();
+    await _connection.api.sleep();
+  }
+
+  /// Deactivate sleep mode (wake) on the server.
+  Future<void> dispatchWake() async {
+    if (!_connection.connected) return;
+    _sleepMode = false;
+    notifyListeners();
+    await _connection.api.wake();
   }
 
   /// Trigger server-side room discovery from the connected hub.

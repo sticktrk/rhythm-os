@@ -6,9 +6,16 @@ import 'solar_orbit.dart'; // For CelestialColors
 /// Data for a single fan menu item.
 class _FanMenuEntry {
   final IconData icon;
+  final Color? iconColor;
+  final Color? borderColor;
   final VoidCallback onTap;
 
-  const _FanMenuEntry({required this.icon, required this.onTap});
+  const _FanMenuEntry({
+    required this.icon,
+    this.iconColor,
+    this.borderColor,
+    required this.onTap,
+  });
 }
 
 /// Pre-computed animations for a single fan item.
@@ -43,6 +50,10 @@ class BottomNavOverlay extends StatefulWidget {
   final VoidCallback? onFixMyLights;
   /// Whether the fix-my-lights operation is in progress.
   final bool isFixing;
+  /// Current sleep mode state from server.
+  final bool sleepMode;
+  /// Callback to toggle sleep/wake mode.
+  final VoidCallback? onSleepToggle;
 
   const BottomNavOverlay({
     super.key,
@@ -55,6 +66,8 @@ class BottomNavOverlay extends StatefulWidget {
     this.onSettingsModeChanged,
     this.onFixMyLights,
     this.isFixing = false,
+    this.sleepMode = false,
+    this.onSleepToggle,
   });
 
   @override
@@ -63,24 +76,35 @@ class BottomNavOverlay extends StatefulWidget {
 
 class _BottomNavOverlayState extends State<BottomNavOverlay> {
   final _fanMenuKey = GlobalKey<_GearFanMenuState>();
+  final _actionFanMenuKey = GlobalKey<_ActionFanMenuState>();
   bool _fanExpanded = false;
+  bool _actionFanExpanded = false;
 
   @override
   void didUpdateWidget(covariant BottomNavOverlay oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.editMode && !oldWidget.editMode) {
-      _collapseFanMenu();
+      _collapseAllFanMenus();
     }
   }
 
-  void _collapseFanMenu() {
+  void _collapseAllFanMenus() {
     _fanMenuKey.currentState?.collapse();
+    _actionFanMenuKey.currentState?.collapse();
   }
 
-  void _onFanExpandedChanged(bool expanded) {
+  void _onGearExpandedChanged(bool expanded) {
+    if (expanded) _actionFanMenuKey.currentState?.collapse();
     if (_fanExpanded != expanded) {
       setState(() => _fanExpanded = expanded);
       widget.onSettingsModeChanged?.call(expanded);
+    }
+  }
+
+  void _onActionExpandedChanged(bool expanded) {
+    if (expanded) _fanMenuKey.currentState?.collapse();
+    if (_actionFanExpanded != expanded) {
+      setState(() => _actionFanExpanded = expanded);
     }
   }
 
@@ -92,40 +116,43 @@ class _BottomNavOverlayState extends State<BottomNavOverlay> {
         // Dismiss barrier
         if (!widget.editMode)
           _FanMenuBarrier(
-            fanMenuKey: _fanMenuKey,
-            onTap: _collapseFanMenu,
+            isVisible: _fanExpanded || _actionFanExpanded,
+            onTap: _collapseAllFanMenus,
           ),
         // Nav bar content
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-          child: Stack(
-            alignment: Alignment.centerLeft,
+          child: Row(
             children: [
-              // Fix My Lights pill (right-aligned)
-              if (!widget.editMode && widget.onFixMyLights != null)
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: _FixMyLightsPill(
-                    onTap: widget.onFixMyLights!,
-                    isFixing: widget.isFixing,
-                  ),
-                ),
-              // Page dots (centered)
-              if (widget.totalPages > 1)
-                Center(
-                  child: _PageDots(
-                    currentPage: widget.currentPage,
-                    totalPages: widget.totalPages,
-                    pageController: widget.pageController,
-                  ),
-                ),
               // Gear fan menu (left)
               if (!widget.editMode)
                 _GearFanMenu(
                   key: _fanMenuKey,
                   onSettingsTap: widget.onSettingsTap,
                   onSunPositionTap: widget.onSunPositionTap,
-                  onExpandedChanged: _onFanExpandedChanged,
+                  onExpandedChanged: _onGearExpandedChanged,
+                ),
+              // Center spacer (with optional page dots)
+              Expanded(
+                child: widget.totalPages > 1
+                    ? Center(
+                        child: _PageDots(
+                          currentPage: widget.currentPage,
+                          totalPages: widget.totalPages,
+                          pageController: widget.pageController,
+                        ),
+                      )
+                    : const SizedBox.shrink(),
+              ),
+              // Action fan menu (right)
+              if (!widget.editMode && widget.onFixMyLights != null)
+                _ActionFanMenu(
+                  key: _actionFanMenuKey,
+                  onFixMyLights: widget.onFixMyLights!,
+                  isFixing: widget.isFixing,
+                  sleepMode: widget.sleepMode,
+                  onSleepToggle: widget.onSleepToggle,
+                  onExpandedChanged: _onActionExpandedChanged,
                 ),
             ],
           ),
@@ -135,31 +162,17 @@ class _BottomNavOverlayState extends State<BottomNavOverlay> {
   }
 }
 
-/// Transparent barrier that covers the screen when fan menu is expanded.
-/// Tapping it collapses the fan menu.
-class _FanMenuBarrier extends StatefulWidget {
-  final GlobalKey<_GearFanMenuState> fanMenuKey;
+/// Transparent barrier that covers the screen when any fan menu is expanded.
+/// Tapping it collapses all menus.
+class _FanMenuBarrier extends StatelessWidget {
+  final bool isVisible;
   final VoidCallback onTap;
 
-  const _FanMenuBarrier({required this.fanMenuKey, required this.onTap});
-
-  @override
-  State<_FanMenuBarrier> createState() => _FanMenuBarrierState();
-}
-
-class _FanMenuBarrierState extends State<_FanMenuBarrier> {
-  bool _isExpanded = false;
-
-  void _checkExpanded() {
-    final expanded = widget.fanMenuKey.currentState?._isExpanded ?? false;
-    if (expanded != _isExpanded) {
-      setState(() => _isExpanded = expanded);
-    }
-  }
+  const _FanMenuBarrier({required this.isVisible, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    if (!_isExpanded) return const SizedBox.shrink();
+    if (!isVisible) return const SizedBox.shrink();
 
     return Positioned(
       left: 0,
@@ -168,7 +181,7 @@ class _FanMenuBarrierState extends State<_FanMenuBarrier> {
       top: -MediaQuery.of(context).size.height,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: widget.onTap,
+        onTap: onTap,
         child: const ColoredBox(color: Colors.transparent),
       ),
     );
@@ -261,7 +274,6 @@ class _GearFanMenuState extends State<_GearFanMenu>
       _controller.reverse();
     }
     widget.onExpandedChanged?.call(_isExpanded);
-    _notifyBarrier();
   }
 
   void collapse() {
@@ -270,23 +282,6 @@ class _GearFanMenuState extends State<_GearFanMenu>
     setState(() => _isExpanded = false);
     _controller.reverse();
     widget.onExpandedChanged?.call(false);
-    _notifyBarrier();
-  }
-
-  void _notifyBarrier() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      final overlayState = context.findAncestorStateOfType<_BottomNavOverlayState>();
-      if (overlayState == null) return;
-      void visitor(Element element) {
-        if (element is StatefulElement && element.state is _FanMenuBarrierState) {
-          (element.state as _FanMenuBarrierState)._checkExpanded();
-          return;
-        }
-        element.visitChildren(visitor);
-      }
-      overlayState.context.visitChildElements(visitor);
-    });
   }
 
   void _handleFanItemTap(VoidCallback callback) {
@@ -294,7 +289,6 @@ class _GearFanMenuState extends State<_GearFanMenu>
     setState(() => _isExpanded = false);
     _controller.reverse();
     widget.onExpandedChanged?.call(false);
-    _notifyBarrier();
     callback();
   }
 
@@ -392,7 +386,7 @@ class _GearFanMenuState extends State<_GearFanMenu>
                 ),
                 child: Icon(
                   entry.icon,
-                  color: CelestialColors.textSecondary,
+                  color: entry.iconColor ?? CelestialColors.textSecondary,
                   size: 22,
                 ),
               ),
@@ -404,50 +398,91 @@ class _GearFanMenuState extends State<_GearFanMenu>
   }
 }
 
-/// Pill-shaped button that triggers "Fix My Lights" action.
+/// Vertical fan-out menu for quick actions (right side of nav bar).
 ///
-/// Features a warm ambient glow, press-scale animation, and an orbital
-/// spinner during the loading state — consistent with the celestial theme.
-class _FixMyLightsPill extends StatefulWidget {
-  final VoidCallback onTap;
+/// Trigger button fans out upward to reveal:
+/// - Fix My Lights (reset all on-lights to adaptive curve)
+/// - Sleep / Wake toggle (celestial moon/sun icons)
+///
+/// Mirrors [_GearFanMenu] animation style but with vertical layout.
+class _ActionFanMenu extends StatefulWidget {
+  final VoidCallback onFixMyLights;
   final bool isFixing;
+  final bool sleepMode;
+  final VoidCallback? onSleepToggle;
+  final ValueChanged<bool>? onExpandedChanged;
 
-  const _FixMyLightsPill({required this.onTap, required this.isFixing});
+  const _ActionFanMenu({
+    super.key,
+    required this.onFixMyLights,
+    required this.isFixing,
+    this.sleepMode = false,
+    this.onSleepToggle,
+    this.onExpandedChanged,
+  });
 
   @override
-  State<_FixMyLightsPill> createState() => _FixMyLightsPillState();
+  State<_ActionFanMenu> createState() => _ActionFanMenuState();
 }
 
-class _FixMyLightsPillState extends State<_FixMyLightsPill>
+/// Moon glow color for sleep icon — matches onboarding celestial palette.
+const _moonGlow = Color(0xFF7C8EBF);
+
+class _ActionFanMenuState extends State<_ActionFanMenu>
     with TickerProviderStateMixin {
-  late AnimationController _pressController;
-  late AnimationController _glowController;
+  late AnimationController _controller;
   late AnimationController _fixingController;
-  late Animation<double> _pressScale;
-  late Animation<double> _glowPulse;
+  late Animation<double> _triggerRotation;
+  late Animation<double> _crossfade;
+  late List<_FanItemAnimations> _fanAnimations;
+  bool _isExpanded = false;
 
   @override
   void initState() {
     super.initState();
-
-    // Press feedback: quick scale-down and bounce back
-    _pressController = AnimationController(
-      duration: const Duration(milliseconds: 120),
-      reverseDuration: const Duration(milliseconds: 200),
+    _controller = AnimationController(
+      duration: const Duration(milliseconds: 450),
       vsync: this,
     );
-    _pressScale = Tween<double>(begin: 1.0, end: 0.92).animate(
-      CurvedAnimation(parent: _pressController, curve: Curves.easeInOut),
+
+    _triggerRotation = Tween<double>(begin: 0.0, end: math.pi / 4).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.easeOut),
     );
 
-    // Ambient glow pulse (idle state)
-    _glowController = AnimationController(
-      duration: const Duration(milliseconds: 2400),
-      vsync: this,
-    )..repeat(reverse: true);
-    _glowPulse = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _glowController, curve: Curves.easeInOut),
+    _crossfade = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(
+        parent: _controller,
+        curve: const Interval(0.0, 0.4, curve: Curves.easeOut),
+      ),
     );
+
+    // Two fan items with staggered timing (same as gear fan)
+    _fanAnimations = List.generate(2, (i) {
+      final start = 0.05 + i * 0.12;
+      final end = math.min(start + 0.55, 1.0);
+
+      return _FanItemAnimations(
+        scale: Tween<double>(begin: 0.0, end: 1.0).animate(
+          CurvedAnimation(
+            parent: _controller,
+            curve: Interval(start, end, curve: Curves.elasticOut),
+          ),
+        ),
+        opacity: Tween<double>(begin: 0.0, end: 1.0).animate(
+          CurvedAnimation(
+            parent: _controller,
+            curve: Interval(start, math.min(start + 0.3, 1.0),
+                curve: Curves.easeOut),
+          ),
+        ),
+        sizeReveal: Tween<double>(begin: 0.0, end: 1.0).animate(
+          CurvedAnimation(
+            parent: _controller,
+            curve: Interval(start, end, curve: Curves.easeOutCubic),
+          ),
+        ),
+      );
+    });
 
     // Fixing spinner rotation
     _fixingController = AnimationController(
@@ -458,125 +493,195 @@ class _FixMyLightsPillState extends State<_FixMyLightsPill>
   }
 
   @override
-  void didUpdateWidget(covariant _FixMyLightsPill oldWidget) {
+  void didUpdateWidget(covariant _ActionFanMenu oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.isFixing && !oldWidget.isFixing) {
       _fixingController.repeat();
-      _glowController.stop();
     } else if (!widget.isFixing && oldWidget.isFixing) {
       _fixingController.stop();
       _fixingController.reset();
-      _glowController.repeat(reverse: true);
     }
   }
 
   @override
   void dispose() {
-    _pressController.dispose();
-    _glowController.dispose();
+    _controller.dispose();
     _fixingController.dispose();
     super.dispose();
   }
 
-  void _handleTapDown(TapDownDetails _) {
-    if (!widget.isFixing) _pressController.forward();
+  void _toggle() {
+    HapticFeedback.mediumImpact();
+    setState(() => _isExpanded = !_isExpanded);
+    if (_isExpanded) {
+      _controller.forward();
+    } else {
+      _controller.reverse();
+    }
+    widget.onExpandedChanged?.call(_isExpanded);
   }
 
-  void _handleTapUp(TapUpDetails _) {
-    _pressController.reverse();
+  void collapse() {
+    if (!_isExpanded) return;
+    HapticFeedback.lightImpact();
+    setState(() => _isExpanded = false);
+    _controller.reverse();
+    widget.onExpandedChanged?.call(false);
   }
 
-  void _handleTapCancel() {
-    _pressController.reverse();
+  void _handleFanItemTap(VoidCallback callback) {
+    HapticFeedback.selectionClick();
+    setState(() => _isExpanded = false);
+    _controller.reverse();
+    widget.onExpandedChanged?.call(false);
+    callback();
   }
 
-  void _handleTap() {
-    if (!widget.isFixing) widget.onTap();
+  List<_FanMenuEntry> _buildEntries() {
+    return [
+      // Item 0 (closest to trigger): Fix My Lights
+      _FanMenuEntry(
+        icon: Icons.auto_fix_high,
+        iconColor: CelestialColors.sunWarm,
+        borderColor: CelestialColors.sunWarm.withValues(alpha: 0.3),
+        onTap: widget.onFixMyLights,
+      ),
+      // Item 1 (further up): Sleep or Wake
+      if (widget.sleepMode)
+        _FanMenuEntry(
+          icon: Icons.wb_sunny_rounded,
+          iconColor: CelestialColors.sunWarm,
+          borderColor: CelestialColors.sunWarm.withValues(alpha: 0.3),
+          onTap: widget.onSleepToggle ?? () {},
+        )
+      else
+        _FanMenuEntry(
+          icon: Icons.nightlight_round,
+          iconColor: _moonGlow,
+          borderColor: _moonGlow.withValues(alpha: 0.3),
+          onTap: widget.onSleepToggle ?? () {},
+        ),
+    ];
   }
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: Listenable.merge([_pressScale, _glowPulse, _fixingController]),
-      builder: (context, child) {
-        final glowOpacity = widget.isFixing ? 0.5 : 0.15 + 0.15 * _glowPulse.value;
-        final glowSpread = widget.isFixing ? 12.0 : 4.0 + 4.0 * _glowPulse.value;
-        final glowBlur = widget.isFixing ? 20.0 : 8.0 + 8.0 * _glowPulse.value;
-        final borderColor = widget.isFixing
-            ? CelestialColors.sunWarm.withValues(alpha: 0.6)
-            : Color.lerp(
-                CelestialColors.orbitRing.withValues(alpha: 0.5),
-                CelestialColors.sunWarm.withValues(alpha: 0.35),
-                _glowPulse.value,
-              )!;
+    final entries = _buildEntries();
 
-        return Transform.scale(
-          scale: _pressScale.value,
-          child: GestureDetector(
-            onTapDown: _handleTapDown,
-            onTapUp: _handleTapUp,
-            onTapCancel: _handleTapCancel,
-            onTap: _handleTap,
-            child: Container(
-              height: 44,
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(22),
-                color: CelestialColors.backgroundCard.withValues(alpha: 0.85),
-                border: Border.all(color: borderColor, width: 1),
-                boxShadow: [
-                  BoxShadow(
-                    color: CelestialColors.sunWarm.withValues(alpha: glowOpacity),
-                    blurRadius: glowBlur,
-                    spreadRadius: glowSpread,
-                  ),
-                ],
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _buildIcon(),
-                  const SizedBox(width: 8),
-                  Text(
-                    widget.isFixing ? 'Fixing...' : 'Fix My Lights',
-                    style: TextStyle(
-                      color: widget.isFixing
-                          ? CelestialColors.sunWarm
-                          : CelestialColors.textPrimary,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                      letterSpacing: 0.3,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
+    return AnimatedBuilder(
+      animation: Listenable.merge([_controller, _fixingController]),
+      builder: (context, _) {
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            // Fan items (expand upward — reverse order so furthest is first)
+            for (int i = entries.length - 1; i >= 0; i--)
+              _buildVerticalFanItem(entries[i], _fanAnimations[i]),
+            // Trigger button (always visible, bottom of column)
+            _buildTriggerButton(),
+          ],
         );
       },
     );
   }
 
-  Widget _buildIcon() {
-    if (widget.isFixing) {
-      return Transform.rotate(
-        angle: _fixingController.value * 2 * math.pi,
-        child: SizedBox(
-          width: 20,
-          height: 20,
-          child: CustomPaint(
-            painter: _OrbitalSpinnerPainter(
-              color: CelestialColors.sunWarm,
-              progress: _fixingController.value,
+  Widget _buildVerticalFanItem(
+      _FanMenuEntry entry, _FanItemAnimations anims) {
+    return Align(
+      alignment: Alignment.bottomCenter,
+      heightFactor: anims.sizeReveal.value,
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Opacity(
+          opacity: anims.opacity.value.clamp(0.0, 1.0),
+          child: Transform.scale(
+            scale: anims.scale.value.clamp(0.0, 1.5),
+            child: GestureDetector(
+              onTap: () => _handleFanItemTap(entry.onTap),
+              child: Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: CelestialColors.backgroundCard.withValues(alpha: 0.8),
+                  border: Border.all(
+                    color: entry.borderColor ??
+                        CelestialColors.orbitRing.withValues(alpha: 0.5),
+                    width: 1,
+                  ),
+                ),
+                child: Icon(
+                  entry.icon,
+                  color: entry.iconColor ?? CelestialColors.textSecondary,
+                  size: 22,
+                ),
+              ),
             ),
           ),
         ),
-      );
-    }
-    return const Icon(
-      Icons.auto_fix_high,
-      color: CelestialColors.sunWarm,
-      size: 20,
+      ),
+    );
+  }
+
+  Widget _buildTriggerButton() {
+    return GestureDetector(
+      onTap: _toggle,
+      child: Transform.rotate(
+        angle: _triggerRotation.value,
+        child: Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: CelestialColors.backgroundCard.withValues(alpha: 0.8),
+            border: Border.all(
+              color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+              width: 1,
+            ),
+          ),
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              // Wand icon (idle) or orbital spinner (fixing)
+              Opacity(
+                opacity: (1.0 - _crossfade.value).clamp(0.0, 1.0),
+                child: widget.isFixing
+                    ? Transform.rotate(
+                        angle: _fixingController.value * 2 * math.pi,
+                        child: SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CustomPaint(
+                            painter: _OrbitalSpinnerPainter(
+                              color: CelestialColors.sunWarm,
+                              progress: _fixingController.value,
+                            ),
+                          ),
+                        ),
+                      )
+                    : const Icon(
+                        Icons.auto_fix_high,
+                        color: CelestialColors.sunWarm,
+                        size: 22,
+                      ),
+              ),
+              // Close icon (expanded)
+              Transform.rotate(
+                angle: -_triggerRotation.value,
+                child: Opacity(
+                  opacity: _crossfade.value.clamp(0.0, 1.0),
+                  child: const Icon(
+                    Icons.close,
+                    color: CelestialColors.textSecondary,
+                    size: 22,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
