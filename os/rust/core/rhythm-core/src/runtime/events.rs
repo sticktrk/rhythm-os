@@ -76,6 +76,12 @@ pub enum ButtonAction {
 
     /// Turn lights fully off (bypasses soft-off, maps to lights_off)
     LightsOff,
+
+    /// Activate sleep mode: switch to sleep curve + turn off room
+    SleepOn,
+
+    /// Deactivate sleep mode: switch to rhythm curve + turn on room
+    SleepOff,
 }
 
 impl ButtonAction {
@@ -182,6 +188,8 @@ impl ButtonAction {
             "dim_down" => Some(Self::DownPress),
             "reset" => Some(Self::Reset),
             "lights_off" => Some(Self::LightsOff),
+            "sleep_on" => Some(Self::SleepOn),
+            "sleep_off" => Some(Self::SleepOff),
             _ => None,
         }
     }

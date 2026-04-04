@@ -243,6 +243,9 @@ impl StoredLocation {
 pub struct StoredSettings {
     pub rhythm_interval_secs: u64,
     pub power_save: bool,
+    /// Whether sleep mode is active. Defaults to false for backwards compat.
+    #[serde(default)]
+    pub sleep_mode: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -453,7 +456,9 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
         // Sync curve-provided motion timeout as the baseline default.
         // StoredSettings load below may override this if the user set it explicitly.
         s.default_motion_timeout_secs =
-            s.config.motion_timeout_secs.unwrap_or(rhythm_core::config::DEFAULT_MOTION_TIMEOUT_SECS) as u64;
+            s.config
+                .motion_timeout_secs
+                .unwrap_or(rhythm_core::config::DEFAULT_MOTION_TIMEOUT_SECS) as u64;
         let c = &s.config;
         info!(target: "sys", "Loaded config: bri={}–{}%, cct={}–{}K, width_bri=L{}/R{}, width_cct=L{}/R{}, shape_p={}, solar_noon={}",
             c.min_brightness, c.max_brightness,
@@ -476,7 +481,8 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
     if let Ok(settings) = storage.load_settings() {
         s.runtime_config.update_interval_secs = settings.rhythm_interval_secs;
         s.power_save = settings.power_save;
-        info!(target: "sys", "Loaded settings: interval={}s", s.runtime_config.update_interval_secs);
+        s.sleep_mode = settings.sleep_mode;
+        info!(target: "sys", "Loaded settings: interval={}s, sleep_mode={}", s.runtime_config.update_interval_secs, s.sleep_mode);
     }
 
     // Load hub credentials
@@ -703,11 +709,13 @@ mod tests {
             let settings = StoredSettings {
                 rhythm_interval_secs: 120,
                 power_save: true,
+                sleep_mode: true,
             };
             storage.save_settings(&settings).unwrap();
             let loaded = storage.load_settings().unwrap();
             assert_eq!(loaded.rhythm_interval_secs, 120);
             assert!(loaded.power_save);
+            assert!(loaded.sleep_mode);
             cleanup(&path);
         }
 

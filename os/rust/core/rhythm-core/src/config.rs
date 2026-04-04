@@ -84,13 +84,19 @@ pub struct CurveConfig {
 
     /// Light transition fade duration in milliseconds.
     /// `None` = auto (curve decides, default 500ms). `Some(v)` = manual override.
-    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub fade_ms: Option<u16>,
 
     /// Motion timeout in seconds.
     /// `None` = auto (curve varies by time of day). `Some(v)` = manual override.
     /// Per-room overrides take precedence over this value.
-    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub motion_timeout_secs: Option<u16>,
 }
 

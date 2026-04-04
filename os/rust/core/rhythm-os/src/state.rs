@@ -169,6 +169,8 @@ pub struct AppState {
     /// Power save mode. When false, lights dim to soft-off brightness
     /// instead of turning fully off.
     pub power_save: bool,
+    /// Whether sleep mode is active (sleep curve is the active module).
+    pub sleep_mode: bool,
 
     // ---- Storage ----
     /// Platform-specific storage backend.
@@ -322,6 +324,7 @@ impl Default for AppState {
             default_motion_timeout_secs: default_motion_timeout,
             default_fade_ms: default_fade,
             power_save: false,
+            sleep_mode: false,
             storage: None,
             work_tx: None,
             pending_hub_event_rxs: Vec::new(),
@@ -425,7 +428,6 @@ impl AppState {
     pub fn solar_midnight_hour(&self) -> f32 {
         self.runtime_config.solar_midnight_hour()
     }
-
 }
 
 #[cfg(feature = "desktop")]
@@ -599,6 +601,12 @@ mod tests {
             }
             fn current_hour(&self) -> f32 {
                 12.0
+            }
+            fn set_curve_module(&self, _: &str) -> bool {
+                true
+            }
+            fn active_curve_module_id(&self) -> String {
+                "rhythm".into()
             }
         }
 

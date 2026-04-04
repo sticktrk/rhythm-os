@@ -102,6 +102,9 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/curve", get(get_curve).post(post_curve_preview))
         .route("/api/curve/now", get(get_curve_now))
         .route("/api/curve/solar", get(get_curve_solar))
+        // Sleep mode
+        .route("/api/sleep", put(put_sleep))
+        .route("/api/wake", put(put_wake))
 }
 
 // ---------------------------------------------------------------------------
@@ -167,7 +170,7 @@ async fn absorb_time_offset(
     State(state): State<SharedState>,
     Json(body): Json<Value>,
 ) -> ApiResponse {
-    handlers::handle_absorb_time_offset(&state, &body)
+    run_blocking(move || handlers::handle_absorb_time_offset(&state, &body)).await
 }
 
 async fn reset_config(State(state): State<SharedState>) -> ApiResponse {
@@ -352,6 +355,14 @@ fn parse_curve_query(params: &HashMap<String, String>) -> handlers::CurveQueryPa
     }
 }
 
+async fn put_sleep(State(state): State<SharedState>) -> ApiResponse {
+    run_blocking(move || handlers::handle_put_sleep(&state)).await
+}
+
+async fn put_wake(State(state): State<SharedState>) -> ApiResponse {
+    run_blocking(move || handlers::handle_put_wake(&state)).await
+}
+
 // ---------------------------------------------------------------------------
 // Blocking handlers — run on a real std::thread (not spawn_blocking)
 // because reqwest::blocking::Client panics if used inside a tokio runtime.
@@ -488,12 +499,167 @@ async fn sse_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
+    use axum::body::Body;
     use axum::http::{Method as HttpMethod, Request, StatusCode};
+    use rhythm_core::{CurveConfig, RoomSnapshot, RuntimeHandle, SolarTime};
+    use serde_json::json;
     use tower::util::ServiceExt;
 
+    use crate::canonical::identity::HubKey;
+    use crate::hub::{ActiveHub, HubType};
     use crate::routes::SHARED_API_ROUTES;
+
+    struct ThreadRecordingRuntime {
+        calls: Arc<Mutex<Vec<String>>>,
+        snapshots: Vec<RoomSnapshot>,
+        current_hour: f32,
+    }
+
+    impl ThreadRecordingRuntime {
+        fn record(&self, op: &str) {
+            let current_thread = std::thread::current();
+            let thread_name = current_thread.name().unwrap_or("unnamed").to_string();
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{op}@{thread_name}"));
+        }
+    }
+
+    impl RuntimeHandle for ThreadRecordingRuntime {
+        fn handle_event(&self, _: &rhythm_core::InputEvent) -> anyhow::Result<bool> {
+            self.record("handle_event");
+            Ok(true)
+        }
+
+        fn sync_rooms(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_solar(&self, _: SolarTime) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_curve_config(&self, _: CurveConfig) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn periodic_tick_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn engine_room_snapshot(&self, room_id: &str) -> Option<RoomSnapshot> {
+            self.snapshots
+                .iter()
+                .find(|snap| snap.id == room_id)
+                .cloned()
+        }
+
+        fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot> {
+            self.snapshots.clone()
+        }
+
+        fn restore_room_state(&self, _: &str, _: bool, _: bool, _: f32, _: f32, _: bool) {}
+
+        fn add_room(&self, _: &str, _: &str) {}
+
+        fn remove_room(&self, _: &str) {}
+
+        fn dim_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn turn_on_room(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_power_save(&self, _: bool) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn is_power_save(&self) -> bool {
+            false
+        }
+
+        fn set_room_brightness(&self, _: &str, _: u8) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_room_time_offset(&self, _: &str, _: f32) -> anyhow::Result<()> {
+            self.record("set_room_time_offset");
+            Ok(())
+        }
+
+        fn idle_brightness(&self) -> u8 {
+            1
+        }
+
+        fn soft_off_tick_room(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn any_lights_on(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        fn current_hour(&self) -> f32 {
+            self.current_hour
+        }
+
+        fn set_curve_module(&self, _: &str) -> bool {
+            self.record("set_curve_module");
+            true
+        }
+
+        fn active_curve_module_id(&self) -> String {
+            "rhythm".to_string()
+        }
+    }
+
+    fn test_state_with_runtime(
+        runtime: Arc<dyn RuntimeHandle>,
+        room_lights_on: &[(&str, bool)],
+    ) -> SharedState {
+        let mut app_state = crate::state::AppState::default();
+        let hub_type = HubType::new("test");
+        let hub_key = HubKey::new(hub_type.clone(), "hub.local");
+        app_state.hubs.insert(
+            hub_key.clone(),
+            ActiveHub {
+                hub_type,
+                hub_key,
+                runtime: Some(runtime),
+                hub_data: Box::new(()),
+                registry: None,
+                discovery: None,
+                shutdown: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        for (room_id, lights_on) in room_lights_on {
+            app_state
+                .room_lights_on
+                .insert((*room_id).to_string(), *lights_on);
+        }
+        Arc::new(Mutex::new(app_state))
+    }
+
+    async fn call_json_route(
+        app: Router,
+        method: HttpMethod,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> StatusCode {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        app.oneshot(req).await.unwrap().status()
+    }
 
     /// Verify every shared route is registered in the axum router.
     ///
@@ -533,5 +699,108 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn absorb_offset_runs_on_handler_thread() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(ThreadRecordingRuntime {
+            calls: calls.clone(),
+            snapshots: vec![RoomSnapshot {
+                id: "room1".into(),
+                name: "Room 1".into(),
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 15.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+            }],
+            current_hour: 8.0,
+        });
+        let state = test_state_with_runtime(runtime, &[]);
+        let app = api_routes().with_state(state);
+
+        let status = call_json_route(
+            app,
+            HttpMethod::POST,
+            "/api/config/absorb-offset",
+            json!({ "offset_minutes": 30.0 }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "set_room_time_offset@http-handler"));
+    }
+
+    #[tokio::test]
+    async fn sleep_runs_on_handler_thread() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(ThreadRecordingRuntime {
+            calls: calls.clone(),
+            snapshots: vec![RoomSnapshot {
+                id: "room1".into(),
+                name: "Room 1".into(),
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+            }],
+            current_hour: 12.0,
+        });
+        let state = test_state_with_runtime(runtime, &[("room1", true)]);
+        let app = api_routes().with_state(state);
+
+        let req = Request::builder()
+            .method(HttpMethod::PUT)
+            .uri("/api/sleep")
+            .body(Body::empty())
+            .unwrap();
+        let status = app.oneshot(req).await.unwrap().status();
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let calls = calls.lock().unwrap();
+        assert!(calls
+            .iter()
+            .any(|call| call == "set_curve_module@http-handler"));
+        assert!(calls.iter().any(|call| call == "handle_event@http-handler"));
+    }
+
+    #[tokio::test]
+    async fn wake_runs_on_handler_thread() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(ThreadRecordingRuntime {
+            calls: calls.clone(),
+            snapshots: vec![RoomSnapshot {
+                id: "room1".into(),
+                name: "Room 1".into(),
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+            }],
+            current_hour: 12.0,
+        });
+        let state = test_state_with_runtime(runtime, &[("room1", true)]);
+        let app = api_routes().with_state(state);
+
+        let req = Request::builder()
+            .method(HttpMethod::PUT)
+            .uri("/api/wake")
+            .body(Body::empty())
+            .unwrap();
+        let status = app.oneshot(req).await.unwrap().status();
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let calls = calls.lock().unwrap();
+        assert!(calls
+            .iter()
+            .any(|call| call == "set_curve_module@http-handler"));
+        assert!(calls.iter().any(|call| call == "handle_event@http-handler"));
     }
 }

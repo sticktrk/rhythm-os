@@ -15,9 +15,7 @@ use std::thread;
 #[cfg(feature = "blocking")]
 use std::time::Duration;
 
-use log::info;
-#[cfg(feature = "blocking")]
-use log::warn;
+use log::{info, warn};
 #[cfg(feature = "blocking")]
 use rhythm_core::{BlockingTimeProvider, LightCurveModule, TimeProvider};
 
@@ -189,7 +187,12 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             }
         }
 
+        // Read last_check_hour before check_solar_midnight updates it
+        let last_hour = state.lock().ok().and_then(|s| s.last_check_hour);
         check_solar_midnight(&state, current_hour);
+        if let Some(last) = last_hour {
+            check_sunrise_sleep_deactivate(&state, last, current_hour);
+        }
 
         // Use curve-suggested tick interval if available, otherwise configured default
         let sleep_duration = values
@@ -278,6 +281,50 @@ pub fn check_solar_midnight(state: &SharedState, current_hour: f32) {
                     );
                 }
             }
+        }
+    }
+}
+
+/// Auto-deactivate sleep mode at sunrise.
+///
+/// Uses the same crossing detection as `check_solar_midnight`.
+/// Sunrise is computed from lat/lon/timezone if available, otherwise
+/// estimated as solar_noon - 6 hours.
+pub fn check_sunrise_sleep_deactivate(state: &SharedState, last_hour: f32, current_hour: f32) {
+    let (sleep_mode, sunrise) = {
+        let Ok(s) = state.lock() else { return };
+
+        if !s.sleep_mode {
+            return;
+        }
+
+        // Compute sunrise hour from location
+        let sunrise = if let (Some(lat), Some(lon)) = (s.latitude, s.longitude) {
+            use chrono::Datelike;
+            let now = chrono::Utc::now().naive_utc();
+            let (year, month, day) = (now.date().year(), now.date().month(), now.date().day());
+            if let Some(ref tz_name) = s.timezone_name {
+                let tz = rhythm_core::Timezone::new(tz_name);
+                let st = rhythm_core::calculate_sun_times(lat, lon, year, month, day, &tz);
+                st.sunrise
+            } else {
+                // Estimate: sunrise ≈ solar_noon - 6h
+                (s.solar_noon_hour() - 6.0).rem_euclid(24.0)
+            }
+        } else {
+            rhythm_core::config::FALLBACK_SUNRISE_HOUR
+        };
+
+        (s.sleep_mode, sunrise)
+    };
+
+    if sleep_mode && rhythm_core::crossed_solar_midnight(last_hour, current_hour, sunrise) {
+        info!(
+            "Sunrise crossed (last={:.2}, now={:.2}, sunrise={:.2}) - auto-deactivating sleep mode",
+            last_hour, current_hour, sunrise
+        );
+        if let Err(e) = crate::commands::do_wake(state) {
+            warn!("Failed to auto-deactivate sleep mode: {}", e);
         }
     }
 }
@@ -611,6 +658,12 @@ mod tests {
             }
             fn current_hour(&self) -> f32 {
                 12.0
+            }
+            fn set_curve_module(&self, _: &str) -> bool {
+                true
+            }
+            fn active_curve_module_id(&self) -> String {
+                "rhythm".into()
             }
         }
 

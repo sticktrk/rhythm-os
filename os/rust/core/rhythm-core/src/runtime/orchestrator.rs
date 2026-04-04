@@ -222,6 +222,18 @@ where
                 engine.lights_off(&event.room_id).await?;
                 Ok(false)
             }
+            ButtonAction::SleepOn => {
+                info!("sleep_on for {}", event.room_id);
+                engine.set_curve_module(crate::curve_module::SleepCurveModule::ID);
+                engine.turn_off(&event.room_id, current_hour).await?;
+                Ok(false)
+            }
+            ButtonAction::SleepOff => {
+                info!("sleep_off for {}", event.room_id);
+                engine.set_curve_module(crate::curve_module::RhythmCurveModule::ID);
+                engine.turn_on(&event.room_id, current_hour).await?;
+                Ok(true)
+            }
         }
     }
 

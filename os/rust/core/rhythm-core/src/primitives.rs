@@ -282,8 +282,7 @@ impl<C: LightController> RhythmEngine<C> {
         let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
 
         // Create command and send
-        let command =
-            LightingCommand::with_transition(brightness, values.kelvin, values.transition_ms);
+        let command = Self::build_command(&values, brightness);
         self.controller.turn_on(room_id, command).await
     }
 
@@ -320,8 +319,7 @@ impl<C: LightController> RhythmEngine<C> {
         let brightness =
             ((values.brightness as f32 + brightness_offset) * factor).clamp(1.0, 100.0) as u8;
 
-        let command =
-            LightingCommand::with_transition(brightness, values.kelvin, values.transition_ms);
+        let command = Self::build_command(&values, brightness);
         self.controller.turn_on(room_id, command).await
     }
 
@@ -507,8 +505,7 @@ impl<C: LightController> RhythmEngine<C> {
         let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
 
         // Send command
-        let command =
-            LightingCommand::with_transition(brightness, values.kelvin, values.transition_ms);
+        let command = Self::build_command(&values, brightness);
         self.controller.turn_on(room_id, command).await
     }
 
@@ -545,7 +542,7 @@ impl<C: LightController> RhythmEngine<C> {
         let room = self.rooms.get_or_create(room_id, room_id);
         room.brightness_offset = target as f32 - values.brightness as f32;
 
-        let command = LightingCommand::with_transition(target, values.kelvin, values.transition_ms);
+        let command = Self::build_command(&values, target);
         self.controller.turn_on(room_id, command).await
     }
 
@@ -588,13 +585,12 @@ impl<C: LightController> RhythmEngine<C> {
         if soft_off && !self.power_save {
             // Soft-off: use idle curve values (brightness + color)
             let idle_values = module.calculate_idle(&ctx);
-            let cmd = self.idle_command(&idle_values);
+            let cmd = Self::build_command(&idle_values, idle_values.brightness);
             self.controller.turn_on(room_id, cmd).await
         } else {
             // On: send full adaptive values preserving brightness_offset
             let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
-            let cmd =
-                LightingCommand::with_transition(brightness, values.kelvin, values.transition_ms);
+            let cmd = Self::build_command(&values, brightness);
             self.controller.turn_on(room_id, cmd).await
         }
     }
@@ -647,7 +643,7 @@ impl<C: LightController> RhythmEngine<C> {
             let module = self.module_registry.active_module();
             let values = module.calculate_idle(&ctx.with_offset(offset));
 
-            let cmd = self.idle_command(&values);
+            let cmd = Self::build_command(&values, values.brightness);
             self.controller.turn_on(room_id, cmd).await
         }
     }
@@ -742,15 +738,20 @@ impl<C: LightController> RhythmEngine<C> {
         (updated, errors)
     }
 
-    /// Build a LightingCommand for idle mode from curve values.
+    /// Build a LightingCommand from curve values, respecting `is_direct_color`.
     ///
-    /// The idle curve's brightness is authoritative (e.g. 1% for soft-off).
-    fn idle_command(&self, values: &crate::adaptive::LightingValues) -> LightingCommand {
-        let bri = values.brightness;
+    /// When `is_direct_color` is true (idle curve, sleep curve), sends XY/RGB.
+    /// Otherwise sends kelvin.
+    fn build_command(values: &crate::adaptive::LightingValues, brightness: u8) -> LightingCommand {
         if values.is_direct_color {
-            LightingCommand::from_color(bri, values.rgb, values.xy, Some(values.transition_ms))
+            LightingCommand::from_color(
+                brightness,
+                values.rgb,
+                values.xy,
+                Some(values.transition_ms),
+            )
         } else {
-            LightingCommand::with_transition(bri, values.kelvin, values.transition_ms)
+            LightingCommand::with_transition(brightness, values.kelvin, values.transition_ms)
         }
     }
 
@@ -773,7 +774,7 @@ impl<C: LightController> RhythmEngine<C> {
         let module = self.module_registry.active_module();
         let values = module.calculate_idle(&ctx.with_offset(offset));
 
-        let cmd = self.idle_command(&values);
+        let cmd = Self::build_command(&values, values.brightness);
         self.controller.turn_on(room_id, cmd).await
     }
 

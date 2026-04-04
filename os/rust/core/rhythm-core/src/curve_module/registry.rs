@@ -10,7 +10,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use super::{LightCurveModule, RhythmCurveModule};
+use super::{LightCurveModule, RhythmCurveModule, SleepCurveModule};
 use crate::config::CurveConfig;
 
 /// Registry for curve modules.
@@ -51,6 +51,7 @@ impl CurveModuleRegistry {
 
         // Register built-in modules
         registry.register(Arc::new(RhythmCurveModule::with_defaults()));
+        registry.register(Arc::new(SleepCurveModule::with_defaults()));
 
         registry
     }
@@ -65,6 +66,7 @@ impl CurveModuleRegistry {
 
         // Register built-in modules
         registry.register(Arc::new(RhythmCurveModule::new(config)));
+        registry.register(Arc::new(SleepCurveModule::with_defaults()));
 
         registry
     }
@@ -173,6 +175,16 @@ impl CurveModuleRegistry {
     pub fn rhythm_module(&self) -> Option<Arc<dyn LightCurveModule>> {
         self.get(RhythmCurveModule::ID)
     }
+
+    /// Update the configuration of the sleep module.
+    pub fn update_sleep_config(&mut self, config: CurveConfig) {
+        self.register(Arc::new(SleepCurveModule::new(config)));
+    }
+
+    /// Check if the sleep curve is currently active.
+    pub fn is_sleep_active(&self) -> bool {
+        self.active_module_id == SleepCurveModule::ID
+    }
 }
 
 impl Default for CurveModuleRegistry {
@@ -200,8 +212,9 @@ mod tests {
     fn test_registry_new() {
         let registry = CurveModuleRegistry::new();
 
-        assert_eq!(registry.module_count(), 1);
+        assert_eq!(registry.module_count(), 2); // rhythm + sleep
         assert!(registry.contains(RhythmCurveModule::ID));
+        assert!(registry.contains(SleepCurveModule::ID));
         assert_eq!(registry.active_module_id(), RhythmCurveModule::ID);
         assert_eq!(registry.default_module_id(), RhythmCurveModule::ID);
     }
@@ -235,8 +248,9 @@ mod tests {
         let registry = CurveModuleRegistry::new();
         let modules = registry.available_modules();
 
-        assert_eq!(modules.len(), 1);
+        assert_eq!(modules.len(), 2);
         assert!(modules.iter().any(|(id, _)| *id == RhythmCurveModule::ID));
+        assert!(modules.iter().any(|(id, _)| *id == SleepCurveModule::ID));
     }
 
     #[test]
@@ -315,7 +329,7 @@ mod tests {
         }
 
         registry.register(Arc::new(TestModule));
-        assert_eq!(registry.module_count(), 2); // rhythm + test
+        assert_eq!(registry.module_count(), 3); // rhythm + sleep + test
         assert!(registry.contains("test"));
 
         // Set test as active
@@ -328,7 +342,7 @@ mod tests {
         // Switch back and unregister
         registry.set_active_module(RhythmCurveModule::ID);
         assert!(registry.unregister("test"));
-        assert_eq!(registry.module_count(), 1);
+        assert_eq!(registry.module_count(), 2); // rhythm + sleep
     }
 
     #[test]
@@ -437,5 +451,33 @@ mod tests {
         assert!(debug_str.contains("CurveModuleRegistry"));
         assert!(debug_str.contains("module_count"));
         assert!(debug_str.contains("rhythm"));
+    }
+
+    #[test]
+    fn test_is_sleep_active() {
+        let mut registry = CurveModuleRegistry::new();
+        assert!(!registry.is_sleep_active());
+
+        registry.set_active_module(SleepCurveModule::ID);
+        assert!(registry.is_sleep_active());
+
+        registry.reset_to_default();
+        assert!(!registry.is_sleep_active());
+    }
+
+    #[test]
+    fn test_update_sleep_config() {
+        let mut registry = CurveModuleRegistry::new();
+        registry.set_active_module(SleepCurveModule::ID);
+
+        registry.update_sleep_config(CurveConfig {
+            min_brightness: 5,
+            max_brightness: 60,
+            ..Default::default()
+        });
+
+        let module = registry.active_module();
+        assert_eq!(module.min_brightness(), 5);
+        assert_eq!(module.max_brightness(), 60);
     }
 }

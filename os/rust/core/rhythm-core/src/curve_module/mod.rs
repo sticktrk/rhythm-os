@@ -15,11 +15,13 @@ mod config;
 mod idle;
 mod registry;
 mod rhythm;
+mod sleep;
 
 pub use config::CurveModuleConfig;
 pub use idle::{IdleCurveConfig, IdleCurveModule};
 pub use registry::CurveModuleRegistry;
 pub use rhythm::RhythmCurveModule;
+pub use sleep::SleepCurveModule;
 
 // Re-export from rhythm-curve
 pub use rhythm_curve::{CommonCurveConfig, CurveContext, LightCurveModule};

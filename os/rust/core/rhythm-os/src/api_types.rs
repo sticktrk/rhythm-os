@@ -132,6 +132,7 @@ pub struct LocationDto {
 pub struct SettingsDto {
     pub rhythm_interval_secs: u64,
     pub power_save: bool,
+    pub sleep_mode: bool,
 }
 
 /// A typed device entry.
@@ -439,6 +440,7 @@ mod tests {
         let dto = SettingsDto {
             rhythm_interval_secs: 60,
             power_save: true,
+            sleep_mode: false,
         };
         let json: Value = serde_json::to_value(&dto).unwrap();
         assert_eq!(json["rhythm_interval_secs"], 60);
@@ -598,6 +600,7 @@ mod tests {
             settings: SettingsDto {
                 rhythm_interval_secs: 60,
                 power_save: false,
+                sleep_mode: false,
             },
             rooms: vec![],
             last_tick_epoch_ms: 1700000000000,
@@ -644,6 +647,7 @@ mod tests {
             settings: SettingsDto {
                 rhythm_interval_secs: 60,
                 power_save: false,
+                sleep_mode: false,
             },
             rooms: vec![RoomFullState {
                 rhythm: sample_rhythm_state(),

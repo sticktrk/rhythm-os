@@ -58,7 +58,7 @@ pub use config::{CurveConfig, SolarContext};
 pub use controller::{LightControlError, LightControlResult, LightController, NoOpController};
 pub use curve_module::{
     CommonCurveConfig, CurveContext, CurveModuleConfig, CurveModuleRegistry, LightCurveModule,
-    RhythmCurveModule,
+    RhythmCurveModule, SleepCurveModule,
 };
 pub use curves::{inverse_super_gaussian, map_super_gaussian};
 #[cfg(feature = "serde")]

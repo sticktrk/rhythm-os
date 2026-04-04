@@ -98,6 +98,12 @@ pub trait RuntimeHandle: Send + Sync {
 
     /// Get the current local hour from the time provider (0.0–24.0).
     fn current_hour(&self) -> f32;
+
+    /// Set the active curve module by ID. Returns true if found.
+    fn set_curve_module(&self, id: &str) -> bool;
+
+    /// Get the ID of the currently active curve module.
+    fn active_curve_module_id(&self) -> String;
 }
 
 // ============================================================================
@@ -321,6 +327,21 @@ where
 
     fn current_hour(&self) -> f32 {
         RhythmRuntime::current_hour(self)
+    }
+
+    fn set_curve_module(&self, id: &str) -> bool {
+        if let Ok(mut engine) = self.engine().write() {
+            engine.set_curve_module(id)
+        } else {
+            false
+        }
+    }
+
+    fn active_curve_module_id(&self) -> String {
+        self.engine()
+            .read()
+            .map(|e| e.module_registry().active_module_id().to_string())
+            .unwrap_or_default()
     }
 }
 

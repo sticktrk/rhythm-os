@@ -238,6 +238,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         let settings_dto = SettingsDto {
             rhythm_interval_secs: s.runtime_config.update_interval_secs,
             power_save: s.power_save,
+            sleep_mode: s.sleep_mode,
         };
 
         let fw_version = s.firmware_version;
@@ -758,8 +759,7 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
 /// Build the current curve config as a JSON string.
 pub fn build_config(state: &SharedState) -> Result<String> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    serde_json::to_string(&s.config)
-        .map_err(|e| anyhow::anyhow!("serialize config: {}", e))
+    serde_json::to_string(&s.config).map_err(|e| anyhow::anyhow!("serialize config: {}", e))
 }
 
 // ============================================================================
@@ -772,6 +772,7 @@ pub fn build_settings_dto(state: &SharedState) -> Result<SettingsDto> {
     Ok(SettingsDto {
         rhythm_interval_secs: s.runtime_config.update_interval_secs,
         power_save: s.power_save,
+        sleep_mode: s.sleep_mode,
     })
 }
 
@@ -814,6 +815,7 @@ pub fn do_settings_set(
             let stored = StoredSettings {
                 rhythm_interval_secs: s.runtime_config.update_interval_secs,
                 power_save: s.power_save,
+                sleep_mode: s.sleep_mode,
             };
             if let Err(e) = storage.save_settings(&stored) {
                 warn!(target: "cmd", "Failed to save settings: {}", e);
@@ -1578,6 +1580,75 @@ pub fn do_config_set(state: &SharedState, config: CurveConfig) -> Result<()> {
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
 
     Ok(())
+}
+
+/// Activate sleep mode: switch all runtimes to the sleep curve.
+pub fn do_sleep(state: &SharedState) -> Result<()> {
+    info!(target: "cmd", "sleep: activating sleep mode");
+
+    let runtimes: Vec<_> = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.sleep_mode = true;
+        s.hubs.values().filter_map(|h| h.runtime.clone()).collect()
+    };
+
+    for rt in &runtimes {
+        rt.set_curve_module(rhythm_core::SleepCurveModule::ID);
+    }
+
+    // Reset all on-rooms so lights immediately move to the sleep curve
+    if let Err(e) = do_fix_my_lights(state, false) {
+        warn!(target: "cmd", "sleep: fix_my_lights failed: {}", e);
+    }
+
+    persist_sleep_mode(state, true);
+
+    #[cfg(feature = "desktop")]
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::SettingsChanged);
+
+    Ok(())
+}
+
+/// Deactivate sleep mode: switch all runtimes back to the rhythm curve.
+pub fn do_wake(state: &SharedState) -> Result<()> {
+    info!(target: "cmd", "wake: deactivating sleep mode");
+
+    let runtimes: Vec<_> = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.sleep_mode = false;
+        s.hubs.values().filter_map(|h| h.runtime.clone()).collect()
+    };
+
+    for rt in &runtimes {
+        rt.set_curve_module(rhythm_core::RhythmCurveModule::ID);
+    }
+
+    // Reset all on-rooms so lights immediately move to the rhythm curve
+    if let Err(e) = do_fix_my_lights(state, false) {
+        warn!(target: "cmd", "wake: fix_my_lights failed: {}", e);
+    }
+
+    persist_sleep_mode(state, false);
+
+    #[cfg(feature = "desktop")]
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::SettingsChanged);
+
+    Ok(())
+}
+
+/// Persist sleep mode to storage.
+fn persist_sleep_mode(state: &SharedState, sleep_mode: bool) {
+    if let Ok(s) = state.lock() {
+        if let Some(ref storage) = s.storage {
+            if let Err(e) = storage.save_settings(&crate::storage::StoredSettings {
+                rhythm_interval_secs: s.runtime_config.update_interval_secs,
+                power_save: s.power_save,
+                sleep_mode,
+            }) {
+                warn!(target: "cmd", "Failed to save settings: {}", e);
+            }
+        }
+    }
 }
 
 /// Absorb a time offset into the curve config by adjusting ramp widths.
@@ -3082,6 +3153,12 @@ mod tests {
         }
         fn current_hour(&self) -> f32 {
             12.0
+        }
+        fn set_curve_module(&self, _: &str) -> bool {
+            true
+        }
+        fn active_curve_module_id(&self) -> String {
+            "rhythm".into()
         }
     }
 

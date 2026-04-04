@@ -913,9 +913,21 @@ mod tests {
         let module = RhythmCurveModule::new(config);
 
         // Manual value returned at all times of day
-        assert_eq!(module.calculate(&test_context(7.0)).motion_timeout_secs, 600);
-        assert_eq!(module.calculate(&test_context(12.0)).motion_timeout_secs, 600);
-        assert_eq!(module.calculate(&test_context(16.0)).motion_timeout_secs, 600);
-        assert_eq!(module.calculate(&test_context(23.0)).motion_timeout_secs, 600);
+        assert_eq!(
+            module.calculate(&test_context(7.0)).motion_timeout_secs,
+            600
+        );
+        assert_eq!(
+            module.calculate(&test_context(12.0)).motion_timeout_secs,
+            600
+        );
+        assert_eq!(
+            module.calculate(&test_context(16.0)).motion_timeout_secs,
+            600
+        );
+        assert_eq!(
+            module.calculate(&test_context(23.0)).motion_timeout_secs,
+            600
+        );
     }
 }

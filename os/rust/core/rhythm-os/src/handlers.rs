@@ -343,6 +343,20 @@ pub fn handle_put_settings(state: &SharedState, body: &Value) -> ApiResponse {
     }
 }
 
+pub fn handle_put_sleep(state: &SharedState) -> ApiResponse {
+    match commands::do_sleep(state) {
+        Ok(()) => ApiResponse::no_content(),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_put_wake(state: &SharedState) -> ApiResponse {
+    match commands::do_wake(state) {
+        Ok(()) => ApiResponse::no_content(),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
 pub fn handle_put_hub_credentials(state: &SharedState, body: &Value) -> ApiResponse {
     // Platform-specific interceptor (e.g., addon auto-fills SUPERVISOR_TOKEN for HA)
     let interceptor = state
@@ -1105,6 +1119,12 @@ mod tests {
             }
             fn current_hour(&self) -> f32 {
                 12.0
+            }
+            fn set_curve_module(&self, _: &str) -> bool {
+                true
+            }
+            fn active_curve_module_id(&self) -> String {
+                "rhythm".into()
             }
         }
 
