@@ -221,6 +221,8 @@ fn make_pipeline_with_caps(
 
     let (event_tx, _) = std::sync::mpsc::channel();
     let hub_data = Arc::new(MatterHubData {
+        #[cfg(feature = "desktop")]
+        transport: std::sync::OnceLock::new(),
         registry: registry.clone(),
         fabric_id: "test".to_string(),
         commissioned: std::sync::Mutex::new(Vec::new()),
@@ -355,6 +357,8 @@ fn unknown_device_falls_back_to_extended_color() {
 
     let (event_tx, _) = std::sync::mpsc::channel();
     let hub_data = Arc::new(MatterHubData {
+        #[cfg(feature = "desktop")]
+        transport: std::sync::OnceLock::new(),
         registry: registry.clone(),
         fabric_id: "test".to_string(),
         commissioned: std::sync::Mutex::new(Vec::new()),

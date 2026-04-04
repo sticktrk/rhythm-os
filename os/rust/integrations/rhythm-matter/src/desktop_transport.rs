@@ -13,6 +13,7 @@
 //! only sees `MatterTransport`. When `rs-matter` gains controller support,
 //! replace this file — nothing else changes.
 
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::time::Duration;
@@ -319,6 +320,7 @@ fn io_thread_main(
     let device_count = dm.list_devices().map(|d| d.len()).unwrap_or(0);
     info!(target: "sys", "Matter I/O thread started ({} devices)", device_count);
     let _ = init_tx.send(Ok(()));
+    let mut connections: HashMap<u64, matc::controller::Connection> = HashMap::new();
 
     loop {
         // Use a timeout so the runtime periodically drives I/O even when
@@ -346,8 +348,16 @@ fn io_thread_main(
                 payload,
                 reply,
             } => {
-                let result =
-                    handle_send_cmd(&dm, &rt, node_id, endpoint, cluster, cmd_id, &payload);
+                let result = handle_send_cmd(
+                    &dm,
+                    &rt,
+                    &mut connections,
+                    node_id,
+                    endpoint,
+                    cluster,
+                    cmd_id,
+                    &payload,
+                );
                 let _ = reply.send(result);
             }
             IoRequest::ReadAttribute {
@@ -357,7 +367,15 @@ fn io_thread_main(
                 attr_id,
                 reply,
             } => {
-                let result = handle_read_attribute(&dm, &rt, node_id, endpoint, cluster, attr_id);
+                let result = handle_read_attribute(
+                    &dm,
+                    &rt,
+                    &mut connections,
+                    node_id,
+                    endpoint,
+                    cluster,
+                    attr_id,
+                );
                 let _ = reply.send(result);
             }
             IoRequest::Subscribe {
@@ -365,11 +383,19 @@ fn io_thread_main(
                 specs,
                 reply,
             } => {
-                let result = handle_subscribe(&dm, &rt, node_id, &specs);
+                let result = handle_subscribe(&dm, &rt, &mut connections, node_id, &specs);
                 let _ = reply.send(result);
             }
             IoRequest::Ping { node_id, reply } => {
-                let result = match handle_read_attribute(&dm, &rt, node_id, 1, 0x0006, 0x0000) {
+                let result = match handle_read_attribute(
+                    &dm,
+                    &rt,
+                    &mut connections,
+                    node_id,
+                    1,
+                    0x0006,
+                    0x0000,
+                ) {
                     Ok(_) => Ok(true),
                     Err(_) => Ok(false),
                 };
@@ -405,17 +431,28 @@ fn io_thread_main(
                 // that prevent the new DM from binding port 5555. Dropping the
                 // runtime first ensures full cleanup.
                 if result.is_ok() {
-                    if let Some(new) = reload_runtime_and_dm(dm, rt, data_path) {
-                        dm = new.0;
-                        rt = new.1;
-                        // Warm-up: connect to the newly paired node to prime
-                        // the CASE session cache and drain early UDP packets.
-                        if let Err(e) = rt.block_on(dm.connect(node_id)) {
-                            log::warn!(target: "sys", "Matter: post-commission warm-up connect failed (non-fatal): {}", e);
+                    connections.clear();
+                    match reload_runtime_and_dm(dm, rt, data_path, "commission") {
+                        Ok(new) => {
+                            dm = new.0;
+                            rt = new.1;
+                            // Warm-up: connect to the newly paired node to prime
+                            // the CASE session cache and drain early UDP packets.
+                            match connect_with_drain(&dm, &rt, node_id) {
+                                Ok(conn) => {
+                                    connections.insert(node_id, conn);
+                                }
+                                Err(e) => {
+                                    log::warn!(target: "sys", "Matter: post-commission warm-up connect failed (non-fatal): {}", e);
+                                }
+                            }
                         }
-                    } else {
-                        let _ = reply.send(result);
-                        break;
+                        Err(e) => {
+                            let _ = reply.send(Err(e.context(
+                                "Matter transport reload failed after commission; commissioner state changed but the transport is no longer usable",
+                            )));
+                            break;
+                        }
                     }
                 }
                 let _ = reply.send(result);
@@ -427,12 +464,18 @@ fn io_thread_main(
             } => {
                 let result = handle_decommission(&dm, &rt, node_id, force);
                 if result.is_ok() {
-                    if let Some(new) = reload_runtime_and_dm(dm, rt, data_path) {
-                        dm = new.0;
-                        rt = new.1;
-                    } else {
-                        let _ = reply.send(result);
-                        break;
+                    connections.clear();
+                    match reload_runtime_and_dm(dm, rt, data_path, "decommission") {
+                        Ok(new) => {
+                            dm = new.0;
+                            rt = new.1;
+                        }
+                        Err(e) => {
+                            let _ = reply.send(Err(e.context(
+                                "Matter transport reload failed after decommission; the fabric registry changed but the transport is no longer usable",
+                            )));
+                            break;
+                        }
                     }
                 }
                 let _ = reply.send(result);
@@ -455,7 +498,8 @@ fn reload_runtime_and_dm(
     dm: matc::devman::DeviceManager,
     rt: tokio::runtime::Runtime,
     data_path: &str,
-) -> Option<(matc::devman::DeviceManager, tokio::runtime::Runtime)> {
+    action: &str,
+) -> Result<(matc::devman::DeviceManager, tokio::runtime::Runtime)> {
     drop(dm);
     drop(rt);
 
@@ -465,20 +509,20 @@ fn reload_runtime_and_dm(
     {
         Ok(rt) => rt,
         Err(e) => {
-            log::error!(target: "sys", "Matter: failed to recreate runtime after commission: {}", e);
-            return None;
+            log::error!(target: "sys", "Matter: failed to recreate runtime after {}: {}", action, e);
+            return Err(anyhow::anyhow!(e).context("Failed to recreate Matter runtime"));
         }
     };
 
     match new_rt.block_on(matc::devman::DeviceManager::load(data_path)) {
         Ok(dm) => {
             let count = dm.list_devices().map(|d| d.len()).unwrap_or(0);
-            info!(target: "sys", "Matter: reloaded fabric after commission ({} devices)", count);
-            Some((dm, new_rt))
+            info!(target: "sys", "Matter: reloaded fabric after {} ({} devices)", action, count);
+            Ok((dm, new_rt))
         }
         Err(e) => {
-            log::error!(target: "sys", "Matter: failed to reload fabric after commission: {}", e);
-            None
+            log::error!(target: "sys", "Matter: failed to reload fabric after {}: {}", action, e);
+            Err(anyhow::anyhow!(e).context("Failed to reload Matter fabric after runtime restart"))
         }
     }
 }
@@ -548,6 +592,39 @@ fn connect_with_drain(
     }
 }
 
+fn cached_connection<'a>(
+    dm: &matc::devman::DeviceManager,
+    rt: &tokio::runtime::Runtime,
+    connections: &'a mut HashMap<u64, matc::controller::Connection>,
+    node_id: u64,
+) -> Result<&'a mut matc::controller::Connection> {
+    if !connections.contains_key(&node_id) {
+        let conn = connect_with_drain(dm, rt, node_id)?;
+        connections.insert(node_id, conn);
+    }
+
+    connections.get_mut(&node_id).ok_or_else(|| {
+        anyhow::anyhow!("Matter connection cache insert failed for node {}", node_id)
+    })
+}
+
+fn reconnect_cached_connection<'a>(
+    dm: &matc::devman::DeviceManager,
+    rt: &tokio::runtime::Runtime,
+    connections: &'a mut HashMap<u64, matc::controller::Connection>,
+    node_id: u64,
+) -> Result<&'a mut matc::controller::Connection> {
+    connections.remove(&node_id);
+    let conn = connect_with_drain(dm, rt, node_id)?;
+    connections.insert(node_id, conn);
+    connections.get_mut(&node_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Matter connection cache reconnect failed for node {}",
+            node_id
+        )
+    })
+}
+
 /// Send a cluster command with one retry on invoke failure.
 ///
 /// Only retries when the invoke fails (stale CASE session) — if the connect
@@ -555,32 +632,38 @@ fn connect_with_drain(
 fn handle_send_cmd(
     dm: &matc::devman::DeviceManager,
     rt: &tokio::runtime::Runtime,
+    connections: &mut HashMap<u64, matc::controller::Connection>,
     node_id: u64,
     endpoint: u16,
     cluster: u32,
     cmd_id: u32,
     payload: &[u8],
 ) -> Result<()> {
-    let conn = connect_with_drain(dm, rt, node_id)?;
+    let first_try = {
+        let conn = cached_connection(dm, rt, connections, node_id)?;
+        rt.block_on(conn.invoke_request(endpoint, cluster, cmd_id, payload))
+    };
 
-    match rt.block_on(conn.invoke_request(endpoint, cluster, cmd_id, payload)) {
+    match first_try {
         Ok(_) => return Ok(()),
         Err(e) => {
             debug!(target: "cmd", "Matter: invoke failed (retrying with fresh connection): {:#}", e);
         }
     }
 
-    // Retry with fresh connection — the invoke failed, not the connect,
-    // so a stale session is likely. Worth one reconnect attempt.
-    let conn = connect_with_drain(dm, rt, node_id)
-        .with_context(|| format!("Failed to reconnect to Matter node {}", node_id))?;
-    rt.block_on(conn.invoke_request(endpoint, cluster, cmd_id, payload))
-        .with_context(|| {
-            format!(
-                "Matter command failed: node={} cluster=0x{:04x} cmd=0x{:02x}",
-                node_id, cluster, cmd_id
-            )
-        })?;
+    // Retry with a fresh CASE session. Cached sessions can go stale between
+    // button presses; reconnect once before surfacing an error.
+    let second_try = {
+        let conn = reconnect_cached_connection(dm, rt, connections, node_id)
+            .with_context(|| format!("Failed to reconnect to Matter node {}", node_id))?;
+        rt.block_on(conn.invoke_request(endpoint, cluster, cmd_id, payload))
+    };
+    second_try.with_context(|| {
+        format!(
+            "Matter command failed: node={} cluster=0x{:04x} cmd=0x{:02x}",
+            node_id, cluster, cmd_id
+        )
+    })?;
     Ok(())
 }
 
@@ -588,20 +671,31 @@ fn handle_send_cmd(
 fn handle_read_attribute(
     dm: &matc::devman::DeviceManager,
     rt: &tokio::runtime::Runtime,
+    connections: &mut HashMap<u64, matc::controller::Connection>,
     node_id: u64,
     endpoint: u16,
     cluster: u32,
     attr_id: u32,
 ) -> Result<Vec<u8>> {
-    let conn = connect_with_drain(dm, rt, node_id)?;
-    let val = rt
-        .block_on(conn.read_request2(endpoint, cluster, attr_id))
-        .with_context(|| {
-            format!(
-                "Matter read failed: node={} cluster=0x{:04x} attr=0x{:04x}",
-                node_id, cluster, attr_id
-            )
-        })?;
+    let first_try = {
+        let conn = cached_connection(dm, rt, connections, node_id)?;
+        rt.block_on(conn.read_request2(endpoint, cluster, attr_id))
+    };
+    let val = match first_try {
+        Ok(val) => val,
+        Err(e) => {
+            debug!(target: "cmd", "Matter: read failed (retrying with fresh connection): {:#}", e);
+            let conn = reconnect_cached_connection(dm, rt, connections, node_id)
+                .with_context(|| format!("Failed to reconnect to Matter node {}", node_id))?;
+            rt.block_on(conn.read_request2(endpoint, cluster, attr_id))
+                .with_context(|| {
+                    format!(
+                        "Matter read failed: node={} cluster=0x{:04x} attr=0x{:04x}",
+                        node_id, cluster, attr_id
+                    )
+                })?
+        }
+    };
     match val {
         TlvItemValue::Int(v) => Ok(v.to_le_bytes().to_vec()),
         TlvItemValue::Bool(b) => Ok(vec![if b { 1 } else { 0 }]),
@@ -615,24 +709,44 @@ fn handle_read_attribute(
 fn handle_subscribe(
     dm: &matc::devman::DeviceManager,
     rt: &tokio::runtime::Runtime,
+    connections: &mut HashMap<u64, matc::controller::Connection>,
     node_id: u64,
     specs: &[SubscribeSpec],
 ) -> Result<()> {
-    let conn = connect_with_drain(dm, rt, node_id)?;
-    for spec in specs {
-        rt.block_on(conn.im_subscribe_request(
-            spec.endpoint,
-            spec.cluster as u32,
-            spec.attr_id as u32,
-        ))
-        .with_context(|| {
-            format!(
-                "Matter subscribe failed: node={} cluster=0x{:04x}",
-                node_id, spec.cluster
-            )
-        })?;
+    for attempt in 0..2 {
+        let result = {
+            let conn = if attempt == 0 {
+                cached_connection(dm, rt, connections, node_id)?
+            } else {
+                reconnect_cached_connection(dm, rt, connections, node_id)?
+            };
+
+            for spec in specs {
+                rt.block_on(conn.im_subscribe_request(
+                    spec.endpoint,
+                    spec.cluster as u32,
+                    spec.attr_id as u32,
+                ))
+                .with_context(|| {
+                    format!(
+                        "Matter subscribe failed: node={} cluster=0x{:04x}",
+                        node_id, spec.cluster
+                    )
+                })?;
+            }
+            Ok(())
+        };
+
+        match result {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt == 0 => {
+                debug!(target: "cmd", "Matter: subscribe failed (retrying with fresh connection): {:#}", e);
+            }
+            Err(e) => return Err(e),
+        }
     }
-    Ok(())
+
+    unreachable!("subscribe retry loop exited unexpectedly")
 }
 
 /// Commission a device on the IO thread's runtime.
@@ -656,7 +770,7 @@ fn handle_commission(
 
     let conn = if already_exists {
         info!(target: "sys", "Matter: node {} already commissioned, reconnecting", node_id);
-        rt.block_on(dm.connect(node_id))
+        connect_with_drain(dm, rt, node_id)
             .with_context(|| format!("Failed to connect to existing Matter node {}", node_id))?
     } else {
         let conn = rt
@@ -715,7 +829,7 @@ fn handle_decommission(
     if !force {
         // Best-effort OTA: connect and send RemoveFabric so the device forgets us
         match (|| -> Result<()> {
-            let conn = rt.block_on(dm.connect(node_id)).with_context(|| {
+            let conn = connect_with_drain(dm, rt, node_id).with_context(|| {
                 format!("Failed to connect to node {} for decommission", node_id)
             })?;
 
