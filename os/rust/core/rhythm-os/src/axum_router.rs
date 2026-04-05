@@ -105,6 +105,8 @@ fn shared_routes() -> Router<SharedState> {
         // Sleep mode
         .route("/api/sleep", put(put_sleep))
         .route("/api/wake", put(put_wake))
+        // Curve module selection
+        .route("/api/curve/module", put(put_curve_module))
 }
 
 // ---------------------------------------------------------------------------
@@ -363,6 +365,13 @@ async fn put_wake(State(state): State<SharedState>) -> ApiResponse {
     run_blocking(move || handlers::handle_put_wake(&state)).await
 }
 
+async fn put_curve_module(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_put_curve_module(&state, &body)).await
+}
+
 // ---------------------------------------------------------------------------
 // Blocking handlers — run on a real std::thread (not spawn_blocking)
 // because reqwest::blocking::Client panics if used inside a tokio runtime.
@@ -616,6 +625,9 @@ mod tests {
 
         fn active_curve_module_id(&self) -> String {
             "rhythm".to_string()
+        }
+        fn available_curve_modules(&self) -> Vec<(String, String)> {
+            vec![("rhythm".into(), "Rhythm Curve".into()), ("sleep".into(), "Sleep Curve".into())]
         }
     }
 

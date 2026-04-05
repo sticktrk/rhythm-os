@@ -127,12 +127,21 @@ pub struct LocationDto {
     pub timezone_name: Option<String>,
 }
 
+/// A curve module descriptor for API responses.
+#[derive(Clone, Debug, Serialize)]
+pub struct CurveModuleDto {
+    pub id: String,
+    pub name: String,
+}
+
 /// Settings in state snapshot and `GET /api/settings`.
 #[derive(Debug, Serialize)]
 pub struct SettingsDto {
     pub rhythm_interval_secs: u64,
     pub power_save: bool,
     pub sleep_mode: bool,
+    pub active_curve_module: String,
+    pub available_curve_modules: Vec<CurveModuleDto>,
 }
 
 /// A typed device entry.
@@ -441,10 +450,17 @@ mod tests {
             rhythm_interval_secs: 60,
             power_save: true,
             sleep_mode: false,
+            active_curve_module: "rhythm".into(),
+            available_curve_modules: vec![
+                CurveModuleDto { id: "rhythm".into(), name: "Rhythm Curve".into() },
+                CurveModuleDto { id: "sleep".into(), name: "Sleep Curve".into() },
+            ],
         };
         let json: Value = serde_json::to_value(&dto).unwrap();
         assert_eq!(json["rhythm_interval_secs"], 60);
         assert_eq!(json["power_save"], true);
+        assert_eq!(json["active_curve_module"], "rhythm");
+        assert_eq!(json["available_curve_modules"].as_array().unwrap().len(), 2);
     }
 
     // ---- HubDto ----
@@ -601,6 +617,11 @@ mod tests {
                 rhythm_interval_secs: 60,
                 power_save: false,
                 sleep_mode: false,
+                active_curve_module: "rhythm".into(),
+                available_curve_modules: vec![
+                    CurveModuleDto { id: "rhythm".into(), name: "Rhythm Curve".into() },
+                    CurveModuleDto { id: "sleep".into(), name: "Sleep Curve".into() },
+                ],
             },
             rooms: vec![],
             last_tick_epoch_ms: 1700000000000,
@@ -648,6 +669,11 @@ mod tests {
                 rhythm_interval_secs: 60,
                 power_save: false,
                 sleep_mode: false,
+                active_curve_module: "rhythm".into(),
+                available_curve_modules: vec![
+                    CurveModuleDto { id: "rhythm".into(), name: "Rhythm Curve".into() },
+                    CurveModuleDto { id: "sleep".into(), name: "Sleep Curve".into() },
+                ],
             },
             rooms: vec![RoomFullState {
                 rhythm: sample_rhythm_state(),

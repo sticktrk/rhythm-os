@@ -195,4 +195,8 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         path: "/api/curve/solar",
         methods: &["GET"],
     },
+    SharedRoute {
+        path: "/api/curve/module",
+        methods: &["PUT"],
+    },
 ];

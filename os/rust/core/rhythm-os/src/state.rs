@@ -608,6 +608,9 @@ mod tests {
             fn active_curve_module_id(&self) -> String {
                 "rhythm".into()
             }
+            fn available_curve_modules(&self) -> Vec<(String, String)> {
+                vec![("rhythm".into(), "Rhythm Curve".into()), ("sleep".into(), "Sleep Curve".into())]
+            }
         }
 
         let runtime = MockRuntime {

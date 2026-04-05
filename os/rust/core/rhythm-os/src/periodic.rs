@@ -194,10 +194,10 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             check_sunrise_sleep_deactivate(&state, last, current_hour);
         }
 
-        // Use curve-suggested tick interval if available, otherwise configured default
+        // Use the longer of curve-suggested and configured interval
         let sleep_duration = values
             .suggested_tick_interval_secs
-            .map(|s| Duration::from_secs(s as u64))
+            .map(|s| Duration::from_secs(s as u64).max(update_interval))
             .unwrap_or(update_interval);
         thread::sleep(sleep_duration);
     }
@@ -318,7 +318,17 @@ pub fn check_sunrise_sleep_deactivate(state: &SharedState, last_hour: f32, curre
         (s.sleep_mode, sunrise)
     };
 
-    if sleep_mode && rhythm_core::crossed_solar_midnight(last_hour, current_hour, sunrise) {
+    if !sleep_mode {
+        return;
+    }
+
+    let crossed = rhythm_core::crossed_solar_midnight(last_hour, current_hour, sunrise);
+    log::debug!(
+        "Sleep sunrise check: last={:.2}, now={:.2}, sunrise={:.2}, crossed={}",
+        last_hour, current_hour, sunrise, crossed
+    );
+
+    if crossed {
         info!(
             "Sunrise crossed (last={:.2}, now={:.2}, sunrise={:.2}) - auto-deactivating sleep mode",
             last_hour, current_hour, sunrise
@@ -664,6 +674,9 @@ mod tests {
             }
             fn active_curve_module_id(&self) -> String {
                 "rhythm".into()
+            }
+            fn available_curve_modules(&self) -> Vec<(String, String)> {
+                vec![("rhythm".into(), "Rhythm Curve".into()), ("sleep".into(), "Sleep Curve".into())]
             }
         }
 

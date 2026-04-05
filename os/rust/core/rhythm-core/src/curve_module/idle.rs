@@ -1,7 +1,8 @@
 //! Idle curve module for soft_off mode.
 //!
-//! Cycles through deep reds, magentas, purples, and blues across the
-//! solar day. Uses direct RGB colors outside the blackbody spectrum.
+//! Cycles through the full color spectrum across the solar day so
+//! that every 2-3 hour segment is visually distinct, even at 1%
+//! brightness. Uses direct RGB colors outside the blackbody spectrum.
 //! The curve's brightness (1%) is authoritative for soft-off dimming.
 
 extern crate alloc;
@@ -60,86 +61,90 @@ struct Keyframe {
 
 /// The 24-hour idle palette keyed to solar time.
 ///
-/// Midnight: near-black navy → dawn: violet/magenta → morning: vivid crimson →
-/// noon: electric fuchsia → afternoon: rich purple → evening: deep blue → midnight
+/// Colors rotate around the spectrum so every 2-3 hour segment is
+/// visually distinct, even at 1% brightness on real bulbs.
+///
+/// Midnight: deep blue → dawn: teal/cyan → morning: warm amber →
+/// noon: coral/orange → afternoon: magenta/rose → evening: purple →
+/// night: indigo → midnight: deep blue
 const PALETTE: &[Keyframe] = &[
     Keyframe {
         hour: 0.0,
-        r: 12,
-        g: 3,
-        b: 30,
+        r: 10,
+        g: 10,
+        b: 80,
     },
     Keyframe {
         hour: 3.0,
-        r: 20,
-        g: 3,
-        b: 55,
+        r: 5,
+        g: 50,
+        b: 80,
     },
     Keyframe {
         hour: 5.0,
-        r: 50,
-        g: 8,
-        b: 90,
+        r: 5,
+        g: 80,
+        b: 60,
     },
     Keyframe {
-        hour: 6.5,
-        r: 120,
-        g: 15,
-        b: 120,
+        hour: 7.0,
+        r: 40,
+        g: 80,
+        b: 10,
     },
     Keyframe {
-        hour: 8.0,
-        r: 200,
-        g: 25,
-        b: 90,
+        hour: 9.0,
+        r: 180,
+        g: 100,
+        b: 5,
     },
     Keyframe {
-        hour: 10.0,
-        r: 240,
-        g: 20,
-        b: 120,
+        hour: 11.0,
+        r: 220,
+        g: 60,
+        b: 5,
     },
     Keyframe {
-        hour: 12.0,
-        r: 255,
-        g: 40,
-        b: 150,
-    },
-    Keyframe {
-        hour: 14.0,
+        hour: 13.0,
         r: 220,
         g: 30,
+        b: 30,
+    },
+    Keyframe {
+        hour: 15.0,
+        r: 200,
+        g: 20,
+        b: 100,
+    },
+    Keyframe {
+        hour: 17.0,
+        r: 160,
+        g: 15,
         b: 180,
     },
     Keyframe {
-        hour: 16.0,
-        r: 150,
-        g: 25,
-        b: 210,
-    },
-    Keyframe {
-        hour: 18.0,
-        r: 70,
-        g: 15,
+        hour: 19.0,
+        r: 80,
+        g: 10,
         b: 200,
     },
     Keyframe {
-        hour: 20.0,
-        r: 35,
+        hour: 21.0,
+        r: 40,
         g: 10,
-        b: 140,
+        b: 160,
     },
     Keyframe {
-        hour: 22.0,
-        r: 20,
-        g: 5,
-        b: 70,
+        hour: 23.0,
+        r: 15,
+        g: 10,
+        b: 100,
     },
     Keyframe {
         hour: 24.0,
-        r: 12,
-        g: 3,
-        b: 30,
+        r: 10,
+        g: 10,
+        b: 80,
     },
 ];
 
@@ -176,14 +181,14 @@ fn sample(hour: f32) -> Rgb {
     Rgb::new(PALETTE[0].r, PALETTE[0].g, PALETTE[0].b)
 }
 
-/// A curve module that cycles through reds, purples, and blues over 24 hours.
+/// A curve module that cycles through the full color spectrum over 24 hours.
 ///
 /// Used for idle (soft_off) mode. The brightness value (1%) is
 /// authoritative — the engine uses it directly for soft-off dimming.
 ///
-/// Night: deep dark indigo. Dawn: violets into magenta.
-/// Morning: vivid crimsons. Noon: electric fuchsia peak.
-/// Afternoon: rich purples. Evening: deep blues. Night: fade to darkness.
+/// Night: deep blue. Dawn: teal → green. Morning: warm amber → orange.
+/// Noon: coral/red peak. Afternoon: rose → magenta. Evening: purple →
+/// indigo. Night: back to deep blue.
 #[derive(Debug, Clone)]
 pub struct IdleCurveModule {
     config: IdleCurveConfig,
@@ -336,21 +341,21 @@ mod tests {
     fn test_dominant_colors_follow_palette() {
         let curve = IdleCurveModule::with_defaults();
 
-        // Morning: reds dominate
-        let morning = curve.calculate(&ctx_at(8.0));
+        // Morning: warm amber, green/red dominate over blue
+        let morning = curve.calculate(&ctx_at(9.0));
         assert!(
             morning.rgb.r > morning.rgb.b,
-            "morning should be red-dominant"
+            "morning should be warm (red > blue)"
         );
 
-        // Afternoon: blues dominate
-        let afternoon = curve.calculate(&ctx_at(16.0));
+        // Evening: purple/blue dominates
+        let evening = curve.calculate(&ctx_at(19.0));
         assert!(
-            afternoon.rgb.b > afternoon.rgb.r,
-            "afternoon should be blue-dominant"
+            evening.rgb.b > evening.rgb.g,
+            "evening should be blue-dominant"
         );
 
-        // Night: blue still dominant but very dim
+        // Night: blue dominant
         let night = curve.calculate(&ctx_at(2.0));
         assert!(night.rgb.b > night.rgb.r, "night should be blue-dominant");
     }
@@ -393,4 +398,5 @@ mod tests {
             assert_eq!(curve.calculate_brightness(&ctx_at(hour)), 1);
         }
     }
+
 }

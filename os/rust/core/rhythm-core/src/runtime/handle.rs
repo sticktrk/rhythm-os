@@ -104,6 +104,9 @@ pub trait RuntimeHandle: Send + Sync {
 
     /// Get the ID of the currently active curve module.
     fn active_curve_module_id(&self) -> String;
+
+    /// List all registered curve modules as `(id, name)` pairs.
+    fn available_curve_modules(&self) -> Vec<(String, String)>;
 }
 
 // ============================================================================
@@ -341,6 +344,19 @@ where
         self.engine()
             .read()
             .map(|e| e.module_registry().active_module_id().to_string())
+            .unwrap_or_default()
+    }
+
+    fn available_curve_modules(&self) -> Vec<(String, String)> {
+        self.engine()
+            .read()
+            .map(|e| {
+                e.module_registry()
+                    .available_modules()
+                    .into_iter()
+                    .map(|(id, name)| (id.to_string(), name.to_string()))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 }

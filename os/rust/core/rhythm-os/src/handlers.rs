@@ -357,6 +357,17 @@ pub fn handle_put_wake(state: &SharedState) -> ApiResponse {
     }
 }
 
+pub fn handle_put_curve_module(state: &SharedState, body: &Value) -> ApiResponse {
+    let id = match body.get("id").and_then(|v| v.as_str()) {
+        Some(id) => id,
+        None => return ApiResponse::bad_request("Missing id"),
+    };
+    match commands::do_set_curve_module(state, id) {
+        Ok(()) => ApiResponse::no_content(),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
 pub fn handle_put_hub_credentials(state: &SharedState, body: &Value) -> ApiResponse {
     // Platform-specific interceptor (e.g., addon auto-fills SUPERVISOR_TOKEN for HA)
     let interceptor = state
@@ -1125,6 +1136,9 @@ mod tests {
             }
             fn active_curve_module_id(&self) -> String {
                 "rhythm".into()
+            }
+            fn available_curve_modules(&self) -> Vec<(String, String)> {
+                vec![("rhythm".into(), "Rhythm Curve".into()), ("sleep".into(), "Sleep Curve".into())]
             }
         }
 
