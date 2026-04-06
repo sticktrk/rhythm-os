@@ -180,18 +180,18 @@ fn power_save_toggle_no_soft_off_rooms_safe() {
 }
 
 // ============================================================================
-// Scenario: soft-off uses idle curve from active module
+// Scenario: soft-off uses the dedicated idle profile
 // ============================================================================
 
-/// The active curve module (RhythmCurveModule) composes an IdleCurveModule,
+/// The dedicated idle profile drives soft-off mode,
 /// so soft-off always uses direct color from the idle palette.
 #[test]
-fn soft_off_uses_idle_curve_from_active_module() {
+fn soft_off_uses_idle_profile() {
     let (harness, spy) = TestHarness::with_spy_controller();
     let harness = harness.with_discovery(vec![room("kitchen", "Kitchen")], vec![]);
     harness.sync();
 
-    // Turn on, then off — idle curve is built into the active module
+    // Turn on, then off — the idle profile is used for soft-off color
     harness.action("kitchen", "on").unwrap();
     spy.reset();
     harness.action("kitchen", "off").unwrap();

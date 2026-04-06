@@ -602,14 +602,17 @@ mod tests {
             fn current_hour(&self) -> f32 {
                 12.0
             }
-            fn set_curve_module(&self, _: &str) -> bool {
+            fn set_light_profile(&self, _: &str) -> bool {
                 true
             }
-            fn active_curve_module_id(&self) -> String {
+            fn active_light_profile_id(&self) -> String {
                 "rhythm".into()
             }
-            fn available_curve_modules(&self) -> Vec<(String, String)> {
-                vec![("rhythm".into(), "Rhythm Curve".into()), ("sleep".into(), "Sleep Curve".into())]
+            fn available_light_profiles(&self) -> Vec<(String, String)> {
+                vec![
+                    ("rhythm".into(), "Rhythm Curve".into()),
+                    ("sleep".into(), "Sleep Curve".into()),
+                ]
             }
         }
 

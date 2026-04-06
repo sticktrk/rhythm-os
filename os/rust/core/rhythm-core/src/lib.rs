@@ -15,7 +15,7 @@
 //! - [`timezone`]: Timezone and DST handling (via chrono-tz)
 //! - [`midpoint`]: Dynamic midpoint values (sunrise/sunset)
 //! - [`adaptive`]: Lighting output types (LightingValues)
-//! - [`curve_module`]: Pluggable light curve module system
+//! - [`light_profile`]: Pluggable light profile system
 //! - [`steps`]: Step/dimming algorithms
 //! - [`lighting`]: Light command types
 //! - [`room`]: Room/area abstractions
@@ -30,12 +30,12 @@ pub mod color;
 pub mod composite_controller;
 pub mod config;
 pub mod controller;
-pub mod curve_module;
 pub mod curves;
 #[cfg(feature = "serde")]
 pub mod defaults;
 pub mod device;
 pub mod groups;
+pub mod light_profile;
 pub mod lighting;
 pub mod midpoint;
 pub mod persistence;
@@ -56,16 +56,20 @@ pub use color::{
 };
 pub use config::{CurveConfig, SolarContext};
 pub use controller::{LightControlError, LightControlResult, LightController, NoOpController};
-pub use curve_module::{
-    CommonCurveConfig, CurveContext, CurveModuleConfig, CurveModuleRegistry, LightCurveModule,
-    RhythmCurveModule, SleepCurveModule,
-};
 pub use curves::{inverse_super_gaussian, map_super_gaussian};
 #[cfg(feature = "serde")]
 pub use defaults::default_config;
 pub use groups::{
     group_name_for_area, is_light_entity, is_rhythm_group, GroupController, GroupError,
     GroupResult, LightGroup, NoOpGroupController, GROUP_PREFIX,
+};
+pub use light_profile::{
+    default_idle_profile, default_rhythm_profile, default_sleep_profile, CommonCurveConfig,
+    CurveContext, LightCurveShape, LightDirectColor, LightPaletteKeyframe, LightProfile,
+    LightProfileConfig, LightProfileModule, LightProfileModuleConfig, LightProfileRegistry,
+    IDLE_PROFILE_ID, IDLE_PROFILE_NAME, RHYTHM_PROFILE_ID, RHYTHM_PROFILE_NAME,
+    SLEEP_DEFAULT_COLOR_TEMP, SLEEP_DEFAULT_MAX_BRIGHTNESS, SLEEP_DEFAULT_MIN_BRIGHTNESS,
+    SLEEP_PROFILE_ID, SLEEP_PROFILE_NAME, SLEEP_XY_X, SLEEP_XY_Y,
 };
 pub use lighting::LightingCommand;
 pub use midpoint::MidpointValue;

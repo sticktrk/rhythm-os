@@ -99,14 +99,14 @@ pub trait RuntimeHandle: Send + Sync {
     /// Get the current local hour from the time provider (0.0–24.0).
     fn current_hour(&self) -> f32;
 
-    /// Set the active curve module by ID. Returns true if found.
-    fn set_curve_module(&self, id: &str) -> bool;
+    /// Set the active light profile by ID. Returns true if found.
+    fn set_light_profile(&self, id: &str) -> bool;
 
-    /// Get the ID of the currently active curve module.
-    fn active_curve_module_id(&self) -> String;
+    /// Get the ID of the currently active light profile.
+    fn active_light_profile_id(&self) -> String;
 
-    /// List all registered curve modules as `(id, name)` pairs.
-    fn available_curve_modules(&self) -> Vec<(String, String)>;
+    /// List all registered light profiles as `(id, name)` pairs.
+    fn available_light_profiles(&self) -> Vec<(String, String)>;
 }
 
 // ============================================================================
@@ -332,27 +332,27 @@ where
         RhythmRuntime::current_hour(self)
     }
 
-    fn set_curve_module(&self, id: &str) -> bool {
+    fn set_light_profile(&self, id: &str) -> bool {
         if let Ok(mut engine) = self.engine().write() {
-            engine.set_curve_module(id)
+            engine.set_light_profile(id)
         } else {
             false
         }
     }
 
-    fn active_curve_module_id(&self) -> String {
+    fn active_light_profile_id(&self) -> String {
         self.engine()
             .read()
-            .map(|e| e.module_registry().active_module_id().to_string())
+            .map(|e| e.profile_registry().active_profile_id().to_string())
             .unwrap_or_default()
     }
 
-    fn available_curve_modules(&self) -> Vec<(String, String)> {
+    fn available_light_profiles(&self) -> Vec<(String, String)> {
         self.engine()
             .read()
             .map(|e| {
-                e.module_registry()
-                    .available_modules()
+                e.profile_registry()
+                    .available_profiles()
                     .into_iter()
                     .map(|(id, name)| (id.to_string(), name.to_string()))
                     .collect()

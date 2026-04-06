@@ -105,8 +105,9 @@ fn shared_routes() -> Router<SharedState> {
         // Sleep mode
         .route("/api/sleep", put(put_sleep))
         .route("/api/wake", put(put_wake))
-        // Curve module selection
-        .route("/api/curve/module", put(put_curve_module))
+        // Light profile selection
+        .route("/api/light-profile", put(put_light_profile))
+        .route("/api/curve/module", put(put_light_profile))
 }
 
 // ---------------------------------------------------------------------------
@@ -365,11 +366,11 @@ async fn put_wake(State(state): State<SharedState>) -> ApiResponse {
     run_blocking(move || handlers::handle_put_wake(&state)).await
 }
 
-async fn put_curve_module(
+async fn put_light_profile(
     State(state): State<SharedState>,
     Json(body): Json<Value>,
 ) -> ApiResponse {
-    run_blocking(move || handlers::handle_put_curve_module(&state, &body)).await
+    run_blocking(move || handlers::handle_put_light_profile(&state, &body)).await
 }
 
 // ---------------------------------------------------------------------------
@@ -618,16 +619,19 @@ mod tests {
             self.current_hour
         }
 
-        fn set_curve_module(&self, _: &str) -> bool {
-            self.record("set_curve_module");
+        fn set_light_profile(&self, _: &str) -> bool {
+            self.record("set_light_profile");
             true
         }
 
-        fn active_curve_module_id(&self) -> String {
+        fn active_light_profile_id(&self) -> String {
             "rhythm".to_string()
         }
-        fn available_curve_modules(&self) -> Vec<(String, String)> {
-            vec![("rhythm".into(), "Rhythm Curve".into()), ("sleep".into(), "Sleep Curve".into())]
+        fn available_light_profiles(&self) -> Vec<(String, String)> {
+            vec![
+                ("rhythm".into(), "Rhythm Curve".into()),
+                ("sleep".into(), "Sleep Curve".into()),
+            ]
         }
     }
 
@@ -778,7 +782,7 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert!(calls
             .iter()
-            .any(|call| call == "set_curve_module@http-handler"));
+            .any(|call| call == "set_light_profile@http-handler"));
         assert!(calls.iter().any(|call| call == "handle_event@http-handler"));
     }
 
@@ -812,7 +816,7 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert!(calls
             .iter()
-            .any(|call| call == "set_curve_module@http-handler"));
+            .any(|call| call == "set_light_profile@http-handler"));
         assert!(calls.iter().any(|call| call == "handle_event@http-handler"));
     }
 }

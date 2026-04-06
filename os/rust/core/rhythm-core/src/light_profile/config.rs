@@ -1,4 +1,4 @@
-//! Configuration types for curve modules.
+//! Configuration types for light profile modules.
 //!
 //! This module provides module-specific configuration enums.
 //! The common [`CommonCurveConfig`] is defined in [`rhythm_curve`] and
@@ -28,37 +28,37 @@ impl From<&CurveConfig> for CommonCurveConfig {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(tag = "type"))]
-pub enum CurveModuleConfig {
+pub enum LightProfileModuleConfig {
     /// Rhythm curve module (original algorithm)
     #[cfg_attr(feature = "serde", serde(rename = "rhythm"))]
     Rhythm(CurveConfig),
 }
 
-impl Default for CurveModuleConfig {
+impl Default for LightProfileModuleConfig {
     fn default() -> Self {
         Self::Rhythm(CurveConfig::default())
     }
 }
 
-impl CurveModuleConfig {
+impl LightProfileModuleConfig {
     /// Get the module type identifier.
     pub fn module_id(&self) -> &str {
         match self {
-            CurveModuleConfig::Rhythm(_) => "rhythm",
+            LightProfileModuleConfig::Rhythm(_) => "rhythm",
         }
     }
 
     /// Get the common curve configuration.
     pub fn common(&self) -> CommonCurveConfig {
         match self {
-            CurveModuleConfig::Rhythm(config) => CommonCurveConfig::from(config),
+            LightProfileModuleConfig::Rhythm(config) => CommonCurveConfig::from(config),
         }
     }
 
     /// Get the inner CurveConfig if this is a Rhythm module.
     pub fn as_rhythm(&self) -> Option<&CurveConfig> {
         match self {
-            CurveModuleConfig::Rhythm(config) => Some(config),
+            LightProfileModuleConfig::Rhythm(config) => Some(config),
         }
     }
 }
@@ -88,14 +88,14 @@ mod tests {
 
     #[test]
     fn test_module_config_default() {
-        let config = CurveModuleConfig::default();
+        let config = LightProfileModuleConfig::default();
         assert_eq!(config.module_id(), "rhythm");
         assert!(config.as_rhythm().is_some());
     }
 
     #[test]
     fn test_module_config_common() {
-        let config = CurveModuleConfig::Rhythm(CurveConfig {
+        let config = LightProfileModuleConfig::Rhythm(CurveConfig {
             min_brightness: 10,
             max_brightness: 90,
             ..Default::default()

@@ -17,7 +17,7 @@ use rhythm_core::{ButtonAction, HubRegistry, InputEvent};
 use serde_json::Value;
 
 use crate::api_types::{
-    CurveModuleDto, FixResponse, HubDto, LocationDto, RoomFullState, RoomPollState,
+    FixResponse, HubDto, LightProfileDto, LocationDto, RoomFullState, RoomPollState,
     RoomRhythmState, RoomsPollResponse, SettingsDto, StateSnapshot, TypedDeviceDto,
 };
 use crate::canonical::identity::HubKey;
@@ -40,7 +40,7 @@ pub fn compute_room_display_values(
     time_offset_minutes: f32,
     brightness_offset: f32,
 ) -> (u8, u16) {
-    use rhythm_core::{LightCurveModule, RhythmCurveModule, SolarTime};
+    use rhythm_core::{LightProfile, LightProfileModule, SolarTime};
 
     let now = chrono::Utc::now().naive_utc();
     let (year, month, day) = (now.date().year(), now.date().month(), now.date().day());
@@ -52,8 +52,8 @@ pub fn compute_room_display_values(
     let current_hour = t.hour() as f32 + t.minute() as f32 / 60.0 + t.second() as f32 / 3600.0;
 
     let solar = SolarTime::new(solar_noon, latitude, day_of_year);
-    let ctx = rhythm_core::curve_module::CurveContext::new(current_hour, solar, None);
-    let module = RhythmCurveModule::new(config.clone());
+    let ctx = rhythm_core::light_profile::CurveContext::new(current_hour, solar, None);
+    let module = LightProfile::new(config.clone().into());
     let values = module.calculate_with_offset(&ctx, time_offset_minutes);
     let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
     (brightness, values.kelvin)
@@ -764,29 +764,29 @@ pub fn build_config(state: &SharedState) -> Result<String> {
 
 /// Build `SettingsDto` from an already-locked `AppState`.
 fn build_settings_dto_inner(s: &AppState) -> SettingsDto {
-    let (active_module, available_modules) = if let Some(rt) = s.hub_runtime() {
-        let active = rt.active_curve_module_id();
+    let (active_profile, available_profiles) = if let Some(rt) = s.hub_runtime() {
+        let active = rt.active_light_profile_id();
         let available = rt
-            .available_curve_modules()
+            .available_light_profiles()
             .into_iter()
-            .map(|(id, name)| CurveModuleDto { id, name })
+            .map(|(id, name)| LightProfileDto { id, name })
             .collect();
         (active, available)
     } else {
-        // No runtime yet — derive from persisted state + known built-in modules
+        // No runtime yet — derive from persisted state + known built-in profiles
         let active = if s.sleep_mode {
-            rhythm_core::SleepCurveModule::ID.to_string()
+            rhythm_core::SLEEP_PROFILE_ID.to_string()
         } else {
-            rhythm_core::RhythmCurveModule::ID.to_string()
+            rhythm_core::RHYTHM_PROFILE_ID.to_string()
         };
         let available = vec![
-            CurveModuleDto {
-                id: rhythm_core::RhythmCurveModule::ID.to_string(),
-                name: rhythm_core::RhythmCurveModule::NAME.to_string(),
+            LightProfileDto {
+                id: rhythm_core::RHYTHM_PROFILE_ID.to_string(),
+                name: rhythm_core::RHYTHM_PROFILE_NAME.to_string(),
             },
-            CurveModuleDto {
-                id: rhythm_core::SleepCurveModule::ID.to_string(),
-                name: rhythm_core::SleepCurveModule::NAME.to_string(),
+            LightProfileDto {
+                id: rhythm_core::SLEEP_PROFILE_ID.to_string(),
+                name: rhythm_core::SLEEP_PROFILE_NAME.to_string(),
             },
         ];
         (active, available)
@@ -796,8 +796,8 @@ fn build_settings_dto_inner(s: &AppState) -> SettingsDto {
         rhythm_interval_secs: s.runtime_config.update_interval_secs,
         power_save: s.power_save,
         sleep_mode: s.sleep_mode,
-        active_curve_module: active_module,
-        available_curve_modules: available_modules,
+        active_light_profile: active_profile,
+        available_light_profiles: available_profiles,
     }
 }
 
@@ -1613,32 +1613,32 @@ pub fn do_config_set(state: &SharedState, config: CurveConfig) -> Result<()> {
     Ok(())
 }
 
-/// Switch all runtimes to the given curve module.
-pub fn do_set_curve_module(state: &SharedState, module_id: &str) -> Result<()> {
-    info!(target: "cmd", "set_curve_module: switching to '{}'", module_id);
+/// Switch all runtimes to the given light profile.
+pub fn do_set_light_profile(state: &SharedState, module_id: &str) -> Result<()> {
+    info!(target: "cmd", "set_light_profile: switching to '{}'", module_id);
 
     let runtimes: Vec<_> = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.sleep_mode = module_id == rhythm_core::SleepCurveModule::ID;
+        s.sleep_mode = module_id == rhythm_core::SLEEP_PROFILE_ID;
         s.hubs.values().filter_map(|h| h.runtime.clone()).collect()
     };
 
     let mut any_set = false;
     for rt in &runtimes {
-        if rt.set_curve_module(module_id) {
+        if rt.set_light_profile(module_id) {
             any_set = true;
         }
     }
     if !runtimes.is_empty() && !any_set {
-        return Err(anyhow::anyhow!("Unknown curve module: {}", module_id));
+        return Err(anyhow::anyhow!("Unknown light profile: {}", module_id));
     }
 
     // Reset all on-rooms so lights immediately move to the new curve
     if let Err(e) = do_fix_my_lights(state, false) {
-        warn!(target: "cmd", "set_curve_module: fix_my_lights failed: {}", e);
+        warn!(target: "cmd", "set_light_profile: fix_my_lights failed: {}", e);
     }
 
-    let is_sleep = module_id == rhythm_core::SleepCurveModule::ID;
+    let is_sleep = module_id == rhythm_core::SLEEP_PROFILE_ID;
     persist_sleep_mode(state, is_sleep);
 
     #[cfg(feature = "desktop")]
@@ -1649,12 +1649,12 @@ pub fn do_set_curve_module(state: &SharedState, module_id: &str) -> Result<()> {
 
 /// Activate sleep mode: switch all runtimes to the sleep curve.
 pub fn do_sleep(state: &SharedState) -> Result<()> {
-    do_set_curve_module(state, rhythm_core::SleepCurveModule::ID)
+    do_set_light_profile(state, rhythm_core::SLEEP_PROFILE_ID)
 }
 
 /// Deactivate sleep mode: switch all runtimes back to the rhythm curve.
 pub fn do_wake(state: &SharedState) -> Result<()> {
-    do_set_curve_module(state, rhythm_core::RhythmCurveModule::ID)
+    do_set_light_profile(state, rhythm_core::RHYTHM_PROFILE_ID)
 }
 
 /// Persist sleep mode to storage.
@@ -2972,7 +2972,7 @@ pub fn build_curve(
     max_steps: Option<u8>,
 ) -> Result<String> {
     use crate::api_types::CurveResponse;
-    use rhythm_core::{RhythmCurveModule, SleepCurveModule};
+    use rhythm_core::{default_sleep_profile, LightProfile};
 
     let (config, utc_offset, is_preview, sleep_mode) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -2988,16 +2988,20 @@ pub fn build_curve(
         resolve_solar(&s, year, month, day)
     };
 
-    // Preview (POST) always uses rhythm curve; GET uses the active module
-    let module: Box<dyn rhythm_core::LightCurveModule> = if is_preview || !sleep_mode {
-        Box::new(RhythmCurveModule::new(config.clone()))
+    // Preview (POST) always uses the backward-compatible rhythm config shape.
+    let module: Box<dyn rhythm_core::LightProfileModule> = if is_preview || !sleep_mode {
+        Box::new(LightProfile::new(config.clone().into()))
     } else {
-        Box::new(SleepCurveModule::new(config.clone()))
+        Box::new(LightProfile::new(default_sleep_profile()))
     };
 
     let samples = samples_per_hour.unwrap_or(4);
-    let curve_data =
-        rhythm_curve::generate_curve_data(module.as_ref(), resolved.solar, resolved.sun_times, samples);
+    let curve_data = rhythm_curve::generate_curve_data(
+        module.as_ref(),
+        resolved.solar,
+        resolved.sun_times,
+        samples,
+    );
 
     let start = start_hour.unwrap_or_else(|| current_local_hour(utc_offset));
     let steps = max_steps.unwrap_or(config.max_dim_steps);
@@ -3027,7 +3031,7 @@ pub fn build_curve(
 /// Used by `GET /api/curve/now`.
 pub fn build_curve_now(state: &SharedState, hour_override: Option<f32>) -> Result<String> {
     use crate::api_types::LightingNowResponse;
-    use rhythm_core::{kelvin_to_mireds, LightCurveModule, RhythmCurveModule, SleepCurveModule};
+    use rhythm_core::{default_sleep_profile, kelvin_to_mireds, LightProfile, LightProfileModule};
 
     let (config, utc_offset, sleep_mode) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -3050,10 +3054,10 @@ pub fn build_curve_now(state: &SharedState, hour_override: Option<f32>) -> Resul
         resolve_solar(&s, year, month, day)
     };
 
-    let module: Box<dyn LightCurveModule> = if sleep_mode {
-        Box::new(SleepCurveModule::new(config))
+    let module: Box<dyn LightProfileModule> = if sleep_mode {
+        Box::new(LightProfile::new(default_sleep_profile()))
     } else {
-        Box::new(RhythmCurveModule::new(config))
+        Box::new(LightProfile::new(config.into()))
     };
     let ctx = rhythm_core::CurveContext::new(hour, resolved.solar, resolved.sun_times);
     let values = module.calculate(&ctx);
@@ -3186,14 +3190,17 @@ mod tests {
         fn current_hour(&self) -> f32 {
             12.0
         }
-        fn set_curve_module(&self, _: &str) -> bool {
+        fn set_light_profile(&self, _: &str) -> bool {
             true
         }
-        fn active_curve_module_id(&self) -> String {
+        fn active_light_profile_id(&self) -> String {
             "rhythm".into()
         }
-        fn available_curve_modules(&self) -> Vec<(String, String)> {
-            vec![("rhythm".into(), "Rhythm Curve".into()), ("sleep".into(), "Sleep Curve".into())]
+        fn available_light_profiles(&self) -> Vec<(String, String)> {
+            vec![
+                ("rhythm".into(), "Rhythm Curve".into()),
+                ("sleep".into(), "Sleep Curve".into()),
+            ]
         }
     }
 

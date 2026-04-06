@@ -321,7 +321,7 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
             .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
         runtime.set_power_save(s.power_save);
         if s.sleep_mode {
-            runtime.set_curve_module(rhythm_core::SleepCurveModule::ID);
+            runtime.set_light_profile(rhythm_core::SLEEP_PROFILE_ID);
             info!(target: "sys", "Restored sleep mode");
         }
         info!(target: "sys", "Power save: {}", s.power_save);
@@ -624,7 +624,7 @@ pub fn ensure_composite_runtime(
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         runtime.set_power_save(s.power_save);
         if s.sleep_mode {
-            runtime.set_curve_module(rhythm_core::SleepCurveModule::ID);
+            runtime.set_light_profile(rhythm_core::SLEEP_PROFILE_ID);
         }
     }
 

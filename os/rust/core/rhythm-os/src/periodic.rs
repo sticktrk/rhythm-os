@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use log::{info, warn};
 #[cfg(feature = "blocking")]
-use rhythm_core::{BlockingTimeProvider, LightCurveModule, TimeProvider};
+use rhythm_core::{BlockingTimeProvider, LightProfileModule, TimeProvider};
 
 use std::sync::Arc;
 
@@ -54,7 +54,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
     );
 
     loop {
-        let (utc_offset, config, solar_noon, lat, lon, update_interval, timezone_name) = {
+        let (utc_offset, config, sleep_mode, solar_noon, lat, lon, update_interval, timezone_name) = {
             let Ok(s) = state.lock() else {
                 thread::sleep(Duration::from_secs(60));
                 continue;
@@ -62,6 +62,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             (
                 s.utc_offset_hours,
                 s.config.clone(),
+                s.sleep_mode,
                 s.solar_noon_hour(),
                 s.latitude.unwrap_or(35.0),
                 s.longitude.unwrap_or(-80.84),
@@ -88,8 +89,12 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
 
         // Calculate generic curve values (no offset) for logging
         let solar = rhythm_core::SolarTime::new(solar_noon, lat, doy);
-        let ctx = rhythm_core::curve_module::CurveContext::new(current_hour, solar, None);
-        let module = rhythm_core::RhythmCurveModule::new(config);
+        let ctx = rhythm_core::light_profile::CurveContext::new(current_hour, solar, None);
+        let module = if sleep_mode {
+            rhythm_core::LightProfile::new(rhythm_core::default_sleep_profile())
+        } else {
+            rhythm_core::LightProfile::new(config.into())
+        };
         let values = module.calculate(&ctx);
 
         // Get rhythm-enabled room IDs, skipping rooms in warning-dim state
@@ -325,7 +330,10 @@ pub fn check_sunrise_sleep_deactivate(state: &SharedState, last_hour: f32, curre
     let crossed = rhythm_core::crossed_solar_midnight(last_hour, current_hour, sunrise);
     log::debug!(
         "Sleep sunrise check: last={:.2}, now={:.2}, sunrise={:.2}, crossed={}",
-        last_hour, current_hour, sunrise, crossed
+        last_hour,
+        current_hour,
+        sunrise,
+        crossed
     );
 
     if crossed {
@@ -669,14 +677,17 @@ mod tests {
             fn current_hour(&self) -> f32 {
                 12.0
             }
-            fn set_curve_module(&self, _: &str) -> bool {
+            fn set_light_profile(&self, _: &str) -> bool {
                 true
             }
-            fn active_curve_module_id(&self) -> String {
+            fn active_light_profile_id(&self) -> String {
                 "rhythm".into()
             }
-            fn available_curve_modules(&self) -> Vec<(String, String)> {
-                vec![("rhythm".into(), "Rhythm Curve".into()), ("sleep".into(), "Sleep Curve".into())]
+            fn available_light_profiles(&self) -> Vec<(String, String)> {
+                vec![
+                    ("rhythm".into(), "Rhythm Curve".into()),
+                    ("sleep".into(), "Sleep Curve".into()),
+                ]
             }
         }
 

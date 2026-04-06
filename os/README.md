@@ -14,7 +14,7 @@
   <a href="https://github.com/sticktrk/rhythm-os/actions/workflows/ci.yml"><img src="https://github.com/sticktrk/rhythm-os/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
 </p>
 
-Rhythm OS is a headless, curve-driven lighting engine written in Rust. It continuously evaluates a lighting curve to produce the right **brightness** and **color temperature** for every moment of the day — then pushes those values to your lights. The default curve is a Gaussian shaped by solar position, but the curve engine is pluggable: implement the `LightCurveModule` trait and drop in any shape you want.
+Rhythm OS is a headless, curve-driven lighting engine written in Rust. It continuously evaluates a lighting curve to produce the right **brightness** and **color temperature** for every moment of the day — then pushes those values to your lights. The default curve is a Gaussian shaped by solar position, but the curve engine is pluggable: implement the `LightProfileModule` trait and drop in any shape you want.
 
 The same core runs everywhere: on an **ESP32** microcontroller, a **macOS/Linux** server, or a **Home Assistant** add-on. Hub-agnostic — works with any lighting product that has an integration crate. The entire system is controlled through a REST API. Bring your own frontend, or use the [Rhythm app](https://apps.apple.com/us/app/rhythm-lighting/id6758312802).
 
@@ -23,7 +23,7 @@ The same core runs everywhere: on an **ESP32** microcontroller, a **macOS/Linux*
 Rhythm OS manages your lights through **curves** — continuous functions that define brightness and color temperature over the course of a day. At any moment, the engine knows the exact values your lights should be at. When you press a button, lights come on at those values. Step dimming moves along the curve instead of arbitrary percentages.
 
 - **Curve-driven** — lights follow a smooth function, not manual presets or timers
-- **Pluggable curve engine** — the default is a Gaussian shaped by solar position, but implement `LightCurveModule` for any shape
+- **Pluggable curve engine** — the default is a Gaussian shaped by solar position, but implement `LightProfileModule` for any shape
 - **Room-level control** — rooms, devices, buttons, motion sensors, group addressing
 - **Hub-agnostic** — add lighting products by implementing a small set of traits
 - **REST API + SSE** — full programmatic control with real-time state streaming
@@ -87,7 +87,7 @@ Rhythm is built as a layered crate architecture. Each layer has a single respons
 
 | Crate | Purpose |
 |-------|---------|
-| **rhythm-curve** | Pluggable lighting curve contract. Defines the `LightCurveModule` trait for custom curve shapes. |
+| **rhythm-curve** | Pluggable lighting curve contract. Defines the `LightProfileModule` trait for custom curve shapes. |
 | **rhythm-core** | Solar calculations, curve engine, color science, runtime orchestration. Pure algorithms with zero I/O — runs on any platform. Feature-gated for `tokio` (async) or `blocking` (embedded). |
 | **rhythm-os** | Hub-agnostic business logic: room management, event loop, command handling, persistence. Knows nothing about Hue — dispatches through traits. |
 | **rhythm-hue** | Philips Hue V2 integration. Implements `LightController`, `HubRegistry`, and `HubProvider`. Platform-abstracted via `HueTransport` trait — same logic on ESP32 and desktop. |

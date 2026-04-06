@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::solar::{SunTimes, TwilightTimes};
+use rhythm_curve::{LightCurveShape, LightProfileConfig};
 
 // Re-export shared default constants from rhythm-curve
 pub use rhythm_curve::config::{
@@ -296,6 +297,36 @@ impl CurveConfig {
             new.width_right_cct = Self::clamped_width(self.width_right_cct * factor);
         }
         Some(new)
+    }
+}
+
+impl From<&CurveConfig> for LightProfileConfig {
+    fn from(config: &CurveConfig) -> Self {
+        Self {
+            id: "rhythm".into(),
+            name: "Rhythm Profile".into(),
+            curve: LightCurveShape::SuperGaussian {
+                width_left_bri: config.width_left_bri,
+                width_right_bri: config.width_right_bri,
+                width_left_cct: config.width_left_cct,
+                width_right_cct: config.width_right_cct,
+                shape_p: config.shape_p,
+            },
+            min_brightness: config.min_brightness,
+            max_brightness: config.max_brightness,
+            min_color_temp: config.min_color_temp,
+            max_color_temp: config.max_color_temp,
+            max_dim_steps: config.max_dim_steps,
+            fade_ms: config.fade_ms,
+            motion_timeout_secs: config.motion_timeout_secs,
+            direct_color: None,
+        }
+    }
+}
+
+impl From<CurveConfig> for LightProfileConfig {
+    fn from(config: CurveConfig) -> Self {
+        Self::from(&config)
     }
 }
 

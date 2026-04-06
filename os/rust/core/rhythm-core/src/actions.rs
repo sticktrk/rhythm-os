@@ -5,7 +5,7 @@
 //! effects — the caller is responsible for executing any resulting commands.
 
 use crate::adaptive::LightingValues;
-use crate::curve_module::{CurveContext, LightCurveModule};
+use crate::light_profile::{CurveContext, LightProfileModule};
 use crate::solar::SolarTime;
 use crate::steps::StepAction;
 
@@ -73,7 +73,7 @@ const DIM_DELTA: f32 = 10.0;
 /// * `action` - The action to process
 /// * `state` - Current room state
 pub fn process_action(
-    module: &dyn LightCurveModule,
+    module: &dyn LightProfileModule,
     solar: SolarTime,
     current_hour: f32,
     action: RoomAction,
@@ -223,10 +223,10 @@ pub fn process_action(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CurveConfig, RhythmCurveModule};
+    use crate::{default_rhythm_profile, LightProfile};
 
-    fn test_module() -> RhythmCurveModule {
-        RhythmCurveModule::new(CurveConfig::default())
+    fn test_module() -> LightProfile {
+        LightProfile::new(default_rhythm_profile())
     }
 
     fn test_solar() -> SolarTime {

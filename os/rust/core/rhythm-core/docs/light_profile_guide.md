@@ -1,28 +1,28 @@
-# Custom Lighting Curve Module Design Guide
+# Custom Light Profile Design Guide
 
-This guide explains how to design and implement custom lighting curve modules for the Rhythm OS system. Whether you're building linear rhythm lighting, manual control modes, or schedule-based automation, this document covers everything you need to know.
+This guide explains how to design and implement custom lighting light profiles for the Rhythm OS system. Whether you're building linear rhythm lighting, manual control modes, or schedule-based automation, this document covers everything you need to know.
 
 ## Table of Contents
 
 1. [Overview](#1-overview)
 2. [Quick Start](#2-quick-start)
-3. [The LightCurveModule Trait](#3-the-lightcurvemodule-trait)
+3. [The LightProfileModule Trait](#3-the-lightcurvemodule-trait)
 4. [Understanding CurveContext](#4-understanding-curvecontext)
 5. [Key Output Types](#5-key-output-types)
 6. [Step Operations](#6-step-operations)
 7. [Configuration Patterns](#7-configuration-patterns)
 8. [Integration with Registry](#8-integration-with-registry)
 9. [Best Practices](#9-best-practices)
-10. [Reference: RhythmCurveModule](#10-reference-rhythmcurvemodule)
-11. [Complete Example: SimpleCurveModule](#11-complete-example-simplecurvemodule)
+10. [Reference: LightProfile](#10-reference-rhythmcurvemodule)
+11. [Complete Example: SimpleProfile](#11-complete-example-simplecurvemodule)
 
 ---
 
 ## 1. Overview
 
-### What is a LightCurveModule?
+### What is a LightProfileModule?
 
-A `LightCurveModule` is a trait that defines how lighting values (brightness and color temperature) are calculated based on the time of day and solar position. Each module encapsulates a specific lighting algorithm, allowing the system to switch between different lighting behaviors without changing the core infrastructure.
+A `LightProfileModule` is a trait that defines how lighting values (brightness and color temperature) are calculated based on the time of day and solar position. Each module encapsulates a specific lighting algorithm, allowing the system to switch between different lighting behaviors without changing the core infrastructure.
 
 The trait provides a clean abstraction for:
 - **Calculating lighting values** at any given time
@@ -46,7 +46,7 @@ Create a custom module when you need:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    CurveModuleRegistry                       │
+│                    LightProfileRegistry                       │
 │  ┌─────────────────┬─────────────────┬─────────────────┐   │
 │  │ RhythmModule    │ linearModule │ ManualModule    │   │
 │  │ (default)       │                 │                 │   │
@@ -54,7 +54,7 @@ Create a custom module when you need:
 │           │                 │                 │             │
 │           ▼                 ▼                 ▼             │
 │      ┌─────────────────────────────────────────────┐       │
-│      │           LightCurveModule Trait            │       │
+│      │           LightProfileModule Trait            │       │
 │      │  • calculate(ctx) → LightingValues          │       │
 │      │  • calculate_step(ctx, action) → StepResult │       │
 │      │  • is_at_maximum/minimum(ctx) → bool        │       │
@@ -77,11 +77,11 @@ Create a custom module when you need:
 
 ### Minimal Implementation
 
-Here's the simplest possible curve module that returns fixed lighting values:
+Here's the simplest possible light profile that returns fixed lighting values:
 
 ```rust
 use std::sync::Arc;
-use rhythm_core::curve_module::{CurveContext, LightCurveModule};
+use rhythm_core::light_profile::{CurveContext, LightProfileModule};
 use rhythm_core::adaptive::LightingValues;
 use rhythm_core::steps::{StepAction, StepResult};
 
@@ -96,7 +96,7 @@ impl FixedLightModule {
     }
 }
 
-impl LightCurveModule for FixedLightModule {
+impl LightProfileModule for FixedLightModule {
     fn id(&self) -> &str { "fixed" }
     fn name(&self) -> &str { "Fixed Light" }
 
@@ -138,21 +138,21 @@ impl LightCurveModule for FixedLightModule {
 ### Registering Your Module
 
 ```rust
-use rhythm_core::curve_module::CurveModuleRegistry;
+use rhythm_core::light_profile::LightProfileRegistry;
 
 fn main() {
-    let mut registry = CurveModuleRegistry::new();
+    let mut registry = LightProfileRegistry::new();
 
     // Create and register the module
     let fixed_module = Arc::new(FixedLightModule::new(75, 4000));
     registry.register(fixed_module);
 
     // Set as active
-    registry.set_active_module("fixed");
+    registry.set_active_profile("fixed");
 
     // Use it
     let ctx = CurveContext::default();
-    let values = registry.active_module().calculate(&ctx);
+    let values = registry.active_profile().calculate(&ctx);
     println!("Brightness: {}%, Color: {}K", values.brightness, values.kelvin);
 }
 ```
@@ -163,7 +163,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rhythm_core::curve_module::CurveContext;
+    use rhythm_core::light_profile::CurveContext;
 
     #[test]
     fn test_fixed_module_returns_configured_values() {
@@ -189,12 +189,12 @@ mod tests {
 
 ---
 
-## 3. The LightCurveModule Trait
+## 3. The LightProfileModule Trait
 
-The `LightCurveModule` trait is the core abstraction for all lighting curve implementations. Here's the complete trait definition with explanations for each method:
+The `LightProfileModule` trait is the core abstraction for all lighting curve implementations. Here's the complete trait definition with explanations for each method:
 
 ```rust
-pub trait LightCurveModule: Send + Sync {
+pub trait LightProfileModule: Send + Sync {
     // Identity methods
     fn id(&self) -> &str;
     fn name(&self) -> &str;
@@ -379,7 +379,7 @@ These values are used by the system to:
 ### Thread Safety: `Send + Sync`
 
 The trait requires `Send + Sync` because modules may be:
-- Shared across threads via `Arc<dyn LightCurveModule>`
+- Shared across threads via `Arc<dyn LightProfileModule>`
 - Accessed concurrently by multiple light controllers
 - Stored in thread-safe registries
 
@@ -797,7 +797,7 @@ fn find_time_for_brightness_interpolated(
 
 ### Using CommonCurveConfig
 
-`CommonCurveConfig` provides shared settings that apply to most curve modules:
+`CommonCurveConfig` provides shared settings that apply to most light profiles:
 
 ```rust
 #[derive(Debug, Clone, PartialEq)]
@@ -825,7 +825,7 @@ pub struct MyModule {
     // Module-specific fields...
 }
 
-impl LightCurveModule for MyModule {
+impl LightProfileModule for MyModule {
     fn min_brightness(&self) -> u8 { self.common.min_brightness }
     fn max_brightness(&self) -> u8 { self.common.max_brightness }
     fn min_color_temp(&self) -> u16 { self.common.min_color_temp }
@@ -879,16 +879,16 @@ impl Default for linearConfig {
 }
 ```
 
-### Extending CurveModuleConfig Enum
+### Extending LightProfileModuleConfig Enum
 
-To integrate with the registry's configuration system, add your config to the `CurveModuleConfig` enum:
+To integrate with the registry's configuration system, add your config to the `LightProfileModuleConfig` enum:
 
 ```rust
-// In curve_module/config.rs
+// In light_profile/config.rs
 
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize), serde(tag = "type"))]
-pub enum CurveModuleConfig {
+pub enum LightProfileModuleConfig {
     #[cfg_attr(feature = "serde", serde(rename = "rhythm"))]
     Rhythm(CurveConfig),
 
@@ -898,7 +898,7 @@ pub enum CurveModuleConfig {
     // Add more variants as needed
 }
 
-impl CurveModuleConfig {
+impl LightProfileModuleConfig {
     pub fn module_id(&self) -> &str {
         match self {
             Self::Rhythm(_) => "rhythm",
@@ -921,14 +921,14 @@ impl CurveModuleConfig {
 
 ### Registering Your Module
 
-The `CurveModuleRegistry` manages all available curve modules:
+The `LightProfileRegistry` manages all available light profiles:
 
 ```rust
 use std::sync::Arc;
-use rhythm_core::curve_module::{CurveModuleRegistry, LightCurveModule};
+use rhythm_core::light_profile::{LightProfileRegistry, LightProfileModule};
 
-fn setup_registry() -> CurveModuleRegistry {
-    let mut registry = CurveModuleRegistry::new();
+fn setup_registry() -> LightProfileRegistry {
+    let mut registry = LightProfileRegistry::new();
 
     // Register custom modules
     let linear = Arc::new(linearModule::new(linearConfig::default()));
@@ -945,14 +945,14 @@ fn setup_registry() -> CurveModuleRegistry {
 
 ```rust
 // Set by ID
-if registry.set_active_module("linear") {
+if registry.set_active_profile("linear") {
     println!("Switched to linear module");
 } else {
     println!("Module 'linear' not found");
 }
 
-// Get the active module
-let active = registry.active_module();
+// Get the active profile
+let active = registry.active_profile();
 println!("Using: {} ({})", active.name(), active.id());
 
 // Reset to default
@@ -963,7 +963,7 @@ registry.reset_to_default();
 
 ```rust
 // Get all registered modules
-for (id, name) in registry.available_modules() {
+for (id, name) in registry.available_profiles() {
     println!("  {}: {}", id, name);
 }
 // Output:
@@ -976,22 +976,22 @@ for (id, name) in registry.available_modules() {
 
 The registry enforces these rules:
 
-1. **Cannot remove the active module**: Attempting to unregister the currently active module returns `false`
+1. **Cannot remove the active profile**: Attempting to unregister the currently active profile returns `false`
 
 2. **Cannot remove the default module**: The default module (rhythm) is protected from removal
 
-3. **Active module always exists**: If you call `active_module()` and it doesn't exist, the code panics (invariant violation)
+3. **Active profile always exists**: If you call `active_profile()` and it doesn't exist, the code panics (invariant violation)
 
 ```rust
 // These will fail (return false)
-registry.set_active_module("rhythm");
+registry.set_active_profile("rhythm");
 registry.unregister("rhythm");  // false: is default
 
-registry.set_active_module("linear");
+registry.set_active_profile("linear");
 registry.unregister("linear");  // false: is active
 
 // This works
-registry.set_active_module("rhythm");
+registry.set_active_profile("rhythm");
 registry.unregister("linear");  // true: not active, not default
 ```
 
@@ -1046,7 +1046,7 @@ Use the `tracing` crate for structured logging:
 ```rust
 use tracing::{debug, trace, instrument};
 
-impl LightCurveModule for MyModule {
+impl LightProfileModule for MyModule {
     #[instrument(skip(self, ctx), fields(module = %self.id()))]
     fn calculate(&self, ctx: &CurveContext) -> LightingValues {
         let brightness = self.calculate_brightness(ctx);
@@ -1133,13 +1133,13 @@ proptest! {
 ```rust
 #[test]
 fn test_module_works_with_registry() {
-    let mut registry = CurveModuleRegistry::new();
+    let mut registry = LightProfileRegistry::new();
     let module = Arc::new(MyModule::default());
 
     registry.register(module);
-    assert!(registry.set_active_module("my_module"));
+    assert!(registry.set_active_profile("my_module"));
 
-    let active = registry.active_module();
+    let active = registry.active_profile();
     assert_eq!(active.id(), "my_module");
 
     let ctx = CurveContext::default();
@@ -1150,9 +1150,9 @@ fn test_module_works_with_registry() {
 
 ---
 
-## 10. Reference: RhythmCurveModule
+## 10. Reference: LightProfile
 
-The `RhythmCurveModule` is the default implementation and serves as a reference for building custom modules. Understanding its approach helps when designing your own.
+The `LightProfile` is the default implementation and serves as a reference for building custom modules. Understanding its approach helps when designing your own.
 
 ### Logistic Curve Approach
 
@@ -1254,7 +1254,7 @@ fn calculate_color_temperature(&self, ctx: &CurveContext) -> u16 {
 
 ---
 
-## 11. Complete Example: SimpleCurveModule
+## 11. Complete Example: SimpleProfile
 
 Here's a complete, working implementation of a simple linear interpolation module that you can use as a starting template.
 
@@ -1262,9 +1262,9 @@ Here's a complete, working implementation of a simple linear interpolation modul
 
 ```rust
 use serde::{Deserialize, Serialize};
-use rhythm_core::curve_module::CommonCurveConfig;
+use rhythm_core::light_profile::CommonCurveConfig;
 
-/// Configuration for the simple linear curve module.
+/// Configuration for the simple linear light profile.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct SimpleCurveConfig {
@@ -1303,10 +1303,10 @@ impl Default for SimpleCurveConfig {
 ```rust
 use std::sync::Arc;
 use rhythm_core::adaptive::LightingValues;
-use rhythm_core::curve_module::{CurveContext, LightCurveModule};
+use rhythm_core::light_profile::{CurveContext, LightProfileModule};
 use rhythm_core::steps::{StepAction, StepResult};
 
-/// A simple curve module using linear interpolation between fixed time points.
+/// A simple light profile using linear interpolation between fixed time points.
 ///
 /// The curve follows this pattern:
 /// - Night (midnight to dawn): minimum brightness, warm color
@@ -1315,11 +1315,11 @@ use rhythm_core::steps::{StepAction, StepResult};
 /// - Dusk to Night: linear ramp down
 /// - Night (to midnight): minimum brightness, warm color
 #[derive(Debug, Clone)]
-pub struct SimpleCurveModule {
+pub struct SimpleProfile {
     config: SimpleCurveConfig,
 }
 
-impl SimpleCurveModule {
+impl SimpleProfile {
     pub const ID: &'static str = "simple";
     pub const NAME: &'static str = "Simple Linear Curve";
 
@@ -1402,7 +1402,7 @@ impl SimpleCurveModule {
     }
 }
 
-impl LightCurveModule for SimpleCurveModule {
+impl LightProfileModule for SimpleProfile {
     fn id(&self) -> &str {
         Self::ID
     }
@@ -1527,7 +1527,7 @@ impl LightCurveModule for SimpleCurveModule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rhythm_core::curve_module::CurveContext;
+    use rhythm_core::light_profile::CurveContext;
     use rhythm_core::solar::SolarTime;
 
     fn make_context(hour: f32) -> CurveContext {
@@ -1536,14 +1536,14 @@ mod tests {
 
     #[test]
     fn test_module_identity() {
-        let module = SimpleCurveModule::with_defaults();
+        let module = SimpleProfile::with_defaults();
         assert_eq!(module.id(), "simple");
         assert_eq!(module.name(), "Simple Linear Curve");
     }
 
     #[test]
     fn test_minimum_brightness_before_dawn() {
-        let module = SimpleCurveModule::with_defaults();
+        let module = SimpleProfile::with_defaults();
         let ctx = make_context(4.0); // 4 AM, before default dawn (6 AM)
 
         assert_eq!(module.calculate_brightness(&ctx), module.min_brightness());
@@ -1551,7 +1551,7 @@ mod tests {
 
     #[test]
     fn test_maximum_brightness_at_peak() {
-        let module = SimpleCurveModule::with_defaults();
+        let module = SimpleProfile::with_defaults();
         let ctx = make_context(12.0); // Noon, between peak (9 AM) and dusk (6 PM)
 
         assert_eq!(module.calculate_brightness(&ctx), module.max_brightness());
@@ -1559,7 +1559,7 @@ mod tests {
 
     #[test]
     fn test_minimum_brightness_after_night() {
-        let module = SimpleCurveModule::with_defaults();
+        let module = SimpleProfile::with_defaults();
         let ctx = make_context(23.0); // 11 PM, after default night (9 PM)
 
         assert_eq!(module.calculate_brightness(&ctx), module.min_brightness());
@@ -1567,7 +1567,7 @@ mod tests {
 
     #[test]
     fn test_brightness_ramps_up_during_dawn() {
-        let module = SimpleCurveModule::with_defaults();
+        let module = SimpleProfile::with_defaults();
 
         let early = make_context(6.5);
         let late = make_context(8.5);
@@ -1580,7 +1580,7 @@ mod tests {
 
     #[test]
     fn test_color_temp_follows_brightness() {
-        let module = SimpleCurveModule::with_defaults();
+        let module = SimpleProfile::with_defaults();
 
         let night = make_context(3.0);
         let noon = make_context(12.0);
@@ -1594,7 +1594,7 @@ mod tests {
 
     #[test]
     fn test_step_brighten_increases_brightness() {
-        let module = SimpleCurveModule::with_defaults();
+        let module = SimpleProfile::with_defaults();
         let ctx = make_context(7.0); // During ramp up
 
         let current = module.calculate_brightness(&ctx);
@@ -1606,7 +1606,7 @@ mod tests {
 
     #[test]
     fn test_step_dim_decreases_brightness() {
-        let module = SimpleCurveModule::with_defaults();
+        let module = SimpleProfile::with_defaults();
         let ctx = make_context(19.0); // During ramp down
 
         let current = module.calculate_brightness(&ctx);
@@ -1617,7 +1617,7 @@ mod tests {
 
     #[test]
     fn test_step_at_maximum_returns_boundary() {
-        let module = SimpleCurveModule::with_defaults();
+        let module = SimpleProfile::with_defaults();
         let ctx = make_context(12.0); // At maximum
 
         let result = module.calculate_step(&ctx, StepAction::Brighten);
@@ -1628,7 +1628,7 @@ mod tests {
 
     #[test]
     fn test_step_at_minimum_returns_boundary() {
-        let module = SimpleCurveModule::with_defaults();
+        let module = SimpleProfile::with_defaults();
         let ctx = make_context(3.0); // At minimum
 
         let result = module.calculate_step(&ctx, StepAction::Dim);
@@ -1639,7 +1639,7 @@ mod tests {
 
     #[test]
     fn test_brightness_always_in_configured_range() {
-        let module = SimpleCurveModule::with_defaults();
+        let module = SimpleProfile::with_defaults();
 
         for hour in 0..24 {
             let ctx = make_context(hour as f32);
@@ -1652,7 +1652,7 @@ mod tests {
 
     #[test]
     fn test_color_temp_always_in_configured_range() {
-        let module = SimpleCurveModule::with_defaults();
+        let module = SimpleProfile::with_defaults();
 
         for hour in 0..24 {
             let ctx = make_context(hour as f32);
@@ -1679,7 +1679,7 @@ mod tests {
             night_hour: 20.0,
         };
 
-        let module = SimpleCurveModule::new(config);
+        let module = SimpleProfile::new(config);
 
         assert_eq!(module.min_brightness(), 10);
         assert_eq!(module.max_brightness(), 90);
@@ -1693,26 +1693,26 @@ mod tests {
 
 ```rust
 use std::sync::Arc;
-use rhythm_core::curve_module::{CurveContext, CurveModuleRegistry};
+use rhythm_core::light_profile::{CurveContext, LightProfileRegistry};
 use rhythm_core::solar::SolarTime;
 
 fn main() {
     // Create registry with default Rhythm module
-    let mut registry = CurveModuleRegistry::new();
+    let mut registry = LightProfileRegistry::new();
 
     // Create and register our simple module
-    let simple = Arc::new(SimpleCurveModule::with_defaults());
+    let simple = Arc::new(SimpleProfile::with_defaults());
     registry.register(simple);
 
     // List available modules
     println!("Available modules:");
-    for (id, name) in registry.available_modules() {
+    for (id, name) in registry.available_profiles() {
         println!("  - {}: {}", id, name);
     }
 
     // Switch to simple module
-    registry.set_active_module("simple");
-    println!("\nActive module: {}", registry.active_module().name());
+    registry.set_active_profile("simple");
+    println!("\nActive profile: {}", registry.active_profile().name());
 
     // Calculate values throughout the day
     println!("\nLighting values throughout the day:");
@@ -1721,7 +1721,7 @@ fn main() {
 
     for hour in (0..24).step_by(3) {
         let ctx = CurveContext::new(hour as f32, SolarTime::default(), None);
-        let values = registry.active_module().calculate(&ctx);
+        let values = registry.active_profile().calculate(&ctx);
 
         println!(
             "{:>5}h {:>11}% {:>7}K",
@@ -1735,7 +1735,7 @@ fn main() {
     let mut offset = 0.0f32;
 
     for i in 0..6 {
-        let result = registry.active_module().calculate_step(&ctx, StepAction::Brighten);
+        let result = registry.active_profile().calculate_step(&ctx, StepAction::Brighten);
         println!(
             "  Step {}: {}% @ {}K (offset: {:.1} min, boundary: {})",
             i + 1,
@@ -1762,7 +1762,7 @@ Available modules:
   - rhythm: Rhythm Curve
   - simple: Simple Linear Curve
 
-Active module: Simple Linear Curve
+Active profile: Simple Linear Curve
 
 Lighting values throughout the day:
   Hour   Brightness  Color K
@@ -1789,7 +1789,7 @@ Step dimming from 7 AM:
 
 ## Summary
 
-Creating a custom `LightCurveModule` involves:
+Creating a custom `LightProfileModule` involves:
 
 1. **Implementing the trait**: Provide all 11 required methods plus use the default `calculate_with_offset()`
 2. **Defining your algorithm**: How brightness and color temperature change over time
@@ -1797,6 +1797,6 @@ Creating a custom `LightCurveModule` involves:
 4. **Creating configuration**: Define adjustable parameters with serde support
 5. **Registering with the system**: Add to the registry and set as active when needed
 
-The `RhythmCurveModule` provides a sophisticated reference implementation using logistic curves, while the `SimpleCurveModule` example shows a straightforward linear approach.
+The `LightProfile` provides a sophisticated reference implementation using logistic curves, while the `SimpleProfile` example shows a straightforward linear approach.
 
 Start simple, test thoroughly, and iterate on your algorithm based on real-world feedback.

@@ -1,4 +1,4 @@
-//! Curve rendering: sample any `LightCurveModule` into visualization data.
+//! Curve rendering: sample any `LightProfileModule` into visualization data.
 //!
 //! These functions work with any curve module implementation — the module
 //! determines what to do with the solar context (or ignore it entirely).
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::color::{Rgb, XyColor};
 use crate::context::CurveContext;
-use crate::module::LightCurveModule;
+use crate::module::LightProfileModule;
 use crate::solar::{SolarTime, SunTimes};
 use crate::steps::StepAction;
 
@@ -59,12 +59,12 @@ pub struct StepSequences {
 ///
 /// # Arguments
 ///
-/// * `module` - Any `LightCurveModule` implementation
+/// * `module` - Any `LightProfileModule` implementation
 /// * `solar` - Solar time reference (used by the module if it cares about the sun)
 /// * `sun_times` - Optional sunrise/sunset data
 /// * `samples_per_hour` - Resolution: 1 = hourly (24 points), 4 = 15-min (96 points), 10 = 6-min (240 points). Clamped to 1–60.
 pub fn generate_curve_data(
-    module: &dyn LightCurveModule,
+    module: &dyn LightProfileModule,
     solar: SolarTime,
     sun_times: Option<SunTimes>,
     samples_per_hour: u32,
@@ -101,13 +101,13 @@ pub fn generate_curve_data(
 ///
 /// # Arguments
 ///
-/// * `module` - Any `LightCurveModule` implementation
+/// * `module` - Any `LightProfileModule` implementation
 /// * `solar` - Solar time reference
 /// * `sun_times` - Optional sunrise/sunset data
 /// * `start_hour` - Starting position on the curve
 /// * `max_steps` - Maximum number of steps in each direction (clamped 1–255)
 pub fn generate_step_sequences(
-    module: &dyn LightCurveModule,
+    module: &dyn LightProfileModule,
     solar: SolarTime,
     sun_times: Option<SunTimes>,
     start_hour: f32,
@@ -173,14 +173,14 @@ pub fn generate_step_sequences(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::module::LightCurveModule;
+    use crate::module::LightProfileModule;
     use crate::steps::StepResult;
     use crate::values::LightingValues;
 
     /// Constant curve for testing — ignores solar context entirely.
     struct ConstantCurve;
 
-    impl LightCurveModule for ConstantCurve {
+    impl LightProfileModule for ConstantCurve {
         fn id(&self) -> &str {
             "constant"
         }

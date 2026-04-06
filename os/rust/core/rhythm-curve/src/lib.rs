@@ -1,22 +1,22 @@
 //! # Rhythm Curve
 //!
-//! Pluggable lighting curve contract for Rhythm OS.
+//! Pluggable lighting profile contract for Rhythm OS.
 //!
 //! This crate defines the trait and types needed to implement a custom
-//! lighting curve algorithm. It has minimal dependencies (`libm` + optional `serde`)
-//! so third-party developers can create curve modules without pulling in
+//! lighting profile. It has minimal dependencies (`libm` + optional `serde`)
+//! so third-party developers can create light profiles without pulling in
 //! the full `rhythm-core` runtime.
 //!
-//! ## Implementing a Custom Curve
+//! ## Implementing a Custom Profile
 //!
 //! ```ignore
-//! use rhythm_curve::{CurveContext, LightCurveModule, LightingValues, StepAction, StepResult};
+//! use rhythm_curve::{CurveContext, LightProfileModule, LightingValues, StepAction, StepResult};
 //!
-//! pub struct MyCurve { /* your config */ }
+//! pub struct MyProfile { /* your config */ }
 //!
-//! impl LightCurveModule for MyCurve {
-//!     fn id(&self) -> &str { "my-curve" }
-//!     fn name(&self) -> &str { "My Custom Curve" }
+//! impl LightProfileModule for MyProfile {
+//!     fn id(&self) -> &str { "my-profile" }
+//!     fn name(&self) -> &str { "My Custom Profile" }
 //!     fn calculate(&self, ctx: &CurveContext) -> LightingValues {
 //!         // Your math here
 //!         LightingValues::new(4000, 80, ctx.solar_time(), 0.0, 500, 600)
@@ -28,7 +28,9 @@
 pub mod color;
 pub mod config;
 pub mod context;
+pub mod curve_shape;
 pub mod module;
+pub mod profile_config;
 pub mod render;
 pub mod solar;
 pub mod steps;
@@ -44,7 +46,9 @@ pub use config::{
     DEFAULT_MIN_BRIGHTNESS, DEFAULT_MIN_COLOR_TEMP,
 };
 pub use context::CurveContext;
-pub use module::LightCurveModule;
+pub use curve_shape::{LightCurveShape, LightDirectColor, LightPaletteKeyframe};
+pub use module::LightProfileModule;
+pub use profile_config::LightProfileConfig;
 pub use render::{
     generate_curve_data, generate_step_sequences, CurveData, StepPoint, StepSequences,
 };

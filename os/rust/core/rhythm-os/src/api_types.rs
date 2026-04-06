@@ -129,7 +129,7 @@ pub struct LocationDto {
 
 /// A curve module descriptor for API responses.
 #[derive(Clone, Debug, Serialize)]
-pub struct CurveModuleDto {
+pub struct LightProfileDto {
     pub id: String,
     pub name: String,
 }
@@ -140,8 +140,8 @@ pub struct SettingsDto {
     pub rhythm_interval_secs: u64,
     pub power_save: bool,
     pub sleep_mode: bool,
-    pub active_curve_module: String,
-    pub available_curve_modules: Vec<CurveModuleDto>,
+    pub active_light_profile: String,
+    pub available_light_profiles: Vec<LightProfileDto>,
 }
 
 /// A typed device entry.
@@ -450,17 +450,26 @@ mod tests {
             rhythm_interval_secs: 60,
             power_save: true,
             sleep_mode: false,
-            active_curve_module: "rhythm".into(),
-            available_curve_modules: vec![
-                CurveModuleDto { id: "rhythm".into(), name: "Rhythm Curve".into() },
-                CurveModuleDto { id: "sleep".into(), name: "Sleep Curve".into() },
+            active_light_profile: "rhythm".into(),
+            available_light_profiles: vec![
+                LightProfileDto {
+                    id: "rhythm".into(),
+                    name: "Rhythm Curve".into(),
+                },
+                LightProfileDto {
+                    id: "sleep".into(),
+                    name: "Sleep Curve".into(),
+                },
             ],
         };
         let json: Value = serde_json::to_value(&dto).unwrap();
         assert_eq!(json["rhythm_interval_secs"], 60);
         assert_eq!(json["power_save"], true);
-        assert_eq!(json["active_curve_module"], "rhythm");
-        assert_eq!(json["available_curve_modules"].as_array().unwrap().len(), 2);
+        assert_eq!(json["active_light_profile"], "rhythm");
+        assert_eq!(
+            json["available_light_profiles"].as_array().unwrap().len(),
+            2
+        );
     }
 
     // ---- HubDto ----
@@ -617,10 +626,16 @@ mod tests {
                 rhythm_interval_secs: 60,
                 power_save: false,
                 sleep_mode: false,
-                active_curve_module: "rhythm".into(),
-                available_curve_modules: vec![
-                    CurveModuleDto { id: "rhythm".into(), name: "Rhythm Curve".into() },
-                    CurveModuleDto { id: "sleep".into(), name: "Sleep Curve".into() },
+                active_light_profile: "rhythm".into(),
+                available_light_profiles: vec![
+                    LightProfileDto {
+                        id: "rhythm".into(),
+                        name: "Rhythm Curve".into(),
+                    },
+                    LightProfileDto {
+                        id: "sleep".into(),
+                        name: "Sleep Curve".into(),
+                    },
                 ],
             },
             rooms: vec![],
@@ -669,10 +684,16 @@ mod tests {
                 rhythm_interval_secs: 60,
                 power_save: false,
                 sleep_mode: false,
-                active_curve_module: "rhythm".into(),
-                available_curve_modules: vec![
-                    CurveModuleDto { id: "rhythm".into(), name: "Rhythm Curve".into() },
-                    CurveModuleDto { id: "sleep".into(), name: "Sleep Curve".into() },
+                active_light_profile: "rhythm".into(),
+                available_light_profiles: vec![
+                    LightProfileDto {
+                        id: "rhythm".into(),
+                        name: "Rhythm Curve".into(),
+                    },
+                    LightProfileDto {
+                        id: "sleep".into(),
+                        name: "Sleep Curve".into(),
+                    },
                 ],
             },
             rooms: vec![RoomFullState {

@@ -1,25 +1,25 @@
-//! Pluggable light curve module trait.
+//! Pluggable light profile module trait.
 //!
-//! Implement [`LightCurveModule`] to create a custom lighting curve algorithm.
+//! Implement [`LightProfileModule`] to create a custom lighting profile.
 //! The trait defines the contract for calculating lighting values from solar context.
 
 use crate::context::CurveContext;
 use crate::steps::{StepAction, StepResult};
 use crate::values::LightingValues;
 
-/// Trait for pluggable light curve modules.
+/// Trait for pluggable light profile modules.
 ///
-/// Implement this trait to create a new curve algorithm. Each module
+/// Implement this trait to create a new lighting profile. Each module
 /// can define its own configuration type and calculation logic.
 ///
 /// # Example
 ///
 /// ```ignore
-/// use rhythm_curve::{CurveContext, LightCurveModule, LightingValues, StepAction, StepResult};
+/// use rhythm_curve::{CurveContext, LightProfileModule, LightingValues, StepAction, StepResult};
 ///
-/// struct ConstantCurve { brightness: u8, kelvin: u16 }
+/// struct ConstantProfile { brightness: u8, kelvin: u16 }
 ///
-/// impl LightCurveModule for ConstantCurve {
+/// impl LightProfileModule for ConstantProfile {
 ///     fn id(&self) -> &str { "constant" }
 ///     fn name(&self) -> &str { "Constant Output" }
 ///     fn calculate(&self, ctx: &CurveContext) -> LightingValues {
@@ -28,7 +28,7 @@ use crate::values::LightingValues;
 ///     // ... implement other methods
 /// }
 /// ```
-pub trait LightCurveModule: Send + Sync {
+pub trait LightProfileModule: Send + Sync {
     /// Unique identifier for this module (e.g., "rhythm", "linear").
     fn id(&self) -> &str;
 
@@ -92,15 +92,6 @@ pub trait LightCurveModule: Send + Sync {
     fn suggested_tick_interval(&self, _ctx: &CurveContext) -> Option<u16> {
         None
     }
-
-    /// Calculate values for idle (soft_off) mode.
-    ///
-    /// The returned brightness is authoritative (e.g. 1% for soft-off).
-    ///
-    /// Default: returns the same as `calculate()` (normal curve values).
-    fn calculate_idle(&self, ctx: &CurveContext) -> LightingValues {
-        self.calculate(ctx)
-    }
 }
 
 #[cfg(test)]
@@ -118,7 +109,7 @@ mod tests {
         kelvin: u16,
     }
 
-    impl LightCurveModule for ConstantCurve {
+    impl LightProfileModule for ConstantCurve {
         fn id(&self) -> &str {
             "constant"
         }
@@ -259,7 +250,7 @@ mod tests {
 
     #[test]
     fn test_trait_object_via_arc() {
-        let curve: Arc<dyn LightCurveModule> = Arc::new(ConstantCurve {
+        let curve: Arc<dyn LightProfileModule> = Arc::new(ConstantCurve {
             brightness: 60,
             kelvin: 3500,
         });

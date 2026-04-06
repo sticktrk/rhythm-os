@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 
 use crate::config::CurveConfig;
 use crate::controller::{LightControlResult, LightController};
-use crate::curve_module::{CurveContext, CurveModuleRegistry, LightCurveModule};
+use crate::light_profile::{CurveContext, LightProfileModule, LightProfileRegistry};
 use crate::lighting::LightingCommand;
 use crate::room::RoomManager;
 use crate::solar::{SolarTime, SunTimes};
@@ -68,7 +68,7 @@ pub fn crossed_solar_midnight(last_hour: f32, current_hour: f32, midnight_hour: 
 
 /// The Rhythm OS engine.
 ///
-/// This struct combines the curve module system with a light controller
+/// This struct combines the light-profile system with a light controller
 /// to provide the service primitives (rhythm_on, step_up, etc.).
 ///
 /// # Type Parameters
@@ -90,8 +90,8 @@ pub struct RhythmEngine<C: LightController> {
     /// The light controller for sending commands.
     controller: C,
 
-    /// Registry of available curve modules.
-    module_registry: CurveModuleRegistry,
+    /// Registry of available light profiles.
+    profile_registry: LightProfileRegistry,
 
     /// Solar time reference for coordinate-based calculations.
     solar: SolarTime,
@@ -112,7 +112,7 @@ impl<C: LightController> RhythmEngine<C> {
     pub fn new(controller: C) -> Self {
         Self {
             controller,
-            module_registry: CurveModuleRegistry::new(),
+            profile_registry: LightProfileRegistry::new(),
             solar: SolarTime::default(),
             sun_times: None,
             rooms: RoomManager::new(),
@@ -124,7 +124,7 @@ impl<C: LightController> RhythmEngine<C> {
     pub fn with_config(controller: C, config: CurveConfig, solar: SolarTime) -> Self {
         Self {
             controller,
-            module_registry: CurveModuleRegistry::with_config(config),
+            profile_registry: LightProfileRegistry::with_config(config),
             solar,
             sun_times: None,
             rooms: RoomManager::new(),
@@ -134,7 +134,7 @@ impl<C: LightController> RhythmEngine<C> {
 
     /// Set the curve configuration for the rhythm module.
     pub fn set_config(&mut self, config: CurveConfig) {
-        self.module_registry.update_rhythm_config(config);
+        self.profile_registry.update_rhythm_config(config);
     }
 
     /// Set the solar time reference.
@@ -162,31 +162,31 @@ impl<C: LightController> RhythmEngine<C> {
         &mut self.rooms
     }
 
-    /// Get a reference to the module registry.
-    pub fn module_registry(&self) -> &CurveModuleRegistry {
-        &self.module_registry
+    /// Get a reference to the profile registry.
+    pub fn profile_registry(&self) -> &LightProfileRegistry {
+        &self.profile_registry
     }
 
-    /// Get a mutable reference to the module registry.
-    pub fn module_registry_mut(&mut self) -> &mut CurveModuleRegistry {
-        &mut self.module_registry
+    /// Get a mutable reference to the profile registry.
+    pub fn profile_registry_mut(&mut self) -> &mut LightProfileRegistry {
+        &mut self.profile_registry
     }
 
-    /// Get the currently active curve module.
-    pub fn active_module(&self) -> Arc<dyn LightCurveModule> {
-        self.module_registry.active_module()
+    /// Get the currently active light profile.
+    pub fn active_profile(&self) -> Arc<dyn LightProfileModule> {
+        self.profile_registry.active_profile()
     }
 
-    /// Set the active curve module by ID.
+    /// Set the active light profile by ID.
     ///
-    /// Returns true if the module was found and set as active.
-    pub fn set_curve_module(&mut self, id: &str) -> bool {
-        self.module_registry.set_active_module(id)
+    /// Returns true if the profile was found and set as active.
+    pub fn set_light_profile(&mut self, id: &str) -> bool {
+        self.profile_registry.set_active_profile(id)
     }
 
-    /// Get a list of available curve modules as (id, name) pairs.
-    pub fn available_modules(&self) -> Vec<(&str, &str)> {
-        self.module_registry.available_modules()
+    /// Get a list of available active profiles as `(id, name)` pairs.
+    pub fn available_profiles(&self) -> Vec<(&str, &str)> {
+        self.profile_registry.available_profiles()
     }
 
     /// Get a reference to the controller.
@@ -199,12 +199,12 @@ impl<C: LightController> RhythmEngine<C> {
         self.power_save
     }
 
-    /// Get the idle brightness from the active curve module.
+    /// Get the idle brightness from the dedicated idle profile.
     pub fn idle_brightness(&self, current_hour: f32) -> u8 {
         let ctx = self.create_context(current_hour);
-        self.module_registry
-            .active_module()
-            .calculate_idle(&ctx)
+        self.profile_registry
+            .idle_profile()
+            .calculate(&ctx)
             .brightness
     }
 
@@ -275,7 +275,7 @@ impl<C: LightController> RhythmEngine<C> {
         let brightness_offset = room.effective_brightness_offset();
 
         let ctx = self.create_context(current_hour);
-        let module = self.module_registry.active_module();
+        let module = self.profile_registry.active_profile();
         let values = module.calculate_with_offset(&ctx, offset_minutes);
 
         // Apply brightness offset if any
@@ -313,7 +313,7 @@ impl<C: LightController> RhythmEngine<C> {
         let brightness_offset = room.effective_brightness_offset();
 
         let ctx = self.create_context(current_hour);
-        let module = self.module_registry.active_module();
+        let module = self.profile_registry.active_profile();
         let values = module.calculate_with_offset(&ctx, offset_minutes);
 
         let brightness =
@@ -429,7 +429,7 @@ impl<C: LightController> RhythmEngine<C> {
 
         // Calculate the step using the active module
         let ctx = self.create_context(effective_hour);
-        let module = self.module_registry.active_module();
+        let module = self.profile_registry.active_profile();
         let step_result = module.calculate_step(&ctx, action);
 
         // Update room offset (don't change rhythm mode state)
@@ -498,7 +498,7 @@ impl<C: LightController> RhythmEngine<C> {
         let brightness_offset = room.effective_brightness_offset();
 
         let ctx = self.create_context(current_hour);
-        let module = self.module_registry.active_module();
+        let module = self.profile_registry.active_profile();
         let values = module.calculate_with_offset(&ctx, offset_minutes);
 
         // Apply brightness offset
@@ -535,7 +535,7 @@ impl<C: LightController> RhythmEngine<C> {
 
         // Calculate curve values at current time
         let ctx = self.create_context(current_hour);
-        let module = self.module_registry.active_module();
+        let module = self.profile_registry.active_profile();
         let values = module.calculate_with_offset(&ctx, offset_minutes);
 
         // Second borrow: set offset so curve_brightness + offset = target
@@ -579,12 +579,15 @@ impl<C: LightController> RhythmEngine<C> {
         }
 
         let ctx = self.create_context(current_hour);
-        let module = self.module_registry.active_module();
+        let module = self.profile_registry.active_profile();
         let values = module.calculate_with_offset(&ctx, time_offset);
 
         if soft_off && !self.power_save {
-            // Soft-off: use idle curve values (brightness + color)
-            let idle_values = module.calculate_idle(&ctx);
+            // Soft-off: use idle profile values (brightness + color)
+            let idle_values = self
+                .profile_registry
+                .idle_profile()
+                .calculate(&ctx.with_offset(time_offset));
             let cmd = Self::build_command(&idle_values, idle_values.brightness);
             self.controller.turn_on(room_id, cmd).await
         } else {
@@ -613,7 +616,7 @@ impl<C: LightController> RhythmEngine<C> {
 
         // Apply current values using the active module
         let ctx = self.create_context(current_hour);
-        let module = self.module_registry.active_module();
+        let module = self.profile_registry.active_profile();
         let values = module.calculate(&ctx);
         let command = LightingCommand::from_values(&values);
         self.controller.turn_on(room_id, command).await
@@ -634,14 +637,16 @@ impl<C: LightController> RhythmEngine<C> {
         if self.power_save {
             self.controller.turn_off(room_id).await
         } else {
-            // Dim to soft-off brightness with idle curve color instead of turning off
+            // Dim to soft-off brightness with idle profile color instead of turning off
             let room = self.rooms.get_or_create(room_id, room_id);
             room.soft_off = true;
             let offset = room.effective_time_offset();
 
             let ctx = self.create_context(current_hour);
-            let module = self.module_registry.active_module();
-            let values = module.calculate_idle(&ctx.with_offset(offset));
+            let values = self
+                .profile_registry
+                .idle_profile()
+                .calculate(&ctx.with_offset(offset));
 
             let cmd = Self::build_command(&values, values.brightness);
             self.controller.turn_on(room_id, cmd).await
@@ -738,9 +743,9 @@ impl<C: LightController> RhythmEngine<C> {
         (updated, errors)
     }
 
-    /// Build a LightingCommand from curve values, respecting `is_direct_color`.
+    /// Build a LightingCommand from profile values, respecting `is_direct_color`.
     ///
-    /// When `is_direct_color` is true (idle curve, sleep curve), sends XY/RGB.
+    /// When `is_direct_color` is true (idle profile, sleep profile), sends XY/RGB.
     /// Otherwise sends kelvin.
     fn build_command(values: &crate::adaptive::LightingValues, brightness: u8) -> LightingCommand {
         if values.is_direct_color {
@@ -755,7 +760,7 @@ impl<C: LightController> RhythmEngine<C> {
         }
     }
 
-    /// Send soft-off brightness with idle curve color to a soft_off room.
+    /// Send soft-off brightness with idle profile color to a soft_off room.
     ///
     /// Called during periodic updates to keep the color
     /// transitioning smoothly even when lights are "logically off".
@@ -771,8 +776,10 @@ impl<C: LightController> RhythmEngine<C> {
             .unwrap_or(0.0);
 
         let ctx = self.create_context(current_hour);
-        let module = self.module_registry.active_module();
-        let values = module.calculate_idle(&ctx.with_offset(offset));
+        let values = self
+            .profile_registry
+            .idle_profile()
+            .calculate(&ctx.with_offset(offset));
 
         let cmd = Self::build_command(&values, values.brightness);
         self.controller.turn_on(room_id, cmd).await
@@ -856,11 +863,11 @@ impl<C: LightController> RhythmEngine<C> {
             .unwrap_or((0.0, 0.0));
 
         let ctx = self.create_context(current_hour);
-        let module = self.module_registry.active_module();
+        let module = self.profile_registry.active_profile();
         let values = module.calculate_with_offset(&ctx, time_offset);
         let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
 
-        LightingCommand::new(brightness, values.kelvin)
+        Self::build_command(&values, brightness)
     }
 }
 
@@ -1653,30 +1660,29 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_available_modules() {
+    fn test_available_profiles() {
         let engine = test_engine();
-        let modules = engine.available_modules();
+        let profiles = engine.available_profiles();
 
-        // Should have at least the default "rhythm" module
-        assert!(!modules.is_empty());
-        assert!(modules.iter().any(|(id, _)| *id == "rhythm"));
+        assert!(!profiles.is_empty());
+        assert!(profiles.iter().any(|(id, _)| *id == "rhythm"));
     }
 
     #[test]
-    fn test_set_invalid_curve_module() {
+    fn test_set_invalid_light_profile() {
         let mut engine = test_engine();
 
-        // Setting a non-existent module should return false
-        let result = engine.set_curve_module("nonexistent");
+        // Setting a non-existent profile should return false
+        let result = engine.set_light_profile("nonexistent");
         assert!(!result);
     }
 
     #[test]
-    fn test_set_valid_curve_module() {
+    fn test_set_valid_light_profile() {
         let mut engine = test_engine();
 
-        // Setting the default module should work
-        let result = engine.set_curve_module("rhythm");
+        // Setting the default profile should work
+        let result = engine.set_light_profile("rhythm");
         assert!(result);
     }
 
@@ -1685,7 +1691,7 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    async fn test_turn_off_uses_idle_curve_from_active_module() {
+    async fn test_turn_off_uses_idle_profile() {
         let (mut engine, spy) = spy_engine();
 
         engine.rhythm_on("room1").await.unwrap();
@@ -1694,10 +1700,9 @@ mod tests {
         let calls = spy.turn_on_calls();
         assert_eq!(calls.len(), 1, "soft-off should send turn_on");
         let (_, cmd) = &calls[0];
-        // RhythmCurveModule composes IdleCurveModule, so calculate_idle() returns direct color
         assert!(
             cmd.is_direct_color,
-            "idle curve should produce direct color"
+            "idle profile should produce direct color"
         );
         assert_eq!(cmd.brightness, 1);
         assert_eq!(cmd.kelvin, 0);
@@ -1706,7 +1711,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_soft_off_tick_uses_idle_curve() {
+    async fn test_soft_off_tick_uses_idle_profile() {
         let (mut engine, spy) = spy_engine();
 
         // Put room into soft_off state
@@ -1719,35 +1724,34 @@ mod tests {
         let calls = spy.turn_on_calls();
         assert_eq!(calls.len(), 1);
         let (_, cmd) = &calls[0];
-        assert!(cmd.is_direct_color, "soft_off_tick should use idle curve");
+        assert!(cmd.is_direct_color, "soft_off_tick should use idle profile");
         assert_eq!(cmd.brightness, 1);
     }
 
     #[tokio::test]
     async fn test_idle_brightness_returns_curve_value() {
         let (engine, _spy) = spy_engine();
-        // IdleCurveModule always returns brightness=1
         assert_eq!(engine.idle_brightness(12.0), 1);
         assert_eq!(engine.idle_brightness(0.0), 1);
         assert_eq!(engine.idle_brightness(23.5), 1);
     }
 
     #[tokio::test]
-    async fn test_set_time_offset_soft_off_uses_idle_curve() {
+    async fn test_set_time_offset_soft_off_uses_idle_profile() {
         let (mut engine, spy) = spy_engine();
 
         // Put room into soft_off state
         engine.rhythm_on("room1").await.unwrap();
         engine.turn_off("room1", 12.0).await.unwrap();
 
-        // Changing the time offset on a soft-off room should use idle curve
+        // Changing the time offset on a soft-off room should use the idle profile
         spy.reset();
         engine.set_time_offset("room1", 14.0, 30.0).await.unwrap();
 
         let calls = spy.turn_on_calls();
         assert_eq!(calls.len(), 1, "soft-off time offset should send turn_on");
         let (_, cmd) = &calls[0];
-        assert!(cmd.is_direct_color, "should use idle curve for soft-off");
-        assert_eq!(cmd.brightness, 1, "brightness from idle curve");
+        assert!(cmd.is_direct_color, "should use idle profile for soft-off");
+        assert_eq!(cmd.brightness, 1, "brightness from idle profile");
     }
 }

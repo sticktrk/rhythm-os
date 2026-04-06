@@ -357,12 +357,12 @@ pub fn handle_put_wake(state: &SharedState) -> ApiResponse {
     }
 }
 
-pub fn handle_put_curve_module(state: &SharedState, body: &Value) -> ApiResponse {
+pub fn handle_put_light_profile(state: &SharedState, body: &Value) -> ApiResponse {
     let id = match body.get("id").and_then(|v| v.as_str()) {
         Some(id) => id,
         None => return ApiResponse::bad_request("Missing id"),
     };
-    match commands::do_set_curve_module(state, id) {
+    match commands::do_set_light_profile(state, id) {
         Ok(()) => ApiResponse::no_content(),
         Err(e) => ApiResponse::server_error(e),
     }
@@ -1131,14 +1131,17 @@ mod tests {
             fn current_hour(&self) -> f32 {
                 12.0
             }
-            fn set_curve_module(&self, _: &str) -> bool {
+            fn set_light_profile(&self, _: &str) -> bool {
                 true
             }
-            fn active_curve_module_id(&self) -> String {
+            fn active_light_profile_id(&self) -> String {
                 "rhythm".into()
             }
-            fn available_curve_modules(&self) -> Vec<(String, String)> {
-                vec![("rhythm".into(), "Rhythm Curve".into()), ("sleep".into(), "Sleep Curve".into())]
+            fn available_light_profiles(&self) -> Vec<(String, String)> {
+                vec![
+                    ("rhythm".into(), "Rhythm Curve".into()),
+                    ("sleep".into(), "Sleep Curve".into()),
+                ]
             }
         }
 
