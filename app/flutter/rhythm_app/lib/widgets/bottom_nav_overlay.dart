@@ -50,11 +50,6 @@ class BottomNavOverlay extends StatefulWidget {
   final VoidCallback? onFixMyLights;
   /// Whether the fix-my-lights operation is in progress.
   final bool isFixing;
-  /// Current sleep mode state from server.
-  final bool sleepMode;
-  /// Callback to toggle sleep/wake mode.
-  final VoidCallback? onSleepToggle;
-
   const BottomNavOverlay({
     super.key,
     required this.currentPage,
@@ -66,8 +61,6 @@ class BottomNavOverlay extends StatefulWidget {
     this.onSettingsModeChanged,
     this.onFixMyLights,
     this.isFixing = false,
-    this.sleepMode = false,
-    this.onSleepToggle,
   });
 
   @override
@@ -150,8 +143,6 @@ class _BottomNavOverlayState extends State<BottomNavOverlay> {
                   key: _actionFanMenuKey,
                   onFixMyLights: widget.onFixMyLights!,
                   isFixing: widget.isFixing,
-                  sleepMode: widget.sleepMode,
-                  onSleepToggle: widget.onSleepToggle,
                   onExpandedChanged: _onActionExpandedChanged,
                 ),
             ],
@@ -408,25 +399,18 @@ class _GearFanMenuState extends State<_GearFanMenu>
 class _ActionFanMenu extends StatefulWidget {
   final VoidCallback onFixMyLights;
   final bool isFixing;
-  final bool sleepMode;
-  final VoidCallback? onSleepToggle;
   final ValueChanged<bool>? onExpandedChanged;
 
   const _ActionFanMenu({
     super.key,
     required this.onFixMyLights,
     required this.isFixing,
-    this.sleepMode = false,
-    this.onSleepToggle,
     this.onExpandedChanged,
   });
 
   @override
   State<_ActionFanMenu> createState() => _ActionFanMenuState();
 }
-
-/// Moon glow color for sleep icon — matches onboarding celestial palette.
-const _moonGlow = Color(0xFF7C8EBF);
 
 class _ActionFanMenuState extends State<_ActionFanMenu>
     with TickerProviderStateMixin {
@@ -456,8 +440,8 @@ class _ActionFanMenuState extends State<_ActionFanMenu>
       ),
     );
 
-    // Two fan items with staggered timing (same as gear fan)
-    _fanAnimations = List.generate(2, (i) {
+    // Fan items with staggered timing (same as gear fan)
+    _fanAnimations = List.generate(1, (i) {
       final start = 0.05 + i * 0.12;
       final end = math.min(start + 0.55, 1.0);
 
@@ -539,28 +523,13 @@ class _ActionFanMenuState extends State<_ActionFanMenu>
 
   List<_FanMenuEntry> _buildEntries() {
     return [
-      // Item 0 (closest to trigger): Fix My Lights
+      // Fix My Lights
       _FanMenuEntry(
         icon: Icons.auto_fix_high,
         iconColor: CelestialColors.sunWarm,
         borderColor: CelestialColors.sunWarm.withValues(alpha: 0.3),
         onTap: widget.onFixMyLights,
       ),
-      // Item 1 (further up): Sleep or Wake
-      if (widget.sleepMode)
-        _FanMenuEntry(
-          icon: Icons.wb_sunny_rounded,
-          iconColor: CelestialColors.sunWarm,
-          borderColor: CelestialColors.sunWarm.withValues(alpha: 0.3),
-          onTap: widget.onSleepToggle ?? () {},
-        )
-      else
-        _FanMenuEntry(
-          icon: Icons.nightlight_round,
-          iconColor: _moonGlow,
-          borderColor: _moonGlow.withValues(alpha: 0.3),
-          onTap: widget.onSleepToggle ?? () {},
-        ),
     ];
   }
 

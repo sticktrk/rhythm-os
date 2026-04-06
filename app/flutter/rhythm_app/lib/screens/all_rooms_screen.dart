@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' show CurveModule;
 import '../providers/room_page_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../widgets/editable_room_card.dart';
@@ -24,6 +25,9 @@ class AllRoomsScreen extends StatefulWidget {
   final CurveData? curveData;
   final PageController pageController;
   final ValueChanged<int> onPageChanged;
+  final String? activeCurveModule;
+  final List<CurveModule> availableCurveModules;
+  final ValueChanged<String>? onCurveModuleSelected;
 
   const AllRoomsScreen({
     super.key,
@@ -32,6 +36,9 @@ class AllRoomsScreen extends StatefulWidget {
     this.curveData,
     required this.pageController,
     required this.onPageChanged,
+    this.activeCurveModule,
+    this.availableCurveModules = const [],
+    this.onCurveModuleSelected,
   });
 
   @override
@@ -506,22 +513,22 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
   Widget _buildHeader(bool isLandscape, bool editMode) {
     final vPad = isLandscape ? 4.0 : 10.0;
 
-    return Padding(
-      padding: EdgeInsets.fromLTRB(20, vPad, 20, vPad),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              editMode ? 'Edit Rooms' : 'All Rooms',
-              style: TextStyle(
-                color: CelestialColors.textPrimary,
-                fontSize: isLandscape ? 16 : 20,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.3,
+    if (editMode) {
+      return Padding(
+        padding: EdgeInsets.fromLTRB(20, vPad, 20, vPad),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Edit Rooms',
+                style: TextStyle(
+                  color: CelestialColors.textPrimary,
+                  fontSize: isLandscape ? 16 : 20,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.3,
+                ),
               ),
             ),
-          ),
-          if (editMode)
             GestureDetector(
               onTap: () {
                 HapticFeedback.lightImpact();
@@ -543,6 +550,31 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
                   ),
                 ),
               ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Padding(
+      padding: EdgeInsets.fromLTRB(20, vPad, 20, vPad),
+      child: Row(
+        children: [
+          Text(
+            'Rooms',
+            style: TextStyle(
+              color: CelestialColors.textPrimary,
+              fontSize: isLandscape ? 16 : 20,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.3,
+            ),
+          ),
+          const Spacer(),
+          if (widget.availableCurveModules.isNotEmpty)
+            _CurveProfileToggle(
+              activeCurveModule: widget.activeCurveModule,
+              availableCurveModules: widget.availableCurveModules,
+              onModuleSelected: widget.onCurveModuleSelected,
             ),
         ],
       ),
@@ -1054,5 +1086,129 @@ class _CelestialPainter extends CustomPainter {
   bool shouldRepaint(covariant _CelestialPainter oldDelegate) {
     return animationValue != oldDelegate.animationValue ||
         !identical(palette, oldDelegate.palette);
+  }
+}
+
+// ─── Curve Profile Toggle ──────────────────────────────────────────────
+
+/// Moon glow color — matches celestial palette.
+const _moonGlow = Color(0xFF7C8EBF);
+
+/// Animated segmented toggle for switching between curve modules.
+///
+/// Dynamically renders segments from [availableCurveModules] with
+/// color-coded visuals for known modules:
+/// - Rhythm (daytime): warm golden accent
+/// - Sleep (nighttime): cool blue-violet accent
+class _CurveProfileToggle extends StatelessWidget {
+  final String? activeCurveModule;
+  final List<CurveModule> availableCurveModules;
+  final ValueChanged<String>? onModuleSelected;
+
+  const _CurveProfileToggle({
+    required this.activeCurveModule,
+    required this.availableCurveModules,
+    this.onModuleSelected,
+  });
+
+  static const _duration = Duration(milliseconds: 350);
+
+  static const _moduleVisuals = <String, (IconData, Color)>{
+    'rhythm': (Icons.wb_sunny_rounded, CelestialColors.sunWarm),
+    'sleep': (Icons.nightlight_round, _moonGlow),
+  };
+  static const _defaultVisual = (Icons.auto_awesome, Colors.white70);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 34,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(17),
+        color: CelestialColors.backgroundCard.withValues(alpha: 0.85),
+        border: Border.all(
+          color: CelestialColors.orbitRing.withValues(alpha: 0.25),
+          width: 1,
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final module in availableCurveModules)
+            _buildSegment(
+              label: module.name,
+              icon: (_moduleVisuals[module.id] ?? _defaultVisual).$1,
+              isActive: module.id == activeCurveModule,
+              activeColor: (_moduleVisuals[module.id] ?? _defaultVisual).$2,
+              onTap: () => onModuleSelected?.call(module.id),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSegment({
+    required String label,
+    required IconData icon,
+    required bool isActive,
+    required Color activeColor,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () {
+        if (!isActive) {
+          HapticFeedback.lightImpact();
+          onTap();
+        }
+      },
+      child: AnimatedContainer(
+        duration: _duration,
+        curve: Curves.easeInOut,
+        margin: const EdgeInsets.all(3),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(14),
+          color: isActive
+              ? activeColor.withValues(alpha: 0.15)
+              : Colors.transparent,
+          border: Border.all(
+            color: isActive
+                ? activeColor.withValues(alpha: 0.25)
+                : Colors.transparent,
+            width: 0.5,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            AnimatedSwitcher(
+              duration: _duration,
+              child: Icon(
+                icon,
+                key: ValueKey(isActive),
+                size: 14,
+                color: isActive
+                    ? activeColor
+                    : CelestialColors.textSecondary.withValues(alpha: 0.4),
+              ),
+            ),
+            const SizedBox(width: 5),
+            AnimatedDefaultTextStyle(
+              duration: _duration,
+              style: TextStyle(
+                color: isActive
+                    ? activeColor
+                    : CelestialColors.textSecondary.withValues(alpha: 0.4),
+                fontSize: 13,
+                fontWeight: isActive ? FontWeight.w600 : FontWeight.w400,
+                letterSpacing: 0.2,
+              ),
+              child: Text(label),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }

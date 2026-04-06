@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -53,6 +54,11 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   // Light transition duration (from server settings).
   double _fadeMs = 500;
 
+  // Background light interval.
+  double _intervalSecs = 60;
+  bool _intervalAuto = true;
+  Timer? _intervalDebounce;
+
   // Curve parameters.
   bool _advancedOpen = false;
   bool _curveConfigDirty = false;
@@ -104,6 +110,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
 
   @override
   void dispose() {
+    _intervalDebounce?.cancel();
     _glowController.dispose();
     super.dispose();
   }
@@ -138,6 +145,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         ?? curveConfig.fadeMs.toDouble();
     _motionTimeoutSecs = syncProvider.effectiveMotionTimeoutSecs
         ?? curveConfig.motionTimeoutSecs;
+    _intervalSecs = syncProvider.rhythmIntervalSecs.toDouble();
 
     if (mounted) setState(() => _loading = false);
 
@@ -168,6 +176,33 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       update();
       _curveConfigDirty = true;
     });
+  }
+
+  void _onIntervalChanged(double value) {
+    setState(() => _intervalSecs = value);
+    _intervalDebounce?.cancel();
+    _intervalDebounce = Timer(const Duration(milliseconds: 500), () {
+      context.read<ServerSyncProvider>().api.settingsSet(
+        rhythmIntervalSecs: value.round(),
+      );
+    });
+  }
+
+  void _onIntervalAutoChanged(bool auto) {
+    setState(() => _intervalAuto = auto);
+    if (auto) {
+      // Reset to server default (60s).
+      _intervalDebounce?.cancel();
+      setState(() => _intervalSecs = 60);
+      context.read<ServerSyncProvider>().api.settingsSet(
+        rhythmIntervalSecs: 60,
+      );
+    }
+  }
+
+  String _formatInterval(double secs) {
+    if (secs >= 60 && secs % 60 == 0) return '${(secs / 60).round()}m';
+    return '${secs.round()}s';
   }
 
   // ---------------------------------------------------------------------------
@@ -532,6 +567,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
             subtitle: 'How long lights stay on after motion stops',
             value: _formatMotionTimeout(_motionTimeoutSecs),
           ),
+          const SizedBox(height: 14),
+          _buildIntervalCard(),
           const SizedBox(height: 24),
           _buildTimeSimulator(),
           const SizedBox(height: 32),
@@ -642,6 +679,146 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                 height: 1.3,
               ),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Background Light Interval card (Auto / Manual)
+  // ---------------------------------------------------------------------------
+
+  Widget _buildIntervalCard() {
+    const color = _Palette.blue;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 18, 18, 12),
+      decoration: BoxDecoration(
+        color: _Palette.card,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: _Palette.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: color.withValues(alpha: 0.12),
+                ),
+                child: const Icon(Icons.update_rounded, color: color, size: 18),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  'Background Light Interval',
+                  style: TextStyle(
+                    color: _Palette.textPrimary,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: -0.1,
+                  ),
+                ),
+              ),
+              // Auto / Manual toggle
+              GestureDetector(
+                onTap: () => _onIntervalAutoChanged(!_intervalAuto),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: color.withValues(alpha: 0.25),
+                    ),
+                  ),
+                  child: Text(
+                    _intervalAuto ? 'Auto' : _formatInterval(_intervalSecs),
+                    style: TextStyle(
+                      color: color,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.3,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Padding(
+            padding: const EdgeInsets.only(left: 48),
+            child: Text(
+              'How often lights update in the background',
+              style: TextStyle(
+                color: _Palette.textSecondary.withValues(alpha: 0.45),
+                fontSize: 12,
+                height: 1.3,
+              ),
+            ),
+          ),
+          // Show slider when not auto
+          AnimatedSize(
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOutCubic,
+            child: _intervalAuto
+                ? const SizedBox(width: double.infinity)
+                : Padding(
+                    padding: const EdgeInsets.only(top: 10),
+                    child: Column(
+                      children: [
+                        SliderTheme(
+                          data: SliderThemeData(
+                            activeTrackColor: color,
+                            inactiveTrackColor: color.withValues(alpha: 0.12),
+                            thumbColor: color,
+                            overlayColor: color.withValues(alpha: 0.12),
+                            trackHeight: 4,
+                            thumbShape: const RoundSliderThumbShape(
+                                enabledThumbRadius: 8),
+                            overlayShape: const RoundSliderOverlayShape(
+                                overlayRadius: 18),
+                          ),
+                          child: Slider(
+                            value: _intervalSecs.clamp(10, 300),
+                            min: 10,
+                            max: 300,
+                            divisions: 29,
+                            onChanged: _onIntervalChanged,
+                          ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                _formatInterval(10),
+                                style: TextStyle(
+                                  color: _Palette.textSecondary
+                                      .withValues(alpha: 0.4),
+                                  fontSize: 11,
+                                ),
+                              ),
+                              Text(
+                                _formatInterval(300),
+                                style: TextStyle(
+                                  color: _Palette.textSecondary
+                                      .withValues(alpha: 0.4),
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
           ),
         ],
       ),

@@ -4,10 +4,9 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
-import '../models/config_model.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType, RhythmRoom;
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType;
 import 'device_detail_sheet.dart';
 import 'light_output_display.dart';
 import 'solar_orbit.dart'; // For CelestialColors
@@ -16,7 +15,7 @@ import 'solar_orbit.dart'; // For CelestialColors
 ///
 /// Currently shows placeholder settings. Opened by tapping the ellipsis
 /// satellite on a room orb while in settings mode.
-class RoomSettingsSheet extends StatelessWidget {
+class RoomSettingsSheet extends StatefulWidget {
   final RoomDto room;
 
   const RoomSettingsSheet({super.key, required this.room});
@@ -30,6 +29,17 @@ class RoomSettingsSheet extends StatelessWidget {
       builder: (context) => RoomSettingsSheet(room: room),
     );
   }
+
+  @override
+  State<RoomSettingsSheet> createState() => _RoomSettingsSheetState();
+}
+
+enum _SheetTab { rhythm, devices, settings }
+
+class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
+  _SheetTab _selectedTab = _SheetTab.rhythm;
+
+  RoomDto get room => widget.room;
 
   @override
   Widget build(BuildContext context) {
@@ -104,139 +114,25 @@ class RoomSettingsSheet extends StatelessWidget {
                 );
               },
             ),
+            const SizedBox(height: 12),
+            // Tab selector
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: _TabSelector(
+                selected: _selectedTab,
+                onChanged: (tab) => setState(() => _selectedTab = tab),
+              ),
+            ),
             const SizedBox(height: 16),
-            // Settings list
+            // Tab content
             Expanded(
-              child: ListView(
-                padding: const EdgeInsets.symmetric(horizontal: 20),
-                children: [
-                  _buildSettingsGroup('General', [
-                    _SettingsRow(
-                      icon: Icons.label_outline,
-                      label: 'Name',
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            room.name,
-                            style: const TextStyle(
-                              color: CelestialColors.textSecondary,
-                              fontSize: 14,
-                            ),
-                          ),
-                          const SizedBox(width: 4),
-                          Icon(
-                            Icons.edit_outlined,
-                            color: CelestialColors.textSecondary.withValues(alpha: 0.5),
-                            size: 14,
-                          ),
-                        ],
-                      ),
-                      onTap: () => _showRenameDialog(context),
-                    ),
-                    _SettingsRow(
-                      icon: Icons.hub_outlined,
-                      label: 'Source',
-                      trailing: Text(
-                        _sourceLabel(room.source),
-                        style: const TextStyle(
-                          color: CelestialColors.textSecondary,
-                          fontSize: 14,
-                        ),
-                      ),
-                    ),
-                    Selector<RoomProvider, bool>(
-                      selector: (_, rp) =>
-                          rp.getRoom(room.id)?.disabled ?? room.disabled,
-                      builder: (context, isHidden, _) {
-                        return _SettingsRow(
-                          icon: Icons.visibility_off_outlined,
-                          label: 'Hide this room',
-                          trailing: _ToggleSwitch(
-                            value: isHidden,
-                            onChanged: (val) {
-                              context.read<RoomProvider>().toggleDisabled(room.id);
-                              HapticFeedback.selectionClick();
-                            },
-                          ),
-                          onTap: () {
-                            context.read<RoomProvider>().toggleDisabled(room.id);
-                            HapticFeedback.selectionClick();
-                          },
-                        );
-                      },
-                    ),
-                    _SettingsRow(
-                      icon: Icons.merge_type_outlined,
-                      label: 'Merge with...',
-                      trailing: const Icon(
-                        Icons.chevron_right,
-                        color: CelestialColors.textSecondary,
-                        size: 20,
-                      ),
-                      onTap: () => _showMergeDialog(context),
-                    ),
-                  ]),
-                  const SizedBox(height: 16),
-                  _buildDevicesSection(context),
-                  const SizedBox(height: 16),
-                  Consumer<ConfigModel>(
-                    builder: (context, configModel, _) {
-                      final cfg = room.curveConfig ?? configModel.config;
-                      return _buildSettingsGroup('Adaptive Lighting', [
-                        _SettingsRow(
-                          icon: Icons.brightness_6_outlined,
-                          label: 'Brightness Range',
-                          trailing: Text(
-                            '${cfg.minBrightness}% – ${cfg.maxBrightness}%',
-                            style: const TextStyle(
-                              color: CelestialColors.textSecondary,
-                              fontSize: 14,
-                            ),
-                          ),
-                          onTap: () {},
-                        ),
-                        _SettingsRow(
-                          icon: Icons.thermostat_outlined,
-                          label: 'Color Temp Range',
-                          trailing: Text(
-                            '${cfg.minColorTemp}K – ${cfg.maxColorTemp}K',
-                            style: const TextStyle(
-                              color: CelestialColors.textSecondary,
-                              fontSize: 14,
-                            ),
-                          ),
-                          onTap: () {},
-                        ),
-                      ]);
-                    },
-                  ),
-                  // const SizedBox(height: 16),
-                  // _buildSettingsGroup('Behavior', [
-                  //   _SettingsRow(
-                  //     icon: Icons.nightlight_outlined,
-                  //     label: 'Sleep Schedule',
-                  //     trailing: const Icon(
-                  //       Icons.chevron_right,
-                  //       color: CelestialColors.textSecondary,
-                  //       size: 20,
-                  //     ),
-                  //     onTap: () {},
-                  //   ),
-                  //   _SettingsRow(
-                  //     icon: Icons.schedule_outlined,
-                  //     label: 'Transition Speed',
-                  //     trailing: const Text(
-                  //       'Normal',
-                  //       style: TextStyle(
-                  //         color: CelestialColors.textSecondary,
-                  //         fontSize: 14,
-                  //       ),
-                  //     ),
-                  //     onTap: () {},
-                  //   ),
-                  // ]),
-                ],
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 200),
+                child: switch (_selectedTab) {
+                  _SheetTab.rhythm => _buildRhythmContent(context),
+                  _SheetTab.devices => _buildDevicesContent(context),
+                  _SheetTab.settings => _buildSettingsContent(context),
+                },
               ),
             ),
             // Done button — pinned at bottom
@@ -317,6 +213,114 @@ class RoomSettingsSheet extends StatelessWidget {
     );
   }
 
+  Widget _buildRhythmContent(BuildContext context) {
+    return ListView(
+      key: const ValueKey('rhythm'),
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      children: [
+        _buildSettingsGroup('Day Profile', [
+          _SettingsRow(
+            icon: Icons.wb_sunny_outlined,
+            label: 'Default',
+            trailing: Icon(
+              Icons.check_rounded,
+              color: CelestialColors.sunWarm.withValues(alpha: 0.8),
+              size: 18,
+            ),
+          ),
+        ]),
+        const SizedBox(height: 16),
+        _buildSettingsGroup('Night Profile', [
+          _SettingsRow(
+            icon: Icons.nightlight_outlined,
+            label: 'Default',
+            trailing: Icon(
+              Icons.check_rounded,
+              color: CelestialColors.sunWarm.withValues(alpha: 0.8),
+              size: 18,
+            ),
+          ),
+        ]),
+      ],
+    );
+  }
+
+  Widget _buildSettingsContent(BuildContext context) {
+    return ListView(
+      key: const ValueKey('settings'),
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      children: [
+        _buildSettingsGroup('General', [
+          _SettingsRow(
+            icon: Icons.label_outline,
+            label: 'Name',
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  room.name,
+                  style: const TextStyle(
+                    color: CelestialColors.textSecondary,
+                    fontSize: 14,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Icon(
+                  Icons.edit_outlined,
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.5),
+                  size: 14,
+                ),
+              ],
+            ),
+            onTap: () => _showRenameDialog(context),
+          ),
+          _SettingsRow(
+            icon: Icons.hub_outlined,
+            label: 'Source',
+            trailing: Text(
+              _sourceLabel(room.source),
+              style: const TextStyle(
+                color: CelestialColors.textSecondary,
+                fontSize: 14,
+              ),
+            ),
+          ),
+          Selector<RoomProvider, bool>(
+            selector: (_, rp) =>
+                rp.getRoom(room.id)?.disabled ?? room.disabled,
+            builder: (context, isHidden, _) {
+              return _SettingsRow(
+                icon: Icons.visibility_off_outlined,
+                label: 'Hide this room',
+                trailing: _ToggleSwitch(
+                  value: isHidden,
+                  onChanged: (val) {
+                    context.read<RoomProvider>().toggleDisabled(room.id);
+                    HapticFeedback.selectionClick();
+                  },
+                ),
+                onTap: () {
+                  context.read<RoomProvider>().toggleDisabled(room.id);
+                  HapticFeedback.selectionClick();
+                },
+              );
+            },
+          ),
+        ]),
+      ],
+    );
+  }
+
+  Widget _buildDevicesContent(BuildContext context) {
+    return ListView(
+      key: const ValueKey('devices'),
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      children: [
+        _buildDevicesSection(context),
+      ],
+    );
+  }
+
   // _buildTogglePlaceholder removed — replaced by _ToggleSwitch widget
 
   Future<void> _showRenameDialog(BuildContext context) async {
@@ -378,128 +382,6 @@ class RoomSettingsSheet extends StatelessWidget {
     }
   }
 
-  Future<void> _showMergeDialog(BuildContext context) async {
-    final syncProvider = context.read<ServerSyncProvider>();
-    final rooms = syncProvider.helloRooms
-        .where((r) => r.id != room.id)
-        .toList();
-
-    if (rooms.isEmpty) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('No other rooms available')),
-        );
-      }
-      return;
-    }
-
-    final targetRoom = await showModalBottomSheet<RhythmRoom>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) => Container(
-        decoration: const BoxDecoration(
-          color: CelestialColors.backgroundCard,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(
-                'Merge "${room.name}" into...',
-                style: const TextStyle(
-                  color: CelestialColors.textPrimary,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-            for (final r in rooms)
-              ListTile(
-                leading: const Icon(
-                  Icons.meeting_room_rounded,
-                  color: Color(0xFFFFC107),
-                ),
-                title: Text(
-                  r.name,
-                  style: const TextStyle(color: CelestialColors.textPrimary),
-                ),
-                subtitle: Text(
-                  r.deviceSummary,
-                  style: TextStyle(
-                    color: CelestialColors.textSecondary.withValues(alpha: 0.7),
-                    fontSize: 12,
-                  ),
-                ),
-                onTap: () => Navigator.of(ctx).pop(r),
-              ),
-            SizedBox(height: MediaQuery.of(ctx).padding.bottom + 16),
-          ],
-        ),
-      ),
-    );
-
-    if (targetRoom == null || !context.mounted) return;
-
-    // Confirm merge
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: CelestialColors.backgroundCard,
-        title: const Text(
-          'Merge Rooms',
-          style: TextStyle(color: CelestialColors.textPrimary),
-        ),
-        content: Text(
-          'Merge "${room.name}" into "${targetRoom.name}"? '
-          'All devices and hub targets will be combined.',
-          style: TextStyle(
-            color: CelestialColors.textSecondary.withValues(alpha: 0.8),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: Text(
-              'Cancel',
-              style: TextStyle(
-                color: CelestialColors.textSecondary.withValues(alpha: 0.7),
-              ),
-            ),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text(
-              'Merge',
-              style: TextStyle(color: CelestialColors.sunWarm),
-            ),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed != true || !context.mounted) return;
-
-    final http = context.read<ServerSyncProvider>().api;
-    final success = await http.topologyMergeRooms(targetRoom.id, room.id);
-    if (context.mounted) {
-      if (success) {
-        Navigator.of(context).pop(); // Close settings sheet
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Merged "${room.name}" into "${targetRoom.name}"'),
-          ),
-        );
-        http.triggerSync();
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to merge rooms')),
-        );
-      }
-    }
-  }
-
   Widget _buildDevicesSection(BuildContext context) {
     final devices = context.read<ServerSyncProvider>().devicesForRoom(room.id);
     if (devices.isEmpty) {
@@ -543,6 +425,77 @@ class RoomSettingsSheet extends StatelessWidget {
       case RoomSourceDto.unknown:
         return 'Unknown';
     }
+  }
+}
+
+/// Segmented tab selector for Settings / Devices.
+class _TabSelector extends StatelessWidget {
+  final _SheetTab selected;
+  final ValueChanged<_SheetTab> onChanged;
+
+  const _TabSelector({required this.selected, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 36,
+      decoration: BoxDecoration(
+        color: CelestialColors.backgroundDark.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+          width: 1,
+        ),
+      ),
+      child: Row(
+        children: [
+          _tabItem('Rhythm', _SheetTab.rhythm),
+          _tabItem('Devices', _SheetTab.devices),
+          _tabItem('Settings', _SheetTab.settings),
+        ],
+      ),
+    );
+  }
+
+  Widget _tabItem(String label, _SheetTab tab) {
+    final isSelected = selected == tab;
+    return Expanded(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {
+          HapticFeedback.selectionClick();
+          onChanged(tab);
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          margin: const EdgeInsets.all(3),
+          decoration: BoxDecoration(
+            color: isSelected
+                ? CelestialColors.sunWarm.withValues(alpha: 0.2)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(15),
+            border: isSelected
+                ? Border.all(
+                    color: CelestialColors.sunWarm.withValues(alpha: 0.4),
+                    width: 1,
+                  )
+                : null,
+          ),
+          alignment: Alignment.center,
+          child: Text(
+            label,
+            style: TextStyle(
+              color: isSelected
+                  ? CelestialColors.sunWarm
+                  : CelestialColors.textSecondary.withValues(alpha: 0.7),
+              fontSize: 13,
+              fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
+              letterSpacing: 0.5,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

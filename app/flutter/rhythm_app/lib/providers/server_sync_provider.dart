@@ -91,8 +91,11 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Whether power-save mode is active on the server.
   bool _powerSave = false;
 
-  /// Whether sleep mode is active on the server.
-  bool _sleepMode = false;
+  /// Active curve module ID from the server (e.g. "rhythm", "sleep").
+  String? _activeCurveModule;
+
+  /// Available curve modules reported by the server.
+  List<CurveModule> _availableCurveModules = [];
 
   /// Rhythm update interval in seconds from server settings.
   int _rhythmIntervalSecs = 60;
@@ -132,8 +135,14 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Whether power-save mode is active on the server.
   bool get powerSave => _powerSave;
 
-  /// Whether sleep mode is active on the server.
-  bool get sleepMode => _sleepMode;
+  /// Whether sleep mode is active on the server (derived from active curve module).
+  bool get sleepMode => _activeCurveModule == 'sleep';
+
+  /// Active curve module ID (e.g. "rhythm", "sleep").
+  String? get activeCurveModule => _activeCurveModule;
+
+  /// Available curve modules reported by the server.
+  List<CurveModule> get availableCurveModules => _availableCurveModules;
 
   /// Rhythm update interval in seconds.
   int get rhythmIntervalSecs => _rhythmIntervalSecs;
@@ -369,7 +378,12 @@ class ServerSyncProvider extends ChangeNotifier {
     _serverPlatformType = hello.platformType;
     _serverPlatformContext = hello.platformContext;
     _powerSave = hello.settings?.powerSave ?? false;
-    _sleepMode = hello.settings?.sleepMode ?? false;
+    _activeCurveModule = hello.settings?.activeCurveModule;
+    _availableCurveModules = hello.settings?.availableCurveModules ?? [];
+    // Fallback for older servers that don't send active_curve_module
+    if (_activeCurveModule == null && (hello.settings?.sleepMode ?? false)) {
+      _activeCurveModule = 'sleep';
+    }
     _rhythmIntervalSecs = hello.settings?.rhythmIntervalSecs ?? 60;
     _effectiveFadeMs = hello.effectiveFadeMs;
     _effectiveMotionTimeoutSecs = hello.effectiveMotionTimeoutSecs;
@@ -642,7 +656,8 @@ class ServerSyncProvider extends ChangeNotifier {
       _serverPlatformType = 'desktop';
       _serverPlatformContext = 'server';
       _powerSave = false;
-      _sleepMode = false;
+      _activeCurveModule = null;
+      _availableCurveModules = [];
       _helloRooms = [];
       _lastHubInfos = [];
       _rhythmIntervalSecs = 60;
@@ -789,20 +804,22 @@ class ServerSyncProvider extends ChangeNotifier {
     return states;
   }
 
+  /// Set the active curve module on the server.
+  Future<void> dispatchSetCurveModule(String id) async {
+    if (!_connection.connected) return;
+    _activeCurveModule = id;
+    notifyListeners();
+    await _connection.api.setCurveModule(id);
+  }
+
   /// Activate sleep mode on the server.
   Future<void> dispatchSleep() async {
-    if (!_connection.connected) return;
-    _sleepMode = true;
-    notifyListeners();
-    await _connection.api.sleep();
+    await dispatchSetCurveModule('sleep');
   }
 
   /// Deactivate sleep mode (wake) on the server.
   Future<void> dispatchWake() async {
-    if (!_connection.connected) return;
-    _sleepMode = false;
-    notifyListeners();
-    await _connection.api.wake();
+    await dispatchSetCurveModule('rhythm');
   }
 
   /// Trigger server-side room discovery from the connected hub.

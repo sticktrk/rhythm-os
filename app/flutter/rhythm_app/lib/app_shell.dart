@@ -157,15 +157,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     }
   }
 
-  /// Toggle sleep/wake mode on the server.
-  Future<void> _toggleSleep() async {
+  /// Set the active curve module on the server.
+  Future<void> _setCurveModule(String moduleId) async {
     HapticFeedback.mediumImpact();
     final serverSync = context.read<ServerSyncProvider>();
-    if (serverSync.sleepMode) {
-      await serverSync.dispatchWake();
-    } else {
-      await serverSync.dispatchSleep();
-    }
+    await serverSync.dispatchSetCurveModule(moduleId);
   }
 
   @override
@@ -275,6 +271,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                 globalConfig: configModel.config,
                 curveData: _curveData,
                 pageController: _roomPageController,
+                activeCurveModule: serverSync.activeCurveModule,
+                availableCurveModules: serverSync.availableCurveModules,
+                onCurveModuleSelected: _setCurveModule,
                 onPageChanged: (page) {
                   setState(() => _currentRoomPage = page);
                 },
@@ -317,8 +316,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                       onSunPositionTap: _openSunPosition,
                       onFixMyLights: _fixMyLights,
                       isFixing: _isFixing,
-                      sleepMode: serverSync.sleepMode,
-                      onSleepToggle: _toggleSleep,
                     ),
                   ),
                 ),
