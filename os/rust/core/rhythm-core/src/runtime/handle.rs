@@ -236,6 +236,7 @@ where
                 room.brightness_offset = bri_offset;
                 room.soft_off = soft_off;
                 room.profile_settings = profile_settings;
+                engine.reset_restored_room_state(room_id);
             }
         }
     }
@@ -248,7 +249,7 @@ where
 
     fn remove_room(&self, room_id: &str) {
         if let Ok(mut engine) = self.engine().write() {
-            engine.rooms_mut().remove(room_id);
+            engine.remove_room_state(room_id);
         }
     }
 

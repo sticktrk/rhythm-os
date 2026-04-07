@@ -1225,11 +1225,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "rhythm-profile"
+name = "rhythm-devices"
 version = "0.1.0"
 dependencies = [
- "libm",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1259,6 +1259,7 @@ dependencies = [
  "async-trait",
  "log",
  "rhythm-core",
+ "rhythm-devices",
  "rhythm-os",
  "serde",
  "serde_json",
@@ -1272,9 +1273,18 @@ dependencies = [
  "chrono",
  "log",
  "rhythm-core",
+ "rhythm-devices",
  "rhythm-profile",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "rhythm-profile"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "serde",
 ]
 
 [[package]]

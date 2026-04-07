@@ -11,6 +11,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use std::collections::HashMap;
 
 use crate::controller::{LightControlResult, LightController};
 use crate::light_profile::{
@@ -35,6 +36,14 @@ pub enum PeriodicTickResult {
     Skipped,
     /// An error occurred during the tick.
     Error(String),
+}
+
+const PERIODIC_DEDUPE_MAX_SKIPS: u8 = 5;
+
+#[derive(Clone)]
+struct PeriodicCommandCacheEntry {
+    command: LightingCommand,
+    skipped_cycles: u8,
 }
 
 /// Check if solar midnight was crossed between two time checks.
@@ -109,6 +118,9 @@ pub struct RhythmEngine<C: LightController> {
     /// Power save mode. When true, lights turn fully off.
     /// When false (default), lights dim to soft-off brightness to maintain color temperature.
     power_save: bool,
+
+    /// Last periodic command sent per room, used to dedupe unchanged ticks.
+    periodic_command_cache: HashMap<String, PeriodicCommandCacheEntry>,
 }
 
 impl<C: LightController> RhythmEngine<C> {
@@ -121,6 +133,7 @@ impl<C: LightController> RhythmEngine<C> {
             sun_times: None,
             rooms: RoomManager::new(),
             power_save: DEFAULT_POWER_SAVE,
+            periodic_command_cache: HashMap::new(),
         }
     }
 
@@ -138,6 +151,7 @@ impl<C: LightController> RhythmEngine<C> {
             sun_times: None,
             rooms: RoomManager::new(),
             power_save: DEFAULT_POWER_SAVE,
+            periodic_command_cache: HashMap::new(),
         }
     }
 
@@ -222,6 +236,7 @@ impl<C: LightController> RhythmEngine<C> {
     pub fn set_power_save(&mut self, enabled: bool) -> Vec<String> {
         let prev = self.power_save;
         self.power_save = enabled;
+        self.periodic_command_cache.clear();
 
         if enabled && !prev {
             // Switching from power_save OFF → ON: collect soft_off rooms
@@ -244,6 +259,60 @@ impl<C: LightController> RhythmEngine<C> {
     /// Create a curve context for the given hour.
     fn create_context(&self, current_hour: f32) -> CurveContext {
         CurveContext::new(current_hour, self.solar, self.sun_times)
+    }
+
+    fn clear_periodic_dedupe(&mut self, room_id: &str) {
+        self.periodic_command_cache.remove(room_id);
+    }
+
+    fn clear_all_periodic_dedupe(&mut self) {
+        self.periodic_command_cache.clear();
+    }
+
+    pub(crate) fn remove_room_state(&mut self, room_id: &str) {
+        self.rooms.remove(room_id);
+        self.clear_periodic_dedupe(room_id);
+    }
+
+    pub(crate) fn reset_restored_room_state(&mut self, room_id: &str) {
+        self.clear_periodic_dedupe(room_id);
+    }
+
+    async fn send_non_periodic_turn_on(
+        &mut self,
+        room_id: &str,
+        command: LightingCommand,
+    ) -> LightControlResult<()> {
+        self.clear_periodic_dedupe(room_id);
+        self.controller.turn_on(room_id, command).await
+    }
+
+    async fn send_non_periodic_turn_off(&mut self, room_id: &str) -> LightControlResult<()> {
+        self.clear_periodic_dedupe(room_id);
+        self.controller.turn_off(room_id).await
+    }
+
+    async fn send_periodic_turn_on(
+        &mut self,
+        room_id: &str,
+        command: LightingCommand,
+    ) -> LightControlResult<bool> {
+        if let Some(entry) = self.periodic_command_cache.get_mut(room_id) {
+            if entry.command == command && entry.skipped_cycles < PERIODIC_DEDUPE_MAX_SKIPS {
+                entry.skipped_cycles = entry.skipped_cycles.saturating_add(1);
+                return Ok(false);
+            }
+        }
+
+        self.controller.turn_on(room_id, command.clone()).await?;
+        self.periodic_command_cache.insert(
+            room_id.to_string(),
+            PeriodicCommandCacheEntry {
+                command,
+                skipped_cycles: 0,
+            },
+        );
+        Ok(true)
     }
 
     fn room_profile_config_for_settings(
@@ -365,7 +434,7 @@ impl<C: LightController> RhythmEngine<C> {
 
         // Create command and send
         let command = Self::build_command(&values, brightness);
-        self.controller.turn_on(room_id, command).await
+        self.send_non_periodic_turn_on(room_id, command).await
     }
 
     /// Dim lights to a fraction of current adaptive brightness.
@@ -406,7 +475,7 @@ impl<C: LightController> RhythmEngine<C> {
             ((values.brightness as f32 + brightness_offset) * factor).clamp(1.0, 100.0) as u8;
 
         let command = Self::build_command(&values, brightness);
-        self.controller.turn_on(room_id, command).await
+        self.send_non_periodic_turn_on(room_id, command).await
     }
 
     /// Disable Rhythm mode (lights remain unchanged).
@@ -422,6 +491,7 @@ impl<C: LightController> RhythmEngine<C> {
         if let Some(room) = self.rooms.get_mut(room_id) {
             room.disable_rhythm();
         }
+        self.clear_periodic_dedupe(room_id);
         // Note: We don't turn off the lights, just disable rhythm mode
         Ok(())
     }
@@ -524,7 +594,7 @@ impl<C: LightController> RhythmEngine<C> {
 
         // Send command
         let command = LightingCommand::from_values(&step_result.values);
-        self.controller.turn_on(room_id, command).await
+        self.send_non_periodic_turn_on(room_id, command).await
     }
 
     /// Increase brightness without following the curve.
@@ -595,7 +665,7 @@ impl<C: LightController> RhythmEngine<C> {
 
         // Send command
         let command = Self::build_command(&values, brightness);
-        self.controller.turn_on(room_id, command).await
+        self.send_non_periodic_turn_on(room_id, command).await
     }
 
     /// Set absolute brightness for a room.
@@ -632,7 +702,7 @@ impl<C: LightController> RhythmEngine<C> {
         room.brightness_offset = target as f32 - values.brightness as f32;
 
         let command = Self::build_command(&values, target);
-        self.controller.turn_on(room_id, command).await
+        self.send_non_periodic_turn_on(room_id, command).await
     }
 
     /// Set the time offset for a room directly.
@@ -677,12 +747,12 @@ impl<C: LightController> RhythmEngine<C> {
             let idle_values =
                 self.idle_values_for_settings(Some(&profile_settings), current_hour, time_offset);
             let cmd = Self::build_command(&idle_values, idle_values.brightness);
-            self.controller.turn_on(room_id, cmd).await
+            self.send_non_periodic_turn_on(room_id, cmd).await
         } else {
             // On: send full adaptive values preserving brightness_offset
             let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
             let cmd = Self::build_command(&values, brightness);
-            self.controller.turn_on(room_id, cmd).await
+            self.send_non_periodic_turn_on(room_id, cmd).await
         }
     }
 
@@ -710,7 +780,7 @@ impl<C: LightController> RhythmEngine<C> {
         let module = self.active_profile_for_settings(Some(&profile_settings));
         let values = module.calculate(&ctx);
         let command = LightingCommand::from_values(&values);
-        self.controller.turn_on(room_id, command).await
+        self.send_non_periodic_turn_on(room_id, command).await
     }
 
     /// Turn off lights in a room (rhythm state unchanged).
@@ -726,7 +796,7 @@ impl<C: LightController> RhythmEngine<C> {
     ///   color temperature when power_save is disabled
     pub async fn turn_off(&mut self, room_id: &str, current_hour: f32) -> LightControlResult<()> {
         if self.power_save {
-            self.controller.turn_off(room_id).await
+            self.send_non_periodic_turn_off(room_id).await
         } else {
             // Dim to soft-off brightness with idle profile color instead of turning off
             let (offset, profile_settings) = {
@@ -738,7 +808,7 @@ impl<C: LightController> RhythmEngine<C> {
                 self.idle_values_for_settings(Some(&profile_settings), current_hour, offset);
 
             let cmd = Self::build_command(&values, values.brightness);
-            self.controller.turn_on(room_id, cmd).await
+            self.send_non_periodic_turn_on(room_id, cmd).await
         }
     }
 
@@ -749,7 +819,7 @@ impl<C: LightController> RhythmEngine<C> {
     pub async fn lights_off(&mut self, room_id: &str) -> LightControlResult<()> {
         let room = self.rooms.get_or_create(room_id, room_id);
         room.soft_off = false;
-        self.controller.turn_off(room_id).await
+        self.send_non_periodic_turn_off(room_id).await
     }
 
     // =========================================================================
@@ -778,8 +848,18 @@ impl<C: LightController> RhythmEngine<C> {
 
         // Soft-off rooms: update color temp at soft-off brightness
         if soft_off && !self.power_save {
-            return match self.soft_off_tick(room_id, current_hour).await {
-                Ok(()) => PeriodicTickResult::Updated,
+            let (offset, profile_settings) = self
+                .rooms
+                .get(room_id)
+                .map(|r| (r.effective_time_offset(), r.profile_settings.clone()))
+                .unwrap_or((0.0, RoomProfileSettings::default()));
+            let values =
+                self.idle_values_for_settings(Some(&profile_settings), current_hour, offset);
+            let cmd = Self::build_command(&values, values.brightness);
+
+            return match self.send_periodic_turn_on(room_id, cmd).await {
+                Ok(true) => PeriodicTickResult::Updated,
+                Ok(false) => PeriodicTickResult::Skipped,
                 Err(e) => PeriodicTickResult::Error(format!("{}: {}", room_id, e)),
             };
         }
@@ -791,9 +871,27 @@ impl<C: LightController> RhythmEngine<C> {
             Ok(true) => {}
         }
 
-        // Apply adaptive lighting
-        match self.turn_on(room_id, current_hour).await {
-            Ok(()) => PeriodicTickResult::Updated,
+        let (offset_minutes, brightness_offset, profile_settings) = self
+            .rooms
+            .get(room_id)
+            .map(|r| {
+                (
+                    r.effective_time_offset(),
+                    r.effective_brightness_offset(),
+                    r.profile_settings.clone(),
+                )
+            })
+            .unwrap_or((0.0, 0.0, RoomProfileSettings::default()));
+
+        let ctx = self.create_context(current_hour);
+        let module = self.active_profile_for_settings(Some(&profile_settings));
+        let values = module.calculate_with_offset(&ctx, offset_minutes);
+        let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
+        let command = Self::build_command(&values, brightness);
+
+        match self.send_periodic_turn_on(room_id, command).await {
+            Ok(true) => PeriodicTickResult::Updated,
+            Ok(false) => PeriodicTickResult::Skipped,
             Err(e) => PeriodicTickResult::Error(format!("{}: {}", room_id, e)),
         }
     }
@@ -867,7 +965,7 @@ impl<C: LightController> RhythmEngine<C> {
             self.idle_values_for_settings(Some(&profile_settings), current_hour, offset);
 
         let cmd = Self::build_command(&values, values.brightness);
-        self.controller.turn_on(room_id, cmd).await
+        self.send_non_periodic_turn_on(room_id, cmd).await
     }
 
     /// Check if solar midnight was crossed and reset all room offsets if so.
@@ -906,6 +1004,7 @@ impl<C: LightController> RhythmEngine<C> {
         for room in self.rooms.iter_mut() {
             room.reset_offsets();
         }
+        self.clear_all_periodic_dedupe();
     }
 
     /// Get the IDs of all rooms with rhythm mode enabled.
@@ -1418,6 +1517,64 @@ mod tests {
         let (updated, _) = engine.periodic_update(10.0).await;
         assert!(updated.is_empty());
         assert!(engine.rooms().is_rhythm_enabled("room1"));
+    }
+
+    #[tokio::test]
+    async fn test_periodic_tick_dedupes_identical_commands() {
+        let (mut engine, spy) = spy_engine();
+
+        engine.rhythm_on("room1").await.unwrap();
+        spy.set_any_lights_on(true);
+
+        let first = engine.periodic_tick_single_room("room1", 12.0).await;
+        let second = engine.periodic_tick_single_room("room1", 12.0).await;
+
+        assert!(matches!(first, PeriodicTickResult::Updated));
+        assert!(matches!(second, PeriodicTickResult::Skipped));
+        assert_eq!(spy.turn_on_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_periodic_tick_forces_refresh_after_repeated_skips() {
+        let (mut engine, spy) = spy_engine();
+
+        engine.rhythm_on("room1").await.unwrap();
+        spy.set_any_lights_on(true);
+
+        let runs = usize::from(PERIODIC_DEDUPE_MAX_SKIPS) + 2;
+        for _ in 0..runs {
+            let _ = engine.periodic_tick_single_room("room1", 12.0).await;
+        }
+
+        assert_eq!(spy.turn_on_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_manual_command_clears_periodic_dedupe_cache() {
+        let (mut engine, spy) = spy_engine();
+
+        engine.rhythm_on("room1").await.unwrap();
+        spy.set_any_lights_on(true);
+
+        assert!(matches!(
+            engine.periodic_tick_single_room("room1", 12.0).await,
+            PeriodicTickResult::Updated
+        ));
+        assert!(matches!(
+            engine.periodic_tick_single_room("room1", 12.0).await,
+            PeriodicTickResult::Skipped
+        ));
+
+        spy.reset();
+        engine.turn_on("room1", 12.0).await.unwrap();
+        assert_eq!(spy.turn_on_count(), 1);
+
+        spy.reset();
+        assert!(matches!(
+            engine.periodic_tick_single_room("room1", 12.0).await,
+            PeriodicTickResult::Updated
+        ));
+        assert_eq!(spy.turn_on_count(), 1);
     }
 
     #[tokio::test]

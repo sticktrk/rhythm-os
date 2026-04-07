@@ -13,7 +13,7 @@
 #[cfg(feature = "blocking")]
 use std::thread;
 #[cfg(feature = "blocking")]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{info, warn};
 #[cfg(feature = "blocking")]
@@ -28,6 +28,68 @@ use crate::state::SharedState;
 use crate::state::WorkItem;
 #[cfg(feature = "blocking")]
 use crate::storage::StoredLocation;
+
+#[cfg(feature = "blocking")]
+fn stable_room_phase_key(room_id: &str) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    room_id.as_bytes().iter().fold(FNV_OFFSET, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
+    })
+}
+
+#[cfg(feature = "blocking")]
+fn dispatch_spacing(cycle_duration: Duration, room_count: usize) -> Duration {
+    if room_count == 0 {
+        Duration::ZERO
+    } else {
+        cycle_duration
+            .checked_div(room_count as u32)
+            .unwrap_or(Duration::ZERO)
+    }
+}
+
+#[cfg(feature = "blocking")]
+fn enqueue_periodic_tick(
+    state: &SharedState,
+    tx: &std::sync::mpsc::SyncSender<WorkItem>,
+    room_id: &str,
+    current_hour: f32,
+) -> bool {
+    let should_enqueue = {
+        let Ok(mut s) = state.lock() else {
+            return false;
+        };
+        match s.pending_periodic_ticks.entry(room_id.to_string()) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.insert(current_hour);
+                false
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(current_hour);
+                true
+            }
+        }
+    };
+
+    if !should_enqueue {
+        return true;
+    }
+
+    match tx.try_send(WorkItem::PeriodicRoomTick {
+        room_id: room_id.to_string(),
+        current_hour,
+    }) {
+        Ok(()) => true,
+        Err(_) => {
+            if let Ok(mut s) = state.lock() {
+                s.pending_periodic_ticks.remove(room_id);
+            }
+            false
+        }
+    }
+}
 
 /// Run the blocking periodic update loop.
 #[cfg(feature = "blocking")]
@@ -99,7 +161,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
         let values = module.calculate(&ctx);
 
         // Get rhythm-enabled room IDs, skipping rooms in warning-dim state
-        let (room_ids, warning_skipped, work_tx) = {
+        let (mut room_ids, warning_skipped, periodic_work_tx, work_tx) = {
             let Ok(s) = state.lock() else {
                 thread::sleep(update_interval);
                 continue;
@@ -129,8 +191,15 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                     }
                 })
                 .collect();
-            (ids, skipped, s.work_tx.clone())
+            (
+                ids,
+                skipped,
+                s.periodic_work_tx.clone(),
+                s.work_tx.clone(),
+            )
         };
+
+        room_ids.sort_by_key(|id| stable_room_phase_key(id));
 
         if warning_skipped > 0 {
             info!(
@@ -161,17 +230,32 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             cb();
         }
 
-        // Dispatch per-room ticks via work queue or inline
-        if let Some(ref tx) = work_tx {
-            for room_id in &room_ids {
-                if tx
-                    .try_send(WorkItem::PeriodicRoomTick {
-                        room_id: room_id.clone(),
-                        current_hour,
-                    })
-                    .is_err()
-                {
+        let cycle_duration = values
+            .suggested_tick_interval_secs
+            .map(|s| Duration::from_secs(s as u64).max(update_interval))
+            .unwrap_or(update_interval);
+        let phase_gap = dispatch_spacing(cycle_duration, room_ids.len());
+        let cycle_started = Instant::now();
+
+        // Dispatch per-room ticks with stable staggering across the cycle.
+        if let Some(ref tx) = periodic_work_tx {
+            for (idx, room_id) in room_ids.iter().enumerate() {
+                let room_hour = BlockingTimeProvider::new(utc_offset).current_hour();
+                if !enqueue_periodic_tick(&state, tx, room_id, room_hour) {
+                    warn!(target: "sys", "Periodic queue full, dropping periodic tick for '{}'", room_id);
+                }
+                if idx + 1 < room_ids.len() && !phase_gap.is_zero() {
+                    thread::sleep(phase_gap);
+                }
+            }
+        } else if let Some(ref tx) = work_tx {
+            for (idx, room_id) in room_ids.iter().enumerate() {
+                let room_hour = BlockingTimeProvider::new(utc_offset).current_hour();
+                if !enqueue_periodic_tick(&state, tx, room_id, room_hour) {
                     warn!(target: "sys", "Work queue full, dropping periodic tick for '{}'", room_id);
+                }
+                if idx + 1 < room_ids.len() && !phase_gap.is_zero() {
+                    thread::sleep(phase_gap);
                 }
             }
         } else {
@@ -184,28 +268,31 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                 s.hub_runtime()
             };
             if let Some(runtime) = runtime {
-                for room_id in &room_ids {
-                    if let Err(e) = runtime.periodic_tick_room(room_id, current_hour) {
+                for (idx, room_id) in room_ids.iter().enumerate() {
+                    let room_hour = BlockingTimeProvider::new(utc_offset).current_hour();
+                    if let Err(e) = runtime.periodic_tick_room(room_id, room_hour) {
                         warn!(target: "sys", "Periodic room tick '{}' failed: {}", room_id, e);
                     }
                     post_tick_room(&state, &runtime, room_id);
+                    if idx + 1 < room_ids.len() && !phase_gap.is_zero() {
+                        thread::sleep(phase_gap);
+                    }
                 }
             }
         }
 
         // Read last_check_hour before check_solar_midnight updates it
         let last_hour = state.lock().ok().and_then(|s| s.last_check_hour);
+        let current_hour = BlockingTimeProvider::new(utc_offset).current_hour();
         check_solar_midnight(&state, current_hour);
         if let Some(last) = last_hour {
             check_sunrise_sleep_deactivate(&state, last, current_hour);
         }
 
-        // Use the longer of curve-suggested and configured interval
-        let sleep_duration = values
-            .suggested_tick_interval_secs
-            .map(|s| Duration::from_secs(s as u64).max(update_interval))
-            .unwrap_or(update_interval);
-        thread::sleep(sleep_duration);
+        let elapsed = cycle_started.elapsed();
+        if elapsed < cycle_duration {
+            thread::sleep(cycle_duration - elapsed);
+        }
     }
 }
 
@@ -443,6 +530,47 @@ mod tests {
 
     fn make_state() -> SharedState {
         Arc::new(Mutex::new(crate::state::AppState::default()))
+    }
+
+    #[test]
+    fn stable_room_phase_key_is_deterministic() {
+        assert_eq!(stable_room_phase_key("room-a"), stable_room_phase_key("room-a"));
+        assert_ne!(stable_room_phase_key("room-a"), stable_room_phase_key("room-b"));
+    }
+
+    #[test]
+    fn dispatch_spacing_spreads_rooms_across_cycle() {
+        assert_eq!(dispatch_spacing(Duration::from_secs(60), 0), Duration::ZERO);
+        assert_eq!(dispatch_spacing(Duration::from_secs(60), 1), Duration::from_secs(60));
+        assert_eq!(dispatch_spacing(Duration::from_secs(60), 5), Duration::from_secs(12));
+    }
+
+    #[test]
+    fn enqueue_periodic_tick_coalesces_latest_hour() {
+        let state = make_state();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<WorkItem>(4);
+
+        assert!(enqueue_periodic_tick(&state, &tx, "room1", 10.0));
+        assert!(enqueue_periodic_tick(&state, &tx, "room1", 10.5));
+
+        let item = rx.try_recv().expect("first periodic item should be queued");
+        match item {
+            WorkItem::PeriodicRoomTick { room_id, current_hour } => {
+                assert_eq!(room_id, "room1");
+                assert!((current_hour - 10.0).abs() < f32::EPSILON);
+            }
+            _ => panic!("unexpected work item"),
+        }
+
+        assert!(rx.try_recv().is_err(), "duplicate periodic item should be coalesced");
+
+        let pending = state.lock().unwrap();
+        let latest = pending
+            .pending_periodic_ticks
+            .get("room1")
+            .copied()
+            .expect("latest hour should be retained");
+        assert!((latest - 10.5).abs() < f32::EPSILON);
     }
 
     /// When no timezone is set, refresh_dst_offset is a no-op.

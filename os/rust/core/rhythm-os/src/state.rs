@@ -178,6 +178,16 @@ pub struct AppState {
     // ---- Worker ----
     /// Sender for offloading work to a background thread.
     pub work_tx: Option<std::sync::mpsc::SyncSender<WorkItem>>,
+    /// Dedicated sender for background periodic room ticks.
+    ///
+    /// When present, periodic updates no longer compete with button actions
+    /// and deferred persists on the main worker queue.
+    pub periodic_work_tx: Option<std::sync::mpsc::SyncSender<WorkItem>>,
+    /// Latest pending periodic tick hour per room.
+    ///
+    /// Used for latest-only coalescing so repeated scheduler passes update the
+    /// most recent hour for a room without queueing duplicate work items.
+    pub pending_periodic_ticks: HashMap<String, f32>,
     /// Pending hub event receivers from hub reconfiguration (picked up by main loop).
     /// Multiple hubs produce multiple receivers — the event loop drains this Vec.
     pub pending_hub_event_rxs: Vec<std::sync::mpsc::Receiver<HubEvent>>,
@@ -324,6 +334,8 @@ impl Default for AppState {
             power_save: false,
             storage: None,
             work_tx: None,
+            periodic_work_tx: None,
+            pending_periodic_ticks: HashMap::new(),
             pending_hub_event_rxs: Vec::new(),
             pending_motion_clear: Vec::new(),
             pending_motion_seed: Vec::new(),

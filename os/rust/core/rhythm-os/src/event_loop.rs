@@ -731,6 +731,12 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             room_id,
             current_hour,
         } => {
+            let current_hour = state
+                .lock()
+                .ok()
+                .and_then(|mut s| s.pending_periodic_ticks.remove(&room_id))
+                .unwrap_or(current_hour);
+
             let runtime = {
                 let Ok(s) = state.lock() else { return };
                 s.hub_runtime()

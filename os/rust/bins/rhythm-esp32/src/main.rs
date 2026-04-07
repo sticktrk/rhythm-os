@@ -472,16 +472,20 @@ fn main() -> Result<()> {
     info!("  GET    /api/ota/version - Firmware version");
     info!("  POST   /api/ota/upload - OTA firmware upload");
 
-    // Spawn cmd-worker thread with a single channel for:
+    // Spawn cmd-worker thread for:
     // - ButtonAction: hub-originated actions (SSE events, button presses)
-    // - PeriodicRoomTick: background periodic updates
     // - DeferredPersist: NVS save after inline button processing
+    // - DeferredPersistState: batched persistence work
     //
     // Physical button/motion events are processed inline on the main thread
     // (16KB stack, same as worker) for zero queue delay.
     let (work_tx, work_rx) = std::sync::mpsc::sync_channel::<WorkItem>(16);
+    let (periodic_tx, periodic_rx) = std::sync::mpsc::sync_channel::<WorkItem>(16);
     match state.lock() {
-        Ok(mut s) => s.work_tx = Some(work_tx),
+        Ok(mut s) => {
+            s.work_tx = Some(work_tx);
+            s.periodic_work_tx = Some(periodic_tx);
+        }
         Err(_) => {
             log::error!("State mutex poisoned during work_tx init — restarting");
             unsafe { esp_idf_svc::sys::esp_restart() };
@@ -506,6 +510,27 @@ fn main() -> Result<()> {
         })
     {
         log::error!("Failed to spawn cmd-worker thread: {} — restarting", e);
+        unsafe { esp_idf_svc::sys::esp_restart() };
+    }
+
+    let periodic_state = state.clone();
+    if let Err(e) = thread::Builder::new()
+        .name("periodic-worker".to_string())
+        .stack_size(16 * 1024)
+        .spawn(move || {
+            info!(target: "sys", "periodic-worker started");
+            loop {
+                match periodic_rx.recv() {
+                    Ok(item) => rhythm_os::event_loop::process_work_item(&periodic_state, item),
+                    Err(_) => {
+                        warn!(target: "sys", "periodic-worker: channel disconnected");
+                        return;
+                    }
+                }
+            }
+        })
+    {
+        log::error!("Failed to spawn periodic-worker thread: {} — restarting", e);
         unsafe { esp_idf_svc::sys::esp_restart() };
     }
 
