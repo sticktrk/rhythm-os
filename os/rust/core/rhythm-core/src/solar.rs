@@ -7,7 +7,7 @@
 //! Timezone/DST handling is done via chrono-tz.
 //!
 //! The core types [`SolarTime`] and [`SunTimes`] are defined in
-//! [`rhythm_curve`] and re-exported here.
+//! [`rhythm_profile`] and re-exported here.
 
 use crate::timezone::{day_of_year, Timezone};
 use libm::{cosf, sinf};
@@ -15,8 +15,8 @@ use libm::{cosf, sinf};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-// Re-export core solar types from rhythm-curve
-pub use rhythm_curve::solar::{SolarTime, SunTimes};
+// Re-export core solar types from rhythm-profile
+pub use rhythm_profile::solar::{SolarTime, SunTimes};
 
 /// Pi constant for calculations.
 const PI: f32 = core::f32::consts::PI;

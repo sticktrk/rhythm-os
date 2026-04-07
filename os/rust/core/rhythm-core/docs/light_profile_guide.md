@@ -879,40 +879,32 @@ impl Default for linearConfig {
 }
 ```
 
-### Extending LightProfileModuleConfig Enum
+### Registering Profile Configs
 
-To integrate with the registry's configuration system, add your config to the `LightProfileModuleConfig` enum:
+The registry no longer uses a `LightProfileModuleConfig` enum. It stores full
+`LightProfileConfig` values keyed by profile ID, and materializes runtime
+profiles directly from those stored configs:
 
 ```rust
-// In light_profile/config.rs
+use rhythm_core::{LightProfileConfig, LightProfileRegistry};
 
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize), serde(tag = "type"))]
-pub enum LightProfileModuleConfig {
-    #[cfg_attr(feature = "serde", serde(rename = "rhythm"))]
-    Rhythm(CurveConfig),
+let mut registry = LightProfileRegistry::new();
 
-    #[cfg_attr(feature = "serde", serde(rename = "linear"))]
-    linear(linearConfig),
+let custom = LightProfileConfig {
+    id: "linear".into(),
+    name: "Linear".into(),
+    curve: /* your LightCurveShape */,
+    min_brightness: 5,
+    max_brightness: 90,
+    min_color_temp: 2200,
+    max_color_temp: 5500,
+    max_dim_steps: 8,
+    fade_ms: None,
+    motion_timeout_secs: None,
+    rhythm_interval_secs: None,
+};
 
-    // Add more variants as needed
-}
-
-impl LightProfileModuleConfig {
-    pub fn module_id(&self) -> &str {
-        match self {
-            Self::Rhythm(_) => "rhythm",
-            Self::linear(_) => "linear",
-        }
-    }
-
-    pub fn common(&self) -> CommonCurveConfig {
-        match self {
-            Self::Rhythm(cfg) => CommonCurveConfig::from(cfg),
-            Self::linear(cfg) => cfg.common.clone(),
-        }
-    }
-}
+registry.register_config(custom);
 ```
 
 ---
@@ -967,7 +959,7 @@ for (id, name) in registry.available_profiles() {
     println!("  {}: {}", id, name);
 }
 // Output:
-//   rhythm: Rhythm Curve
+//   rhythm: Rhythm Profile
 //   linear: linear Rhythm
 //   manual: Manual Control
 ```
@@ -1215,7 +1207,7 @@ This allows:
 Mirror flags allow the color temperature curve to follow the brightness curve:
 
 ```rust
-pub struct CurveConfig {
+pub struct MirrorProfileConfig {
     // When true, CCT uses brightness curve parameters
     pub mirror_up: bool,  // Default: true
     pub mirror_dn: bool,  // Default: false
@@ -1267,7 +1259,7 @@ use rhythm_core::light_profile::CommonCurveConfig;
 /// Configuration for the simple linear light profile.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct SimpleCurveConfig {
+pub struct SimpleProfileConfig {
     /// Common brightness/color temperature settings
     #[cfg_attr(feature = "serde", serde(flatten))]
     pub common: CommonCurveConfig,
@@ -1285,7 +1277,7 @@ pub struct SimpleCurveConfig {
     pub night_hour: f32,
 }
 
-impl Default for SimpleCurveConfig {
+impl Default for SimpleProfileConfig {
     fn default() -> Self {
         Self {
             common: CommonCurveConfig::default(),
@@ -1316,19 +1308,19 @@ use rhythm_core::steps::{StepAction, StepResult};
 /// - Night (to midnight): minimum brightness, warm color
 #[derive(Debug, Clone)]
 pub struct SimpleProfile {
-    config: SimpleCurveConfig,
+    config: SimpleProfileConfig,
 }
 
 impl SimpleProfile {
     pub const ID: &'static str = "simple";
     pub const NAME: &'static str = "Simple Linear Curve";
 
-    pub fn new(config: SimpleCurveConfig) -> Self {
+    pub fn new(config: SimpleProfileConfig) -> Self {
         Self { config }
     }
 
     pub fn with_defaults() -> Self {
-        Self::new(SimpleCurveConfig::default())
+        Self::new(SimpleProfileConfig::default())
     }
 
     /// Linear interpolation helper
@@ -1665,7 +1657,7 @@ mod tests {
 
     #[test]
     fn test_custom_config() {
-        let config = SimpleCurveConfig {
+        let config = SimpleProfileConfig {
             common: CommonCurveConfig {
                 min_brightness: 10,
                 max_brightness: 90,
@@ -1759,7 +1751,7 @@ fn main() {
 
 ```
 Available modules:
-  - rhythm: Rhythm Curve
+  - rhythm: Rhythm Profile
   - simple: Simple Linear Curve
 
 Active profile: Simple Linear Curve

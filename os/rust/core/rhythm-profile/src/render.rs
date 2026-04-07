@@ -1,6 +1,6 @@
 //! Curve rendering: sample any `LightProfileModule` into visualization data.
 //!
-//! These functions work with any curve module implementation — the module
+//! These functions work with any light profile implementation — the profile
 //! determines what to do with the solar context (or ignore it entirely).
 
 #[cfg(feature = "serde")]
@@ -55,7 +55,7 @@ pub struct StepSequences {
     pub step_down: Vec<StepPoint>,
 }
 
-/// Sample a curve module at regular intervals over 24 hours.
+/// Sample a light profile at regular intervals over 24 hours.
 ///
 /// # Arguments
 ///

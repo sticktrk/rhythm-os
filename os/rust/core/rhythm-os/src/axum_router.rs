@@ -102,12 +102,8 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/curve", get(get_curve).post(post_curve_preview))
         .route("/api/curve/now", get(get_curve_now))
         .route("/api/curve/solar", get(get_curve_solar))
-        // Sleep mode
-        .route("/api/sleep", put(put_sleep))
-        .route("/api/wake", put(put_wake))
         // Light profile selection
         .route("/api/light-profile", put(put_light_profile))
-        .route("/api/curve/module", put(put_light_profile))
 }
 
 // ---------------------------------------------------------------------------
@@ -161,23 +157,36 @@ async fn put_motion_timeout(
     handlers::handle_put_motion_timeout(&state, &body)
 }
 
-async fn get_config(State(state): State<SharedState>) -> ApiResponse {
-    handlers::handle_get_config(&state)
+async fn get_config(
+    State(state): State<SharedState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResponse {
+    handlers::handle_get_config(&state, params.get("id").map(|s| s.as_str()))
 }
 
-async fn put_config(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {
-    handlers::handle_put_config(&state, &body)
+async fn put_config(
+    State(state): State<SharedState>,
+    Query(params): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    handlers::handle_put_config(&state, params.get("id").map(|s| s.as_str()), &body)
 }
 
 async fn absorb_time_offset(
     State(state): State<SharedState>,
+    Query(params): Query<HashMap<String, String>>,
     Json(body): Json<Value>,
 ) -> ApiResponse {
-    run_blocking(move || handlers::handle_absorb_time_offset(&state, &body)).await
+    let profile_id = params.get("id").cloned();
+    run_blocking(move || handlers::handle_absorb_time_offset(&state, profile_id.as_deref(), &body))
+        .await
 }
 
-async fn reset_config(State(state): State<SharedState>) -> ApiResponse {
-    handlers::handle_reset_config(&state)
+async fn reset_config(
+    State(state): State<SharedState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResponse {
+    handlers::handle_reset_config(&state, params.get("id").map(|s| s.as_str()))
 }
 
 async fn put_location(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {
@@ -339,7 +348,7 @@ async fn get_curve_now(
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResponse {
     let hour = params.get("hour").and_then(|v| v.parse::<f32>().ok());
-    handlers::handle_get_curve_now(&state, hour)
+    handlers::handle_get_curve_now(&state, params.get("id").map(|s| s.as_str()), hour)
 }
 
 async fn get_curve_solar(
@@ -351,19 +360,12 @@ async fn get_curve_solar(
 
 fn parse_curve_query(params: &HashMap<String, String>) -> handlers::CurveQueryParams {
     handlers::CurveQueryParams {
+        id: params.get("id").cloned(),
         samples_per_hour: params.get("samples_per_hour").and_then(|v| v.parse().ok()),
         date: params.get("date").cloned(),
         start_hour: params.get("start_hour").and_then(|v| v.parse().ok()),
         max_steps: params.get("max_steps").and_then(|v| v.parse().ok()),
     }
-}
-
-async fn put_sleep(State(state): State<SharedState>) -> ApiResponse {
-    run_blocking(move || handlers::handle_put_sleep(&state)).await
-}
-
-async fn put_wake(State(state): State<SharedState>) -> ApiResponse {
-    run_blocking(move || handlers::handle_put_wake(&state)).await
 }
 
 async fn put_light_profile(
@@ -514,7 +516,7 @@ mod tests {
 
     use axum::body::Body;
     use axum::http::{Method as HttpMethod, Request, StatusCode};
-    use rhythm_core::{CurveConfig, RoomSnapshot, RuntimeHandle, SolarTime};
+    use rhythm_core::{LightProfileConfig, RoomSnapshot, RuntimeHandle, SolarTime};
     use serde_json::json;
     use tower::util::ServiceExt;
 
@@ -553,7 +555,7 @@ mod tests {
             Ok(())
         }
 
-        fn set_curve_config(&self, _: CurveConfig) -> anyhow::Result<()> {
+        fn set_light_profile_config(&self, _: LightProfileConfig) -> anyhow::Result<()> {
             Ok(())
         }
 
@@ -572,7 +574,17 @@ mod tests {
             self.snapshots.clone()
         }
 
-        fn restore_room_state(&self, _: &str, _: bool, _: bool, _: f32, _: f32, _: bool) {}
+        fn restore_room_state(
+            &self,
+            _: &str,
+            _: bool,
+            _: bool,
+            _: f32,
+            _: f32,
+            _: bool,
+            _: rhythm_core::RoomProfileSettings,
+        ) {
+        }
 
         fn add_room(&self, _: &str, _: &str) {}
 
@@ -730,6 +742,7 @@ mod tests {
                 time_offset_minutes: 15.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                profile_settings: rhythm_core::RoomProfileSettings::default(),
             }],
             current_hour: 8.0,
         });
@@ -753,7 +766,113 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sleep_runs_on_handler_thread() {
+    async fn put_config_query_id_targets_requested_profile() {
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(ThreadRecordingRuntime {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            snapshots: vec![],
+            current_hour: 12.0,
+        });
+        let state = test_state_with_runtime(runtime, &[]);
+        let app = api_routes().with_state(state.clone());
+
+        let status = call_json_route(
+            app,
+            HttpMethod::PUT,
+            "/api/config?id=sleep",
+            json!({
+                "id": "rhythm",
+                "name": "Sleep",
+                "curve": { "type": "super-gaussian" },
+                "min_brightness": 8,
+                "max_brightness": 18,
+                "min_color_temp": 1000,
+                "max_color_temp": 1500,
+                "max_dim_steps": 4
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state
+                .light_profile_config(rhythm_core::SLEEP_PROFILE_ID)
+                .unwrap()
+                .min_brightness,
+            8
+        );
+        assert_eq!(
+            state
+                .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
+                .unwrap()
+                .min_brightness,
+            rhythm_core::default_rhythm_profile().min_brightness
+        );
+    }
+
+    #[tokio::test]
+    async fn absorb_offset_query_id_targets_requested_profile() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(ThreadRecordingRuntime {
+            calls: calls.clone(),
+            snapshots: vec![RoomSnapshot {
+                id: "room1".into(),
+                name: "Room 1".into(),
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 15.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                profile_settings: rhythm_core::RoomProfileSettings::default(),
+            }],
+            current_hour: 8.0,
+        });
+        let state = test_state_with_runtime(runtime, &[]);
+        let before_sleep = state
+            .lock()
+            .unwrap()
+            .light_profile_config(rhythm_core::SLEEP_PROFILE_ID)
+            .unwrap()
+            .clone();
+        let before_rhythm = state
+            .lock()
+            .unwrap()
+            .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
+            .unwrap()
+            .clone();
+        let app = api_routes().with_state(state.clone());
+
+        let status = call_json_route(
+            app,
+            HttpMethod::POST,
+            "/api/config/absorb-offset?id=sleep",
+            json!({ "offset_minutes": 30.0 }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let state = state.lock().unwrap();
+        assert_ne!(
+            state
+                .light_profile_config(rhythm_core::SLEEP_PROFILE_ID)
+                .unwrap(),
+            &before_sleep
+        );
+        assert_eq!(
+            state
+                .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
+                .unwrap(),
+            &before_rhythm
+        );
+        assert!(calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "set_room_time_offset@http-handler"));
+    }
+
+    #[tokio::test]
+    async fn set_sleep_profile_runs_on_handler_thread() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let runtime: Arc<dyn RuntimeHandle> = Arc::new(ThreadRecordingRuntime {
             calls: calls.clone(),
@@ -765,6 +884,7 @@ mod tests {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                profile_settings: rhythm_core::RoomProfileSettings::default(),
             }],
             current_hour: 12.0,
         });
@@ -773,8 +893,9 @@ mod tests {
 
         let req = Request::builder()
             .method(HttpMethod::PUT)
-            .uri("/api/sleep")
-            .body(Body::empty())
+            .uri("/api/light-profile")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"id":"sleep"}"#))
             .unwrap();
         let status = app.oneshot(req).await.unwrap().status();
 
@@ -787,7 +908,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wake_runs_on_handler_thread() {
+    async fn set_rhythm_profile_runs_on_handler_thread() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let runtime: Arc<dyn RuntimeHandle> = Arc::new(ThreadRecordingRuntime {
             calls: calls.clone(),
@@ -799,6 +920,7 @@ mod tests {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                profile_settings: rhythm_core::RoomProfileSettings::default(),
             }],
             current_hour: 12.0,
         });
@@ -807,8 +929,9 @@ mod tests {
 
         let req = Request::builder()
             .method(HttpMethod::PUT)
-            .uri("/api/wake")
-            .body(Body::empty())
+            .uri("/api/light-profile")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"id":"rhythm"}"#))
             .unwrap();
         let status = app.oneshot(req).await.unwrap().status();
 

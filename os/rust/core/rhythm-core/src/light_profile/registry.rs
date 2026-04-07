@@ -7,29 +7,116 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use rhythm_curve::LightProfileConfig;
+use rhythm_profile::profile_config::DEFAULT_FADE_MS;
+use rhythm_profile::{CurveContext, LightCurveShape, LightProfileConfig, LightingValues};
 
 use super::defaults::{
     default_idle_profile, default_rhythm_profile, default_sleep_profile, IDLE_PROFILE_ID,
     RHYTHM_PROFILE_ID, SLEEP_PROFILE_ID,
 };
 use super::{LightProfile, LightProfileModule};
-use crate::config::CurveConfig;
 
-fn sleep_profile_from_curve_config(config: CurveConfig) -> LightProfileConfig {
-    let mut profile = LightProfileConfig::from(config);
-    let defaults = default_sleep_profile();
-    profile.id = defaults.id;
-    profile.name = defaults.name;
-    profile.direct_color = defaults.direct_color;
-    profile
+#[derive(Clone)]
+struct InheritedIdleProfile {
+    config: LightProfileConfig,
+    active_profile: Arc<dyn LightProfileModule>,
+}
+
+impl InheritedIdleProfile {
+    fn new(config: LightProfileConfig, active_profile: Arc<dyn LightProfileModule>) -> Self {
+        Self {
+            config,
+            active_profile,
+        }
+    }
+
+    fn constant_brightness(&self) -> u8 {
+        self.config.max_brightness.max(self.config.min_brightness)
+    }
+
+    fn motion_timeout(&self, ctx: &CurveContext, active_values: &LightingValues) -> u16 {
+        self.config
+            .motion_timeout_secs
+            .resolve(ctx.current_hour)
+            .map(|v| v as u16)
+            .unwrap_or(active_values.motion_timeout_secs)
+    }
+}
+
+impl LightProfileModule for InheritedIdleProfile {
+    fn id(&self) -> &str {
+        &self.config.id
+    }
+
+    fn name(&self) -> &str {
+        &self.config.name
+    }
+
+    fn calculate(&self, ctx: &CurveContext) -> LightingValues {
+        let mut values = self.active_profile.calculate(ctx);
+        values.brightness = self.constant_brightness();
+        values.kelvin = 0;
+        values.is_direct_color = true;
+        values.transition_ms = self
+            .config
+            .fade_ms
+            .resolve(ctx.current_hour)
+            .unwrap_or(DEFAULT_FADE_MS as u32);
+        values.motion_timeout_secs = self.motion_timeout(ctx, &values);
+        values
+    }
+
+    fn calculate_brightness(&self, _ctx: &CurveContext) -> u8 {
+        self.constant_brightness()
+    }
+
+    fn calculate_color_temperature(&self, ctx: &CurveContext) -> u16 {
+        self.active_profile.calculate(ctx).kelvin
+    }
+
+    fn calculate_step(
+        &self,
+        ctx: &CurveContext,
+        _action: rhythm_profile::StepAction,
+    ) -> rhythm_profile::StepResult {
+        rhythm_profile::StepResult {
+            values: self.calculate(ctx),
+            time_offset_minutes: 0.0,
+            at_boundary: true,
+        }
+    }
+
+    fn is_at_maximum(&self, _ctx: &CurveContext) -> bool {
+        true
+    }
+
+    fn is_at_minimum(&self, _ctx: &CurveContext) -> bool {
+        true
+    }
+
+    fn min_brightness(&self) -> u8 {
+        self.config.min_brightness
+    }
+
+    fn max_brightness(&self) -> u8 {
+        self.config.max_brightness
+    }
+
+    fn min_color_temp(&self) -> u16 {
+        self.config.min_color_temp
+    }
+
+    fn max_color_temp(&self) -> u16 {
+        self.config.max_color_temp
+    }
 }
 
 /// Registry for light profiles.
 ///
-/// The registry keeps active profiles separate from the idle soft-off profile.
+/// The registry stores profile configs as the source of truth and materializes
+/// runtime profile modules on demand.
 pub struct LightProfileRegistry {
-    profiles: BTreeMap<String, Arc<dyn LightProfileModule>>,
+    profiles: BTreeMap<String, LightProfileConfig>,
     default_profile_id: String,
     active_profile_id: String,
     idle_profile_id: String,
@@ -38,6 +125,24 @@ pub struct LightProfileRegistry {
 impl LightProfileRegistry {
     /// Create a new registry with the built-in rhythm, sleep, and idle profiles.
     pub fn new() -> Self {
+        Self::with_profiles(
+            vec![
+                default_rhythm_profile(),
+                default_sleep_profile(),
+                default_idle_profile(),
+            ],
+            RHYTHM_PROFILE_ID,
+        )
+    }
+
+    /// Create a new registry with explicit profile configs.
+    ///
+    /// Missing built-in configs are filled from defaults so rhythm, sleep, and
+    /// idle always exist.
+    pub fn with_profiles<I>(profiles: I, active_profile_id: &str) -> Self
+    where
+        I: IntoIterator<Item = LightProfileConfig>,
+    {
         let mut registry = Self {
             profiles: BTreeMap::new(),
             default_profile_id: RHYTHM_PROFILE_ID.into(),
@@ -45,33 +150,43 @@ impl LightProfileRegistry {
             idle_profile_id: IDLE_PROFILE_ID.into(),
         };
 
-        registry.register(Arc::new(LightProfile::new(default_rhythm_profile())));
-        registry.register(Arc::new(LightProfile::new(default_sleep_profile())));
-        registry.register(Arc::new(LightProfile::new(default_idle_profile())));
+        for profile in profiles {
+            registry.register_config(profile);
+        }
+
+        for builtin in [
+            default_rhythm_profile(),
+            default_sleep_profile(),
+            default_idle_profile(),
+        ] {
+            if !registry.profiles.contains_key(&builtin.id) {
+                registry.register_config(builtin);
+            }
+        }
+
+        if registry.contains(active_profile_id) && active_profile_id != registry.idle_profile_id {
+            registry.active_profile_id = active_profile_id.into();
+        }
+
         registry
     }
 
-    /// Create a new registry with a custom rhythm configuration.
-    pub fn with_config(config: CurveConfig) -> Self {
-        let mut registry = Self {
-            profiles: BTreeMap::new(),
-            default_profile_id: RHYTHM_PROFILE_ID.into(),
-            active_profile_id: RHYTHM_PROFILE_ID.into(),
-            idle_profile_id: IDLE_PROFILE_ID.into(),
-        };
-
-        registry.register(Arc::new(LightProfile::new(LightProfileConfig::from(
-            config,
-        ))));
-        registry.register(Arc::new(LightProfile::new(default_sleep_profile())));
-        registry.register(Arc::new(LightProfile::new(default_idle_profile())));
-        registry
+    fn profile_for_config(&self, config: &LightProfileConfig) -> Arc<dyn LightProfileModule> {
+        if config.id == self.idle_profile_id
+            && matches!(config.curve, LightCurveShape::InheritActive)
+        {
+            Arc::new(InheritedIdleProfile::new(
+                config.clone(),
+                self.active_profile(),
+            ))
+        } else {
+            Arc::new(LightProfile::new(config.clone()))
+        }
     }
 
-    /// Register a profile.
-    pub fn register(&mut self, profile: Arc<dyn LightProfileModule>) {
-        let id = profile.id().to_string();
-        self.profiles.insert(id, profile);
+    /// Register or replace a profile config.
+    pub fn register_config(&mut self, config: LightProfileConfig) {
+        self.profiles.insert(config.id.clone(), config);
     }
 
     /// Unregister a profile by ID.
@@ -87,16 +202,44 @@ impl LightProfileRegistry {
         self.profiles.remove(id).is_some()
     }
 
-    /// Get a profile by ID.
+    /// Get a runtime profile by ID.
     pub fn get(&self, id: &str) -> Option<Arc<dyn LightProfileModule>> {
+        self.profiles
+            .get(id)
+            .map(|config| self.profile_for_config(config))
+    }
+
+    /// Get a stored profile config by ID.
+    pub fn profile_config(&self, id: &str) -> Option<&LightProfileConfig> {
+        self.profiles.get(id)
+    }
+
+    /// Get a cloned profile config by ID.
+    pub fn profile_config_cloned(&self, id: &str) -> Option<LightProfileConfig> {
         self.profiles.get(id).cloned()
+    }
+
+    /// Get all stored profile configs.
+    pub fn profile_configs(&self) -> Vec<LightProfileConfig> {
+        self.profiles.values().cloned().collect()
+    }
+
+    /// Replace an existing profile config.
+    ///
+    /// Returns false when the profile ID is unknown.
+    pub fn set_profile_config(&mut self, config: LightProfileConfig) -> bool {
+        if !self.profiles.contains_key(&config.id) {
+            return false;
+        }
+        self.profiles.insert(config.id.clone(), config);
+        true
     }
 
     /// Get the currently active profile.
     pub fn active_profile(&self) -> Arc<dyn LightProfileModule> {
         self.profiles
             .get(&self.active_profile_id)
-            .cloned()
+            .map(|config| self.profile_for_config(config))
             .expect("Active profile must exist in registry")
     }
 
@@ -104,7 +247,7 @@ impl LightProfileRegistry {
     pub fn idle_profile(&self) -> Arc<dyn LightProfileModule> {
         self.profiles
             .get(&self.idle_profile_id)
-            .cloned()
+            .map(|config| self.profile_for_config(config))
             .expect("Idle profile must exist in registry")
     }
 
@@ -162,8 +305,8 @@ impl LightProfileRegistry {
     pub fn available_profiles(&self) -> Vec<(&str, &str)> {
         self.profiles
             .values()
-            .filter(|profile| profile.id() != self.idle_profile_id)
-            .map(|profile| (profile.id(), profile.name()))
+            .filter(|profile| profile.id != self.idle_profile_id)
+            .map(|profile| (profile.id.as_str(), profile.name.as_str()))
             .collect()
     }
 
@@ -175,20 +318,6 @@ impl LightProfileRegistry {
     /// Check whether a profile ID is registered.
     pub fn contains(&self, id: &str) -> bool {
         self.profiles.contains_key(id)
-    }
-
-    /// Replace the rhythm profile using the backward-compatible `CurveConfig` shape.
-    pub fn update_rhythm_config(&mut self, config: CurveConfig) {
-        self.register(Arc::new(LightProfile::new(LightProfileConfig::from(
-            config,
-        ))));
-    }
-
-    /// Replace the sleep profile using a `CurveConfig`-shaped input.
-    pub fn update_sleep_config(&mut self, config: CurveConfig) {
-        self.register(Arc::new(LightProfile::new(
-            sleep_profile_from_curve_config(config),
-        )));
     }
 
     /// Get the rhythm profile if it exists.
@@ -225,6 +354,10 @@ mod tests {
     use super::super::defaults::{IDLE_PROFILE_NAME, RHYTHM_PROFILE_NAME, SLEEP_PROFILE_NAME};
     use super::*;
 
+    fn test_context(hour: f32) -> CurveContext {
+        CurveContext::new(hour, crate::SolarTime::new(12.0, 35.0, 172), None)
+    }
+
     #[test]
     fn registry_new_registers_builtin_profiles() {
         let registry = LightProfileRegistry::new();
@@ -239,14 +372,12 @@ mod tests {
     }
 
     #[test]
-    fn registry_with_config_replaces_rhythm_defaults() {
-        let config = CurveConfig {
-            min_brightness: 10,
-            max_brightness: 90,
-            ..Default::default()
-        };
+    fn registry_with_profiles_replaces_rhythm_defaults() {
+        let mut config = default_rhythm_profile();
+        config.min_brightness = 10;
+        config.max_brightness = 90;
 
-        let registry = LightProfileRegistry::with_config(config);
+        let registry = LightProfileRegistry::with_profiles(vec![config], RHYTHM_PROFILE_ID);
         let profile = registry.active_profile();
 
         assert_eq!(profile.min_brightness(), 10);
@@ -280,17 +411,31 @@ mod tests {
     }
 
     #[test]
-    fn update_rhythm_config_preserves_rhythm_identity() {
+    fn set_profile_config_preserves_rhythm_identity() {
         let mut registry = LightProfileRegistry::new();
-        registry.update_rhythm_config(CurveConfig {
-            min_brightness: 12,
-            ..Default::default()
-        });
+        let mut config = registry.profile_config_cloned(RHYTHM_PROFILE_ID).unwrap();
+        config.min_brightness = 12;
+        assert!(registry.set_profile_config(config));
 
         let profile = registry.rhythm_profile().unwrap();
         assert_eq!(profile.id(), RHYTHM_PROFILE_ID);
         assert_eq!(profile.name(), RHYTHM_PROFILE_NAME);
         assert_eq!(profile.min_brightness(), 12);
+    }
+
+    #[test]
+    fn idle_inherit_active_uses_active_profile_color() {
+        let registry = LightProfileRegistry::new();
+        let ctx = test_context(12.0);
+
+        let active = registry.active_profile().calculate(&ctx);
+        let idle = registry.idle_profile().calculate(&ctx);
+
+        assert_eq!(idle.brightness, 1);
+        assert_eq!(idle.rgb, active.rgb);
+        assert_eq!(idle.xy, active.xy);
+        assert_eq!(idle.kelvin, 0);
+        assert!(idle.is_direct_color);
     }
 
     #[test]

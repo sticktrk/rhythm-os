@@ -3,8 +3,8 @@
 //! Handles WiFi station mode connection with automatic reconnection.
 
 use anyhow::{bail, Result};
-use esp_idf_svc::hal::modem::WifiModemPeripheral;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
+use esp_idf_svc::hal::modem::WifiModemPeripheral;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::wifi::{BlockingWifi, ClientConfiguration, Configuration, EspWifi};
 use log::info;
@@ -20,10 +20,7 @@ pub fn connect_wifi<'a, M: WifiModemPeripheral + 'a>(
     ssid: &str,
     password: &str,
 ) -> Result<BlockingWifi<EspWifi<'a>>> {
-    let mut wifi = BlockingWifi::wrap(
-        EspWifi::new(modem, sysloop.clone(), Some(nvs))?,
-        sysloop,
-    )?;
+    let mut wifi = BlockingWifi::wrap(EspWifi::new(modem, sysloop.clone(), Some(nvs))?, sysloop)?;
 
     let wifi_configuration = Configuration::Client(ClientConfiguration {
         ssid: ssid

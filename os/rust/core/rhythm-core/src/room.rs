@@ -6,10 +6,62 @@
 
 use std::collections::HashMap;
 
+use crate::light_profile::{LightProfileConfig, TimerSetting};
+
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::config::CurveConfig;
+/// Per-room light profile selection and timer overrides.
+///
+/// This layer sits on top of the globally active profile:
+/// - `profile_id`: optionally selects a different stored base profile for this room
+/// - timer fields: optionally override the selected profile's timer settings
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct RoomProfileSettings {
+    /// Optional stored profile ID to use instead of the global active profile.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub profile_id: Option<String>,
+
+    /// Optional per-room fade override.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub fade_ms: Option<TimerSetting>,
+
+    /// Optional per-room motion timeout override.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub motion_timeout_secs: Option<TimerSetting>,
+}
+
+impl RoomProfileSettings {
+    /// Returns `true` when this room uses the global active profile unchanged.
+    pub fn is_empty(&self) -> bool {
+        self.profile_id.is_none() && self.fade_ms.is_none() && self.motion_timeout_secs.is_none()
+    }
+
+    /// Resolve which stored profile ID should back this room.
+    pub fn resolved_profile_id<'a>(&'a self, active_profile_id: &'a str) -> &'a str {
+        self.profile_id.as_deref().unwrap_or(active_profile_id)
+    }
+
+    /// Apply any per-room timer overrides to a profile config.
+    pub fn apply_to_config(&self, config: &mut LightProfileConfig) {
+        if let Some(fade_ms) = &self.fade_ms {
+            config.fade_ms = fade_ms.clone();
+        }
+        if let Some(motion_timeout_secs) = &self.motion_timeout_secs {
+            config.motion_timeout_secs = motion_timeout_secs.clone();
+        }
+    }
+}
 
 /// A room or area that can have Rhythm lighting enabled.
 ///
@@ -38,16 +90,19 @@ pub struct Room {
     /// Direct brightness offset (for dim_up/dim_down)
     pub brightness_offset: f32,
 
-    /// Per-room curve configuration (None uses global config)
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub curve_config: Option<CurveConfig>,
-
     /// Whether this room is in "soft off" state (at soft-off brightness level).
     /// Used when power_save is disabled: lights dim to the configured
     /// soft-off brightness instead of turning fully off, maintaining
     /// color temperature readiness.
     #[cfg_attr(feature = "serde", serde(default))]
     pub soft_off: bool,
+
+    /// Optional per-room base profile selection and timer overrides.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, rename = "room_profile", skip_serializing_if = "RoomProfileSettings::is_empty")
+    )]
+    pub profile_settings: RoomProfileSettings,
 }
 
 impl Room {
@@ -60,8 +115,8 @@ impl Room {
             disabled: false,
             time_offset_minutes: 0.0,
             brightness_offset: 0.0,
-            curve_config: None,
             soft_off: false,
+            profile_settings: RoomProfileSettings::default(),
         }
     }
 
@@ -117,13 +172,6 @@ impl Room {
         self.disabled = disabled;
     }
 
-    /// Set the per-room curve configuration.
-    ///
-    /// Pass `None` to use the global configuration.
-    pub fn set_curve_config(&mut self, config: Option<CurveConfig>) {
-        self.curve_config = config;
-    }
-
     /// Check if this room is disabled.
     pub fn is_disabled(&self) -> bool {
         self.disabled
@@ -139,8 +187,8 @@ impl Default for Room {
             disabled: false,
             time_offset_minutes: 0.0,
             brightness_offset: 0.0,
-            curve_config: None,
             soft_off: false,
+            profile_settings: RoomProfileSettings::default(),
         }
     }
 }
@@ -297,7 +345,8 @@ mod tests {
         assert!(!room.disabled);
         assert_eq!(room.time_offset_minutes, 0.0);
         assert_eq!(room.brightness_offset, 0.0);
-        assert!(room.curve_config.is_none());
+        assert!(!room.soft_off);
+        assert!(room.profile_settings.is_empty());
     }
 
     #[test]
@@ -344,6 +393,22 @@ mod tests {
         room.reset_offsets();
         assert_eq!(room.time_offset_minutes, 0.0);
         assert_eq!(room.brightness_offset, 0.0);
+    }
+
+    #[test]
+    fn test_room_profile_settings_apply_to_config() {
+        let settings = RoomProfileSettings {
+            profile_id: Some("sleep".into()),
+            fade_ms: Some(TimerSetting::Fixed { value: 250 }),
+            motion_timeout_secs: Some(TimerSetting::Fixed { value: 42 }),
+        };
+        let mut config = crate::default_rhythm_profile();
+
+        settings.apply_to_config(&mut config);
+
+        assert_eq!(settings.resolved_profile_id("rhythm"), "sleep");
+        assert_eq!(config.fade_ms, TimerSetting::Fixed { value: 250 });
+        assert_eq!(config.motion_timeout_secs, TimerSetting::Fixed { value: 42 });
     }
 
     #[test]
@@ -457,7 +522,7 @@ mod tests {
 
         #[test]
         fn test_room_deserialize_missing_optional_fields() {
-            // JSON without optional fields (disabled, curve_config)
+            // JSON without optional fields (disabled, soft_off)
             let json = r#"{
                 "id": "room1",
                 "name": "Test Room",
@@ -469,7 +534,7 @@ mod tests {
             let room: Room = serde_json::from_str(json).unwrap();
             assert_eq!(room.id, "room1");
             assert!(!room.disabled); // default
-            assert!(room.curve_config.is_none()); // default
+            assert!(!room.soft_off); // default
         }
 
         #[test]

@@ -1755,22 +1755,13 @@ dependencies = [
  "futures",
  "libm",
  "log",
- "rhythm-curve",
+ "rhythm-profile",
  "serde",
  "serde_json",
  "sunrise",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "rhythm-curve"
-version = "0.1.0"
-dependencies = [
- "libm",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1791,6 +1782,7 @@ dependencies = [
  "log",
  "reqwest",
  "rhythm-core",
+ "rhythm-devices",
  "rhythm-os",
  "serde",
  "serde_json",
@@ -1809,6 +1801,7 @@ dependencies = [
  "reqwest",
  "reqwest-eventsource",
  "rhythm-core",
+ "rhythm-devices",
  "rhythm-os",
  "serde",
  "serde_json",
@@ -1844,14 +1837,24 @@ dependencies = [
  "log",
  "mdns-sd",
  "rhythm-core",
- "rhythm-curve",
+ "rhythm-devices",
  "rhythm-ha",
  "rhythm-hue",
+ "rhythm-profile",
  "serde",
  "serde_json",
  "tokio",
  "tower 0.4.13",
  "tower-http 0.5.2",
+]
+
+[[package]]
+name = "rhythm-profile"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

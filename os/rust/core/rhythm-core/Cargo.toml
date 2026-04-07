@@ -14,7 +14,7 @@ blocking = ["dep:futures"]
 test-support = []
 
 [dependencies]
-rhythm-curve = { path = "../rhythm-curve" }
+rhythm-profile = { path = "../rhythm-profile" }
 libm = "0.2"
 serde = { version = "1.0", optional = true, features = ["derive"] }
 serde_json = { version = "1.0", optional = true }

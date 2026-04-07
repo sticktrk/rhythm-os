@@ -26,13 +26,13 @@ use anyhow::Result;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::gpio::{PinDriver, Pull};
 use esp_idf_svc::hal::peripherals::Peripherals;
+use esp_idf_svc::mdns::EspMdns;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sntp::{EspSntp, SntpConf};
-use esp_idf_svc::mdns::EspMdns;
 use log::{info, warn};
 
-use rhythm_os::hub::HubEvent;
 use rhythm_os::event_loop::MotionTimerState;
+use rhythm_os::hub::HubEvent;
 use rhythm_os::state::{AppState, SharedState, WorkItem};
 
 /// Firmware version from Cargo.toml, used in mDNS, BLE, HTTP API, and OTA.
@@ -63,8 +63,7 @@ fn install_panic_hook() {
                     let remaining = self.buf.len() - self.pos;
                     let to_copy = bytes.len().min(remaining);
                     if to_copy > 0 {
-                        self.buf[self.pos..self.pos + to_copy]
-                            .copy_from_slice(&bytes[..to_copy]);
+                        self.buf[self.pos..self.pos + to_copy].copy_from_slice(&bytes[..to_copy]);
                         self.pos += to_copy;
                     }
                     Ok(())
@@ -82,10 +81,7 @@ fn install_panic_hook() {
         };
 
         // Print to UART before attempting NVS (in case NVS write hangs)
-        let _ = std::io::Write::write_fmt(
-            &mut std::io::stderr(),
-            format_args!("PANIC: {}\n", msg),
-        );
+        let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("PANIC: {}\n", msg));
 
         // Persist to NVS if available. Reason 0xFF = sentinel (real reason unknown yet).
         if let Some(nvs) = NVS_FOR_PANIC.get() {
@@ -131,8 +127,7 @@ fn main() -> Result<()> {
     // ---- Boot crash detection ----
     // Check esp_reset_reason() and persist crash info if this was a crash reboot.
     {
-        let reset_reason_raw =
-            unsafe { esp_idf_svc::sys::esp_reset_reason() } as u32;
+        let reset_reason_raw = unsafe { esp_idf_svc::sys::esp_reset_reason() } as u32;
         let reset_reason_s = diag::reset_reason_str(reset_reason_raw);
         diag::log_reset_reason(reset_reason_s);
 
@@ -191,55 +186,33 @@ fn main() -> Result<()> {
     app_state.platform_type = "embedded";
     app_state.platform_context = "esp32";
     app_state.platform = rhythm_os::state::PlatformConfig::embedded();
+    rhythm_os::storage::load_persisted_state(&mut app_state);
 
     // Set platform-specific callbacks
     app_state.ensure_runtime_fn = Some(Arc::new(|state: &SharedState| {
         let bridge_ip = {
             let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-            s.hub_credentials.values().next()
+            s.hub_credentials
+                .values()
+                .next()
                 .map(|c| c.address.clone())
                 .ok_or_else(|| anyhow::anyhow!("No hub credentials configured"))?
         };
         let transport = platform::hue::client::HueClient::new(bridge_ip);
         rhythm_hue::embedded_lifecycle::ensure_runtime(state, transport)
     }));
-    app_state.get_hub_provider_fn = Some(Arc::new(|hub_type| {
-        hub::get_hub_provider(hub_type)
-    }));
+    app_state.get_hub_provider_fn = Some(Arc::new(|hub_type| hub::get_hub_provider(hub_type)));
     app_state.on_hub_heartbeat = Some(Arc::new(|| {
         diag::vitals_hub_heartbeat(rhythm_os::hub::HubType::new(rhythm_os::hub::HubType::HUE));
     }));
     app_state.on_hub_disconnect = Some(Arc::new(|| {
-        diag::vitals_hub_conn_state(rhythm_os::hub::HubType::new(rhythm_os::hub::HubType::HUE), diag::CONN_DISCONNECTED);
+        diag::vitals_hub_conn_state(
+            rhythm_os::hub::HubType::new(rhythm_os::hub::HubType::HUE),
+            diag::CONN_DISCONNECTED,
+        );
     }));
 
     let state = Arc::new(Mutex::new(app_state));
-
-    // Load configuration from NVS into state
-    if let Err(e) = storage::load_config(&nvs, &state) {
-        warn!("Failed to load config from NVS: {:?}", e);
-        led.show(led::LedStatus::Error);
-    }
-
-    // Recompute UTC offset from timezone name (handles DST transitions on boot)
-    {
-        use rhythm_os::storage::Storage;
-        let nvs_storage = storage::NvsStorage::new(nvs.clone());
-        if let Ok(loc) = nvs_storage.load_location() {
-            if loc.timezone_name.is_some() {
-                if let Ok(mut guard) = state.lock() {
-                    let s = &mut *guard;
-                    loc.apply_to_state(
-                        &mut s.latitude,
-                        &mut s.longitude,
-                        &mut s.utc_offset_hours,
-                        &mut s.runtime_config,
-                        &mut s.timezone_name,
-                    );
-                }
-            }
-        }
-    }
 
     // =========================================================================
     // Phase 3: Connect WiFi (compile-time → NVS → BLE provisioning)
@@ -252,7 +225,9 @@ fn main() -> Result<()> {
     // Strategy 2: NVS-persisted credentials
     let nvs_creds = storage::load_wifi_credentials(&nvs);
 
-    let (wifi_ssid, wifi_pass, modem) = if let (Some(ssid), Some(pass)) = (compile_ssid, compile_pass) {
+    let (wifi_ssid, wifi_pass, modem) = if let (Some(ssid), Some(pass)) =
+        (compile_ssid, compile_pass)
+    {
         // Dev mode: use compile-time credentials, skip BLE entirely
         info!("Using compile-time WiFi credentials: {}", ssid);
         (ssid.to_string(), pass.to_string(), peripherals.modem)
@@ -324,13 +299,7 @@ fn main() -> Result<()> {
             return Err(anyhow::anyhow!("WiFi provisioning thread spawn failed"));
         }
 
-        let creds = ble_prov::run_provisioning(
-            bt_modem,
-            nvs.clone(),
-            &mut led,
-            cred_tx,
-            wifi_rx,
-        )?;
+        let creds = ble_prov::run_provisioning(bt_modem, nvs.clone(), &mut led, cred_tx, wifi_rx)?;
 
         // Save to NVS for next boot
         if let Err(e) = storage::save_wifi_credentials(&nvs, &creds.ssid, &creds.password) {
@@ -345,9 +314,8 @@ fn main() -> Result<()> {
     // Release Bluetooth controller memory back to the heap (~60-70KB).
     // BLE is either never started (NVS/compile-time creds) or already torn down.
     unsafe {
-        let ret = esp_idf_svc::sys::esp_bt_mem_release(
-            esp_idf_svc::sys::esp_bt_mode_t_ESP_BT_MODE_BTDM,
-        );
+        let ret =
+            esp_idf_svc::sys::esp_bt_mem_release(esp_idf_svc::sys::esp_bt_mode_t_ESP_BT_MODE_BTDM);
         if ret == esp_idf_svc::sys::ESP_OK {
             let free = esp_idf_svc::sys::esp_get_free_heap_size();
             info!("Released BT memory, free heap now: {}KB", free / 1024);
@@ -359,34 +327,29 @@ fn main() -> Result<()> {
     info!("Connecting to WiFi: {}", &wifi_ssid);
     led.show(led::LedStatus::WifiConnecting);
 
-    let _wifi = match wifi::connect_wifi(
-        modem,
-        sysloop.clone(),
-        nvs.clone(),
-        &wifi_ssid,
-        &wifi_pass,
-    ) {
-        Ok(wifi) => {
-            led.show(led::LedStatus::WifiConnected);
-            wifi
-        }
-        Err(e) => {
-            warn!("WiFi connection failed: {:?}", e);
-
-            // If we had NVS credentials that failed, clear them and restart
-            // to re-enter BLE provisioning
-            if compile_ssid.is_none() {
-                info!("Clearing failed NVS credentials and restarting...");
-                let _ = storage::clear_wifi_credentials(&nvs);
-                led.show(led::LedStatus::Error);
-                thread::sleep(Duration::from_secs(2));
-                unsafe { esp_idf_svc::sys::esp_restart() };
+    let _wifi =
+        match wifi::connect_wifi(modem, sysloop.clone(), nvs.clone(), &wifi_ssid, &wifi_pass) {
+            Ok(wifi) => {
+                led.show(led::LedStatus::WifiConnected);
+                wifi
             }
+            Err(e) => {
+                warn!("WiFi connection failed: {:?}", e);
 
-            led.show(led::LedStatus::Error);
-            return Err(e);
-        }
-    };
+                // If we had NVS credentials that failed, clear them and restart
+                // to re-enter BLE provisioning
+                if compile_ssid.is_none() {
+                    info!("Clearing failed NVS credentials and restarting...");
+                    let _ = storage::clear_wifi_credentials(&nvs);
+                    led.show(led::LedStatus::Error);
+                    thread::sleep(Duration::from_secs(2));
+                    unsafe { esp_idf_svc::sys::esp_restart() };
+                }
+
+                led.show(led::LedStatus::Error);
+                return Err(e);
+            }
+        };
 
     info!("WiFi connected!");
 
@@ -401,7 +364,12 @@ fn main() -> Result<()> {
     // Start mDNS so the device is discoverable as rhythm-XXYY.local
     let _mdns = {
         let mac = ble_prov::get_mac_address();
-        let hostname = format!("{}{:02x}{:02x}", rhythm_os::mdns::MDNS_HOSTNAME_PREFIX, mac[4], mac[5]);
+        let hostname = format!(
+            "{}{:02x}{:02x}",
+            rhythm_os::mdns::MDNS_HOSTNAME_PREFIX,
+            mac[4],
+            mac[5]
+        );
 
         match EspMdns::take() {
             Ok(mut mdns) => {
@@ -416,7 +384,10 @@ fn main() -> Result<()> {
                     rhythm_os::mdns::MDNS_SERVICE_TYPE,
                     rhythm_os::mdns::MDNS_SERVICE_PROTO,
                     80,
-                    &[(rhythm_os::mdns::MDNS_TXT_VERSION, FIRMWARE_VERSION), (rhythm_os::mdns::MDNS_TXT_TYPE, "rhythm-esp32")],
+                    &[
+                        (rhythm_os::mdns::MDNS_TXT_VERSION, FIRMWARE_VERSION),
+                        (rhythm_os::mdns::MDNS_TXT_TYPE, "rhythm-esp32"),
+                    ],
                 ) {
                     warn!("mDNS: failed to register HTTP service: {:?}", e);
                 }
@@ -487,14 +458,17 @@ fn main() -> Result<()> {
     // Suppress noisy WiFi ADDBA negotiation logs during normal runtime
     // (keep them at INFO during boot for diagnostics)
     unsafe {
-        esp_idf_svc::sys::esp_log_level_set(b"wifi\0".as_ptr() as *const _, esp_idf_svc::sys::esp_log_level_t_ESP_LOG_WARN);
+        esp_idf_svc::sys::esp_log_level_set(
+            b"wifi\0".as_ptr() as *const _,
+            esp_idf_svc::sys::esp_log_level_t_ESP_LOG_WARN,
+        );
     }
     info!("Endpoints:");
     info!("  GET    /health - Health check");
     info!("  GET    /api/state - Full state snapshot");
     info!("  GET    /api/rooms/state - Room state for polling");
     info!("  PUT    /api/rooms - Upsert room(s)");
-    info!("  PUT    /api/config - Push curve config");
+    info!("  PUT    /api/config - Save light profile config");
     info!("  GET    /api/ota/version - Firmware version");
     info!("  POST   /api/ota/upload - OTA firmware upload");
 
@@ -539,7 +513,8 @@ fn main() -> Result<()> {
     // Phase 5: Initialize Hub (if configured)
     // =========================================================================
     let mut hub_event_rx: Option<std::sync::mpsc::Receiver<HubEvent>> = {
-        let is_configured = state.lock()
+        let is_configured = state
+            .lock()
             .map(|s| s.hub_credentials.values().any(|c| c.is_configured()))
             .unwrap_or(false);
 
@@ -558,15 +533,23 @@ fn main() -> Result<()> {
                         init_state,
                         |ip| Ok(platform::hue::client::HueClient::new(ip.to_string())),
                         |config, registry, shutdown| {
-                            platform::hue::start_event_stream(config, registry, shutdown, event_state)
+                            platform::hue::start_event_stream(
+                                config,
+                                registry,
+                                shutdown,
+                                event_state,
+                            )
                         },
                     )
-                })
-            {
-                Ok(handle) => handle.join()
+                }) {
+                Ok(handle) => handle
+                    .join()
                     .map_err(|_| anyhow::anyhow!("Hub init thread panicked"))?,
                 Err(e) => {
-                    warn!("Failed to spawn hub init thread: {} — continuing without hub", e);
+                    warn!(
+                        "Failed to spawn hub init thread: {} — continuing without hub",
+                        e
+                    );
                     Err(anyhow::anyhow!("spawn failed"))
                 }
             };
@@ -584,12 +567,18 @@ fn main() -> Result<()> {
                             rhythm_os::room_sync::poll_initial_light_state(&poll_state);
                         })
                     {
-                        warn!("Failed to spawn init-poll thread: {} — skipping initial poll", e);
+                        warn!(
+                            "Failed to spawn init-poll thread: {} — skipping initial poll",
+                            e
+                        );
                     }
                     Some(event_rx)
                 }
                 Err(e) => {
-                    warn!("Failed to connect SSE: {} (will retry when app pushes credentials)", e);
+                    warn!(
+                        "Failed to connect SSE: {} (will retry when app pushes credentials)",
+                        e
+                    );
                     None
                 }
             }

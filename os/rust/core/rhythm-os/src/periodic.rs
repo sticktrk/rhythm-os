@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use log::{info, warn};
 #[cfg(feature = "blocking")]
-use rhythm_core::{BlockingTimeProvider, LightProfileModule, TimeProvider};
+use rhythm_core::{BlockingTimeProvider, TimeProvider};
 
 use std::sync::Arc;
 
@@ -54,15 +54,20 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
     );
 
     loop {
-        let (utc_offset, config, sleep_mode, solar_noon, lat, lon, update_interval, timezone_name) = {
+        let (utc_offset, profile_registry, solar_noon, lat, lon, update_interval, timezone_name) = {
             let Ok(s) = state.lock() else {
                 thread::sleep(Duration::from_secs(60));
                 continue;
             };
             (
                 s.utc_offset_hours,
-                s.config.clone(),
-                s.sleep_mode,
+                rhythm_core::LightProfileRegistry::with_profiles(
+                    s.light_profile_configs
+                        .values()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    &s.active_light_profile_id,
+                ),
                 s.solar_noon_hour(),
                 s.latitude.unwrap_or(35.0),
                 s.longitude.unwrap_or(-80.84),
@@ -90,11 +95,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
         // Calculate generic curve values (no offset) for logging
         let solar = rhythm_core::SolarTime::new(solar_noon, lat, doy);
         let ctx = rhythm_core::light_profile::CurveContext::new(current_hour, solar, None);
-        let module = if sleep_mode {
-            rhythm_core::LightProfile::new(rhythm_core::default_sleep_profile())
-        } else {
-            rhythm_core::LightProfile::new(config.into())
-        };
+        let module = profile_registry.active_profile();
         let values = module.calculate(&ctx);
 
         // Get rhythm-enabled room IDs, skipping rooms in warning-dim state
@@ -269,6 +270,7 @@ pub fn check_solar_midnight(state: &SharedState, current_hour: f32) {
                     0.0,
                     0.0,
                     snap.soft_off,
+                    snap.profile_settings.clone(),
                 );
             }
 
@@ -296,10 +298,10 @@ pub fn check_solar_midnight(state: &SharedState, current_hour: f32) {
 /// Sunrise is computed from lat/lon/timezone if available, otherwise
 /// estimated as solar_noon - 6 hours.
 pub fn check_sunrise_sleep_deactivate(state: &SharedState, last_hour: f32, current_hour: f32) {
-    let (sleep_mode, sunrise) = {
+    let (sleep_active, sunrise) = {
         let Ok(s) = state.lock() else { return };
 
-        if !s.sleep_mode {
+        if s.active_light_profile_id != rhythm_core::SLEEP_PROFILE_ID {
             return;
         }
 
@@ -320,10 +322,10 @@ pub fn check_sunrise_sleep_deactivate(state: &SharedState, last_hour: f32, curre
             rhythm_core::config::FALLBACK_SUNRISE_HOUR
         };
 
-        (s.sleep_mode, sunrise)
+        (true, sunrise)
     };
 
-    if !sleep_mode {
+    if !sleep_active {
         return;
     }
 
@@ -341,7 +343,8 @@ pub fn check_sunrise_sleep_deactivate(state: &SharedState, last_hour: f32, curre
             "Sunrise crossed (last={:.2}, now={:.2}, sunrise={:.2}) - auto-deactivating sleep mode",
             last_hour, current_hour, sunrise
         );
-        if let Err(e) = crate::commands::do_wake(state) {
+        if let Err(e) = crate::commands::do_set_light_profile(state, rhythm_core::RHYTHM_PROFILE_ID)
+        {
             warn!("Failed to auto-deactivate sleep mode: {}", e);
         }
     }
@@ -595,7 +598,7 @@ mod tests {
     #[test]
     fn solar_midnight_crossing_resets_offsets() {
         // We need a runtime to verify offset reset
-        use rhythm_core::{CurveConfig, InputEvent, RoomSnapshot, RuntimeHandle};
+        use rhythm_core::{InputEvent, LightProfileConfig, RoomSnapshot, RuntimeHandle};
         use std::sync::Mutex as StdMutex;
 
         struct MockRuntime {
@@ -613,7 +616,7 @@ mod tests {
             fn set_solar(&self, _: rhythm_core::SolarTime) -> anyhow::Result<()> {
                 Ok(())
             }
-            fn set_curve_config(&self, _: CurveConfig) -> anyhow::Result<()> {
+            fn set_light_profile_config(&self, _: LightProfileConfig) -> anyhow::Result<()> {
                 Ok(())
             }
             fn periodic_tick_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
@@ -638,6 +641,7 @@ mod tests {
                 time_offset: f32,
                 bri_offset: f32,
                 _: bool,
+                _: rhythm_core::RoomProfileSettings,
             ) {
                 self.restore_calls.lock().unwrap().push((
                     room_id.to_string(),
@@ -700,6 +704,7 @@ mod tests {
                 time_offset_minutes: 30.0,
                 brightness_offset: 10.0,
                 soft_off: false,
+                profile_settings: rhythm_core::RoomProfileSettings::default(),
             }]),
             restore_calls: StdMutex::new(Vec::new()),
         });

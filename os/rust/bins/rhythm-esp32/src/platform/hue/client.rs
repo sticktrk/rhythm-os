@@ -84,7 +84,9 @@ impl HueClient {
 
     /// Check out the persistent V2 client (or create one if absent).
     fn take_v2_client(&self) -> Result<Client<EspHttpConnection>> {
-        let mut guard = self.v2_conn.lock()
+        let mut guard = self
+            .v2_conn
+            .lock()
             .map_err(|_| anyhow::anyhow!("v2_conn lock poisoned"))?;
         match guard.take() {
             Some(client) => Ok(client),
@@ -141,7 +143,9 @@ impl HueClient {
         if status != 200 {
             return Err(anyhow::anyhow!(
                 "V2 GET {}/{} failed with status {}",
-                resource_type, resource_id, status
+                resource_type,
+                resource_id,
+                status
             ));
         }
         let body_str = std::str::from_utf8(&body)?;
@@ -150,11 +154,13 @@ impl HueClient {
             warn!(target: "hub", "V2 GET {}/{} returned {} error(s): {:?}",
                 resource_type, resource_id, envelope.errors.len(), envelope.errors);
         }
-        envelope
-            .data
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("No data in V2 response for {}/{}", resource_type, resource_id))
+        envelope.data.into_iter().next().ok_or_else(|| {
+            anyhow::anyhow!(
+                "No data in V2 response for {}/{}",
+                resource_type,
+                resource_id
+            )
+        })
     }
 
     /// Connection-level GET: connect, submit, read body. No parsing.
@@ -174,7 +180,13 @@ impl HueClient {
     ///
     /// Connection errors trigger a retry. HTTP errors (non-200) do NOT retry —
     /// the connection is returned for reuse.
-    fn v2_put(&self, username: &str, resource_type: &str, resource_id: &str, body: &str) -> Result<()> {
+    fn v2_put(
+        &self,
+        username: &str,
+        resource_type: &str,
+        resource_id: &str,
+        body: &str,
+    ) -> Result<()> {
         let mut client = self.take_v2_client()?;
 
         let url = format!(
@@ -210,7 +222,10 @@ impl HueClient {
             crate::diag::vitals_cmd_result(false);
             return Err(anyhow::anyhow!(
                 "V2 PUT {}/{} failed with status {}: {}",
-                resource_type, resource_id, status, resp_body
+                resource_type,
+                resource_id,
+                status,
+                resp_body
             ));
         }
 
@@ -295,7 +310,8 @@ impl HueClient {
 
     /// Check if a grouped_light (room) has any lights on.
     pub fn is_grouped_light_on(&self, username: &str, grouped_light_id: &str) -> Result<bool> {
-        let gl = self.v2_get_one::<HueV2GroupedLight>(username, "grouped_light", grouped_light_id)?;
+        let gl =
+            self.v2_get_one::<HueV2GroupedLight>(username, "grouped_light", grouped_light_id)?;
         Ok(gl.on.map(|s| s.on).unwrap_or(false))
     }
 
@@ -329,7 +345,8 @@ impl HueClient {
         if status != 200 {
             return Err(anyhow::anyhow!(
                 "V2 GET resource/{} failed with status {}",
-                resource_type, status
+                resource_type,
+                status
             ));
         }
 
@@ -405,4 +422,3 @@ impl ClientExt for Client<EspHttpConnection> {
         Ok(self.request(Method::Get, url, headers)?)
     }
 }
-

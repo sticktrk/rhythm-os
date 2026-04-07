@@ -1,23 +1,22 @@
 //! Default light profile configurations.
 //!
 //! Factory functions that produce the built-in profile configs:
-//! `rhythm` (adaptive lighting), `sleep` (nighttime motion), `idle` (soft-off palette).
+//! `rhythm` (adaptive lighting), `sleep` (nighttime motion), `idle` (soft-off).
 
-use rhythm_curve::curve_shape::{LightCurveShape, LightDirectColor};
-use rhythm_curve::profile_config::LightProfileConfig;
-use rhythm_curve::{Rgb, XyColor};
-
-use crate::config::{
+use rhythm_profile::curve_shape::{LightCurveShape, LightDirectColor};
+use rhythm_profile::profile_config::{LightProfileConfig, TimerSetting};
+use rhythm_profile::{Rgb, XyColor};
+use rhythm_profile::{
     DEFAULT_MAX_BRIGHTNESS, DEFAULT_MAX_COLOR_TEMP, DEFAULT_MAX_DIM_STEPS, DEFAULT_MIN_BRIGHTNESS,
     DEFAULT_MIN_COLOR_TEMP,
 };
 
 pub const RHYTHM_PROFILE_ID: &str = "rhythm";
-pub const RHYTHM_PROFILE_NAME: &str = "Rhythm Profile";
+pub const RHYTHM_PROFILE_NAME: &str = "Day";
 pub const SLEEP_PROFILE_ID: &str = "sleep";
-pub const SLEEP_PROFILE_NAME: &str = "Sleep Profile";
+pub const SLEEP_PROFILE_NAME: &str = "Sleep";
 pub const IDLE_PROFILE_ID: &str = "idle";
-pub const IDLE_PROFILE_NAME: &str = "Idle Profile";
+pub const IDLE_PROFILE_NAME: &str = "Idle";
 pub const SLEEP_DEFAULT_MIN_BRIGHTNESS: u8 = 10;
 pub const SLEEP_DEFAULT_MAX_BRIGHTNESS: u8 = 40;
 pub const SLEEP_DEFAULT_COLOR_TEMP: u16 = 500;
@@ -35,49 +34,58 @@ pub fn default_rhythm_profile() -> LightProfileConfig {
         min_color_temp: DEFAULT_MIN_COLOR_TEMP,
         max_color_temp: DEFAULT_MAX_COLOR_TEMP,
         max_dim_steps: DEFAULT_MAX_DIM_STEPS,
-        fade_ms: None,
-        motion_timeout_secs: None,
-        direct_color: None,
+        fade_ms: TimerSetting::Auto,
+        motion_timeout_secs: TimerSetting::Auto,
+        rhythm_interval_secs: TimerSetting::Auto,
     }
 }
 
 /// Create the default sleep profile config.
 pub fn default_sleep_profile() -> LightProfileConfig {
-    LightProfileConfig {
-        id: SLEEP_PROFILE_ID.into(),
-        name: SLEEP_PROFILE_NAME.into(),
-        curve: LightCurveShape::default_super_gaussian(),
-        min_brightness: SLEEP_DEFAULT_MIN_BRIGHTNESS,
-        max_brightness: SLEEP_DEFAULT_MAX_BRIGHTNESS,
-        min_color_temp: SLEEP_DEFAULT_COLOR_TEMP,
-        max_color_temp: SLEEP_DEFAULT_COLOR_TEMP,
-        max_dim_steps: DEFAULT_MAX_DIM_STEPS,
-        fade_ms: None,
-        motion_timeout_secs: None,
-        direct_color: Some(LightDirectColor {
+    let mut curve = LightCurveShape::default_super_gaussian();
+    if let LightCurveShape::SuperGaussian { direct_color, .. } = &mut curve {
+        *direct_color = Some(LightDirectColor {
             xy: XyColor {
                 x: SLEEP_XY_X,
                 y: SLEEP_XY_Y,
             },
             rgb: Rgb::new(255, 147, 41),
-        }),
+        });
+    }
+
+    LightProfileConfig {
+        id: SLEEP_PROFILE_ID.into(),
+        name: SLEEP_PROFILE_NAME.into(),
+        curve,
+        min_brightness: SLEEP_DEFAULT_MIN_BRIGHTNESS,
+        max_brightness: SLEEP_DEFAULT_MAX_BRIGHTNESS,
+        min_color_temp: SLEEP_DEFAULT_COLOR_TEMP,
+        max_color_temp: SLEEP_DEFAULT_COLOR_TEMP,
+        max_dim_steps: DEFAULT_MAX_DIM_STEPS,
+        fade_ms: TimerSetting::Auto,
+        motion_timeout_secs: TimerSetting::Auto,
+        rhythm_interval_secs: TimerSetting::Auto,
     }
 }
 
 /// Create the default idle (soft-off) profile config.
+///
+/// The default idle mode inherits the active profile's current color while
+/// forcing output to 1% brightness. Saving an explicit idle palette replaces
+/// this fallback behavior.
 pub fn default_idle_profile() -> LightProfileConfig {
     LightProfileConfig {
         id: IDLE_PROFILE_ID.into(),
         name: IDLE_PROFILE_NAME.into(),
-        curve: LightCurveShape::default_idle_palette(),
+        curve: LightCurveShape::InheritActive,
         min_brightness: 1,
         max_brightness: 1,
         min_color_temp: 0,
         max_color_temp: 0,
         max_dim_steps: 1,
-        fade_ms: None,
-        motion_timeout_secs: None,
-        direct_color: None,
+        fade_ms: TimerSetting::Auto,
+        motion_timeout_secs: TimerSetting::Auto,
+        rhythm_interval_secs: TimerSetting::Auto,
     }
 }
 
@@ -89,27 +97,41 @@ mod tests {
     fn test_rhythm_profile_defaults() {
         let p = default_rhythm_profile();
         assert_eq!(p.id, "rhythm");
-        assert!(matches!(p.curve, LightCurveShape::SuperGaussian { .. }));
+        assert!(matches!(
+            p.curve,
+            LightCurveShape::SuperGaussian {
+                direct_color: None,
+                ..
+            }
+        ));
         assert_eq!(p.min_brightness, DEFAULT_MIN_BRIGHTNESS);
         assert_eq!(p.max_brightness, DEFAULT_MAX_BRIGHTNESS);
-        assert!(p.direct_color.is_none());
+        assert!(p.rhythm_interval_secs.is_auto());
     }
 
     #[test]
     fn test_sleep_profile_defaults() {
         let p = default_sleep_profile();
         assert_eq!(p.id, "sleep");
-        assert!(p.direct_color.is_some());
+        assert!(matches!(
+            p.curve,
+            LightCurveShape::SuperGaussian {
+                direct_color: Some(_),
+                ..
+            }
+        ));
         assert_eq!(p.min_brightness, SLEEP_DEFAULT_MIN_BRIGHTNESS);
         assert_eq!(p.max_brightness, SLEEP_DEFAULT_MAX_BRIGHTNESS);
+        assert!(p.rhythm_interval_secs.is_auto());
     }
 
     #[test]
     fn test_idle_profile_defaults() {
         let p = default_idle_profile();
         assert_eq!(p.id, "idle");
-        assert!(matches!(p.curve, LightCurveShape::Palette { .. }));
+        assert!(matches!(p.curve, LightCurveShape::InheritActive));
         assert_eq!(p.min_brightness, 1);
         assert_eq!(p.max_brightness, 1);
+        assert!(p.rhythm_interval_secs.is_auto());
     }
 }

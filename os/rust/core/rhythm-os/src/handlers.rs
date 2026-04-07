@@ -189,7 +189,17 @@ pub fn handle_put_motion_timeout(state: &SharedState, body: &Value) -> ApiRespon
         None => return ApiResponse::bad_request("Missing room_id"),
     };
     let room_id = commands::resolve_room_id(state, raw_room_id);
-    let timeout = match body.get("timeout_secs").and_then(|v| v.as_u64()) {
+
+    // null timeout_secs → remove per-room override (use profile default)
+    let timeout_val = body.get("timeout_secs");
+    if timeout_val.is_some_and(|v| v.is_null()) {
+        match commands::do_motion_timeout_clear(state, &room_id, None) {
+            Ok(()) => return ApiResponse::no_content(),
+            Err(e) => return ApiResponse::server_error(e),
+        }
+    }
+
+    let timeout = match timeout_val.and_then(|v| v.as_u64()) {
         Some(t) => t,
         None => return ApiResponse::bad_request("Missing timeout_secs"),
     };
@@ -199,28 +209,98 @@ pub fn handle_put_motion_timeout(state: &SharedState, body: &Value) -> ApiRespon
     }
 }
 
-pub fn handle_get_config(state: &SharedState) -> ApiResponse {
-    match commands::build_config(state) {
+fn parse_timer_patch_value(
+    body: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<Option<rhythm_core::TimerSetting>>, String> {
+    match body.get(key) {
+        None => Ok(None),
+        Some(v) if v.is_null() => Ok(Some(None)),
+        Some(v) => serde_json::from_value(v.clone())
+            .map(|value| Some(Some(value)))
+            .map_err(|e| format!("Invalid {}: {}", key, e)),
+    }
+}
+
+fn parse_room_profile_patch(value: Option<&Value>) -> Result<Option<commands::RoomProfileSettingsPatch>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(Some(commands::RoomProfileSettingsPatch {
+            clear_all: true,
+            ..Default::default()
+        }));
+    }
+
+    let body = value
+        .as_object()
+        .ok_or_else(|| "room_profile must be an object or null".to_string())?;
+
+    let profile_id = match body.get("profile_id") {
+        None => None,
+        Some(v) if v.is_null() => Some(None),
+        Some(v) => Some(Some(
+            v.as_str()
+                .ok_or_else(|| "room_profile.profile_id must be a string or null".to_string())?
+                .to_string(),
+        )),
+    };
+
+    Ok(Some(commands::RoomProfileSettingsPatch {
+        clear_all: false,
+        profile_id,
+        fade_ms: parse_timer_patch_value(body, "fade_ms")?,
+        motion_timeout_secs: parse_timer_patch_value(body, "motion_timeout_secs")?,
+    }))
+}
+
+fn default_profile_config_for(
+    state: &SharedState,
+    requested_id: Option<&str>,
+) -> Result<rhythm_core::LightProfileConfig, String> {
+    let s = state.lock().map_err(|_| "lock".to_string())?;
+    let id = requested_id.unwrap_or(&s.active_light_profile_id);
+    match id {
+        rhythm_core::RHYTHM_PROFILE_ID => Ok(rhythm_core::default_rhythm_profile()),
+        rhythm_core::SLEEP_PROFILE_ID => Ok(rhythm_core::default_sleep_profile()),
+        rhythm_core::IDLE_PROFILE_ID => Ok(rhythm_core::default_idle_profile()),
+        _ => Err(format!("Unknown light profile: {}", id)),
+    }
+}
+
+pub fn handle_get_config(state: &SharedState, profile_id: Option<&str>) -> ApiResponse {
+    match commands::build_config(state, profile_id) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
     }
 }
 
-pub fn handle_put_config(state: &SharedState, body: &Value) -> ApiResponse {
-    let config: rhythm_core::CurveConfig = match serde_json::from_value(body.clone()) {
+pub fn handle_put_config(
+    state: &SharedState,
+    profile_id: Option<&str>,
+    body: &Value,
+) -> ApiResponse {
+    let mut config: rhythm_core::LightProfileConfig = match serde_json::from_value(body.clone()) {
         Ok(c) => c,
         Err(e) => return ApiResponse::bad_request(&format!("Invalid config: {}", e)),
     };
+    if let Some(id) = profile_id {
+        config.id = id.to_string();
+    }
     match commands::do_config_set(state, config) {
         Ok(()) => ApiResponse::no_content(),
         Err(e) => ApiResponse::server_error(e),
     }
 }
 
-pub fn handle_reset_config(state: &SharedState) -> ApiResponse {
-    let default_config = rhythm_core::CurveConfig::default();
+pub fn handle_reset_config(state: &SharedState, profile_id: Option<&str>) -> ApiResponse {
+    let default_config = match default_profile_config_for(state, profile_id) {
+        Ok(config) => config,
+        Err(e) => return ApiResponse::bad_request(&e),
+    };
     match commands::do_config_set(state, default_config) {
-        Ok(()) => match commands::build_config(state) {
+        Ok(()) => match commands::build_config(state, profile_id) {
             Ok(json) => ApiResponse::json_ok(json),
             Err(e) => ApiResponse::server_error(e),
         },
@@ -228,13 +308,17 @@ pub fn handle_reset_config(state: &SharedState) -> ApiResponse {
     }
 }
 
-pub fn handle_absorb_time_offset(state: &SharedState, body: &Value) -> ApiResponse {
+pub fn handle_absorb_time_offset(
+    state: &SharedState,
+    profile_id: Option<&str>,
+    body: &Value,
+) -> ApiResponse {
     let offset_minutes = match body.get("offset_minutes").and_then(|v| v.as_f64()) {
         Some(v) => v as f32,
         None => return ApiResponse::bad_request("Missing offset_minutes"),
     };
-    match commands::do_absorb_time_offset(state, offset_minutes) {
-        Ok(()) => match commands::build_config(state) {
+    match commands::do_absorb_time_offset(state, profile_id, offset_minutes) {
+        Ok(()) => match commands::build_config(state, profile_id) {
             Ok(json) => ApiResponse::json_ok(json),
             Err(e) => ApiResponse::server_error(e),
         },
@@ -246,6 +330,7 @@ pub fn handle_absorb_time_offset(state: &SharedState, body: &Value) -> ApiRespon
 
 /// Query parameters for `GET /api/curve` and `POST /api/curve`.
 pub struct CurveQueryParams {
+    pub id: Option<String>,
     pub samples_per_hour: Option<u32>,
     pub date: Option<String>,
     pub start_hour: Option<f32>,
@@ -256,6 +341,7 @@ pub fn handle_get_curve(state: &SharedState, params: &CurveQueryParams) -> ApiRe
     match commands::build_curve(
         state,
         None,
+        params.id.as_deref(),
         params.date.as_deref(),
         params.samples_per_hour,
         params.start_hour,
@@ -271,13 +357,17 @@ pub fn handle_post_curve(
     body: &Value,
     params: &CurveQueryParams,
 ) -> ApiResponse {
-    let config: rhythm_core::CurveConfig = match serde_json::from_value(body.clone()) {
+    let mut config: rhythm_core::LightProfileConfig = match serde_json::from_value(body.clone()) {
         Ok(c) => c,
         Err(e) => return ApiResponse::bad_request(&format!("Invalid config: {}", e)),
     };
+    if let Some(id) = params.id.as_deref() {
+        config.id = id.to_string();
+    }
     match commands::build_curve(
         state,
         Some(config),
+        params.id.as_deref(),
         params.date.as_deref(),
         params.samples_per_hour,
         params.start_hour,
@@ -288,8 +378,12 @@ pub fn handle_post_curve(
     }
 }
 
-pub fn handle_get_curve_now(state: &SharedState, hour: Option<f32>) -> ApiResponse {
-    match commands::build_curve_now(state, hour) {
+pub fn handle_get_curve_now(
+    state: &SharedState,
+    profile_id: Option<&str>,
+    hour: Option<f32>,
+) -> ApiResponse {
+    match commands::build_curve_now(state, profile_id, hour) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
     }
@@ -334,25 +428,15 @@ pub fn handle_get_settings(state: &SharedState) -> ApiResponse {
 }
 
 pub fn handle_put_settings(state: &SharedState, body: &Value) -> ApiResponse {
-    let interval = body.get("rhythm_interval_secs").and_then(|v| v.as_u64());
+    if body.get("rhythm_interval_secs").is_some() {
+        return ApiResponse::bad_request(
+            "rhythm_interval_secs now belongs in light profile config",
+        );
+    }
     let power_save = body.get("power_save").and_then(|v| v.as_bool());
 
-    match commands::do_settings_set(state, interval, power_save) {
+    match commands::do_settings_set(state, power_save) {
         Ok(json) => ApiResponse::json_ok(json),
-        Err(e) => ApiResponse::server_error(e),
-    }
-}
-
-pub fn handle_put_sleep(state: &SharedState) -> ApiResponse {
-    match commands::do_sleep(state) {
-        Ok(()) => ApiResponse::no_content(),
-        Err(e) => ApiResponse::server_error(e),
-    }
-}
-
-pub fn handle_put_wake(state: &SharedState) -> ApiResponse {
-    match commands::do_wake(state) {
-        Ok(()) => ApiResponse::no_content(),
         Err(e) => ApiResponse::server_error(e),
     }
 }
@@ -565,6 +649,10 @@ pub fn handle_put_room_preferences(
         let rhythm_enabled = item.get("rhythm_enabled").and_then(|v| v.as_bool());
         let disabled = item.get("disabled").and_then(|v| v.as_bool());
         let soft_off = item.get("soft_off").and_then(|v| v.as_bool());
+        let room_profile = match parse_room_profile_patch(item.get("room_profile")) {
+            Ok(patch) => patch,
+            Err(e) => return ApiResponse::bad_request(&e),
+        };
 
         let per_item_persist = persist && !batch;
         match commands::do_room_preferences_set(
@@ -573,6 +661,7 @@ pub fn handle_put_room_preferences(
             rhythm_enabled,
             disabled,
             soft_off,
+            room_profile.as_ref(),
             per_item_persist,
         ) {
             Ok(json) => results.push(json),
@@ -985,7 +1074,7 @@ mod tests {
     #[test]
     fn put_config_invalid_json() {
         let state = test_state();
-        let r = handle_put_config(&state, &json!({"min_brightness": "not_a_number"}));
+        let r = handle_put_config(&state, None, &json!({"min_brightness": "not_a_number"}));
         assert_eq!(r.status, 400);
     }
 
@@ -1068,7 +1157,9 @@ mod tests {
     // Helper: set up state with a mock runtime for handler tests
     fn handler_state_with_runtime() -> SharedState {
         use crate::hub::{ActiveHub, HubType};
-        use rhythm_core::{ButtonAction, CurveConfig, InputEvent, RoomSnapshot, RuntimeHandle};
+        use rhythm_core::{
+            ButtonAction, InputEvent, LightProfileConfig, RoomSnapshot, RuntimeHandle,
+        };
 
         struct HandlerMockRuntime {
             snapshots: Vec<RoomSnapshot>,
@@ -1086,7 +1177,7 @@ mod tests {
             fn set_solar(&self, _: rhythm_core::SolarTime) -> anyhow::Result<()> {
                 Ok(())
             }
-            fn set_curve_config(&self, _: CurveConfig) -> anyhow::Result<()> {
+            fn set_light_profile_config(&self, _: LightProfileConfig) -> anyhow::Result<()> {
                 Ok(())
             }
             fn periodic_tick_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
@@ -1098,7 +1189,17 @@ mod tests {
             fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot> {
                 self.snapshots.clone()
             }
-            fn restore_room_state(&self, _: &str, _: bool, _: bool, _: f32, _: f32, _: bool) {}
+            fn restore_room_state(
+                &self,
+                _: &str,
+                _: bool,
+                _: bool,
+                _: f32,
+                _: f32,
+                _: bool,
+                _: rhythm_core::RoomProfileSettings,
+            ) {
+            }
             fn add_room(&self, _: &str, _: &str) {}
             fn remove_room(&self, _: &str) {}
             fn dim_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
@@ -1155,6 +1256,7 @@ mod tests {
                     time_offset_minutes: 0.0,
                     brightness_offset: 0.0,
                     soft_off: false,
+                    profile_settings: rhythm_core::RoomProfileSettings::default(),
                 },
                 RoomSnapshot {
                     id: "room2".into(),
@@ -1164,6 +1266,7 @@ mod tests {
                     time_offset_minutes: 0.0,
                     brightness_offset: 0.0,
                     soft_off: false,
+                    profile_settings: rhythm_core::RoomProfileSettings::default(),
                 },
             ],
         });
@@ -1206,7 +1309,7 @@ mod tests {
     #[test]
     fn reset_config_returns_200_with_defaults() {
         let state = handler_state_with_runtime();
-        let r = handle_reset_config(&state);
+        let r = handle_reset_config(&state, None);
         assert_eq!(r.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert!(parsed.get("max_brightness").is_some());
@@ -1217,16 +1320,96 @@ mod tests {
         let state = handler_state_with_runtime();
         let r = handle_put_config(
             &state,
+            None,
             &json!({
+                "id": "rhythm",
+                "name": "Day",
+                "curve": { "type": "super-gaussian" },
                 "min_brightness": 1,
                 "max_brightness": 100,
-                "min_kelvin": 2200,
-                "max_kelvin": 6500,
-                "bell_width": 6.0
+                "min_color_temp": 2200,
+                "max_color_temp": 6500,
+                "max_dim_steps": 6
             }),
         );
         assert_eq!(r.status, 204);
         assert!(r.body.is_empty());
+    }
+
+    #[test]
+    fn get_config_for_sleep_profile_returns_requested_profile() {
+        let state = handler_state_with_runtime();
+        let r = handle_get_config(&state, Some(rhythm_core::SLEEP_PROFILE_ID));
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["id"], rhythm_core::SLEEP_PROFILE_ID);
+        assert_eq!(parsed["name"], rhythm_core::SLEEP_PROFILE_NAME);
+        assert_eq!(parsed["curve"]["type"], "super-gaussian");
+        assert_eq!(parsed["curve"]["direct_color"]["rgb"]["r"], 255);
+        assert!(parsed.get("direct_color").is_none());
+    }
+
+    #[test]
+    fn put_config_query_id_overrides_body_id() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_config(
+            &state,
+            Some(rhythm_core::SLEEP_PROFILE_ID),
+            &json!({
+                "id": "rhythm",
+                "name": "Sleep",
+                "curve": { "type": "super-gaussian" },
+                "min_brightness": 7,
+                "max_brightness": 21,
+                "min_color_temp": 1200,
+                "max_color_temp": 1600,
+                "max_dim_steps": 4
+            }),
+        );
+        assert_eq!(r.status, 204);
+
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state
+                .light_profile_config(rhythm_core::SLEEP_PROFILE_ID)
+                .unwrap()
+                .min_brightness,
+            7
+        );
+        assert_eq!(
+            state
+                .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
+                .unwrap()
+                .min_brightness,
+            rhythm_core::default_rhythm_profile().min_brightness
+        );
+    }
+
+    #[test]
+    fn reset_config_for_idle_returns_inherit_active_default() {
+        let state = handler_state_with_runtime();
+        let r = handle_reset_config(&state, Some(rhythm_core::IDLE_PROFILE_ID));
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["id"], rhythm_core::IDLE_PROFILE_ID);
+        assert_eq!(parsed["curve"]["type"], "inherit-active");
+        assert_eq!(parsed["min_brightness"], 1);
+    }
+
+    #[test]
+    fn get_config_unknown_profile_returns_error() {
+        let state = handler_state_with_runtime();
+        let r = handle_get_config(&state, Some("unknown-profile"));
+        assert_eq!(r.status, 500);
+        assert!(r.body.contains("Unknown light profile"));
+    }
+
+    #[test]
+    fn reset_config_unknown_profile_returns_bad_request() {
+        let state = handler_state_with_runtime();
+        let r = handle_reset_config(&state, Some("unknown-profile"));
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("Unknown light profile"));
     }
 
     #[test]
@@ -1350,10 +1533,10 @@ mod tests {
     #[test]
     fn put_settings_returns_raw_settings() {
         let state = handler_state_with_runtime();
-        let r = handle_put_settings(&state, &json!({"rhythm_interval_secs": 120}));
+        let r = handle_put_settings(&state, &json!({"power_save": true}));
         assert_eq!(r.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
-        assert!(parsed["rhythm_interval_secs"].is_number());
+        assert_eq!(parsed["power_save"], true);
         assert!(parsed.get("status").is_none());
     }
 
@@ -1363,8 +1546,18 @@ mod tests {
         let r = handle_get_settings(&state);
         assert_eq!(r.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
-        assert!(parsed["rhythm_interval_secs"].is_number());
+        assert!(parsed["power_save"].is_boolean());
         assert!(parsed.get("status").is_none());
+    }
+
+    #[test]
+    fn put_settings_rejects_legacy_interval_field() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_settings(&state, &json!({"rhythm_interval_secs": 120}));
+        assert_eq!(r.status, 400);
+        assert!(r
+            .body
+            .contains("rhythm_interval_secs now belongs in light profile config"));
     }
 
     // -- fix_my_lights returns rooms as objects --

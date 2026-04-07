@@ -11,7 +11,7 @@ use log::{info, warn};
 use rhythm_core::controller::{LightControlError, LightControlResult, LightController};
 use rhythm_core::lighting::LightingCommand;
 use rhythm_core::room::Room;
-use rhythm_devices::{adapt_command, LightCapabilities, LightType};
+use rhythm_devices::{ColorPreference, LightCapabilities, LightType};
 
 use crate::clusters;
 use crate::hub_state::MatterHubData;
@@ -65,13 +65,6 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
         let _target =
             rhythm_os::controller_helpers::resolve_room_target(&self.hub_data.registry, room_id)?;
 
-        let fade_ms = command.transition_ms.unwrap_or(0) as u16;
-        let transition_ms = if fade_ms > 0 {
-            Some(fade_ms as u32)
-        } else {
-            None
-        };
-
         // Get light device IDs for this room
         let device_ids = {
             let registry = self.hub_data.registry.lock().map_err(|e| {
@@ -93,13 +86,10 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
             };
 
             let caps = device_caps.get(device_id).unwrap_or(&default_caps);
-
-            let adapted = adapt_command(
+            let adapted = rhythm_os::controller_helpers::adapt_lighting_command(
                 caps,
-                command.brightness,
-                command.kelvin,
-                (command.xy.x, command.xy.y),
-                transition_ms,
+                &command,
+                ColorPreference::PreferXy,
             );
 
             let transition_tenths = adapted
@@ -126,12 +116,9 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
                 }
             }
 
-            // Always use XY color for Matter devices — produces better results
-            // than native CT on most bulbs. The engine pre-computes xy from the
-            // target kelvin via blackbody curve, so command.xy matches command.kelvin.
-            if adapted.kelvin.is_some() || adapted.xy.is_some() {
-                let cx = clusters::xy_to_matter(command.xy.x);
-                let cy = clusters::xy_to_matter(command.xy.y);
+            if let Some((x, y)) = adapted.xy {
+                let cx = clusters::xy_to_matter(x);
+                let cy = clusters::xy_to_matter(y);
                 if let Err(e) = clusters::send_color_xy(
                     &*self.transport,
                     node_id,
@@ -142,13 +129,34 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
                 ) {
                     warn!(target: "cmd", "Matter: color xy command failed for node {}: {}", node_id, e);
                 }
+            } else if let Some(kelvin) = adapted.kelvin {
+                let mireds = clusters::kelvin_to_mireds(kelvin);
+                if let Err(e) = clusters::send_color_temperature(
+                    &*self.transport,
+                    node_id,
+                    endpoint,
+                    mireds,
+                    transition_tenths,
+                ) {
+                    warn!(target: "cmd", "Matter: color temperature command failed for node {}: {}", node_id, e);
+                }
             }
         }
 
-        info!(target: "cmd",
-            "Matter turn_on: room={} bri={} kelvin={} devices={}",
-            room_id, command.brightness, command.kelvin, device_ids.len()
-        );
+        if command.is_direct_color || command.kelvin == 0 {
+            info!(target: "cmd",
+                "Matter turn_on: room={} bri={} xy=({:.3},{:.3}) rgb=({},{},{}) devices={}",
+                room_id, command.brightness,
+                command.xy.x, command.xy.y,
+                command.rgb.r, command.rgb.g, command.rgb.b,
+                device_ids.len(),
+            );
+        } else {
+            info!(target: "cmd",
+                "Matter turn_on: room={} bri={} kelvin={} devices={}",
+                room_id, command.brightness, command.kelvin, device_ids.len()
+            );
+        }
 
         Ok(())
     }

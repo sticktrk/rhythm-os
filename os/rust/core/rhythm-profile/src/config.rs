@@ -1,4 +1,4 @@
-//! Common configuration types shared by all curve modules.
+//! Common configuration types shared by light profiles.
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ pub const DEFAULT_MAX_DIM_STEPS: u8 = 6;
 
 /// Common curve configuration shared by all modules.
 ///
-/// This contains the basic min/max ranges that apply to any curve module.
+/// This contains the basic min/max ranges that apply to any light profile.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct CommonCurveConfig {

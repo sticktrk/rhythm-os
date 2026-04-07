@@ -7,7 +7,7 @@
 pub use rhythm_os::hub::*;
 
 // Re-export RuntimeHandle and RoomSnapshot from rhythm-core
-pub use rhythm_core::{RuntimeHandle, RoomSnapshot};
+pub use rhythm_core::{RoomSnapshot, RuntimeHandle};
 
 /// Get the static hub provider for a given hub type.
 ///

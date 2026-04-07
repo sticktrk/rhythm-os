@@ -7,8 +7,8 @@ use std::sync::{Arc, RwLock};
 
 use tracing::{debug, info};
 
-use crate::config::CurveConfig;
 use crate::controller::LightController;
+use crate::light_profile::LightProfileConfig;
 use crate::primitives::RhythmEngine;
 use crate::solar::{SolarTime, SunTimes};
 
@@ -114,13 +114,17 @@ where
         self.config = config;
     }
 
-    /// Set the curve configuration on the engine.
-    pub fn set_curve_config(&self, config: CurveConfig) -> RuntimeResult<()> {
+    /// Set or replace a light profile configuration on the engine.
+    pub fn set_light_profile_config(&self, config: LightProfileConfig) -> RuntimeResult<()> {
         let mut engine = self
             .engine
             .write()
             .map_err(|e| RuntimeError::Internal(format!("Failed to lock engine: {}", e)))?;
-        engine.set_config(config);
+        if !engine.set_light_profile_config(config) {
+            return Err(RuntimeError::ConfigError(
+                "Unknown light profile".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -420,10 +424,11 @@ mod tests {
     }
 
     #[test]
-    fn test_set_curve_config() {
+    fn test_set_light_profile_config() {
         let runtime = test_runtime();
-        let config = CurveConfig::default();
-        let result = runtime.set_curve_config(config);
+        let mut config = crate::default_rhythm_profile();
+        config.max_brightness = 90;
+        let result = runtime.set_light_profile_config(config);
         assert!(result.is_ok());
     }
 

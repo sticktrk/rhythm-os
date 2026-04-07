@@ -199,8 +199,4 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         path: "/api/light-profile",
         methods: &["PUT"],
     },
-    SharedRoute {
-        path: "/api/curve/module",
-        methods: &["PUT"],
-    },
 ];

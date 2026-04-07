@@ -45,6 +45,8 @@ pub enum LightCurveShape {
     ///
     /// Width < 1 = faster ramp, > 1 = slower ramp.
     /// shape_p: 2 = round top, 6 = flat plateau, 10 = very flat.
+    /// When `direct_color` is set, brightness still follows the super-Gaussian
+    /// curve, but emitted color is fixed to the provided RGB/XY value.
     #[cfg_attr(feature = "serde", serde(rename = "super-gaussian"))]
     SuperGaussian {
         /// Morning ramp speed for brightness
@@ -62,6 +64,12 @@ pub enum LightCurveShape {
         /// Shape exponent (2 = round, 6 = flat plateau)
         #[cfg_attr(feature = "serde", serde(default = "default_shape_p"))]
         shape_p: f32,
+        /// Optional fixed color output for the super-Gaussian brightness curve.
+        #[cfg_attr(
+            feature = "serde",
+            serde(default, skip_serializing_if = "Option::is_none")
+        )]
+        direct_color: Option<LightDirectColor>,
     },
 
     /// Color palette that cycles through keyframes over 24 hours.
@@ -73,6 +81,15 @@ pub enum LightCurveShape {
         keyframes: Vec<LightPaletteKeyframe>,
     },
 
+    /// Follow the active profile's current color while using this profile's
+    /// brightness/timer settings.
+    ///
+    /// This is primarily used by the idle profile so soft-off can default to
+    /// "1% of whatever the active profile looks like right now" without
+    /// requiring a separate stored palette.
+    #[cfg_attr(feature = "serde", serde(rename = "inherit-active"))]
+    InheritActive,
+
     /// Constant output (ignores time of day).
     #[cfg_attr(feature = "serde", serde(rename = "constant"))]
     Constant {
@@ -80,6 +97,12 @@ pub enum LightCurveShape {
         brightness: f32,
         /// Fixed color temperature level (0.0–1.0 normalized)
         color_temp: f32,
+        /// Optional fixed direct color output for this constant level.
+        #[cfg_attr(
+            feature = "serde",
+            serde(default, skip_serializing_if = "Option::is_none")
+        )]
+        direct_color: Option<LightDirectColor>,
     },
 }
 
@@ -169,7 +192,33 @@ pub fn clamp_shape_p(shape_p: f32) -> f32 {
 impl LightCurveShape {
     /// Whether this curve produces direct color (RGB/XY) rather than Kelvin.
     pub fn is_direct_color(&self) -> bool {
-        matches!(self, LightCurveShape::Palette { .. })
+        matches!(
+            self,
+            LightCurveShape::Palette { .. }
+                | LightCurveShape::SuperGaussian {
+                    direct_color: Some(_),
+                    ..
+                }
+                | LightCurveShape::Constant {
+                    direct_color: Some(_),
+                    ..
+                }
+        )
+    }
+
+    /// Get the fixed direct color for this curve, if it has one.
+    pub fn direct_color(&self) -> Option<&LightDirectColor> {
+        match self {
+            LightCurveShape::SuperGaussian {
+                direct_color: Some(direct_color),
+                ..
+            }
+            | LightCurveShape::Constant {
+                direct_color: Some(direct_color),
+                ..
+            } => Some(direct_color),
+            _ => None,
+        }
     }
 
     /// Sample the palette color at the given solar hour.
@@ -197,6 +246,7 @@ impl LightCurveShape {
                 width_left_cct,
                 width_right_cct,
                 shape_p,
+                ..
             } => Some((
                 clamp_width(*width_left_bri),
                 clamp_width(*width_right_bri),
@@ -216,6 +266,7 @@ impl LightCurveShape {
             width_left_cct: DEFAULT_WIDTH_LEFT_CCT,
             width_right_cct: DEFAULT_WIDTH_RIGHT_CCT,
             shape_p: DEFAULT_SHAPE_P,
+            direct_color: None,
         }
     }
 
@@ -337,6 +388,19 @@ mod tests {
 
         let sg = LightCurveShape::default_super_gaussian();
         assert!(!sg.is_direct_color());
+
+        let sg_direct = LightCurveShape::SuperGaussian {
+            width_left_bri: DEFAULT_WIDTH_LEFT_BRI,
+            width_right_bri: DEFAULT_WIDTH_RIGHT_BRI,
+            width_left_cct: DEFAULT_WIDTH_LEFT_CCT,
+            width_right_cct: DEFAULT_WIDTH_RIGHT_CCT,
+            shape_p: DEFAULT_SHAPE_P,
+            direct_color: Some(LightDirectColor {
+                xy: XyColor { x: 0.5, y: 0.3 },
+                rgb: Rgb::new(255, 140, 40),
+            }),
+        };
+        assert!(sg_direct.is_direct_color());
     }
 
     #[test]
@@ -370,6 +434,7 @@ mod tests {
             width_left_cct: 0.5,
             width_right_cct: 1.0,
             shape_p: 1.0, // below min
+            direct_color: None,
         };
         let (wlb, wrb, wlc, wrc, sp) = shape.effective_sg_params().unwrap();
         assert_eq!(wlb, 0.2);
@@ -384,9 +449,26 @@ mod tests {
         let c = LightCurveShape::Constant {
             brightness: 0.5,
             color_temp: 0.5,
+            direct_color: None,
         };
         assert!(!c.is_direct_color());
         assert!(c.sample_color(12.0).is_none());
+    }
+
+    #[test]
+    fn test_constant_with_direct_color_is_direct_color() {
+        let direct = LightDirectColor {
+            xy: XyColor { x: 0.45, y: 0.25 },
+            rgb: Rgb::new(255, 40, 150),
+        };
+        let c = LightCurveShape::Constant {
+            brightness: 0.5,
+            color_temp: 0.5,
+            direct_color: Some(direct.clone()),
+        };
+
+        assert!(c.is_direct_color());
+        assert_eq!(c.direct_color(), Some(&direct));
     }
 
     #[cfg(feature = "serde")]
@@ -410,10 +492,44 @@ mod tests {
         }
 
         #[test]
+        fn test_super_gaussian_with_direct_color_roundtrip() {
+            let shape = LightCurveShape::SuperGaussian {
+                width_left_bri: DEFAULT_WIDTH_LEFT_BRI,
+                width_right_bri: DEFAULT_WIDTH_RIGHT_BRI,
+                width_left_cct: DEFAULT_WIDTH_LEFT_CCT,
+                width_right_cct: DEFAULT_WIDTH_RIGHT_CCT,
+                shape_p: DEFAULT_SHAPE_P,
+                direct_color: Some(LightDirectColor {
+                    xy: XyColor { x: 0.45, y: 0.25 },
+                    rgb: Rgb::new(255, 40, 150),
+                }),
+            };
+            let json = serde_json::to_string(&shape).unwrap();
+            let back: LightCurveShape = serde_json::from_str(&json).unwrap();
+            assert_eq!(shape, back);
+        }
+
+        #[test]
         fn test_constant_roundtrip() {
             let shape = LightCurveShape::Constant {
                 brightness: 0.8,
                 color_temp: 0.5,
+                direct_color: None,
+            };
+            let json = serde_json::to_string(&shape).unwrap();
+            let back: LightCurveShape = serde_json::from_str(&json).unwrap();
+            assert_eq!(shape, back);
+        }
+
+        #[test]
+        fn test_constant_with_direct_color_roundtrip() {
+            let shape = LightCurveShape::Constant {
+                brightness: 0.8,
+                color_temp: 0.5,
+                direct_color: Some(LightDirectColor {
+                    xy: XyColor { x: 0.45, y: 0.25 },
+                    rgb: Rgb::new(255, 40, 150),
+                }),
             };
             let json = serde_json::to_string(&shape).unwrap();
             let back: LightCurveShape = serde_json::from_str(&json).unwrap();

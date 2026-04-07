@@ -18,15 +18,19 @@ use esp_idf_svc::sys;
 use esp_idf_svc::tls::{self, EspTls};
 use log::{info, warn};
 
+use rhythm_hue::sse::{drain_sse_lines, SseParseState};
 pub use rhythm_hue::sse::{ChunkedDecoder, HueSseConfig, HueSseEvent};
-use rhythm_hue::sse::{SseParseState, drain_sse_lines};
 
 /// Run the SSE event stream in a blocking loop with reconnection.
 ///
 /// This function returns when the shutdown flag is set, or runs indefinitely
 /// otherwise. It connects to the Hue bridge's SSE endpoint and reads events
 /// in a loop. On disconnection, it reconnects with exponential backoff.
-pub fn run_hue_sse(config: HueSseConfig, event_tx: SyncSender<HueSseEvent>, shutdown: &Arc<AtomicBool>) {
+pub fn run_hue_sse(
+    config: HueSseConfig,
+    event_tx: SyncSender<HueSseEvent>,
+    shutdown: &Arc<AtomicBool>,
+) {
     let mut backoff_ms: u64 = 1000;
     let mut is_reconnect = false;
     const MAX_BACKOFF_MS: u64 = 60_000;
@@ -38,7 +42,10 @@ pub fn run_hue_sse(config: HueSseConfig, event_tx: SyncSender<HueSseEvent>, shut
         }
 
         info!(target: "conn", "SSE: Connecting to bridge {}...", config.bridge_ip);
-        crate::diag::vitals_hub_conn_state(crate::hub::HubType::new(crate::hub::HubType::HUE), crate::diag::CONN_CONNECTING);
+        crate::diag::vitals_hub_conn_state(
+            crate::hub::HubType::new(crate::hub::HubType::HUE),
+            crate::diag::CONN_CONNECTING,
+        );
 
         match connect_and_stream(&config, &event_tx, &mut backoff_ms) {
             Ok(()) => {
@@ -110,7 +117,10 @@ fn connect_and_stream(
     let (chunked, leftover) = read_response_headers(&mut tls)?;
 
     info!(target: "conn", "SSE: Connected to event stream (chunked={})", chunked);
-    crate::diag::vitals_hub_conn_state(crate::hub::HubType::new(crate::hub::HubType::HUE), crate::diag::CONN_CONNECTED);
+    crate::diag::vitals_hub_conn_state(
+        crate::hub::HubType::new(crate::hub::HubType::HUE),
+        crate::diag::CONN_CONNECTED,
+    );
     *backoff_ms = 1000;
 
     let mut decoder = ChunkedDecoder::new(chunked);
@@ -151,8 +161,7 @@ fn connect_and_stream(
             }
             Err(e) => {
                 let code = e.code();
-                if code == sys::ESP_TLS_ERR_SSL_WANT_READ
-                    || code == sys::ESP_TLS_ERR_SSL_WANT_WRITE
+                if code == sys::ESP_TLS_ERR_SSL_WANT_READ || code == sys::ESP_TLS_ERR_SSL_WANT_WRITE
                 {
                     // Socket timeout (5s SO_RCVTIMEO) — normal idle, not an error
                     consecutive_timeouts += 1;
@@ -169,12 +178,16 @@ fn connect_and_stream(
 ///
 /// Returns `(is_chunked, leftover_body_bytes)`. The leftover contains any
 /// body bytes that were read past the `\r\n\r\n` header terminator.
-fn read_response_headers(tls: &mut EspTls<esp_idf_svc::tls::InternalSocket>) -> Result<(bool, Vec<u8>), anyhow::Error> {
+fn read_response_headers(
+    tls: &mut EspTls<esp_idf_svc::tls::InternalSocket>,
+) -> Result<(bool, Vec<u8>), anyhow::Error> {
     let mut header_buf = Vec::with_capacity(1024);
     let mut tmp = [0u8; 256];
 
     loop {
-        let n = tls.read(&mut tmp).map_err(|e| anyhow::anyhow!("Header read error: {}", e))?;
+        let n = tls
+            .read(&mut tmp)
+            .map_err(|e| anyhow::anyhow!("Header read error: {}", e))?;
         if n == 0 {
             return Err(anyhow::anyhow!("Connection closed during header read"));
         }

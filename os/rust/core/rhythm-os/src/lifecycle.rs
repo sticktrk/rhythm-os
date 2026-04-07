@@ -33,7 +33,7 @@ use crate::state::SharedState;
 /// is `None` — call `ensure_hub_runtime` when the first room arrives.
 #[allow(clippy::too_many_arguments)]
 pub fn connect_hub<D, F>(
-    state: &SharedState,
+    _state: &SharedState,
     hub_type: HubType,
     hub_key: HubKey,
     default_grouped_light_to_room_id: bool,
@@ -50,33 +50,6 @@ where
     if let Some(snapshot) = load_registry_snapshot {
         info!(target: "sys", "Restoring registry from snapshot...");
         registry.restore_from_snapshot(snapshot);
-    }
-
-    // Populate AppState.motion_timeouts from restored registry.
-    // Registry stores hub-native room IDs, but AppState.motion_timeouts
-    // must use topology room IDs. Translate via the topology store
-    // (loaded during load_persisted_state before connect_hub).
-    {
-        let timeouts = registry.get_all_motion_timeouts();
-        if !timeouts.is_empty() {
-            let mut s = state
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
-            let translated: std::collections::HashMap<String, u64> = timeouts
-                .into_iter()
-                .map(|(hub_room_id, timeout)| {
-                    let topo_id = s
-                        .topology
-                        .translate_room_id_any_hub(&hub_room_id)
-                        .map(|s| s.to_string())
-                        .unwrap_or(hub_room_id);
-                    (topo_id, timeout)
-                })
-                .collect();
-            let count = translated.len();
-            s.motion_timeouts = translated;
-            info!(target: "sys", "Loaded {} motion timeouts from registry", count);
-        }
     }
 
     let registry = Arc::new(Mutex::new(registry));
@@ -132,7 +105,8 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
     };
 
     let (
-        config,
+        light_profiles,
+        active_light_profile_id,
         runtime_config,
         utc_offset,
         latitude,
@@ -152,7 +126,11 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
         }
 
         (
-            s.config.clone(),
+            s.light_profile_configs
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
+            s.active_light_profile_id.clone(),
             s.runtime_config.clone(),
             s.utc_offset_hours,
             s.latitude,
@@ -242,9 +220,17 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
     runtime
         .set_solar(solar_time)
         .map_err(|e| anyhow::anyhow!("Failed to set solar: {}", e))?;
-    runtime
-        .set_curve_config(config)
-        .map_err(|e| anyhow::anyhow!("Failed to set config: {}", e))?;
+    for profile in light_profiles {
+        runtime
+            .set_light_profile_config(profile)
+            .map_err(|e| anyhow::anyhow!("Failed to set profile config: {}", e))?;
+    }
+    if !runtime.set_light_profile(&active_light_profile_id) {
+        return Err(anyhow::anyhow!(
+            "Failed to activate light profile '{}'",
+            active_light_profile_id
+        ));
+    }
 
     // Add rooms from registry to the engine
     {
@@ -282,7 +268,15 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
                             persisted.len()
                         );
                         for snap in runtime.engine_all_room_snapshots() {
-                            runtime.restore_room_state(&snap.id, true, false, 0.0, 0.0, false);
+                            runtime.restore_room_state(
+                                &snap.id,
+                                true,
+                                false,
+                                0.0,
+                                0.0,
+                                false,
+                                rhythm_core::RoomProfileSettings::default(),
+                            );
                         }
                     } else {
                         for room in persisted.iter() {
@@ -293,6 +287,7 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
                                 room.time_offset_minutes,
                                 room.brightness_offset,
                                 room.soft_off,
+                                room.profile_settings.clone(),
                             );
                             info!(target: "sys",
                                 "Restored room '{}': rhythm={}, disabled={}, time_offset={}, bri_offset={}, soft_off={}",
@@ -305,7 +300,15 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
                 Err(e) => {
                     warn!(target: "sys", "No persisted rooms (first boot?): {}", e);
                     for snap in runtime.engine_all_room_snapshots() {
-                        runtime.restore_room_state(&snap.id, true, false, 0.0, 0.0, false);
+                        runtime.restore_room_state(
+                            &snap.id,
+                            true,
+                            false,
+                            0.0,
+                            0.0,
+                            false,
+                            rhythm_core::RoomProfileSettings::default(),
+                        );
                     }
                 }
             }
@@ -314,16 +317,13 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
 
     let runtime = Arc::new(runtime);
 
-    // Push power_save and sleep mode settings to engine
+    // Push runtime settings to engine
     {
         let s = state
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
         runtime.set_power_save(s.power_save);
-        if s.sleep_mode {
-            runtime.set_light_profile(rhythm_core::SLEEP_PROFILE_ID);
-            info!(target: "sys", "Restored sleep mode");
-        }
+        info!(target: "sys", "Active light profile: {}", s.active_light_profile_id);
         info!(target: "sys", "Power save: {}", s.power_save);
     }
 
@@ -422,7 +422,16 @@ pub fn ensure_composite_runtime(
         RhythmRuntime, RuntimeConfig, RuntimeHandle, TimeProvider,
     };
 
-    let (config, runtime_config, utc_offset, latitude, longitude, scheduler_stack, timezone_name) = {
+    let (
+        light_profiles,
+        active_light_profile_id,
+        runtime_config,
+        utc_offset,
+        latitude,
+        longitude,
+        scheduler_stack,
+        timezone_name,
+    ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
         // Check if runtime already exists
@@ -432,7 +441,11 @@ pub fn ensure_composite_runtime(
         }
 
         (
-            s.config.clone(),
+            s.light_profile_configs
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
+            s.active_light_profile_id.clone(),
             s.runtime_config.clone(),
             s.utc_offset_hours,
             s.latitude,
@@ -551,9 +564,17 @@ pub fn ensure_composite_runtime(
     runtime
         .set_solar(solar_time)
         .map_err(|e| anyhow::anyhow!("set solar: {}", e))?;
-    runtime
-        .set_curve_config(config)
-        .map_err(|e| anyhow::anyhow!("set config: {}", e))?;
+    for profile in light_profiles {
+        runtime
+            .set_light_profile_config(profile)
+            .map_err(|e| anyhow::anyhow!("set profile config: {}", e))?;
+    }
+    if !runtime.set_light_profile(&active_light_profile_id) {
+        return Err(anyhow::anyhow!(
+            "Failed to activate light profile '{}'",
+            active_light_profile_id
+        ));
+    }
 
     // Add rooms from all hubs' registries (using topology IDs to avoid
     // duplicates when do_room_set later adds the same room under its
@@ -593,7 +614,15 @@ pub fn ensure_composite_runtime(
                     if all_defaults {
                         warn!(target: "sys", "All {} rooms at default state — defaulting to rhythm_enabled=true", persisted.len());
                         for snap in runtime.engine_all_room_snapshots() {
-                            runtime.restore_room_state(&snap.id, true, false, 0.0, 0.0, false);
+                            runtime.restore_room_state(
+                                &snap.id,
+                                true,
+                                false,
+                                0.0,
+                                0.0,
+                                false,
+                                rhythm_core::RoomProfileSettings::default(),
+                            );
                         }
                     } else {
                         for room in persisted.iter() {
@@ -604,13 +633,22 @@ pub fn ensure_composite_runtime(
                                 room.time_offset_minutes,
                                 room.brightness_offset,
                                 room.soft_off,
+                                room.profile_settings.clone(),
                             );
                         }
                     }
                 }
                 Err(_) => {
                     for snap in runtime.engine_all_room_snapshots() {
-                        runtime.restore_room_state(&snap.id, true, false, 0.0, 0.0, false);
+                        runtime.restore_room_state(
+                            &snap.id,
+                            true,
+                            false,
+                            0.0,
+                            0.0,
+                            false,
+                            rhythm_core::RoomProfileSettings::default(),
+                        );
                     }
                 }
             }
@@ -623,9 +661,6 @@ pub fn ensure_composite_runtime(
     {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         runtime.set_power_save(s.power_save);
-        if s.sleep_mode {
-            runtime.set_light_profile(rhythm_core::SLEEP_PROFILE_ID);
-        }
     }
 
     // Store runtime and composite controller

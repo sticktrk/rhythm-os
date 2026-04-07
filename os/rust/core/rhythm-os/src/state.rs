@@ -2,11 +2,14 @@
 //!
 //! Platform-agnostic `AppState` with `dyn Storage` instead of NVS.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use rhythm_core::CurveConfig;
-use rhythm_core::{ButtonAction, RuntimeConfig, RuntimeHandle};
+use rhythm_core::{
+    default_idle_profile, default_rhythm_profile, default_sleep_profile, ButtonAction,
+    LightProfileConfig, RuntimeConfig, RuntimeHandle, RHYTHM_PROFILE_ID,
+};
+use rhythm_profile::profile_config::DEFAULT_FADE_MS;
 
 use crate::canonical::identity::HubKey;
 use crate::canonical::registry::CanonicalRegistry;
@@ -116,8 +119,10 @@ impl Default for PlatformConfig {
 
 /// Application state shared across threads.
 pub struct AppState {
-    /// Adaptive lighting configuration.
-    pub config: CurveConfig,
+    /// Stored light profile configs keyed by profile ID.
+    pub light_profile_configs: BTreeMap<String, LightProfileConfig>,
+    /// The currently active selectable light profile.
+    pub active_light_profile_id: String,
     /// Runtime configuration.
     pub runtime_config: RuntimeConfig,
     /// UTC offset in hours (e.g., -5.0 for EST, -8.0 for PST).
@@ -150,9 +155,6 @@ pub struct AppState {
     /// to poll the hub directly.
     pub room_lights_on: HashMap<String, bool>,
 
-    /// Per-room motion timeout in seconds.
-    /// Keyed by **topology room IDs** (not hub-native IDs).
-    pub motion_timeouts: HashMap<String, u64>,
     /// Per-room motion timer snapshots, updated by the main loop.
     /// Keyed by **topology room IDs** (not hub-native IDs).
     pub motion_snapshots: HashMap<String, MotionSnapshot>,
@@ -162,16 +164,13 @@ pub struct AppState {
     pub last_tick_epoch_ms: u64,
 
     // ---- Global settings ----
-    /// Default motion timeout in seconds when no per-room value is configured.
+    /// Current globally resolved motion timeout in seconds for the active profile.
     pub default_motion_timeout_secs: u64,
     /// Current curve-computed fade/transition time in milliseconds.
     pub default_fade_ms: u32,
     /// Power save mode. When false, lights dim to soft-off brightness
     /// instead of turning fully off.
     pub power_save: bool,
-    /// Whether sleep mode is active (sleep curve is the active module).
-    pub sleep_mode: bool,
-
     // ---- Storage ----
     /// Platform-specific storage backend.
     pub storage: Option<Box<dyn Storage>>,
@@ -299,11 +298,11 @@ pub struct AppState {
 
 impl Default for AppState {
     fn default() -> Self {
-        let config = CurveConfig::default();
         let default_motion_timeout = rhythm_core::config::DEFAULT_MOTION_TIMEOUT_SECS as u64;
-        let default_fade = rhythm_core::config::DEFAULT_FADE_MS as u32;
-        Self {
-            config,
+        let default_fade = DEFAULT_FADE_MS as u32;
+        let mut state = Self {
+            light_profile_configs: default_light_profile_configs(),
+            active_light_profile_id: RHYTHM_PROFILE_ID.to_string(),
             runtime_config: RuntimeConfig::default().with_solar_noon(12.5),
             utc_offset_hours: 0.0,
             latitude: None,
@@ -314,7 +313,6 @@ impl Default for AppState {
             canonical_registry: CanonicalRegistry::new(),
             topology: RoomTopologyStore::new(),
             room_lights_on: HashMap::new(),
-            motion_timeouts: HashMap::new(),
             motion_snapshots: HashMap::new(),
             last_check_hour: None,
             last_tick_epoch_ms: std::time::SystemTime::now()
@@ -324,7 +322,6 @@ impl Default for AppState {
             default_motion_timeout_secs: default_motion_timeout,
             default_fade_ms: default_fade,
             power_save: false,
-            sleep_mode: false,
             storage: None,
             work_tx: None,
             pending_hub_event_rxs: Vec::new(),
@@ -349,11 +346,91 @@ impl Default for AppState {
             platform: PlatformConfig::default(),
             #[cfg(feature = "desktop")]
             event_tx: None,
-        }
+        };
+        state.sync_active_light_profile_runtime_overrides();
+        state
     }
 }
 
+fn default_light_profile_configs() -> BTreeMap<String, LightProfileConfig> {
+    let mut configs = BTreeMap::new();
+    for profile in [
+        default_rhythm_profile(),
+        default_sleep_profile(),
+        default_idle_profile(),
+    ] {
+        configs.insert(profile.id.clone(), profile);
+    }
+    configs
+}
+
 impl AppState {
+    /// Get a stored profile config by ID.
+    pub fn light_profile_config(&self, id: &str) -> Option<&LightProfileConfig> {
+        self.light_profile_configs.get(id)
+    }
+
+    /// Get the currently active profile config.
+    pub fn active_light_profile_config(&self) -> Option<&LightProfileConfig> {
+        self.light_profile_config(&self.active_light_profile_id)
+    }
+
+    /// Insert or replace a stored profile config.
+    pub fn set_light_profile_config(&mut self, config: LightProfileConfig) {
+        let is_active = config.id == self.active_light_profile_id;
+        self.light_profile_configs.insert(config.id.clone(), config);
+        if is_active {
+            self.sync_active_light_profile_runtime_overrides();
+        }
+    }
+
+    /// Restore the built-in profile set.
+    pub fn reset_light_profile_configs(&mut self) {
+        self.light_profile_configs = default_light_profile_configs();
+        self.ensure_active_light_profile();
+        self.sync_active_light_profile_runtime_overrides();
+    }
+
+    /// Ensure the active profile points at a selectable stored profile.
+    pub fn ensure_active_light_profile(&mut self) {
+        let valid = self
+            .light_profile_configs
+            .contains_key(&self.active_light_profile_id)
+            && self.active_light_profile_id != rhythm_core::IDLE_PROFILE_ID;
+        if !valid {
+            self.active_light_profile_id = RHYTHM_PROFILE_ID.to_string();
+        }
+    }
+
+    /// Sync runtime-level defaults from the active light profile config.
+    ///
+    /// Resolves `TimerSetting` values at a reference hour (12.0) for initial
+    /// state. The periodic tick updates these live via `LightingValues`.
+    pub fn sync_active_light_profile_runtime_overrides(&mut self) {
+        use rhythm_core::config::DEFAULT_MOTION_TIMEOUT_SECS;
+        use rhythm_core::runtime::config::DEFAULT_UPDATE_INTERVAL_SECS;
+        use rhythm_profile::profile_config::DEFAULT_FADE_MS;
+
+        const REF_HOUR: f32 = 12.0;
+
+        if let Some(active) = self.active_light_profile_config().cloned() {
+            self.runtime_config.update_interval_secs = active
+                .rhythm_interval_secs
+                .resolve(REF_HOUR)
+                .map(|v| v as u64)
+                .unwrap_or(DEFAULT_UPDATE_INTERVAL_SECS);
+            self.default_motion_timeout_secs = active
+                .motion_timeout_secs
+                .resolve(REF_HOUR)
+                .map(|v| v as u64)
+                .unwrap_or(DEFAULT_MOTION_TIMEOUT_SECS as u64);
+            self.default_fade_ms = active
+                .fade_ms
+                .resolve(REF_HOUR)
+                .unwrap_or(DEFAULT_FADE_MS as u32);
+        }
+    }
+
     /// Get the type-erased runtime handle for the first available hub.
     pub fn hub_runtime(&self) -> Option<Arc<dyn RuntimeHandle>> {
         self.hubs.values().find_map(|hub| hub.runtime.clone())
@@ -464,6 +541,7 @@ pub fn rooms_from_engine(runtime: &dyn RuntimeHandle) -> rhythm_core::room::Room
         room.time_offset_minutes = snap.time_offset_minutes;
         room.brightness_offset = snap.brightness_offset;
         room.soft_off = snap.soft_off;
+        room.profile_settings = snap.profile_settings;
     }
     rooms
 }
@@ -487,7 +565,6 @@ mod tests {
         assert!(state.longitude.is_none());
         assert_eq!(state.utc_offset_hours, 0.0);
         assert!(state.room_lights_on.is_empty());
-        assert!(state.motion_timeouts.is_empty());
         assert_eq!(state.firmware_version, "0.0.0");
         assert_eq!(state.platform_type, "desktop");
         assert_eq!(state.platform_context, "server");
@@ -557,7 +634,10 @@ mod tests {
             fn set_solar(&self, _: rhythm_core::SolarTime) -> anyhow::Result<()> {
                 Ok(())
             }
-            fn set_curve_config(&self, _: CurveConfig) -> anyhow::Result<()> {
+            fn set_light_profile_config(
+                &self,
+                _: rhythm_core::LightProfileConfig,
+            ) -> anyhow::Result<()> {
                 Ok(())
             }
             fn periodic_tick_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
@@ -569,7 +649,17 @@ mod tests {
             fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot> {
                 self.snapshots.clone()
             }
-            fn restore_room_state(&self, _: &str, _: bool, _: bool, _: f32, _: f32, _: bool) {}
+            fn restore_room_state(
+                &self,
+                _: &str,
+                _: bool,
+                _: bool,
+                _: f32,
+                _: f32,
+                _: bool,
+                _: rhythm_core::RoomProfileSettings,
+            ) {
+            }
             fn add_room(&self, _: &str, _: &str) {}
             fn remove_room(&self, _: &str) {}
             fn dim_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
@@ -626,6 +716,7 @@ mod tests {
                     time_offset_minutes: 15.0,
                     brightness_offset: -5.0,
                     soft_off: true,
+                    profile_settings: rhythm_core::RoomProfileSettings::default(),
                 },
                 RoomSnapshot {
                     id: "bedroom".into(),
@@ -635,6 +726,7 @@ mod tests {
                     time_offset_minutes: 0.0,
                     brightness_offset: 0.0,
                     soft_off: false,
+                    profile_settings: rhythm_core::RoomProfileSettings::default(),
                 },
             ],
         };

@@ -5,24 +5,26 @@
 //! operation (registry update, engine update, persistence), and returns
 //! a result that the transport layer can format into a response.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use chrono::{Datelike, Timelike};
 use log::{info, warn};
 use rhythm_core::runtime::hub_registry::DeviceType;
-use rhythm_core::CurveConfig;
-use rhythm_core::{ButtonAction, HubRegistry, InputEvent};
+use rhythm_core::{
+    ButtonAction, HubRegistry, InputEvent, LightProfile, LightProfileConfig,
+    LightProfileRegistry, RoomProfileSettings, TimerSetting, IDLE_PROFILE_ID,
+};
 use serde_json::Value;
 
 use crate::api_types::{
-    FixResponse, HubDto, LightProfileDto, LocationDto, RoomFullState, RoomPollState,
-    RoomRhythmState, RoomsPollResponse, SettingsDto, StateSnapshot, TypedDeviceDto,
+    ActiveProfileDto, ActiveProfileEffectiveDto, FixResponse, HubDto, LocationDto, RoomFullState,
+    RoomPollState, RoomRhythmState, RoomsPollResponse, SettingsDto, StateSnapshot, TypedDeviceDto,
 };
 use crate::canonical::identity::HubKey;
 use crate::state::{rooms_from_engine, AppState, SharedState};
-use crate::storage::{StoredLocation, StoredSettings};
+use crate::storage::StoredLocation;
 
 // ============================================================================
 // Display value computation
@@ -30,10 +32,10 @@ use crate::storage::{StoredLocation, StoredSettings};
 
 /// Compute effective brightness and kelvin for a room given its offsets.
 ///
-/// Uses the global CurveConfig, current solar context, and room offsets
+/// Uses the provided light profile config, current solar context, and room offsets
 /// to produce the values a client should display.
 pub fn compute_room_display_values(
-    config: &CurveConfig,
+    config: &LightProfileConfig,
     solar_noon: f32,
     latitude: f32,
     utc_offset: f32,
@@ -53,10 +55,125 @@ pub fn compute_room_display_values(
 
     let solar = SolarTime::new(solar_noon, latitude, day_of_year);
     let ctx = rhythm_core::light_profile::CurveContext::new(current_hour, solar, None);
-    let module = LightProfile::new(config.clone().into());
+    let module = LightProfile::new(config.clone());
     let values = module.calculate_with_offset(&ctx, time_offset_minutes);
     let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
     (brightness, values.kelvin)
+}
+
+fn resolved_room_profile_config_from_parts(
+    light_profile_configs: &BTreeMap<String, LightProfileConfig>,
+    active_light_profile_id: &str,
+    settings: &RoomProfileSettings,
+) -> LightProfileConfig {
+    let requested_id = settings.resolved_profile_id(active_light_profile_id);
+    let base_id = if light_profile_configs.contains_key(requested_id) && requested_id != IDLE_PROFILE_ID {
+        requested_id
+    } else {
+        active_light_profile_id
+    };
+
+    let mut config = light_profile_configs
+        .get(base_id)
+        .cloned()
+        .or_else(|| light_profile_configs.get(active_light_profile_id).cloned())
+        .unwrap_or_else(rhythm_core::default_rhythm_profile);
+    settings.apply_to_config(&mut config);
+    config
+}
+
+fn compute_room_display_values_for_settings_from_parts(
+    light_profile_configs: &BTreeMap<String, LightProfileConfig>,
+    active_light_profile_id: &str,
+    solar_noon: f32,
+    latitude: f32,
+    utc_offset: f32,
+    settings: &RoomProfileSettings,
+    time_offset_minutes: f32,
+    brightness_offset: f32,
+) -> (u8, u16) {
+    let config =
+        resolved_room_profile_config_from_parts(light_profile_configs, active_light_profile_id, settings);
+    compute_room_display_values(
+        &config,
+        solar_noon,
+        latitude,
+        utc_offset,
+        time_offset_minutes,
+        brightness_offset,
+    )
+}
+
+fn compute_room_display_values_for_settings(
+    s: &AppState,
+    settings: &RoomProfileSettings,
+    time_offset_minutes: f32,
+    brightness_offset: f32,
+) -> (u8, u16) {
+    compute_room_display_values_for_settings_from_parts(
+        &s.light_profile_configs,
+        &s.active_light_profile_id,
+        s.solar_noon_hour(),
+        s.latitude.unwrap_or(35.0),
+        s.utc_offset_hours,
+        settings,
+        time_offset_minutes,
+        brightness_offset,
+    )
+}
+
+fn resolved_room_motion_timeout_secs_from_parts(
+    light_profile_configs: &BTreeMap<String, LightProfileConfig>,
+    active_light_profile_id: &str,
+    solar_noon: f32,
+    latitude: f32,
+    settings: &RoomProfileSettings,
+    current_hour: f32,
+) -> u64 {
+    use rhythm_core::LightProfileModule;
+
+    let now = chrono::Utc::now().naive_utc();
+    let (year, month, day) = (now.date().year(), now.date().month(), now.date().day());
+    let day_of_year = rhythm_core::timezone::day_of_year(year, month, day);
+    let solar = rhythm_core::SolarTime::new(solar_noon, latitude, day_of_year);
+    let config =
+        resolved_room_profile_config_from_parts(light_profile_configs, active_light_profile_id, settings);
+    let ctx = rhythm_core::light_profile::CurveContext::new(current_hour, solar, None);
+    LightProfile::new(config).calculate(&ctx).motion_timeout_secs as u64
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RoomProfileSettingsPatch {
+    pub clear_all: bool,
+    pub profile_id: Option<Option<String>>,
+    pub fade_ms: Option<Option<TimerSetting>>,
+    pub motion_timeout_secs: Option<Option<TimerSetting>>,
+}
+
+impl RoomProfileSettingsPatch {
+    fn apply_to(&self, settings: &mut RoomProfileSettings) {
+        if self.clear_all {
+            *settings = RoomProfileSettings::default();
+            return;
+        }
+
+        if let Some(profile_id) = &self.profile_id {
+            settings.profile_id = profile_id.clone();
+        }
+        if let Some(fade_ms) = &self.fade_ms {
+            settings.fade_ms = fade_ms.clone();
+        }
+        if let Some(motion_timeout_secs) = &self.motion_timeout_secs {
+            settings.motion_timeout_secs = motion_timeout_secs.clone();
+        }
+    }
+
+    fn touches_profile_settings(&self) -> bool {
+        self.clear_all
+            || self.profile_id.is_some()
+            || self.fade_ms.is_some()
+            || self.motion_timeout_secs.is_some()
+    }
 }
 
 /// Build a RoomStateEvent for a room, computing display values from AppState.
@@ -71,11 +188,9 @@ pub fn build_room_state_event(
     let (lights_on, brightness, kelvin) = {
         let s = state.lock().unwrap_or_else(|e| e.into_inner());
         let lights_on = s.room_lights_on.get(&snap.id).copied().unwrap_or(false);
-        let (curve_brightness, kelvin) = compute_room_display_values(
-            &s.config,
-            s.solar_noon_hour(),
-            s.latitude.unwrap_or(35.0),
-            s.utc_offset_hours,
+        let (curve_brightness, kelvin) = compute_room_display_values_for_settings(
+            &s,
+            &snap.profile_settings,
             snap.time_offset_minutes,
             snap.brightness_offset,
         );
@@ -86,7 +201,13 @@ pub fn build_room_state_event(
         };
         (lights_on, brightness, kelvin)
     };
-    crate::server_event::RoomStateEvent::from_snapshot(snap, lights_on, brightness, kelvin)
+    crate::server_event::RoomStateEvent::from_snapshot(
+        snap,
+        lights_on,
+        brightness,
+        kelvin,
+        snap.profile_settings.clone(),
+    )
 }
 
 /// Extract a single registry Arc from any active hub (brief AppState lock).
@@ -96,6 +217,143 @@ fn extract_registry(state: &SharedState) -> Option<Arc<Mutex<dyn HubRegistry>>> 
         .lock()
         .ok()
         .and_then(|s| s.all_hub_registries().into_iter().next())
+}
+
+fn light_profile_registry_from_state(s: &AppState) -> LightProfileRegistry {
+    LightProfileRegistry::with_profiles(
+        s.light_profile_configs
+            .values()
+            .cloned()
+            .collect::<Vec<_>>(),
+        &s.active_light_profile_id,
+    )
+}
+
+fn resolve_profile_id(s: &AppState, requested_id: Option<&str>) -> Result<String> {
+    let id = requested_id.unwrap_or(&s.active_light_profile_id);
+    if s.light_profile_configs.contains_key(id) {
+        Ok(id.to_string())
+    } else {
+        Err(anyhow::anyhow!("Unknown light profile: {}", id))
+    }
+}
+
+fn active_profile_config(s: &AppState) -> LightProfileConfig {
+    s.active_light_profile_config()
+        .cloned()
+        .unwrap_or_else(rhythm_core::default_rhythm_profile)
+}
+
+fn absorb_light_profile_time_offset(
+    config: &LightProfileConfig,
+    current_hour: f32,
+    offset_minutes: f32,
+    sunrise: f32,
+    sunset: f32,
+) -> Option<LightProfileConfig> {
+    let rhythm_core::LightCurveShape::SuperGaussian {
+        width_left_bri,
+        width_right_bri,
+        width_left_cct,
+        width_right_cct,
+        ..
+    } = &config.curve
+    else {
+        return None;
+    };
+
+    let mu = (sunrise + sunset) / 2.0;
+    let offset_hours = offset_minutes / 60.0;
+    let target_hour = (current_hour + offset_hours).rem_euclid(24.0);
+
+    let wrapped_dist = |hour: f32| {
+        let mut d = hour - mu;
+        if d > 12.0 {
+            d -= 24.0;
+        }
+        if d < -12.0 {
+            d += 24.0;
+        }
+        d
+    };
+
+    let dist_current = wrapped_dist(current_hour);
+    let dist_target = wrapped_dist(target_hour);
+
+    if dist_current.abs() < 0.25 || dist_target.abs() < 0.25 {
+        return None;
+    }
+    if dist_current.signum() != dist_target.signum() {
+        return None;
+    }
+
+    let factor = dist_target.abs() / dist_current.abs();
+    if !(0.1..=5.0).contains(&factor) {
+        return None;
+    }
+
+    let mut new = config.clone();
+    if let rhythm_core::LightCurveShape::SuperGaussian {
+        width_left_bri: new_width_left_bri,
+        width_right_bri: new_width_right_bri,
+        width_left_cct: new_width_left_cct,
+        width_right_cct: new_width_right_cct,
+        ..
+    } = &mut new.curve
+    {
+        if dist_current < 0.0 {
+            *new_width_left_bri = width_left_bri.clamp(0.2, 2.0) * factor;
+            *new_width_left_cct = width_left_cct.clamp(0.2, 2.0) * factor;
+            *new_width_left_bri = new_width_left_bri.clamp(0.2, 2.0);
+            *new_width_left_cct = new_width_left_cct.clamp(0.2, 2.0);
+        } else {
+            *new_width_right_bri = width_right_bri.clamp(0.2, 2.0) * factor;
+            *new_width_right_cct = width_right_cct.clamp(0.2, 2.0) * factor;
+            *new_width_right_bri = new_width_right_bri.clamp(0.2, 2.0);
+            *new_width_right_cct = new_width_right_cct.clamp(0.2, 2.0);
+        }
+        Some(new)
+    } else {
+        None
+    }
+}
+
+fn persist_light_profiles_locked(s: &AppState) {
+    if let Some(ref storage) = s.storage {
+        let stored = crate::storage::StoredLightProfiles::from_state(
+            &s.light_profile_configs,
+            &s.runtime_config,
+        );
+        if let Err(e) = storage.save_light_profiles(&stored) {
+            warn!(target: "cmd", "Failed to save light profiles: {}", e);
+        }
+    }
+}
+
+fn persist_settings_locked(s: &AppState) {
+    if let Some(ref storage) = s.storage {
+        if let Err(e) = storage.save_settings(&crate::storage::StoredSettings {
+            power_save: s.power_save,
+            active_light_profile: s.active_light_profile_id.clone(),
+        }) {
+            warn!(target: "cmd", "Failed to save settings: {}", e);
+        }
+    }
+}
+
+pub(crate) fn sync_active_profile_from_runtime(
+    state: &SharedState,
+    runtime: &Arc<dyn rhythm_core::RuntimeHandle>,
+) {
+    let active = runtime.active_light_profile_id();
+    if let Ok(mut s) = state.lock() {
+        if s.active_light_profile_id != active {
+            s.active_light_profile_id = active;
+            s.ensure_active_light_profile();
+            s.sync_active_light_profile_runtime_overrides();
+            persist_settings_locked(&s);
+        }
+    }
 }
 
 // ============================================================================
@@ -166,11 +424,11 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         all_registries,
         runtime,
         storage_rooms,
-        hub_dto,
         hubs_dto,
-        config_value,
+        active_profile_cfg,
         effective_fade_ms,
         effective_motion_timeout_secs,
+        effective_rhythm_interval_secs,
         location_dto,
         settings_dto,
         firmware_version,
@@ -194,8 +452,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
 
         let all_registries = s.all_hub_registries();
 
-        // Build multi-hub DTOs (sorted: connected hubs first for deterministic primary selection)
-        let mut hubs_dto: Vec<HubDto> = s
+        let hubs_dto: Vec<HubDto> = s
             .hub_credentials
             .iter()
             .map(|(key, creds)| HubDto {
@@ -208,27 +465,23 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
                 connected: s.hubs.contains_key(key),
             })
             .collect();
-        // Sort connected hubs first so primary hub is deterministic
-        hubs_dto.sort_by(|a, b| b.connected.cmp(&a.connected));
 
-        // Primary hub (backward compat): first connected, or first configured
-        let hub_dto = hubs_dto
-            .iter()
-            .find(|h| h.connected)
-            .or(hubs_dto.first())
-            .cloned()
-            .unwrap_or(HubDto {
-                hub_type: "none".to_string(),
-                address: None,
-                connected: false,
-            });
-
-        let config_value = serde_json::to_value(&s.config)
-            .unwrap_or(serde_json::Value::Object(Default::default()));
+        let active_profile_cfg = active_profile_config(&s);
         let effective_fade_ms = s.default_fade_ms;
         let effective_motion_timeout_secs = s.default_motion_timeout_secs;
+        let effective_rhythm_interval_secs = s.runtime_config.update_interval_secs;
+
+        let current_local_time = {
+            let offset_secs = (s.utc_offset_hours * 3600.0) as i32;
+            let tz = chrono::FixedOffset::east_opt(offset_secs)
+                .unwrap_or(chrono::FixedOffset::east_opt(0).unwrap());
+            chrono::Utc::now()
+                .with_timezone(&tz)
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        };
 
         let location_dto = LocationDto {
+            current_local_time,
             latitude: s.latitude,
             longitude: s.longitude,
             utc_offset_hours: s.utc_offset_hours,
@@ -302,11 +555,11 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             all_registries,
             runtime,
             storage_rooms,
-            hub_dto,
             hubs_dto,
-            config_value,
+            active_profile_cfg,
             effective_fade_ms,
             effective_motion_timeout_secs,
+            effective_rhythm_interval_secs,
             location_dto,
             settings_dto,
             fw_version,
@@ -382,10 +635,19 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
 
     // Phase 2: query engine snapshots without state lock
     // Grab display context for computing brightness/kelvin
-    let (disp_config, disp_solar, disp_lat, disp_utc, disp_lights, disp_power_save) = {
+    let (
+        disp_profiles,
+        disp_active_profile_id,
+        disp_solar,
+        disp_lat,
+        disp_utc,
+        disp_lights,
+        disp_power_save,
+    ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
-            s.config.clone(),
+            s.light_profile_configs.clone(),
+            s.active_light_profile_id.clone(),
             s.solar_noon_hour(),
             s.latitude.unwrap_or(35.0),
             s.utc_offset_hours,
@@ -397,7 +659,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
 
     let mut rooms = Vec::with_capacity(room_infos.len());
     for info in &room_infos {
-        let (rhythm_enabled, disabled, time_offset, bri_offset, soft_off) =
+        let (rhythm_enabled, disabled, time_offset, bri_offset, soft_off, room_profile) =
             if let Some(ref rt) = runtime {
                 rt.engine_room_snapshot(&info.topology_id)
                     .map(|snap| {
@@ -407,9 +669,10 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
                             snap.time_offset_minutes,
                             snap.brightness_offset,
                             snap.soft_off,
+                            snap.profile_settings,
                         )
                     })
-                    .unwrap_or((false, false, 0.0, 0.0, false))
+                    .unwrap_or((false, false, 0.0, 0.0, false, RoomProfileSettings::default()))
             } else if let Some(ref mgr) = storage_rooms {
                 mgr.get(&info.topology_id)
                     .map(|r| {
@@ -419,19 +682,22 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
                             r.time_offset_minutes,
                             r.brightness_offset,
                             r.soft_off,
+                            r.profile_settings.clone(),
                         )
                     })
-                    .unwrap_or((false, false, 0.0, 0.0, false))
+                    .unwrap_or((false, false, 0.0, 0.0, false, RoomProfileSettings::default()))
             } else {
-                (false, false, 0.0, 0.0, false)
+                (false, false, 0.0, 0.0, false, RoomProfileSettings::default())
             };
 
         let lights_on = disp_lights.get(&info.topology_id).copied().unwrap_or(false);
-        let (curve_brightness, kelvin) = compute_room_display_values(
-            &disp_config,
+        let (curve_brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
+            &disp_profiles,
+            &disp_active_profile_id,
             disp_solar,
             disp_lat,
             disp_utc,
+            &room_profile,
             time_offset,
             bri_offset,
         );
@@ -512,6 +778,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
                 lights_on,
                 brightness,
                 kelvin,
+                room_profile,
             },
             name: info.name.clone(),
             grouped_light_id: info.grouped_light_id.clone(),
@@ -521,30 +788,24 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         });
     }
 
-    let current_time = {
-        let offset_secs = (location_dto.utc_offset_hours * 3600.0) as i32;
-        let tz = chrono::FixedOffset::east_opt(offset_secs)
-            .unwrap_or(chrono::FixedOffset::east_opt(0).unwrap());
-        chrono::Utc::now()
-            .with_timezone(&tz)
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-    };
-
     let snapshot = StateSnapshot {
         version: firmware_version.to_string(),
         platform: platform_type.to_string(),
         context: platform_ctx.to_string(),
         listen_port,
-        hub: hub_dto,
         hubs: hubs_dto,
-        config: config_value,
-        effective_fade_ms,
-        effective_motion_timeout_secs,
+        active_profile: ActiveProfileDto {
+            config: active_profile_cfg,
+            effective: ActiveProfileEffectiveDto {
+                fade_ms: effective_fade_ms,
+                motion_timeout_secs: effective_motion_timeout_secs,
+                rhythm_interval_secs: effective_rhythm_interval_secs,
+            },
+        },
         location: location_dto,
         settings: settings_dto,
         rooms,
         last_tick_epoch_ms,
-        current_time,
     };
     serde_json::to_string(&snapshot).map_err(|e| anyhow::anyhow!("serialize: {}", e))
 }
@@ -557,14 +818,13 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
         storage_rooms,
         motion_snapshots,
         room_lights_on,
-        config,
+        light_profile_configs,
+        active_light_profile_id,
         solar_noon,
         latitude,
         utc_offset,
         power_save,
         rooms_with_sensors,
-        motion_timeouts,
-        default_motion_timeout,
     ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let runtime = s.hub_runtime();
@@ -576,22 +836,19 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
         let motion = s.motion_snapshots.clone();
         let lights = s.room_lights_on.clone();
         let sensor_rooms = s.motion_sensor_room_ids();
-        let mt = s.motion_timeouts.clone();
-        let dmt = s.default_motion_timeout_secs;
         (
             s.has_any_hub(),
             runtime,
             storage_rooms,
             motion,
             lights,
-            s.config.clone(),
+            s.light_profile_configs.clone(),
+            s.active_light_profile_id.clone(),
             s.solar_noon_hour(),
             s.latitude.unwrap_or(35.0),
             s.utc_offset_hours,
             s.power_save,
             sensor_rooms,
-            mt,
-            dmt,
         )
     };
     let idle_bri = runtime.as_ref().map(|r| r.idle_brightness()).unwrap_or(1);
@@ -607,11 +864,13 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
     if !snapshots.is_empty() {
         for snap in &snapshots {
             let lights_on = room_lights_on.get(&snap.id).copied().unwrap_or(false);
-            let (curve_brightness, kelvin) = compute_room_display_values(
-                &config,
+            let (curve_brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
+                &light_profile_configs,
+                &active_light_profile_id,
                 solar_noon,
                 latitude,
                 utc_offset,
+                &snap.profile_settings,
                 snap.time_offset_minutes,
                 snap.brightness_offset,
             );
@@ -630,6 +889,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                 lights_on,
                 brightness,
                 kelvin,
+                room_profile: snap.profile_settings.clone(),
             };
             let (motion_active, motion_owned, remaining_secs, timeout_secs, warning_active) =
                 if let Some(ms) = motion_snapshots.get(&snap.id) {
@@ -642,10 +902,14 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                     )
                 } else if rooms_with_sensors.contains(&snap.id) {
                     // Sensor exists but hasn't fired yet — idle defaults
-                    let timeout = motion_timeouts
-                        .get(&snap.id)
-                        .copied()
-                        .unwrap_or(default_motion_timeout);
+                    let timeout = resolved_room_motion_timeout_secs_from_parts(
+                        &light_profile_configs,
+                        &active_light_profile_id,
+                        solar_noon,
+                        latitude,
+                        &snap.profile_settings,
+                        runtime.as_ref().map(|rt| rt.current_hour()).unwrap_or(12.0),
+                    );
                     (Some(false), Some(false), None, Some(timeout), Some(false))
                 } else {
                     (None, None, None, None, None)
@@ -661,11 +925,13 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
         }
     } else if let Some(ref mgr) = storage_rooms {
         for room in mgr.iter() {
-            let (curve_brightness, kelvin) = compute_room_display_values(
-                &config,
+            let (curve_brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
+                &light_profile_configs,
+                &active_light_profile_id,
                 solar_noon,
                 latitude,
                 utc_offset,
+                &room.profile_settings,
                 room.time_offset_minutes,
                 room.brightness_offset,
             );
@@ -685,6 +951,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                     lights_on: false,
                     brightness,
                     kelvin,
+                    room_profile: room.profile_settings.clone(),
                 },
                 motion_active: None,
                 motion_owned: None,
@@ -704,15 +971,11 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
 
 /// Build a `RoomRhythmState` for a single room from engine state.
 pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<RoomRhythmState> {
-    let (runtime, lights_on, config, solar_noon, latitude, utc_offset, power_save) = {
+    let (runtime, lights_on, power_save) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             s.hub_runtime(),
             s.room_lights_on.get(room_id).copied().unwrap_or(false),
-            s.config.clone(),
-            s.solar_noon_hour(),
-            s.latitude.unwrap_or(35.0),
-            s.utc_offset_hours,
             s.power_save,
         )
     };
@@ -721,14 +984,15 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
     let snap = runtime
         .engine_room_snapshot(room_id)
         .ok_or_else(|| anyhow::anyhow!("Room '{}' not found in engine", room_id))?;
-    let (curve_brightness, kelvin) = compute_room_display_values(
-        &config,
-        solar_noon,
-        latitude,
-        utc_offset,
-        snap.time_offset_minutes,
-        snap.brightness_offset,
-    );
+    let (curve_brightness, kelvin) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        compute_room_display_values_for_settings(
+            &s,
+            &snap.profile_settings,
+            snap.time_offset_minutes,
+            snap.brightness_offset,
+        )
+    };
     let brightness = if snap.soft_off && !power_save {
         runtime.idle_brightness()
     } else {
@@ -745,6 +1009,7 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
         lights_on,
         brightness,
         kelvin,
+        room_profile: snap.profile_settings.clone(),
     })
 }
 
@@ -752,10 +1017,15 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
 // Config queries
 // ============================================================================
 
-/// Build the current curve config as a JSON string.
-pub fn build_config(state: &SharedState) -> Result<String> {
+/// Build the requested light profile config as a JSON string.
+pub fn build_config(state: &SharedState, profile_id: Option<&str>) -> Result<String> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    serde_json::to_string(&s.config).map_err(|e| anyhow::anyhow!("serialize config: {}", e))
+    let id = resolve_profile_id(&s, profile_id)?;
+    let config = s
+        .light_profile_config(&id)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Unknown light profile: {}", id))?;
+    serde_json::to_string(&config).map_err(|e| anyhow::anyhow!("serialize config: {}", e))
 }
 
 // ============================================================================
@@ -764,40 +1034,13 @@ pub fn build_config(state: &SharedState) -> Result<String> {
 
 /// Build `SettingsDto` from an already-locked `AppState`.
 fn build_settings_dto_inner(s: &AppState) -> SettingsDto {
-    let (active_profile, available_profiles) = if let Some(rt) = s.hub_runtime() {
-        let active = rt.active_light_profile_id();
-        let available = rt
-            .available_light_profiles()
-            .into_iter()
-            .map(|(id, name)| LightProfileDto { id, name })
-            .collect();
-        (active, available)
-    } else {
-        // No runtime yet — derive from persisted state + known built-in profiles
-        let active = if s.sleep_mode {
-            rhythm_core::SLEEP_PROFILE_ID.to_string()
-        } else {
-            rhythm_core::RHYTHM_PROFILE_ID.to_string()
-        };
-        let available = vec![
-            LightProfileDto {
-                id: rhythm_core::RHYTHM_PROFILE_ID.to_string(),
-                name: rhythm_core::RHYTHM_PROFILE_NAME.to_string(),
-            },
-            LightProfileDto {
-                id: rhythm_core::SLEEP_PROFILE_ID.to_string(),
-                name: rhythm_core::SLEEP_PROFILE_NAME.to_string(),
-            },
-        ];
-        (active, available)
-    };
+    let active_profile = s.active_light_profile_id.clone();
+    let profiles = s.light_profile_configs.values().cloned().collect();
 
     SettingsDto {
-        rhythm_interval_secs: s.runtime_config.update_interval_secs,
         power_save: s.power_save,
-        sleep_mode: s.sleep_mode,
         active_light_profile: active_profile,
-        available_light_profiles: available_profiles,
+        profiles,
     }
 }
 
@@ -814,23 +1057,11 @@ pub fn build_settings(state: &SharedState) -> Result<String> {
 }
 
 /// Update global settings (partial: only provided fields are changed).
-///
-/// Persists to storage and updates the atomic for dynamics duration.
-pub fn do_settings_set(
-    state: &SharedState,
-    update_interval: Option<u64>,
-    power_save: Option<bool>,
-) -> Result<String> {
+pub fn do_settings_set(state: &SharedState, power_save: Option<bool>) -> Result<String> {
     let mut rooms_to_off = Vec::new();
 
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-
-        if let Some(interval) = update_interval {
-            let clamped = interval.max(10);
-            s.runtime_config.update_interval_secs = clamped;
-            info!(target: "cmd", "settings: rhythm_interval_secs={}", clamped);
-        }
 
         if let Some(ps) = power_save {
             s.power_save = ps;
@@ -842,16 +1073,7 @@ pub fn do_settings_set(
         }
 
         // Persist settings
-        if let Some(ref storage) = s.storage {
-            let stored = StoredSettings {
-                rhythm_interval_secs: s.runtime_config.update_interval_secs,
-                power_save: s.power_save,
-                sleep_mode: s.sleep_mode,
-            };
-            if let Err(e) = storage.save_settings(&stored) {
-                warn!(target: "cmd", "Failed to save settings: {}", e);
-            }
-        }
+        persist_settings_locked(&s);
     }
 
     // If switching power_save ON, turn soft_off rooms truly off
@@ -864,8 +1086,9 @@ pub fn do_settings_set(
             for room_id in &rooms_to_off {
                 info!(target: "cmd", "Turning off soft_off room '{}' (power_save ON)", room_id);
                 let event = InputEvent::new(room_id, ButtonAction::OffPress);
-                if let Err(e) = runtime.handle_event(&event) {
-                    warn!(target: "cmd", "Failed to turn off room '{}': {}", room_id, e);
+                match runtime.handle_event(&event) {
+                    Ok(_) => sync_active_profile_from_runtime(state, &runtime),
+                    Err(e) => warn!(target: "cmd", "Failed to turn off room '{}': {}", room_id, e),
                 }
             }
         }
@@ -1048,13 +1271,14 @@ pub fn do_room_set(
     if let Some(runtime) = runtime {
         let existing = runtime.engine_room_snapshot(&engine_room_id);
         runtime.add_room(&engine_room_id, &params.name);
-        let (rhythm_enabled, time_offset, bri_offset, soft_off) = existing
+        let (rhythm_enabled, time_offset, bri_offset, soft_off, profile_settings) = existing
             .map(|snap| {
                 (
                     params.rhythm_enabled,
                     snap.time_offset_minutes,
                     snap.brightness_offset,
                     params.soft_off.unwrap_or(snap.soft_off),
+                    snap.profile_settings,
                 )
             })
             .unwrap_or((
@@ -1062,6 +1286,7 @@ pub fn do_room_set(
                 0.0,
                 0.0,
                 params.soft_off.unwrap_or(false),
+                RoomProfileSettings::default(),
             ));
         // Soft-off rooms need rhythm enabled for periodic soft-off ticks
         let rhythm_enabled = if soft_off { true } else { rhythm_enabled };
@@ -1072,6 +1297,7 @@ pub fn do_room_set(
             time_offset,
             bri_offset,
             soft_off,
+            profile_settings,
         );
     }
 
@@ -1125,7 +1351,6 @@ pub fn do_room_remove(state: &SharedState, room_id: &str) -> Result<()> {
     {
         if let Ok(mut s) = state.lock() {
             s.room_lights_on.remove(room_id);
-            s.motion_timeouts.remove(room_id);
             s.motion_snapshots.remove(room_id);
         }
     }
@@ -1173,6 +1398,7 @@ pub fn do_room_action(
 
     let event = InputEvent::new(room_id, action);
     let turned_on = runtime.handle_event(&event)?;
+    sync_active_profile_from_runtime(state, &runtime);
 
     // Track lights_on state from action result
     {
@@ -1259,6 +1485,7 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
         let event = InputEvent::new(&snap.id, ButtonAction::Reset);
         match runtime.handle_event(&event) {
             Ok(turned_on) => {
+                sync_active_profile_from_runtime(state, &runtime);
                 if let Ok(mut s) = state.lock() {
                     s.room_lights_on.insert(snap.id.clone(), turned_on);
                 }
@@ -1280,6 +1507,7 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
                 0.0,
                 0.0,
                 snap.soft_off,
+                snap.profile_settings.clone(),
             );
         }
     }
@@ -1292,6 +1520,7 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
         let event = InputEvent::new(&snap.id, ButtonAction::OffPress);
         match runtime.handle_event(&event) {
             Ok(turned_on) => {
+                sync_active_profile_from_runtime(state, &runtime);
                 if let Ok(mut s) = state.lock() {
                     s.room_lights_on.insert(snap.id.clone(), turned_on);
                 }
@@ -1542,68 +1771,150 @@ pub fn do_canonical_soft_remove(state: &SharedState, device_id: &str, hub_key: &
     }
 }
 
-/// Set per-room motion timeout.
-///
-/// `room_id` should be a topology room ID (handler resolves before calling).
-/// Updates the registry with hub-native IDs and AppState with the topology ID.
-///
-/// When `hub_key` is provided, updates that hub's registry only.
-/// When `None`, falls back to the first hub's registry (backward compat).
+/// Set a per-room motion timeout override in the room profile settings layer.
 pub fn do_motion_timeout_set(
     state: &SharedState,
     room_id: &str,
     timeout_secs: u64,
-    hub_key: Option<&HubKey>,
+    _hub_key: Option<&HubKey>,
 ) -> Result<()> {
     info!(target: "cmd", "motion_timeout_set: room {} -> {}s", room_id, timeout_secs);
 
-    // Registry uses hub-native IDs — reverse-lookup from topology
-    let hub_room_ids = hub_room_ids_for_topology(state, room_id);
-
-    let registry = hub_key
-        .and_then(|k| state.lock().ok().and_then(|s| s.hub_registry_for(k)))
-        .or_else(|| extract_registry(state));
-    if let Some(reg) = registry {
-        if let Ok(mut reg) = reg.lock() {
-            for hub_room_id in &hub_room_ids {
-                reg.upsert_motion_timeout(hub_room_id, timeout_secs);
-            }
-        }
-    }
-
-    // AppState uses topology room IDs
-    {
-        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.motion_timeouts.insert(room_id.to_string(), timeout_secs);
-    }
-
-    persist_registry(state);
+    let value = u32::try_from(timeout_secs)
+        .map_err(|_| anyhow::anyhow!("motion timeout {} exceeds supported range", timeout_secs))?;
+    let patch = RoomProfileSettingsPatch {
+        motion_timeout_secs: Some(Some(TimerSetting::Fixed { value })),
+        ..Default::default()
+    };
+    do_room_preferences_set(
+        state,
+        room_id,
+        None,
+        None,
+        None,
+        Some(&patch),
+        true,
+    )?;
     Ok(())
+}
+
+/// Remove a per-room motion timeout override so it falls back to the profile default.
+pub fn do_motion_timeout_clear(
+    state: &SharedState,
+    room_id: &str,
+    _hub_key: Option<&HubKey>,
+) -> Result<()> {
+    info!(target: "cmd", "motion_timeout_clear: room {}", room_id);
+
+    let patch = RoomProfileSettingsPatch {
+        motion_timeout_secs: Some(None),
+        ..Default::default()
+    };
+    do_room_preferences_set(
+        state,
+        room_id,
+        None,
+        None,
+        None,
+        Some(&patch),
+        true,
+    )?;
+    Ok(())
+}
+
+/// Resolve room motion timeout defaults from persisted room profile settings.
+pub(crate) fn resolved_room_motion_timeout_map(
+    state: &SharedState,
+) -> (HashMap<String, u64>, HashSet<String>) {
+    let (runtime, light_profile_configs, active_light_profile_id, solar_noon, latitude, sensor_rooms) = {
+        let Ok(s) = state.lock() else {
+            return (HashMap::new(), HashSet::new());
+        };
+        (
+            s.hub_runtime(),
+            s.light_profile_configs.clone(),
+            s.active_light_profile_id.clone(),
+            s.solar_noon_hour(),
+            s.latitude.unwrap_or(35.0),
+            s.motion_sensor_room_ids(),
+        )
+    };
+
+    let current_hour = runtime.as_ref().map(|rt| rt.current_hour()).unwrap_or(12.0);
+    let snapshots = runtime
+        .as_ref()
+        .map(|rt| rt.engine_all_room_snapshots())
+        .unwrap_or_default();
+
+    let mut timeouts = HashMap::new();
+    for snap in &snapshots {
+        timeouts.insert(
+            snap.id.clone(),
+            resolved_room_motion_timeout_secs_from_parts(
+                &light_profile_configs,
+                &active_light_profile_id,
+                solar_noon,
+                latitude,
+                &snap.profile_settings,
+                current_hour,
+            ),
+        );
+    }
+    (timeouts, sensor_rooms)
 }
 
 // ============================================================================
 // Config commands
 // ============================================================================
 
-/// Update CurveConfig, push to runtime, save to storage.
-pub fn do_config_set(state: &SharedState, config: CurveConfig) -> Result<()> {
-    info!(target: "cmd", "config_set: min_bri={}, max_bri={}", config.min_brightness, config.max_brightness);
+/// Update a light profile config, push it to the runtime, and persist it.
+pub fn do_config_set(state: &SharedState, config: LightProfileConfig) -> Result<()> {
+    let curve_desc = match &config.curve {
+        rhythm_core::LightCurveShape::SuperGaussian { direct_color, .. } => {
+            if let Some(dc) = direct_color {
+                format!("super-gaussian+color(xy={:.3},{:.3} rgb={},{},{})",
+                    dc.xy.x, dc.xy.y, dc.rgb.r, dc.rgb.g, dc.rgb.b)
+            } else {
+                "super-gaussian".to_string()
+            }
+        }
+        rhythm_core::LightCurveShape::Palette { keyframes } =>
+            format!("palette({}kf)", keyframes.len()),
+        rhythm_core::LightCurveShape::InheritActive => "inherit-active".to_string(),
+        rhythm_core::LightCurveShape::Constant { brightness, color_temp, .. } =>
+            format!("constant(bri={:.2}, cct={:.2})", brightness, color_temp),
+    };
+    info!(
+        target: "cmd",
+        "config_set: id='{}', curve={}, min_bri={}, max_bri={}, min_cct={}, max_cct={}, dim_steps={}, fade={:?}, motion={:?}, interval={:?}",
+        config.id,
+        curve_desc,
+        config.min_brightness,
+        config.max_brightness,
+        config.min_color_temp,
+        config.max_color_temp,
+        config.max_dim_steps,
+        config.fade_ms,
+        config.motion_timeout_secs,
+        config.rhythm_interval_secs,
+    );
 
     let runtime = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.config = config.clone();
-        if let Some(ref storage) = s.storage {
-            let stored = crate::storage::StoredConfig::from_state(&s.config, &s.runtime_config);
-            if let Err(e) = storage.save_config(&stored) {
-                warn!(target: "cmd", "Failed to save config: {}", e);
-            }
+        if !s.light_profile_configs.contains_key(&config.id) {
+            return Err(anyhow::anyhow!("Unknown light profile: {}", config.id));
         }
+        s.set_light_profile_config(config.clone());
+        if config.id == s.active_light_profile_id {
+            s.sync_active_light_profile_runtime_overrides();
+        }
+        persist_light_profiles_locked(&s);
         s.hub_runtime()
     };
 
     if let Some(runtime) = runtime {
-        if let Err(e) = runtime.set_curve_config(config) {
-            warn!(target: "cmd", "Failed to update runtime curve config: {}", e);
+        if let Err(e) = runtime.set_light_profile_config(config) {
+            warn!(target: "cmd", "Failed to update runtime light profile config: {}", e);
         }
     }
 
@@ -1614,23 +1925,31 @@ pub fn do_config_set(state: &SharedState, config: CurveConfig) -> Result<()> {
 }
 
 /// Switch all runtimes to the given light profile.
-pub fn do_set_light_profile(state: &SharedState, module_id: &str) -> Result<()> {
-    info!(target: "cmd", "set_light_profile: switching to '{}'", module_id);
+pub fn do_set_light_profile(state: &SharedState, profile_id: &str) -> Result<()> {
+    info!(target: "cmd", "set_light_profile: switching to '{}'", profile_id);
 
     let runtimes: Vec<_> = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.sleep_mode = module_id == rhythm_core::SLEEP_PROFILE_ID;
+        if !s.light_profile_configs.contains_key(profile_id) {
+            return Err(anyhow::anyhow!("Unknown light profile: {}", profile_id));
+        }
+        if profile_id == rhythm_core::IDLE_PROFILE_ID {
+            return Err(anyhow::anyhow!("Idle profile cannot be activated directly"));
+        }
+        s.active_light_profile_id = profile_id.to_string();
+        s.sync_active_light_profile_runtime_overrides();
+        persist_settings_locked(&s);
         s.hubs.values().filter_map(|h| h.runtime.clone()).collect()
     };
 
     let mut any_set = false;
     for rt in &runtimes {
-        if rt.set_light_profile(module_id) {
+        if rt.set_light_profile(profile_id) {
             any_set = true;
         }
     }
     if !runtimes.is_empty() && !any_set {
-        return Err(anyhow::anyhow!("Unknown light profile: {}", module_id));
+        return Err(anyhow::anyhow!("Unknown light profile: {}", profile_id));
     }
 
     // Reset all on-rooms so lights immediately move to the new curve
@@ -1638,51 +1957,31 @@ pub fn do_set_light_profile(state: &SharedState, module_id: &str) -> Result<()> 
         warn!(target: "cmd", "set_light_profile: fix_my_lights failed: {}", e);
     }
 
-    let is_sleep = module_id == rhythm_core::SLEEP_PROFILE_ID;
-    persist_sleep_mode(state, is_sleep);
-
     #[cfg(feature = "desktop")]
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::SettingsChanged);
 
     Ok(())
 }
 
-/// Activate sleep mode: switch all runtimes to the sleep curve.
-pub fn do_sleep(state: &SharedState) -> Result<()> {
-    do_set_light_profile(state, rhythm_core::SLEEP_PROFILE_ID)
-}
-
-/// Deactivate sleep mode: switch all runtimes back to the rhythm curve.
-pub fn do_wake(state: &SharedState) -> Result<()> {
-    do_set_light_profile(state, rhythm_core::RHYTHM_PROFILE_ID)
-}
-
-/// Persist sleep mode to storage.
-fn persist_sleep_mode(state: &SharedState, sleep_mode: bool) {
-    if let Ok(s) = state.lock() {
-        if let Some(ref storage) = s.storage {
-            if let Err(e) = storage.save_settings(&crate::storage::StoredSettings {
-                rhythm_interval_secs: s.runtime_config.update_interval_secs,
-                power_save: s.power_save,
-                sleep_mode,
-            }) {
-                warn!(target: "cmd", "Failed to save settings: {}", e);
-            }
-        }
-    }
-}
-
-/// Absorb a time offset into the curve config by adjusting ramp widths.
+/// Absorb a time offset into a light profile config by adjusting ramp widths.
 ///
 /// Modifies the width parameters for the current side of the day (morning/evening)
 /// so the curve naturally produces the offset's values at the current time, then
 /// resets all room time offsets to 0.
-pub fn do_absorb_time_offset(state: &SharedState, offset_minutes: f32) -> Result<()> {
+pub fn do_absorb_time_offset(
+    state: &SharedState,
+    profile_id: Option<&str>,
+    offset_minutes: f32,
+) -> Result<()> {
     info!(target: "cmd", "absorb_time_offset: {}min", offset_minutes);
 
-    let (config, runtime, sunrise, sunset) = {
+    let (resolved_profile_id, config, runtime, sunrise, sunset) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        let config = s.config.clone();
+        let resolved_profile_id = resolve_profile_id(&s, profile_id)?;
+        let config = s
+            .light_profile_config(&resolved_profile_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Unknown light profile: {}", resolved_profile_id))?;
         let runtime = s.hub_runtime();
 
         // Compute sunrise/sunset from location, or use fallbacks
@@ -1707,7 +2006,7 @@ pub fn do_absorb_time_offset(state: &SharedState, offset_minutes: f32) -> Result
             )
         };
 
-        (config, runtime, sunrise, sunset)
+        (resolved_profile_id, config, runtime, sunrise, sunset)
     };
 
     // Compute current local hour — prefer the runtime's time provider (which
@@ -1725,27 +2024,44 @@ pub fn do_absorb_time_offset(state: &SharedState, offset_minutes: f32) -> Result
 
     // Adjust config widths if offset is meaningful
     if let Some(new_config) =
-        config.absorb_time_offset(current_hour, offset_minutes, sunrise, sunset)
+        absorb_light_profile_time_offset(&config, current_hour, offset_minutes, sunrise, sunset)
     {
         info!(target: "cmd", "absorb_time_offset: adjusted widths — bri L={:.3} R={:.3}, cct L={:.3} R={:.3}",
-            new_config.width_left_bri, new_config.width_right_bri,
-            new_config.width_left_cct, new_config.width_right_cct);
+        match &new_config.curve {
+            rhythm_core::LightCurveShape::SuperGaussian { width_left_bri, .. } => *width_left_bri,
+            _ => 0.0,
+        },
+        match &new_config.curve {
+            rhythm_core::LightCurveShape::SuperGaussian { width_right_bri, .. } => *width_right_bri,
+            _ => 0.0,
+        },
+        match &new_config.curve {
+            rhythm_core::LightCurveShape::SuperGaussian { width_left_cct, .. } => *width_left_cct,
+            _ => 0.0,
+        },
+        match &new_config.curve {
+            rhythm_core::LightCurveShape::SuperGaussian { width_right_cct, .. } => *width_right_cct,
+            _ => 0.0,
+        });
 
         // Update config in state + persist + push to engine
         {
             let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-            s.config = new_config.clone();
-            if let Some(ref storage) = s.storage {
-                let stored = crate::storage::StoredConfig::from_state(&s.config, &s.runtime_config);
-                if let Err(e) = storage.save_config(&stored) {
-                    warn!(target: "cmd", "Failed to save config: {}", e);
-                }
+            if resolved_profile_id != new_config.id {
+                return Err(anyhow::anyhow!(
+                    "Profile ID mismatch while absorbing offset"
+                ));
             }
+            s.set_light_profile_config(new_config.clone());
+            if resolved_profile_id == s.active_light_profile_id {
+                s.sync_active_light_profile_runtime_overrides();
+            }
+            persist_light_profiles_locked(&s);
         }
 
         if let Some(ref rt) = runtime {
-            if let Err(e) = rt.set_curve_config(new_config) {
-                warn!(target: "cmd", "Failed to update runtime curve config: {}", e);
+            if let Err(e) = rt.set_light_profile_config(new_config) {
+                warn!(target: "cmd", "Failed to update runtime light profile config: {}", e);
             }
         }
     }
@@ -1937,7 +2253,6 @@ pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
         }
 
         s.room_lights_on.clear();
-        s.motion_timeouts.clear();
         s.motion_snapshots.clear();
 
         if let Some(ref storage) = s.storage {
@@ -2081,14 +2396,26 @@ pub fn do_room_preferences_set(
     rhythm_enabled: Option<bool>,
     disabled: Option<bool>,
     soft_off: Option<bool>,
+    room_profile: Option<&RoomProfileSettingsPatch>,
     persist: bool,
 ) -> Result<String> {
-    info!(target: "cmd", "room_preferences_set: {} rhythm={:?} disabled={:?} soft_off={:?}",
-        room_id, rhythm_enabled, disabled, soft_off);
+    info!(
+        target: "cmd",
+        "room_preferences_set: {} rhythm={:?} disabled={:?} soft_off={:?} room_profile={}",
+        room_id,
+        rhythm_enabled,
+        disabled,
+        soft_off,
+        room_profile.is_some()
+    );
 
-    let runtime = {
+    let (runtime, lights_on, valid_profile_ids) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.hub_runtime()
+        (
+            s.hub_runtime(),
+            s.room_lights_on.get(room_id).copied().unwrap_or(false),
+            s.light_profile_configs.keys().cloned().collect::<HashSet<_>>(),
+        )
     };
 
     let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
@@ -2101,6 +2428,19 @@ pub fn do_room_preferences_set(
     let rhythm_enabled = rhythm_enabled.unwrap_or(snap.rhythm_enabled);
     let disabled = disabled.unwrap_or(snap.disabled);
     let soft_off = soft_off.unwrap_or(snap.soft_off);
+    let mut profile_settings = snap.profile_settings.clone();
+    if let Some(patch) = room_profile {
+        patch.apply_to(&mut profile_settings);
+    }
+
+    if let Some(profile_id) = profile_settings.profile_id.as_deref() {
+        if profile_id == IDLE_PROFILE_ID {
+            return Err(anyhow::anyhow!("Idle profile cannot be selected per-room"));
+        }
+        if !valid_profile_ids.contains(profile_id) {
+            return Err(anyhow::anyhow!("Unknown light profile: {}", profile_id));
+        }
+    }
 
     // Soft-off rooms need rhythm enabled for periodic soft-off ticks
     let rhythm_enabled = if soft_off { true } else { rhythm_enabled };
@@ -2112,6 +2452,7 @@ pub fn do_room_preferences_set(
         snap.time_offset_minutes,
         snap.brightness_offset,
         soft_off,
+        profile_settings.clone(),
     );
 
     // Immediate light command when soft_off transitions
@@ -2126,6 +2467,18 @@ pub fn do_room_preferences_set(
         info!(target: "cmd", "room_preferences_set: {} leaving soft_off, turning on", room_id);
         if let Err(e) = runtime.turn_on_room(room_id) {
             warn!(target: "cmd", "turn_on for '{}' failed: {}", room_id, e);
+        }
+    } else if room_profile.is_some_and(|patch| patch.touches_profile_settings()) {
+        if soft_off {
+            info!(target: "cmd", "room_preferences_set: {} applying room profile to soft-off state", room_id);
+            if let Err(e) = runtime.soft_off_tick_room(room_id) {
+                warn!(target: "cmd", "soft_off_tick for '{}' failed: {}", room_id, e);
+            }
+        } else if lights_on {
+            info!(target: "cmd", "room_preferences_set: {} applying room profile to active lights", room_id);
+            if let Err(e) = runtime.turn_on_room(room_id) {
+                warn!(target: "cmd", "turn_on for '{}' failed: {}", room_id, e);
+            }
         }
     }
 
@@ -2702,6 +3055,7 @@ pub fn do_triage_bind_room_to(
                     snap.time_offset_minutes,
                     snap.brightness_offset,
                     snap.soft_off,
+                    snap.profile_settings.clone(),
                 );
             }
             runtime.remove_room(&source_id);
@@ -2965,20 +3319,34 @@ fn current_local_hour(utc_offset: f32) -> f32 {
 /// Used by `GET /api/curve` and `POST /api/curve`.
 pub fn build_curve(
     state: &SharedState,
-    config_override: Option<CurveConfig>,
+    config_override: Option<LightProfileConfig>,
+    profile_id: Option<&str>,
     date: Option<&str>,
     samples_per_hour: Option<u32>,
     start_hour: Option<f32>,
     max_steps: Option<u8>,
 ) -> Result<String> {
     use crate::api_types::CurveResponse;
-    use rhythm_core::{default_sleep_profile, LightProfile};
 
-    let (config, utc_offset, is_preview, sleep_mode) = {
+    let (registry, target_id, config, utc_offset) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        let is_preview = config_override.is_some();
-        let config = config_override.unwrap_or_else(|| s.config.clone());
-        (config, s.utc_offset_hours, is_preview, s.sleep_mode)
+        let mut registry = light_profile_registry_from_state(&s);
+        let target_id = if let Some(ref config) = config_override {
+            config.id.clone()
+        } else {
+            resolve_profile_id(&s, profile_id)?
+        };
+        let config = if let Some(config) = config_override {
+            if !registry.set_profile_config(config.clone()) {
+                return Err(anyhow::anyhow!("Unknown light profile: {}", config.id));
+            }
+            config
+        } else {
+            s.light_profile_config(&target_id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Unknown light profile: {}", target_id))?
+        };
+        (registry, target_id, config, s.utc_offset_hours)
     };
 
     let (year, month, day) = parse_date_or_today(date, utc_offset)?;
@@ -2988,15 +3356,12 @@ pub fn build_curve(
         resolve_solar(&s, year, month, day)
     };
 
-    // Preview (POST) always uses the backward-compatible rhythm config shape.
-    let module: Box<dyn rhythm_core::LightProfileModule> = if is_preview || !sleep_mode {
-        Box::new(LightProfile::new(config.clone().into()))
-    } else {
-        Box::new(LightProfile::new(default_sleep_profile()))
-    };
+    let module = registry
+        .get(&target_id)
+        .ok_or_else(|| anyhow::anyhow!("Unknown light profile: {}", target_id))?;
 
     let samples = samples_per_hour.unwrap_or(4);
-    let curve_data = rhythm_curve::generate_curve_data(
+    let curve_data = rhythm_profile::generate_curve_data(
         module.as_ref(),
         resolved.solar,
         resolved.sun_times,
@@ -3005,7 +3370,7 @@ pub fn build_curve(
 
     let start = start_hour.unwrap_or_else(|| current_local_hour(utc_offset));
     let steps = max_steps.unwrap_or(config.max_dim_steps);
-    let step_data = rhythm_curve::generate_step_sequences(
+    let step_data = rhythm_profile::generate_step_sequences(
         module.as_ref(),
         resolved.solar,
         resolved.sun_times,
@@ -3029,13 +3394,21 @@ pub fn build_curve(
 /// Build the current lighting values response.
 ///
 /// Used by `GET /api/curve/now`.
-pub fn build_curve_now(state: &SharedState, hour_override: Option<f32>) -> Result<String> {
+pub fn build_curve_now(
+    state: &SharedState,
+    profile_id: Option<&str>,
+    hour_override: Option<f32>,
+) -> Result<String> {
     use crate::api_types::LightingNowResponse;
-    use rhythm_core::{default_sleep_profile, kelvin_to_mireds, LightProfile, LightProfileModule};
+    use rhythm_core::kelvin_to_mireds;
 
-    let (config, utc_offset, sleep_mode) = {
+    let (registry, target_id, utc_offset) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        (s.config.clone(), s.utc_offset_hours, s.sleep_mode)
+        (
+            light_profile_registry_from_state(&s),
+            resolve_profile_id(&s, profile_id)?,
+            s.utc_offset_hours,
+        )
     };
 
     let hour = hour_override.unwrap_or_else(|| current_local_hour(utc_offset));
@@ -3054,11 +3427,9 @@ pub fn build_curve_now(state: &SharedState, hour_override: Option<f32>) -> Resul
         resolve_solar(&s, year, month, day)
     };
 
-    let module: Box<dyn LightProfileModule> = if sleep_mode {
-        Box::new(LightProfile::new(default_sleep_profile()))
-    } else {
-        Box::new(LightProfile::new(config.into()))
-    };
+    let module = registry
+        .get(&target_id)
+        .ok_or_else(|| anyhow::anyhow!("Unknown light profile: {}", target_id))?;
     let ctx = rhythm_core::CurveContext::new(hour, resolved.solar, resolved.sun_times);
     let values = module.calculate(&ctx);
 
@@ -3105,25 +3476,39 @@ mod tests {
     use super::*;
     use crate::hub::{ActiveHub, HubType};
     use crate::state::{AppState, MotionSnapshot};
-    use rhythm_core::{CurveConfig, RoomSnapshot, RuntimeHandle};
+    use rhythm_core::{LightProfileConfig, RoomSnapshot, RuntimeHandle};
     use std::sync::{Arc, Mutex};
 
     /// Mock runtime that returns configurable room snapshots and tracks events.
     struct MockRuntime {
         snapshots: Vec<RoomSnapshot>,
         events: Mutex<Vec<(String, ButtonAction)>>,
+        config_updates: Mutex<Vec<LightProfileConfig>>,
+        time_offset_updates: Mutex<Vec<(String, f32)>>,
+        current_hour: f32,
     }
 
     impl MockRuntime {
-        fn new(snapshots: Vec<RoomSnapshot>) -> Self {
+        fn new(snapshots: Vec<RoomSnapshot>, current_hour: f32) -> Self {
             Self {
                 snapshots,
                 events: Mutex::new(Vec::new()),
+                config_updates: Mutex::new(Vec::new()),
+                time_offset_updates: Mutex::new(Vec::new()),
+                current_hour,
             }
         }
 
         fn events(&self) -> Vec<(String, ButtonAction)> {
             self.events.lock().unwrap().clone()
+        }
+
+        fn config_updates(&self) -> Vec<LightProfileConfig> {
+            self.config_updates.lock().unwrap().clone()
+        }
+
+        fn time_offset_updates(&self) -> Vec<(String, f32)> {
+            self.time_offset_updates.lock().unwrap().clone()
         }
     }
 
@@ -3145,7 +3530,8 @@ mod tests {
         fn set_solar(&self, _: rhythm_core::SolarTime) -> anyhow::Result<()> {
             Ok(())
         }
-        fn set_curve_config(&self, _: CurveConfig) -> anyhow::Result<()> {
+        fn set_light_profile_config(&self, config: LightProfileConfig) -> anyhow::Result<()> {
+            self.config_updates.lock().unwrap().push(config);
             Ok(())
         }
         fn periodic_tick_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
@@ -3157,7 +3543,17 @@ mod tests {
         fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot> {
             self.snapshots.clone()
         }
-        fn restore_room_state(&self, _: &str, _: bool, _: bool, _: f32, _: f32, _: bool) {}
+        fn restore_room_state(
+            &self,
+            _: &str,
+            _: bool,
+            _: bool,
+            _: f32,
+            _: f32,
+            _: bool,
+            _: rhythm_core::RoomProfileSettings,
+        ) {
+        }
         fn add_room(&self, _: &str, _: &str) {}
         fn remove_room(&self, _: &str) {}
         fn dim_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
@@ -3175,7 +3571,11 @@ mod tests {
         fn set_room_brightness(&self, _: &str, _: u8) -> anyhow::Result<()> {
             Ok(())
         }
-        fn set_room_time_offset(&self, _: &str, _: f32) -> anyhow::Result<()> {
+        fn set_room_time_offset(&self, room_id: &str, offset_minutes: f32) -> anyhow::Result<()> {
+            self.time_offset_updates
+                .lock()
+                .unwrap()
+                .push((room_id.to_string(), offset_minutes));
             Ok(())
         }
         fn idle_brightness(&self) -> u8 {
@@ -3188,7 +3588,7 @@ mod tests {
             Ok(false)
         }
         fn current_hour(&self) -> f32 {
-            12.0
+            self.current_hour
         }
         fn set_light_profile(&self, _: &str) -> bool {
             true
@@ -3213,11 +3613,19 @@ mod tests {
             time_offset_minutes: 0.0,
             brightness_offset: 0.0,
             soft_off,
+            profile_settings: rhythm_core::RoomProfileSettings::default(),
         }
     }
 
     fn setup_state(snapshots: Vec<RoomSnapshot>) -> (SharedState, Arc<MockRuntime>) {
-        let runtime = Arc::new(MockRuntime::new(snapshots));
+        setup_state_at_hour(snapshots, 12.0)
+    }
+
+    fn setup_state_at_hour(
+        snapshots: Vec<RoomSnapshot>,
+        current_hour: f32,
+    ) -> (SharedState, Arc<MockRuntime>) {
+        let runtime = Arc::new(MockRuntime::new(snapshots, current_hour));
         let mut app = AppState::default();
         let hub_type = HubType::parse("mock").unwrap();
         let hub_key = crate::canonical::identity::HubKey::new(hub_type.clone(), "mock");
@@ -3361,10 +3769,13 @@ mod tests {
     fn fix_turns_off_motion_sensor_rooms_without_active_timer() {
         // Room has a motion sensor registered in the registry but no active
         // motion timer. fix_my_lights should still turn it off (not reset).
-        let runtime = Arc::new(MockRuntime::new(vec![
-            make_snapshot("motion_room", false, false),
-            make_snapshot("normal_room", false, false),
-        ]));
+        let runtime = Arc::new(MockRuntime::new(
+            vec![
+                make_snapshot("motion_room", false, false),
+                make_snapshot("normal_room", false, false),
+            ],
+            12.0,
+        ));
         let mut registry = crate::registry::HubDeviceRegistry::new();
         registry.upsert_device("sensor1", "motion_room", &[], DeviceType::Motion);
         let registry: Arc<Mutex<dyn HubRegistry>> = Arc::new(Mutex::new(registry));
@@ -3504,29 +3915,27 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn settings_interval_clamped() {
+    fn settings_partial_update() {
         let (state, _runtime) = setup_state(vec![]);
-        do_settings_set(&state, Some(5), None).unwrap();
+        do_settings_set(&state, Some(true)).unwrap();
         let s = state.lock().unwrap();
-        assert_eq!(s.runtime_config.update_interval_secs, 10);
+        assert!(s.power_save);
     }
 
     #[test]
-    fn settings_partial_update() {
+    fn settings_update_preserves_profile_interval() {
         let (state, _runtime) = setup_state(vec![]);
 
-        // Record original values
-        let orig_motion = {
+        let original_interval = {
             let s = state.lock().unwrap();
-            s.default_motion_timeout_secs
+            s.runtime_config.update_interval_secs
         };
 
-        // Only update interval
-        do_settings_set(&state, Some(120), None).unwrap();
+        do_settings_set(&state, Some(true)).unwrap();
 
         let s = state.lock().unwrap();
-        assert_eq!(s.runtime_config.update_interval_secs, 120);
-        assert_eq!(s.default_motion_timeout_secs, orig_motion);
+        assert_eq!(s.runtime_config.update_interval_secs, original_interval);
+        assert!(s.power_save);
     }
 
     // ========================================================================
@@ -3686,9 +4095,8 @@ mod tests {
     #[test]
     fn settings_response_is_valid_settings_json() {
         let (state, _rt) = setup_state(vec![]);
-        let result = do_settings_set(&state, Some(120), None).unwrap();
+        let result = do_settings_set(&state, Some(true)).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert!(parsed["rhythm_interval_secs"].is_number());
         assert!(parsed["power_save"].is_boolean());
         // No status wrapper
         assert!(parsed.get("status").is_none());
@@ -3699,11 +4107,9 @@ mod tests {
         let (state, _rt) = setup_state(vec![]);
         {
             let mut s = state.lock().unwrap();
-            s.runtime_config.update_interval_secs = 30;
             s.power_save = true;
         }
         let dto = build_settings_dto(&state).unwrap();
-        assert_eq!(dto.rhythm_interval_secs, 30);
         assert!(dto.power_save);
     }
 
@@ -3772,10 +4178,13 @@ mod tests {
     #[test]
     fn build_rooms_state_sensor_no_motion_snapshot_populates_defaults() {
         // Room has a motion sensor in the registry but no MotionSnapshot yet.
-        let runtime = Arc::new(MockRuntime::new(vec![
-            make_snapshot("sensor_room", false, false),
-            make_snapshot("plain_room", false, false),
-        ]));
+        let runtime = Arc::new(MockRuntime::new(
+            vec![
+                make_snapshot("sensor_room", false, false),
+                make_snapshot("plain_room", false, false),
+            ],
+            12.0,
+        ));
         let mut registry = crate::registry::HubDeviceRegistry::new();
         registry.upsert_device("ms1", "sensor_room", &[], DeviceType::Motion);
         let registry: Arc<Mutex<dyn HubRegistry>> = Arc::new(Mutex::new(registry));
@@ -3835,8 +4244,10 @@ mod tests {
         assert!(parsed["version"].is_string());
         assert!(parsed["platform"].is_string());
         assert!(parsed["context"].is_string());
-        assert!(parsed["hub"].is_object());
-        assert!(parsed["config"].is_object());
+        assert!(parsed["hubs"].is_array());
+        assert!(parsed["active_profile"].is_object());
+        assert!(parsed["active_profile"]["config"].is_object());
+        assert!(parsed["active_profile"]["effective"].is_object());
         assert!(parsed["location"].is_object());
         assert!(parsed["settings"].is_object());
         assert!(parsed["rooms"].is_array());
@@ -3854,16 +4265,6 @@ mod tests {
         let result = build_state_snapshot(&state).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["settings"]["power_save"], true);
-    }
-
-    #[test]
-    fn build_state_snapshot_hub_uses_type_not_hub_type() {
-        let (state, _rt) = setup_state(vec![]);
-        let result = build_state_snapshot(&state).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        // Hub serializes "type", not "hub_type"
-        assert!(parsed["hub"]["type"].is_string());
-        assert!(parsed["hub"].get("hub_type").is_none());
     }
 
     #[test]
@@ -3999,7 +4400,7 @@ mod tests {
     fn room_preferences_rhythm_enabled() {
         let snap = make_snapshot("r1", false, false);
         let (state, _rt) = setup_state(vec![snap]);
-        let result = do_room_preferences_set(&state, "r1", Some(true), None, None, false);
+        let result = do_room_preferences_set(&state, "r1", Some(true), None, None, None, false);
         assert!(result.is_ok());
     }
 
@@ -4009,7 +4410,8 @@ mod tests {
         let mut snap = make_snapshot("r1", false, false);
         snap.rhythm_enabled = false;
         let (state, _rt) = setup_state(vec![snap]);
-        let result = do_room_preferences_set(&state, "r1", Some(false), None, Some(true), false);
+        let result =
+            do_room_preferences_set(&state, "r1", Some(false), None, Some(true), None, false);
         assert!(result.is_ok());
         // soft_off implies lights conceptually on
         assert_eq!(state.lock().unwrap().room_lights_on.get("r1"), Some(&true));
@@ -4018,7 +4420,8 @@ mod tests {
     #[test]
     fn room_preferences_missing_room_errors() {
         let (state, _rt) = setup_state(vec![]);
-        let result = do_room_preferences_set(&state, "nonexistent", Some(true), None, None, false);
+        let result =
+            do_room_preferences_set(&state, "nonexistent", Some(true), None, None, None, false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
@@ -4030,19 +4433,48 @@ mod tests {
     #[test]
     fn settings_power_save() {
         let (state, _rt) = setup_state(vec![]);
-        do_settings_set(&state, None, Some(true)).unwrap();
+        do_settings_set(&state, Some(true)).unwrap();
         assert!(state.lock().unwrap().power_save);
-        do_settings_set(&state, None, Some(false)).unwrap();
+        do_settings_set(&state, Some(false)).unwrap();
         assert!(!state.lock().unwrap().power_save);
     }
 
     #[test]
-    fn settings_interval_valid() {
+    fn active_profile_interval_defaults_from_config() {
         let (state, _rt) = setup_state(vec![]);
-        do_settings_set(&state, Some(120), None).unwrap();
+        // Auto resolves to DEFAULT_UPDATE_INTERVAL_SECS at reference hour
         assert_eq!(
             state.lock().unwrap().runtime_config.update_interval_secs,
-            120
+            rhythm_core::runtime::config::DEFAULT_UPDATE_INTERVAL_SECS
+        );
+    }
+
+    #[test]
+    fn active_profile_config_updates_runtime_interval() {
+        let (state, _rt) = setup_state(vec![]);
+        let mut rhythm = rhythm_core::default_rhythm_profile();
+        rhythm.rhythm_interval_secs = rhythm_core::TimerSetting::Fixed { value: 17 };
+
+        do_config_set(&state, rhythm).unwrap();
+
+        assert_eq!(
+            state.lock().unwrap().runtime_config.update_interval_secs,
+            17
+        );
+    }
+
+    #[test]
+    fn switching_profiles_updates_runtime_interval() {
+        let (state, _rt) = setup_state(vec![]);
+        let mut sleep = rhythm_core::default_sleep_profile();
+        sleep.rhythm_interval_secs = rhythm_core::TimerSetting::Fixed { value: 23 };
+
+        do_config_set(&state, sleep).unwrap();
+        do_set_light_profile(&state, rhythm_core::SLEEP_PROFILE_ID).unwrap();
+
+        assert_eq!(
+            state.lock().unwrap().runtime_config.update_interval_secs,
+            23
         );
     }
 
@@ -4054,7 +4486,7 @@ mod tests {
     fn absorb_offset_no_runtime_still_succeeds() {
         // Without a runtime, absorb should succeed (no rooms to reset)
         let state: SharedState = Arc::new(Mutex::new(AppState::default()));
-        let result = do_absorb_time_offset(&state, 30.0);
+        let result = do_absorb_time_offset(&state, None, 30.0);
         assert!(result.is_ok());
     }
 
@@ -4064,7 +4496,7 @@ mod tests {
         snap.time_offset_minutes = 30.0;
         let (state, _rt) = setup_state(vec![snap]);
 
-        let result = do_absorb_time_offset(&state, 30.0);
+        let result = do_absorb_time_offset(&state, None, 30.0);
         assert!(result.is_ok());
 
         // MockRuntime's set_room_time_offset is a no-op, so we can't assert
@@ -4085,14 +4517,106 @@ mod tests {
             s.timezone_name = Some("America/Los_Angeles".to_string());
         }
 
-        let before = state.lock().unwrap().config.clone();
-        let result = do_absorb_time_offset(&state, 30.0);
+        let before = state
+            .lock()
+            .unwrap()
+            .active_light_profile_config()
+            .cloned()
+            .unwrap();
+        let result = do_absorb_time_offset(&state, None, 30.0);
         assert!(result.is_ok());
 
-        let after = state.lock().unwrap().config.clone();
+        let after = state
+            .lock()
+            .unwrap()
+            .active_light_profile_config()
+            .cloned()
+            .unwrap();
         // Config may or may not change depending on current time of day
         // (might be at peak or in tail where absorb returns None)
         // But the command should always succeed
         let _ = (before, after);
+    }
+
+    #[test]
+    fn absorb_offset_targets_requested_non_active_profile() {
+        let mut snap = make_snapshot("r1", false, false);
+        snap.time_offset_minutes = 30.0;
+        let (state, runtime) = setup_state_at_hour(vec![snap], 8.0);
+
+        let before_sleep = state
+            .lock()
+            .unwrap()
+            .light_profile_config(rhythm_core::SLEEP_PROFILE_ID)
+            .cloned()
+            .unwrap();
+        let before_rhythm = state
+            .lock()
+            .unwrap()
+            .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
+            .cloned()
+            .unwrap();
+
+        let result = do_absorb_time_offset(&state, Some(rhythm_core::SLEEP_PROFILE_ID), 60.0);
+        assert!(result.is_ok());
+
+        let after_sleep = state
+            .lock()
+            .unwrap()
+            .light_profile_config(rhythm_core::SLEEP_PROFILE_ID)
+            .cloned()
+            .unwrap();
+        let after_rhythm = state
+            .lock()
+            .unwrap()
+            .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
+            .cloned()
+            .unwrap();
+
+        assert_ne!(after_sleep, before_sleep, "sleep profile should change");
+        assert_eq!(
+            after_rhythm, before_rhythm,
+            "rhythm profile should be untouched"
+        );
+        assert_eq!(runtime.config_updates().len(), 1);
+        assert_eq!(
+            runtime.config_updates()[0].id,
+            rhythm_core::SLEEP_PROFILE_ID
+        );
+        assert_eq!(runtime.time_offset_updates(), vec![("r1".to_string(), 0.0)]);
+    }
+
+    #[test]
+    fn absorb_offset_idle_profile_is_noop_for_config_but_resets_offsets() {
+        let mut snap = make_snapshot("r1", false, false);
+        snap.time_offset_minutes = 45.0;
+        let (state, runtime) = setup_state_at_hour(vec![snap], 8.0);
+
+        let before_idle = state
+            .lock()
+            .unwrap()
+            .light_profile_config(rhythm_core::IDLE_PROFILE_ID)
+            .cloned()
+            .unwrap();
+
+        let result = do_absorb_time_offset(&state, Some(rhythm_core::IDLE_PROFILE_ID), 30.0);
+        assert!(result.is_ok());
+
+        let after_idle = state
+            .lock()
+            .unwrap()
+            .light_profile_config(rhythm_core::IDLE_PROFILE_ID)
+            .cloned()
+            .unwrap();
+
+        assert_eq!(
+            after_idle, before_idle,
+            "idle inherit-active config should not change"
+        );
+        assert!(
+            runtime.config_updates().is_empty(),
+            "non-super-gaussian target should not push config updates"
+        );
+        assert_eq!(runtime.time_offset_updates(), vec![("r1".to_string(), 0.0)]);
     }
 }

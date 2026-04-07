@@ -138,6 +138,7 @@ pub fn process_button_inline(
     match runtime.handle_event(&event) {
         Ok(turned_on) => {
             info!(target: "evt", "Inline: {:?} room '{}' -> on={}", action, room_id, turned_on);
+            crate::commands::sync_active_profile_from_runtime(state, &runtime);
             // Track lights_on state
             if let Ok(mut s) = state.lock() {
                 s.room_lights_on.insert(room_id.to_string(), turned_on);
@@ -406,16 +407,18 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
 ///
 /// Groups sensors by room. For each room, countdown only starts when ALL
 /// sensors have cleared. Uses the latest sensor stop time as the countdown
-/// start. Per-room timeout from `AppState.motion_timeouts` (fallback to
-/// `AppState.default_motion_timeout_secs`). Timeout=0 disables auto-off.
+/// start. Per-room timeout is resolved from the room's selected base profile
+/// plus any persisted `room_profile.motion_timeout_secs` override. Timeout=0
+/// disables auto-off.
 pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
     let now = Instant::now();
 
-    // Read per-room timeouts and default from AppState
-    let (timeouts, default_timeout) = {
-        let Ok(s) = state.lock() else { return };
-        (s.motion_timeouts.clone(), s.default_motion_timeout_secs)
-    };
+    let (timeouts, _) = commands::resolved_room_motion_timeout_map(state);
+    let default_timeout_secs = state
+        .lock()
+        .ok()
+        .map(|s| s.default_motion_timeout_secs)
+        .unwrap_or(0);
 
     // Group sensors by room_id
     let mut rooms: HashMap<String, Vec<(&String, &Option<Instant>)>> = HashMap::new();
@@ -430,7 +433,10 @@ pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
     let status: Vec<String> = rooms
         .iter()
         .map(|(room_id, sensors)| {
-            let room_timeout = timeouts.get(room_id).copied().unwrap_or(default_timeout);
+            let room_timeout = timeouts
+                .get(room_id)
+                .copied()
+                .unwrap_or(default_timeout_secs);
             let sensor_status: Vec<String> = sensors
                 .iter()
                 .map(|(sid, stopped)| match stopped {
@@ -468,7 +474,10 @@ pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
         };
 
         // Get per-room timeout (fallback to default)
-        let timeout_secs = timeouts.get(room_id).copied().unwrap_or(default_timeout);
+        let timeout_secs = timeouts
+            .get(room_id)
+            .copied()
+            .unwrap_or(default_timeout_secs);
 
         // Timeout=0 means auto-off disabled for this room
         if timeout_secs == 0 {
@@ -644,6 +653,13 @@ fn check_registry_dirty(state: &SharedState) {
 
 /// Sync motion timer snapshots into AppState for API visibility.
 pub fn sync_motion_snapshots(state: &SharedState, motion: &MotionTimerState) {
+    let (timeouts, _) = commands::resolved_room_motion_timeout_map(state);
+    let default_timeout_secs = state
+        .lock()
+        .ok()
+        .map(|s| s.default_motion_timeout_secs)
+        .unwrap_or(0);
+
     if let Ok(mut s) = state.lock() {
         if motion.sensors.is_empty() {
             if !s.motion_snapshots.is_empty() {
@@ -652,8 +668,7 @@ pub fn sync_motion_snapshots(state: &SharedState, motion: &MotionTimerState) {
                 s.emit_event(crate::server_event::ServerEvent::MotionTimer { timers: vec![] });
             }
         } else {
-            s.motion_snapshots =
-                motion.snapshots(&s.motion_timeouts, s.default_motion_timeout_secs);
+            s.motion_snapshots = motion.snapshots(&timeouts, default_timeout_secs);
             #[cfg(feature = "desktop")]
             {
                 let timers: Vec<_> = s
@@ -702,6 +717,7 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             match runtime.handle_event(&event) {
                 Ok(turned_on) => {
                     info!(target: "evt", "Worker: {:?} room '{}' -> on={}", action, room_id, turned_on);
+                    crate::commands::sync_active_profile_from_runtime(state, &runtime);
                     if let Ok(mut s) = state.lock() {
                         s.room_lights_on.insert(room_id.clone(), turned_on);
                     }
@@ -739,8 +755,15 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
+    use rhythm_core::runtime::{RoomSnapshot, RuntimeHandle};
+    use rhythm_core::{LightProfileConfig, RoomProfileSettings, TimerSetting};
+
+    use crate::canonical::identity::HubKey;
+    use crate::hub::{ActiveHub, HubType};
 
     #[test]
     fn new_is_empty() {
@@ -962,6 +985,132 @@ mod tests {
         std::sync::Arc::new(std::sync::Mutex::new(crate::state::AppState::default()))
     }
 
+    struct MotionTestRuntime {
+        snapshots: Vec<RoomSnapshot>,
+    }
+
+    impl RuntimeHandle for MotionTestRuntime {
+        fn handle_event(&self, _: &rhythm_core::InputEvent) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn sync_rooms(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn set_solar(&self, _: rhythm_core::SolarTime) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn set_light_profile_config(&self, _: LightProfileConfig) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn periodic_tick_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn engine_room_snapshot(&self, room_id: &str) -> Option<RoomSnapshot> {
+            self.snapshots.iter().find(|snap| snap.id == room_id).cloned()
+        }
+        fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot> {
+            self.snapshots.clone()
+        }
+        fn restore_room_state(
+            &self,
+            _: &str,
+            _: bool,
+            _: bool,
+            _: f32,
+            _: f32,
+            _: bool,
+            _: RoomProfileSettings,
+        ) {
+        }
+        fn add_room(&self, _: &str, _: &str) {}
+        fn remove_room(&self, _: &str) {}
+        fn dim_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn turn_on_room(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn set_power_save(&self, _: bool) -> Vec<String> {
+            vec![]
+        }
+        fn is_power_save(&self) -> bool {
+            false
+        }
+        fn set_room_brightness(&self, _: &str, _: u8) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn set_room_time_offset(&self, _: &str, _: f32) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn idle_brightness(&self) -> u8 {
+            1
+        }
+        fn soft_off_tick_room(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn any_lights_on(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn current_hour(&self) -> f32 {
+            12.0
+        }
+        fn set_light_profile(&self, _: &str) -> bool {
+            true
+        }
+        fn active_light_profile_id(&self) -> String {
+            rhythm_core::RHYTHM_PROFILE_ID.to_string()
+        }
+        fn available_light_profiles(&self) -> Vec<(String, String)> {
+            vec![
+                ("rhythm".into(), "Rhythm Curve".into()),
+                ("sleep".into(), "Sleep Curve".into()),
+            ]
+        }
+    }
+
+    fn make_state_with_motion_override(timeout_secs: u32) -> SharedState {
+        let mut app = crate::state::AppState::default();
+        let mut active = app
+            .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
+            .cloned()
+            .unwrap();
+        active.motion_timeout_secs = TimerSetting::Fixed { value: 300 };
+        app.set_light_profile_config(active);
+        app.default_motion_timeout_secs = 300;
+
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(MotionTestRuntime {
+            snapshots: vec![RoomSnapshot {
+                id: "room_a".into(),
+                name: "Room A".into(),
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                profile_settings: RoomProfileSettings {
+                    motion_timeout_secs: Some(TimerSetting::Fixed { value: timeout_secs }),
+                    ..Default::default()
+                },
+            }],
+        });
+        let hub_type = HubType::new("test");
+        let hub_key = HubKey::new(hub_type.clone(), "hub.local");
+        app.hubs.insert(
+            hub_key.clone(),
+            ActiveHub {
+                hub_type,
+                hub_key,
+                runtime: Some(runtime),
+                hub_data: Box::new(()),
+                registry: None,
+                discovery: None,
+                shutdown: Arc::new(AtomicBool::new(false)),
+            },
+        );
+
+        Arc::new(Mutex::new(app))
+    }
+
     #[test]
     fn check_motion_timers_all_active_no_expiry() {
         let state = make_state();
@@ -1017,7 +1166,7 @@ mod tests {
 
     #[test]
     fn check_motion_timers_timeout_zero_disables() {
-        let state = make_state();
+        let state = make_state_with_motion_override(0);
 
         let mut motion = MotionTimerState::new();
         let stopped_at = Instant::now() - Duration::from_secs(9999);
@@ -1025,13 +1174,6 @@ mod tests {
             .sensors
             .insert("s1".into(), ("room_a".into(), Some(stopped_at)));
         motion.motion_owned.insert("room_a".into());
-
-        // Set per-room timeout to 0 (disabled)
-        state
-            .lock()
-            .unwrap()
-            .motion_timeouts
-            .insert("room_a".into(), 0);
 
         check_motion_timers(&state, &mut motion);
 
@@ -1042,14 +1184,7 @@ mod tests {
 
     #[test]
     fn check_motion_timers_per_room_timeout() {
-        let state = make_state();
-        state.lock().unwrap().default_motion_timeout_secs = 300;
-        // room_a has a shorter per-room timeout
-        state
-            .lock()
-            .unwrap()
-            .motion_timeouts
-            .insert("room_a".into(), 60);
+        let state = make_state_with_motion_override(60);
 
         let mut motion = MotionTimerState::new();
         // Stopped 100 seconds ago — past the 60s per-room timeout but within 300s default

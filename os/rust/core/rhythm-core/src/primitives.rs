@@ -12,13 +12,17 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use crate::config::CurveConfig;
 use crate::controller::{LightControlResult, LightController};
-use crate::light_profile::{CurveContext, LightProfileModule, LightProfileRegistry};
+use crate::light_profile::{
+    CurveContext, LightCurveShape, LightProfile, LightProfileConfig, LightProfileModule,
+    LightProfileRegistry, IDLE_PROFILE_ID,
+};
 use crate::lighting::LightingCommand;
-use crate::room::RoomManager;
+use crate::room::{RoomManager, RoomProfileSettings};
 use crate::solar::{SolarTime, SunTimes};
 use crate::steps::StepAction;
+use crate::{default_idle_profile, default_rhythm_profile, LightingValues};
+use rhythm_profile::profile_config::DEFAULT_FADE_MS;
 
 /// Default power save mode (false = lights dim to soft-off brightness instead of turning fully off).
 pub const DEFAULT_POWER_SAVE: bool = false;
@@ -120,11 +124,16 @@ impl<C: LightController> RhythmEngine<C> {
         }
     }
 
-    /// Create a new RhythmEngine with custom configuration.
-    pub fn with_config(controller: C, config: CurveConfig, solar: SolarTime) -> Self {
+    /// Create a new RhythmEngine with custom profile configs.
+    pub fn with_profiles(
+        controller: C,
+        profiles: Vec<LightProfileConfig>,
+        active_profile_id: &str,
+        solar: SolarTime,
+    ) -> Self {
         Self {
             controller,
-            profile_registry: LightProfileRegistry::with_config(config),
+            profile_registry: LightProfileRegistry::with_profiles(profiles, active_profile_id),
             solar,
             sun_times: None,
             rooms: RoomManager::new(),
@@ -132,9 +141,9 @@ impl<C: LightController> RhythmEngine<C> {
         }
     }
 
-    /// Set the curve configuration for the rhythm module.
-    pub fn set_config(&mut self, config: CurveConfig) {
-        self.profile_registry.update_rhythm_config(config);
+    /// Set or replace a profile configuration.
+    pub fn set_light_profile_config(&mut self, config: LightProfileConfig) -> bool {
+        self.profile_registry.set_profile_config(config)
     }
 
     /// Set the solar time reference.
@@ -237,6 +246,75 @@ impl<C: LightController> RhythmEngine<C> {
         CurveContext::new(current_hour, self.solar, self.sun_times)
     }
 
+    fn room_profile_config_for_settings(
+        &self,
+        settings: Option<&RoomProfileSettings>,
+    ) -> LightProfileConfig {
+        let active_profile_id = self.profile_registry.active_profile_id();
+        let requested_id = settings
+            .map(|settings| settings.resolved_profile_id(active_profile_id))
+            .unwrap_or(active_profile_id);
+        let base_id = if self.profile_registry.contains(requested_id) && requested_id != IDLE_PROFILE_ID
+        {
+            requested_id
+        } else {
+            active_profile_id
+        };
+
+        let mut config = self
+            .profile_registry
+            .profile_config_cloned(base_id)
+            .or_else(|| self.profile_registry.profile_config_cloned(active_profile_id))
+            .unwrap_or_else(default_rhythm_profile);
+
+        if let Some(settings) = settings {
+            settings.apply_to_config(&mut config);
+        }
+
+        config
+    }
+
+    fn active_profile_for_settings(
+        &self,
+        settings: Option<&RoomProfileSettings>,
+    ) -> Arc<dyn LightProfileModule> {
+        Arc::new(LightProfile::new(
+            self.room_profile_config_for_settings(settings),
+        ))
+    }
+
+    fn idle_values_for_settings(
+        &self,
+        settings: Option<&RoomProfileSettings>,
+        current_hour: f32,
+        time_offset_minutes: f32,
+    ) -> LightingValues {
+        let ctx = self.create_context(current_hour).with_offset(time_offset_minutes);
+        let idle_config = self
+            .profile_registry
+            .profile_config_cloned(IDLE_PROFILE_ID)
+            .unwrap_or_else(default_idle_profile);
+
+        if matches!(idle_config.curve, LightCurveShape::InheritActive) {
+            let mut values = self.active_profile_for_settings(settings).calculate(&ctx);
+            values.brightness = idle_config.max_brightness.max(idle_config.min_brightness);
+            values.kelvin = 0;
+            values.is_direct_color = true;
+            values.transition_ms = idle_config
+                .fade_ms
+                .resolve(ctx.current_hour)
+                .unwrap_or(DEFAULT_FADE_MS as u32);
+            values.motion_timeout_secs = idle_config
+                .motion_timeout_secs
+                .resolve(ctx.current_hour)
+                .map(|v| v as u16)
+                .unwrap_or(values.motion_timeout_secs);
+            values
+        } else {
+            LightProfile::new(idle_config).calculate(&ctx)
+        }
+    }
+
     // =========================================================================
     // Service Primitives
     // =========================================================================
@@ -266,16 +344,20 @@ impl<C: LightController> RhythmEngine<C> {
     /// * `current_hour` - Current time in hours (0-24)
     pub async fn turn_on(&mut self, room_id: &str, current_hour: f32) -> LightControlResult<()> {
         // Get or create room and enable rhythm
-        let room = self.rooms.get_or_create(room_id, room_id);
-        room.enable_rhythm();
-        room.soft_off = false;
+        let (offset_minutes, brightness_offset, profile_settings) = {
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.enable_rhythm();
+            room.soft_off = false;
+            (
+                room.effective_time_offset(),
+                room.effective_brightness_offset(),
+                room.profile_settings.clone(),
+            )
+        };
 
         // Calculate lighting values with any stored offset
-        let offset_minutes = room.effective_time_offset();
-        let brightness_offset = room.effective_brightness_offset();
-
         let ctx = self.create_context(current_hour);
-        let module = self.profile_registry.active_profile();
+        let module = self.active_profile_for_settings(Some(&profile_settings));
         let values = module.calculate_with_offset(&ctx, offset_minutes);
 
         // Apply brightness offset if any
@@ -304,16 +386,20 @@ impl<C: LightController> RhythmEngine<C> {
         current_hour: f32,
         factor: f32,
     ) -> LightControlResult<()> {
-        let Some(room) = self.rooms.get_mut(room_id) else {
-            return Ok(());
+        let (offset_minutes, brightness_offset, profile_settings) = {
+            let Some(room) = self.rooms.get_mut(room_id) else {
+                return Ok(());
+            };
+            room.soft_off = false;
+            (
+                room.effective_time_offset(),
+                room.effective_brightness_offset(),
+                room.profile_settings.clone(),
+            )
         };
-        room.soft_off = false;
-
-        let offset_minutes = room.effective_time_offset();
-        let brightness_offset = room.effective_brightness_offset();
 
         let ctx = self.create_context(current_hour);
-        let module = self.profile_registry.active_profile();
+        let module = self.active_profile_for_settings(Some(&profile_settings));
         let values = module.calculate_with_offset(&ctx, offset_minutes);
 
         let brightness =
@@ -418,18 +504,18 @@ impl<C: LightController> RhythmEngine<C> {
         }
 
         // Get the room's current time offset
-        let current_offset = self
+        let (current_offset, profile_settings) = self
             .rooms
             .get(room_id)
-            .map(|r| r.effective_time_offset())
-            .unwrap_or(0.0);
+            .map(|r| (r.effective_time_offset(), r.profile_settings.clone()))
+            .unwrap_or((0.0, RoomProfileSettings::default()));
 
         // Calculate effective current hour with offset
         let effective_hour = (current_hour + current_offset / 60.0).rem_euclid(24.0);
 
         // Calculate the step using the active module
         let ctx = self.create_context(effective_hour);
-        let module = self.profile_registry.active_profile();
+        let module = self.active_profile_for_settings(Some(&profile_settings));
         let step_result = module.calculate_step(&ctx, action);
 
         // Update room offset (don't change rhythm mode state)
@@ -489,16 +575,19 @@ impl<C: LightController> RhythmEngine<C> {
         amount: f32,
     ) -> LightControlResult<()> {
         // User is interacting — clear soft_off
-        let room = self.rooms.get_or_create(room_id, room_id);
-        room.soft_off = false;
-        room.apply_brightness_offset(amount);
-
-        // Calculate current values with time offset
-        let offset_minutes = room.effective_time_offset();
-        let brightness_offset = room.effective_brightness_offset();
+        let (offset_minutes, brightness_offset, profile_settings) = {
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.soft_off = false;
+            room.apply_brightness_offset(amount);
+            (
+                room.effective_time_offset(),
+                room.effective_brightness_offset(),
+                room.profile_settings.clone(),
+            )
+        };
 
         let ctx = self.create_context(current_hour);
-        let module = self.profile_registry.active_profile();
+        let module = self.active_profile_for_settings(Some(&profile_settings));
         let values = module.calculate_with_offset(&ctx, offset_minutes);
 
         // Apply brightness offset
@@ -526,16 +615,16 @@ impl<C: LightController> RhythmEngine<C> {
         current_hour: f32,
         target: u8,
     ) -> LightControlResult<()> {
-        // First borrow: clear soft_off and extract time offset
-        let offset_minutes = {
+        // First borrow: clear soft_off and extract time offset + profile settings
+        let (offset_minutes, profile_settings) = {
             let room = self.rooms.get_or_create(room_id, room_id);
             room.soft_off = false;
-            room.effective_time_offset()
+            (room.effective_time_offset(), room.profile_settings.clone())
         };
 
         // Calculate curve values at current time
         let ctx = self.create_context(current_hour);
-        let module = self.profile_registry.active_profile();
+        let module = self.active_profile_for_settings(Some(&profile_settings));
         let values = module.calculate_with_offset(&ctx, offset_minutes);
 
         // Second borrow: set offset so curve_brightness + offset = target
@@ -572,6 +661,7 @@ impl<C: LightController> RhythmEngine<C> {
         let soft_off = room.soft_off;
         let brightness_offset = room.effective_brightness_offset();
         let time_offset = room.effective_time_offset();
+        let profile_settings = room.profile_settings.clone();
 
         if !rhythm_enabled && !soft_off {
             // Room is off — just set the offset, no light command
@@ -579,15 +669,13 @@ impl<C: LightController> RhythmEngine<C> {
         }
 
         let ctx = self.create_context(current_hour);
-        let module = self.profile_registry.active_profile();
+        let module = self.active_profile_for_settings(Some(&profile_settings));
         let values = module.calculate_with_offset(&ctx, time_offset);
 
         if soft_off && !self.power_save {
             // Soft-off: use idle profile values (brightness + color)
-            let idle_values = self
-                .profile_registry
-                .idle_profile()
-                .calculate(&ctx.with_offset(time_offset));
+            let idle_values =
+                self.idle_values_for_settings(Some(&profile_settings), current_hour, time_offset);
             let cmd = Self::build_command(&idle_values, idle_values.brightness);
             self.controller.turn_on(room_id, cmd).await
         } else {
@@ -609,14 +697,17 @@ impl<C: LightController> RhythmEngine<C> {
     /// * `current_hour` - Current time in hours (0-24)
     pub async fn reset(&mut self, room_id: &str, current_hour: f32) -> LightControlResult<()> {
         // Reset room offsets, clear soft_off, and enable rhythm mode
-        let room = self.rooms.get_or_create(room_id, room_id);
-        room.reset_offsets();
-        room.soft_off = false;
-        room.enable_rhythm();
+        let profile_settings = {
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.reset_offsets();
+            room.soft_off = false;
+            room.enable_rhythm();
+            room.profile_settings.clone()
+        };
 
         // Apply current values using the active module
         let ctx = self.create_context(current_hour);
-        let module = self.profile_registry.active_profile();
+        let module = self.active_profile_for_settings(Some(&profile_settings));
         let values = module.calculate(&ctx);
         let command = LightingCommand::from_values(&values);
         self.controller.turn_on(room_id, command).await
@@ -638,15 +729,13 @@ impl<C: LightController> RhythmEngine<C> {
             self.controller.turn_off(room_id).await
         } else {
             // Dim to soft-off brightness with idle profile color instead of turning off
-            let room = self.rooms.get_or_create(room_id, room_id);
-            room.soft_off = true;
-            let offset = room.effective_time_offset();
-
-            let ctx = self.create_context(current_hour);
-            let values = self
-                .profile_registry
-                .idle_profile()
-                .calculate(&ctx.with_offset(offset));
+            let (offset, profile_settings) = {
+                let room = self.rooms.get_or_create(room_id, room_id);
+                room.soft_off = true;
+                (room.effective_time_offset(), room.profile_settings.clone())
+            };
+            let values =
+                self.idle_values_for_settings(Some(&profile_settings), current_hour, offset);
 
             let cmd = Self::build_command(&values, values.brightness);
             self.controller.turn_on(room_id, cmd).await
@@ -769,17 +858,13 @@ impl<C: LightController> RhythmEngine<C> {
         room_id: &str,
         current_hour: f32,
     ) -> LightControlResult<()> {
-        let offset = self
+        let (offset, profile_settings) = self
             .rooms
             .get(room_id)
-            .map(|r| r.effective_time_offset())
-            .unwrap_or(0.0);
-
-        let ctx = self.create_context(current_hour);
-        let values = self
-            .profile_registry
-            .idle_profile()
-            .calculate(&ctx.with_offset(offset));
+            .map(|r| (r.effective_time_offset(), r.profile_settings.clone()))
+            .unwrap_or((0.0, RoomProfileSettings::default()));
+        let values =
+            self.idle_values_for_settings(Some(&profile_settings), current_hour, offset);
 
         let cmd = Self::build_command(&values, values.brightness);
         self.controller.turn_on(room_id, cmd).await
@@ -1067,7 +1152,7 @@ mod tests {
 
         // At noon, should be bright and cool
         assert!(cmd.brightness > 90);
-        assert!(cmd.kelvin >= crate::config::DEFAULT_MAX_COLOR_TEMP - 100);
+        assert!(cmd.kelvin >= rhythm_profile::DEFAULT_MAX_COLOR_TEMP - 100);
     }
 
     // =========================================================================
@@ -1576,7 +1661,7 @@ mod tests {
         // At noon - should be bright and cool
         let cmd_noon = engine.get_current_values("room1", 12.0);
         assert!(cmd_noon.brightness >= 90);
-        assert!(cmd_noon.kelvin >= crate::config::DEFAULT_MAX_COLOR_TEMP - 100);
+        assert!(cmd_noon.kelvin >= rhythm_profile::DEFAULT_MAX_COLOR_TEMP - 100);
 
         // At end of day (23.99)
         let cmd_late = engine.get_current_values("room1", 23.99);

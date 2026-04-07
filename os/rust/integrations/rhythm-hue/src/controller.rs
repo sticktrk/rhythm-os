@@ -11,6 +11,9 @@ use log::info;
 use rhythm_core::controller::{LightControlError, LightControlResult, LightController};
 use rhythm_core::lighting::LightingCommand;
 use rhythm_core::room::Room;
+use rhythm_devices::ColorPreference;
+use rhythm_os::canonical::identity::HubKey;
+use rhythm_os::state::SharedState;
 
 use crate::registry::HueDeviceRegistry;
 use crate::transport::HueTransport;
@@ -24,6 +27,8 @@ pub struct HueLightController<H: HueTransport> {
     client: H,
     username: String,
     registry: Arc<Mutex<HueDeviceRegistry>>,
+    capability_state: Option<SharedState>,
+    capability_hub_key: Option<HubKey>,
 }
 
 impl<H: HueTransport> HueLightController<H> {
@@ -39,7 +44,17 @@ impl<H: HueTransport> HueLightController<H> {
             client,
             username,
             registry,
+            capability_state: None,
+            capability_hub_key: None,
         }
+    }
+
+    /// Attach shared state so room capabilities can be derived from the
+    /// canonical registry at command time.
+    pub fn with_capability_source(mut self, state: SharedState, hub_key: HubKey) -> Self {
+        self.capability_state = Some(state);
+        self.capability_hub_key = Some(hub_key);
+        self
     }
 
     /// Eagerly establish the TLS connection to the Hue bridge so the first
@@ -55,24 +70,28 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
         let grouped_light_id =
             rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
 
-        let dynamics = command.transition_ms.unwrap_or(0) as u16;
-
-        // Direct color: send XY coordinates. Otherwise: send kelvin as mirek.
-        let (kelvin, xy) = if command.is_direct_color {
-            (None, Some((command.xy.x, command.xy.y)))
-        } else {
-            (Some(command.kelvin), None)
-        };
+        let caps = rhythm_os::controller_helpers::resolve_room_capabilities(
+            &self.registry,
+            self.capability_state.as_ref(),
+            self.capability_hub_key.as_ref(),
+            room_id,
+        );
+        let adapted = rhythm_os::controller_helpers::adapt_lighting_command(
+            &caps,
+            &command,
+            ColorPreference::PreferColorTemperature,
+        );
+        let dynamics = adapted.transition_ms.map(|ms| ms as u16);
 
         self.client
             .set_grouped_light(
                 &self.username,
                 &grouped_light_id,
                 true,
-                Some(command.brightness),
-                kelvin,
-                xy,
-                if dynamics > 0 { Some(dynamics) } else { None },
+                adapted.brightness,
+                adapted.kelvin,
+                adapted.xy,
+                dynamics.filter(|ms| *ms > 0),
             )
             .map_err(|e| {
                 log::warn!(target: "cmd", "Hue turn_on failed: room={} err={}", room_id, e);
@@ -82,15 +101,22 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
                 ))
             })?;
 
-        if command.is_direct_color {
+        if let Some((x, y)) = adapted.xy {
             info!(target: "cmd",
-                "Hue turn_on: room={} grouped_light={} bri={} xy=({:.3},{:.3})",
-                room_id, grouped_light_id, command.brightness, command.xy.x, command.xy.y
+                "Hue turn_on: room={} grouped_light={} bri={} xy=({:.3},{:.3}) rgb=({},{},{})",
+                room_id, grouped_light_id, adapted.brightness.unwrap_or(0),
+                x, y,
+                command.rgb.r, command.rgb.g, command.rgb.b,
+            );
+        } else if let Some(kelvin) = adapted.kelvin {
+            info!(target: "cmd",
+                "Hue turn_on: room={} grouped_light={} bri={} kelvin={}",
+                room_id, grouped_light_id, adapted.brightness.unwrap_or(0), kelvin
             );
         } else {
             info!(target: "cmd",
-                "Hue turn_on: room={} grouped_light={} bri={} kelvin={}",
-                room_id, grouped_light_id, command.brightness, command.kelvin
+                "Hue turn_on: room={} grouped_light={} bri={}",
+                room_id, grouped_light_id, adapted.brightness.unwrap_or(0)
             );
         }
 

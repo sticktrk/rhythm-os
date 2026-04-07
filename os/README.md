@@ -87,7 +87,7 @@ Rhythm is built as a layered crate architecture. Each layer has a single respons
 
 | Crate | Purpose |
 |-------|---------|
-| **rhythm-curve** | Pluggable lighting curve contract. Defines the `LightProfileModule` trait for custom curve shapes. |
+| **rhythm-profile** | Pluggable lighting profile contract. Defines the `LightProfileModule` trait and shared profile types. |
 | **rhythm-core** | Solar calculations, curve engine, color science, runtime orchestration. Pure algorithms with zero I/O — runs on any platform. Feature-gated for `tokio` (async) or `blocking` (embedded). |
 | **rhythm-os** | Hub-agnostic business logic: room management, event loop, command handling, persistence. Knows nothing about Hue — dispatches through traits. |
 | **rhythm-hue** | Philips Hue V2 integration. Implements `LightController`, `HubRegistry`, and `HubProvider`. Platform-abstracted via `HueTransport` trait — same logic on ESP32 and desktop. |
@@ -99,11 +99,11 @@ Rhythm is built as a layered crate architecture. Each layer has a single respons
 ### Dependency graph
 
 ```
-rhythm-curve ← base, no rhythm-* deps
+rhythm-profile ← base, no rhythm-* deps
     ↑
-rhythm-core  ──→ rhythm-curve
+rhythm-core  ──→ rhythm-profile
     ↑
-rhythm-os    ──→ rhythm-core + rhythm-curve
+rhythm-os    ──→ rhythm-core + rhythm-profile
 rhythm-hue   ──→ rhythm-core + rhythm-os
 rhythm-ha    ──→ rhythm-core + rhythm-os
     ↑

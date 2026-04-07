@@ -1,4 +1,4 @@
-//! # Rhythm Curve
+//! # Rhythm Profile
 //!
 //! Pluggable lighting profile contract for Rhythm OS.
 //!
@@ -10,7 +10,7 @@
 //! ## Implementing a Custom Profile
 //!
 //! ```ignore
-//! use rhythm_curve::{CurveContext, LightProfileModule, LightingValues, StepAction, StepResult};
+//! use rhythm_profile::{CurveContext, LightProfileModule, LightingValues, StepAction, StepResult};
 //!
 //! pub struct MyProfile { /* your config */ }
 //!
@@ -48,7 +48,7 @@ pub use config::{
 pub use context::CurveContext;
 pub use curve_shape::{LightCurveShape, LightDirectColor, LightPaletteKeyframe};
 pub use module::LightProfileModule;
-pub use profile_config::LightProfileConfig;
+pub use profile_config::{HourBreakpoint, LightProfileConfig, TimerSetting};
 pub use render::{
     generate_curve_data, generate_step_sequences, CurveData, StepPoint, StepSequences,
 };

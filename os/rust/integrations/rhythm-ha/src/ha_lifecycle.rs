@@ -96,18 +96,22 @@ pub fn ensure_ha_runtime<H: crate::transport::HaTransport + 'static>(
 ) -> Result<()> {
     use crate::controller::HaLightController;
 
-    let registry = {
+    let (hub_key, registry) = {
         let s = state
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
 
-        let ha_data = s.hubs.values().find_map(|h| h.data::<HaHubData>());
-        ha_data
-            .map(|ha| ha.registry.clone())
+        s.hubs
+            .iter()
+            .find_map(|(key, hub)| {
+                hub.data::<HaHubData>()
+                    .map(|ha| (key.clone(), ha.registry.clone()))
+            })
             .ok_or_else(|| anyhow::anyhow!("HA hub not active (call connect first)"))?
     };
 
-    let controller = HaLightController::new(transport, registry.clone());
+    let controller = HaLightController::new(transport, registry.clone())
+        .with_capability_source(state.clone(), hub_key);
 
     rhythm_os::lifecycle::ensure_hub_runtime(
         state, controller, registry, None, // No TLS warmup for HA

@@ -1216,7 +1216,7 @@ dependencies = [
  "futures",
  "libm",
  "log",
- "rhythm-curve",
+ "rhythm-profile",
  "serde",
  "serde_json",
  "sunrise",
@@ -1225,7 +1225,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rhythm-curve"
+name = "rhythm-profile"
 version = "0.1.0"
 dependencies = [
  "libm",
@@ -1272,7 +1272,7 @@ dependencies = [
  "chrono",
  "log",
  "rhythm-core",
- "rhythm-curve",
+ "rhythm-profile",
  "serde",
  "serde_json",
 ]

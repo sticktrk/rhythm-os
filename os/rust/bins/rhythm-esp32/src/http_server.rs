@@ -12,22 +12,28 @@ use log::{info, warn};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::storage;
 use rhythm_os::handlers::{self, ApiResponse};
 use rhythm_os::state::{SharedState, WorkItem};
-use crate::storage;
 
 /// JSON Content-Type + CORS headers for all responses.
 const JSON_CORS_HEADERS: &[(&str, &str)] = &[
     ("Content-Type", "application/json"),
     ("Access-Control-Allow-Origin", "*"),
-    ("Access-Control-Allow-Methods", "GET, PUT, POST, DELETE, OPTIONS"),
+    (
+        "Access-Control-Allow-Methods",
+        "GET, PUT, POST, DELETE, OPTIONS",
+    ),
     ("Access-Control-Allow-Headers", "Content-Type"),
 ];
 
 /// CORS-only headers for OPTIONS preflight responses (no Content-Type).
 const CORS_HEADERS: &[(&str, &str)] = &[
     ("Access-Control-Allow-Origin", "*"),
-    ("Access-Control-Allow-Methods", "GET, PUT, POST, DELETE, OPTIONS"),
+    (
+        "Access-Control-Allow-Methods",
+        "GET, PUT, POST, DELETE, OPTIONS",
+    ),
     ("Access-Control-Allow-Headers", "Content-Type"),
 ];
 
@@ -150,13 +156,19 @@ pub fn start_server(
     })?;
 
     let s = state.clone();
-    server.fn_handler::<anyhow::Error, _>("/api/config/absorb-offset", Method::Post, move |mut req| {
-        let body = match read_json_body(&mut req) {
-            Ok(b) => b,
-            Err(e) => return write_api_response(req, &ApiResponse::bad_request(&e.to_string())),
-        };
-        write_api_response(req, &handlers::handle_absorb_time_offset(&s, &body))
-    })?;
+    server.fn_handler::<anyhow::Error, _>(
+        "/api/config/absorb-offset",
+        Method::Post,
+        move |mut req| {
+            let body = match read_json_body(&mut req) {
+                Ok(b) => b,
+                Err(e) => {
+                    return write_api_response(req, &ApiResponse::bad_request(&e.to_string()))
+                }
+            };
+            write_api_response(req, &handlers::handle_absorb_time_offset(&s, &body))
+        },
+    )?;
 
     let s = state.clone();
     server.fn_handler::<anyhow::Error, _>("/api/curve/now", Method::Get, move |req| {
@@ -187,27 +199,39 @@ pub fn start_server(
     })?;
 
     let s = state.clone();
-    server.fn_handler::<anyhow::Error, _>("/api/hub/credentials", Method::Put, move |mut req| {
-        let body = match read_json_body(&mut req) {
-            Ok(b) => b,
-            Err(e) => return write_api_response(req, &ApiResponse::bad_request(&e.to_string())),
-        };
-        write_api_response(req, &handlers::handle_put_hub_credentials(&s, &body))
-    })?;
+    server.fn_handler::<anyhow::Error, _>(
+        "/api/hub/credentials",
+        Method::Put,
+        move |mut req| {
+            let body = match read_json_body(&mut req) {
+                Ok(b) => b,
+                Err(e) => {
+                    return write_api_response(req, &ApiResponse::bad_request(&e.to_string()))
+                }
+            };
+            write_api_response(req, &handlers::handle_put_hub_credentials(&s, &body))
+        },
+    )?;
 
     let s = state.clone();
-    server.fn_handler::<anyhow::Error, _>("/api/rooms/preferences", Method::Put, move |mut req| {
-        let body = match read_json_body(&mut req) {
-            Ok(b) => b,
-            Err(e) => return write_api_response(req, &ApiResponse::bad_request(&e.to_string())),
-        };
-        let is_batch = body.is_array() && body.as_array().map(|a| a.len() > 1).unwrap_or(false);
-        let resp = handlers::handle_put_room_preferences(&s, &body, !is_batch);
-        if is_batch && resp.status == 200 {
-            defer_persist(&s);
-        }
-        write_api_response(req, &resp)
-    })?;
+    server.fn_handler::<anyhow::Error, _>(
+        "/api/rooms/preferences",
+        Method::Put,
+        move |mut req| {
+            let body = match read_json_body(&mut req) {
+                Ok(b) => b,
+                Err(e) => {
+                    return write_api_response(req, &ApiResponse::bad_request(&e.to_string()))
+                }
+            };
+            let is_batch = body.is_array() && body.as_array().map(|a| a.len() > 1).unwrap_or(false);
+            let resp = handlers::handle_put_room_preferences(&s, &body, !is_batch);
+            if is_batch && resp.status == 200 {
+                defer_persist(&s);
+            }
+            write_api_response(req, &resp)
+        },
+    )?;
 
     let s = state.clone();
     server.fn_handler::<anyhow::Error, _>("/api/rooms/action", Method::Put, move |mut req| {
@@ -224,18 +248,24 @@ pub fn start_server(
     })?;
 
     let s = state.clone();
-    server.fn_handler::<anyhow::Error, _>("/api/rooms/brightness", Method::Put, move |mut req| {
-        let body = match read_json_body(&mut req) {
-            Ok(b) => b,
-            Err(e) => return write_api_response(req, &ApiResponse::bad_request(&e.to_string())),
-        };
-        let is_batch = body.is_array() && body.as_array().map(|a| a.len() > 1).unwrap_or(false);
-        let resp = handlers::handle_set_brightness(&s, &body, !is_batch);
-        if is_batch && resp.status == 200 {
-            defer_persist(&s);
-        }
-        write_api_response(req, &resp)
-    })?;
+    server.fn_handler::<anyhow::Error, _>(
+        "/api/rooms/brightness",
+        Method::Put,
+        move |mut req| {
+            let body = match read_json_body(&mut req) {
+                Ok(b) => b,
+                Err(e) => {
+                    return write_api_response(req, &ApiResponse::bad_request(&e.to_string()))
+                }
+            };
+            let is_batch = body.is_array() && body.as_array().map(|a| a.len() > 1).unwrap_or(false);
+            let resp = handlers::handle_set_brightness(&s, &body, !is_batch);
+            if is_batch && resp.status == 200 {
+                defer_persist(&s);
+            }
+            write_api_response(req, &resp)
+        },
+    )?;
 
     let s = state.clone();
     server.fn_handler::<anyhow::Error, _>("/api/rooms/offset", Method::Put, move |mut req| {
@@ -259,7 +289,9 @@ pub fn start_server(
     let s = state.clone();
     server.fn_handler::<anyhow::Error, _>("/api/rooms/fix", Method::Post, move |req| {
         let resp = handlers::handle_fix_my_lights(&s, false);
-        if resp.status == 200 { defer_persist(&s); }
+        if resp.status == 200 {
+            defer_persist(&s);
+        }
         write_api_response(req, &resp)
     })?;
 
@@ -329,9 +361,9 @@ pub fn start_server(
     })?;
 
     server.fn_handler::<anyhow::Error, _>("/api/ota/upload", Method::Post, move |mut req| {
-        let content_length = req.content_len()
-            .ok_or_else(|| anyhow::anyhow!("Missing Content-Length"))?
-            as usize;
+        let content_length =
+            req.content_len()
+                .ok_or_else(|| anyhow::anyhow!("Missing Content-Length"))? as usize;
 
         if content_length == 0 || content_length > 4 * 1024 * 1024 {
             let mut resp = req.into_response(400, Some("Bad Request"), JSON_CORS_HEADERS)?;
@@ -357,7 +389,8 @@ pub fn start_server(
                 let msg = serde_json::to_string(&format!("{}", e))
                     .unwrap_or_else(|_| "\"OTA failed\"".to_string());
                 let body = format!(r#"{{"status":"error","message":{}}}"#, msg);
-                let mut resp = req.into_response(500, Some("Internal Server Error"), JSON_CORS_HEADERS)?;
+                let mut resp =
+                    req.into_response(500, Some("Internal Server Error"), JSON_CORS_HEADERS)?;
                 resp.write_all(body.as_bytes())?;
                 Ok(())
             }
@@ -466,13 +499,12 @@ fn handle_get_diag_logs(
 ) -> Result<(), anyhow::Error> {
     let uri = req.uri().to_string();
 
-    let category = parse_query_param(&uri, "category")
-        .and_then(|s| crate::diag::DiagCategory::from_str(&s));
+    let category =
+        parse_query_param(&uri, "category").and_then(|s| crate::diag::DiagCategory::from_str(&s));
     let limit = parse_query_param(&uri, "limit")
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(10);
-    let since = parse_query_param(&uri, "since")
-        .and_then(|s| s.parse::<u32>().ok());
+    let since = parse_query_param(&uri, "since").and_then(|s| s.parse::<u32>().ok());
 
     let logs = crate::diag::get_logs(category, limit, since);
     let response = DiagLogsResponse {

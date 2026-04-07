@@ -10,6 +10,9 @@ use log::info;
 use rhythm_core::controller::{LightControlError, LightControlResult, LightController};
 use rhythm_core::lighting::LightingCommand;
 use rhythm_core::room::Room;
+use rhythm_devices::ColorPreference;
+use rhythm_os::canonical::identity::HubKey;
+use rhythm_os::state::SharedState;
 
 use crate::registry::HaDeviceRegistry;
 use crate::transport::HaTransport;
@@ -22,12 +25,27 @@ use crate::transport::HaTransport;
 pub struct HaLightController<H: HaTransport> {
     client: H,
     registry: Arc<Mutex<HaDeviceRegistry>>,
+    capability_state: Option<SharedState>,
+    capability_hub_key: Option<HubKey>,
 }
 
 impl<H: HaTransport> HaLightController<H> {
     /// Create a new HA light controller.
     pub fn new(client: H, registry: Arc<Mutex<HaDeviceRegistry>>) -> Self {
-        Self { client, registry }
+        Self {
+            client,
+            registry,
+            capability_state: None,
+            capability_hub_key: None,
+        }
+    }
+
+    /// Attach shared state so room capabilities can be derived from the
+    /// canonical registry at command time.
+    pub fn with_capability_source(mut self, state: SharedState, hub_key: HubKey) -> Self {
+        self.capability_state = Some(state);
+        self.capability_hub_key = Some(hub_key);
+        self
     }
 }
 
@@ -36,20 +54,30 @@ impl<H: HaTransport + 'static> LightController for HaLightController<H> {
     async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
         // Verify room exists in registry (for HA, target == room_id == area_id)
         let area_id = rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
+        let caps = rhythm_os::controller_helpers::resolve_room_capabilities(
+            &self.registry,
+            self.capability_state.as_ref(),
+            self.capability_hub_key.as_ref(),
+            room_id,
+        );
+        let adapted = rhythm_os::controller_helpers::adapt_lighting_command(
+            &caps,
+            &command,
+            ColorPreference::PreferColorTemperature,
+        );
 
-        let fade_ms = command.transition_ms.unwrap_or(0) as u16;
+        let fade_ms = adapted.transition_ms.unwrap_or(0) as u16;
 
         // Build service data targeting area_id
         let mut data = serde_json::json!({
             "area_id": area_id,
-            "brightness_pct": command.brightness,
+            "brightness_pct": adapted.brightness.unwrap_or(0),
         });
 
-        // Direct color: send xy_color. Otherwise: send color_temp_kelvin.
-        if command.is_direct_color {
-            data["xy_color"] = serde_json::json!([command.xy.x, command.xy.y]);
-        } else {
-            data["color_temp_kelvin"] = serde_json::json!(command.kelvin);
+        if let Some((x, y)) = adapted.xy {
+            data["xy_color"] = serde_json::json!([x, y]);
+        } else if let Some(kelvin) = adapted.kelvin {
+            data["color_temp_kelvin"] = serde_json::json!(kelvin);
         }
 
         // Add transition if fade is set (HA uses seconds)
@@ -68,16 +96,20 @@ impl<H: HaTransport + 'static> LightController for HaLightController<H> {
                 ))
             })?;
 
-        if command.is_direct_color {
+        if let Some((x, y)) = adapted.xy {
             info!(target: "cmd",
-                "HA turn_on: room={} bri={} xy=({:.3},{:.3})",
-                room_id, command.brightness, command.xy.x, command.xy.y
+                "HA turn_on: room={} bri={} xy=({:.3},{:.3}) rgb=({},{},{})",
+                room_id, adapted.brightness.unwrap_or(0),
+                x, y,
+                command.rgb.r, command.rgb.g, command.rgb.b,
             );
-        } else {
+        } else if let Some(kelvin) = adapted.kelvin {
             info!(target: "cmd",
                 "HA turn_on: room={} bri={} kelvin={}",
-                room_id, command.brightness, command.kelvin
+                room_id, adapted.brightness.unwrap_or(0), kelvin
             );
+        } else {
+            info!(target: "cmd", "HA turn_on: room={} bri={}", room_id, adapted.brightness.unwrap_or(0));
         }
 
         Ok(())

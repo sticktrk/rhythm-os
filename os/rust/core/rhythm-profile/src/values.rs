@@ -1,7 +1,7 @@
 //! Adaptive lighting output types.
 //!
 //! This module provides the [`LightingValues`] struct which is the standard
-//! output type for all curve modules.
+//! output type for all light profiles.
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use crate::color::{kelvin_to_rgb, kelvin_to_xy, Rgb, XyColor};
 
 /// Output lighting values from adaptive calculations.
 ///
-/// This struct is the standard output format for all curve modules.
+/// This struct is the standard output format for all light profiles.
 /// It contains the calculated lighting parameters along with
 /// solar time information.
 #[derive(Debug, Clone, PartialEq)]
@@ -40,11 +40,11 @@ pub struct LightingValues {
     pub is_direct_color: bool,
 
     /// Transition time in milliseconds for this lighting state.
-    /// Set by the curve module to control how fast lights fade to these values.
+    /// Set by the active light profile to control how fast lights fade to these values.
     pub transition_ms: u32,
 
     /// Default motion timeout in seconds for this lighting state.
-    /// Set by the curve module; per-room overrides take precedence.
+    /// Set by the active light profile; per-room overrides take precedence.
     pub motion_timeout_secs: u16,
 
     /// Suggested tick interval in seconds based on curve rate of change.

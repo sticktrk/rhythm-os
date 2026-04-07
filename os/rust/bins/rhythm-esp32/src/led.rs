@@ -78,10 +78,7 @@ pub struct Ws2812Led<'d> {
 #[allow(deprecated)]
 impl<'d> Ws2812Led<'d> {
     /// Create a new WS2812 LED controller.
-    pub fn new(
-        channel: impl RmtChannel + 'd,
-        pin: impl OutputPin + 'd,
-    ) -> anyhow::Result<Self> {
+    pub fn new(channel: impl RmtChannel + 'd, pin: impl OutputPin + 'd) -> anyhow::Result<Self> {
         let config = TransmitConfig::new().clock_divider(1);
         let tx = TxRmtDriver::new(channel, pin, &config)?;
         info!("WS2812 RGB LED initialized");
@@ -243,4 +240,3 @@ pub fn led_activity() {
 pub fn led_periodic() {
     request_periodic_flash();
 }
-

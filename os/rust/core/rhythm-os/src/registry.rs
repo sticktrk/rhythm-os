@@ -58,9 +58,6 @@ pub struct RegistrySnapshot {
     /// button_id -> (device_id, control_id)
     #[serde(rename = "b")]
     pub buttons: HashMap<String, (String, u8)>,
-    /// room_id -> motion timeout in seconds
-    #[serde(rename = "t", default)]
-    pub motion_timeouts: HashMap<String, u64>,
     /// area_id -> list of light entity_ids (HA-specific, empty on Hue/ESP32)
     #[serde(rename = "l", default, skip_serializing_if = "HashMap::is_empty")]
     pub area_lights: HashMap<String, Vec<String>>,
@@ -82,8 +79,6 @@ pub struct HubDeviceRegistry {
     room_names: HashMap<String, String>,
     /// device_id -> DeviceType (Button or Motion; lights not tracked here)
     device_types: HashMap<String, DeviceType>,
-    /// room_id -> motion timeout in seconds
-    motion_timeouts: HashMap<String, u64>,
     /// area_id -> list of light entity_ids (HA-specific, empty on Hue)
     area_lights: HashMap<String, Vec<String>>,
     /// When true, `upsert_room` defaults grouped_light_id to room_id (HA behavior).
@@ -102,7 +97,6 @@ impl HubDeviceRegistry {
             room_to_grouped_light: HashMap::new(),
             room_names: HashMap::new(),
             device_types: HashMap::new(),
-            motion_timeouts: HashMap::new(),
             area_lights: HashMap::new(),
             default_grouped_light_to_room_id: false,
             dirty: false,
@@ -289,7 +283,6 @@ impl HubDeviceRegistry {
         for dev_id in &removed_devices {
             self.device_types.remove(dev_id);
         }
-        self.motion_timeouts.remove(room_id);
         self.area_lights.remove(room_id);
         info!("Registry: removed room {}", room_id);
     }
@@ -412,30 +405,6 @@ impl HubDeviceRegistry {
             .collect()
     }
 
-    // =========================================================================
-    // Motion timeout methods
-    // =========================================================================
-
-    /// Set per-room motion timeout in seconds.
-    pub fn upsert_motion_timeout(&mut self, room_id: &str, timeout_secs: u64) {
-        self.motion_timeouts
-            .insert(room_id.to_string(), timeout_secs);
-        info!(
-            "Registry: upserted motion timeout {} -> {}s",
-            room_id, timeout_secs
-        );
-    }
-
-    /// Remove per-room motion timeout.
-    pub fn remove_motion_timeout(&mut self, room_id: &str) {
-        self.motion_timeouts.remove(room_id);
-    }
-
-    /// Get all per-room motion timeouts.
-    pub fn get_all_motion_timeouts(&self) -> HashMap<String, u64> {
-        self.motion_timeouts.clone()
-    }
-
     /// Check if the registry has any rooms.
     pub fn has_rooms(&self) -> bool {
         !self.room_names.is_empty()
@@ -491,7 +460,6 @@ impl HubDeviceRegistry {
             rooms,
             devices,
             buttons: self.buttons.clone(),
-            motion_timeouts: self.motion_timeouts.clone(),
             area_lights: self.area_lights.clone(),
         }
     }
@@ -510,7 +478,6 @@ impl HubDeviceRegistry {
         }
 
         self.buttons = snapshot.buttons;
-        self.motion_timeouts = snapshot.motion_timeouts;
         self.area_lights = snapshot.area_lights;
 
         self.device_rooms.clear();
@@ -524,11 +491,10 @@ impl HubDeviceRegistry {
 
         self.dirty = false;
         info!(
-            "Registry restored from snapshot: {} rooms, {} buttons, {} devices, {} motion timeouts",
+            "Registry restored from snapshot: {} rooms, {} buttons, {} devices",
             self.room_names.len(),
             self.buttons.len(),
             self.device_rooms.len(),
-            self.motion_timeouts.len(),
         );
     }
 }
@@ -600,10 +566,6 @@ impl HubRegistry for HubDeviceRegistry {
 
     fn devices_for_room_typed(&self, room_id: &str) -> Vec<(String, DeviceType)> {
         self.devices_for_room_typed(room_id)
-    }
-
-    fn upsert_motion_timeout(&mut self, room_id: &str, timeout_secs: u64) {
-        self.upsert_motion_timeout(room_id, timeout_secs);
     }
 
     fn rooms_with_motion_sensors(&self) -> Vec<String> {
@@ -826,7 +788,6 @@ mod tests {
         let devices = vec!["light1".to_string()];
         reg.upsert_room("r1", "Room", "gl1", &devices);
         reg.upsert_device("ms1", "r1", &[], DeviceType::Motion);
-        reg.upsert_motion_timeout("r1", 120);
 
         reg.remove_room("r1");
 
@@ -836,7 +797,6 @@ mod tests {
         assert!(!reg.device_rooms.contains_key("light1"));
         assert!(!reg.device_rooms.contains_key("ms1"));
         assert!(!reg.device_types.contains_key("ms1"));
-        assert!(!reg.motion_timeouts.contains_key("r1"));
         assert!(reg.get_light_entities("r1").is_empty());
     }
 
@@ -1013,32 +973,6 @@ mod tests {
             .any(|(id, dt)| id == "ms1" && *dt == DeviceType::Motion));
     }
 
-    // =========================================================================
-    // Motion timeouts
-    // =========================================================================
-
-    #[test]
-    fn motion_timeout_crud() {
-        let mut reg = HubDeviceRegistry::new();
-
-        reg.upsert_motion_timeout("r1", 60);
-        reg.upsert_motion_timeout("r2", 300);
-
-        let all = reg.get_all_motion_timeouts();
-        assert_eq!(all.len(), 2);
-        assert_eq!(all.get("r1"), Some(&60));
-        assert_eq!(all.get("r2"), Some(&300));
-
-        reg.remove_motion_timeout("r1");
-        let all = reg.get_all_motion_timeouts();
-        assert_eq!(all.len(), 1);
-        assert!(!all.contains_key("r1"));
-    }
-
-    // =========================================================================
-    // Dedup / matches
-    // =========================================================================
-
     #[test]
     fn room_matches_exact() {
         let mut reg = HubDeviceRegistry::new();
@@ -1119,7 +1053,6 @@ mod tests {
             DeviceType::Button,
         );
         reg.upsert_device("ms1", "r1", &[], DeviceType::Motion);
-        reg.upsert_motion_timeout("r1", 120);
         reg.set_area_lights("r1", vec!["entity1".to_string()]);
 
         let snapshot = reg.snapshot();
@@ -1150,7 +1083,6 @@ mod tests {
             Some("r1".to_string())
         );
         assert_eq!(restored.device_types.get("ms1"), Some(&DeviceType::Motion));
-        assert_eq!(restored.get_all_motion_timeouts().get("r1"), Some(&120));
 
         // Area lights
         assert_eq!(

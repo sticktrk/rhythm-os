@@ -5,8 +5,9 @@
 //! without knowing the concrete generic types.
 
 use crate::controller::LightController;
+use crate::light_profile::LightProfileConfig;
+use crate::room::RoomProfileSettings;
 use crate::solar::SolarTime;
-use crate::CurveConfig;
 use anyhow::Result;
 
 use crate::runtime::events::InputEvent;
@@ -33,8 +34,8 @@ pub trait RuntimeHandle: Send + Sync {
     /// Update the solar time parameters.
     fn set_solar(&self, solar: SolarTime) -> Result<()>;
 
-    /// Update the curve configuration.
-    fn set_curve_config(&self, config: CurveConfig) -> Result<()>;
+    /// Update a light profile configuration.
+    fn set_light_profile_config(&self, config: LightProfileConfig) -> Result<()>;
 
     /// Run a periodic update for a single room. Holds the engine lock only
     /// for this one room (~200-500ms) instead of all rooms at once.
@@ -55,6 +56,7 @@ pub trait RuntimeHandle: Send + Sync {
         time_offset: f32,
         bri_offset: f32,
         soft_off: bool,
+        profile_settings: RoomProfileSettings,
     );
 
     /// Add a room to the engine's room manager.
@@ -85,7 +87,7 @@ pub trait RuntimeHandle: Send + Sync {
     /// Set the time offset for a room directly (not additive).
     fn set_room_time_offset(&self, room_id: &str, offset_minutes: f32) -> Result<()>;
 
-    /// Get the idle brightness from the active curve module.
+    /// Get the idle brightness from the active light profile.
     fn idle_brightness(&self) -> u8;
 
     /// Send a soft-off tick to a room: idle curve color at idle brightness.
@@ -125,6 +127,7 @@ pub struct RoomSnapshot {
     pub time_offset_minutes: f32,
     pub brightness_offset: f32,
     pub soft_off: bool,
+    pub profile_settings: RoomProfileSettings,
 }
 
 // ============================================================================
@@ -154,8 +157,8 @@ where
         Ok(RhythmRuntime::set_solar(self, solar)?)
     }
 
-    fn set_curve_config(&self, config: CurveConfig) -> Result<()> {
-        Ok(RhythmRuntime::set_curve_config(self, config)?)
+    fn set_light_profile_config(&self, config: LightProfileConfig) -> Result<()> {
+        Ok(RhythmRuntime::set_light_profile_config(self, config)?)
     }
 
     fn periodic_tick_room(&self, room_id: &str, current_hour: f32) -> Result<()> {
@@ -191,6 +194,7 @@ where
             time_offset_minutes: room.time_offset_minutes,
             brightness_offset: room.brightness_offset,
             soft_off: room.soft_off,
+            profile_settings: room.profile_settings.clone(),
         })
     }
 
@@ -209,6 +213,7 @@ where
                 time_offset_minutes: room.time_offset_minutes,
                 brightness_offset: room.brightness_offset,
                 soft_off: room.soft_off,
+                profile_settings: room.profile_settings.clone(),
             })
             .collect()
     }
@@ -221,6 +226,7 @@ where
         time_offset: f32,
         bri_offset: f32,
         soft_off: bool,
+        profile_settings: RoomProfileSettings,
     ) {
         if let Ok(mut engine) = self.engine().write() {
             if let Some(room) = engine.rooms_mut().get_mut(room_id) {
@@ -229,6 +235,7 @@ where
                 room.time_offset_minutes = time_offset;
                 room.brightness_offset = bri_offset;
                 room.soft_off = soft_off;
+                room.profile_settings = profile_settings;
             }
         }
     }
@@ -440,7 +447,15 @@ mod tests {
         let handle = as_handle(&rt);
         handle.add_room("living", "Living Room");
 
-        handle.restore_room_state("living", false, true, 30.0, 5.0, true);
+        handle.restore_room_state(
+            "living",
+            false,
+            true,
+            30.0,
+            5.0,
+            true,
+            crate::RoomProfileSettings::default(),
+        );
 
         let snap = handle.engine_room_snapshot("living").unwrap();
         assert!(!snap.rhythm_enabled);

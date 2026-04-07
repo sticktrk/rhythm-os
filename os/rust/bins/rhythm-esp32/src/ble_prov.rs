@@ -48,13 +48,13 @@ pub enum WifiResult {
 // ============================================================================
 
 // Service UUID:         72797468-6d00-1000-8000-00805f9b34fb
-const SERVICE_UUID: u128 =      0x72797468_6d00_1000_8000_00805f9b34fb;
+const SERVICE_UUID: u128 = 0x72797468_6d00_1000_8000_00805f9b34fb;
 // WiFi Command char:   72797468-6d01-1000-8000-00805f9b34fb
-const WIFI_CMD_UUID: u128 =     0x72797468_6d01_1000_8000_00805f9b34fb;
+const WIFI_CMD_UUID: u128 = 0x72797468_6d01_1000_8000_00805f9b34fb;
 // Status char:          72797468-6d02-1000-8000-00805f9b34fb
-const STATUS_UUID: u128 =       0x72797468_6d02_1000_8000_00805f9b34fb;
+const STATUS_UUID: u128 = 0x72797468_6d02_1000_8000_00805f9b34fb;
 // Device Info char:     72797468-6d03-1000-8000-00805f9b34fb
-const DEVICE_INFO_UUID: u128 =  0x72797468_6d03_1000_8000_00805f9b34fb;
+const DEVICE_INFO_UUID: u128 = 0x72797468_6d03_1000_8000_00805f9b34fb;
 
 // ============================================================================
 // Internal event type — callback → main loop communication
@@ -118,7 +118,14 @@ pub fn run_provisioning<'d>(
 
     let device_info_json = format!(
         r#"{{"name":"{}","version":"{}","mac":"{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}"}}"#,
-        device_name, crate::FIRMWARE_VERSION, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        device_name,
+        crate::FIRMWARE_VERSION,
+        mac[0],
+        mac[1],
+        mac[2],
+        mac[3],
+        mac[4],
+        mac[5]
     );
 
     // Initialize BLE driver with BluetoothModem (not full Modem)
@@ -218,7 +225,10 @@ pub fn run_provisioning<'d>(
                 service_handle,
                 ..
             } => {
-                info!("Service created: status={:?} handle={}", status, service_handle);
+                info!(
+                    "Service created: status={:?} handle={}",
+                    status, service_handle
+                );
                 char_count = 0;
                 let _ = evt_tx.send(BleEvent::ServiceCreated { service_handle });
             }
@@ -246,7 +256,10 @@ pub fn run_provisioning<'d>(
                 service_handle,
                 ..
             } => {
-                info!("Descriptor added: status={:?} svc={}", status, service_handle);
+                info!(
+                    "Descriptor added: status={:?} svc={}",
+                    status, service_handle
+                );
                 let _ = evt_tx.send(BleEvent::DescriptorAdded { service_handle });
             }
 
@@ -278,10 +291,15 @@ pub fn run_provisioning<'d>(
 
             GattsEvent::Write { handle, value, .. } => {
                 // Debug: hex-dump every write so we can discover Apple's wire format
-                info!("BLE write handle={} len={} hex=[{}]",
+                info!(
+                    "BLE write handle={} len={} hex=[{}]",
                     handle,
                     value.len(),
-                    value.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
+                    value
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 );
                 if let Ok(s) = std::str::from_utf8(value) {
                     info!("BLE write UTF-8: {}", s);
@@ -302,12 +320,11 @@ pub fn run_provisioning<'d>(
                                 let password = val.get("password").and_then(|v| v.as_str());
                                 match (ssid, password) {
                                     (Some(s), Some(p)) => {
-                                        let _ = evt_tx.send(BleEvent::Credentials(
-                                            WifiCredentials {
+                                        let _ =
+                                            evt_tx.send(BleEvent::Credentials(WifiCredentials {
                                                 ssid: s.to_string(),
                                                 password: p.to_string(),
-                                            },
-                                        ));
+                                            }));
                                     }
                                     _ => {
                                         let _ = evt_tx.send(BleEvent::WriteError(
@@ -317,10 +334,8 @@ pub fn run_provisioning<'d>(
                                 }
                             }
                             Err(e) => {
-                                let _ = evt_tx.send(BleEvent::WriteError(format!(
-                                    "Invalid JSON: {}",
-                                    e
-                                )));
+                                let _ = evt_tx
+                                    .send(BleEvent::WriteError(format!("Invalid JSON: {}", e)));
                             }
                         }
                     }
@@ -443,11 +458,7 @@ pub fn run_provisioning<'d>(
                     max_len: 256,
                     auto_rsp: AutoResponse::ByGatt,
                 };
-                gatts.add_characteristic(
-                    service_handle,
-                    &char_def,
-                    device_info_json.as_bytes(),
-                )?;
+                gatts.add_characteristic(service_handle, &char_def, device_info_json.as_bytes())?;
             }
 
             Ok(BleEvent::ServiceStarted) => {
@@ -463,7 +474,9 @@ pub fn run_provisioning<'d>(
             }
 
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(anyhow::anyhow!("BLE event channel disconnected during setup"));
+                return Err(anyhow::anyhow!(
+                    "BLE event channel disconnected during setup"
+                ));
             }
         }
     }
@@ -490,12 +503,7 @@ pub fn run_provisioning<'d>(
 
                     // Notify connected client
                     if let (Some(gif), Some(cid)) = (gatt_if, conn_id) {
-                        let _ = gatts.notify(
-                            gif,
-                            cid,
-                            sh,
-                            br#"{"status":"connecting"}"#,
-                        );
+                        let _ = gatts.notify(gif, cid, sh, br#"{"status":"connecting"}"#);
                     }
                 }
 

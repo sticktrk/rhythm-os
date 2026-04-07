@@ -1,13 +1,13 @@
 //! Curve calculation context.
 //!
 //! This module provides the [`CurveContext`] struct which carries all
-//! the information a curve module needs to calculate lighting values.
+//! the information a light profile needs to calculate lighting values.
 
 use crate::solar::{SolarTime, SunTimes};
 
 /// Context for curve calculations.
 ///
-/// Contains all the information needed for a curve module to calculate
+/// Contains all the information needed for a light profile to calculate
 /// lighting values at a given time.
 #[derive(Debug, Clone)]
 pub struct CurveContext {

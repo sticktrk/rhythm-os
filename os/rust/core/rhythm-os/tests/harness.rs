@@ -28,8 +28,11 @@ use rhythm_core::runtime::scheduler::NoOpScheduler;
 use rhythm_core::runtime::time::MockTimeProvider;
 use rhythm_core::runtime::RuntimeConfig;
 use rhythm_core::spy_controller::SpyLightController;
-use rhythm_core::CurveConfig;
 use rhythm_core::HubRegistry;
+use rhythm_core::{
+    default_idle_profile, default_rhythm_profile, default_sleep_profile, LightProfileConfig,
+    IDLE_PROFILE_ID, RHYTHM_PROFILE_ID, SLEEP_PROFILE_ID,
+};
 
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::commands;
@@ -38,6 +41,15 @@ use rhythm_os::hub::{ActiveHub, HubType};
 use rhythm_os::registry::HubDeviceRegistry;
 use rhythm_os::room_sync::{self, SyncReport};
 use rhythm_os::state::{AppState, MotionSnapshot, SharedState};
+
+fn default_profile_for_id(profile_id: &str) -> LightProfileConfig {
+    match profile_id {
+        RHYTHM_PROFILE_ID => default_rhythm_profile(),
+        SLEEP_PROFILE_ID => default_sleep_profile(),
+        IDLE_PROFILE_ID => default_idle_profile(),
+        _ => panic!("unknown built-in profile: {}", profile_id),
+    }
+}
 
 use rhythm_core::runtime::hub_registry::DeviceType;
 
@@ -529,6 +541,7 @@ impl TestHarness {
             rhythm_enabled,
             disabled,
             soft_off,
+            None,
             false,
         )
         .expect("do_room_preferences_set failed");
@@ -546,26 +559,35 @@ impl TestHarness {
     // ========================================================================
 
     /// Update global settings (mirrors "Settings → Preferences" screen).
-    ///
-    /// Pass `None` for any field to leave it unchanged.
-    pub fn set_settings(&self, update_interval: Option<u64>, power_save: Option<bool>) -> String {
-        commands::do_settings_set(&self.state, update_interval, power_save)
-            .expect("do_settings_set failed")
+    pub fn set_settings(&self, power_save: Option<bool>) -> String {
+        commands::do_settings_set(&self.state, power_save).expect("do_settings_set failed")
     }
 
-    /// Push a new CurveConfig to the engine (mirrors "Designer → Save").
-    pub fn set_config(&self, config: CurveConfig) {
+    /// Push a new light profile config to the active profile (mirrors "Designer → Save").
+    pub fn set_config(&self, config: LightProfileConfig) {
+        let active_id = self.state.lock().unwrap().active_light_profile_id.clone();
+        self.set_config_for(&active_id, config);
+    }
+
+    /// Push a new light profile config to the requested stored profile.
+    pub fn set_config_for(&self, profile_id: &str, mut config: LightProfileConfig) {
+        let default = default_profile_for_id(profile_id);
+        config.id = default.id;
+        if config.name.is_empty() {
+            config.name = default.name;
+        }
         commands::do_config_set(&self.state, config).expect("do_config_set failed");
     }
 
-    /// Reset the CurveConfig to defaults (mirrors "POST /api/config/reset").
+    /// Reset the active light profile config to built-in defaults.
     pub fn reset_config(&self) {
-        self.set_config(CurveConfig::default());
+        let active_id = self.state.lock().unwrap().active_light_profile_id.clone();
+        self.set_config(default_profile_for_id(&active_id));
     }
 
-    /// Absorb a time offset into the curve config (mirrors "Tuning → Absorb").
+    /// Absorb a time offset into the active light profile config.
     pub fn absorb_offset(&self, offset_minutes: f32) {
-        commands::do_absorb_time_offset(&self.state, offset_minutes)
+        commands::do_absorb_time_offset(&self.state, None, offset_minutes)
             .expect("do_absorb_time_offset failed");
     }
 
@@ -576,9 +598,20 @@ impl TestHarness {
             .expect("do_set_time_offset failed");
     }
 
-    /// Read the current CurveConfig from state.
-    pub fn config(&self) -> CurveConfig {
-        self.state.lock().unwrap().config.clone()
+    /// Read the current active light profile config from state.
+    pub fn config(&self) -> LightProfileConfig {
+        let active_id = self.state.lock().unwrap().active_light_profile_id.clone();
+        self.config_for(&active_id)
+    }
+
+    /// Read a stored light profile config by ID.
+    pub fn config_for(&self, profile_id: &str) -> LightProfileConfig {
+        self.state
+            .lock()
+            .unwrap()
+            .light_profile_config(profile_id)
+            .expect("light profile missing")
+            .clone()
     }
 }
 

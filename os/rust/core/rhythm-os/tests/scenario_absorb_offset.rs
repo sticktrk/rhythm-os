@@ -1,6 +1,6 @@
 //! Scenario: Absorb time offset — "Light Tuning Screen".
 //!
-//! Tests that absorbing a time offset into the curve config adjusts the
+//! Tests that absorbing a time offset into the active light profile config adjusts the
 //! width parameters and resets all room offsets to zero.
 //!
 //! ## API journey
@@ -15,6 +15,27 @@
 mod harness;
 
 use harness::{room, TestHarness};
+use rhythm_core::{LightCurveShape, LightProfileConfig};
+
+fn super_gaussian_widths(config: &LightProfileConfig) -> (f32, f32, f32, f32, f32) {
+    match &config.curve {
+        LightCurveShape::SuperGaussian {
+            width_left_bri,
+            width_right_bri,
+            width_left_cct,
+            width_right_cct,
+            shape_p,
+            ..
+        } => (
+            *width_left_bri,
+            *width_right_bri,
+            *width_left_cct,
+            *width_right_cct,
+            *shape_p,
+        ),
+        _ => panic!("expected super-gaussian profile"),
+    }
+}
 
 // ============================================================================
 // Scenario: Absorb resets room offsets to zero
@@ -74,36 +95,40 @@ fn absorb_adjusts_width_for_current_side() {
     harness.action("kitchen", "on").unwrap();
 
     let before = harness.config();
+    let (before_left_bri, before_right_bri, before_left_cct, before_right_cct, _) =
+        super_gaussian_widths(&before);
 
     // Harness runs at 14:00 (evening side, mu ≈ 13.0 for sunrise=6/sunset=20).
     // +60min offset moves to 15:00, further from mu → width_right increases.
     harness.absorb_offset(60.0);
 
     let after = harness.config();
+    let (after_left_bri, after_right_bri, after_left_cct, after_right_cct, _) =
+        super_gaussian_widths(&after);
 
     // Evening side should change (the harness time is 14:00, which is past mu)
     // Morning side should be unchanged
     assert_eq!(
-        after.width_left_bri, before.width_left_bri,
+        after_left_bri, before_left_bri,
         "morning width should be unchanged"
     );
     assert_eq!(
-        after.width_left_cct, before.width_left_cct,
+        after_left_cct, before_left_cct,
         "morning cct width should be unchanged"
     );
 
     // Evening width should increase (further from noon = steeper ramp)
     assert!(
-        after.width_right_bri > before.width_right_bri,
+        after_right_bri > before_right_bri,
         "evening width_right_bri should increase: {} -> {}",
-        before.width_right_bri,
-        after.width_right_bri
+        before_right_bri,
+        after_right_bri
     );
     assert!(
-        after.width_right_cct > before.width_right_cct,
+        after_right_cct > before_right_cct,
         "evening width_right_cct should increase: {} -> {}",
-        before.width_right_cct,
-        after.width_right_cct
+        before_right_cct,
+        after_right_cct
     );
 }
 
@@ -122,12 +147,14 @@ fn absorb_preserves_other_config_fields() {
     let before = harness.config();
     harness.absorb_offset(60.0);
     let after = harness.config();
+    let (_, _, _, _, before_shape_p) = super_gaussian_widths(&before);
+    let (_, _, _, _, after_shape_p) = super_gaussian_widths(&after);
 
     assert_eq!(after.min_brightness, before.min_brightness);
     assert_eq!(after.max_brightness, before.max_brightness);
     assert_eq!(after.min_color_temp, before.min_color_temp);
     assert_eq!(after.max_color_temp, before.max_color_temp);
-    assert_eq!(after.shape_p, before.shape_p);
+    assert_eq!(after_shape_p, before_shape_p);
     assert_eq!(after.max_dim_steps, before.max_dim_steps);
 }
 
@@ -144,14 +171,18 @@ fn absorb_zero_offset_no_config_change() {
     harness.set_room_offset("kitchen", 15.0);
 
     let before = harness.config();
+    let (before_left_bri, before_right_bri, before_left_cct, before_right_cct, _) =
+        super_gaussian_widths(&before);
     harness.absorb_offset(0.0);
     let after = harness.config();
+    let (after_left_bri, after_right_bri, after_left_cct, after_right_cct, _) =
+        super_gaussian_widths(&after);
 
     // Config should be identical (factor = 1.0)
-    assert_eq!(after.width_left_bri, before.width_left_bri);
-    assert_eq!(after.width_right_bri, before.width_right_bri);
-    assert_eq!(after.width_left_cct, before.width_left_cct);
-    assert_eq!(after.width_right_cct, before.width_right_cct);
+    assert_eq!(after_left_bri, before_left_bri);
+    assert_eq!(after_right_bri, before_right_bri);
+    assert_eq!(after_left_cct, before_left_cct);
+    assert_eq!(after_right_cct, before_right_cct);
 
     // But room offset should still be reset
     let snap = harness.snapshot("kitchen").unwrap();
@@ -174,19 +205,22 @@ fn successive_absorbs_compound() {
     harness.action("kitchen", "on").unwrap();
 
     let original = harness.config();
+    let (_, original_right_bri, _, _, _) = super_gaussian_widths(&original);
 
     // First absorb
     harness.absorb_offset(30.0);
     let after_one = harness.config();
+    let (_, after_one_right_bri, _, _, _) = super_gaussian_widths(&after_one);
 
     // Second absorb
     harness.absorb_offset(30.0);
     let after_two = harness.config();
+    let (_, after_two_right_bri, _, _, _) = super_gaussian_widths(&after_two);
 
     // Both should change the same side (evening at 14:00)
     // After two absorbs, width_right should be further from original
-    let delta_one = (after_one.width_right_bri - original.width_right_bri).abs();
-    let delta_two = (after_two.width_right_bri - original.width_right_bri).abs();
+    let delta_one = (after_one_right_bri - original_right_bri).abs();
+    let delta_two = (after_two_right_bri - original_right_bri).abs();
     assert!(
         delta_two > delta_one,
         "two absorbs should compound: delta_one={}, delta_two={}",

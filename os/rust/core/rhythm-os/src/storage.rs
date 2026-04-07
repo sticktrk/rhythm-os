@@ -9,7 +9,7 @@ use anyhow::Result;
 use chrono::{Datelike, Timelike};
 use log::info;
 use rhythm_core::room::RoomManager;
-use rhythm_core::CurveConfig;
+use rhythm_core::LightProfileConfig;
 use rhythm_core::RuntimeConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,8 +27,8 @@ use crate::hub::HubCredentials;
 pub trait Storage: Send + Sync {
     fn load_rooms(&self) -> Result<RoomManager>;
     fn save_rooms(&self, rooms: &RoomManager) -> Result<()>;
-    fn load_config(&self) -> Result<StoredConfig>;
-    fn save_config(&self, config: &StoredConfig) -> Result<()>;
+    fn load_light_profiles(&self) -> Result<StoredLightProfiles>;
+    fn save_light_profiles(&self, config: &StoredLightProfiles) -> Result<()>;
     fn load_location(&self) -> Result<StoredLocation>;
     fn save_location(&self, loc: &StoredLocation) -> Result<()>;
     fn load_settings(&self) -> Result<StoredSettings>;
@@ -93,101 +93,33 @@ pub trait Storage: Send + Sync {
     }
 }
 
-/// Curve configuration for persistence.
-///
-/// Legacy `utc_offset_hours` field is accepted on deserialization but ignored —
-/// location is the single owner of UTC offset.
+/// Stored light profile configurations for persistence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredConfig {
-    pub min_brightness: u8,
-    pub max_brightness: u8,
-    pub min_color_temp: u16,
-    pub max_color_temp: u16,
+pub struct StoredLightProfiles {
     pub solar_noon_hour: f32,
-    #[serde(default = "default_width_left_bri")]
-    pub width_left_bri: f32,
-    #[serde(default = "default_width_right_bri")]
-    pub width_right_bri: f32,
-    #[serde(default = "default_width_left_cct")]
-    pub width_left_cct: f32,
-    #[serde(default = "default_width_right_cct")]
-    pub width_right_cct: f32,
-    #[serde(default = "default_shape_p")]
-    pub shape_p: f32,
-    #[serde(default = "default_max_dim_steps")]
-    pub max_dim_steps: u8,
-    #[serde(default, deserialize_with = "deserialize_fade_ms")]
-    pub fade_ms: Option<u16>,
-    #[serde(default, deserialize_with = "deserialize_motion_timeout_secs")]
-    pub motion_timeout_secs: Option<u16>,
+    pub profiles: Vec<LightProfileConfig>,
 }
 
-fn default_width_left_bri() -> f32 {
-    rhythm_core::config::DEFAULT_WIDTH_LEFT_BRI
-}
-fn default_width_right_bri() -> f32 {
-    rhythm_core::config::DEFAULT_WIDTH_RIGHT_BRI
-}
-fn default_width_left_cct() -> f32 {
-    rhythm_core::config::DEFAULT_WIDTH_LEFT_CCT
-}
-fn default_width_right_cct() -> f32 {
-    rhythm_core::config::DEFAULT_WIDTH_RIGHT_CCT
-}
-fn default_shape_p() -> f32 {
-    rhythm_core::config::DEFAULT_SHAPE_P
-}
-fn default_max_dim_steps() -> u8 {
-    rhythm_core::config::DEFAULT_MAX_DIM_STEPS
-}
-/// Migrate old stored `fade_ms: 500` (the old default) to `None` (auto).
-/// Accepts both integer (old format) and null/missing (new format).
-fn deserialize_fade_ms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u16>, D::Error> {
-    let v: Option<u16> = Option::deserialize(d)?;
-    Ok(v.filter(|&x| x != rhythm_core::config::DEFAULT_FADE_MS))
-}
-
-/// Migrate old stored `motion_timeout_secs: 1200` (the old default) to `None` (auto).
-/// Accepts both integer (old format) and null/missing (new format).
-fn deserialize_motion_timeout_secs<'de, D: serde::Deserializer<'de>>(
-    d: D,
-) -> Result<Option<u16>, D::Error> {
-    let v: Option<u16> = Option::deserialize(d)?;
-    Ok(v.filter(|&x| x != rhythm_core::config::DEFAULT_MOTION_TIMEOUT_SECS))
-}
-
-impl StoredConfig {
-    pub fn from_state(config: &CurveConfig, runtime_config: &RuntimeConfig) -> Self {
+impl StoredLightProfiles {
+    pub fn from_state(
+        profiles: &std::collections::BTreeMap<String, LightProfileConfig>,
+        runtime_config: &RuntimeConfig,
+    ) -> Self {
         Self {
-            min_brightness: config.min_brightness,
-            max_brightness: config.max_brightness,
-            min_color_temp: config.min_color_temp,
-            max_color_temp: config.max_color_temp,
             solar_noon_hour: runtime_config.solar_noon_hour,
-            width_left_bri: config.width_left_bri,
-            width_right_bri: config.width_right_bri,
-            width_left_cct: config.width_left_cct,
-            width_right_cct: config.width_right_cct,
-            shape_p: config.shape_p,
-            max_dim_steps: config.max_dim_steps,
-            fade_ms: config.fade_ms,
-            motion_timeout_secs: config.motion_timeout_secs,
+            profiles: profiles.values().cloned().collect(),
         }
     }
 
-    pub fn apply_to_state(&self, config: &mut CurveConfig, runtime_config: &mut RuntimeConfig) {
-        config.min_brightness = self.min_brightness;
-        config.max_brightness = self.max_brightness;
-        config.min_color_temp = self.min_color_temp;
-        config.max_color_temp = self.max_color_temp;
-        config.width_left_bri = self.width_left_bri;
-        config.width_right_bri = self.width_right_bri;
-        config.width_left_cct = self.width_left_cct;
-        config.width_right_cct = self.width_right_cct;
-        config.shape_p = self.shape_p;
-        config.max_dim_steps = self.max_dim_steps;
-        config.fade_ms = self.fade_ms;
-        config.motion_timeout_secs = self.motion_timeout_secs;
+    pub fn apply_to_state(
+        &self,
+        profiles: &mut std::collections::BTreeMap<String, LightProfileConfig>,
+        runtime_config: &mut RuntimeConfig,
+    ) {
+        profiles.clear();
+        for profile in &self.profiles {
+            profiles.insert(profile.id.clone(), profile.clone());
+        }
         runtime_config.solar_noon_hour = self.solar_noon_hour;
     }
 }
@@ -241,11 +173,8 @@ impl StoredLocation {
 /// Global settings for persistence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredSettings {
-    pub rhythm_interval_secs: u64,
     pub power_save: bool,
-    /// Whether sleep mode is active. Defaults to false for backwards compat.
-    #[serde(default)]
-    pub sleep_mode: bool,
+    pub active_light_profile: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -308,13 +237,13 @@ impl Storage for FileStorage {
         self.write_atomic("rooms.json", data.as_bytes())
     }
 
-    fn load_config(&self) -> Result<StoredConfig> {
-        self.read_json("config.json")
+    fn load_light_profiles(&self) -> Result<StoredLightProfiles> {
+        self.read_json("light_profiles.json")
     }
 
-    fn save_config(&self, config: &StoredConfig) -> Result<()> {
+    fn save_light_profiles(&self, config: &StoredLightProfiles) -> Result<()> {
         let data = serde_json::to_string_pretty(config)?;
-        self.write_atomic("config.json", data.as_bytes())
+        self.write_atomic("light_profiles.json", data.as_bytes())
     }
 
     fn load_location(&self) -> Result<StoredLocation> {
@@ -446,92 +375,101 @@ fn sanitize_hub_key(key: &HubKey) -> String {
 /// Loads config, location, settings, and hub credentials from the
 /// configured [`Storage`] backend. Safe to call on any platform.
 pub fn load_persisted_state(s: &mut crate::state::AppState) {
-    let storage = match s.storage.as_ref() {
-        Some(st) => st,
-        None => return,
-    };
-
-    if let Ok(config) = storage.load_config() {
-        config.apply_to_state(&mut s.config, &mut s.runtime_config);
-        // Sync curve-provided motion timeout as the baseline default.
-        // StoredSettings load below may override this if the user set it explicitly.
-        s.default_motion_timeout_secs =
-            s.config
-                .motion_timeout_secs
-                .unwrap_or(rhythm_core::config::DEFAULT_MOTION_TIMEOUT_SECS) as u64;
-        let c = &s.config;
-        info!(target: "sys", "Loaded config: bri={}–{}%, cct={}–{}K, width_bri=L{}/R{}, width_cct=L{}/R{}, shape_p={}, solar_noon={}",
-            c.min_brightness, c.max_brightness,
-            c.min_color_temp, c.max_color_temp,
-            c.width_left_bri, c.width_right_bri,
-            c.width_left_cct, c.width_right_cct,
-            c.shape_p, s.runtime_config.solar_noon_hour);
+    if s.storage.is_none() {
+        return;
     }
 
-    if let Ok(loc) = storage.load_location() {
-        loc.apply_to_state(
-            &mut s.latitude,
-            &mut s.longitude,
-            &mut s.utc_offset_hours,
-            &mut s.runtime_config,
-            &mut s.timezone_name,
-        );
-    }
-
-    if let Ok(settings) = storage.load_settings() {
-        s.runtime_config.update_interval_secs = settings.rhythm_interval_secs;
-        s.power_save = settings.power_save;
-        s.sleep_mode = settings.sleep_mode;
-        info!(target: "sys", "Loaded settings: interval={}s, sleep_mode={}", s.runtime_config.update_interval_secs, s.sleep_mode);
-    }
-
-    // Load hub credentials
-    match storage.load_all_hub_credentials() {
-        Ok(all_creds) if !all_creds.is_empty() => {
-            for creds in all_creds {
-                info!(target: "sys", "Loaded hub credentials: type={:?}, addr={}", creds.hub_type, creds.address);
-                if let Some(key) = creds.hub_key() {
-                    s.hub_credentials.insert(key, creds);
-                }
-            }
+    if let Some(storage) = s.storage.as_ref() {
+        if let Ok(configs) = storage.load_light_profiles() {
+            configs.apply_to_state(&mut s.light_profile_configs, &mut s.runtime_config);
+            s.ensure_active_light_profile();
+            s.sync_active_light_profile_runtime_overrides();
+            info!(
+                target: "sys",
+                "Loaded light profiles: {} profiles, solar_noon={}",
+                s.light_profile_configs.len(),
+                s.runtime_config.solar_noon_hour
+            );
         }
-        _ => {
-            // Try legacy single-credential load
-            if let Ok(creds) = storage.load_hub_credentials() {
-                if creds.is_configured() {
+    }
+
+    if let Some(storage) = s.storage.as_ref() {
+        if let Ok(loc) = storage.load_location() {
+            loc.apply_to_state(
+                &mut s.latitude,
+                &mut s.longitude,
+                &mut s.utc_offset_hours,
+                &mut s.runtime_config,
+                &mut s.timezone_name,
+            );
+        }
+    }
+
+    if let Some(storage) = s.storage.as_ref() {
+        if let Ok(settings) = storage.load_settings() {
+            s.power_save = settings.power_save;
+            s.active_light_profile_id = settings.active_light_profile;
+            s.ensure_active_light_profile();
+            s.sync_active_light_profile_runtime_overrides();
+            info!(
+                target: "sys",
+                "Loaded settings: active_light_profile={}",
+                s.active_light_profile_id
+            );
+        }
+    }
+
+    if let Some(storage) = s.storage.as_ref() {
+        match storage.load_all_hub_credentials() {
+            Ok(all_creds) if !all_creds.is_empty() => {
+                for creds in all_creds {
                     info!(target: "sys", "Loaded hub credentials: type={:?}, addr={}", creds.hub_type, creds.address);
                     if let Some(key) = creds.hub_key() {
                         s.hub_credentials.insert(key, creds);
                     }
                 }
             }
-        }
-    }
-
-    if let Ok(Some(value)) = storage.load_canonical_registry() {
-        match serde_json::from_value::<crate::canonical::registry::CanonicalRegistry>(value) {
-            Ok(mut registry) => {
-                registry.rebuild_indices();
-                let count = registry.device_count();
-                s.canonical_registry = registry;
-                info!(target: "sys", "Loaded canonical registry: {} devices", count);
-            }
-            Err(e) => {
-                info!(target: "sys", "Failed to parse canonical registry (will start fresh): {}", e);
+            _ => {
+                if let Ok(creds) = storage.load_hub_credentials() {
+                    if creds.is_configured() {
+                        info!(target: "sys", "Loaded hub credentials: type={:?}, addr={}", creds.hub_type, creds.address);
+                        if let Some(key) = creds.hub_key() {
+                            s.hub_credentials.insert(key, creds);
+                        }
+                    }
+                }
             }
         }
     }
 
-    if let Ok(Some(value)) = storage.load_topology() {
-        match serde_json::from_value::<crate::topology::RoomTopologyStore>(value) {
-            Ok(mut topology) => {
-                topology.rebuild_indices();
-                let count = topology.room_count();
-                s.topology = topology;
-                info!(target: "sys", "Loaded topology: {} rooms", count);
+    if let Some(storage) = s.storage.as_ref() {
+        if let Ok(Some(value)) = storage.load_canonical_registry() {
+            match serde_json::from_value::<crate::canonical::registry::CanonicalRegistry>(value) {
+                Ok(mut registry) => {
+                    registry.rebuild_indices();
+                    let count = registry.device_count();
+                    s.canonical_registry = registry;
+                    info!(target: "sys", "Loaded canonical registry: {} devices", count);
+                }
+                Err(e) => {
+                    info!(target: "sys", "Failed to parse canonical registry (will start fresh): {}", e);
+                }
             }
-            Err(e) => {
-                info!(target: "sys", "Failed to parse topology (will start fresh): {}", e);
+        }
+    }
+
+    if let Some(storage) = s.storage.as_ref() {
+        if let Ok(Some(value)) = storage.load_topology() {
+            match serde_json::from_value::<crate::topology::RoomTopologyStore>(value) {
+                Ok(mut topology) => {
+                    topology.rebuild_indices();
+                    let count = topology.room_count();
+                    s.topology = topology;
+                    info!(target: "sys", "Loaded topology: {} rooms", count);
+                }
+                Err(e) => {
+                    info!(target: "sys", "Failed to parse topology (will start fresh): {}", e);
+                }
             }
         }
     }
@@ -542,55 +480,228 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hub::HubCredentials;
 
-    // ---- StoredConfig tests (no feature gate needed) ----
+    #[derive(Default)]
+    struct TestStorage {
+        light_profiles: Option<StoredLightProfiles>,
+        location: Option<StoredLocation>,
+        settings: Option<StoredSettings>,
+    }
+
+    impl Storage for TestStorage {
+        fn load_rooms(&self) -> Result<RoomManager> {
+            Ok(RoomManager::new())
+        }
+
+        fn save_rooms(&self, _rooms: &RoomManager) -> Result<()> {
+            Ok(())
+        }
+
+        fn load_light_profiles(&self) -> Result<StoredLightProfiles> {
+            self.light_profiles
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("missing light profiles"))
+        }
+
+        fn save_light_profiles(&self, _config: &StoredLightProfiles) -> Result<()> {
+            Ok(())
+        }
+
+        fn load_location(&self) -> Result<StoredLocation> {
+            self.location
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("missing location"))
+        }
+
+        fn save_location(&self, _loc: &StoredLocation) -> Result<()> {
+            Ok(())
+        }
+
+        fn load_settings(&self) -> Result<StoredSettings> {
+            self.settings
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("missing settings"))
+        }
+
+        fn save_settings(&self, _settings: &StoredSettings) -> Result<()> {
+            Ok(())
+        }
+
+        fn load_hub_credentials(&self) -> Result<HubCredentials> {
+            Ok(HubCredentials::default())
+        }
+
+        fn save_hub_credentials(&self, _creds: &HubCredentials) -> Result<()> {
+            Ok(())
+        }
+
+        fn load_hub_registry(&self) -> Result<Option<Value>> {
+            Ok(None)
+        }
+
+        fn save_hub_registry(&self, _data: &Value) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    // ---- StoredLightProfiles tests (no feature gate needed) ----
 
     #[test]
-    fn stored_config_from_state_roundtrip() {
-        // Create CurveConfig and RuntimeConfig, convert to StoredConfig, apply back
-        let config = rhythm_core::CurveConfig {
-            min_brightness: 5,
-            max_brightness: 95,
-            min_color_temp: 2200,
-            max_color_temp: 5500,
-            width_left_bri: 0.7,
-            width_right_bri: 1.3,
-            width_left_cct: 0.8,
-            width_right_cct: 1.1,
-            shape_p: 4.0,
-            max_dim_steps: 8,
-            fade_ms: None,
-            motion_timeout_secs: Some(300),
-        };
+    fn stored_light_profiles_from_state_roundtrip() {
+        let mut profiles = std::collections::BTreeMap::new();
+        let mut config = rhythm_core::default_rhythm_profile();
+        config.min_brightness = 5;
+        config.max_brightness = 95;
+        config.motion_timeout_secs = rhythm_core::TimerSetting::Fixed { value: 300 };
+        profiles.insert(config.id.clone(), config.clone());
         let runtime_config = rhythm_core::RuntimeConfig::default().with_solar_noon(12.8);
 
-        let stored = StoredConfig::from_state(&config, &runtime_config);
-        assert_eq!(stored.min_brightness, 5);
-        assert_eq!(stored.max_brightness, 95);
-        assert_eq!(stored.min_color_temp, 2200);
-        assert_eq!(stored.max_color_temp, 5500);
+        let stored = StoredLightProfiles::from_state(&profiles, &runtime_config);
+        assert_eq!(stored.profiles.len(), 1);
+        assert_eq!(stored.profiles[0].min_brightness, 5);
+        assert_eq!(stored.profiles[0].max_brightness, 95);
         assert!((stored.solar_noon_hour - 12.8).abs() < 0.01);
-        assert!((stored.width_left_bri - 0.7).abs() < 0.001);
-        assert!((stored.width_right_bri - 1.3).abs() < 0.001);
-        assert!((stored.shape_p - 4.0).abs() < 0.001);
-        assert_eq!(stored.max_dim_steps, 8);
-        assert_eq!(stored.fade_ms, None);
-        assert_eq!(stored.motion_timeout_secs, Some(300));
 
-        let mut config2 = rhythm_core::CurveConfig::default();
+        let mut profiles2 = std::collections::BTreeMap::new();
         let mut runtime_config2 = rhythm_core::RuntimeConfig::default();
-        stored.apply_to_state(&mut config2, &mut runtime_config2);
+        stored.apply_to_state(&mut profiles2, &mut runtime_config2);
+        let config2 = profiles2.get(rhythm_core::RHYTHM_PROFILE_ID).unwrap();
         assert_eq!(config2.min_brightness, 5);
         assert_eq!(config2.max_brightness, 95);
-        assert_eq!(config2.min_color_temp, 2200);
-        assert_eq!(config2.max_color_temp, 5500);
-        assert!((config2.width_left_bri - 0.7).abs() < 0.001);
-        assert!((config2.width_right_bri - 1.3).abs() < 0.001);
-        assert!((config2.width_left_cct - 0.8).abs() < 0.001);
-        assert!((config2.width_right_cct - 1.1).abs() < 0.001);
-        assert!((config2.shape_p - 4.0).abs() < 0.001);
-        assert_eq!(config2.max_dim_steps, 8);
+        assert_eq!(
+            config2.motion_timeout_secs,
+            rhythm_core::TimerSetting::Fixed { value: 300 }
+        );
         assert!((runtime_config2.solar_noon_hour - 12.8).abs() < 0.01);
+    }
+
+    #[test]
+    fn load_persisted_state_missing_active_profile_falls_back_to_rhythm() {
+        let storage = TestStorage {
+            light_profiles: Some(StoredLightProfiles {
+                solar_noon_hour: 12.5,
+                profiles: vec![
+                    rhythm_core::default_rhythm_profile(),
+                    rhythm_core::default_sleep_profile(),
+                    rhythm_core::default_idle_profile(),
+                ],
+            }),
+            settings: Some(StoredSettings {
+                power_save: false,
+                active_light_profile: "missing-profile".to_string(),
+            }),
+            ..Default::default()
+        };
+
+        let mut app = crate::state::AppState::default();
+        app.storage = Some(Box::new(storage));
+        load_persisted_state(&mut app);
+
+        assert_eq!(app.active_light_profile_id, rhythm_core::RHYTHM_PROFILE_ID);
+    }
+
+    #[test]
+    fn load_persisted_state_idle_active_profile_falls_back_to_rhythm() {
+        let storage = TestStorage {
+            light_profiles: Some(StoredLightProfiles {
+                solar_noon_hour: 12.5,
+                profiles: vec![
+                    rhythm_core::default_rhythm_profile(),
+                    rhythm_core::default_sleep_profile(),
+                    rhythm_core::default_idle_profile(),
+                ],
+            }),
+            settings: Some(StoredSettings {
+                power_save: false,
+                active_light_profile: rhythm_core::IDLE_PROFILE_ID.to_string(),
+            }),
+            ..Default::default()
+        };
+
+        let mut app = crate::state::AppState::default();
+        app.storage = Some(Box::new(storage));
+        load_persisted_state(&mut app);
+
+        assert_eq!(app.active_light_profile_id, rhythm_core::RHYTHM_PROFILE_ID);
+    }
+
+    #[test]
+    fn load_persisted_state_syncs_motion_timeout_from_restored_active_profile() {
+        let mut sleep = rhythm_core::default_sleep_profile();
+        sleep.motion_timeout_secs = rhythm_core::TimerSetting::Fixed { value: 42 };
+        sleep.rhythm_interval_secs = rhythm_core::TimerSetting::Fixed { value: 17 };
+
+        let storage = TestStorage {
+            light_profiles: Some(StoredLightProfiles {
+                solar_noon_hour: 12.5,
+                profiles: vec![
+                    rhythm_core::default_rhythm_profile(),
+                    sleep,
+                    rhythm_core::default_idle_profile(),
+                ],
+            }),
+            settings: Some(StoredSettings {
+                power_save: false,
+                active_light_profile: rhythm_core::SLEEP_PROFILE_ID.to_string(),
+            }),
+            ..Default::default()
+        };
+
+        let mut app = crate::state::AppState::default();
+        app.storage = Some(Box::new(storage));
+        load_persisted_state(&mut app);
+
+        assert_eq!(app.active_light_profile_id, rhythm_core::SLEEP_PROFILE_ID);
+        assert_eq!(app.default_motion_timeout_secs, 42);
+        assert_eq!(app.runtime_config.update_interval_secs, 17);
+    }
+
+    #[test]
+    fn load_persisted_state_restores_idle_palette_override() {
+        let mut idle = rhythm_core::default_idle_profile();
+        idle.curve = rhythm_core::LightCurveShape::Palette {
+            keyframes: vec![
+                rhythm_core::LightPaletteKeyframe {
+                    hour: 0.0,
+                    r: 255,
+                    g: 0,
+                    b: 0,
+                },
+                rhythm_core::LightPaletteKeyframe {
+                    hour: 24.0,
+                    r: 255,
+                    g: 0,
+                    b: 0,
+                },
+            ],
+        };
+
+        let storage = TestStorage {
+            light_profiles: Some(StoredLightProfiles {
+                solar_noon_hour: 12.5,
+                profiles: vec![
+                    rhythm_core::default_rhythm_profile(),
+                    rhythm_core::default_sleep_profile(),
+                    idle.clone(),
+                ],
+            }),
+            settings: Some(StoredSettings {
+                power_save: false,
+                active_light_profile: rhythm_core::RHYTHM_PROFILE_ID.to_string(),
+            }),
+            ..Default::default()
+        };
+
+        let mut app = crate::state::AppState::default();
+        app.storage = Some(Box::new(storage));
+        load_persisted_state(&mut app);
+
+        assert_eq!(
+            app.light_profile_config(rhythm_core::IDLE_PROFILE_ID)
+                .unwrap(),
+            &idle
+        );
     }
 
     // ---- FileStorage tests (desktop only) ----
@@ -598,7 +709,6 @@ mod tests {
     #[cfg(feature = "desktop")]
     mod file_storage_tests {
         use super::*;
-        use crate::hub::HubCredentials;
 
         fn temp_storage() -> (FileStorage, std::path::PathBuf) {
             let dir = std::env::temp_dir().join(format!("rhythm_test_{}", std::process::id()));
@@ -627,61 +737,28 @@ mod tests {
         }
 
         #[test]
-        fn config_save_load_roundtrip() {
+        fn light_profiles_save_load_roundtrip() {
             let (storage, path) = temp_storage();
-            let config = StoredConfig {
-                min_brightness: 10,
-                max_brightness: 90,
-                min_color_temp: 2000,
-                max_color_temp: 6000,
+            let config = StoredLightProfiles {
                 solar_noon_hour: 13.25,
-                width_left_bri: 0.7,
-                width_right_bri: 1.2,
-                width_left_cct: 0.8,
-                width_right_cct: 1.1,
-                shape_p: 4.0,
-                max_dim_steps: 8,
-                fade_ms: Some(300),
-                motion_timeout_secs: Some(300),
+                profiles: vec![rhythm_core::default_rhythm_profile()],
             };
-            storage.save_config(&config).unwrap();
-            let loaded = storage.load_config().unwrap();
-            assert_eq!(loaded.min_brightness, 10);
-            assert_eq!(loaded.max_brightness, 90);
-            assert_eq!(loaded.min_color_temp, 2000);
-            assert_eq!(loaded.max_color_temp, 6000);
+            storage.save_light_profiles(&config).unwrap();
+            let loaded = storage.load_light_profiles().unwrap();
+            assert_eq!(loaded.profiles.len(), 1);
+            assert_eq!(loaded.profiles[0].id, rhythm_core::RHYTHM_PROFILE_ID);
             assert!((loaded.solar_noon_hour - 13.25).abs() < 0.01);
-            assert!((loaded.width_left_bri - 0.7).abs() < 0.001);
-            assert!((loaded.width_right_bri - 1.2).abs() < 0.001);
-            assert!((loaded.shape_p - 4.0).abs() < 0.001);
-            assert_eq!(loaded.fade_ms, Some(300));
-            assert_eq!(loaded.motion_timeout_secs, Some(300));
-            assert_eq!(loaded.max_dim_steps, 8);
             cleanup(&path);
         }
 
         #[test]
-        fn config_legacy_json_uses_defaults_for_new_fields() {
-            // Simulate loading a config.json from before width fields were added
+        fn light_profiles_save_load_minimal_json() {
             let (storage, path) = temp_storage();
-            let legacy_json = r#"{"min_brightness":5,"max_brightness":90,"min_color_temp":2000,"max_color_temp":5500,"solar_noon_hour":12.5}"#;
-            std::fs::write(path.join("config.json"), legacy_json).unwrap();
-            let loaded = storage.load_config().unwrap();
-            assert_eq!(loaded.min_brightness, 5);
-            assert_eq!(loaded.max_brightness, 90);
-            // New fields should get defaults
-            assert!(
-                (loaded.width_left_bri - rhythm_core::config::DEFAULT_WIDTH_LEFT_BRI).abs() < 0.001
-            );
-            assert!(
-                (loaded.width_right_bri - rhythm_core::config::DEFAULT_WIDTH_RIGHT_BRI).abs()
-                    < 0.001
-            );
-            assert!((loaded.shape_p - rhythm_core::config::DEFAULT_SHAPE_P).abs() < 0.001);
-            assert_eq!(
-                loaded.max_dim_steps,
-                rhythm_core::config::DEFAULT_MAX_DIM_STEPS
-            );
+            let json = r#"{"solar_noon_hour":12.5,"profiles":[{"id":"rhythm","name":"Day","curve":{"type":"super-gaussian"}}]}"#;
+            std::fs::write(path.join("light_profiles.json"), json).unwrap();
+            let loaded = storage.load_light_profiles().unwrap();
+            assert_eq!(loaded.profiles.len(), 1);
+            assert_eq!(loaded.profiles[0].id, rhythm_core::RHYTHM_PROFILE_ID);
             cleanup(&path);
         }
 
@@ -707,15 +784,13 @@ mod tests {
         fn settings_save_load_roundtrip() {
             let (storage, path) = temp_storage();
             let settings = StoredSettings {
-                rhythm_interval_secs: 120,
                 power_save: true,
-                sleep_mode: true,
+                active_light_profile: rhythm_core::SLEEP_PROFILE_ID.to_string(),
             };
             storage.save_settings(&settings).unwrap();
             let loaded = storage.load_settings().unwrap();
-            assert_eq!(loaded.rhythm_interval_secs, 120);
             assert!(loaded.power_save);
-            assert!(loaded.sleep_mode);
+            assert_eq!(loaded.active_light_profile, rhythm_core::SLEEP_PROFILE_ID);
             cleanup(&path);
         }
 

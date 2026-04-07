@@ -67,7 +67,7 @@ const DIM_DELTA: f32 = 10.0;
 ///
 /// # Arguments
 ///
-/// * `module` - The curve module to use for lighting calculations
+/// * `module` - The active light profile implementation to use for calculations
 /// * `solar` - Solar time context
 /// * `current_hour` - Current time in hours (0-24)
 /// * `action` - The action to process

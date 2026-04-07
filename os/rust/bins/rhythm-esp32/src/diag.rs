@@ -360,8 +360,8 @@ pub fn is_crash_reason(reason: u32) -> bool {
 // ============================================================================
 
 struct HubVitals {
-    hub_type: AtomicU8,          // 0=unused, 1=hue, 2=ha, ...
-    conn_state: AtomicU8,        // CONN_DISCONNECTED/CONNECTING/CONNECTED
+    hub_type: AtomicU8,   // 0=unused, 1=hue, 2=ha, ...
+    conn_state: AtomicU8, // CONN_DISCONNECTED/CONNECTING/CONNECTED
     last_heartbeat_ts: AtomicU32,
     reconnect_count: AtomicU32,
 }

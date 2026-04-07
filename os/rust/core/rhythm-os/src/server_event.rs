@@ -5,7 +5,7 @@
 
 use serde::Serialize;
 
-use rhythm_core::RoomSnapshot;
+use rhythm_core::{RoomProfileSettings, RoomSnapshot};
 
 use crate::state::MotionSnapshot;
 
@@ -64,6 +64,8 @@ pub struct RoomStateEvent {
     /// Absent (or `false`) for user actions, polls, and other state changes.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub tick: bool,
+    #[serde(rename = "room_profile", default, skip_serializing_if = "RoomProfileSettings::is_empty")]
+    pub room_profile: RoomProfileSettings,
 }
 
 impl RoomStateEvent {
@@ -73,6 +75,7 @@ impl RoomStateEvent {
         lights_on: bool,
         brightness: u8,
         kelvin: u16,
+        room_profile: RoomProfileSettings,
     ) -> Self {
         Self {
             id: snap.id.clone(),
@@ -84,6 +87,7 @@ impl RoomStateEvent {
             brightness,
             kelvin,
             tick: false,
+            room_profile,
         }
     }
 }

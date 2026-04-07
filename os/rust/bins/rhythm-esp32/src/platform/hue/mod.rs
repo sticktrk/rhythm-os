@@ -54,7 +54,10 @@ pub fn start_event_stream(
             sse::run_hue_sse(sse_config, sse_tx, &sse_shutdown);
         })
     {
-        log::warn!("Failed to spawn Hue SSE thread: {} — events will not stream", e);
+        log::warn!(
+            "Failed to spawn Hue SSE thread: {} — events will not stream",
+            e
+        );
     }
 
     // Build on-demand discovery closures for the translator thread.
@@ -222,23 +225,25 @@ impl HubProvider for HueHubProvider {
         // Try starting runtime if rooms exist
         let has_rooms = {
             let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-            s.all_hub_registries()
-                .iter()
-                .any(|reg| reg.lock().ok().map(|r| !r.rooms().is_empty()).unwrap_or(false))
+            s.all_hub_registries().iter().any(|reg| {
+                reg.lock()
+                    .ok()
+                    .map(|r| !r.rooms().is_empty())
+                    .unwrap_or(false)
+            })
         };
 
         if has_rooms {
             let bridge_ip = {
                 let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-                s.hub_credentials.values().next()
+                s.hub_credentials
+                    .values()
+                    .next()
                     .map(|c| c.address.clone())
                     .ok_or_else(|| anyhow::anyhow!("No hub credentials"))?
             };
             let transport = HueClient::new(bridge_ip);
-            if let Err(e) = rhythm_hue::embedded_lifecycle::ensure_runtime(
-                state,
-                transport,
-            ) {
+            if let Err(e) = rhythm_hue::embedded_lifecycle::ensure_runtime(state, transport) {
                 warn!(target: "sys", "Failed to start runtime on reconfigure: {}", e);
             }
         }

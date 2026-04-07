@@ -8,7 +8,7 @@
 //!
 //! ## Modules
 //!
-//! - [`config`]: Configuration types for curve parameters
+//! - [`config`]: Shared timing constants and solar context helpers
 //! - [`curves`]: Super-Gaussian (flat-topped bell) curve calculations
 //! - [`color`]: Color space conversions (Kelvin to XY/RGB)
 //! - [`solar`]: Solar time and sunrise/sunset calculations
@@ -31,8 +31,6 @@ pub mod composite_controller;
 pub mod config;
 pub mod controller;
 pub mod curves;
-#[cfg(feature = "serde")]
-pub mod defaults;
 pub mod device;
 pub mod groups;
 pub mod light_profile;
@@ -54,19 +52,17 @@ pub use adaptive::LightingValues;
 pub use color::{
     kelvin_to_mireds, kelvin_to_rgb, kelvin_to_xy, mireds_to_kelvin, rgb_to_xy, Rgb, XyColor,
 };
-pub use config::{CurveConfig, SolarContext};
+pub use config::SolarContext;
 pub use controller::{LightControlError, LightControlResult, LightController, NoOpController};
 pub use curves::{inverse_super_gaussian, map_super_gaussian};
-#[cfg(feature = "serde")]
-pub use defaults::default_config;
 pub use groups::{
     group_name_for_area, is_light_entity, is_rhythm_group, GroupController, GroupError,
     GroupResult, LightGroup, NoOpGroupController, GROUP_PREFIX,
 };
 pub use light_profile::{
     default_idle_profile, default_rhythm_profile, default_sleep_profile, CommonCurveConfig,
-    CurveContext, LightCurveShape, LightDirectColor, LightPaletteKeyframe, LightProfile,
-    LightProfileConfig, LightProfileModule, LightProfileModuleConfig, LightProfileRegistry,
+    CurveContext, HourBreakpoint, LightCurveShape, LightDirectColor, LightPaletteKeyframe,
+    LightProfile, LightProfileConfig, LightProfileModule, LightProfileRegistry, TimerSetting,
     IDLE_PROFILE_ID, IDLE_PROFILE_NAME, RHYTHM_PROFILE_ID, RHYTHM_PROFILE_NAME,
     SLEEP_DEFAULT_COLOR_TEMP, SLEEP_DEFAULT_MAX_BRIGHTNESS, SLEEP_DEFAULT_MIN_BRIGHTNESS,
     SLEEP_PROFILE_ID, SLEEP_PROFILE_NAME, SLEEP_XY_X, SLEEP_XY_Y,
@@ -77,7 +73,7 @@ pub use persistence::{
     NoOpPersistenceProvider, PersistenceError, PersistenceProvider, PersistenceResult,
 };
 pub use primitives::{crossed_solar_midnight, PeriodicTickResult, RhythmEngine};
-pub use room::{Room, RoomManager};
+pub use room::{Room, RoomManager, RoomProfileSettings};
 pub use solar::{
     calculate_solar_noon, calculate_solar_noon_from_offset, calculate_sun_times, calculate_sunrise,
     calculate_sunset, calculate_twilight_times, solar_time_from_location, SolarTime, SunTimes,

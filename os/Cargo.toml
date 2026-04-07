@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "rust/core/rhythm-curve",
+    "rust/core/rhythm-profile",
     "rust/core/rhythm-devices",
     "rust/core/rhythm-core",
     "rust/core/rhythm-os",

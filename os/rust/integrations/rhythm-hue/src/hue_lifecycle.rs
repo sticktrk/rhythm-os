@@ -116,30 +116,34 @@ pub fn ensure_hue_runtime<H: crate::transport::HueTransport + 'static>(
     use crate::controller::HueLightController;
     use log::warn;
 
-    let (username, registry) = {
+    let (hub_key, username, registry) = {
         let s = state
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
 
+        let (hub_key, registry) = s
+            .hubs
+            .iter()
+            .find_map(|(key, hub)| {
+                hub.data::<HueHubData>()
+                    .map(|hue| (key.clone(), hue.registry.clone()))
+            })
+            .ok_or_else(|| anyhow::anyhow!("Hue hub not active (call connect_sse first)"))?;
+
         let hue_creds = s
             .hub_credentials
-            .values()
-            .find(|c| c.hub_type.as_ref().is_some_and(|t| t.as_str() == "hue"))
+            .get(&hub_key)
             .or_else(|| s.first_hub_credentials())
             .ok_or_else(|| anyhow::anyhow!("No hub credentials configured"))?;
         let user = crate::provider::hue_username(hue_creds)
             .ok_or_else(|| anyhow::anyhow!("Hue credentials not configured"))?
             .to_string();
 
-        let hue_data = s.hubs.values().find_map(|h| h.data::<HueHubData>());
-        let reg = hue_data
-            .map(|hue| hue.registry.clone())
-            .ok_or_else(|| anyhow::anyhow!("Hue hub not active (call connect_sse first)"))?;
-
-        (user, reg)
+        (hub_key, user, registry)
     };
 
-    let controller = HueLightController::new(transport, username, registry.clone());
+    let controller = HueLightController::new(transport, username, registry.clone())
+        .with_capability_source(state.clone(), hub_key);
 
     rhythm_os::lifecycle::ensure_hub_runtime(
         state,

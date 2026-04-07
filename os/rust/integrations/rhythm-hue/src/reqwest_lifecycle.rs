@@ -137,7 +137,8 @@ pub fn create_hue_controller(
     };
 
     let transport = ReqwestHueTransport::new(&bridge_ip)?;
-    let controller = HueLightController::new(transport, username, registry);
+    let controller = HueLightController::new(transport, username, registry)
+        .with_capability_source(state.clone(), key.clone());
     Ok(std::sync::Arc::new(controller))
 }
 

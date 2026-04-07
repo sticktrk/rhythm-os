@@ -1,11 +1,11 @@
 [package]
-name = "rhythm-curve"
+name = "rhythm-profile"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Pluggable lighting curve contract for Rhythm OS"
+description = "Pluggable lighting profile contract for Rhythm OS"
 
 [features]
 default = ["serde"]

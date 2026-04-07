@@ -30,7 +30,7 @@ pub mod gamut;
 pub mod lookup;
 pub mod quirks;
 
-pub use adapt::{adapt_command, AdaptedCommand};
+pub use adapt::{adapt_command, AdaptedCommand, ColorPreference, ColorRequest};
 pub use capabilities::{ColorMode, LightCapabilities, LightType};
 pub use entry::DeviceEntry;
 pub use gamut::{GamutTriangle, XyPoint};

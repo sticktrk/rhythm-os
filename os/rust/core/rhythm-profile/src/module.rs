@@ -15,7 +15,7 @@ use crate::values::LightingValues;
 /// # Example
 ///
 /// ```ignore
-/// use rhythm_curve::{CurveContext, LightProfileModule, LightingValues, StepAction, StepResult};
+/// use rhythm_profile::{CurveContext, LightProfileModule, LightingValues, StepAction, StepResult};
 ///
 /// struct ConstantProfile { brightness: u8, kelvin: u16 }
 ///

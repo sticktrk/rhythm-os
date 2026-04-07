@@ -1,6 +1,6 @@
 //! NVS storage for persistent configuration.
 //!
-//! Stores curve configuration, hub credentials, room state, and location
+//! Stores light profile configuration, hub credentials, room state, and location
 //! in NVS. Hub-specific persistence (e.g., Hue registry snapshots) lives
 //! in the respective hub modules.
 
@@ -9,12 +9,10 @@ use std::collections::HashMap;
 use anyhow::Result;
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
 use log::{info, warn};
-use serde::{Deserialize, Serialize};
-use rhythm_core::config::CurveConfig;
 use rhythm_core::room::{Room, RoomManager};
+use serde::{Deserialize, Serialize};
 
 use rhythm_os::hub::{HubCredentials, HubType};
-use rhythm_os::state::SharedState;
 
 // ============================================================================
 // Compact NVS Types — short field names for embedded storage
@@ -40,38 +38,16 @@ struct NvsRoom {
     time_offset_minutes: f32,
     #[serde(rename = "bo", default, skip_serializing_if = "is_zero_f32")]
     brightness_offset: f32,
-    #[serde(rename = "cc", default, skip_serializing_if = "Option::is_none")]
-    curve_config: Option<NvsCurveConfig>,
     #[serde(rename = "so", default, skip_serializing_if = "is_false")]
     soft_off: bool,
 }
 
-#[derive(Serialize, Deserialize)]
-struct NvsCurveConfig {
-    #[serde(rename = "ct0")]
-    min_color_temp: u16,
-    #[serde(rename = "ct1")]
-    max_color_temp: u16,
-    #[serde(rename = "b0")]
-    min_brightness: u8,
-    #[serde(rename = "b1")]
-    max_brightness: u8,
-    #[serde(rename = "wlb")]
-    width_left_bri: f32,
-    #[serde(rename = "wrb")]
-    width_right_bri: f32,
-    #[serde(rename = "wlc")]
-    width_left_cct: f32,
-    #[serde(rename = "wrc")]
-    width_right_cct: f32,
-    #[serde(rename = "sp")]
-    shape_p: f32,
-    #[serde(rename = "ds")]
-    max_dim_steps: u8,
+fn is_false(v: &bool) -> bool {
+    !v
 }
-
-fn is_false(v: &bool) -> bool { !v }
-fn is_zero_f32(v: &f32) -> bool { *v == 0.0 }
+fn is_zero_f32(v: &f32) -> bool {
+    *v == 0.0
+}
 
 // --- Conversions ---
 
@@ -84,7 +60,6 @@ impl From<&Room> for NvsRoom {
             disabled: r.disabled,
             time_offset_minutes: r.time_offset_minutes,
             brightness_offset: r.brightness_offset,
-            curve_config: r.curve_config.as_ref().map(NvsCurveConfig::from),
             soft_off: r.soft_off,
         }
     }
@@ -99,42 +74,7 @@ impl From<NvsRoom> for Room {
             disabled: r.disabled,
             time_offset_minutes: r.time_offset_minutes,
             brightness_offset: r.brightness_offset,
-            curve_config: r.curve_config.map(CurveConfig::from),
             soft_off: r.soft_off,
-        }
-    }
-}
-
-impl From<&CurveConfig> for NvsCurveConfig {
-    fn from(c: &CurveConfig) -> Self {
-        Self {
-            min_color_temp: c.min_color_temp,
-            max_color_temp: c.max_color_temp,
-            min_brightness: c.min_brightness,
-            max_brightness: c.max_brightness,
-            width_left_bri: c.width_left_bri,
-            width_right_bri: c.width_right_bri,
-            width_left_cct: c.width_left_cct,
-            width_right_cct: c.width_right_cct,
-            shape_p: c.shape_p,
-            max_dim_steps: c.max_dim_steps,
-        }
-    }
-}
-
-impl From<NvsCurveConfig> for CurveConfig {
-    fn from(c: NvsCurveConfig) -> Self {
-        Self {
-            min_color_temp: c.min_color_temp,
-            max_color_temp: c.max_color_temp,
-            min_brightness: c.min_brightness,
-            max_brightness: c.max_brightness,
-            width_left_bri: c.width_left_bri,
-            width_right_bri: c.width_right_bri,
-            width_left_cct: c.width_left_cct,
-            width_right_cct: c.width_right_cct,
-            shape_p: c.shape_p,
-            max_dim_steps: c.max_dim_steps,
         }
     }
 }
@@ -142,7 +82,10 @@ impl From<NvsCurveConfig> for CurveConfig {
 impl From<&RoomManager> for NvsRoomManager {
     fn from(rm: &RoomManager) -> Self {
         Self {
-            rooms: rm.iter().map(|r| (r.id.clone(), NvsRoom::from(r))).collect(),
+            rooms: rm
+                .iter()
+                .map(|r| (r.id.clone(), NvsRoom::from(r)))
+                .collect(),
         }
     }
 }
@@ -178,7 +121,10 @@ pub fn load_rooms(nvs: &EspDefaultNvsPartition) -> Result<RoomManager> {
             // Fall back to verbose format (migration)
             match serde_json::from_str::<RoomManager>(json) {
                 Ok(rooms) => {
-                    info!("Loaded {} rooms from NVS (verbose, will compact on next save)", rooms.len());
+                    info!(
+                        "Loaded {} rooms from NVS (verbose, will compact on next save)",
+                        rooms.len()
+                    );
                     return Ok(rooms);
                 }
                 Err(e) => warn!("Failed to parse rooms JSON from NVS: {}", e),
@@ -204,11 +150,7 @@ pub fn save_rooms(nvs: &EspDefaultNvsPartition, rooms: &RoomManager) -> Result<(
 pub const NVS_NAMESPACE: &str = "rhythm";
 
 // NVS keys (max 15 chars)
-const KEY_MIN_BRI: &str = "min_bri";
-const KEY_MAX_BRI: &str = "max_bri";
-const KEY_MIN_CCT: &str = "min_cct";
-const KEY_MAX_CCT: &str = "max_cct";
-const KEY_SOLAR_NOON: &str = "solar_noon";
+const KEY_PROFILES: &str = "profiles";
 const KEY_UTC_OFFSET: &str = "utc_offset";
 const KEY_HUB_TYPE: &str = "hub_type";
 const KEY_HUE_IP: &str = "hue_ip";
@@ -224,6 +166,7 @@ const KEY_BULB_FADE_MS: &str = "bulb_fade_ms";
 const KEY_RHYTHM_INTV: &str = "rhythm_intv";
 const KEY_DFL_MOT_TOUT: &str = "dfl_mot_tout";
 const KEY_PWR_SAVE: &str = "pwr_save";
+const KEY_ACTIVE_PROF: &str = "act_prof";
 const KEY_SOB: &str = "soft_off_bri";
 const KEY_TZ_NAME: &str = "tz_name";
 const KEY_CRASH_CNT: &str = "crash_cnt";
@@ -231,144 +174,12 @@ const KEY_LAST_RST_RSN: &str = "last_rst_rsn";
 const KEY_LAST_CRASH_TS: &str = "last_crash_ts";
 const KEY_LAST_PANIC: &str = "last_panic";
 
-/// Load configuration from NVS.
-pub fn load_config(nvs: &EspDefaultNvsPartition, state: &SharedState) -> Result<()> {
-    let nvs = EspNvs::new(nvs.clone(), NVS_NAMESPACE, true)?;
-
-    let mut state = state
-        .lock()
-        .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
-
-    // Load curve config values
-    if let Ok(Some(val)) = nvs.get_u8(KEY_MIN_BRI) {
-        state.config.min_brightness = val;
-        info!("Loaded min_brightness: {}", val);
-    }
-
-    if let Ok(Some(val)) = nvs.get_u8(KEY_MAX_BRI) {
-        state.config.max_brightness = val;
-        info!("Loaded max_brightness: {}", val);
-    }
-
-    if let Ok(Some(val)) = nvs.get_u16(KEY_MIN_CCT) {
-        state.config.min_color_temp = val;
-        info!("Loaded min_color_temp: {}", val);
-    }
-
-    if let Ok(Some(val)) = nvs.get_u16(KEY_MAX_CCT) {
-        state.config.max_color_temp = val;
-        info!("Loaded max_color_temp: {}", val);
-    }
-
-    // Load solar noon (stored as i16 representing hour * 100)
-    if let Ok(Some(val)) = nvs.get_i16(KEY_SOLAR_NOON) {
-        state.runtime_config.solar_noon_hour = val as f32 / 100.0;
-        info!("Loaded solar_noon_hour: {}", state.runtime_config.solar_noon_hour);
-    }
-
-    // Load UTC offset (stored as i16 representing hours * 100)
-    if let Ok(Some(val)) = nvs.get_i16(KEY_UTC_OFFSET) {
-        state.utc_offset_hours = val as f32 / 100.0;
-        info!("Loaded utc_offset_hours: {}", state.utc_offset_hours);
-    }
-
-    // Load hub credentials (hub_type key dispatches to per-hub keys)
-    let creds = load_hub_credentials_inner(&nvs);
-    if creds.is_configured() {
-        if let Some(key) = creds.hub_key() {
-            state.hub_credentials.insert(key, creds);
-        }
-    }
-
-    // Load location (stored as i32 * 10000 for precision)
-    if let Ok(Some(val)) = nvs.get_i32(KEY_LATITUDE) {
-        state.latitude = Some(val as f32 / 10000.0);
-        info!("Loaded latitude: {:.4}", state.latitude.unwrap());
-    }
-
-    if let Ok(Some(val)) = nvs.get_i32(KEY_LONGITUDE) {
-        state.longitude = Some(val as f32 / 10000.0);
-        info!("Loaded longitude: {:.4}", state.longitude.unwrap());
-    }
-
-    // Load global settings
-    if let Ok(Some(val)) = nvs.get_u16(KEY_RHYTHM_INTV) {
-        state.runtime_config.update_interval_secs = val as u64;
-        info!("Loaded rhythm_interval_secs: {}", val);
-    }
-
-    if let Ok(Some(val)) = nvs.get_u8(KEY_PWR_SAVE) {
-        state.power_save = val != 0;
-        info!("Loaded power_save: {}", state.power_save);
-    }
-
-    Ok(())
-}
-
-/// Save configuration to NVS.
-pub fn save_config(nvs: &EspDefaultNvsPartition, state: &SharedState) -> Result<()> {
-    let nvs = EspNvs::new(nvs.clone(), NVS_NAMESPACE, true)?;
-
-    let state = state
-        .lock()
-        .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
-
-    // Save curve config values
-    nvs.set_u8(KEY_MIN_BRI, state.config.min_brightness)?;
-    nvs.set_u8(KEY_MAX_BRI, state.config.max_brightness)?;
-    nvs.set_u16(KEY_MIN_CCT, state.config.min_color_temp)?;
-    nvs.set_u16(KEY_MAX_CCT, state.config.max_color_temp)?;
-
-    // Save solar noon (stored as i16 representing hour * 100)
-    let solar_noon_encoded = (state.runtime_config.solar_noon_hour * 100.0) as i16;
-    nvs.set_i16(KEY_SOLAR_NOON, solar_noon_encoded)?;
-
-    // Save UTC offset (stored as i16 representing hours * 100)
-    let utc_offset_encoded = (state.utc_offset_hours * 100.0) as i16;
-    nvs.set_i16(KEY_UTC_OFFSET, utc_offset_encoded)?;
-
-    // Save hub credentials (ESP32: single hub, save first configured)
-    if let Some(creds) = state.hub_credentials.values().next() {
-        save_hub_credentials_inner(&nvs, creds)?;
-    }
-
-    // Save location (stored as i32 * 10000 for precision)
-    if let Some(lat) = state.latitude {
-        nvs.set_i32(KEY_LATITUDE, (lat * 10000.0) as i32)?;
-    }
-    if let Some(lon) = state.longitude {
-        nvs.set_i32(KEY_LONGITUDE, (lon * 10000.0) as i32)?;
-    }
-
-    info!("Configuration saved to NVS");
-    Ok(())
-}
-
-/// Save global settings to NVS.
-pub fn save_settings(nvs: &EspDefaultNvsPartition, state: &SharedState) -> Result<()> {
-    let nvs = EspNvs::new(nvs.clone(), NVS_NAMESPACE, true)?;
-
-    let state = state
-        .lock()
-        .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
-
-    nvs.set_u16(KEY_RHYTHM_INTV, state.runtime_config.update_interval_secs as u16)?;
-    nvs.set_u8(KEY_PWR_SAVE, if state.power_save { 1 } else { 0 })?;
-
-    info!("Settings saved to NVS");
-    Ok(())
-}
-
 /// Clear all stored configuration from NVS.
 pub fn clear_config(nvs: &EspDefaultNvsPartition) -> Result<()> {
     let nvs = EspNvs::new(nvs.clone(), NVS_NAMESPACE, true)?;
 
     // Remove all keys
-    let _ = nvs.remove(KEY_MIN_BRI);
-    let _ = nvs.remove(KEY_MAX_BRI);
-    let _ = nvs.remove(KEY_MIN_CCT);
-    let _ = nvs.remove(KEY_MAX_CCT);
-    let _ = nvs.remove(KEY_SOLAR_NOON);
+    let _ = nvs.remove(KEY_PROFILES);
     let _ = nvs.remove(KEY_UTC_OFFSET);
     let _ = nvs.remove(KEY_HUB_TYPE);
     let _ = nvs.remove(KEY_HUE_IP);
@@ -383,6 +194,7 @@ pub fn clear_config(nvs: &EspDefaultNvsPartition) -> Result<()> {
     let _ = nvs.remove(KEY_RHYTHM_INTV);
     let _ = nvs.remove(KEY_DFL_MOT_TOUT);
     let _ = nvs.remove(KEY_PWR_SAVE);
+    let _ = nvs.remove(KEY_ACTIVE_PROF);
 
     info!("Configuration cleared from NVS");
     Ok(())
@@ -421,8 +233,16 @@ fn load_hue_credentials(nvs: &EspNvs<NvsDefault>) -> HubCredentials {
     let mut ip_buf = [0u8; 64];
     let mut user_buf = [0u8; 128];
 
-    let ip = nvs.get_str(KEY_HUE_IP, &mut ip_buf).ok().flatten().map(|s| s.to_string());
-    let user = nvs.get_str(KEY_HUE_USER, &mut user_buf).ok().flatten().map(|s| s.to_string());
+    let ip = nvs
+        .get_str(KEY_HUE_IP, &mut ip_buf)
+        .ok()
+        .flatten()
+        .map(|s| s.to_string());
+    let user = nvs
+        .get_str(KEY_HUE_USER, &mut user_buf)
+        .ok()
+        .flatten()
+        .map(|s| s.to_string());
 
     match (ip, user) {
         (Some(bridge_ip), Some(username)) => {
@@ -436,13 +256,19 @@ fn load_hue_credentials(nvs: &EspNvs<NvsDefault>) -> HubCredentials {
 /// Save hub credentials to NVS.
 ///
 /// Writes the `hub_type` key and the appropriate per-hub credential keys.
-pub fn save_hub_credentials(nvs: &EspDefaultNvsPartition, credentials: &HubCredentials) -> Result<()> {
+pub fn save_hub_credentials(
+    nvs: &EspDefaultNvsPartition,
+    credentials: &HubCredentials,
+) -> Result<()> {
     let nvs = EspNvs::new(nvs.clone(), NVS_NAMESPACE, true)?;
     save_hub_credentials_inner(&nvs, credentials)
 }
 
 /// Inner implementation that works with an already-opened NVS handle.
-fn save_hub_credentials_inner(nvs: &EspNvs<NvsDefault>, credentials: &HubCredentials) -> Result<()> {
+fn save_hub_credentials_inner(
+    nvs: &EspNvs<NvsDefault>,
+    credentials: &HubCredentials,
+) -> Result<()> {
     if !credentials.is_configured() {
         let _ = nvs.remove(KEY_HUB_TYPE);
         let _ = nvs.remove(KEY_HUE_IP);
@@ -468,15 +294,25 @@ pub fn load_wifi_credentials(nvs: &EspDefaultNvsPartition) -> Option<(String, St
     let mut ssid_buf = [0u8; 64];
     let mut pass_buf = [0u8; 128];
 
-    let ssid = nvs.get_str(KEY_WIFI_SSID, &mut ssid_buf).ok()?.map(|s| s.to_string())?;
-    let pass = nvs.get_str(KEY_WIFI_PASS, &mut pass_buf).ok()?.map(|s| s.to_string())?;
+    let ssid = nvs
+        .get_str(KEY_WIFI_SSID, &mut ssid_buf)
+        .ok()?
+        .map(|s| s.to_string())?;
+    let pass = nvs
+        .get_str(KEY_WIFI_PASS, &mut pass_buf)
+        .ok()?
+        .map(|s| s.to_string())?;
 
     info!("Loaded WiFi credentials from NVS: ssid={}", ssid);
     Some((ssid, pass))
 }
 
 /// Save WiFi credentials to NVS.
-pub fn save_wifi_credentials(nvs: &EspDefaultNvsPartition, ssid: &str, password: &str) -> Result<()> {
+pub fn save_wifi_credentials(
+    nvs: &EspDefaultNvsPartition,
+    ssid: &str,
+    password: &str,
+) -> Result<()> {
     let nvs = EspNvs::new(nvs.clone(), NVS_NAMESPACE, true)?;
     nvs.set_str(KEY_WIFI_SSID, ssid)?;
     nvs.set_str(KEY_WIFI_PASS, password)?;
@@ -514,7 +350,11 @@ pub struct CrashInfo {
 /// The `reason` field uses 0xFF as a sentinel when set by the panic hook
 /// (real reason not yet known). Boot detection overwrites it with the actual
 /// `esp_reset_reason()` value.
-pub fn save_crash_info(nvs: &EspDefaultNvsPartition, reason: u8, panic_msg: Option<&str>) -> Result<()> {
+pub fn save_crash_info(
+    nvs: &EspDefaultNvsPartition,
+    reason: u8,
+    panic_msg: Option<&str>,
+) -> Result<()> {
     let nvs = EspNvs::new(nvs.clone(), NVS_NAMESPACE, true)?;
 
     // Increment crash counter
@@ -590,7 +430,13 @@ pub fn update_crash_reset_reason(nvs: &EspDefaultNvsPartition, reason: u8) -> Re
 // ============================================================================
 
 /// Save location to NVS (stored as i32 * 10000 for precision).
-pub fn save_location(nvs: &EspDefaultNvsPartition, lat: f32, lon: f32, utc_offset: f32, timezone_name: Option<&str>) -> Result<()> {
+pub fn save_location(
+    nvs: &EspDefaultNvsPartition,
+    lat: f32,
+    lon: f32,
+    utc_offset: f32,
+    timezone_name: Option<&str>,
+) -> Result<()> {
     let nvs = EspNvs::new(nvs.clone(), NVS_NAMESPACE, true)?;
     nvs.set_i32(KEY_LATITUDE, (lat * 10000.0) as i32)?;
     nvs.set_i32(KEY_LONGITUDE, (lon * 10000.0) as i32)?;
@@ -598,7 +444,10 @@ pub fn save_location(nvs: &EspDefaultNvsPartition, lat: f32, lon: f32, utc_offse
     if let Some(tz) = timezone_name {
         nvs.set_str(KEY_TZ_NAME, tz)?;
     }
-    info!("Saved location to NVS: lat={:.4}, lon={:.4}, utc_offset={}, tz={:?}", lat, lon, utc_offset, timezone_name);
+    info!(
+        "Saved location to NVS: lat={:.4}, lon={:.4}, utc_offset={}, tz={:?}",
+        lat, lon, utc_offset, timezone_name
+    );
     Ok(())
 }
 
@@ -626,58 +475,68 @@ impl rhythm_os::storage::Storage for NvsStorage {
         save_rooms(&self.nvs, rooms)
     }
 
-    fn load_config(&self) -> Result<rhythm_os::storage::StoredConfig> {
+    fn load_light_profiles(&self) -> Result<rhythm_os::storage::StoredLightProfiles> {
         let nvs_handle = EspNvs::new(self.nvs.clone(), NVS_NAMESPACE, true)?;
-        let defaults = rhythm_core::CurveConfig::default();
+        let mut buf = vec![0u8; 4096];
 
-        let min_bri = nvs_handle.get_u8(KEY_MIN_BRI).ok().flatten().unwrap_or(defaults.min_brightness);
-        let max_bri = nvs_handle.get_u8(KEY_MAX_BRI).ok().flatten().unwrap_or(defaults.max_brightness);
-        let min_cct = nvs_handle.get_u16(KEY_MIN_CCT).ok().flatten().unwrap_or(defaults.min_color_temp);
-        let max_cct = nvs_handle.get_u16(KEY_MAX_CCT).ok().flatten().unwrap_or(defaults.max_color_temp);
-        let solar_noon = nvs_handle.get_i16(KEY_SOLAR_NOON).ok().flatten()
-            .map(|v| v as f32 / 100.0)
-            .unwrap_or(12.5);
+        if let Ok(Some(blob)) = nvs_handle.get_blob(KEY_PROFILES, &mut buf) {
+            let json = std::str::from_utf8(blob)?;
+            let stored: rhythm_os::storage::StoredLightProfiles = serde_json::from_str(json)?;
+            info!(
+                "Loaded light profiles from NVS: {} profiles",
+                stored.profiles.len()
+            );
+            return Ok(stored);
+        }
 
-        Ok(rhythm_os::storage::StoredConfig {
-            min_brightness: min_bri,
-            max_brightness: max_bri,
-            min_color_temp: min_cct,
-            max_color_temp: max_cct,
-            solar_noon_hour: solar_noon,
-            width_left_bri: rhythm_core::config::DEFAULT_WIDTH_LEFT_BRI,
-            width_right_bri: rhythm_core::config::DEFAULT_WIDTH_RIGHT_BRI,
-            width_left_cct: rhythm_core::config::DEFAULT_WIDTH_LEFT_CCT,
-            width_right_cct: rhythm_core::config::DEFAULT_WIDTH_RIGHT_CCT,
-            shape_p: rhythm_core::config::DEFAULT_SHAPE_P,
-            max_dim_steps: rhythm_core::config::DEFAULT_MAX_DIM_STEPS,
+        Ok(rhythm_os::storage::StoredLightProfiles {
+            solar_noon_hour: 12.5,
+            profiles: vec![
+                rhythm_core::default_rhythm_profile(),
+                rhythm_core::default_sleep_profile(),
+                rhythm_core::default_idle_profile(),
+            ],
         })
     }
 
-    fn save_config(&self, config: &rhythm_os::storage::StoredConfig) -> Result<()> {
+    fn save_light_profiles(&self, config: &rhythm_os::storage::StoredLightProfiles) -> Result<()> {
         let nvs_handle = EspNvs::new(self.nvs.clone(), NVS_NAMESPACE, true)?;
-        nvs_handle.set_u8(KEY_MIN_BRI, config.min_brightness)?;
-        nvs_handle.set_u8(KEY_MAX_BRI, config.max_brightness)?;
-        nvs_handle.set_u16(KEY_MIN_CCT, config.min_color_temp)?;
-        nvs_handle.set_u16(KEY_MAX_CCT, config.max_color_temp)?;
-        nvs_handle.set_i16(KEY_SOLAR_NOON, (config.solar_noon_hour * 100.0) as i16)?;
-        info!("Config saved to NVS");
+        let json = serde_json::to_string(config)?;
+        nvs_handle.set_blob(KEY_PROFILES, json.as_bytes())?;
+        info!(
+            "Saved light profiles to NVS: {} profiles ({} bytes)",
+            config.profiles.len(),
+            json.len()
+        );
         Ok(())
     }
 
     fn load_location(&self) -> Result<rhythm_os::storage::StoredLocation> {
         let nvs_handle = EspNvs::new(self.nvs.clone(), NVS_NAMESPACE, true)?;
 
-        let lat = nvs_handle.get_i32(KEY_LATITUDE).ok().flatten()
+        let lat = nvs_handle
+            .get_i32(KEY_LATITUDE)
+            .ok()
+            .flatten()
             .map(|v| v as f32 / 10000.0);
-        let lon = nvs_handle.get_i32(KEY_LONGITUDE).ok().flatten()
+        let lon = nvs_handle
+            .get_i32(KEY_LONGITUDE)
+            .ok()
+            .flatten()
             .map(|v| v as f32 / 10000.0);
-        let utc_offset = nvs_handle.get_i16(KEY_UTC_OFFSET).ok().flatten()
+        let utc_offset = nvs_handle
+            .get_i16(KEY_UTC_OFFSET)
+            .ok()
+            .flatten()
             .map(|v| v as f32 / 100.0)
             .unwrap_or(0.0);
 
         let mut tz_buf = [0u8; 64];
-        let timezone_name = nvs_handle.get_str(KEY_TZ_NAME, &mut tz_buf)
-            .ok().flatten().map(|s| s.to_string());
+        let timezone_name = nvs_handle
+            .get_str(KEY_TZ_NAME, &mut tz_buf)
+            .ok()
+            .flatten()
+            .map(|s| s.to_string());
 
         Ok(rhythm_os::storage::StoredLocation {
             latitude: lat,
@@ -689,7 +548,13 @@ impl rhythm_os::storage::Storage for NvsStorage {
 
     fn save_location(&self, loc: &rhythm_os::storage::StoredLocation) -> Result<()> {
         if let (Some(lat), Some(lon)) = (loc.latitude, loc.longitude) {
-            save_location(&self.nvs, lat, lon, loc.utc_offset_hours, loc.timezone_name.as_deref())
+            save_location(
+                &self.nvs,
+                lat,
+                lon,
+                loc.utc_offset_hours,
+                loc.timezone_name.as_deref(),
+            )
         } else {
             Ok(())
         }
@@ -697,25 +562,33 @@ impl rhythm_os::storage::Storage for NvsStorage {
 
     fn load_settings(&self) -> Result<rhythm_os::storage::StoredSettings> {
         let nvs_handle = EspNvs::new(self.nvs.clone(), NVS_NAMESPACE, true)?;
+        let mut buf = [0u8; 32];
 
         Ok(rhythm_os::storage::StoredSettings {
-            rhythm_interval_secs: nvs_handle.get_u16(KEY_RHYTHM_INTV).ok().flatten().unwrap_or(60) as u64,
             power_save: nvs_handle.get_u8(KEY_PWR_SAVE).ok().flatten().unwrap_or(0) != 0,
+            active_light_profile: nvs_handle
+                .get_str(KEY_ACTIVE_PROF, &mut buf)
+                .ok()
+                .flatten()
+                .unwrap_or(rhythm_core::RHYTHM_PROFILE_ID)
+                .to_string(),
         })
     }
 
     fn save_settings(&self, settings: &rhythm_os::storage::StoredSettings) -> Result<()> {
         let nvs_handle = EspNvs::new(self.nvs.clone(), NVS_NAMESPACE, true)?;
-        nvs_handle.set_u16(KEY_RHYTHM_INTV, settings.rhythm_interval_secs as u16)?;
         nvs_handle.set_u8(KEY_PWR_SAVE, if settings.power_save { 1 } else { 0 })?;
+        nvs_handle.set_str(KEY_ACTIVE_PROF, &settings.active_light_profile)?;
         info!("Settings saved to NVS");
         Ok(())
     }
 
     fn load_hub_credentials(&self) -> Result<HubCredentials> {
-        Ok(load_hub_credentials_inner(
-            &EspNvs::new(self.nvs.clone(), NVS_NAMESPACE, true)?,
-        ))
+        Ok(load_hub_credentials_inner(&EspNvs::new(
+            self.nvs.clone(),
+            NVS_NAMESPACE,
+            true,
+        )?))
     }
 
     fn save_hub_credentials(&self, creds: &HubCredentials) -> Result<()> {
@@ -730,7 +603,8 @@ impl rhythm_os::storage::Storage for NvsStorage {
     }
 
     fn save_hub_registry(&self, data: &serde_json::Value) -> Result<()> {
-        let snapshot: rhythm_hue::registry::HueRegistrySnapshot = serde_json::from_value(data.clone())?;
+        let snapshot: rhythm_hue::registry::HueRegistrySnapshot =
+            serde_json::from_value(data.clone())?;
         save_hue_registry(&self.nvs, &snapshot)
     }
 }

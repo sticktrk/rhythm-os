@@ -320,7 +320,8 @@ pub fn create_ha_controller(
     };
 
     let transport = ReqwestHaTransport::new(config)?;
-    let controller = HaLightController::new(transport, registry);
+    let controller = HaLightController::new(transport, registry)
+        .with_capability_source(state.clone(), key.clone());
     Ok(std::sync::Arc::new(controller))
 }
 

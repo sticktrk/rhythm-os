@@ -5,14 +5,14 @@
 //! mathematical algorithm; the profile config provides output ranges
 //! and timer settings.
 
-use rhythm_curve::color::rgb_to_xy;
-use rhythm_curve::context::CurveContext;
-use rhythm_curve::curve_shape::LightCurveShape;
-use rhythm_curve::module::LightProfileModule;
-use rhythm_curve::profile_config::{LightProfileConfig, DEFAULT_FADE_MS};
-use rhythm_curve::steps::{StepAction, StepResult};
-use rhythm_curve::values::LightingValues;
-use rhythm_curve::SunTimes;
+use rhythm_profile::color::rgb_to_xy;
+use rhythm_profile::context::CurveContext;
+use rhythm_profile::curve_shape::{LightCurveShape, LightDirectColor};
+use rhythm_profile::module::LightProfileModule;
+use rhythm_profile::profile_config::{LightProfileConfig, DEFAULT_FADE_MS};
+use rhythm_profile::steps::{StepAction, StepResult};
+use rhythm_profile::values::LightingValues;
+use rhythm_profile::SunTimes;
 
 use crate::config::{DEFAULT_MOTION_TIMEOUT_SECS, FALLBACK_SUNRISE_HOUR, FALLBACK_SUNSET_HOUR};
 use crate::curves::{inverse_super_gaussian, map_super_gaussian};
@@ -57,12 +57,17 @@ impl LightProfile {
             .unwrap_or(FALLBACK_SUNSET_HOUR)
     }
 
-    /// Calculate motion timeout based on time of day (auto mode).
+    /// Calculate motion timeout at the given hour.
+    ///
+    /// For [`TimerSetting::Fixed`] and [`TimerSetting::Scheduled`], resolves
+    /// directly. For [`TimerSetting::Auto`], uses time-of-day bands based on
+    /// sunrise/sunset.
     fn calculate_motion_timeout(&self, ctx: &CurveContext) -> u16 {
-        if let Some(manual) = self.config.motion_timeout_secs {
-            return manual;
+        if let Some(val) = self.config.motion_timeout_secs.resolve(ctx.current_hour) {
+            return val as u16;
         }
 
+        // Auto: time-of-day bands
         let sun_times_ref = ctx.sun_times.as_ref();
         let sunrise = Self::get_sunrise(sun_times_ref);
         let sunset = Self::get_sunset(sun_times_ref);
@@ -112,6 +117,37 @@ impl LightProfile {
             None
         }
     }
+
+    fn constant_brightness(&self) -> u8 {
+        self.config.max_brightness.max(self.config.min_brightness)
+    }
+
+    fn fallback_direct_color(&self) -> LightDirectColor {
+        LightDirectColor {
+            xy: rhythm_profile::XyColor { x: 0.612, y: 0.356 },
+            rgb: rhythm_profile::Rgb::new(255, 147, 41),
+        }
+    }
+
+    fn fallback_inherit_active_values(&self, ctx: &CurveContext) -> LightingValues {
+        let fade = self
+            .config
+            .fade_ms
+            .resolve(ctx.current_hour)
+            .unwrap_or(DEFAULT_FADE_MS as u32);
+        let motion_timeout = self.calculate_motion_timeout(ctx);
+        let direct = self.fallback_direct_color();
+
+        LightingValues::from_color(
+            direct.rgb,
+            direct.xy,
+            self.constant_brightness(),
+            ctx.solar.get_solar_time(ctx.current_hour),
+            ctx.solar.get_sun_position(ctx.current_hour),
+            fade,
+            motion_timeout,
+        )
+    }
 }
 
 impl LightProfileModule for LightProfile {
@@ -127,7 +163,11 @@ impl LightProfileModule for LightProfile {
         let solar_time = ctx.solar.get_solar_time(ctx.current_hour);
         let sun_position = ctx.solar.get_sun_position(ctx.current_hour);
         let motion_timeout = self.calculate_motion_timeout(ctx);
-        let fade = self.config.fade_ms.unwrap_or(DEFAULT_FADE_MS) as u32;
+        let fade = self
+            .config
+            .fade_ms
+            .resolve(ctx.current_hour)
+            .unwrap_or(DEFAULT_FADE_MS as u32);
 
         match &self.config.curve {
             LightCurveShape::SuperGaussian { .. } => {
@@ -144,8 +184,8 @@ impl LightProfileModule for LightProfile {
                 );
                 values.suggested_tick_interval_secs = self.suggested_tick_interval(ctx);
 
-                // Apply direct color override (e.g., sleep mode)
-                if let Some(dc) = &self.config.direct_color {
+                // Apply fixed direct color on top of the super-Gaussian brightness curve.
+                if let Some(dc) = self.config.curve.direct_color() {
                     values.xy = dc.xy;
                     values.rgb = dc.rgb;
                     values.is_direct_color = true;
@@ -159,7 +199,7 @@ impl LightProfileModule for LightProfile {
                     .curve
                     .sample_color(solar_time)
                     .map(|(rgb, _)| rgb)
-                    .unwrap_or_else(|| rhythm_curve::Rgb::new(255, 147, 41));
+                    .unwrap_or_else(|| rhythm_profile::Rgb::new(255, 147, 41));
                 let xy = rgb_to_xy(rgb);
 
                 LightingValues::from_color(
@@ -175,6 +215,7 @@ impl LightProfileModule for LightProfile {
             LightCurveShape::Constant {
                 brightness,
                 color_temp,
+                direct_color,
             } => {
                 let bri = (self.config.min_brightness as f32
                     + (self.config.max_brightness as f32 - self.config.min_brightness as f32)
@@ -193,8 +234,24 @@ impl LightProfileModule for LightProfile {
                         self.config.max_color_temp as f32,
                     ) as u16;
 
-                LightingValues::new(kelvin, bri, solar_time, sun_position, fade, motion_timeout)
+                let mut values = LightingValues::new(
+                    kelvin,
+                    bri,
+                    solar_time,
+                    sun_position,
+                    fade,
+                    motion_timeout,
+                );
+
+                if let Some(dc) = direct_color {
+                    values.xy = dc.xy;
+                    values.rgb = dc.rgb;
+                    values.is_direct_color = true;
+                }
+
+                values
             }
+            LightCurveShape::InheritActive => self.fallback_inherit_active_values(ctx),
         }
     }
 
@@ -223,6 +280,7 @@ impl LightProfileModule for LightProfile {
                 ) as u8
             }
             LightCurveShape::Palette { .. } => self.config.min_brightness,
+            LightCurveShape::InheritActive => self.constant_brightness(),
             LightCurveShape::Constant { brightness, .. } => {
                 let range = self.config.max_brightness as f32 - self.config.min_brightness as f32;
                 (self.config.min_brightness as f32 + range * brightness)
@@ -260,6 +318,7 @@ impl LightProfileModule for LightProfile {
                 ) as u16
             }
             LightCurveShape::Palette { .. } => 0,
+            LightCurveShape::InheritActive => self.config.min_color_temp,
             LightCurveShape::Constant { color_temp, .. } => {
                 let range = self.config.max_color_temp as f32 - self.config.min_color_temp as f32;
                 (self.config.min_color_temp as f32 + range * color_temp)
@@ -370,6 +429,7 @@ impl LightProfileModule for LightProfile {
                     && values.kelvin >= self.config.max_color_temp
             }
             LightCurveShape::Palette { .. } => true,
+            LightCurveShape::InheritActive => true,
             LightCurveShape::Constant { .. } => true,
         }
     }
@@ -382,6 +442,7 @@ impl LightProfileModule for LightProfile {
                     && values.kelvin <= self.config.min_color_temp
             }
             LightCurveShape::Palette { .. } => true,
+            LightCurveShape::InheritActive => true,
             LightCurveShape::Constant { .. } => true,
         }
     }
@@ -441,7 +502,7 @@ mod tests {
     use crate::light_profile::defaults::{
         default_idle_profile, default_rhythm_profile, default_sleep_profile,
     };
-    use rhythm_curve::solar::SolarTime;
+    use rhythm_profile::{solar::SolarTime, TimerSetting};
 
     fn test_sun_times() -> SunTimes {
         SunTimes {
@@ -523,11 +584,11 @@ mod tests {
     }
 
     #[test]
-    fn test_idle_color_varies() {
+    fn test_idle_uses_fallback_color_when_unresolved() {
         let profile = LightProfile::new(default_idle_profile());
         let midnight = profile.calculate(&test_context(0.0));
         let noon = profile.calculate(&test_context(12.0));
-        assert_ne!(midnight.rgb, noon.rgb);
+        assert_eq!(midnight.rgb, noon.rgb);
     }
 
     #[test]
@@ -547,19 +608,52 @@ mod tests {
             curve: LightCurveShape::Constant {
                 brightness: 0.5,
                 color_temp: 0.5,
+                direct_color: None,
             },
             min_brightness: 0,
             max_brightness: 100,
             min_color_temp: 2000,
             max_color_temp: 6000,
             max_dim_steps: 6,
-            fade_ms: None,
-            motion_timeout_secs: None,
-            direct_color: None,
+            fade_ms: TimerSetting::Auto,
+            motion_timeout_secs: TimerSetting::Auto,
+            rhythm_interval_secs: TimerSetting::Auto,
         };
         let profile = LightProfile::new(config);
         let values = profile.calculate(&test_context(12.0));
         assert_eq!(values.brightness, 50);
         assert_eq!(values.kelvin, 4000);
+    }
+
+    #[test]
+    fn test_constant_direct_color_fixed_output() {
+        let direct = LightDirectColor {
+            xy: rhythm_profile::XyColor { x: 0.45, y: 0.25 },
+            rgb: rhythm_profile::Rgb::new(255, 40, 150),
+        };
+        let config = LightProfileConfig {
+            id: "constant".into(),
+            name: "Constant".into(),
+            curve: LightCurveShape::Constant {
+                brightness: 0.5,
+                color_temp: 0.5,
+                direct_color: Some(direct),
+            },
+            min_brightness: 0,
+            max_brightness: 100,
+            min_color_temp: 2000,
+            max_color_temp: 6000,
+            max_dim_steps: 6,
+            fade_ms: TimerSetting::Auto,
+            motion_timeout_secs: TimerSetting::Auto,
+            rhythm_interval_secs: TimerSetting::Auto,
+        };
+        let profile = LightProfile::new(config);
+        let values = profile.calculate(&test_context(12.0));
+        assert_eq!(values.brightness, 50);
+        assert_eq!(values.kelvin, 4000);
+        assert!(values.is_direct_color);
+        assert_eq!(values.rgb, rhythm_profile::Rgb::new(255, 40, 150));
+        assert_eq!(values.xy, rhythm_profile::XyColor { x: 0.45, y: 0.25 });
     }
 }

@@ -7,11 +7,15 @@
 //! - Home Assistant addon: File-based JSON storage
 //! - ESP32: Flash/NVS storage (future)
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::config::CurveConfig;
 use crate::room::RoomManager;
+use crate::{
+    default_idle_profile, default_rhythm_profile, default_sleep_profile, LightProfileConfig,
+};
 
 /// Errors that can occur with persistence operations.
 #[derive(Error, Debug)]
@@ -65,13 +69,16 @@ pub trait PersistenceProvider: Send + Sync {
     /// Returns an empty RoomManager if no saved state exists.
     async fn load_rooms(&self) -> PersistenceResult<RoomManager>;
 
-    /// Save curve configuration to persistent storage.
-    async fn save_config(&self, config: &CurveConfig) -> PersistenceResult<()>;
+    /// Save light profile configurations to persistent storage.
+    async fn save_light_profiles(
+        &self,
+        profiles: &BTreeMap<String, LightProfileConfig>,
+    ) -> PersistenceResult<()>;
 
-    /// Load curve configuration from persistent storage.
+    /// Load light profile configurations from persistent storage.
     ///
-    /// Returns default config if no saved config exists.
-    async fn load_config(&self) -> PersistenceResult<CurveConfig>;
+    /// Returns built-in defaults if no saved config exists.
+    async fn load_light_profiles(&self) -> PersistenceResult<BTreeMap<String, LightProfileConfig>>;
 
     /// Check if persistence is available.
     ///
@@ -90,8 +97,20 @@ pub trait PersistenceProvider: Send + Sync {
     async fn save_if_dirty(
         &self,
         rooms: &RoomManager,
-        config: &CurveConfig,
+        profiles: &BTreeMap<String, LightProfileConfig>,
     ) -> PersistenceResult<()>;
+}
+
+fn default_light_profiles() -> BTreeMap<String, LightProfileConfig> {
+    let mut profiles = BTreeMap::new();
+    for profile in [
+        default_rhythm_profile(),
+        default_sleep_profile(),
+        default_idle_profile(),
+    ] {
+        profiles.insert(profile.id.clone(), profile);
+    }
+    profiles
 }
 
 /// A no-op persistence provider for testing or when persistence isn't needed.
@@ -114,12 +133,15 @@ impl PersistenceProvider for NoOpPersistenceProvider {
         Ok(RoomManager::new())
     }
 
-    async fn save_config(&self, _config: &CurveConfig) -> PersistenceResult<()> {
+    async fn save_light_profiles(
+        &self,
+        _profiles: &BTreeMap<String, LightProfileConfig>,
+    ) -> PersistenceResult<()> {
         Ok(())
     }
 
-    async fn load_config(&self) -> PersistenceResult<CurveConfig> {
-        Ok(CurveConfig::default())
+    async fn load_light_profiles(&self) -> PersistenceResult<BTreeMap<String, LightProfileConfig>> {
+        Ok(default_light_profiles())
     }
 
     async fn is_available(&self) -> bool {
@@ -133,7 +155,7 @@ impl PersistenceProvider for NoOpPersistenceProvider {
     async fn save_if_dirty(
         &self,
         _rooms: &RoomManager,
-        _config: &CurveConfig,
+        _profiles: &BTreeMap<String, LightProfileConfig>,
     ) -> PersistenceResult<()> {
         Ok(())
     }
@@ -152,11 +174,16 @@ mod tests {
         let rooms = provider.load_rooms().await.unwrap();
         assert!(rooms.is_empty());
 
-        let config = provider.load_config().await.unwrap();
-        assert_eq!(config, CurveConfig::default());
+        let profiles = provider.load_light_profiles().await.unwrap();
+        assert!(profiles.contains_key(crate::RHYTHM_PROFILE_ID));
+        assert!(profiles.contains_key(crate::SLEEP_PROFILE_ID));
+        assert!(profiles.contains_key(crate::IDLE_PROFILE_ID));
 
         // Save operations should succeed silently
         provider.save_rooms(&RoomManager::new()).await.unwrap();
-        provider.save_config(&CurveConfig::default()).await.unwrap();
+        provider
+            .save_light_profiles(&default_light_profiles())
+            .await
+            .unwrap();
     }
 }

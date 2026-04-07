@@ -1,6 +1,6 @@
-//! Scenario: Curve config hot-reload — "Designer Screen".
+//! Scenario: Light profile config hot-reload — "Designer Screen".
 //!
-//! Tests that changing the CurveConfig while rooms are actively on updates
+//! Tests that changing the active LightProfileConfig while rooms are actively on updates
 //! the lighting values the engine computes. The Designer is one of the main
 //! screens and config changes during active use had zero test coverage.
 //!
@@ -8,28 +8,27 @@
 //!
 //! 1. User opens Designer screen
 //! 2. Drags brightness/color slider
-//! 3. PUT /api/config pushes new CurveConfig
+//! 3. PUT /api/config pushes new LightProfileConfig
 //! 4. Active rooms immediately use new curve for next action/tick
 //! 5. Fix My Lights uses new curve values
 
 mod harness;
 
 use harness::{room, TestHarness};
-use rhythm_core::CurveConfig;
+use rhythm_core::{default_rhythm_profile, LightProfileConfig};
 
-/// Build a config with max_brightness capped to a low value.
-fn config_with_max_brightness(max_bri: u8) -> CurveConfig {
-    CurveConfig {
-        max_brightness: max_bri,
-        ..CurveConfig::default()
-    }
+/// Build a rhythm profile with max_brightness capped to a low value.
+fn config_with_max_brightness(max_bri: u8) -> LightProfileConfig {
+    let mut config = default_rhythm_profile();
+    config.max_brightness = max_bri;
+    config
 }
 
 // ============================================================================
 // Scenario: Config change updates active room values
 // ============================================================================
 
-/// After pushing a new CurveConfig with lower max_brightness, a reset action
+/// After pushing a new LightProfileConfig with lower max_brightness, a reset action
 /// should dispatch a lighting command at the new (lower) brightness.
 #[test]
 fn config_change_updates_active_room_values() {
@@ -69,7 +68,7 @@ fn config_change_updates_active_room_values() {
 // Scenario: Config change preserves room offsets
 // ============================================================================
 
-/// Pushing a new curve config should not alter room time/brightness offsets.
+/// Pushing a new light profile config should not alter room time/brightness offsets.
 #[test]
 fn config_change_preserves_offsets() {
     let harness = TestHarness::new().with_discovery(vec![room("kitchen", "Kitchen")], vec![]);
@@ -86,10 +85,13 @@ fn config_change_preserves_offsets() {
     );
 
     // -- Action: change curve shape --
-    harness.set_config(CurveConfig {
-        shape_p: 2.0, // round curve instead of default flat plateau
-        ..CurveConfig::default()
-    });
+    let mut config = default_rhythm_profile();
+    if let rhythm_core::LightCurveShape::SuperGaussian { shape_p, .. } = &mut config.curve {
+        *shape_p = 2.0; // round curve instead of default flat plateau
+    } else {
+        panic!("expected super-gaussian rhythm profile");
+    }
+    harness.set_config(config);
 
     // -- Assert: offsets unchanged --
     let after = harness.snapshot("kitchen").unwrap();
@@ -154,11 +156,10 @@ fn new_on_after_config_uses_new_values() {
     harness.action("kitchen", "lights_off").unwrap();
 
     // -- Action: push constrained config, then on --
-    harness.set_config(CurveConfig {
-        max_brightness: 30,
-        max_color_temp: 3000,
-        ..CurveConfig::default()
-    });
+    let mut config = default_rhythm_profile();
+    config.max_brightness = 30;
+    config.max_color_temp = 3000;
+    harness.set_config(config);
     spy.reset();
     harness.action("kitchen", "on").unwrap();
 
@@ -204,7 +205,7 @@ fn reset_config_restores_defaults() {
     // Assert: brightness should be back to default range (> 30)
     let calls = spy.turn_on_calls();
     assert!(!calls.is_empty());
-    let default_config = CurveConfig::default();
+    let default_config = default_rhythm_profile();
     assert!(calls[0].1.brightness <= default_config.max_brightness);
     // Verify config in state matches defaults
     assert_eq!(
@@ -230,13 +231,12 @@ fn extreme_config_values_produce_valid_commands() {
     harness.sync();
 
     // -- Minimum extremes --
-    harness.set_config(CurveConfig {
-        min_brightness: 1,
-        max_brightness: 1,
-        min_color_temp: 2000,
-        max_color_temp: 2000,
-        ..CurveConfig::default()
-    });
+    let mut config = default_rhythm_profile();
+    config.min_brightness = 1;
+    config.max_brightness = 1;
+    config.min_color_temp = 2000;
+    config.max_color_temp = 2000;
+    harness.set_config(config);
     harness.action("kitchen", "on").unwrap();
 
     let calls = spy.turn_on_calls();
@@ -245,13 +245,12 @@ fn extreme_config_values_produce_valid_commands() {
     assert_eq!(calls[0].1.kelvin, 2000, "kelvin should be 2000");
 
     // -- Maximum extremes --
-    harness.set_config(CurveConfig {
-        min_brightness: 100,
-        max_brightness: 100,
-        min_color_temp: 6500,
-        max_color_temp: 6500,
-        ..CurveConfig::default()
-    });
+    let mut config = default_rhythm_profile();
+    config.min_brightness = 100;
+    config.max_brightness = 100;
+    config.min_color_temp = 6500;
+    config.max_color_temp = 6500;
+    harness.set_config(config);
     spy.reset();
     harness.action("kitchen", "reset").unwrap();
 

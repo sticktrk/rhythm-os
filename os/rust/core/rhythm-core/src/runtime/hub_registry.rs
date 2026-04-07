@@ -90,9 +90,6 @@ pub trait HubRegistry: Send + Sync {
     // Motion sensors
     // =========================================================================
 
-    /// Set per-room motion timeout in seconds.
-    fn upsert_motion_timeout(&mut self, room_id: &str, timeout_secs: u64);
-
     /// Get room IDs that have at least one motion sensor mapped.
     ///
     /// Default returns empty — override if the registry tracks motion sensors.

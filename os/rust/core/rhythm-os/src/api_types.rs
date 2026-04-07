@@ -4,7 +4,7 @@
 //! `format!()` string concatenation. Field names match the SSE types
 //! in `server_event.rs` — one canonical naming convention.
 
-use rhythm_core::runtime::hub_registry::DeviceType;
+use rhythm_core::{runtime::hub_registry::DeviceType, LightProfileConfig, RoomProfileSettings};
 use serde::Serialize;
 
 // ---------------------------------------------------------------------------
@@ -26,6 +26,8 @@ pub struct RoomRhythmState {
     pub lights_on: bool,
     pub brightness: u8,
     pub kelvin: u16,
+    #[serde(rename = "room_profile", default, skip_serializing_if = "RoomProfileSettings::is_empty")]
+    pub room_profile: RoomProfileSettings,
 }
 
 /// Room state for poll endpoint (`GET /api/rooms/state`).
@@ -79,8 +81,6 @@ pub struct RoomsPollResponse {
 /// Full state snapshot for `GET /api/state`.
 #[derive(Debug, Serialize)]
 pub struct StateSnapshot {
-    /// Current server time as ISO 8601 UTC string.
-    pub current_time: String,
     /// Epoch milliseconds of the most recent periodic tick (for client bootstrap).
     pub last_tick_epoch_ms: u64,
     pub version: String,
@@ -88,16 +88,9 @@ pub struct StateSnapshot {
     pub context: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub listen_port: Option<u16>,
-    /// Primary hub (backward compat — first connected hub).
-    pub hub: HubDto,
-    /// All connected hubs (multi-hub support).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// All connected hubs.
     pub hubs: Vec<HubDto>,
-    pub config: serde_json::Value,
-    /// Current curve-computed fade duration (ms), regardless of auto/manual mode.
-    pub effective_fade_ms: u32,
-    /// Current curve-computed motion timeout (secs), regardless of auto/manual mode.
-    pub effective_motion_timeout_secs: u64,
+    pub active_profile: ActiveProfileDto,
     pub location: LocationDto,
     pub settings: SettingsDto,
     pub rooms: Vec<RoomFullState>,
@@ -120,6 +113,7 @@ pub struct HubDto {
 /// Location in state snapshot.
 #[derive(Debug, Serialize)]
 pub struct LocationDto {
+    pub current_local_time: String,
     pub latitude: Option<f32>,
     pub longitude: Option<f32>,
     pub utc_offset_hours: f32,
@@ -127,21 +121,28 @@ pub struct LocationDto {
     pub timezone_name: Option<String>,
 }
 
-/// A curve module descriptor for API responses.
-#[derive(Clone, Debug, Serialize)]
-pub struct LightProfileDto {
-    pub id: String,
-    pub name: String,
-}
-
 /// Settings in state snapshot and `GET /api/settings`.
 #[derive(Debug, Serialize)]
 pub struct SettingsDto {
-    pub rhythm_interval_secs: u64,
     pub power_save: bool,
-    pub sleep_mode: bool,
     pub active_light_profile: String,
-    pub available_light_profiles: Vec<LightProfileDto>,
+    pub profiles: Vec<LightProfileConfig>,
+}
+
+/// Active profile in `GET /api/state`, including persisted config plus
+/// runtime-resolved effective values.
+#[derive(Debug, Serialize)]
+pub struct ActiveProfileDto {
+    pub config: LightProfileConfig,
+    pub effective: ActiveProfileEffectiveDto,
+}
+
+/// Runtime-resolved values for the active profile.
+#[derive(Debug, Serialize)]
+pub struct ActiveProfileEffectiveDto {
+    pub fade_ms: u32,
+    pub motion_timeout_secs: u64,
+    pub rhythm_interval_secs: u64,
 }
 
 /// A typed device entry.
@@ -231,8 +232,8 @@ pub struct HubCredentialsResponse {
 pub struct CurveResponse {
     pub config: serde_json::Value,
     pub solar: SolarResponse,
-    pub curve: rhythm_curve::CurveData,
-    pub steps: rhythm_curve::StepSequences,
+    pub curve: rhythm_profile::CurveData,
+    pub steps: rhythm_profile::StepSequences,
 }
 
 /// Solar times and twilight data.
@@ -275,8 +276,8 @@ pub struct LightingNowResponse {
     pub brightness: u8,
     pub kelvin: u16,
     pub mireds: u16,
-    pub rgb: rhythm_curve::Rgb,
-    pub xy: rhythm_curve::XyColor,
+    pub rgb: rhythm_profile::Rgb,
+    pub xy: rhythm_profile::XyColor,
     pub solar_time: f32,
     pub sun_position: f32,
 }
@@ -301,6 +302,7 @@ mod tests {
             lights_on: true,
             brightness: 80,
             kelvin: 4000,
+            room_profile: rhythm_core::RoomProfileSettings::default(),
         }
     }
 
@@ -447,29 +449,18 @@ mod tests {
     #[test]
     fn settings_dto_serializes() {
         let dto = SettingsDto {
-            rhythm_interval_secs: 60,
             power_save: true,
-            sleep_mode: false,
             active_light_profile: "rhythm".into(),
-            available_light_profiles: vec![
-                LightProfileDto {
-                    id: "rhythm".into(),
-                    name: "Rhythm Curve".into(),
-                },
-                LightProfileDto {
-                    id: "sleep".into(),
-                    name: "Sleep Curve".into(),
-                },
+            profiles: vec![
+                rhythm_core::default_rhythm_profile(),
+                rhythm_core::default_sleep_profile(),
             ],
         };
         let json: Value = serde_json::to_value(&dto).unwrap();
-        assert_eq!(json["rhythm_interval_secs"], 60);
         assert_eq!(json["power_save"], true);
         assert_eq!(json["active_light_profile"], "rhythm");
-        assert_eq!(
-            json["available_light_profiles"].as_array().unwrap().len(),
-            2
-        );
+        assert_eq!(json["profiles"].as_array().unwrap().len(), 2);
+        assert_eq!(json["profiles"][0]["id"], "rhythm");
     }
 
     // ---- HubDto ----
@@ -507,6 +498,7 @@ mod tests {
     #[test]
     fn location_dto_with_timezone() {
         let loc = LocationDto {
+            current_local_time: "2024-01-01T06:00:00-06:00".into(),
             latitude: Some(35.6),
             longitude: Some(-97.5),
             utc_offset_hours: -6.0,
@@ -522,6 +514,7 @@ mod tests {
     #[test]
     fn location_dto_null_optionals() {
         let loc = LocationDto {
+            current_local_time: "2024-01-01T00:00:00Z".into(),
             latitude: None,
             longitude: None,
             utc_offset_hours: 0.0,
@@ -607,51 +600,46 @@ mod tests {
             platform: "desktop".into(),
             context: "server".into(),
             listen_port: None,
-            hub: HubDto {
-                hub_type: "none".into(),
-                address: None,
-                connected: false,
-            },
             hubs: vec![],
-            config: serde_json::json!({}),
-            effective_fade_ms: 500,
-            effective_motion_timeout_secs: 1200,
+            active_profile: ActiveProfileDto {
+                config: rhythm_core::default_rhythm_profile(),
+                effective: ActiveProfileEffectiveDto {
+                    fade_ms: 500,
+                    motion_timeout_secs: 1200,
+                    rhythm_interval_secs: 60,
+                },
+            },
             location: LocationDto {
+                current_local_time: "2024-01-01T00:00:00Z".into(),
                 latitude: None,
                 longitude: None,
                 utc_offset_hours: 0.0,
                 timezone_name: None,
             },
             settings: SettingsDto {
-                rhythm_interval_secs: 60,
                 power_save: false,
-                sleep_mode: false,
                 active_light_profile: "rhythm".into(),
-                available_light_profiles: vec![
-                    LightProfileDto {
-                        id: "rhythm".into(),
-                        name: "Rhythm Curve".into(),
-                    },
-                    LightProfileDto {
-                        id: "sleep".into(),
-                        name: "Sleep Curve".into(),
-                    },
+                profiles: vec![
+                    rhythm_core::default_rhythm_profile(),
+                    rhythm_core::default_sleep_profile(),
                 ],
             },
             rooms: vec![],
             last_tick_epoch_ms: 1700000000000,
-            current_time: "2024-01-01T00:00:00Z".into(),
         };
         let json: Value = serde_json::to_value(&snap).unwrap();
         assert!(json.get("listen_port").is_none());
-        // hubs omitted when empty
-        assert!(json.get("hubs").is_none());
         assert_eq!(json["last_tick_epoch_ms"], 1700000000000u64);
         assert_eq!(json["version"], "1.0.0");
         assert_eq!(json["platform"], "desktop");
         assert_eq!(json["context"], "server");
+        assert_eq!(json["active_profile"]["effective"]["fade_ms"], 500);
+        assert_eq!(
+            json["active_profile"]["effective"]["motion_timeout_secs"],
+            1200
+        );
         assert!(json["rooms"].as_array().unwrap().is_empty());
-        assert!(json["current_time"].is_string());
+        assert!(json["location"]["current_local_time"].is_string());
     }
 
     #[test]
@@ -661,39 +649,32 @@ mod tests {
             platform: "desktop".into(),
             context: "ha_addon".into(),
             listen_port: Some(8099),
-            hub: HubDto {
-                hub_type: "hue".into(),
-                address: Some("192.168.1.2".into()),
-                connected: true,
-            },
             hubs: vec![HubDto {
                 hub_type: "hue".into(),
                 address: Some("192.168.1.2".into()),
                 connected: true,
             }],
-            config: serde_json::json!({"min_brightness": 1}),
-            effective_fade_ms: 500,
-            effective_motion_timeout_secs: 300,
+            active_profile: ActiveProfileDto {
+                config: rhythm_core::default_rhythm_profile(),
+                effective: ActiveProfileEffectiveDto {
+                    fade_ms: 500,
+                    motion_timeout_secs: 300,
+                    rhythm_interval_secs: 60,
+                },
+            },
             location: LocationDto {
+                current_local_time: "2024-01-01T00:00:00Z".into(),
                 latitude: Some(35.0),
                 longitude: Some(-97.0),
                 utc_offset_hours: -6.0,
                 timezone_name: Some("America/Chicago".into()),
             },
             settings: SettingsDto {
-                rhythm_interval_secs: 60,
                 power_save: false,
-                sleep_mode: false,
                 active_light_profile: "rhythm".into(),
-                available_light_profiles: vec![
-                    LightProfileDto {
-                        id: "rhythm".into(),
-                        name: "Rhythm Curve".into(),
-                    },
-                    LightProfileDto {
-                        id: "sleep".into(),
-                        name: "Sleep Curve".into(),
-                    },
+                profiles: vec![
+                    rhythm_core::default_rhythm_profile(),
+                    rhythm_core::default_sleep_profile(),
                 ],
             },
             rooms: vec![RoomFullState {
@@ -705,13 +686,12 @@ mod tests {
                 devices: vec![],
             }],
             last_tick_epoch_ms: 1700000000000,
-            current_time: "2024-01-01T00:00:00Z".into(),
         };
         let json: Value = serde_json::to_value(&snap).unwrap();
         assert_eq!(json["listen_port"], 8099);
         assert_eq!(json["rooms"].as_array().unwrap().len(), 1);
         assert_eq!(json["rooms"][0]["name"], "Office");
-        assert_eq!(json["hub"]["type"], "hue");
+        assert_eq!(json["hubs"][0]["type"], "hue");
         assert_eq!(json["last_tick_epoch_ms"], 1700000000000u64);
     }
 }
