@@ -1,15 +1,18 @@
 //! Curve configuration DTOs for Flutter.
 
+use rhythm_core::config::DEFAULT_MOTION_TIMEOUT_SECS;
 use rhythm_core::{
-    CurveConfig,
-    config::{
-        DEFAULT_MIN_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP,
-        DEFAULT_MIN_BRIGHTNESS, DEFAULT_MAX_BRIGHTNESS,
-        DEFAULT_WIDTH_LEFT_BRI, DEFAULT_WIDTH_RIGHT_BRI,
-        DEFAULT_WIDTH_LEFT_CCT, DEFAULT_WIDTH_RIGHT_CCT,
-        DEFAULT_SHAPE_P, DEFAULT_MAX_DIM_STEPS,
-        DEFAULT_FADE_MS, DEFAULT_MOTION_TIMEOUT_SECS,
-    },
+    CommonCurveConfig, LightCurveShape, LightProfileConfig, TimerSetting, RHYTHM_PROFILE_ID,
+    RHYTHM_PROFILE_NAME,
+};
+use rhythm_profile::curve_shape::{
+    DEFAULT_SHAPE_P, DEFAULT_WIDTH_LEFT_BRI, DEFAULT_WIDTH_LEFT_CCT, DEFAULT_WIDTH_RIGHT_BRI,
+    DEFAULT_WIDTH_RIGHT_CCT,
+};
+use rhythm_profile::profile_config::DEFAULT_FADE_MS;
+use rhythm_profile::{
+    DEFAULT_MAX_BRIGHTNESS, DEFAULT_MAX_COLOR_TEMP, DEFAULT_MAX_DIM_STEPS, DEFAULT_MIN_BRIGHTNESS,
+    DEFAULT_MIN_COLOR_TEMP,
 };
 
 use super::color::RgbDto;
@@ -61,21 +64,43 @@ impl Default for CurveConfigDto {
     }
 }
 
-impl From<CurveConfigDto> for CurveConfig {
+impl From<CurveConfigDto> for LightProfileConfig {
     fn from(dto: CurveConfigDto) -> Self {
-        CurveConfig {
+        LightProfileConfig {
+            id: RHYTHM_PROFILE_ID.to_string(),
+            name: RHYTHM_PROFILE_NAME.to_string(),
+            curve: LightCurveShape::SuperGaussian {
+                width_left_bri: dto.width_left_bri as f32,
+                width_right_bri: dto.width_right_bri as f32,
+                width_left_cct: dto.width_left_cct as f32,
+                width_right_cct: dto.width_right_cct as f32,
+                shape_p: dto.shape_p as f32,
+                direct_color: None,
+            },
             min_color_temp: dto.min_color_temp as u16,
             max_color_temp: dto.max_color_temp as u16,
             min_brightness: dto.min_brightness as u8,
             max_brightness: dto.max_brightness as u8,
-            width_left_bri: dto.width_left_bri as f32,
-            width_right_bri: dto.width_right_bri as f32,
-            width_left_cct: dto.width_left_cct as f32,
-            width_right_cct: dto.width_right_cct as f32,
-            shape_p: dto.shape_p as f32,
             max_dim_steps: dto.max_dim_steps as u8,
-            fade_ms: Some(dto.fade_ms as u16),
-            motion_timeout_secs: Some(dto.motion_timeout_secs as u16),
+            fade_ms: TimerSetting::Fixed {
+                value: dto.fade_ms as u32,
+            },
+            motion_timeout_secs: TimerSetting::Fixed {
+                value: dto.motion_timeout_secs as u32,
+            },
+            rhythm_interval_secs: TimerSetting::Auto,
+        }
+    }
+}
+
+impl From<CurveConfigDto> for CommonCurveConfig {
+    fn from(dto: CurveConfigDto) -> Self {
+        CommonCurveConfig {
+            min_color_temp: dto.min_color_temp as u16,
+            max_color_temp: dto.max_color_temp as u16,
+            min_brightness: dto.min_brightness as u8,
+            max_brightness: dto.max_brightness as u8,
+            max_dim_steps: dto.max_dim_steps as u8,
         }
     }
 }

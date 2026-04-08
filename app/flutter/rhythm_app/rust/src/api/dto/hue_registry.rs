@@ -37,11 +37,7 @@ impl From<HueBehaviorTracker> for HueBehaviorTrackerDto {
             })
             .collect();
 
-        let configured_device_ids = tracker
-            .configured_device_ids()
-            .iter()
-            .cloned()
-            .collect();
+        let configured_device_ids = tracker.configured_device_ids().iter().cloned().collect();
 
         Self {
             behavior_mappings,

@@ -1,15 +1,14 @@
 //! Curve generation and lighting calculation functions.
 
 use rhythm_core::{
-    calculate_sun_times, calculate_twilight_times, solar_time_from_location,
-    CurveConfig, CurveContext, RhythmCurveModule, SolarTime, StepAction,
-    Timezone, kelvin_to_mireds, LightCurveModule, lookup_timezone,
+    calculate_sun_times, calculate_twilight_times, kelvin_to_mireds, lookup_timezone,
+    solar_time_from_location, CurveContext, LightProfile, LightProfileModule, SolarTime,
+    StepAction, Timezone,
 };
 
 use super::dto::{
-    CurveConfigDto, CurveDataDto, LightingValuesDto, RgbDto, XyDto,
-    SolarInfoDto, SunTimesDto, TwilightPhaseDto, TwilightTimesDto,
-    StepPointDto, StepSequencesDto,
+    CurveConfigDto, CurveDataDto, LightingValuesDto, RgbDto, SolarInfoDto, StepPointDto,
+    StepSequencesDto, SunTimesDto, TwilightPhaseDto, TwilightTimesDto, XyDto,
 };
 
 /// Generate curve data for visualization.
@@ -34,9 +33,8 @@ pub fn generate_curve_data(
     latitude: f64,
     day_of_year: i32,
 ) -> CurveDataDto {
-    let config: CurveConfig = config.into();
+    let profile = LightProfile::new(config.into());
     let solar = SolarTime::new(solar_noon_hour as f32, latitude as f32, day_of_year as u32);
-    let module = RhythmCurveModule::new(config);
 
     let mut hours = Vec::with_capacity(24);
     let mut brightness = Vec::with_capacity(24);
@@ -46,7 +44,7 @@ pub fn generate_curve_data(
         let hour = h as f32;
         hours.push(hour as f64);
         let ctx = CurveContext::new(hour, solar, None);
-        let values = module.calculate(&ctx);
+        let values = profile.calculate(&ctx);
         brightness.push(values.brightness as i32);
         kelvin.push(values.kelvin as i32);
     }
@@ -89,9 +87,8 @@ pub fn generate_curve_data_high_res(
     day_of_year: i32,
     samples_per_hour: i32,
 ) -> CurveDataDto {
-    let config: CurveConfig = config.into();
+    let profile = LightProfile::new(config.into());
     let solar = SolarTime::new(solar_noon_hour as f32, latitude as f32, day_of_year as u32);
-    let module = RhythmCurveModule::new(config);
 
     let samples = samples_per_hour.max(1) as usize;
     let total_samples = 24 * samples;
@@ -105,7 +102,7 @@ pub fn generate_curve_data_high_res(
         let hour = i as f32 * step;
         hours.push(hour as f64);
         let ctx = CurveContext::new(hour, solar, None);
-        let values = module.calculate(&ctx);
+        let values = profile.calculate(&ctx);
         brightness.push(values.brightness as i32);
         kelvin.push(values.kelvin as i32);
     }
@@ -146,12 +143,11 @@ pub fn calculate_lighting(
     day_of_year: i32,
     current_hour: f64,
 ) -> LightingValuesDto {
-    let config: CurveConfig = config.into();
+    let profile = LightProfile::new(config.into());
     let solar = SolarTime::new(solar_noon_hour as f32, latitude as f32, day_of_year as u32);
-    let module = RhythmCurveModule::new(config);
     let ctx = CurveContext::new(current_hour as f32, solar, None);
 
-    let values = module.calculate(&ctx);
+    let values = profile.calculate(&ctx);
 
     LightingValuesDto {
         kelvin: values.kelvin as i32,
@@ -201,12 +197,12 @@ pub fn calculate_step_sequences(
     max_steps: i32,
 ) -> StepSequencesDto {
     // Override max_dim_steps with the passed value so step size matches UI
-    let mut config: CurveConfig = config.into();
+    let mut profile_config = rhythm_core::LightProfileConfig::from(config);
     let max_steps = max_steps.clamp(1, 500) as u8;
-    config.max_dim_steps = max_steps;
+    profile_config.max_dim_steps = max_steps;
 
     let solar = SolarTime::new(solar_noon_hour as f32, latitude as f32, day_of_year as u32);
-    let module = RhythmCurveModule::new(config);
+    let profile = LightProfile::new(profile_config);
 
     let max_iterations = max_steps as usize;
 
@@ -216,7 +212,7 @@ pub fn calculate_step_sequences(
 
     for _ in 0..max_iterations {
         let ctx = CurveContext::new(current_hour, solar, None);
-        let result = module.calculate_step(&ctx, StepAction::Brighten);
+        let result = profile.calculate_step(&ctx, StepAction::Brighten);
 
         // Stop if we're at the boundary (no more steps possible)
         if result.at_boundary {
@@ -231,7 +227,11 @@ pub fn calculate_step_sequences(
             hour: target_hour as f64,
             brightness: values.brightness as i32,
             kelvin: values.kelvin as i32,
-            rgb: vec![values.rgb.r as i32, values.rgb.g as i32, values.rgb.b as i32],
+            rgb: vec![
+                values.rgb.r as i32,
+                values.rgb.g as i32,
+                values.rgb.b as i32,
+            ],
         });
 
         current_hour = target_hour;
@@ -243,7 +243,7 @@ pub fn calculate_step_sequences(
 
     for _ in 0..max_iterations {
         let ctx = CurveContext::new(current_hour, solar, None);
-        let result = module.calculate_step(&ctx, StepAction::Dim);
+        let result = profile.calculate_step(&ctx, StepAction::Dim);
 
         // Stop if we're at the boundary (no more steps possible)
         if result.at_boundary {
@@ -258,7 +258,11 @@ pub fn calculate_step_sequences(
             hour: target_hour as f64,
             brightness: values.brightness as i32,
             kelvin: values.kelvin as i32,
-            rgb: vec![values.rgb.r as i32, values.rgb.g as i32, values.rgb.b as i32],
+            rgb: vec![
+                values.rgb.r as i32,
+                values.rgb.g as i32,
+                values.rgb.b as i32,
+            ],
         });
 
         current_hour = target_hour;
@@ -417,8 +421,7 @@ pub fn generate_curve_data_with_sun_times(
         &tz,
     );
 
-    let config: CurveConfig = config.into();
-    let module = RhythmCurveModule::new(config);
+    let profile = LightProfile::new(config.into());
 
     let mut hours = Vec::with_capacity(24);
     let mut brightness = Vec::with_capacity(24);
@@ -428,7 +431,7 @@ pub fn generate_curve_data_with_sun_times(
         let hour = h as f32;
         hours.push(hour as f64);
         let ctx = CurveContext::new(hour, solar, Some(sun_times));
-        let values = module.calculate(&ctx);
+        let values = profile.calculate(&ctx);
         brightness.push(values.brightness as i32);
         kelvin.push(values.kelvin as i32);
     }

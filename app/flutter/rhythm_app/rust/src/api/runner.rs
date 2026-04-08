@@ -1,14 +1,14 @@
 //! Runner state management functions.
 
 use rhythm_core::{
-    kelvin_to_mireds, process_action, ActionResult, CurveConfig, RhythmCurveModule, RoomAction,
-    RoomActionState, SolarTime,
+    kelvin_to_mireds, process_action, ActionResult, LightProfile, RoomAction, RoomActionState,
+    SolarTime,
 };
 
 use super::dto::{
-    ActionResultDto, CurveConfigDto, LightCommandDto, LightCommandType, LightingValuesDto,
-    RgbDto, RhythmActionDto, RoomDto, RoomSourceDto, RoomStateDto, RunnerActionResultDto,
-    RunnerStateDto, XyDto,
+    ActionResultDto, CurveConfigDto, LightCommandDto, LightCommandType, LightingValuesDto, RgbDto,
+    RhythmActionDto, RoomDto, RoomSourceDto, RoomStateDto, RunnerActionResultDto, RunnerStateDto,
+    XyDto,
 };
 
 /// Process an action and calculate the resulting lighting state.
@@ -24,9 +24,8 @@ pub fn calculate_action_result(
     action: RhythmActionDto,
     room_state: RoomStateDto,
 ) -> ActionResultDto {
-    let config_rust: CurveConfig = config.into();
+    let profile = LightProfile::new(config.into());
     let solar = SolarTime::new(solar_noon_hour as f32, latitude as f32, day_of_year as u32);
-    let module = RhythmCurveModule::new(config_rust);
 
     let core_action = match action {
         RhythmActionDto::OnPress => RoomAction::OnPress,
@@ -47,8 +46,13 @@ pub fn calculate_action_result(
         brightness_offset: room_state.brightness_offset as f32,
     };
 
-    let result: ActionResult =
-        process_action(&module, solar, current_hour as f32, core_action, &core_state);
+    let result: ActionResult = process_action(
+        &profile,
+        solar,
+        current_hour as f32,
+        core_action,
+        &core_state,
+    );
 
     ActionResultDto {
         lighting: result.lighting.map(|v| LightingValuesDto {
@@ -226,13 +230,21 @@ pub fn runner_get_enabled_rooms(state: RunnerStateDto) -> Vec<RoomDto> {
 ///
 /// Returns a copy of all rooms with the specified source.
 pub fn runner_get_rooms_by_source(state: RunnerStateDto, source: RoomSourceDto) -> Vec<RoomDto> {
-    state.rooms.into_iter().filter(|r| r.source == source).collect()
+    state
+        .rooms
+        .into_iter()
+        .filter(|r| r.source == source)
+        .collect()
 }
 
 /// Set room disabled state.
 ///
 /// Returns a new state with the room's disabled flag updated.
-pub fn runner_set_room_disabled(state: RunnerStateDto, room_id: String, disabled: bool) -> RunnerStateDto {
+pub fn runner_set_room_disabled(
+    state: RunnerStateDto,
+    room_id: String,
+    disabled: bool,
+) -> RunnerStateDto {
     let mut new_state = state;
     if let Some(room) = new_state.rooms.iter_mut().find(|r| r.id == room_id) {
         room.disabled = disabled;
@@ -246,7 +258,11 @@ pub fn runner_set_room_disabled(state: RunnerStateDto, room_id: String, disabled
 /// reported by external systems (e.g., Hue bridge).
 ///
 /// Returns a new state with the room's lights_on flag updated.
-pub fn runner_set_room_lights_on(state: RunnerStateDto, room_id: String, lights_on: bool) -> RunnerStateDto {
+pub fn runner_set_room_lights_on(
+    state: RunnerStateDto,
+    room_id: String,
+    lights_on: bool,
+) -> RunnerStateDto {
     let mut new_state = state;
     if let Some(room) = new_state.rooms.iter_mut().find(|r| r.id == room_id) {
         room.lights_on = lights_on;
@@ -257,7 +273,11 @@ pub fn runner_set_room_lights_on(state: RunnerStateDto, room_id: String, lights_
 /// Set room rhythm_enabled state.
 ///
 /// Returns a new state with the room's rhythm_enabled flag updated.
-pub fn runner_set_room_rhythm_enabled(state: RunnerStateDto, room_id: String, rhythm_enabled: bool) -> RunnerStateDto {
+pub fn runner_set_room_rhythm_enabled(
+    state: RunnerStateDto,
+    room_id: String,
+    rhythm_enabled: bool,
+) -> RunnerStateDto {
     let mut new_state = state;
     if let Some(room) = new_state.rooms.iter_mut().find(|r| r.id == room_id) {
         room.rhythm_enabled = rhythm_enabled;
@@ -272,7 +292,11 @@ pub fn runner_set_room_rhythm_enabled(state: RunnerStateDto, room_id: String, rh
 /// a negative offset moves backward.
 ///
 /// Returns a new state with the room's time_offset_minutes updated.
-pub fn runner_set_room_time_offset(state: RunnerStateDto, room_id: String, time_offset_minutes: f64) -> RunnerStateDto {
+pub fn runner_set_room_time_offset(
+    state: RunnerStateDto,
+    room_id: String,
+    time_offset_minutes: f64,
+) -> RunnerStateDto {
     let mut new_state = state;
     if let Some(room) = new_state.rooms.iter_mut().find(|r| r.id == room_id) {
         room.time_offset_minutes = time_offset_minutes;
@@ -286,7 +310,11 @@ pub fn runner_set_room_time_offset(state: RunnerStateDto, room_id: String, time_
 /// A positive offset brightens, a negative offset dims.
 ///
 /// Returns a new state with the room's brightness_offset updated.
-pub fn runner_set_room_brightness_offset(state: RunnerStateDto, room_id: String, brightness_offset: f64) -> RunnerStateDto {
+pub fn runner_set_room_brightness_offset(
+    state: RunnerStateDto,
+    room_id: String,
+    brightness_offset: f64,
+) -> RunnerStateDto {
     let mut new_state = state;
     if let Some(room) = new_state.rooms.iter_mut().find(|r| r.id == room_id) {
         room.brightness_offset = brightness_offset;
@@ -298,7 +326,11 @@ pub fn runner_set_room_brightness_offset(state: RunnerStateDto, room_id: String,
 ///
 /// Pass `None` to use the global configuration.
 /// Returns a new state with the room's curve_config updated.
-pub fn runner_set_room_curve_config(state: RunnerStateDto, room_id: String, config: Option<CurveConfigDto>) -> RunnerStateDto {
+pub fn runner_set_room_curve_config(
+    state: RunnerStateDto,
+    room_id: String,
+    config: Option<CurveConfigDto>,
+) -> RunnerStateDto {
     let mut new_state = state;
     if let Some(room) = new_state.rooms.iter_mut().find(|r| r.id == room_id) {
         room.curve_config = config;

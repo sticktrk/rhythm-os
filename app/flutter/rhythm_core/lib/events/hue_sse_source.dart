@@ -9,8 +9,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' show min;
 
-import '../src/rust/api/dto/hue.dart' show HueButtonEventTypeDto;
-import '../src/rust/api/dto/runner.dart' show RhythmActionDto;
 import '../src/rust/api/hue.dart' show mapHueButtonEvent, parseHueButtonEventType;
 import 'event_source.dart';
 

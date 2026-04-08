@@ -47,7 +47,8 @@ class CurveData {
   factory CurveData.fromJson(Map<String, dynamic> json) {
     return CurveData(
       hours: (json['hours'] as List).map((e) => (e as num).toDouble()).toList(),
-      brightness: (json['bris'] as List).map((e) => (e as num).toInt()).toList(),
+      brightness:
+          (json['bris'] as List).map((e) => (e as num).toInt()).toList(),
       kelvin: (json['ccts'] as List).map((e) => (e as num).toInt()).toList(),
       solar: SolarInfo.fromJson(json['solar']),
     );
@@ -174,8 +175,12 @@ class TimeInfo {
 
   factory TimeInfo.fromJson(Map<String, dynamic> json) {
     final lighting = json['lighting'] as Map<String, dynamic>;
+    final location = json['location'] as Map<String, dynamic>?;
     return TimeInfo(
-      currentTime: json['current_time'] as String,
+      currentTime: (json['current_time'] ??
+          json['current_local_time'] ??
+          location?['current_local_time'] ??
+          location?['current_time']) as String,
       currentHour: (json['current_hour'] as num).toDouble(),
       timezone: json['timezone'] as String?,
       brightness: (lighting['brightness'] as num).toInt(),

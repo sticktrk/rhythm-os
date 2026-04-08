@@ -158,16 +158,21 @@ class LightOutputDisplay extends StatelessWidget {
 class LightOutputCompact extends StatelessWidget {
   final int brightness;
   final int kelvin;
+  final Color? directColor;
 
   const LightOutputCompact({
     super.key,
     required this.brightness,
     required this.kelvin,
+    this.directColor,
   });
 
   @override
   Widget build(BuildContext context) {
-    final cctColor = ColorUtils.cctToColor(kelvin);
+    final hasDirectColor = directColor != null;
+    final dotColor = hasDirectColor
+        ? directColor!
+        : ColorUtils.cctToColor(kelvin);
 
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -186,24 +191,26 @@ class LightOutputCompact extends StatelessWidget {
           height: 10,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: cctColor,
+            color: dotColor,
             boxShadow: [
               BoxShadow(
-                color: cctColor.withValues(alpha: 0.5),
+                color: dotColor.withValues(alpha: 0.5),
                 blurRadius: 4,
               ),
             ],
           ),
         ),
-        const SizedBox(width: 12),
-        Text(
-          '${kelvin}K',
-          style: const TextStyle(
-            color: CelestialColors.textPrimary,
-            fontSize: 16,
-            fontWeight: FontWeight.w600,
+        if (!hasDirectColor) ...[
+          const SizedBox(width: 12),
+          Text(
+            '${kelvin}K',
+            style: const TextStyle(
+              color: CelestialColors.textPrimary,
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+            ),
           ),
-        ),
+        ],
       ],
     );
   }

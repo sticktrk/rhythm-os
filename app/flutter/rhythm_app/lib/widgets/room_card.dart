@@ -116,7 +116,7 @@ class _RoomCardState extends State<RoomCard> {
 
   @override
   Widget build(BuildContext context) {
-    return Selector<RoomProvider, (RoomDto?, int, MotionTimerInfo?, bool, int?, int?, bool)>(
+    return Selector<RoomProvider, (RoomDto?, int, MotionTimerInfo?, bool, int?, int?, (int, int, int)?, bool)>(
       selector: (_, p) => (
         p.getRoom(widget.roomId),
         p.resetGeneration,
@@ -124,10 +124,11 @@ class _RoomCardState extends State<RoomCard> {
         p.isRoomIdle(widget.roomId),
         p.getBrightness(widget.roomId),
         p.getKelvin(widget.roomId),
+        p.getRoomColor(widget.roomId),
         p.hasMotionSensor(widget.roomId),
       ),
       builder: (context, data, _) {
-        final (room, resetGen, motionTimer, isIdle, serverBrightness, serverKelvin, hasSensor) = data;
+        final (room, resetGen, motionTimer, isIdle, serverBrightness, serverKelvin, serverColor, hasSensor) = data;
         if (room == null) return const SizedBox.shrink();
 
         // External reset bumps the generation counter — drop local overrides
@@ -154,7 +155,9 @@ class _RoomCardState extends State<RoomCard> {
           RoomMode.off => _sliderBrightness ?? brightness,
         };
 
-        final cctColor = ColorUtils.cctToColor(kelvin);
+        final cctColor = serverColor != null
+            ? Color.fromARGB(255, serverColor.$1, serverColor.$2, serverColor.$3)
+            : ColorUtils.cctToColor(kelvin);
 
         // Use CCT color directly, lightly softened with white
         final softCct = Color.lerp(

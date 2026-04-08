@@ -2,28 +2,46 @@
 
 #[cfg(test)]
 mod tests {
-    use rhythm_core::config::{DEFAULT_MIN_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP};
-
     use crate::api::{
-        // Curve functions
-        generate_curve_data, calculate_lighting, calculate_step_sequences,
-        get_sun_position, get_sun_times, generate_curve_data_with_sun_times,
+        area_ids_match,
         // Runner functions
         calculate_action_result,
+        calculate_lighting,
+        calculate_step_sequences,
         create_runner_state,
-        runner_add_room, runner_remove_room, runner_set_room_devices,
-        runner_handle_action, runner_get_enabled_rooms,
-        runner_get_rooms_by_source, runner_set_room_disabled,
-        runner_set_room_curve_config,
+        endpoint_for_manufacturer,
+        // Curve functions
+        generate_curve_data,
+        generate_curve_data_with_sun_times,
         // Helper functions
-        get_group_prefix, normalize_ieee, is_hue_ieee,
-        endpoint_for_manufacturer, normalize_area_id, area_ids_match,
-        group_name_for_area, is_light_entity, is_rhythm_group,
+        get_group_prefix,
+        get_sun_position,
+        get_sun_times,
+        group_name_for_area,
+        is_hue_ieee,
+        is_light_entity,
+        is_rhythm_group,
         // Hue functions
-        map_hue_button_event, parse_hue_button_event_type,
+        map_hue_button_event,
+        normalize_area_id,
+        normalize_ieee,
+        parse_hue_button_event_type,
+        runner_add_room,
+        runner_get_enabled_rooms,
+        runner_get_rooms_by_source,
+        runner_handle_action,
+        runner_remove_room,
+        runner_set_room_curve_config,
+        runner_set_room_devices,
+        runner_set_room_disabled,
         // DTOs
-        CurveConfigDto, RhythmActionDto, RoomDto, RoomSourceDto, RoomStateDto,
-        HueButtonEventTypeDto, LightCommandType,
+        CurveConfigDto,
+        HueButtonEventTypeDto,
+        LightCommandType,
+        RhythmActionDto,
+        RoomDto,
+        RoomSourceDto,
+        RoomStateDto,
     };
 
     #[test]
@@ -37,12 +55,12 @@ mod tests {
 
         // At noon (index 12), brightness should be high
         assert!(result.brightness[12] > 90);
-        assert!(result.kelvin[12] >= DEFAULT_MAX_COLOR_TEMP as i32 - 100);
+        assert!(result.kelvin[12] >= CurveConfigDto::default().max_color_temp - 100);
 
         // At midnight (index 0), brightness should be low and color warm
         assert!(result.brightness[0] < 10);
         // Min color temp is 1200K from defaults, so kelvin should be close to that
-        assert!(result.kelvin[0] <= DEFAULT_MIN_COLOR_TEMP as i32 + 100);
+        assert!(result.kelvin[0] <= CurveConfigDto::default().min_color_temp + 100);
     }
 
     #[test]
@@ -51,7 +69,7 @@ mod tests {
         let result = calculate_lighting(config, 12.0, 35.0, 172, 12.0);
 
         assert!(result.brightness > 90);
-        assert!(result.kelvin >= DEFAULT_MAX_COLOR_TEMP as i32 - 100);
+        assert!(result.kelvin >= CurveConfigDto::default().max_color_temp - 100);
         assert!((result.sun_position - 1.0).abs() < 0.1);
     }
 
@@ -65,8 +83,14 @@ mod tests {
         let result = calculate_step_sequences(config, 12.0, 35.0, 172, 9.0, 10);
 
         // Should have generated some steps in both directions
-        assert!(!result.step_up.is_empty(), "step_up should not be empty at 9am");
-        assert!(!result.step_down.is_empty(), "step_down should not be empty at 9am");
+        assert!(
+            !result.step_up.is_empty(),
+            "step_up should not be empty at 9am"
+        );
+        assert!(
+            !result.step_down.is_empty(),
+            "step_down should not be empty at 9am"
+        );
 
         // Step up should increase brightness (moving toward noon)
         if result.step_up.len() > 1 {
@@ -91,7 +115,14 @@ mod tests {
     #[test]
     fn test_get_sun_times_nyc() {
         // NYC on summer solstice
-        let times = get_sun_times(40.7128, -74.006, 2024, 6, 21, "America/New_York".to_string());
+        let times = get_sun_times(
+            40.7128,
+            -74.006,
+            2024,
+            6,
+            21,
+            "America/New_York".to_string(),
+        );
 
         // Sunrise should be around 5:25 AM
         assert!(
@@ -155,8 +186,13 @@ mod tests {
 
         // OnPress should turn on
         let result = calculate_action_result(
-            config.clone(), 12.0, 35.0, 172, 12.0,
-            RhythmActionDto::OnPress, room_state
+            config.clone(),
+            12.0,
+            35.0,
+            172,
+            12.0,
+            RhythmActionDto::OnPress,
+            room_state,
         );
 
         assert!(result.should_turn_on);
@@ -167,8 +203,13 @@ mod tests {
 
         // Now with lights on, OnPress should turn off
         let result2 = calculate_action_result(
-            config, 12.0, 35.0, 172, 12.0,
-            RhythmActionDto::OnPress, result.new_state
+            config,
+            12.0,
+            35.0,
+            172,
+            12.0,
+            RhythmActionDto::OnPress,
+            result.new_state,
         );
 
         assert!(!result2.should_turn_on);
@@ -190,8 +231,13 @@ mod tests {
 
         // Step up at 6 AM (morning, before peak)
         let result = calculate_action_result(
-            config.clone(), 12.0, 35.0, 172, 6.0,
-            RhythmActionDto::StepUp, room_state
+            config.clone(),
+            12.0,
+            35.0,
+            172,
+            6.0,
+            RhythmActionDto::StepUp,
+            room_state,
         );
 
         // Should have positive time offset (moving toward brighter)
@@ -216,8 +262,13 @@ mod tests {
 
         // Dim up at 6 AM
         let result = calculate_action_result(
-            config.clone(), 12.0, 35.0, 172, 6.0,
-            RhythmActionDto::DimUp, room_state
+            config.clone(),
+            12.0,
+            35.0,
+            172,
+            6.0,
+            RhythmActionDto::DimUp,
+            room_state,
         );
 
         // Should have +10 brightness offset
@@ -244,8 +295,13 @@ mod tests {
 
         // Dim down at noon (high brightness)
         let result = calculate_action_result(
-            config.clone(), 12.0, 35.0, 172, 12.0,
-            RhythmActionDto::DimDown, room_state
+            config.clone(),
+            12.0,
+            35.0,
+            172,
+            12.0,
+            RhythmActionDto::DimDown,
+            room_state,
         );
 
         // Should have -10 brightness offset
@@ -270,8 +326,13 @@ mod tests {
         };
 
         let result = calculate_action_result(
-            config, 12.0, 35.0, 172, 12.0,
-            RhythmActionDto::DimUp, room_state
+            config,
+            12.0,
+            35.0,
+            172,
+            12.0,
+            RhythmActionDto::DimUp,
+            room_state,
         );
 
         // Offset should clamp at 100
@@ -293,8 +354,13 @@ mod tests {
         };
 
         let result = calculate_action_result(
-            config, 12.0, 35.0, 172, 12.0,
-            RhythmActionDto::Reset, room_state
+            config,
+            12.0,
+            35.0,
+            172,
+            12.0,
+            RhythmActionDto::Reset,
+            room_state,
         );
 
         // Both offsets should be reset to 0
@@ -308,31 +374,37 @@ mod tests {
     fn test_runner_get_enabled_rooms() {
         let mut state = create_runner_state();
 
-        state = runner_add_room(state, RoomDto {
-            id: "room1".to_string(),
-            name: "Room 1".to_string(),
-            source: RoomSourceDto::Hue,
-            device_ids: vec![],
-            rhythm_enabled: false,
-            disabled: false,
-            lights_on: false,
-            time_offset_minutes: 0.0,
-            brightness_offset: 0.0,
-            curve_config: None,
-        });
+        state = runner_add_room(
+            state,
+            RoomDto {
+                id: "room1".to_string(),
+                name: "Room 1".to_string(),
+                source: RoomSourceDto::Hue,
+                device_ids: vec![],
+                rhythm_enabled: false,
+                disabled: false,
+                lights_on: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                curve_config: None,
+            },
+        );
 
-        state = runner_add_room(state, RoomDto {
-            id: "room2".to_string(),
-            name: "Room 2".to_string(),
-            source: RoomSourceDto::Hue,
-            device_ids: vec![],
-            rhythm_enabled: false,
-            disabled: true, // This one is disabled
-            lights_on: false,
-            time_offset_minutes: 0.0,
-            brightness_offset: 0.0,
-            curve_config: None,
-        });
+        state = runner_add_room(
+            state,
+            RoomDto {
+                id: "room2".to_string(),
+                name: "Room 2".to_string(),
+                source: RoomSourceDto::Hue,
+                device_ids: vec![],
+                rhythm_enabled: false,
+                disabled: true, // This one is disabled
+                lights_on: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                curve_config: None,
+            },
+        );
 
         let enabled = runner_get_enabled_rooms(state);
         assert_eq!(enabled.len(), 1);
@@ -343,9 +415,22 @@ mod tests {
     fn test_runner_get_rooms_by_source() {
         let mut state = create_runner_state();
 
-        state = runner_add_room(state, RoomDto::with_source("hue1".to_string(), "Hue 1".to_string(), RoomSourceDto::Hue));
-        state = runner_add_room(state, RoomDto::with_source("hue2".to_string(), "Hue 2".to_string(), RoomSourceDto::Hue));
-        state = runner_add_room(state, RoomDto::with_source("ha1".to_string(), "HA 1".to_string(), RoomSourceDto::HomeAssistant));
+        state = runner_add_room(
+            state,
+            RoomDto::with_source("hue1".to_string(), "Hue 1".to_string(), RoomSourceDto::Hue),
+        );
+        state = runner_add_room(
+            state,
+            RoomDto::with_source("hue2".to_string(), "Hue 2".to_string(), RoomSourceDto::Hue),
+        );
+        state = runner_add_room(
+            state,
+            RoomDto::with_source(
+                "ha1".to_string(),
+                "HA 1".to_string(),
+                RoomSourceDto::HomeAssistant,
+            ),
+        );
 
         let hue_rooms = runner_get_rooms_by_source(state.clone(), RoomSourceDto::Hue);
         assert_eq!(hue_rooms.len(), 2);
@@ -383,7 +468,10 @@ mod tests {
         state = runner_set_room_curve_config(state, "test".to_string(), Some(config));
 
         assert!(state.rooms[0].curve_config.is_some());
-        assert_eq!(state.rooms[0].curve_config.as_ref().unwrap().min_brightness, 10);
+        assert_eq!(
+            state.rooms[0].curve_config.as_ref().unwrap().min_brightness,
+            10
+        );
 
         // Set back to None
         state = runner_set_room_curve_config(state, "test".to_string(), None);
@@ -396,24 +484,30 @@ mod tests {
         let mut state = create_runner_state();
 
         // Add a room with devices
-        state = runner_add_room(state, RoomDto {
-            id: "test_room".to_string(),
-            name: "Test Room".to_string(),
-            source: RoomSourceDto::Unknown,
-            device_ids: vec!["light.test1".to_string(), "light.test2".to_string()],
-            rhythm_enabled: false,
-            disabled: false,
-            lights_on: false,
-            time_offset_minutes: 0.0,
-            brightness_offset: 0.0,
-            curve_config: None,
-        });
+        state = runner_add_room(
+            state,
+            RoomDto {
+                id: "test_room".to_string(),
+                name: "Test Room".to_string(),
+                source: RoomSourceDto::Unknown,
+                device_ids: vec!["light.test1".to_string(), "light.test2".to_string()],
+                rhythm_enabled: false,
+                disabled: false,
+                lights_on: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                curve_config: None,
+            },
+        );
 
         // Turn on via OnPress
         let result = runner_handle_action(
             state,
             config.clone(),
-            12.0, 35.0, 172, 12.0,
+            12.0,
+            35.0,
+            172,
+            12.0,
             "test_room".to_string(),
             RhythmActionDto::OnPress,
         );
@@ -430,7 +524,12 @@ mod tests {
         assert!(cmd.kelvin.is_some());
 
         // Verify state updated
-        let room = result.state.rooms.iter().find(|r| r.id == "test_room").unwrap();
+        let room = result
+            .state
+            .rooms
+            .iter()
+            .find(|r| r.id == "test_room")
+            .unwrap();
         assert!(room.rhythm_enabled);
         assert!(room.lights_on);
     }
@@ -440,15 +539,25 @@ mod tests {
         let mut state = create_runner_state();
 
         // Add room
-        state = runner_add_room(state, RoomDto::new("room1".to_string(), "Room 1".to_string()));
+        state = runner_add_room(
+            state,
+            RoomDto::new("room1".to_string(), "Room 1".to_string()),
+        );
         assert_eq!(state.rooms.len(), 1);
 
         // Update devices
-        state = runner_set_room_devices(state, "room1".to_string(), vec!["dev1".to_string(), "dev2".to_string()]);
+        state = runner_set_room_devices(
+            state,
+            "room1".to_string(),
+            vec!["dev1".to_string(), "dev2".to_string()],
+        );
         assert_eq!(state.rooms[0].device_ids.len(), 2);
 
         // Add another room
-        state = runner_add_room(state, RoomDto::new("room2".to_string(), "Room 2".to_string()));
+        state = runner_add_room(
+            state,
+            RoomDto::new("room2".to_string(), "Room 2".to_string()),
+        );
         assert_eq!(state.rooms.len(), 2);
 
         // Remove first room
@@ -486,9 +595,18 @@ mod tests {
 
     #[test]
     fn test_endpoint_for_manufacturer_ffi() {
-        assert_eq!(endpoint_for_manufacturer("Signify Netherlands B.V.".to_string(), "LCT015".to_string()), 11);
-        assert_eq!(endpoint_for_manufacturer("IKEA of Sweden".to_string(), "TRADFRI bulb".to_string()), 1);
-        assert_eq!(endpoint_for_manufacturer("Unknown".to_string(), "Unknown".to_string()), 11);
+        assert_eq!(
+            endpoint_for_manufacturer("Signify Netherlands B.V.".to_string(), "LCT015".to_string()),
+            11
+        );
+        assert_eq!(
+            endpoint_for_manufacturer("IKEA of Sweden".to_string(), "TRADFRI bulb".to_string()),
+            1
+        );
+        assert_eq!(
+            endpoint_for_manufacturer("Unknown".to_string(), "Unknown".to_string()),
+            11
+        );
     }
 
     #[test]
@@ -499,13 +617,22 @@ mod tests {
 
     #[test]
     fn test_area_ids_match_ffi() {
-        assert!(area_ids_match("Living Room".to_string(), "living_room".to_string()));
-        assert!(!area_ids_match("living_room".to_string(), "bedroom".to_string()));
+        assert!(area_ids_match(
+            "Living Room".to_string(),
+            "living_room".to_string()
+        ));
+        assert!(!area_ids_match(
+            "living_room".to_string(),
+            "bedroom".to_string()
+        ));
     }
 
     #[test]
     fn test_group_name_for_area_ffi() {
-        assert_eq!(group_name_for_area("Living Room".to_string()), "Rhythm_Living_Room");
+        assert_eq!(
+            group_name_for_area("Living Room".to_string()),
+            "Rhythm_Living_Room"
+        );
     }
 
     #[test]

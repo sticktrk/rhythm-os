@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmCurveConfig;
+import 'package:rhythm_core/rhythm_core.dart' show RhythmApi;
 import '../../models/config_model.dart';
 import '../../providers/server_sync_provider.dart';
 
@@ -97,8 +97,8 @@ class _PreferencesScreenState extends State<PreferencesScreen>
   void _onPowerSaveChanged(bool value) {
     setState(() => _powerSave = value);
     context.read<ServerSyncProvider>().api.settingsSet(
-      powerSave: value,
-    );
+          powerSave: value,
+        );
   }
 
   // ---------------------------------------------------------------------------
@@ -148,8 +148,7 @@ class _PreferencesScreenState extends State<PreferencesScreen>
                   color: _Palette.amber.withValues(alpha: 0.25),
                 ),
               ),
-              child:
-                  const Icon(Icons.close, color: _Palette.amber, size: 20),
+              child: const Icon(Icons.close, color: _Palette.amber, size: 20),
             ),
           ),
           const Expanded(
@@ -251,8 +250,8 @@ class _PreferencesScreenState extends State<PreferencesScreen>
             ),
             boxShadow: [
               BoxShadow(
-                color:
-                    _Palette.amber.withValues(alpha: _glowAnimation.value * 0.15),
+                color: _Palette.amber
+                    .withValues(alpha: _glowAnimation.value * 0.15),
                 blurRadius: 32,
                 spreadRadius: 0,
               ),
@@ -398,24 +397,26 @@ class _PreferencesScreenState extends State<PreferencesScreen>
 
   Future<void> _resetToDefaults() async {
     final api = context.read<ServerSyncProvider>().api;
+    final rhythmApi = context.read<RhythmApi>();
+    final configModel = context.read<ConfigModel>();
 
     await Future.wait([
       api.settingsSet(
-        powerSave: true,
+        powerSave: false,
       ),
-      api.configSet(const RhythmCurveConfig()),
+      api.resetConfig(id: 'rhythm'),
+      api.resetConfig(id: 'sleep'),
+      api.resetConfig(id: 'idle'),
     ]);
 
     setState(() {
-      _powerSave = true;
+      _powerSave = false;
     });
 
-    // Update ConfigModel so the designer reflects the change.
-    if (mounted) {
-      context.read<ConfigModel>().resetToDefaults();
-    }
+    final configState = await rhythmApi.getConfigState();
+    if (!mounted) return;
+    configModel.updateFromConfigState(configState);
   }
-
 }
 
 // -----------------------------------------------------------------------------

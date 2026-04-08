@@ -74,7 +74,8 @@ class ServerSyncProvider extends ChangeNotifier {
   List<RhythmRoom> _helloRooms = [];
 
   /// Previous connection state for detecting transitions.
-  RhythmConnectionState _previousConnectionState = RhythmConnectionState.disconnected;
+  RhythmConnectionState _previousConnectionState =
+      RhythmConnectionState.disconnected;
 
   /// Tracks the last poll time for debouncing [fullRefresh] and [pollNow].
   DateTime _lastPollTime = DateTime.fromMillisecondsSinceEpoch(0);
@@ -115,7 +116,8 @@ class ServerSyncProvider extends ChangeNotifier {
   bool get synced => _connection.connected;
 
   /// Whether the server can dispatch room actions.
-  bool get canDispatchActions => _connection.connected || HueServiceLocator.isDemoMode;
+  bool get canDispatchActions =>
+      _connection.connected || HueServiceLocator.isDemoMode;
 
   /// Connection state of the underlying connection.
   RhythmConnectionState get connectionState => _connection.connectionState;
@@ -197,7 +199,8 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Number of typed lights for a room (0 until lights are typed in the backend).
   int lightCountForRoom(String roomId) {
-    return _helloRooms.where((r) => r.id == roomId).firstOrNull?.lightCount ?? 0;
+    return _helloRooms.where((r) => r.id == roomId).firstOrNull?.lightCount ??
+        0;
   }
 
   /// All typed devices for a room (lights, buttons, motion sensors).
@@ -207,7 +210,11 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Human-readable device summary for a room (e.g. "4 lights, 2 buttons").
   String deviceSummaryForRoom(String roomId) {
-    return _helloRooms.where((r) => r.id == roomId).firstOrNull?.deviceSummary ?? '';
+    return _helloRooms
+            .where((r) => r.id == roomId)
+            .firstOrNull
+            ?.deviceSummary ??
+        '';
   }
 
   /// All rooms grouped by hub type (for hub debug sections).
@@ -238,7 +245,11 @@ class ServerSyncProvider extends ChangeNotifier {
       }
     }
     devices.sort((a, b) {
-      const order = {RhythmDeviceType.light: 0, RhythmDeviceType.button: 1, RhythmDeviceType.motion: 2};
+      const order = {
+        RhythmDeviceType.light: 0,
+        RhythmDeviceType.button: 1,
+        RhythmDeviceType.motion: 2
+      };
       return (order[a.type] ?? 3).compareTo(order[b.type] ?? 3);
     });
     return devices;
@@ -279,7 +290,8 @@ class ServerSyncProvider extends ChangeNotifier {
     _hubEventSub = _connection.hubEvents.listen(_onHubEvent);
     _motionTimerSub = _connection.motionTimerEvents.listen(_onMotionTimer);
     _newRoomsSub = _connection.newRoomsDetected.listen(_onNewRoomsDetected);
-    _triageChangedSub = _connection.triageChangedEvents.listen(_onTriageChanged);
+    _triageChangedSub =
+        _connection.triageChangedEvents.listen(_onTriageChanged);
 
     // Listen for room source changes (Hue pairing, re-sync, disconnect)
     _sourceChangedSub =
@@ -300,9 +312,7 @@ class ServerSyncProvider extends ChangeNotifier {
     // but don't actually connect to the fake 127.0.0.1 host.
     if (HueServiceLocator.isDemoMode) {
       final hubs = _homeProvider.currentHomeHubs;
-      final serverHub = hubs
-          .where((h) => h.type == HubType.server)
-          .firstOrNull;
+      final serverHub = hubs.where((h) => h.type == HubType.server).firstOrNull;
       if (serverHub != null && _serverHub?.id != serverHub.id) {
         _serverHub = serverHub;
         notifyListeners();
@@ -311,9 +321,7 @@ class ServerSyncProvider extends ChangeNotifier {
     }
 
     final hubs = _homeProvider.currentHomeHubs;
-    final serverHub = hubs
-        .where((h) => h.type == HubType.server)
-        .firstOrNull;
+    final serverHub = hubs.where((h) => h.type == HubType.server).firstOrNull;
 
     if (serverHub != null) {
       if (serverHub.id == _serverHub?.id &&
@@ -321,7 +329,8 @@ class ServerSyncProvider extends ChangeNotifier {
           serverHub.endpoint.port == _serverHub?.endpoint.port) {
         return; // Same hub, no change
       }
-      debugPrint('ServerSync: connectIfAvailable — connecting to ${serverHub.endpoint.host}:${serverHub.endpoint.port}');
+      debugPrint(
+          'ServerSync: connectIfAvailable — connecting to ${serverHub.endpoint.host}:${serverHub.endpoint.port}');
       _serverHub = serverHub;
       // Defer all side-effects to avoid notifyListeners during ProxyProvider build phase
       final host = serverHub.endpoint.host;
@@ -368,31 +377,40 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Handle hello from server — accept rooms and reconcile config.
   void _onHello(RhythmHello hello) {
-    debugPrint('ServerSync: Hello received with ${hello.rooms.length} rooms, version=${hello.version}');
-    debugPrint('ServerSync: Server global config: ${hello.config}');
+    debugPrint(
+        'ServerSync: Hello received with ${hello.rooms.length} rooms, version=${hello.version}');
+    debugPrint('ServerSync: Server active profile: ${hello.activeProfile}');
     debugPrint('ServerSync: Server location: ${hello.location}');
     for (final r in hello.rooms) {
-      debugPrint('ServerSync: Server room "${r.name}" rhythm=${r.rhythmEnabled} offset=${r.timeOffset} softOff=${r.softOff}');
+      debugPrint(
+          'ServerSync: Server room "${r.name}" rhythm=${r.rhythmEnabled} offset=${r.timeOffset} softOff=${r.softOff}');
     }
     _firmwareVersion = hello.version;
     _serverPlatformType = hello.platformType;
     _serverPlatformContext = hello.platformContext;
+    RhythmCurveConfig? activeProfileConfig;
+    if (hello.activeProfile.isNotEmpty) {
+      try {
+        activeProfileConfig = RhythmCurveConfig.fromJson(hello.activeProfile);
+      } catch (e) {
+        debugPrint('ServerSync: Failed to parse active profile config: $e');
+      }
+    }
+    activeProfileConfig ??= hello.settings?.activeProfileConfig;
     _powerSave = hello.settings?.powerSave ?? false;
     _activeCurveModule = hello.settings?.activeCurveModule;
     _availableCurveModules = hello.settings?.availableCurveModules ?? [];
-    // Fallback for older servers that don't send active_curve_module
-    if (_activeCurveModule == null && (hello.settings?.sleepMode ?? false)) {
-      _activeCurveModule = 'sleep';
-    }
-    _rhythmIntervalSecs = hello.settings?.rhythmIntervalSecs ?? 60;
-    _effectiveFadeMs = hello.effectiveFadeMs;
-    _effectiveMotionTimeoutSecs = hello.effectiveMotionTimeoutSecs;
+    _rhythmIntervalSecs = activeProfileConfig?.rhythmIntervalSecs ?? 60;
+    _effectiveFadeMs = activeProfileConfig?.fadeMs ?? hello.effectiveFadeMs;
+    _effectiveMotionTimeoutSecs = activeProfileConfig?.motionTimeoutSecs ??
+        hello.effectiveMotionTimeoutSecs;
     _helloRooms = hello.rooms;
     _lastHubInfos = hello.hubs;
 
     // Bootstrap countdown timer from server's last tick timestamp
     if (hello.lastTickEpochMs != null) {
-      final lastTick = DateTime.fromMillisecondsSinceEpoch(hello.lastTickEpochMs!);
+      final lastTick =
+          DateTime.fromMillisecondsSinceEpoch(hello.lastTickEpochMs!);
       for (final room in hello.rooms) {
         if (room.id.isNotEmpty && room.rhythmEnabled) {
           _roomProvider.setLastTickTime(room.id, lastTick);
@@ -407,8 +425,10 @@ class ServerSyncProvider extends ChangeNotifier {
     // would eat the next real event (e.g. Hue pairing).
     _suppressNextSourceSync = hello.rooms.isNotEmpty;
     try {
-      // 1. Accept server rooms as authoritative
-      _acceptServerRooms(hello.rooms, hello.hub);
+      // 1. Accept server rooms as authoritative.
+      // Prefer the new `hubs` array; fall back to the synthesized primary hub.
+      _acceptServerRooms(
+          hello.rooms, hello.hubs.isNotEmpty ? hello.hubs.first : hello.hub);
 
       // 2. Reconcile motion sensors — mark rooms that have sensors,
       //    unmark rooms that lost their sensors since last hello
@@ -422,7 +442,7 @@ class ServerSyncProvider extends ChangeNotifier {
       _roomProvider.reconcileMotionSensors(serverSensorRooms);
 
       // 3. Accept server config as authoritative, push location if different
-      _acceptServerConfig(hello.config);
+      _acceptServerConfig(hello.activeProfile);
       _pushLocationIfUnset(hello.location);
     } finally {
       _isProcessingHello = false;
@@ -440,7 +460,8 @@ class ServerSyncProvider extends ChangeNotifier {
   ///
   /// The server discovers rooms from connected hubs. Each room carries its
   /// own `hub_types`, so we group by source and add each group atomically.
-  void _acceptServerRooms(List<RhythmRoom> serverRooms, Map<String, dynamic> hubInfo) {
+  void _acceptServerRooms(
+      List<RhythmRoom> serverRooms, Map<String, dynamic> hubInfo) {
     // Filter out empty rooms (e.g. from stale server-side rooms.json)
     final validRooms = serverRooms.where((r) => r.id.isNotEmpty).toList();
     if (validRooms.isEmpty) {
@@ -471,18 +492,21 @@ class ServerSyncProvider extends ChangeNotifier {
       };
       (grouped[source] ??= []).add(sr);
     }
-    debugPrint('ServerSync: Accepting ${validRooms.length} rooms across ${grouped.length} source(s): ${grouped.entries.map((e) => '${e.key}=${e.value.length}').join(', ')}');
+    debugPrint(
+        'ServerSync: Accepting ${validRooms.length} rooms across ${grouped.length} source(s): ${grouped.entries.map((e) => '${e.key}=${e.value.length}').join(', ')}');
 
     // The server is authoritative for ALL rooms. Remove any local rooms
     // from sources not present in the server's list.
     final serverRoomIds = validRooms.map((r) => r.id).toSet();
     for (final otherSource in RoomSourceDto.values) {
       if (grouped.containsKey(otherSource)) continue;
-      final stale = _roomProvider.getRoomsBySource(otherSource)
+      final stale = _roomProvider
+          .getRoomsBySource(otherSource)
           .where((r) => !serverRoomIds.contains(r.id))
           .toList();
       if (stale.isNotEmpty) {
-        debugPrint('ServerSync: Removing ${stale.length} stale room(s) from source=$otherSource');
+        debugPrint(
+            'ServerSync: Removing ${stale.length} stale room(s) from source=$otherSource');
         for (final room in stale) {
           _roomProvider.removeRoom(room.id);
         }
@@ -541,11 +565,13 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Hub credentials are only pushed via explicit user action (hub picker,
   /// configurator screens, server settings) — not automatically here.
   void _onSourceRoomsChanged(RoomSourceDto source) {
-    debugPrint('ServerSync: onSourceRoomsChanged($source), connected=${_connection.connected}, processingHello=$_isProcessingHello, suppressSync=$_suppressNextSourceSync');
+    debugPrint(
+        'ServerSync: onSourceRoomsChanged($source), connected=${_connection.connected}, processingHello=$_isProcessingHello, suppressSync=$_suppressNextSourceSync');
     if (!_connection.connected || _isProcessingHello) return;
     if (_suppressNextSourceSync) {
       _suppressNextSourceSync = false;
-      debugPrint('ServerSync: Suppressing source sync (hello just populated rooms)');
+      debugPrint(
+          'ServerSync: Suppressing source sync (hello just populated rooms)');
       return;
     }
   }
@@ -564,6 +590,9 @@ class ServerSyncProvider extends ChangeNotifier {
         lightsOn: state.lightsOn,
         brightness: state.brightness,
         kelvin: state.kelvin,
+        color: state.color != null
+            ? (state.color!.r, state.color!.g, state.color!.b)
+            : null,
         tick: state.tick,
       );
     } finally {
@@ -617,7 +646,8 @@ class ServerSyncProvider extends ChangeNotifier {
 
     // A hub just connected — re-fetch full state to pick up new rooms.
     if (event == 'connected') {
-      debugPrint('ServerSync: Hub connected — triggering re-hello for room sync');
+      debugPrint(
+          'ServerSync: Hub connected — triggering re-hello for room sync');
       _connection.reconnect();
     }
   }
@@ -629,11 +659,14 @@ class ServerSyncProvider extends ChangeNotifier {
   /// [connectionState] to show a reconnecting indicator.
   void _onTriageChanged(Map<String, dynamic> data) {
     final count = (data['total'] as num?)?.toInt() ??
-        (data['pending_count'] as num?)?.toInt() ?? 0;
+        (data['pending_count'] as num?)?.toInt() ??
+        0;
     final devices = (data['devices'] as num?)?.toInt() ??
-        (data['pending_devices'] as num?)?.toInt() ?? 0;
+        (data['pending_devices'] as num?)?.toInt() ??
+        0;
     final rooms = (data['rooms'] as num?)?.toInt() ??
-        (data['pending_rooms'] as num?)?.toInt() ?? 0;
+        (data['pending_rooms'] as num?)?.toInt() ??
+        0;
     if (_triagePendingCount != count ||
         _triagePendingDevices != devices ||
         _triagePendingRooms != rooms) {
@@ -650,8 +683,9 @@ class ServerSyncProvider extends ChangeNotifier {
 
     if (current != previous &&
         (current == RhythmConnectionState.disconnected ||
-         current == RhythmConnectionState.reconnecting)) {
-      debugPrint('ServerSync: Connection lost ($previous → $current) — resetting metadata, keeping rooms');
+            current == RhythmConnectionState.reconnecting)) {
+      debugPrint(
+          'ServerSync: Connection lost ($previous → $current) — resetting metadata, keeping rooms');
       _firmwareVersion = '0.0.0';
       _serverPlatformType = 'desktop';
       _serverPlatformContext = 'server';
@@ -680,9 +714,13 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Returns true if dispatched to server, false if not connected.
   /// On success, applies the server's response immediately for fast convergence.
   bool dispatchAction(String roomId, String action) {
-    if (HueServiceLocator.isDemoMode) return true; // optimistic UI already applied
+    if (HueServiceLocator.isDemoMode) {
+      return true; // optimistic UI already applied
+    }
     if (!_connection.connected) return false;
-    _connection.api.roomAction(roomId: roomId, action: action).then((serverState) {
+    _connection.api
+        .roomAction(roomId: roomId, action: action)
+        .then((serverState) {
       if (serverState != null) _onRhythmState(serverState);
     });
     return true;
@@ -692,7 +730,8 @@ class ServerSyncProvider extends ChangeNotifier {
   ///
   /// Returns true if dispatched to server, false if not connected.
   /// On success, applies each returned state for fast convergence.
-  Future<bool> dispatchBatchActions(List<({String roomId, String action})> actions) async {
+  Future<bool> dispatchBatchActions(
+      List<({String roomId, String action})> actions) async {
     if (!_connection.connected || actions.isEmpty) return false;
     final states = await _connection.api.roomActionBatch(actions);
     for (final state in states) {
@@ -724,10 +763,12 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   /// Push room preferences to the server (user-state only, no topology).
-  void pushRoomPreferences(String roomId, {bool? rhythmEnabled, bool? disabled, bool? softOff}) {
+  void pushRoomPreferences(String roomId,
+      {bool? rhythmEnabled, bool? disabled, bool? softOff}) {
     if (HueServiceLocator.isDemoMode) return; // optimistic UI already applied
     if (!_connection.connected || _receivingFromServer) return;
-    debugPrint('ServerSync: pushRoomPreferences $roomId rhythmEnabled=$rhythmEnabled disabled=$disabled softOff=$softOff');
+    debugPrint(
+        'ServerSync: pushRoomPreferences $roomId rhythmEnabled=$rhythmEnabled disabled=$disabled softOff=$softOff');
     _connection.api.roomPreferencesSet(
       roomId: roomId,
       rhythmEnabled: rhythmEnabled,
@@ -764,7 +805,9 @@ class ServerSyncProvider extends ChangeNotifier {
       return;
     }
     if (!_connection.connected) return;
-    _connection.api.roomAction(roomId: roomId, action: 'reset').then((serverState) {
+    _connection.api
+        .roomAction(roomId: roomId, action: 'reset')
+        .then((serverState) {
       if (serverState != null) _onRhythmState(serverState);
       _roomProvider.bumpResetGeneration();
     });
@@ -806,10 +849,12 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Set the active curve module on the server.
   Future<void> dispatchSetCurveModule(String id) async {
+    if (id == 'idle') return;
     if (!_connection.connected) return;
     _activeCurveModule = id;
     notifyListeners();
     await _connection.api.setCurveModule(id);
+    await fullRefresh();
   }
 
   /// Activate sleep mode on the server.
@@ -840,7 +885,8 @@ class ServerSyncProvider extends ChangeNotifier {
     String? timezoneName,
   }) {
     if (!_connection.connected) return;
-    _connection.api.locationSet(lat: lat, lon: lon, utcOffset: utcOffset, timezoneName: timezoneName);
+    _connection.api.locationSet(
+        lat: lat, lon: lon, utcOffset: utcOffset, timezoneName: timezoneName);
   }
 
   /// Push per-room motion timeout to the server.
@@ -902,7 +948,8 @@ class ServerSyncProvider extends ChangeNotifier {
         ? {'token': hub.token}
         : {'username': hub.token};
 
-    debugPrint('ServerSync: Pushing ${hub.typeName} credentials after source change');
+    debugPrint(
+        'ServerSync: Pushing ${hub.typeName} credentials after source change');
     _connection.api.hubCredentials(
       hubType: _hubTypeWireName(hubType),
       address: '${hub.endpoint.host}:${hub.endpoint.port}',
@@ -915,27 +962,38 @@ class ServerSyncProvider extends ChangeNotifier {
   /// The server (addon) owns the curve config. On hello, if the server's
   /// config differs from the app's cached copy, we update the app to match.
   void _acceptServerConfig(Map<String, dynamic> serverConfig) {
-    final srvMinBri = serverConfig['min_brightness'] as int?;
-    final srvMaxBri = serverConfig['max_brightness'] as int?;
-    final srvMinCct = serverConfig['min_color_temp'] as int?;
-    final srvMaxCct = serverConfig['max_color_temp'] as int?;
-    final srvWlBri = (serverConfig['width_left_bri'] as num?)?.toDouble();
-    final srvWrBri = (serverConfig['width_right_bri'] as num?)?.toDouble();
-    final srvWlCct = (serverConfig['width_left_cct'] as num?)?.toDouble();
-    final srvWrCct = (serverConfig['width_right_cct'] as num?)?.toDouble();
-    final srvShapeP = (serverConfig['shape_p'] as num?)?.toDouble();
-    final srvMaxDim = serverConfig['max_dim_steps'] as int?;
-    final srvFadeMs = (serverConfig['fade_ms'] as num?)?.toInt();
-    final srvMotionTimeout = (serverConfig['motion_timeout_secs'] as num?)?.toInt();
-
-    if (srvMinBri == null || srvMaxBri == null ||
-        srvMinCct == null || srvMaxCct == null ||
-        srvWlBri == null || srvWrBri == null ||
-        srvWlCct == null || srvWrCct == null ||
-        srvShapeP == null || srvMaxDim == null) {
-      debugPrint('ServerSync: CONFIG ACCEPT skipped — server config incomplete');
+    if (serverConfig.isEmpty) {
+      debugPrint('ServerSync: CONFIG ACCEPT skipped — server config missing');
       return;
     }
+
+    RhythmCurveConfig profileConfig;
+    try {
+      profileConfig = RhythmCurveConfig.fromJson(serverConfig);
+    } catch (e) {
+      debugPrint('ServerSync: CONFIG ACCEPT skipped — parse failed: $e');
+      return;
+    }
+
+    final superGaussian = profileConfig.superGaussianCurve;
+    if (superGaussian == null) {
+      debugPrint('ServerSync: CONFIG ACCEPT skipped — unsupported curve type '
+          '${profileConfig.curve.type}');
+      return;
+    }
+
+    final srvMinBri = profileConfig.minBrightness;
+    final srvMaxBri = profileConfig.maxBrightness;
+    final srvMinCct = profileConfig.minColorTemp;
+    final srvMaxCct = profileConfig.maxColorTemp;
+    final srvWlBri = superGaussian.widthLeftBri;
+    final srvWrBri = superGaussian.widthRightBri;
+    final srvWlCct = superGaussian.widthLeftCct;
+    final srvWrCct = superGaussian.widthRightCct;
+    final srvShapeP = superGaussian.shapeP;
+    final srvMaxDim = profileConfig.maxDimSteps;
+    final srvFadeMs = profileConfig.fadeMs;
+    final srvMotionTimeout = profileConfig.motionTimeoutSecs;
 
     final serverCurve = CurveConfigDto(
       minBrightness: srvMinBri,
@@ -949,13 +1007,15 @@ class ServerSyncProvider extends ChangeNotifier {
       shapeP: srvShapeP,
       maxDimSteps: srvMaxDim,
       fadeMs: srvFadeMs ?? CurveConfigDto.default_().fadeMs,
-      motionTimeoutSecs: srvMotionTimeout ?? CurveConfigDto.default_().motionTimeoutSecs,
+      motionTimeoutSecs:
+          srvMotionTimeout ?? CurveConfigDto.default_().motionTimeoutSecs,
     );
 
     final appConfig = _homeProvider.currentHome?.curveConfig;
 
     debugPrint('ServerSync: CONFIG COMPARE — '
-        'Server: bri=$srvMinBri-$srvMaxBri cct=$srvMinCct-$srvMaxCct '
+        'Server: profile=${profileConfig.id} curve=${profileConfig.curve.type} '
+        'bri=$srvMinBri-$srvMaxBri cct=$srvMinCct-$srvMaxCct '
         'wBri=$srvWlBri/$srvWrBri wCct=$srvWlCct/$srvWrCct shapeP=$srvShapeP | '
         'App: bri=${appConfig?.minBrightness}-${appConfig?.maxBrightness} '
         'cct=${appConfig?.minColorTemp}-${appConfig?.maxColorTemp} '
@@ -964,7 +1024,8 @@ class ServerSyncProvider extends ChangeNotifier {
         'shapeP=${appConfig?.shapeP}');
 
     if (appConfig != serverCurve) {
-      debugPrint('ServerSync: Config mismatch — accepting server config into app');
+      debugPrint(
+          'ServerSync: Config mismatch — accepting server config into app');
       _homeProvider.updateCurrentHomeCurveConfig(serverCurve);
     }
   }
@@ -993,24 +1054,30 @@ class ServerSyncProvider extends ChangeNotifier {
   void _pushLocationWithIanaTimezone(HomeLocation loc) {
     final homeTz = _homeProvider.currentHome?.timezone;
     if (_isIanaTimezone(homeTz)) {
-      _connection.api.locationSet(lat: loc.latitude, lon: loc.longitude, timezoneName: homeTz);
+      _connection.api.locationSet(
+          lat: loc.latitude, lon: loc.longitude, timezoneName: homeTz);
     } else {
       // Resolve proper IANA name asynchronously.
       FlutterTimezone.getLocalTimezone().then((tz) {
         final ianaTz = tz.identifier;
-        debugPrint('ServerSync: Resolved IANA timezone: $ianaTz (was: $homeTz)');
-        _connection.api.locationSet(lat: loc.latitude, lon: loc.longitude, timezoneName: ianaTz);
+        debugPrint(
+            'ServerSync: Resolved IANA timezone: $ianaTz (was: $homeTz)');
+        _connection.api.locationSet(
+            lat: loc.latitude, lon: loc.longitude, timezoneName: ianaTz);
 
         // Also fix the Home model so future syncs don't need this fallback.
         final home = _homeProvider.currentHome;
         if (home != null && home.timezone != ianaTz) {
           _homeProvider.updateCurrentHome(
-            home.copyWith(timezone: ianaTz, updatedAt: DateTime.now(), pendingSync: true),
+            home.copyWith(
+                timezone: ianaTz, updatedAt: DateTime.now(), pendingSync: true),
           );
         }
       }).catchError((e) {
-        debugPrint('ServerSync: FlutterTimezone failed: $e, using home timezone');
-        _connection.api.locationSet(lat: loc.latitude, lon: loc.longitude, timezoneName: homeTz);
+        debugPrint(
+            'ServerSync: FlutterTimezone failed: $e, using home timezone');
+        _connection.api.locationSet(
+            lat: loc.latitude, lon: loc.longitude, timezoneName: homeTz);
       });
     }
   }

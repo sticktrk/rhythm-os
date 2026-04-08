@@ -6,8 +6,7 @@
 use rhythm_hue::HueBehaviorTracker;
 
 use super::dto::{
-    BehaviorRemoveResultDto, HueBehaviorTrackerDto, HueButtonDto, HueRoomDto,
-    HueSwitchDeviceDto,
+    BehaviorRemoveResultDto, HueBehaviorTrackerDto, HueButtonDto, HueRoomDto, HueSwitchDeviceDto,
 };
 
 // ============================================================================

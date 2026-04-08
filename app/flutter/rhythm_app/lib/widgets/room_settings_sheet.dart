@@ -88,25 +88,29 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
               ),
             ),
             // Room orb preview with live CCT + light output
-            Selector<RoomProvider, (int?, int?, bool, bool, DateTime?)>(
+            Selector<RoomProvider, (int?, int?, (int, int, int)?, bool, bool, DateTime?)>(
               selector: (_, rp) {
                 final r = rp.getRoom(room.id);
                 return (
                   rp.getBrightness(room.id),
                   rp.getKelvin(room.id),
+                  rp.getRoomColor(room.id),
                   r?.lightsOn ?? false,
                   r?.rhythmEnabled ?? false,
                   rp.getLastTickTime(room.id),
                 );
               },
               builder: (context, data, _) {
-                final (brightness, kelvin, lightsOn, rhythmEnabled, lastTickTime) = data;
+                final (brightness, kelvin, color, lightsOn, rhythmEnabled, lastTickTime) = data;
                 final intervalSecs = context.read<ServerSyncProvider>().rhythmIntervalSecs;
                 return _AnimatedRoomOrb(
                   roomId: room.id,
                   roomName: room.name,
                   brightness: brightness,
                   kelvin: kelvin,
+                  directColor: color != null
+                      ? Color.fromARGB(255, color.$1, color.$2, color.$3)
+                      : null,
                   lightsOn: lightsOn,
                   rhythmEnabled: rhythmEnabled,
                   rhythmIntervalSecs: intervalSecs,
@@ -230,7 +234,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
           ),
         ]),
         const SizedBox(height: 16),
-        _buildSettingsGroup('Night Profile', [
+        _buildSettingsGroup('Sleep Profile', [
           _SettingsRow(
             icon: Icons.nightlight_outlined,
             label: 'Default',
@@ -676,6 +680,7 @@ class _AnimatedRoomOrb extends StatefulWidget {
   final String roomName;
   final int? brightness;
   final int? kelvin;
+  final Color? directColor;
   final bool lightsOn;
   final bool rhythmEnabled;
   final int rhythmIntervalSecs;
@@ -686,6 +691,7 @@ class _AnimatedRoomOrb extends StatefulWidget {
     required this.roomName,
     required this.brightness,
     required this.kelvin,
+    this.directColor,
     required this.lightsOn,
     required this.rhythmEnabled,
     required this.rhythmIntervalSecs,
@@ -797,9 +803,9 @@ class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb>
   Widget build(BuildContext context) {
     final effectiveBrightness = widget.brightness ?? 0;
     final effectiveKelvin = widget.kelvin ?? 3000;
-    final cctColor = widget.lightsOn
-        ? ColorUtils.cctToColor(effectiveKelvin)
-        : CelestialColors.textSecondary;
+    final cctColor = !widget.lightsOn
+        ? CelestialColors.textSecondary
+        : widget.directColor ?? ColorUtils.cctToColor(effectiveKelvin);
     final glowAlpha =
         widget.lightsOn ? 0.15 + (effectiveBrightness / 100.0) * 0.25 : 0.05;
     final borderAlpha =
@@ -887,6 +893,7 @@ class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb>
           LightOutputCompact(
             brightness: effectiveBrightness,
             kelvin: effectiveKelvin,
+            directColor: widget.directColor,
           ),
           const SizedBox(height: 6),
           GestureDetector(

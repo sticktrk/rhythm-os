@@ -162,6 +162,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     HapticFeedback.mediumImpact();
     final serverSync = context.read<ServerSyncProvider>();
     await serverSync.dispatchSetCurveModule(moduleId);
+    if (mounted) {
+      await _loadData();
+    }
   }
 
   @override

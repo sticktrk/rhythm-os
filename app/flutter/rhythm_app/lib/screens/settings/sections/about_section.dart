@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../../../config/platform_capabilities.dart';
 import '../../../main.dart';
 import '../../../widgets/solar_orbit.dart'; // For CelestialColors
 import '../../../widgets/settings_row.dart';
@@ -12,6 +13,7 @@ import '../../../services/auth_service.dart';
 import '../../../services/settings_service.dart';
 import '../../../services/hue_sse_storage.dart';
 import '../dialogs/feedback_dialog.dart';
+import '../../location_settings_screen.dart';
 /// About section showing help and version info.
 class AboutSection extends StatelessWidget {
   const AboutSection({super.key});
@@ -20,12 +22,20 @@ class AboutSection extends StatelessWidget {
   Widget build(BuildContext context) {
     return Consumer<SettingsProvider>(
       builder: (context, settings, child) {
+        final caps = context.read<PlatformCapabilities>();
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             const SettingsSectionHeader(title: 'About'),
             SettingsGroup(
               children: [
+                if (caps.hasLocationSetup)
+                  SettingsRow(
+                    icon: Icons.location_on_outlined,
+                    iconColor: const Color(0xFF4CAF50),
+                    label: 'Location',
+                    onTap: () => _showLocationSettings(context, settings),
+                  ),
                 SettingsRow(
                   icon: Icons.chat_bubble_outline_rounded,
                   iconColor: const Color(0xFFFFC857),
@@ -46,6 +56,14 @@ class AboutSection extends StatelessWidget {
         );
       },
     );
+  }
+
+  Future<void> _showLocationSettings(
+      BuildContext context, SettingsProvider settings) async {
+    final result = await LocationSettingsScreen.show(context);
+    if (result == true) {
+      settings.loadSettings();
+    }
   }
 }
 

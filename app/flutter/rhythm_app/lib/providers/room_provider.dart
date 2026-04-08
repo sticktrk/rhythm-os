@@ -157,6 +157,9 @@ class RoomProvider extends ChangeNotifier {
   /// Per-room kelvin from server (effective color temperature after offsets).
   final Map<String, int> _roomKelvin = {};
 
+  /// Per-room direct color from server (for direct-color profiles like idle).
+  final Map<String, (int r, int g, int b)> _roomColor = {};
+
   /// Per-room timestamp of the last rhythm tick from the server.
   final Map<String, DateTime> _lastTickTime = {};
 
@@ -194,6 +197,9 @@ class RoomProvider extends ChangeNotifier {
 
   /// Get server-computed kelvin for a room, or null if not available.
   int? getKelvin(String roomId) => _roomKelvin[roomId];
+
+  /// Get direct color for a room (from direct-color profiles), or null.
+  (int r, int g, int b)? getRoomColor(String roomId) => _roomColor[roomId];
 
   /// Get the timestamp of the last rhythm tick for a room.
   DateTime? getLastTickTime(String roomId) => _lastTickTime[roomId];
@@ -439,6 +445,7 @@ class RoomProvider extends ChangeNotifier {
     bool? lightsOn,
     int? brightness,
     int? kelvin,
+    (int r, int g, int b)? color,
     bool tick = false,
   }) async {
     bool changed = false;
@@ -497,6 +504,13 @@ class RoomProvider extends ChangeNotifier {
     if (kelvin != null && _roomKelvin[roomId] != kelvin) {
       _roomKelvin[roomId] = kelvin;
       changed = true;
+    }
+    if (color != null) {
+      _roomColor[roomId] = color;
+      changed = true;
+    } else if (kelvin != null && kelvin > 0) {
+      // Clear direct color when receiving a real kelvin value.
+      if (_roomColor.remove(roomId) != null) changed = true;
     }
     if (changed) {
       await _save();
@@ -653,6 +667,7 @@ class RoomProvider extends ChangeNotifier {
     _roomIdleState.clear();
     _roomBrightness.clear();
     _roomKelvin.clear();
+    _roomColor.clear();
     _lastTickTime.clear();
     notifyListeners();
   }
@@ -674,6 +689,7 @@ class RoomProvider extends ChangeNotifier {
     _roomIdleState.clear();
     _roomBrightness.clear();
     _roomKelvin.clear();
+    _roomColor.clear();
     _lastTickTime.clear();
     await _save();
     // Update room count analytics property

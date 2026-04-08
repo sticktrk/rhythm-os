@@ -9,8 +9,7 @@ import 'dart:io';
 
 // Import the generated Rust bindings for behavior tracking
 import '../src/rust/api/hue_registry.dart' as rust_hue;
-import '../src/rust/api/dto/hue_registry.dart'
-    show HueBehaviorTrackerDto, BehaviorMappingDto;
+import '../src/rust/api/dto/hue_registry.dart' show HueBehaviorTrackerDto;
 import 'behavior_tracker_json.dart' as tracker_json;
 
 /// A Hue button resource from the V2 API.

@@ -33,7 +33,8 @@ class HybridApiClient implements RhythmApi {
   /// If Rust brain initialization fails, falls back to remote-only mode.
   static Future<HybridApiClient> create({String? baseUrl}) async {
     final effectiveBaseUrl = baseUrl ?? _defaultBaseUrl();
-    final remote = _SdkConfigAdapter(sdk.RhythmConfigApi(baseUrl: effectiveBaseUrl));
+    final remote =
+        _SdkConfigAdapter(sdk.RhythmConfigApi(baseUrl: effectiveBaseUrl));
 
     NativeBrain? brain;
     try {
@@ -59,7 +60,8 @@ class HybridApiClient implements RhythmApi {
   /// Create a remote-only client (no local Rust calculations).
   static HybridApiClient remoteOnly({String? baseUrl}) {
     return HybridApiClient._(
-      remote: _SdkConfigAdapter(sdk.RhythmConfigApi(baseUrl: baseUrl ?? _defaultBaseUrl())),
+      remote: _SdkConfigAdapter(
+          sdk.RhythmConfigApi(baseUrl: baseUrl ?? _defaultBaseUrl())),
       brain: null,
     );
   }
@@ -232,7 +234,8 @@ class HybridApiClient implements RhythmApi {
     // Use local brain if available
     if (_brain != null) {
       try {
-        final config = overrides ?? ConfigState.rawConfigToDto((await _remote.getConfigState()).config);
+        final config = overrides ??
+            ConfigState.rawConfigToDto((await _remote.getConfigState()).config);
         // Sync call - runs on main thread
         return _brain.getStepSequences(
           config: config,
@@ -391,7 +394,8 @@ class _SdkConfigAdapter implements RhythmApi {
       _sdk.saveConfig(_toSdkRawConfig(config));
 
   @override
-  Future<CurveData> getCurveData({int? month, CurveConfigDto? overrides}) async {
+  Future<CurveData> getCurveData(
+      {int? month, CurveConfigDto? overrides}) async {
     final data = await _sdk.getCurveData(
       month: month,
       overrides: overrides != null ? _dtoToSdkCurveConfig(overrides) : null,
@@ -438,59 +442,99 @@ class _SdkConfigAdapter implements RhythmApi {
   Future<bool> healthCheck() => _sdk.healthCheck();
 
   static RawConfig _toRawConfig(sdk.RhythmRawConfig c) => RawConfig(
-    minColorTemp: c.minColorTemp, maxColorTemp: c.maxColorTemp,
-    minBrightness: c.minBrightness, maxBrightness: c.maxBrightness,
-    widthLeftBri: c.widthLeftBri, widthRightBri: c.widthRightBri,
-    widthLeftCct: c.widthLeftCct, widthRightCct: c.widthRightCct,
-    shapeP: c.shapeP, maxDimSteps: c.maxDimSteps,
-    fadeMs: c.fadeMs, motionTimeoutSecs: c.motionTimeoutSecs,
-  );
+        minColorTemp: c.minColorTemp,
+        maxColorTemp: c.maxColorTemp,
+        minBrightness: c.minBrightness,
+        maxBrightness: c.maxBrightness,
+        widthLeftBri: c.widthLeftBri,
+        widthRightBri: c.widthRightBri,
+        widthLeftCct: c.widthLeftCct,
+        widthRightCct: c.widthRightCct,
+        shapeP: c.shapeP,
+        maxDimSteps: c.maxDimSteps,
+        fadeMs: c.fadeMs,
+        motionTimeoutSecs: c.motionTimeoutSecs,
+      );
 
-  static sdk.RhythmRawConfig _toSdkRawConfig(RawConfig c) => sdk.RhythmRawConfig(
-    minColorTemp: c.minColorTemp, maxColorTemp: c.maxColorTemp,
-    minBrightness: c.minBrightness, maxBrightness: c.maxBrightness,
-    widthLeftBri: c.widthLeftBri, widthRightBri: c.widthRightBri,
-    widthLeftCct: c.widthLeftCct, widthRightCct: c.widthRightCct,
-    shapeP: c.shapeP, maxDimSteps: c.maxDimSteps,
-    fadeMs: c.fadeMs, motionTimeoutSecs: c.motionTimeoutSecs,
-  );
+  static sdk.RhythmRawConfig _toSdkRawConfig(RawConfig c) =>
+      sdk.RhythmRawConfig(
+        minColorTemp: c.minColorTemp,
+        maxColorTemp: c.maxColorTemp,
+        minBrightness: c.minBrightness,
+        maxBrightness: c.maxBrightness,
+        widthLeftBri: c.widthLeftBri,
+        widthRightBri: c.widthRightBri,
+        widthLeftCct: c.widthLeftCct,
+        widthRightCct: c.widthRightCct,
+        shapeP: c.shapeP,
+        maxDimSteps: c.maxDimSteps,
+        fadeMs: c.fadeMs,
+        motionTimeoutSecs: c.motionTimeoutSecs,
+      );
 
   static SolarInfo _toSolarInfo(sdk.RhythmSolarInfo s) => SolarInfo(
-    sunrise: s.sunrise, sunset: s.sunset,
-    solarNoon: s.solarNoon, solarMidnight: s.solarMidnight,
-    dayLength: s.dayLength,
-    dawn: s.dawn != null ? TwilightPhase(
-      civil: s.dawn!.civil, nautical: s.dawn!.nautical, astronomical: s.dawn!.astronomical,
-    ) : null,
-    dusk: s.dusk != null ? TwilightPhase(
-      civil: s.dusk!.civil, nautical: s.dusk!.nautical, astronomical: s.dusk!.astronomical,
-    ) : null,
-  );
+        sunrise: s.sunrise,
+        sunset: s.sunset,
+        solarNoon: s.solarNoon,
+        solarMidnight: s.solarMidnight,
+        dayLength: s.dayLength,
+        dawn: s.dawn != null
+            ? TwilightPhase(
+                civil: s.dawn!.civil,
+                nautical: s.dawn!.nautical,
+                astronomical: s.dawn!.astronomical,
+              )
+            : null,
+        dusk: s.dusk != null
+            ? TwilightPhase(
+                civil: s.dusk!.civil,
+                nautical: s.dusk!.nautical,
+                astronomical: s.dusk!.astronomical,
+              )
+            : null,
+      );
 
   static StepPoint _toStepPoint(sdk.RhythmStepPoint p) => StepPoint(
-    hour: p.hour, brightness: p.brightness, kelvin: p.kelvin, rgb: p.rgb,
-  );
+        hour: p.hour,
+        brightness: p.brightness,
+        kelvin: p.kelvin,
+        rgb: p.rgb,
+      );
 }
 
 /// Convert [CurveConfigDto] (Rust FFI) to [sdk.RhythmCurveConfig] (SDK).
-sdk.RhythmCurveConfig _dtoToSdkCurveConfig(CurveConfigDto c) => sdk.RhythmCurveConfig(
-  minColorTemp: c.minColorTemp, maxColorTemp: c.maxColorTemp,
-  minBrightness: c.minBrightness, maxBrightness: c.maxBrightness,
-  widthLeftBri: c.widthLeftBri, widthRightBri: c.widthRightBri,
-  widthLeftCct: c.widthLeftCct, widthRightCct: c.widthRightCct,
-  shapeP: c.shapeP, maxDimSteps: c.maxDimSteps,
-  fadeMs: c.fadeMs, motionTimeoutSecs: c.motionTimeoutSecs,
-);
+sdk.RhythmCurveConfig _dtoToSdkCurveConfig(CurveConfigDto c) =>
+    sdk.RhythmCurveConfig(
+      minColorTemp: c.minColorTemp,
+      maxColorTemp: c.maxColorTemp,
+      minBrightness: c.minBrightness,
+      maxBrightness: c.maxBrightness,
+      widthLeftBri: c.widthLeftBri,
+      widthRightBri: c.widthRightBri,
+      widthLeftCct: c.widthLeftCct,
+      widthRightCct: c.widthRightCct,
+      shapeP: c.shapeP,
+      maxDimSteps: c.maxDimSteps,
+      fadeMs: c.fadeMs,
+      motionTimeoutSecs: c.motionTimeoutSecs,
+    );
 
 /// Convert [sdk.RhythmCurveConfig] (SDK) to [CurveConfigDto] (Rust FFI).
 CurveConfigDto sdkCurveConfigToDto(sdk.RhythmCurveConfig c) => CurveConfigDto(
-  minColorTemp: c.minColorTemp, maxColorTemp: c.maxColorTemp,
-  minBrightness: c.minBrightness, maxBrightness: c.maxBrightness,
-  widthLeftBri: c.widthLeftBri, widthRightBri: c.widthRightBri,
-  widthLeftCct: c.widthLeftCct, widthRightCct: c.widthRightCct,
-  shapeP: c.shapeP, maxDimSteps: c.maxDimSteps,
-  fadeMs: c.fadeMs, motionTimeoutSecs: c.motionTimeoutSecs,
-);
+      minColorTemp: c.minColorTemp,
+      maxColorTemp: c.maxColorTemp,
+      minBrightness: c.minBrightness,
+      maxBrightness: c.maxBrightness,
+      widthLeftBri: c.widthLeftBri,
+      widthRightBri: c.widthRightBri,
+      widthLeftCct: c.widthLeftCct,
+      widthRightCct: c.widthRightCct,
+      shapeP: c.shapeP,
+      maxDimSteps: c.maxDimSteps,
+      fadeMs: c.fadeMs ?? CurveConfigDto.default_().fadeMs,
+      motionTimeoutSecs:
+          c.motionTimeoutSecs ?? CurveConfigDto.default_().motionTimeoutSecs,
+    );
 
 /// Local-only API implementation with SettingsService (Hive) persistence.
 class _LocalOnlyApi implements RhythmApi {
