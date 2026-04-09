@@ -77,6 +77,11 @@ class AppStateRefresh {
     }
 
     final homeProvider = Provider.of<HomeProvider>(context, listen: false);
+    final api = Provider.of<RhythmApi>(context, listen: false);
+    final roomProvider = Provider.of<RoomProvider>(context, listen: false);
+    final hubConnection =
+        Provider.of<HubConnectionProvider>(context, listen: false);
+    final serverSync = Provider.of<ServerSyncProvider>(context, listen: false);
     int roomsSynced = 0;
 
     // Step 1: Ensure homes are loaded and create if needed
@@ -89,7 +94,6 @@ class AppStateRefresh {
     final home = homeProvider.currentHome;
     final loc = home?.location;
     if (loc != null) {
-      final api = Provider.of<RhythmApi>(context, listen: false);
       if (api is HybridApiClient) {
         final now = DateTime.now();
         final dayOfYear = now.difference(DateTime(now.year, 1, 1)).inDays + 1;
@@ -105,14 +109,19 @@ class AppStateRefresh {
         try {
           await api.getCurveData();
         } catch (_) {}
-        debugPrint('AppStateRefresh: Synced location lat=${loc.latitude} lon=${loc.longitude} '
+        debugPrint(
+            'AppStateRefresh: Synced location lat=${loc.latitude} lon=${loc.longitude} '
             'tz=$tz dayOfYear=$dayOfYear solarNoon=${api.solarNoonHour}');
       }
     }
 
     // Step 3: Room sync from configured hubs if requested
     if (options.rooms) {
-      roomsSynced = await _syncRoomsFromHubs(context, homeProvider);
+      roomsSynced = await _syncRoomsFromHubs(
+        homeProvider: homeProvider,
+        roomProvider: roomProvider,
+        serverSync: serverSync,
+      );
       if (!context.mounted) {
         return SyncResult.success(roomsSynced: roomsSynced);
       }
@@ -120,7 +129,6 @@ class AppStateRefresh {
 
     // Step 4: Connection verification if requested
     if (options.connections && context.mounted) {
-      final hubConnection = Provider.of<HubConnectionProvider>(context, listen: false);
       await hubConnection.verifyConnection();
     }
 
@@ -129,32 +137,38 @@ class AppStateRefresh {
 
   /// Sync rooms from all configured hubs.
   /// Returns the number of rooms synced.
-  static Future<int> _syncRoomsFromHubs(
-    BuildContext context,
-    HomeProvider homeProvider,
-  ) async {
+  static Future<int> _syncRoomsFromHubs({
+    required HomeProvider homeProvider,
+    required RoomProvider roomProvider,
+    required ServerSyncProvider serverSync,
+  }) async {
     debugPrint('AppStateRefresh: Syncing rooms from hubs...');
     debugPrint('AppStateRefresh: currentHome=${homeProvider.currentHome?.id}');
-    debugPrint('AppStateRefresh: currentHomeHubs=${homeProvider.currentHomeHubs.length}');
+    debugPrint(
+        'AppStateRefresh: currentHomeHubs=${homeProvider.currentHomeHubs.length}');
 
     // HA addon: fetch rooms from the addon backend (auto-imported from HA areas)
     if (PlatformCtx.isHaAddon) {
-      return _syncRoomsFromAddon(context);
+      return _syncRoomsFromAddon(roomProvider);
     }
 
     // Demo mode: create a fake server hub and populate mock rooms locally
     if (HueServiceLocator.isDemoMode) {
-      return _syncDemoRooms(context, homeProvider);
+      return _syncDemoRooms(
+        homeProvider: homeProvider,
+        roomProvider: roomProvider,
+      );
     }
 
     // Rooms come from the server via the hello/poll cycle in ServerSyncProvider.
     // No client-side Hue sync needed — server is the single source of truth.
     try {
-      final serverSync = Provider.of<ServerSyncProvider>(context, listen: false);
       if (serverSync.synced) {
-        debugPrint('AppStateRefresh: Server connected — rooms managed by hello/poll cycle');
+        debugPrint(
+            'AppStateRefresh: Server connected — rooms managed by hello/poll cycle');
       } else {
-        debugPrint('AppStateRefresh: Server not yet connected — rooms will arrive via hello');
+        debugPrint(
+            'AppStateRefresh: Server not yet connected — rooms will arrive via hello');
       }
     } catch (_) {
       // ServerSyncProvider not available in this context
@@ -164,26 +178,26 @@ class AppStateRefresh {
   }
 
   /// Fetch rooms from the addon backend (same-origin GET /api/state).
-  static Future<int> _syncRoomsFromAddon(BuildContext context) async {
+  static Future<int> _syncRoomsFromAddon(RoomProvider roomProvider) async {
     try {
       final baseUrl = Uri.base.toString();
       debugPrint('AppStateRefresh: Addon sync baseUrl=$baseUrl');
       final api = sdk.RhythmConfigApi(baseUrl: baseUrl);
       final hello = await api.getState();
-      debugPrint('AppStateRefresh: Addon /api/state returned ${hello.rooms.length} rooms');
+      debugPrint(
+          'AppStateRefresh: Addon /api/state returned ${hello.rooms.length} rooms');
 
       if (hello.rooms.isEmpty) return 0;
 
-      if (!context.mounted) return 0;
-      final roomProvider = Provider.of<RoomProvider>(context, listen: false);
-
       final rooms = hello.rooms
           .where((r) => r.id.isNotEmpty && r.name.isNotEmpty)
-          .map((r) => RoomDto.withSource(id: r.id, name: r.name, source: RoomSourceDto.homeAssistant))
+          .map((r) => RoomDto.withSource(
+              id: r.id, name: r.name, source: RoomSourceDto.homeAssistant))
           .toList();
 
       if (rooms.isNotEmpty) {
-        await roomProvider.addRoomsFromSource(RoomSourceDto.homeAssistant, rooms);
+        await roomProvider.addRoomsFromSource(
+            RoomSourceDto.homeAssistant, rooms);
       }
 
       debugPrint('AppStateRefresh: Synced ${rooms.length} rooms from addon');
@@ -198,10 +212,10 @@ class AppStateRefresh {
   ///
   /// Creates a fake server hub so the UI sees a connected hub, then adds
   /// mock rooms with initial "on" state so demo users see warm room cards.
-  static Future<int> _syncDemoRooms(
-    BuildContext context,
-    HomeProvider homeProvider,
-  ) async {
+  static Future<int> _syncDemoRooms({
+    required HomeProvider homeProvider,
+    required RoomProvider roomProvider,
+  }) async {
     debugPrint('AppStateRefresh: Syncing demo rooms');
 
     // Create a fake server hub if one doesn't exist yet
@@ -215,13 +229,9 @@ class AppStateRefresh {
       debugPrint('AppStateRefresh: Created fake demo server hub');
     }
 
-    if (!context.mounted) return 0;
-
     // Fetch mock rooms
     final rooms = await DemoHueBridgeService.instance.fetchRooms();
-    if (rooms.isEmpty || !context.mounted) return 0;
-
-    final roomProvider = Provider.of<RoomProvider>(context, listen: false);
+    if (rooms.isEmpty) return 0;
     await roomProvider.addRoomsFromSource(RoomSourceDto.hue, rooms);
 
     // Apply initial "on" state so rooms appear alive
@@ -231,7 +241,7 @@ class AppStateRefresh {
         rhythmEnabled: true,
         timeOffset: 0,
         brightnessOffset: 0,
-        softOff: false,
+        state: sdk.RoomModeState.active,
         lightsOn: true,
         brightness: 75,
         kelvin: 3200,

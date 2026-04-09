@@ -5,11 +5,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show CurveModule;
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmMode;
 import '../providers/room_page_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../widgets/editable_room_card.dart';
 import '../widgets/room_card.dart';
+import '../widgets/hub_connection_banner.dart';
 import '../widgets/solar_orbit.dart'; // For CelestialColors
 
 /// All Rooms screen — horizontally paged room cards with edit-mode drag support.
@@ -25,9 +26,8 @@ class AllRoomsScreen extends StatefulWidget {
   final CurveData? curveData;
   final PageController pageController;
   final ValueChanged<int> onPageChanged;
-  final String? activeCurveModule;
-  final List<CurveModule> availableCurveModules;
-  final ValueChanged<String>? onCurveModuleSelected;
+  final RhythmMode? activeMode;
+  final ValueChanged<RhythmMode>? onModeSelected;
 
   const AllRoomsScreen({
     super.key,
@@ -36,9 +36,8 @@ class AllRoomsScreen extends StatefulWidget {
     this.curveData,
     required this.pageController,
     required this.onPageChanged,
-    this.activeCurveModule,
-    this.availableCurveModules = const [],
-    this.onCurveModuleSelected,
+    this.activeMode,
+    this.onModeSelected,
   });
 
   @override
@@ -88,7 +87,8 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
   void _onHandleDragStart(String roomId, int pointer, Offset globalPosition) {
     _removeTrackedPointerRoute();
     _activeDragPointer = pointer;
-    GestureBinding.instance.pointerRouter.addRoute(pointer, _handleTrackedPointerEvent);
+    GestureBinding.instance.pointerRouter
+        .addRoute(pointer, _handleTrackedPointerEvent);
 
     final pageProvider = context.read<RoomPageProvider>();
     final currentPage = pageProvider.getPage(roomId);
@@ -346,6 +346,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _buildHeader(isLandscape, pageProvider.editMode),
+              if (!pageProvider.editMode) const HubConnectionBanner(),
               Expanded(
                 child: Selector<ServerSyncProvider, bool>(
                   selector: (_, p) => p.powerSave,
@@ -439,7 +440,8 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     final draggedIndex = _draggingRoomId == null
         ? -1
         : rooms.indexWhere((room) => room.id == _draggingRoomId);
-    final nonDraggedCount = draggedIndex == -1 ? rooms.length : rooms.length - 1;
+    final nonDraggedCount =
+        draggedIndex == -1 ? rooms.length : rooms.length - 1;
     final rawPlaceholderIndex = pageIndex == _hoverPage
         ? (_hoverIndex ?? nonDraggedCount).clamp(0, nonDraggedCount)
         : null;
@@ -570,11 +572,10 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
             ),
           ),
           const Spacer(),
-          if (widget.availableCurveModules.isNotEmpty)
+          if (widget.activeMode != null)
             _CurveProfileToggle(
-              activeCurveModule: widget.activeCurveModule,
-              availableCurveModules: widget.availableCurveModules,
-              onModuleSelected: widget.onCurveModuleSelected,
+              activeMode: widget.activeMode!,
+              onModeSelected: widget.onModeSelected,
             ),
         ],
       ),
@@ -1094,30 +1095,22 @@ class _CelestialPainter extends CustomPainter {
 /// Moon glow color — matches celestial palette.
 const _moonGlow = Color(0xFF7C8EBF);
 
-/// Animated segmented toggle for switching between curve modules.
-///
-/// Dynamically renders segments from [availableCurveModules] with
-/// color-coded visuals for known modules:
-/// - Rhythm (daytime): warm golden accent
-/// - Sleep (nighttime): cool blue-violet accent
+/// Animated segmented toggle for switching between day and sleep modes.
 class _CurveProfileToggle extends StatelessWidget {
-  final String? activeCurveModule;
-  final List<CurveModule> availableCurveModules;
-  final ValueChanged<String>? onModuleSelected;
+  final RhythmMode activeMode;
+  final ValueChanged<RhythmMode>? onModeSelected;
 
   const _CurveProfileToggle({
-    required this.activeCurveModule,
-    required this.availableCurveModules,
-    this.onModuleSelected,
+    required this.activeMode,
+    this.onModeSelected,
   });
 
   static const _duration = Duration(milliseconds: 350);
 
-  static const _moduleVisuals = <String, (IconData, Color)>{
-    'rhythm': (Icons.wb_sunny_rounded, CelestialColors.sunWarm),
-    'sleep': (Icons.nightlight_round, _moonGlow),
+  static const _modeVisuals = <RhythmMode, (String, IconData, Color)>{
+    RhythmMode.day: ('Day', Icons.wb_sunny_rounded, CelestialColors.sunWarm),
+    RhythmMode.sleep: ('Sleep', Icons.nightlight_round, _moonGlow),
   };
-  static const _defaultVisual = (Icons.auto_awesome, Colors.white70);
 
   @override
   Widget build(BuildContext context) {
@@ -1134,13 +1127,13 @@ class _CurveProfileToggle extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          for (final module in availableCurveModules)
+          for (final mode in RhythmMode.values)
             _buildSegment(
-              label: module.name,
-              icon: (_moduleVisuals[module.id] ?? _defaultVisual).$1,
-              isActive: module.id == activeCurveModule,
-              activeColor: (_moduleVisuals[module.id] ?? _defaultVisual).$2,
-              onTap: () => onModuleSelected?.call(module.id),
+              label: _modeVisuals[mode]!.$1,
+              icon: _modeVisuals[mode]!.$2,
+              isActive: mode == activeMode,
+              activeColor: _modeVisuals[mode]!.$3,
+              onTap: () => onModeSelected?.call(mode),
             ),
         ],
       ),

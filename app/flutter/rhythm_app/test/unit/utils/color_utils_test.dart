@@ -186,9 +186,8 @@ void main() {
 }
 
 /// Extension to get RGB components from Color as 0-255 integers.
-/// Flutter's Color.red/green/blue already return 0-255 integers.
 extension ColorComponents on Color {
-  int get red255 => red;
-  int get green255 => green;
-  int get blue255 => blue;
+  int get red255 => (r * 255.0).round().clamp(0, 255);
+  int get green255 => (g * 255.0).round().clamp(0, 255);
+  int get blue255 => (b * 255.0).round().clamp(0, 255);
 }

@@ -1001,7 +1001,7 @@ class _CelestialPainter extends CustomPainter {
       final sin = math.sin(a);
       final above = sin < 0; // upper semicircle
       final label = use24
-          ? '${h.toString().padLeft(2, '0')}'
+          ? h.toString().padLeft(2, '0')
           : h == 0 ? '12a' : h == 12 ? '12p' : h < 12 ? '${h}a' : '${h - 12}p';
       final tp = TextPainter(
         text: TextSpan(

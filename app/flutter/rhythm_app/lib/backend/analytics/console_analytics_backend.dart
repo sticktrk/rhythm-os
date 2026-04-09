@@ -10,7 +10,6 @@ import 'analytics_backend.dart';
 class ConsoleAnalyticsBackend implements AnalyticsBackend {
   final bool enabled;
   bool _initialized = false;
-  String? _userId;
 
   ConsoleAnalyticsBackend({this.enabled = true});
 
@@ -51,7 +50,6 @@ class ConsoleAnalyticsBackend implements AnalyticsBackend {
   Future<void> setUserId(String? userId) async {
     if (!_initialized) return;
 
-    _userId = userId;
     if (enabled) {
       debugPrint('Analytics: user_id = $userId');
     }
@@ -60,6 +58,5 @@ class ConsoleAnalyticsBackend implements AnalyticsBackend {
   @override
   void dispose() {
     _initialized = false;
-    _userId = null;
   }
 }

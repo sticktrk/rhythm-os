@@ -2,9 +2,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:rhythm_core/providers/hub_discovery.dart';
-import 'package:rhythm_core/providers/ha_provider.dart';
-import 'package:rhythm_core/providers/light_provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import '../../widgets/solar_orbit.dart';
 import '../../widgets/hub_status_indicator.dart';
@@ -124,6 +121,9 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
   }
 
   Future<void> _disconnectHomeAssistant() async {
+    final syncProvider = context.read<ServerSyncProvider>();
+    final roomProvider = context.read<RoomProvider>();
+    final homeProvider = context.read<HomeProvider>();
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -174,14 +174,10 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
     if (confirmed != true) return;
 
     // Tell server to drop hub + rooms, then clear locally
-    final syncProvider = context.read<ServerSyncProvider>();
-    final roomProvider = context.read<RoomProvider>();
-
     await syncProvider.disconnectHub();
     await roomProvider.clearRoomsBySource(RoomSourceDto.homeAssistant);
 
     // Delete HA hub from HomeProvider
-    final homeProvider = context.read<HomeProvider>();
     final haHub = homeProvider.getFirstHubOfType(HubType.homeAssistant);
     if (haHub != null) {
       await homeProvider.deleteHub(haHub.id);
@@ -189,9 +185,8 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
 
     HapticFeedback.mediumImpact();
 
-    if (mounted) {
-      Navigator.of(context).pop(true);
-    }
+    if (!mounted) return;
+    Navigator.of(context).pop(true);
   }
 
   Future<void> _verifyConnection() async {
@@ -386,7 +381,8 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
               center: Alignment.center,
               radius: 1.2,
               colors: [
-                const Color(0xFF03A9F4).withValues(alpha: _glowAnimation.value * 0.15),
+                const Color(0xFF03A9F4)
+                    .withValues(alpha: _glowAnimation.value * 0.15),
                 CelestialColors.backgroundCard,
               ],
             ),
@@ -412,7 +408,8 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
                   ),
                   boxShadow: [
                     BoxShadow(
-                      color: const Color(0xFF03A9F4).withValues(alpha: _glowAnimation.value),
+                      color: const Color(0xFF03A9F4)
+                          .withValues(alpha: _glowAnimation.value),
                       blurRadius: 24,
                       spreadRadius: 2,
                     ),
@@ -762,7 +759,9 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
               height: 22,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: value ? Colors.green.shade400 : CelestialColors.textSecondary,
+                color: value
+                    ? Colors.green.shade400
+                    : CelestialColors.textSecondary,
               ),
             ),
           ),
@@ -842,7 +841,9 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
       children: [
         // Verify button
         GestureDetector(
-          onTap: _status == HAConnectionStatus.connecting ? null : _verifyConnection,
+          onTap: _status == HAConnectionStatus.connecting
+              ? null
+              : _verifyConnection,
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 200),
             padding: const EdgeInsets.symmetric(vertical: 16),
@@ -861,7 +862,9 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Icon(
-                  _isVerified ? Icons.check_rounded : Icons.wifi_tethering_rounded,
+                  _isVerified
+                      ? Icons.check_rounded
+                      : Icons.wifi_tethering_rounded,
                   color: _isVerified
                       ? Colors.green.shade400
                       : CelestialColors.textSecondary,
@@ -902,7 +905,9 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
                       ],
                     )
                   : null,
-              color: _isVerified ? null : CelestialColors.orbitRing.withValues(alpha: 0.3),
+              color: _isVerified
+                  ? null
+                  : CelestialColors.orbitRing.withValues(alpha: 0.3),
               boxShadow: _isVerified
                   ? [
                       BoxShadow(
@@ -1150,7 +1155,8 @@ class _DiscoveryBottomSheetState extends State<_DiscoveryBottomSheet>
                       padding: const EdgeInsets.symmetric(
                           horizontal: 12, vertical: 6),
                       decoration: BoxDecoration(
-                        color: CelestialColors.accentBlue.withValues(alpha: 0.15),
+                        color:
+                            CelestialColors.accentBlue.withValues(alpha: 0.15),
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: Row(
@@ -1357,7 +1363,8 @@ class _DiscoveryBottomSheetState extends State<_DiscoveryBottomSheet>
                       Text(
                         '${hub.address}:${hub.port}',
                         style: TextStyle(
-                          color: CelestialColors.textSecondary.withValues(alpha: 0.8),
+                          color: CelestialColors.textSecondary
+                              .withValues(alpha: 0.8),
                           fontSize: 13,
                           fontFamily: 'monospace',
                         ),

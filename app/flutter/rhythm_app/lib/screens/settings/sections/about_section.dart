@@ -14,6 +14,7 @@ import '../../../services/settings_service.dart';
 import '../../../services/hue_sse_storage.dart';
 import '../dialogs/feedback_dialog.dart';
 import '../../location_settings_screen.dart';
+
 /// About section showing help and version info.
 class AboutSection extends StatelessWidget {
   const AboutSection({super.key});
@@ -104,6 +105,9 @@ class DeleteAccountSection extends StatelessWidget {
     );
 
     if (confirmed == true && context.mounted) {
+      final homeProvider = context.read<HomeProvider>();
+      final hubProvider = context.read<HubConnectionProvider>();
+      final roomProvider = context.read<RoomProvider>();
       debugPrint('Delete Account: Starting account deletion...');
 
       // 1. Delete from server FIRST (before clearing local state)
@@ -119,7 +123,6 @@ class DeleteAccountSection extends StatelessWidget {
           // CASCADE will remove hubs. The auth user remains but has no data,
           // so re-signing in gives a clean slate.
           try {
-            final homeProvider = context.read<HomeProvider>();
             for (final home in homeProvider.homes) {
               await homeProvider.repository.deleteHome(home.id);
             }
@@ -135,16 +138,15 @@ class DeleteAccountSection extends StatelessWidget {
 
       // 2. Disconnect hub connections
       try {
-        final hubProvider = context.read<HubConnectionProvider>();
         hubProvider.disconnect();
         debugPrint('Delete Account: Hub connections disconnected');
       } catch (e) {
-        debugPrint('Delete Account: Hub disconnect error (may not be provided): $e');
+        debugPrint(
+            'Delete Account: Hub disconnect error (may not be provided): $e');
       }
 
       // 4. Clear in-memory RoomProvider state
       try {
-        final roomProvider = context.read<RoomProvider>();
         await roomProvider.clearAllRooms();
         debugPrint('Delete Account: Room provider cleared');
       } catch (e) {
@@ -165,9 +167,9 @@ class DeleteAccountSection extends StatelessWidget {
 
       // 7. Clear HomeProvider state (homes and hubs)
       try {
-        final homeProvider = context.read<HomeProvider>();
         await homeProvider.onUserSignOut();
-        debugPrint('Delete Account: Home provider signed out (all local data cleared)');
+        debugPrint(
+            'Delete Account: Home provider signed out (all local data cleared)');
       } catch (e) {
         debugPrint('Delete Account: Home provider error: $e');
       }
@@ -180,7 +182,8 @@ class DeleteAccountSection extends StatelessWidget {
 
       // 9. Pop ALL routes and trigger onboarding reset
       if (context.mounted) {
-        Navigator.of(context, rootNavigator: true).popUntil((route) => route.isFirst);
+        Navigator.of(context, rootNavigator: true)
+            .popUntil((route) => route.isFirst);
         WidgetsBinding.instance.addPostFrameCallback((_) {
           AuthGate.resetToOnboarding();
         });

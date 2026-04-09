@@ -1,4 +1,4 @@
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' as sdk;
 import '../services/settings_service.dart';
@@ -20,7 +20,6 @@ class HybridApiClient implements RhythmApi {
   double _longitude = -78.9; // Default: Raleigh, NC
   String _timezone = 'America/New_York';
   int _dayOfYear = 172;
-  double _currentHour = 12.0;
 
   HybridApiClient._({
     required RhythmApi remote,
@@ -42,7 +41,7 @@ class HybridApiClient implements RhythmApi {
     } catch (e) {
       // Rust brain not available (e.g., WASM not loaded)
       // Fall back to remote-only mode
-      print('NativeBrain not available, using remote-only mode: $e');
+      debugPrint('NativeBrain not available, using remote-only mode: $e');
     }
 
     final client = HybridApiClient._(remote: remote, brain: brain);
@@ -83,7 +82,7 @@ class HybridApiClient implements RhythmApi {
       try {
         brain = await NativeBrain.init();
       } catch (e) {
-        print('NativeBrain init failed: $e');
+        debugPrint('NativeBrain init failed: $e');
       }
     }
 
@@ -133,8 +132,9 @@ class HybridApiClient implements RhythmApi {
           final configState = await _remote.getConfigState();
           config = ConfigState.rawConfigToDto(configState.config);
           if (configState.latitude != null) _latitude = configState.latitude!;
-          if (configState.longitude != null)
+          if (configState.longitude != null) {
             _longitude = configState.longitude!;
+          }
           if (configState.timezone != null) _timezone = configState.timezone!;
         }
 
@@ -184,18 +184,12 @@ class HybridApiClient implements RhythmApi {
         return curveData;
       } catch (e) {
         // Fall back to remote on error
-        print('Local brain error, falling back to remote: $e');
+        debugPrint('Local brain error, falling back to remote: $e');
       }
     }
 
     // Fetch from server when brain unavailable
     return _remote.getCurveData(month: month, overrides: overrides);
-  }
-
-  int _dayOfYearForMonth(int month) {
-    // Return middle of the month as day of year
-    final date = DateTime(DateTime.now().year, month, 15);
-    return date.difference(DateTime(date.year, 1, 1)).inDays + 1;
   }
 
   int _dayOfYearForDate(DateTime date) {
@@ -246,7 +240,7 @@ class HybridApiClient implements RhythmApi {
           maxSteps: maxSteps,
         );
       } catch (e) {
-        print('Local brain error, falling back to remote: $e');
+        debugPrint('Local brain error, falling back to remote: $e');
       }
     }
 
@@ -262,8 +256,6 @@ class HybridApiClient implements RhythmApi {
     final info = await _remote.getTime();
 
     // Update cached values
-    _currentHour = info.currentHour;
-
     // Extract solar data from response if available
     // (The server would need to include this in the response)
 
@@ -278,9 +270,7 @@ class HybridApiClient implements RhythmApi {
   /// Call this periodically to keep solar calculations accurate.
   Future<void> syncSolarData() async {
     try {
-      final timeInfo = await _remote.getTime();
-      _currentHour = timeInfo.currentHour;
-
+      await _remote.getTime();
       // Calculate day of year from current time
       // The server should ideally provide this
       final now = DateTime.now();
@@ -550,10 +540,10 @@ class _LocalOnlyApi implements RhythmApi {
       final config = SettingsService.instance.getCurveConfig();
       if (config != null) {
         _cachedConfig = config;
-        print('Config loaded from SettingsService');
+        debugPrint('Config loaded from SettingsService');
       }
     } catch (e) {
-      print('Failed to load config: $e');
+      debugPrint('Failed to load config: $e');
     }
 
     _cachedConfig ??= RawConfig.defaults();
@@ -576,9 +566,9 @@ class _LocalOnlyApi implements RhythmApi {
     _cachedConfig = config;
     try {
       await SettingsService.instance.saveCurveConfig(config);
-      print('Config saved to SettingsService');
+      debugPrint('Config saved to SettingsService');
     } catch (e) {
-      print('Failed to save config: $e');
+      debugPrint('Failed to save config: $e');
       rethrow;
     }
   }

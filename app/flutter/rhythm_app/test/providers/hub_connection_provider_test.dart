@@ -22,7 +22,7 @@ void main() {
         // Allow async initialization
         await Future.delayed(const Duration(milliseconds: 100));
 
-        expect(provider.activeHubType, equals(HubType.none));
+        expect(provider.activeHubType, equals(HubConnectionType.none));
       });
 
       test('starts disconnected', () async {
@@ -31,7 +31,8 @@ void main() {
 
         await Future.delayed(const Duration(milliseconds: 100));
 
-        expect(provider.connectionStatus, equals(ConnectionStatus.disconnected));
+        expect(
+            provider.connectionStatus, equals(ConnectionStatus.disconnected));
       });
 
       test('hasActiveHub is false when not connected', () async {
@@ -77,9 +78,10 @@ void main() {
         provider = HubConnectionProvider();
         await Future.delayed(const Duration(milliseconds: 100));
 
-        expect(provider.activeHubType, equals(HubType.homeAssistant));
+        expect(provider.activeHubType, equals(HubConnectionType.homeAssistant));
         // Note: actual connection not verified in test since it needs real HA
-        expect(provider.connectionStatus, equals(ConnectionStatus.disconnected));
+        expect(
+            provider.connectionStatus, equals(ConnectionStatus.disconnected));
       });
 
       test('loads Hue hub when verified and no HA', () async {
@@ -93,7 +95,7 @@ void main() {
         await Future.delayed(const Duration(milliseconds: 100));
 
         // Hue should be active when no HA is configured
-        expect(provider.activeHubType, equals(HubType.hue));
+        expect(provider.activeHubType, equals(HubConnectionType.hue));
       });
 
       test('prefers HA over Hue when both configured', () async {
@@ -108,7 +110,7 @@ void main() {
         await Future.delayed(const Duration(milliseconds: 100));
 
         // HA takes precedence
-        expect(provider.activeHubType, equals(HubType.homeAssistant));
+        expect(provider.activeHubType, equals(HubConnectionType.homeAssistant));
       });
 
       test('remains none when nothing configured', () async {
@@ -117,7 +119,7 @@ void main() {
         provider = HubConnectionProvider();
         await Future.delayed(const Duration(milliseconds: 100));
 
-        expect(provider.activeHubType, equals(HubType.none));
+        expect(provider.activeHubType, equals(HubConnectionType.none));
       });
     });
 
@@ -171,7 +173,8 @@ void main() {
 
         await provider.disconnect();
 
-        expect(provider.connectionStatus, equals(ConnectionStatus.disconnected));
+        expect(
+            provider.connectionStatus, equals(ConnectionStatus.disconnected));
       });
 
       test('resets retry count', () async {
@@ -209,8 +212,9 @@ void main() {
         await provider.reload();
 
         // Should have reloaded the saved hub type
-        expect(provider.activeHubType, equals(HubType.homeAssistant));
-        expect(provider.connectionStatus, equals(ConnectionStatus.disconnected));
+        expect(provider.activeHubType, equals(HubConnectionType.homeAssistant));
+        expect(
+            provider.connectionStatus, equals(ConnectionStatus.disconnected));
       });
     });
 

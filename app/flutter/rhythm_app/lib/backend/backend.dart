@@ -17,7 +17,7 @@
 /// // Access backends
 /// final user = BackendProvider.instance.auth.currentUser;
 /// ```
-library backend;
+library;
 
 // Configuration
 export 'backend_config.dart';

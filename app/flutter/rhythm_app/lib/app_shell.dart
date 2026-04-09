@@ -9,7 +9,7 @@ import 'models/config_model.dart';
 import 'providers/room_provider.dart';
 import 'providers/home_provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmConnection, RhythmConnectionState;
+    show RhythmConnection, RhythmConnectionState, RhythmMode;
 import 'screens/designer_screen.dart';
 import 'screens/mobile_designer_screen.dart';
 import 'providers/room_page_provider.dart';
@@ -157,11 +157,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     }
   }
 
-  /// Set the active curve module on the server.
-  Future<void> _setCurveModule(String moduleId) async {
+  /// Set the active global mode on the server.
+  Future<void> _setActiveMode(RhythmMode mode) async {
     HapticFeedback.mediumImpact();
     final serverSync = context.read<ServerSyncProvider>();
-    await serverSync.dispatchSetCurveModule(moduleId);
+    await serverSync.dispatchSetActiveMode(mode);
     if (mounted) {
       await _loadData();
     }
@@ -274,9 +274,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                 globalConfig: configModel.config,
                 curveData: _curveData,
                 pageController: _roomPageController,
-                activeCurveModule: serverSync.activeCurveModule,
-                availableCurveModules: serverSync.availableCurveModules,
-                onCurveModuleSelected: _setCurveModule,
+                activeMode: serverSync.activeMode,
+                onModeSelected: _setActiveMode,
                 onPageChanged: (page) {
                   setState(() => _currentRoomPage = page);
                 },

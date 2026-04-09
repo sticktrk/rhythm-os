@@ -27,7 +27,8 @@ class SleepSection extends StatelessWidget {
     );
   }
 
-  Widget _buildSleepScheduleCard(BuildContext context, SettingsProvider settings) {
+  Widget _buildSleepScheduleCard(
+      BuildContext context, SettingsProvider settings) {
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(16),
@@ -48,7 +49,9 @@ class SleepSection extends StatelessWidget {
                   icon: Icons.wb_sunny_rounded,
                   iconColor: const Color(0xFFFF9800),
                   label: 'Wake Time',
-                  time: settings.formatTime(settings.wakeTimeHour, settings.wakeTimeMinute, use24h: MediaQuery.alwaysUse24HourFormatOf(context)),
+                  time: settings.formatTime(
+                      settings.wakeTimeHour, settings.wakeTimeMinute,
+                      use24h: MediaQuery.alwaysUse24HourFormatOf(context)),
                   onTap: () => _showTimePicker(
                     context: context,
                     settings: settings,
@@ -73,7 +76,9 @@ class SleepSection extends StatelessWidget {
                   icon: Icons.nightlight_round,
                   iconColor: OnboardingColors.moonGlow,
                   label: 'Bedtime',
-                  time: settings.formatTime(settings.bedtimeHour, settings.bedtimeMinute, use24h: MediaQuery.alwaysUse24HourFormatOf(context)),
+                  time: settings.formatTime(
+                      settings.bedtimeHour, settings.bedtimeMinute,
+                      use24h: MediaQuery.alwaysUse24HourFormatOf(context)),
                   onTap: () => _showTimePicker(
                     context: context,
                     settings: settings,
@@ -204,7 +209,8 @@ class SleepSection extends StatelessWidget {
             children: [
               // Header
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                 decoration: BoxDecoration(
                   border: Border(
                     bottom: BorderSide(
@@ -237,18 +243,24 @@ class SleepSection extends StatelessWidget {
                       onPressed: () async {
                         // Update sleep schedule via HomeProvider
                         final homeProvider = context.read<HomeProvider>();
-                        final currentSchedule = homeProvider.currentHome?.sleepSchedule ?? SleepSchedule.defaults();
+                        final currentSchedule =
+                            homeProvider.currentHome?.sleepSchedule ??
+                                SleepSchedule.defaults();
 
                         SleepSchedule newSchedule;
                         if (isBedtime) {
                           final bedtime = tempHour + (tempMinute / 60.0);
-                          newSchedule = currentSchedule.copyWith(bedtime: bedtime);
+                          newSchedule =
+                              currentSchedule.copyWith(bedtime: bedtime);
                         } else {
                           final wakeTime = tempHour + (tempMinute / 60.0);
-                          newSchedule = currentSchedule.copyWith(wakeTime: wakeTime);
+                          newSchedule =
+                              currentSchedule.copyWith(wakeTime: wakeTime);
                         }
 
-                        await homeProvider.updateCurrentHomeSleepSchedule(newSchedule);
+                        await homeProvider
+                            .updateCurrentHomeSleepSchedule(newSchedule);
+                        if (!popupContext.mounted) return;
                         Navigator.pop(popupContext);
                       },
                       child: Text(
@@ -279,7 +291,8 @@ class SleepSection extends StatelessWidget {
                   ),
                   child: CupertinoDatePicker(
                     mode: CupertinoDatePickerMode.time,
-                    initialDateTime: DateTime(2024, 1, 1, currentHour, currentMinute),
+                    initialDateTime:
+                        DateTime(2024, 1, 1, currentHour, currentMinute),
                     use24hFormat: MediaQuery.alwaysUse24HourFormatOf(context),
                     onDateTimeChanged: (DateTime newTime) {
                       tempHour = newTime.hour;

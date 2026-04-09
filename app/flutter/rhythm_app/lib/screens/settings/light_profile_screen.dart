@@ -52,10 +52,19 @@ class LightProfileScreen extends StatefulWidget {
 
 class _LightProfileScreenState extends State<LightProfileScreen>
     with SingleTickerProviderStateMixin {
-  static const List<String> _profileOrder = ['rhythm', 'sleep', 'idle'];
+  static const List<String> _profileOrder = [
+    'rhythm',
+    'sleep',
+    'day_idle',
+    'sleep_idle',
+    'idle',
+  ];
 
   late String _selectedProfileId;
   final Map<String, sdk.RhythmCurveConfig> _profileConfigs = {};
+  List<sdk.RhythmModeConfig> _modeConfigs = const [];
+  List<sdk.RhythmModeTransitionConfig> _modeTransitions = const [];
+  sdk.RhythmMode? _serverActiveMode;
 
   // Light transition duration (from selected profile config).
   double _fadeMs = 500;
@@ -81,15 +90,14 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   // Interval auto mode (null = server decides).
   bool _intervalAuto = false;
 
-  // Sleep profile color state (directColor on super-gaussian).
-  bool _sleepHasColor = false;
+  // Sleep profile state: fixed direct color plus a single brightness level.
   double _sleepHue = 10;
+  double _sleepBrightness = 20;
 
   // Idle profile state (folded into day/sleep profiles).
   bool _idleCustomBri = false;
   bool _idleCustomColor = false;
   double _idleBrightness = 1;
-  int _idleColorTemp = 2200;
   double _idleHue = 30; // hue angle for spectrum picker
 
   bool _loading = true;
@@ -114,9 +122,12 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   @override
   void initState() {
     super.initState();
-    _selectedProfileId = widget.initialProfile == 'idle'
-        ? 'rhythm'
-        : (widget.initialProfile ?? 'rhythm');
+    _selectedProfileId = switch (widget.initialProfile) {
+      'idle' || 'day_idle' => 'rhythm',
+      'sleep_idle' => 'sleep',
+      final profile? => profile,
+      null => 'rhythm',
+    };
 
     _glowController = AnimationController(
       duration: const Duration(milliseconds: 2500),
@@ -137,6 +148,64 @@ class _LightProfileScreenState extends State<LightProfileScreen>
 
   bool get _isSleepProfile => _selectedProfileId == 'sleep';
 
+  sdk.RhythmMode _modeForProfileId(String profileId) =>
+      profileId == 'sleep' ? sdk.RhythmMode.sleep : sdk.RhythmMode.day;
+
+  sdk.RhythmMode get _selectedMode => _modeForProfileId(_selectedProfileId);
+
+  String get _defaultIdleProfileId =>
+      _defaultIdleProfileIdForMode(_selectedMode);
+
+  String _defaultIdleProfileIdForMode(sdk.RhythmMode mode) =>
+      mode == sdk.RhythmMode.sleep ? 'sleep_idle' : 'day_idle';
+
+  String _defaultIdleProfileNameForMode(sdk.RhythmMode mode) =>
+      mode == sdk.RhythmMode.sleep ? 'Sleep Standby' : 'Day Standby';
+
+  sdk.RhythmModeConfig? _modeConfigForMode(sdk.RhythmMode mode) {
+    for (final config in _modeConfigs) {
+      if (config.mode == mode) return config;
+    }
+    return null;
+  }
+
+  sdk.RhythmModeConfig? _modeConfigForProfile(String profileId) =>
+      _modeConfigForMode(_modeForProfileId(profileId));
+
+  String? _customIdleProfileIdForProfile(String profileId) =>
+      _modeConfigForProfile(profileId)?.idleProfileId;
+
+  String? get _selectedCustomIdleProfileId =>
+      _customIdleProfileIdForProfile(_selectedProfileId);
+
+  sdk.RhythmModeConfig _defaultModeConfigForMode(sdk.RhythmMode mode) =>
+      sdk.RhythmModeConfig(
+        mode: mode,
+        activeProfileId: mode == sdk.RhythmMode.sleep ? 'sleep' : 'rhythm',
+      );
+
+  List<sdk.RhythmModeConfig> _updatedModeConfigsForIdle(String? idleProfileId) {
+    final updated = <sdk.RhythmModeConfig>[];
+    var found = false;
+    for (final config in _modeConfigs) {
+      if (config.mode != _selectedMode) {
+        updated.add(config);
+        continue;
+      }
+      updated.add(config.copyWith(idleProfileId: idleProfileId));
+      found = true;
+    }
+    if (!found) {
+      updated.add(
+        _defaultModeConfigForMode(_selectedMode).copyWith(
+          idleProfileId: idleProfileId,
+        ),
+      );
+    }
+    updated.sort((a, b) => a.mode.index.compareTo(b.mode.index));
+    return updated;
+  }
+
   String get _profileTitle => switch (_selectedProfileId) {
         'sleep' => 'Sleep Profile',
         _ => 'Day Profile',
@@ -145,13 +214,17 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   sdk.RhythmCurveConfig? get _selectedProfileConfig =>
       _profileConfigs[_selectedProfileId];
 
-  sdk.RhythmSuperGaussianCurve? get _selectedSuperGaussianCurve {
+  sdk.RhythmDirectColor? get _selectedDirectColor {
     final curve = _selectedProfileConfig?.curve;
-    return curve is sdk.RhythmSuperGaussianCurve ? curve : null;
+    return switch (curve) {
+      sdk.RhythmSuperGaussianCurve(:final directColor) => directColor,
+      sdk.RhythmConstantCurve(:final directColor) => directColor,
+      _ => null,
+    };
   }
 
   Color? get _selectedFixedColor {
-    final directColor = _selectedSuperGaussianCurve?.directColor;
+    final directColor = _selectedDirectColor;
     if (directColor == null) return null;
     return Color.fromARGB(
       255,
@@ -173,10 +246,13 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     }
 
     final api = context.read<ServerSyncProvider>().api;
-    final settings = await api.getSettings();
+    final mode = await api.getMode();
+    final settingsProfiles = [...await api.getProfiles()];
     if (!mounted) return;
 
-    final settingsProfiles = [...?settings?.profiles];
+    _modeConfigs = [...?mode?.configs];
+    _modeTransitions = [...?mode?.transitions];
+    _serverActiveMode = mode?.active;
     settingsProfiles.sort((a, b) {
       final ia = _profileOrder.indexOf(a.id);
       final ib = _profileOrder.indexOf(b.id);
@@ -188,19 +264,16 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       for (final profile in settingsProfiles)
         if (profile.id.isNotEmpty) profile.id: profile,
     };
-    final availableProfiles =
-        settingsProfiles.map(sdk.CurveModule.fromProfile).toList();
 
     final initialProfileId = profileConfigs.containsKey(_selectedProfileId)
         ? _selectedProfileId
-        : settings?.activeLightProfile ??
-            availableProfiles.firstOrNull?.id ??
+        : mode?.activeConfig?.activeProfileId ??
+            settingsProfiles.firstOrNull?.id ??
             'rhythm';
     final selectedConfig = profileConfigs[initialProfileId] ??
         await api.getConfig(id: initialProfileId);
     if (selectedConfig == null) {
       setState(() {
-
         _selectedProfileId = initialProfileId;
         _loading = false;
       });
@@ -208,22 +281,24 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     }
 
     profileConfigs[selectedConfig.id] = selectedConfig;
-    if (!availableProfiles.any((profile) => profile.id == selectedConfig.id)) {
-      availableProfiles.add(sdk.CurveModule.fromProfile(selectedConfig));
-      availableProfiles.sort((a, b) {
-        final ia = _profileOrder.indexOf(a.id);
-        final ib = _profileOrder.indexOf(b.id);
-        final orderA = ia == -1 ? _profileOrder.length : ia;
-        final orderB = ib == -1 ? _profileOrder.length : ib;
-        return orderA.compareTo(orderB);
-      });
-    }
     _profileConfigs
       ..clear()
       ..addAll(profileConfigs);
     _applyProfileConfig(selectedConfig);
-    final idleConfig = profileConfigs['idle'];
-    if (idleConfig != null) _applyIdleConfig(idleConfig);
+    final idleProfileId = _customIdleProfileIdForProfile(initialProfileId);
+    final idleConfig = idleProfileId != null
+        ? profileConfigs[idleProfileId] ??
+            await api.getConfig(id: idleProfileId)
+        : null;
+    if (idleConfig != null) {
+      profileConfigs[idleConfig.id] = idleConfig;
+      _profileConfigs[idleConfig.id] = idleConfig;
+    }
+    if (idleConfig != null) {
+      _applyIdleConfig(idleConfig);
+    } else {
+      _applyIdleFallback();
+    }
     await _loadCurveData(profileId: initialProfileId);
     if (!mounted) return;
 
@@ -315,18 +390,28 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       _widthLeftCct = curve.widthLeftCct;
       _widthRightCct = curve.widthRightCct;
       _shapeP = curve.shapeP;
-
-      // Sleep profile direct color.
-      if (curve.directColor != null) {
-        _sleepHasColor = true;
-        final rgb = curve.directColor!.rgb;
-        _sleepHue = HSVColor.fromColor(
-          Color.fromARGB(255, rgb.r, rgb.g, rgb.b),
-        ).hue;
-      } else {
-        _sleepHasColor = false;
-      }
     }
+
+    final directColor = switch (curve) {
+      sdk.RhythmSuperGaussianCurve(:final directColor) => directColor,
+      sdk.RhythmConstantCurve(:final directColor) => directColor,
+      _ => null,
+    };
+
+    if (directColor != null) {
+      final rgb = directColor.rgb;
+      _sleepHue = HSVColor.fromColor(
+        Color.fromARGB(255, rgb.r, rgb.g, rgb.b),
+      ).hue;
+    }
+
+    _sleepBrightness = switch (curve) {
+      sdk.RhythmConstantCurve(:final brightness) => (config.minBrightness +
+              (config.maxBrightness - config.minBrightness) * brightness)
+          .toDouble()
+          .clamp(1, 100),
+      _ => config.maxBrightness.toDouble().clamp(1, 100),
+    };
 
     _curveConfigDirty = false;
   }
@@ -336,36 +421,25 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     if (curve is sdk.RhythmInheritActiveCurve) {
       _idleCustomBri = false;
       _idleCustomColor = false;
-      _idleBrightness = config.maxBrightness.toDouble().clamp(1, 100);
+      _idleBrightness = 1;
     } else if (curve is sdk.RhythmConstantCurve) {
       _idleBrightness = config.maxBrightness.toDouble().clamp(1, 100);
-      _idleCustomBri = true;
+      _idleCustomBri = config.minBrightness != 1 || config.maxBrightness != 1;
       _idleCustomColor = curve.directColor != null;
-      _idleColorTemp = curve.directColor != null
-          ? curve.colorTemp
-          : (curve.colorTemp > 0 ? curve.colorTemp : 2200);
       if (curve.directColor != null) {
         final rgb = curve.directColor!.rgb;
         final c = Color.fromARGB(255, rgb.r, rgb.g, rgb.b);
         _idleHue = HSVColor.fromColor(c).hue;
-        final matchingPreset = _idleColorPresets
-            .where((p) =>
-                (p.color.r * 255 - rgb.r).abs() < 10 &&
-                (p.color.g * 255 - rgb.g).abs() < 10 &&
-                (p.color.b * 255 - rgb.b).abs() < 10)
-            .firstOrNull;
-        if (matchingPreset != null) {
-          _idleColorTemp = matchingPreset.colorTemp;
-        }
-      } else if (_idleColorTemp > 0) {
-        final matchingPreset = _idleColorPresets
-            .where((p) => p.colorTemp == _idleColorTemp)
-            .firstOrNull;
-        if (matchingPreset != null) {
-          _idleHue = HSVColor.fromColor(matchingPreset.color).hue;
-        }
       }
+    } else {
+      _applyIdleFallback();
     }
+  }
+
+  void _applyIdleFallback() {
+    _idleCustomBri = false;
+    _idleCustomColor = false;
+    _idleBrightness = 1;
   }
 
   sdk.RhythmCurveConfig _buildDraftConfig() {
@@ -374,30 +448,37 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       return const sdk.RhythmCurveConfig();
     }
 
+    if (_isSleepProfile) {
+      final brightness = _sleepBrightness.round().clamp(1, 100);
+      return sdk.RhythmCurveConfig(
+        id: base.id,
+        name: base.name,
+        minColorTemp: 0,
+        maxColorTemp: 0,
+        minBrightness: brightness,
+        maxBrightness: brightness,
+        maxDimSteps: base.maxDimSteps,
+        fadeMs: base.fadeMs,
+        motionTimeoutSecs: _motionTimeoutAuto ? null : _motionTimeoutSecs,
+        rhythmIntervalSecs: _intervalAuto ? null : _intervalSecs.round(),
+        curve: sdk.RhythmConstantCurve(
+          brightness: 1,
+          colorTemp: 0,
+          directColor: _sleepDirectColor,
+        ),
+      );
+    }
+
     final curve = base.curve;
     sdk.RhythmCurveShape nextCurve;
     if (curve is sdk.RhythmSuperGaussianCurve) {
-      final sleepColor = (_isSleepProfile && _sleepHasColor)
-          ? _sleepDirectColor
-          : null;
       nextCurve = curve.copyWith(
         widthLeftBri: _widthLeftBri,
         widthRightBri: _widthRightBri,
         widthLeftCct: _widthLeftCct,
         widthRightCct: _widthRightCct,
         shapeP: _shapeP,
-        directColor: sleepColor,
       );
-      // Clear directColor when sleep has no fixed color.
-      if (_isSleepProfile && !_sleepHasColor) {
-        nextCurve = sdk.RhythmSuperGaussianCurve(
-          widthLeftBri: _widthLeftBri,
-          widthRightBri: _widthRightBri,
-          widthLeftCct: _widthLeftCct,
-          widthRightCct: _widthRightCct,
-          shapeP: _shapeP,
-        );
-      }
     } else {
       nextCurve = curve;
     }
@@ -418,19 +499,13 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   sdk.RhythmCurveConfig? _buildIdleDraftConfig() {
-    final base = _profileConfigs['idle'];
-    if (base == null) return null;
+    if (!_idleCustomBri && !_idleCustomColor) return null;
 
-    if (!_idleCustomBri && !_idleCustomColor) {
-      return base.copyWith(
-        curve: const sdk.RhythmInheritActiveCurve(),
-      );
-    }
+    final idleProfileId = _defaultIdleProfileId;
+    final base = _profileConfigs[idleProfileId] ?? _defaultIdleProfileConfig();
 
-    final bri =
-        _idleCustomBri ? _idleBrightness.round() : _minBrightness.round();
+    final bri = _idleCustomBri ? _idleBrightness.round() : 1;
     sdk.RhythmDirectColor? directColor;
-    int colorTemp = 0;
 
     if (_idleCustomColor) {
       final color = _idleSelectedColor;
@@ -439,17 +514,35 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         (color.g * 255).round(),
         (color.b * 255).round(),
       );
-      colorTemp = _idleColorTemp;
     }
 
     return base.copyWith(
+      id: idleProfileId,
       minBrightness: bri,
       maxBrightness: bri,
+      minColorTemp: 0,
+      maxColorTemp: 0,
       curve: sdk.RhythmConstantCurve(
-        brightness: bri,
-        colorTemp: colorTemp,
+        brightness: 1,
+        colorTemp: 0,
         directColor: directColor,
       ),
+    );
+  }
+
+  sdk.RhythmCurveConfig _defaultIdleProfileConfig() {
+    return sdk.RhythmCurveConfig(
+      id: _defaultIdleProfileId,
+      name: _defaultIdleProfileNameForMode(_selectedMode),
+      curve: const sdk.RhythmInheritActiveCurve(),
+      minColorTemp: 0,
+      maxColorTemp: 0,
+      minBrightness: 1,
+      maxBrightness: 1,
+      maxDimSteps: 1,
+      fadeMs: null,
+      motionTimeoutSecs: null,
+      rhythmIntervalSecs: null,
     );
   }
 
@@ -574,8 +667,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   Future<void> _syncActiveConfigModel(sdk.RhythmCurveConfig config) async {
-    final activeProfileId =
-        context.read<ServerSyncProvider>().activeCurveModule;
+    final activeProfileId = context.read<ServerSyncProvider>().activeProfileId;
     if (config.id != activeProfileId) return;
 
     final dto = _toCurveConfigDto(config);
@@ -666,37 +758,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   Future<void> _resetToDefaults() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: _Palette.card,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(18),
-          side: const BorderSide(color: _Palette.border),
-        ),
-        title: const Text(
-          'Reset to Defaults?',
-          style: TextStyle(color: _Palette.textPrimary, fontSize: 17),
-        ),
-        content: const Text(
-          'This will reset the light curve to factory defaults on the server.',
-          style: TextStyle(color: _Palette.textSecondary, fontSize: 14),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel',
-                style: TextStyle(color: _Palette.textSecondary)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Reset', style: TextStyle(color: _Palette.amber)),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
-
     final api = context.read<ServerSyncProvider>().api;
     final sdkConfig = await api.resetConfig(id: _selectedProfileId);
     if (!mounted) return;
@@ -712,6 +773,16 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       _curveConfigDirty = false;
       _timeOffsetApplied = false;
     });
+  }
+
+  void _showSaveFeedback(String message, {required bool error}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: error ? Colors.red.shade700 : Colors.green.shade700,
+      ),
+    );
   }
 
   /// Current time as a compressed slider fraction.
@@ -859,9 +930,9 @@ class _LightProfileScreenState extends State<LightProfileScreen>
           if (_isSleepProfile) ...[
             _buildSleepColorCard(),
             const SizedBox(height: 16),
-          ],
-          _buildBrightnessRangeCard(),
-          if (!_isSleepProfile) ...[
+            _buildSleepBrightnessCard(),
+          ] else ...[
+            _buildBrightnessRangeCard(),
             const SizedBox(height: 14),
             _buildColorTempRangeCard(),
             const SizedBox(height: 24),
@@ -891,7 +962,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   // ---------------------------------------------------------------------------
 
   Widget _buildSleepColorCard() {
-    final activeColor = _sleepHasColor ? _sleepSelectedColor : _Palette.amber;
+    final activeColor = _sleepSelectedColor;
 
     return Container(
       padding: const EdgeInsets.fromLTRB(18, 18, 18, 18),
@@ -912,8 +983,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                   shape: BoxShape.circle,
                   color: activeColor.withValues(alpha: 0.2),
                 ),
-                child: Icon(Icons.palette_rounded,
-                    color: activeColor, size: 18),
+                child:
+                    Icon(Icons.palette_rounded, color: activeColor, size: 18),
               ),
               const SizedBox(width: 12),
               const Expanded(
@@ -927,196 +998,36 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                   ),
                 ),
               ),
-              SizedBox(
+              Container(
+                width: 28,
                 height: 28,
-                child: Switch.adaptive(
-                  value: _sleepHasColor,
-                  onChanged: (v) {
-                    setState(() {
-                      _sleepHasColor = v;
-                      _curveConfigDirty = true;
-                    });
-                  },
-                  activeTrackColor: activeColor,
-                  activeThumbColor: _Palette.textPrimary,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: activeColor.withValues(alpha: 0.85),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.18),
+                  ),
                 ),
               ),
             ],
           ),
-          AnimatedSize(
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeOutCubic,
-            alignment: Alignment.topCenter,
-            child: !_sleepHasColor
-                ? Padding(
-                    padding: const EdgeInsets.only(left: 48, top: 8),
-                    child: Text(
-                      'Uses sun-based color temperature curve',
-                      style: TextStyle(
-                        color: _Palette.textSecondary.withValues(alpha: 0.45),
-                        fontSize: 12,
-                        height: 1.3,
-                      ),
-                    ),
-                  )
-                : Padding(
-                    padding: const EdgeInsets.only(top: 18),
-                    child: Column(
-                      children: [
-                        // Warm spectrum bar.
-                        GestureDetector(
-                          onTapDown: (d) =>
-                              _onSleepSpectrumTap(d.localPosition.dx, context),
-                          onHorizontalDragUpdate: (d) =>
-                              _onSleepSpectrumTap(d.localPosition.dx, context),
-                          child: LayoutBuilder(
-                            builder: (context, constraints) {
-                              final width = constraints.maxWidth;
-                              final thumbX = (_sleepHue / 360) * width;
-                              return SizedBox(
-                                height: 44,
-                                child: Stack(
-                                  clipBehavior: Clip.none,
-                                  children: [
-                                    Container(
-                                      height: 32,
-                                      decoration: BoxDecoration(
-                                        borderRadius: BorderRadius.circular(16),
-                                        gradient: const LinearGradient(
-                                          colors: [
-                                            Color(0xFFFF0000),
-                                            Color(0xFFFF8800),
-                                            Color(0xFFFFFF00),
-                                            Color(0xFF00FF00),
-                                            Color(0xFF00FFFF),
-                                            Color(0xFF0088FF),
-                                            Color(0xFF0000FF),
-                                            Color(0xFF8800FF),
-                                            Color(0xFFFF00FF),
-                                            Color(0xFFFF0044),
-                                            Color(0xFFFF0000),
-                                          ],
-                                        ),
-                                        border: Border.all(
-                                          color:
-                                              Colors.white.withValues(alpha: 0.06),
-                                        ),
-                                      ),
-                                    ),
-                                    Positioned(
-                                      left: thumbX - 10,
-                                      top: 0,
-                                      child: Container(
-                                        width: 20,
-                                        height: 32,
-                                        decoration: BoxDecoration(
-                                          borderRadius: BorderRadius.circular(10),
-                                          border: Border.all(
-                                            color: Colors.white
-                                                .withValues(alpha: 0.9),
-                                            width: 2.5,
-                                          ),
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: activeColor
-                                                  .withValues(alpha: 0.5),
-                                              blurRadius: 12,
-                                              spreadRadius: 1,
-                                            ),
-                                            BoxShadow(
-                                              color: Colors.black
-                                                  .withValues(alpha: 0.4),
-                                              blurRadius: 4,
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              );
-                            },
-                          ),
-                        ),
-                        const SizedBox(height: 18),
-                        // Preset swatches.
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: _sleepColorPresets.map((preset) {
-                            final selected = _isSleepPresetSelected(preset.color);
-                            return GestureDetector(
-                              onTap: () {
-                                setState(() {
-                                  _sleepHue = preset.hue;
-                                  _curveConfigDirty = true;
-                                });
-                              },
-                              child: Column(
-                                children: [
-                                  Container(
-                                    width: 40,
-                                    height: 40,
-                                    decoration: BoxDecoration(
-                                      shape: BoxShape.circle,
-                                      color: preset.color.withValues(
-                                          alpha: selected ? 0.9 : 0.4),
-                                      border: Border.all(
-                                        color: selected
-                                            ? Colors.white
-                                                .withValues(alpha: 0.7)
-                                            : Colors.white
-                                                .withValues(alpha: 0.06),
-                                        width: selected ? 2.5 : 1,
-                                      ),
-                                      boxShadow: selected
-                                          ? [
-                                              BoxShadow(
-                                                color: preset.color
-                                                    .withValues(alpha: 0.4),
-                                                blurRadius: 16,
-                                                spreadRadius: 2,
-                                              ),
-                                            ]
-                                          : null,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 6),
-                                  Text(
-                                    preset.label,
-                                    style: TextStyle(
-                                      color: selected
-                                          ? _Palette.textPrimary
-                                          : _Palette.textSecondary
-                                              .withValues(alpha: 0.5),
-                                      fontSize: 10,
-                                      fontWeight: selected
-                                          ? FontWeight.w600
-                                          : FontWeight.w500,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            );
-                          }).toList(),
-                        ),
-                      ],
-                    ),
-                  ),
+          Padding(
+            padding: const EdgeInsets.only(top: 18),
+            child: _buildFixedColorPicker(
+              hue: _sleepHue,
+              selectedColor: activeColor,
+              isPresetSelected: _isSleepPresetSelected,
+              onHueChanged: (hue) {
+                setState(() {
+                  _sleepHue = hue;
+                  _curveConfigDirty = true;
+                });
+              },
+            ),
           ),
         ],
       ),
     );
-  }
-
-  void _onSleepSpectrumTap(double dx, BuildContext context) {
-    final box = context.findRenderObject() as RenderBox?;
-    if (box == null) return;
-    final width = box.size.width - 36;
-    final fraction = (dx / width).clamp(0.0, 1.0);
-    setState(() {
-      _sleepHue = fraction * 360;
-      _curveConfigDirty = true;
-    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1124,7 +1035,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   // ---------------------------------------------------------------------------
 
   Widget _buildIdleSection() {
-    final minBri = _minBrightness.round();
     final isDefault = !_idleCustomBri && !_idleCustomColor;
     final briColor = _idleCustomBri ? _Palette.amber : _Palette.idle;
     final colorColor = _idleCustomColor ? _idleSelectedColor : _Palette.idle;
@@ -1161,7 +1071,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      'When Idle',
+                      'When Standby',
                       style: TextStyle(
                         color: _Palette.textPrimary,
                         fontSize: 15,
@@ -1172,10 +1082,11 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                     if (isDefault) ...[
                       const SizedBox(height: 2),
                       Text(
-                        'Dims to curve minimum ($minBri%)',
+                        _selectedCustomIdleProfileId == null
+                            ? 'Uses default standby fallback (inherit active at 1%)'
+                            : 'Uses 1% inherited standby',
                         style: TextStyle(
-                          color:
-                              _Palette.textSecondary.withValues(alpha: 0.5),
+                          color: _Palette.textSecondary.withValues(alpha: 0.5),
                           fontSize: 12,
                         ),
                       ),
@@ -1191,8 +1102,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
             children: [
               Icon(
                 Icons.brightness_medium_rounded,
-                color: briColor.withValues(
-                    alpha: _idleCustomBri ? 0.8 : 0.35),
+                color: briColor.withValues(alpha: _idleCustomBri ? 0.8 : 0.35),
                 size: 16,
               ),
               const SizedBox(width: 10),
@@ -1229,7 +1139,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                     setState(() {
                       _idleCustomBri = v;
                       if (v && _idleBrightness < 1) {
-                        _idleBrightness = minBri.toDouble();
+                        _idleBrightness = 1;
                       }
                       _curveConfigDirty = true;
                     });
@@ -1250,15 +1160,14 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                     child: SliderTheme(
                       data: SliderThemeData(
                         activeTrackColor: briColor,
-                        inactiveTrackColor:
-                            briColor.withValues(alpha: 0.12),
+                        inactiveTrackColor: briColor.withValues(alpha: 0.12),
                         thumbColor: briColor,
                         overlayColor: briColor.withValues(alpha: 0.12),
                         trackHeight: 4,
-                        thumbShape: const RoundSliderThumbShape(
-                            enabledThumbRadius: 7),
-                        overlayShape: const RoundSliderOverlayShape(
-                            overlayRadius: 16),
+                        thumbShape:
+                            const RoundSliderThumbShape(enabledThumbRadius: 7),
+                        overlayShape:
+                            const RoundSliderOverlayShape(overlayRadius: 16),
                       ),
                       child: Slider(
                         value: _idleBrightness.clamp(1, 100),
@@ -1288,8 +1197,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
             children: [
               Icon(
                 Icons.palette_outlined,
-                color: colorColor.withValues(
-                    alpha: _idleCustomColor ? 0.8 : 0.35),
+                color:
+                    colorColor.withValues(alpha: _idleCustomColor ? 0.8 : 0.35),
                 size: 16,
               ),
               const SizedBox(width: 10),
@@ -1337,18 +1246,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     );
   }
 
-  // Warm color presets for sleep profile.
-  static const _sleepColorPresets = <({Color color, double hue, String label})>[
-    (color: Color(0xFFFF3B30), hue: 4,   label: 'Red'),
-    (color: Color(0xFFFF6B4A), hue: 14,  label: 'Ember'),
-    (color: Color(0xFFFF9500), hue: 35,  label: 'Amber'),
-    (color: Color(0xFFFFB347), hue: 33,  label: 'Peach'),
-    (color: Color(0xFFFF6E8A), hue: 345, label: 'Rose'),
-    (color: Color(0xFFE8A87C), hue: 24,  label: 'Sand'),
-  ];
-
-  sdk.RhythmDirectColor? get _sleepDirectColor {
-    if (!_sleepHasColor) return null;
+  sdk.RhythmDirectColor get _sleepDirectColor {
     final color = HSVColor.fromAHSV(1, _sleepHue, 0.85, 1).toColor();
     return _rgbToDirectColor(
       (color.r * 255).round(),
@@ -1361,40 +1259,129 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       HSVColor.fromAHSV(1, _sleepHue, 0.85, 1).toColor();
 
   bool _isSleepPresetSelected(Color presetColor) {
-    if (!_sleepHasColor) return false;
     final selected = _sleepSelectedColor;
     return (selected.r - presetColor.r).abs() < 0.04 &&
         (selected.g - presetColor.g).abs() < 0.04 &&
         (selected.b - presetColor.b).abs() < 0.04;
   }
 
-  // Full-spectrum color presets for idle custom-color mode.
-  // Explicit hue ensures the spectrum thumb lands where expected.
-  static const _idleColorPresets = <({Color color, double hue, String label, int colorTemp})>[
-    (color: Color(0xFFFF4D6A), hue: 0,   label: 'Rose',    colorTemp: 1800),
-    (color: Color(0xFFFF8A2D), hue: 28,  label: 'Ember',   colorTemp: 2200),
-    (color: Color(0xFFFFD23F), hue: 47,  label: 'Gold',    colorTemp: 2700),
-    (color: Color(0xFF3DDC84), hue: 145, label: 'Mint',    colorTemp: 4000),
-    (color: Color(0xFF4FC3F7), hue: 199, label: 'Sky',     colorTemp: 5500),
-    (color: Color(0xFFB388FF), hue: 262, label: 'Violet',  colorTemp: 3500),
+  Widget _buildSleepBrightnessCard() {
+    const color = _Palette.amber;
+    final brightness = _sleepBrightness.round();
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 18, 18, 10),
+      decoration: BoxDecoration(
+        color: _Palette.card,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: _Palette.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: color.withValues(alpha: 0.12),
+                ),
+                child:
+                    const Icon(Icons.wb_sunny_rounded, color: color, size: 18),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  'Brightness',
+                  style: TextStyle(
+                    color: _Palette.textPrimary,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: -0.1,
+                  ),
+                ),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: color.withValues(alpha: 0.25)),
+                ),
+                child: Text(
+                  '$brightness%',
+                  style: const TextStyle(
+                    color: color,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    fontFeatures: [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          _buildInlineSlider(
+            label: 'Level',
+            value: _sleepBrightness,
+            min: 1,
+            max: 100,
+            divisions: 99,
+            format: (v) => '${v.round()}%',
+            color: color,
+            onChanged: (v) => _onCurveChanged(() => _sleepBrightness = v),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Shared presets for all fixed/direct-color pickers.
+  static const _fixedColorPresets = <({Color color, double hue, String label})>[
+    (color: Color(0xFFFF3B30), hue: 4, label: 'Red'),
+    (color: Color(0xFFFF6B4A), hue: 14, label: 'Ember'),
+    (color: Color(0xFFFF9500), hue: 35, label: 'Amber'),
+    (color: Color(0xFFFFB347), hue: 33, label: 'Peach'),
+    (color: Color(0xFFFF6E8A), hue: 345, label: 'Rose'),
+    (color: Color(0xFFE8A87C), hue: 24, label: 'Sand'),
   ];
 
   Widget _buildIdleColorPicker() {
-    final activeColor = _idleSelectedColor;
+    return _buildFixedColorPicker(
+      hue: _idleHue,
+      selectedColor: _idleSelectedColor,
+      isPresetSelected: _isPresetSelected,
+      onHueChanged: (hue) {
+        setState(() {
+          _idleHue = hue;
+          _curveConfigDirty = true;
+        });
+      },
+    );
+  }
 
-    return Column(
-      children: [
-        // Full-spectrum hue bar.
-        GestureDetector(
-          onTapDown: (d) => _onSpectrumTap(d.localPosition.dx, context),
-          onHorizontalDragUpdate: (d) =>
-              _onSpectrumTap(d.localPosition.dx, context),
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final width = constraints.maxWidth;
-              final thumbX = (_idleHue / 360) * width;
+  Widget _buildFixedColorPicker({
+    required double hue,
+    required Color selectedColor,
+    required bool Function(Color presetColor) isPresetSelected,
+    required ValueChanged<double> onHueChanged,
+  }) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth;
+        final thumbX = (hue / 360) * width;
 
-              return SizedBox(
+        return Column(
+          children: [
+            GestureDetector(
+              onTapDown: (d) => _onFixedColorSpectrumTap(
+                  d.localPosition.dx, width, onHueChanged),
+              onHorizontalDragUpdate: (d) => _onFixedColorSpectrumTap(
+                  d.localPosition.dx, width, onHueChanged),
+              child: SizedBox(
                 height: 44,
                 child: Stack(
                   clipBehavior: Clip.none,
@@ -1437,7 +1424,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                           ),
                           boxShadow: [
                             BoxShadow(
-                              color: activeColor.withValues(alpha: 0.5),
+                              color: selectedColor.withValues(alpha: 0.5),
                               blurRadius: 12,
                               spreadRadius: 1,
                             ),
@@ -1451,83 +1438,76 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                     ),
                   ],
                 ),
-              );
-            },
-          ),
-        ),
-        const SizedBox(height: 18),
-        // Preset swatches.
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: _idleColorPresets.map((preset) {
-            final selected = _isPresetSelected(preset.color);
-            return GestureDetector(
-              onTap: () => _onIdleColorChanged(
-                  preset.color, preset.hue, preset.colorTemp),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                curve: Curves.easeOutCubic,
-                child: Column(
-                  children: [
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: preset.color.withValues(
-                            alpha: selected ? 0.9 : 0.4),
-                        border: Border.all(
-                          color: selected
-                              ? Colors.white.withValues(alpha: 0.7)
-                              : Colors.white.withValues(alpha: 0.06),
-                          width: selected ? 2.5 : 1,
-                        ),
-                        boxShadow: selected
-                            ? [
-                                BoxShadow(
-                                  color: preset.color
-                                      .withValues(alpha: 0.4),
-                                  blurRadius: 16,
-                                  spreadRadius: 2,
-                                ),
-                              ]
-                            : null,
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      preset.label,
-                      style: TextStyle(
-                        color: selected
-                            ? _Palette.textPrimary
-                            : _Palette.textSecondary
-                                .withValues(alpha: 0.5),
-                        fontSize: 10,
-                        fontWeight:
-                            selected ? FontWeight.w600 : FontWeight.w500,
-                      ),
-                    ),
-                  ],
-                ),
               ),
-            );
-          }).toList(),
-        ),
-      ],
+            ),
+            const SizedBox(height: 18),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: _fixedColorPresets.map((preset) {
+                final selected = isPresetSelected(preset.color);
+                return GestureDetector(
+                  onTap: () => onHueChanged(preset.hue),
+                  child: Column(
+                    children: [
+                      Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: preset.color
+                              .withValues(alpha: selected ? 0.9 : 0.4),
+                          border: Border.all(
+                            color: selected
+                                ? Colors.white.withValues(alpha: 0.7)
+                                : Colors.white.withValues(alpha: 0.06),
+                            width: selected ? 2.5 : 1,
+                          ),
+                          boxShadow: selected
+                              ? [
+                                  BoxShadow(
+                                    color: preset.color.withValues(alpha: 0.4),
+                                    blurRadius: 16,
+                                    spreadRadius: 2,
+                                  ),
+                                ]
+                              : null,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        preset.label,
+                        style: TextStyle(
+                          color: selected
+                              ? _Palette.textPrimary
+                              : _Palette.textSecondary.withValues(alpha: 0.5),
+                          fontSize: 10,
+                          fontWeight:
+                              selected ? FontWeight.w600 : FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }).toList(),
+            ),
+          ],
+        );
+      },
     );
   }
 
-  /// The currently selected idle color — either a preset or from the hue bar.
-  Color get _idleSelectedColor {
-    // Check if current colorTemp matches a preset.
-    if (_idleColorTemp > 0) {
-      for (final p in _idleColorPresets) {
-        if (_idleColorTemp == p.colorTemp) return p.color;
-      }
-    }
-    // Custom hue from the spectrum bar.
-    return HSVColor.fromAHSV(1, _idleHue, 0.85, 1).toColor();
+  void _onFixedColorSpectrumTap(
+    double dx,
+    double width,
+    ValueChanged<double> onHueChanged,
+  ) {
+    final fraction = (dx / width).clamp(0.0, 1.0);
+    onHueChanged(fraction * 360);
   }
+
+  /// The currently selected idle color — from the shared fixed-color picker.
+  Color get _idleSelectedColor =>
+      HSVColor.fromAHSV(1, _idleHue, 0.85, 1).toColor();
 
   bool _isPresetSelected(Color presetColor) {
     final selected = _idleSelectedColor;
@@ -1536,34 +1516,16 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         (selected.b - presetColor.b).abs() < 0.04;
   }
 
-  void _onIdleColorChanged(Color color, double hue, int colorTemp) {
-    setState(() {
-      _idleColorTemp = colorTemp;
-      _idleHue = hue;
-      _curveConfigDirty = true;
-    });
-  }
-
-  void _onSpectrumTap(double dx, BuildContext context) {
-    final box = context.findRenderObject() as RenderBox?;
-    if (box == null) return;
-    final width = box.size.width - 36; // account for card padding
-    final fraction = (dx / width).clamp(0.0, 1.0);
-    final hue = fraction * 360;
-    setState(() {
-      _idleHue = hue;
-      _idleColorTemp = 0; // no CCT — direct_color carries the RGB/XY
-      _curveConfigDirty = true;
-    });
-  }
-
   /// Convert sRGB (0-255) to CIE 1931 XY + build [RhythmDirectColor].
   static sdk.RhythmDirectColor _rgbToDirectColor(int r, int g, int b) {
     // 1. Linearise sRGB.
     double linearise(int c) {
       final s = c / 255.0;
-      return s <= 0.04045 ? s / 12.92 : math.pow((s + 0.055) / 1.055, 2.4).toDouble();
+      return s <= 0.04045
+          ? s / 12.92
+          : math.pow((s + 0.055) / 1.055, 2.4).toDouble();
     }
+
     final rl = linearise(r);
     final gl = linearise(g);
     final bl = linearise(b);
@@ -1652,8 +1614,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                 child: Text(
                   '–',
                   style: TextStyle(
-                    color:
-                        _Palette.textSecondary.withValues(alpha: 0.3),
+                    color: _Palette.textSecondary.withValues(alpha: 0.3),
                     fontSize: 13,
                   ),
                 ),
@@ -1736,7 +1697,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                     ],
                   ),
                 ),
-                child: Icon(Icons.thermostat_rounded, color: warmColor, size: 18),
+                child:
+                    Icon(Icons.thermostat_rounded, color: warmColor, size: 18),
               ),
               const SizedBox(width: 12),
               const Expanded(
@@ -1773,8 +1735,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                 child: Text(
                   '–',
                   style: TextStyle(
-                    color:
-                        _Palette.textSecondary.withValues(alpha: 0.3),
+                    color: _Palette.textSecondary.withValues(alpha: 0.3),
                     fontSize: 13,
                   ),
                 ),
@@ -1807,8 +1768,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
               borderRadius: BorderRadius.circular(3),
               gradient: LinearGradient(
                 colors: List.generate(8, (i) {
-                  final k = _minColorTemp +
-                      (i / 7) * (_maxColorTemp - _minColorTemp);
+                  final k =
+                      _minColorTemp + (i / 7) * (_maxColorTemp - _minColorTemp);
                   return ColorUtils.curveColorForCCT(k.round());
                 }),
               ),
@@ -1903,9 +1864,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                   child: Text(
                     _intervalAuto ? 'Auto' : _formatInterval(_intervalSecs),
                     style: TextStyle(
-                      color: _intervalAuto
-                          ? color
-                          : color.withValues(alpha: 0.7),
+                      color:
+                          _intervalAuto ? color : color.withValues(alpha: 0.7),
                       fontSize: 13,
                       fontWeight: FontWeight.w700,
                       letterSpacing: 0.3,
@@ -1936,54 +1896,56 @@ class _LightProfileScreenState extends State<LightProfileScreen>
             child: _intervalAuto
                 ? const SizedBox.shrink()
                 : Padding(
-          padding: const EdgeInsets.only(top: 10),
-            child: Column(
-              children: [
-                SliderTheme(
-                  data: SliderThemeData(
-                    activeTrackColor: color,
-                    inactiveTrackColor: color.withValues(alpha: 0.12),
-                    thumbColor: color,
-                    overlayColor: color.withValues(alpha: 0.12),
-                    trackHeight: 4,
-                    thumbShape:
-                        const RoundSliderThumbShape(enabledThumbRadius: 8),
-                    overlayShape:
-                        const RoundSliderOverlayShape(overlayRadius: 18),
-                  ),
-                  child: Slider(
-                    value: _intervalSecs.clamp(30, 300),
-                    min: 30,
-                    max: 300,
-                    divisions: 27,
-                    onChanged: _onIntervalChanged,
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        _formatInterval(30),
-                        style: TextStyle(
-                          color: _Palette.textSecondary.withValues(alpha: 0.4),
-                          fontSize: 11,
+                    padding: const EdgeInsets.only(top: 10),
+                    child: Column(
+                      children: [
+                        SliderTheme(
+                          data: SliderThemeData(
+                            activeTrackColor: color,
+                            inactiveTrackColor: color.withValues(alpha: 0.12),
+                            thumbColor: color,
+                            overlayColor: color.withValues(alpha: 0.12),
+                            trackHeight: 4,
+                            thumbShape: const RoundSliderThumbShape(
+                                enabledThumbRadius: 8),
+                            overlayShape: const RoundSliderOverlayShape(
+                                overlayRadius: 18),
+                          ),
+                          child: Slider(
+                            value: _intervalSecs.clamp(30, 300),
+                            min: 30,
+                            max: 300,
+                            divisions: 27,
+                            onChanged: _onIntervalChanged,
+                          ),
                         ),
-                      ),
-                      Text(
-                        _formatInterval(300),
-                        style: TextStyle(
-                          color: _Palette.textSecondary.withValues(alpha: 0.4),
-                          fontSize: 11,
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                _formatInterval(30),
+                                style: TextStyle(
+                                  color: _Palette.textSecondary
+                                      .withValues(alpha: 0.4),
+                                  fontSize: 11,
+                                ),
+                              ),
+                              Text(
+                                _formatInterval(300),
+                                style: TextStyle(
+                                  color: _Palette.textSecondary
+                                      .withValues(alpha: 0.4),
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
-                ),
-              ],
-            ),
-          ),
           ),
         ],
       ),
@@ -2038,9 +2000,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                   ? 'Auto'
                   : _formatMotionTimeout(_motionTimeoutSecs),
               style: TextStyle(
-                color: _motionTimeoutAuto
-                    ? color
-                    : color.withValues(alpha: 0.7),
+                color:
+                    _motionTimeoutAuto ? color : color.withValues(alpha: 0.7),
                 fontSize: 11,
                 fontWeight: FontWeight.w600,
               ),
@@ -2459,8 +2420,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                 ),
               ),
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
                   color: ltColor.withValues(alpha: 0.06),
                   borderRadius: BorderRadius.circular(6),
@@ -2490,7 +2450,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       ),
     );
   }
-
 
   // ---------------------------------------------------------------------------
   // Hero icon — color shifts to match simulated CCT
@@ -2571,10 +2530,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                 thumbColor: color,
                 overlayColor: color.withValues(alpha: 0.08),
                 trackHeight: 4,
-                thumbShape:
-                    const RoundSliderThumbShape(enabledThumbRadius: 7),
-                overlayShape:
-                    const RoundSliderOverlayShape(overlayRadius: 16),
+                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+                overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
               ),
               child: Slider(
                 value: value.clamp(min, max),
@@ -2609,7 +2566,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
 
   Widget _buildSaveButton() {
     return GestureDetector(
-      onTap: _confirmSaveCurveConfig,
+      onTap: _saveCurveConfig,
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 14),
         decoration: BoxDecoration(
@@ -2636,61 +2593,79 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     );
   }
 
-  Future<void> _confirmSaveCurveConfig() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: _Palette.card,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(18),
-          side: const BorderSide(color: _Palette.border),
-        ),
-        title: const Text(
-          'Are you sure??',
-          style: TextStyle(color: _Palette.textPrimary, fontSize: 17),
-        ),
-        content: const Text(
-          'This will replace the stored profile config on the server.',
-          style: TextStyle(color: _Palette.textSecondary, fontSize: 14),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel',
-                style: TextStyle(color: _Palette.textSecondary)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Save', style: TextStyle(color: _Palette.amber)),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed == true) {
-      await _saveCurveConfig();
-    }
-  }
-
   Future<void> _saveCurveConfig() async {
     final config = _buildDraftConfig();
     final api = context.read<ServerSyncProvider>().api;
-    await api.configSet(config, id: _selectedProfileId);
+    setState(() => _curveConfigDirty = false);
+    final profileSaved = await api.configSet(config, id: _selectedProfileId);
+    if (!mounted) return;
+    if (!profileSaved) {
+      setState(() => _curveConfigDirty = true);
+      _showSaveFeedback(
+        'Failed to save ${_profileTitle.toLowerCase()}.',
+        error: true,
+      );
+      return;
+    }
 
     // Also save idle config.
     final idleConfig = _buildIdleDraftConfig();
+    bool idleSaved = true;
     if (idleConfig != null) {
-      await api.configSet(idleConfig, id: 'idle');
+      idleSaved = await api.configSet(idleConfig, id: idleConfig.id);
+      if (!mounted) return;
+      if (!idleSaved) {
+        setState(() => _curveConfigDirty = true);
+        _showSaveFeedback(
+          'Saved ${_profileTitle.toLowerCase()}, but failed to save standby settings.',
+          error: true,
+        );
+        return;
+      }
     }
 
-    if (mounted) {
-      _profileConfigs[_selectedProfileId] = config;
-      if (idleConfig != null) _profileConfigs['idle'] = idleConfig;
-      _applyProfileConfig(config);
-      await _syncActiveConfigModel(config);
-      await _loadCurveData(profileId: _selectedProfileId);
-      setState(() => _curveConfigDirty = false);
+    final targetIdleProfileId = idleConfig?.id;
+    final currentIdleProfileId = _selectedCustomIdleProfileId;
+    final shouldUpdateIdleModeConfig =
+        currentIdleProfileId != targetIdleProfileId;
+    List<sdk.RhythmModeConfig>? updatedModeConfigs;
+    var idleModeSaved = true;
+    if (shouldUpdateIdleModeConfig) {
+      updatedModeConfigs = _updatedModeConfigsForIdle(targetIdleProfileId);
+      idleModeSaved = await api.modeSet(
+        active: _serverActiveMode,
+        configs: updatedModeConfigs,
+        transitions: _modeTransitions,
+      );
+      if (!mounted) return;
+      if (!idleModeSaved) {
+        setState(() => _curveConfigDirty = true);
+        _showSaveFeedback(
+          targetIdleProfileId == null
+              ? 'Saved ${_profileTitle.toLowerCase()}, but failed to disable custom standby.'
+              : 'Saved ${_profileTitle.toLowerCase()}, but failed to attach standby settings.',
+          error: true,
+        );
+        return;
+      }
     }
+
+    _profileConfigs[_selectedProfileId] = config;
+    if (idleConfig != null) {
+      _profileConfigs[idleConfig.id] = idleConfig;
+    }
+    if (updatedModeConfigs != null) {
+      _modeConfigs = updatedModeConfigs;
+    }
+    _applyProfileConfig(config);
+    if (idleConfig != null) {
+      _applyIdleConfig(idleConfig);
+    } else {
+      _applyIdleFallback();
+    }
+    await _syncActiveConfigModel(config);
+    await _loadCurveData(profileId: _selectedProfileId);
+    if (!mounted) return;
   }
 
   Widget _buildResetToDefaultsButton() {

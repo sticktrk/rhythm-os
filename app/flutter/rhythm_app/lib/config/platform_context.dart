@@ -1,4 +1,4 @@
-/// Compile-time platform context set via --dart-define=PLATFORM_CONTEXT=<value>.
+/// Compile-time platform context set via `--dart-define=PLATFORM_CONTEXT=value`.
 ///
 /// Tells the UI what context it's running in so it can show/hide
 /// sections that don't apply.
@@ -17,11 +17,11 @@ class PlatformCtx {
   );
 
   static PlatformContext get current => switch (_raw) {
-    'ha_addon' => PlatformContext.haAddon,
-    'standalone_web' => PlatformContext.standaloneWeb,
-    'desktop' => PlatformContext.desktop,
-    _ => PlatformContext.mobile,
-  };
+        'ha_addon' => PlatformContext.haAddon,
+        'standalone_web' => PlatformContext.standaloneWeb,
+        'desktop' => PlatformContext.desktop,
+        _ => PlatformContext.mobile,
+      };
 
   static bool get isHaAddon => current == PlatformContext.haAddon;
   static bool get isWeb =>

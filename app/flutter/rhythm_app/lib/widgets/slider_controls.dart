@@ -30,8 +30,11 @@ class _SliderControlsState extends State<SliderControls> {
 
   /// Initialize mirror state based on whether bri and cct widths match
   void _initMirrorState() {
-    _mirrorMorning ??= (widget.config.widthLeftBri - widget.config.widthLeftCct).abs() < 0.01;
-    _mirrorEvening ??= (widget.config.widthRightBri - widget.config.widthRightCct).abs() < 0.01;
+    _mirrorMorning ??=
+        (widget.config.widthLeftBri - widget.config.widthLeftCct).abs() < 0.01;
+    _mirrorEvening ??=
+        (widget.config.widthRightBri - widget.config.widthRightCct).abs() <
+            0.01;
   }
 
   @override
@@ -121,8 +124,8 @@ class _SliderControlsState extends State<SliderControls> {
               }
               widget.onConfigChanged(newConfig);
             },
-            onWidthCctChanged: (v) =>
-                widget.onConfigChanged(widget.config.copyWith(widthRightCct: v)),
+            onWidthCctChanged: (v) => widget
+                .onConfigChanged(widget.config.copyWith(widthRightCct: v)),
             onMirrorChanged: (v) {
               setState(() => _mirrorEvening = v);
               // Track mirror toggle
@@ -163,7 +166,7 @@ class _SliderControlsState extends State<SliderControls> {
       decoration: BoxDecoration(
         color: const Color(0xFF1E1E2E),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.white.withOpacity(0.1)),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -289,7 +292,7 @@ class _SliderControlsState extends State<SliderControls> {
               }
               return Colors.transparent;
             }),
-            side: BorderSide(color: Colors.white.withOpacity(0.5)),
+            side: BorderSide(color: Colors.white.withValues(alpha: 0.5)),
             materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
           ),
         ),
@@ -344,7 +347,7 @@ class _SliderControlsState extends State<SliderControls> {
                 activeTrackColor: sliderColor,
                 inactiveTrackColor: trackColor,
                 thumbColor: enabled ? Colors.white : Colors.white54,
-                overlayColor: sliderColor.withOpacity(0.2),
+                overlayColor: sliderColor.withValues(alpha: 0.2),
                 trackHeight: 4,
                 thumbShape: const RoundSliderThumbShape(
                   enabledThumbRadius: 6,
@@ -357,12 +360,15 @@ class _SliderControlsState extends State<SliderControls> {
                 max: max,
                 divisions: divisions,
                 onChanged: enabled ? onChanged : null,
-                onChangeEnd: enabled ? (v) {
-                  onChangeEnd?.call();
-                  if (trackingParameter != null) {
-                    AnalyticsService().logCurveSliderChange(trackingParameter, v);
-                  }
-                } : null,
+                onChangeEnd: enabled
+                    ? (v) {
+                        onChangeEnd?.call();
+                        if (trackingParameter != null) {
+                          AnalyticsService()
+                              .logCurveSliderChange(trackingParameter, v);
+                        }
+                      }
+                    : null,
               ),
             ),
           ),
@@ -389,7 +395,7 @@ class _SliderControlsState extends State<SliderControls> {
       decoration: BoxDecoration(
         color: const Color(0xFF1E1E2E),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.white.withOpacity(0.1)),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -419,7 +425,7 @@ class _SliderControlsState extends State<SliderControls> {
           Text(
             'Lower = round peak, Higher = flat plateau',
             style: TextStyle(
-              color: Colors.white.withOpacity(0.5),
+              color: Colors.white.withValues(alpha: 0.5),
               fontSize: 10,
             ),
           ),
@@ -446,7 +452,7 @@ class _SliderControlsState extends State<SliderControls> {
       decoration: BoxDecoration(
         color: const Color(0xFF1E1E2E),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.white.withOpacity(0.1)),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -563,7 +569,7 @@ class _SliderControlsState extends State<SliderControls> {
               activeTrackColor: const Color(0xFF1E90FF),
               inactiveTrackColor: Colors.white24,
               thumbColor: Colors.white,
-              overlayColor: const Color(0xFF1E90FF).withOpacity(0.2),
+              overlayColor: const Color(0xFF1E90FF).withValues(alpha: 0.2),
               trackHeight: 4,
               rangeThumbShape: const RoundRangeSliderThumbShape(
                 enabledThumbRadius: 6,

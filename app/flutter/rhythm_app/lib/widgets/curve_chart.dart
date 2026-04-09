@@ -126,7 +126,7 @@ class _CurveChartState extends State<CurveChart>
         solarLines.add(
           VerticalLine(
             x: solar.solarMidnight,
-            color: Colors.blueGrey.withOpacity(0.2),
+            color: Colors.blueGrey.withValues(alpha: 0.2),
             strokeWidth: 1,
             dashArray: [3, 3],
             label: VerticalLineLabel(
@@ -134,7 +134,7 @@ class _CurveChartState extends State<CurveChart>
               alignment: Alignment.topCenter,
               padding: const EdgeInsets.only(top: 4),
               style: TextStyle(
-                color: Colors.blueGrey.withOpacity(0.6),
+                color: Colors.blueGrey.withValues(alpha: 0.6),
                 fontSize: 8,
               ),
               labelResolver: (line) => 'midnight',
@@ -147,14 +147,14 @@ class _CurveChartState extends State<CurveChart>
         solarLines.add(
           VerticalLine(
             x: solar.sunrise!,
-            color: Colors.orange.withOpacity(0.3),
+            color: Colors.orange.withValues(alpha: 0.3),
             strokeWidth: 1,
             label: VerticalLineLabel(
               show: true,
               alignment: Alignment.bottomRight,
               padding: const EdgeInsets.only(bottom: 4, left: 4),
               style: TextStyle(
-                color: Colors.orange.withOpacity(0.7),
+                color: Colors.orange.withValues(alpha: 0.7),
                 fontSize: 8,
               ),
               labelResolver: (line) => 'sunrise ${_formatTime(solar.sunrise!)}',
@@ -167,14 +167,14 @@ class _CurveChartState extends State<CurveChart>
         solarLines.add(
           VerticalLine(
             x: solar.solarNoon,
-            color: Colors.amber.withOpacity(0.4),
+            color: Colors.amber.withValues(alpha: 0.4),
             strokeWidth: 2,
             label: VerticalLineLabel(
               show: true,
               alignment: Alignment.topCenter,
               padding: const EdgeInsets.only(top: 4),
               style: TextStyle(
-                color: Colors.amber.withOpacity(0.9),
+                color: Colors.amber.withValues(alpha: 0.9),
                 fontSize: 8,
                 fontWeight: FontWeight.bold,
               ),
@@ -188,14 +188,14 @@ class _CurveChartState extends State<CurveChart>
         solarLines.add(
           VerticalLine(
             x: solar.sunset!,
-            color: Colors.deepOrange.withOpacity(0.3),
+            color: Colors.deepOrange.withValues(alpha: 0.3),
             strokeWidth: 1,
             label: VerticalLineLabel(
               show: true,
               alignment: Alignment.bottomLeft,
               padding: const EdgeInsets.only(bottom: 4, right: 4),
               style: TextStyle(
-                color: Colors.deepOrange.withOpacity(0.7),
+                color: Colors.deepOrange.withValues(alpha: 0.7),
                 fontSize: 8,
               ),
               labelResolver: (line) => 'sunset ${_formatTime(solar.sunset!)}',
@@ -332,7 +332,7 @@ class _CurveChartState extends State<CurveChart>
     lines.add(
       VerticalLine(
         x: hour,
-        color: color.withOpacity(0.25),
+        color: color.withValues(alpha: 0.25),
         strokeWidth: 1,
         dashArray: [2, 4],
         label: VerticalLineLabel(
@@ -340,7 +340,7 @@ class _CurveChartState extends State<CurveChart>
           alignment: alignment,
           padding: padding,
           style: TextStyle(
-            color: color.withOpacity(0.7),
+            color: color.withValues(alpha: 0.7),
             fontSize: 8,
           ),
           labelResolver: (line) => '$label ${_formatTime(hour)}',
@@ -480,7 +480,7 @@ class _CurveChartState extends State<CurveChart>
                       ),
                       boxShadow: [
                         BoxShadow(
-                          color: const Color(0xFF1E90FF).withOpacity(0.5),
+                          color: const Color(0xFF1E90FF).withValues(alpha: 0.5),
                           blurRadius: 8,
                           spreadRadius: 2,
                         ),
@@ -499,7 +499,7 @@ class _CurveChartState extends State<CurveChart>
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
             decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.7),
+              color: Colors.black.withValues(alpha: 0.7),
               borderRadius: BorderRadius.circular(2),
             ),
             child: Text(
@@ -544,7 +544,7 @@ class _CurveChartState extends State<CurveChart>
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
             decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.8),
+              color: Colors.black.withValues(alpha: 0.8),
               borderRadius: BorderRadius.circular(4),
               border: Border.all(color: Colors.white30),
             ),
@@ -620,7 +620,7 @@ class _CurveChartState extends State<CurveChart>
     for (int i = 0; i <= numSamples; i++) {
       final idx = (i * (n - 1) / numSamples).round().clamp(0, n - 1);
       final color = ColorUtils.curveColorForCCT(kelvinValues[idx]);
-      colors.add(color.withOpacity(opacity));
+      colors.add(color.withValues(alpha: opacity));
       stops.add(i / numSamples);
     }
 
@@ -646,34 +646,6 @@ class _CurveChartState extends State<CurveChart>
     }
 
     return spots;
-  }
-
-  List<FlSpot> _kelvinSpots() {
-    if (widget.data == null) return [];
-
-    // Normalize kelvin to 0-100 range for display
-    final spots = List.generate(widget.data!.hours.length, (i) {
-      final normalized = _kelvinToPercent(widget.data!.kelvin[i].toDouble());
-      return FlSpot(widget.data!.hours[i], normalized);
-    });
-
-    // Add wrap-around point at hour 24
-    if (spots.isNotEmpty && widget.data!.kelvin.isNotEmpty) {
-      final normalized = _kelvinToPercent(widget.data!.kelvin[0].toDouble());
-      spots.add(FlSpot(24, normalized));
-    }
-
-    return spots;
-  }
-
-  double _kelvinToPercent(double kelvin) {
-    if (widget.data == null) return 50;
-    // Find min/max from actual data
-    final minK = widget.data!.kelvin.reduce((a, b) => a < b ? a : b).toDouble();
-    final maxK = widget.data!.kelvin.reduce((a, b) => a > b ? a : b).toDouble();
-    final range = maxK - minK;
-    if (range == 0) return 50;
-    return ((kelvin - minK) / range) * 100;
   }
 
   double _percentToKelvin(double percent) {

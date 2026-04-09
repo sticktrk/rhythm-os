@@ -1,4 +1,3 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/widgets/solar_orbit.dart';
 import 'package:rhythm_core/rhythm_core.dart';
@@ -102,14 +101,12 @@ void main() {
 
     group('callbacks', () {
       testWidgets('onSunTap is provided', (tester) async {
-        bool tapped = false;
-
         await tester.pumpWidget(buildMinimalWidget(
           SolarOrbit(
             curveData: testCurveData,
             selectedHour: 12.0,
             onHourChanged: (_) {},
-            onSunTap: () => tapped = true,
+            onSunTap: () {},
           ),
         ));
         await tester.pump(const Duration(milliseconds: 100));
@@ -119,13 +116,11 @@ void main() {
       });
 
       testWidgets('onHourChanged is required', (tester) async {
-        double? changedHour;
-
         await tester.pumpWidget(buildMinimalWidget(
           SolarOrbit(
             curveData: testCurveData,
             selectedHour: 12.0,
-            onHourChanged: (hour) => changedHour = hour,
+            onHourChanged: (_) {},
           ),
         ));
         await tester.pump(const Duration(milliseconds: 100));

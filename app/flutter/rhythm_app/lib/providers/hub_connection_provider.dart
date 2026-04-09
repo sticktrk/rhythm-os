@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:rhythm_core/rhythm_core.dart';
-import 'package:rhythm_core/providers/hue_provider.dart';
 
 /// Type of hub connection (legacy - for backward compatibility).
 enum HubConnectionType {

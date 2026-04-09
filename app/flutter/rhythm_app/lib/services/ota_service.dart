@@ -17,6 +17,7 @@ enum OtaState {
   upToDate,
   downloading,
   uploading,
+
   /// Bytes sent — waiting for ESP32 to finish writing firmware to flash.
   flashing,
   rebooting,
@@ -109,23 +110,23 @@ class OtaService extends ChangeNotifier {
 
   void _onProgress(sdk.RhythmOtaProgress event) {
     _state = _mapState(event.state);
-    _progress = event.progressPercent ?? _progress;
+    _progress = event.progressPercent;
     _errorMessage = event.errorMessage;
     notifyListeners();
   }
 
   static OtaState _mapState(sdk.RhythmOtaState s) => switch (s) {
-    sdk.RhythmOtaState.idle => OtaState.idle,
-    sdk.RhythmOtaState.checking => OtaState.checking,
-    sdk.RhythmOtaState.available => OtaState.available,
-    sdk.RhythmOtaState.upToDate => OtaState.upToDate,
-    sdk.RhythmOtaState.downloading => OtaState.downloading,
-    sdk.RhythmOtaState.uploading => OtaState.uploading,
-    sdk.RhythmOtaState.flashing => OtaState.flashing,
-    sdk.RhythmOtaState.rebooting => OtaState.rebooting,
-    sdk.RhythmOtaState.complete => OtaState.complete,
-    sdk.RhythmOtaState.error => OtaState.error,
-  };
+        sdk.RhythmOtaState.idle => OtaState.idle,
+        sdk.RhythmOtaState.checking => OtaState.checking,
+        sdk.RhythmOtaState.available => OtaState.available,
+        sdk.RhythmOtaState.upToDate => OtaState.upToDate,
+        sdk.RhythmOtaState.downloading => OtaState.downloading,
+        sdk.RhythmOtaState.uploading => OtaState.uploading,
+        sdk.RhythmOtaState.flashing => OtaState.flashing,
+        sdk.RhythmOtaState.rebooting => OtaState.rebooting,
+        sdk.RhythmOtaState.complete => OtaState.complete,
+        sdk.RhythmOtaState.error => OtaState.error,
+      };
 
   /// Reset to idle state.
   void reset() {

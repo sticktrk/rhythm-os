@@ -1,13 +1,13 @@
-/// Integration tests for room navigation.
-///
-/// Tests the room swipe/page navigation functionality including:
-/// - Adding and displaying rooms
-/// - Swipe gestures between rooms
-/// - Page indicator dots
-/// - Current room display
-///
-/// Note: These tests require a running app with WASM initialized.
-/// For pure unit tests of RoomProvider, see test/providers/room_provider_test.dart
+// Integration tests for room navigation.
+//
+// Tests the room swipe/page navigation functionality including:
+// - Adding and displaying rooms
+// - Swipe gestures between rooms
+// - Page indicator dots
+// - Current room display
+//
+// Note: These tests require a running app with WASM initialized.
+// For pure unit tests of RoomProvider, see test/providers/room_provider_test.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
@@ -31,7 +31,8 @@ void main() {
       roomProvider.dispose();
     });
 
-    testWidgets('RoomProvider starts with no rooms', (WidgetTester tester) async {
+    testWidgets('RoomProvider starts with no rooms',
+        (WidgetTester tester) async {
       await tester.pumpWidget(
         MaterialApp(
           home: ChangeNotifierProvider<RoomProvider>.value(
@@ -51,15 +52,16 @@ void main() {
     });
 
     testWidgets('RoomProvider can add rooms', (WidgetTester tester) async {
-      await roomProvider.addRoom(RoomDto(
+      await roomProvider.addRoom(RoomDto.raw(
         id: 'room_1',
         name: 'Living Room',
         source: RoomSourceDto.hue,
-        areaId: 'area_1',
         deviceIds: [],
         disabled: false,
         rhythmEnabled: false,
-        currentStep: 0,
+        lightsOn: false,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
         curveConfig: null,
       ));
 
@@ -88,27 +90,30 @@ void main() {
       expect(find.text('Current: Living Room'), findsOneWidget);
     });
 
-    testWidgets('setCurrentIndex navigates to room', (WidgetTester tester) async {
-      await roomProvider.addRoom(RoomDto(
+    testWidgets('setCurrentIndex navigates to room',
+        (WidgetTester tester) async {
+      await roomProvider.addRoom(RoomDto.raw(
         id: 'room_1',
         name: 'Living Room',
         source: RoomSourceDto.hue,
-        areaId: 'area_1',
         deviceIds: [],
         disabled: false,
         rhythmEnabled: false,
-        currentStep: 0,
+        lightsOn: false,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
         curveConfig: null,
       ));
-      await roomProvider.addRoom(RoomDto(
+      await roomProvider.addRoom(RoomDto.raw(
         id: 'room_2',
         name: 'Bedroom',
         source: RoomSourceDto.hue,
-        areaId: 'area_2',
         deviceIds: [],
         disabled: false,
         rhythmEnabled: false,
-        currentStep: 0,
+        lightsOn: false,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
         curveConfig: null,
       ));
 
@@ -148,27 +153,30 @@ void main() {
       expect(find.text('Room: Bedroom'), findsOneWidget);
     });
 
-    testWidgets('nextRoom and previousRoom navigate correctly', (WidgetTester tester) async {
-      await roomProvider.addRoom(RoomDto(
+    testWidgets('nextRoom and previousRoom navigate correctly',
+        (WidgetTester tester) async {
+      await roomProvider.addRoom(RoomDto.raw(
         id: 'room_1',
         name: 'Room 1',
         source: RoomSourceDto.hue,
-        areaId: 'area_1',
         deviceIds: [],
         disabled: false,
         rhythmEnabled: false,
-        currentStep: 0,
+        lightsOn: false,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
         curveConfig: null,
       ));
-      await roomProvider.addRoom(RoomDto(
+      await roomProvider.addRoom(RoomDto.raw(
         id: 'room_2',
         name: 'Room 2',
         source: RoomSourceDto.hue,
-        areaId: 'area_2',
         deviceIds: [],
         disabled: false,
         rhythmEnabled: false,
-        currentStep: 0,
+        lightsOn: false,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
         curveConfig: null,
       ));
 

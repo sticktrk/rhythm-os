@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
-import 'package:rhythm_core/providers/hue_provider.dart';
 import '../api/hybrid_client.dart';
 import '../models/config_model.dart';
 import '../services/analytics_service.dart';
@@ -37,7 +36,7 @@ class _MobileDesignerScreenState extends State<MobileDesignerScreen> {
   bool _isLightOn = true;
   int? _manualBrightness;
   bool _isFollowingNow = true; // Auto-follow current time until user drags
-  bool _isEditMode = false; // Polar day editor mode
+  final bool _isEditMode = false; // Polar day editor mode
 
   @override
   void initState() {
@@ -175,18 +174,6 @@ class _MobileDesignerScreenState extends State<MobileDesignerScreen> {
     });
   }
 
-  void _toggleEditMode() {
-    HapticFeedback.mediumImpact();
-    setState(() {
-      _isEditMode = !_isEditMode;
-      // Exit tune mode when entering edit mode
-      if (_isEditMode) {
-        _isTuneMode = false;
-        _tuneParameter = null;
-      }
-    });
-  }
-
   void _onEditConfigChanged(CurveConfigDto newConfig) {
     final configModel = context.read<ConfigModel>();
     configModel.updateConfig(newConfig);
@@ -208,11 +195,14 @@ class _MobileDesignerScreenState extends State<MobileDesignerScreen> {
 
   Future<void> _controlHueLights({required bool turnOn}) async {
     try {
+      final model = context.read<ConfigModel>();
+      final api = context.read<RhythmApi>();
+
       // Get Hue config from HomeProvider
       final homeProvider = context.read<HomeProvider>();
       final hueHub = homeProvider.getFirstHubOfType(HubType.hue);
       if (hueHub == null || !hueHub.hasCredentials) {
-        print('[Orbit] No Hue credentials configured');
+        debugPrint('[Orbit] No Hue credentials configured');
         return;
       }
       final config = HueConfig(
@@ -224,7 +214,7 @@ class _MobileDesignerScreenState extends State<MobileDesignerScreen> {
       final devices = await provider.discoverDevices();
 
       if (devices.isEmpty) {
-        print('[Orbit] No Hue lights found');
+        debugPrint('[Orbit] No Hue lights found');
         return;
       }
 
@@ -232,8 +222,6 @@ class _MobileDesignerScreenState extends State<MobileDesignerScreen> {
       // Always use real current time, not the blue dot position
       final now = DateTime.now();
       final currentHour = now.hour + now.minute / 60.0;
-      final model = context.read<ConfigModel>();
-      final api = context.read<RhythmApi>();
 
       int brightness = 80;
       int kelvin = 4000;
@@ -249,26 +237,29 @@ class _MobileDesignerScreenState extends State<MobileDesignerScreen> {
         }
       }
 
-      print('[Orbit] ${turnOn ? "Turning ON" : "Turning OFF"} ${devices.length} lights (${brightness}%, ${kelvin}K)');
+      debugPrint(
+        '[Orbit] ${turnOn ? "Turning ON" : "Turning OFF"} ${devices.length} lights ($brightness%, ${kelvin}K)',
+      );
       HapticFeedback.mediumImpact();
 
       // Control all lights
       for (final device in devices) {
         try {
           if (turnOn) {
-            await provider.turnOn(device.id, brightness: brightness, kelvin: kelvin);
+            await provider.turnOn(device.id,
+                brightness: brightness, kelvin: kelvin);
           } else {
             await provider.turnOff(device.id);
           }
         } catch (e) {
-          print('[Orbit] Failed to control ${device.name}: $e');
+          debugPrint('[Orbit] Failed to control ${device.name}: $e');
         }
       }
 
       await provider.dispose();
-      print('[Orbit] Done controlling lights');
+      debugPrint('[Orbit] Done controlling lights');
     } catch (e) {
-      print('[Orbit] Hue control error: $e');
+      debugPrint('[Orbit] Hue control error: $e');
     }
   }
 
@@ -319,7 +310,9 @@ class _MobileDesignerScreenState extends State<MobileDesignerScreen> {
         newConfig = config.copyWith(
           shapeP: (config.shapeP + shapeChange).clamp(2.0, 10.0),
         );
-        final shapeLabel = config.shapeP <= 3 ? 'round' : (config.shapeP >= 5 ? 'flat' : 'moderate');
+        final shapeLabel = config.shapeP <= 3
+            ? 'round'
+            : (config.shapeP >= 5 ? 'flat' : 'moderate');
         setState(() => _tuneParameter =
             'Shape: ${newConfig!.shapeP.toStringAsFixed(1)} ($shapeLabel)');
         break;
@@ -333,14 +326,18 @@ class _MobileDesignerScreenState extends State<MobileDesignerScreen> {
           newConfig = config.copyWith(
             widthLeftBri: (config.widthLeftBri + widthChange).clamp(0.2, 2.0),
           );
-          final speedLabel = newConfig.widthLeftBri < 0.7 ? 'slow' : (newConfig.widthLeftBri > 1.3 ? 'fast' : 'normal');
+          final speedLabel = newConfig.widthLeftBri < 0.7
+              ? 'slow'
+              : (newConfig.widthLeftBri > 1.3 ? 'fast' : 'normal');
           setState(() => _tuneParameter =
               'Width: ${newConfig!.widthLeftBri.toStringAsFixed(2)} ($speedLabel)');
         } else {
           newConfig = config.copyWith(
             widthRightBri: (config.widthRightBri + widthChange).clamp(0.2, 2.0),
           );
-          final speedLabel = newConfig.widthRightBri < 0.7 ? 'slow' : (newConfig.widthRightBri > 1.3 ? 'fast' : 'normal');
+          final speedLabel = newConfig.widthRightBri < 0.7
+              ? 'slow'
+              : (newConfig.widthRightBri > 1.3 ? 'fast' : 'normal');
           setState(() => _tuneParameter =
               'Width: ${newConfig!.widthRightBri.toStringAsFixed(2)} ($speedLabel)');
         }
@@ -540,7 +537,8 @@ class _MobileDesignerScreenState extends State<MobileDesignerScreen> {
                                     onHourChanged: _onHourChanged,
                                     onSunTap: _toggleLight,
                                     onBrightnessChanged: _onBrightnessChanged,
-                                    onBrightnessChangeEnd: _onBrightnessChangeEnd,
+                                    onBrightnessChangeEnd:
+                                        _onBrightnessChangeEnd,
                                     onTuneModeRequested: _enterTuneMode,
                                     onTuneGesture: _onTuneGesture,
                                     onTuneGestureEnd: _onTuneGestureEnd,
@@ -577,7 +575,8 @@ class _MobileDesignerScreenState extends State<MobileDesignerScreen> {
                         child: Text(
                           'Drag morning or evening handles to shape transitions',
                           style: TextStyle(
-                            color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+                            color: CelestialColors.textSecondary
+                                .withValues(alpha: 0.6),
                             fontSize: 13,
                             letterSpacing: 0.3,
                           ),
@@ -644,9 +643,8 @@ class _MobileDesignerScreenState extends State<MobileDesignerScreen> {
   }) {
     // Active state uses warm sun color
     final isHighlighted = isPrimary || isActive;
-    final highlightColor = isActive
-        ? CelestialColors.sunWarm
-        : CelestialColors.accentBlue;
+    final highlightColor =
+        isActive ? CelestialColors.sunWarm : CelestialColors.accentBlue;
 
     Widget button = GestureDetector(
       onTap: onTap,
@@ -740,7 +738,8 @@ class _MobileDesignerScreenState extends State<MobileDesignerScreen> {
             GestureDetector(
               onTap: _loadData,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                 decoration: BoxDecoration(
                   color: CelestialColors.accentBlue.withValues(alpha: 0.15),
                   borderRadius: BorderRadius.circular(24),
@@ -815,7 +814,8 @@ class _MobileDesignerScreenState extends State<MobileDesignerScreen> {
                         height: 32,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
-                          color: CelestialColors.accentBlue.withValues(alpha: 0.15),
+                          color: CelestialColors.accentBlue
+                              .withValues(alpha: 0.15),
                         ),
                         child: const Icon(
                           Icons.tune_rounded,
@@ -841,7 +841,8 @@ class _MobileDesignerScreenState extends State<MobileDesignerScreen> {
                             vertical: 4,
                           ),
                           decoration: BoxDecoration(
-                            color: CelestialColors.accentBlue.withValues(alpha: 0.15),
+                            color: CelestialColors.accentBlue
+                                .withValues(alpha: 0.15),
                             borderRadius: BorderRadius.circular(12),
                           ),
                           child: Text(
@@ -859,7 +860,8 @@ class _MobileDesignerScreenState extends State<MobileDesignerScreen> {
                   Text(
                     'Drag vertically to adjust brightness\nPinch to adjust shape (peak flatness)\nDrag horizontally to adjust width (ramp speed)\n\nTap anywhere to exit',
                     style: TextStyle(
-                      color: CelestialColors.textSecondary.withValues(alpha: 0.8),
+                      color:
+                          CelestialColors.textSecondary.withValues(alpha: 0.8),
                       fontSize: 13,
                       height: 1.6,
                     ),

@@ -1,22 +1,24 @@
-/// Firebase to Supabase Migration Script
-///
-/// This script migrates data from Firebase Firestore to Supabase.
-///
-/// Usage:
-///   1. Set environment variables:
-///      export FIREBASE_PROJECT_ID=your-firebase-project
-///      export SUPABASE_URL=https://xxx.supabase.co
-///      export SUPABASE_SERVICE_KEY=your-service-role-key  # NOT anon key!
-///
-///   2. Run with Firebase credentials:
-///      dart run scripts/migrate_firebase_to_supabase.dart
-///
-/// Requirements:
-///   - Firebase Admin SDK service account JSON
-///   - Supabase service role key (has full database access)
-///
-/// Note: This is a one-time migration script. Run it once, verify data,
-/// then delete Firebase resources.
+// ignore_for_file: avoid_print
+
+// Firebase to Supabase Migration Script
+//
+// This script migrates data from Firebase Firestore to Supabase.
+//
+// Usage:
+//   1. Set environment variables:
+//      export FIREBASE_PROJECT_ID=your-firebase-project
+//      export SUPABASE_URL=https://xxx.supabase.co
+//      export SUPABASE_SERVICE_KEY=your-service-role-key  # NOT anon key!
+//
+//   2. Run with Firebase credentials:
+//      dart run scripts/migrate_firebase_to_supabase.dart
+//
+// Requirements:
+//   - Firebase Admin SDK service account JSON
+//   - Supabase service role key (has full database access)
+//
+// Note: This is a one-time migration script. Run it once, verify data,
+// then delete Firebase resources.
 
 import 'dart:convert';
 import 'dart:io';
@@ -58,6 +60,16 @@ class MigrationConfig {
       firebaseCredentialsPath: credPath,
     );
   }
+}
+
+class HttpPostResponse {
+  final int statusCode;
+  final String body;
+
+  const HttpPostResponse({
+    required this.statusCode,
+    required this.body,
+  });
 }
 
 /// Main migration function
@@ -181,7 +193,9 @@ Map<String, dynamic> parseFirestoreDocument(Map<String, dynamic> doc) {
 /// Parse Firestore value types
 dynamic parseFirestoreValue(Map<String, dynamic> value) {
   if (value.containsKey('stringValue')) return value['stringValue'];
-  if (value.containsKey('integerValue')) return int.parse(value['integerValue']);
+  if (value.containsKey('integerValue')) {
+    return int.parse(value['integerValue']);
+  }
   if (value.containsKey('doubleValue')) return value['doubleValue'];
   if (value.containsKey('booleanValue')) return value['booleanValue'];
   if (value.containsKey('timestampValue')) return value['timestampValue'];
@@ -212,15 +226,18 @@ Map<String, List<Map<String, dynamic>>> transformData(
       'owner_id': home['ownerId'],
       'member_ids': home['memberIds'] ?? [home['ownerId']],
       'location': home['location'],
-      'sleep_schedule': home['sleepSchedule'] ?? {
-        'bedtime': 22.0,
-        'wakeTime': 6.5,
-        'enabled': true,
-      },
+      'sleep_schedule': home['sleepSchedule'] ??
+          {
+            'bedtime': 22.0,
+            'wakeTime': 6.5,
+            'enabled': true,
+          },
       'curve_config': home['curveConfig'],
       'timezone': home['timezone'],
-      'created_at': home['createdAt'] ?? DateTime.now().toUtc().toIso8601String(),
-      'updated_at': home['updatedAt'] ?? DateTime.now().toUtc().toIso8601String(),
+      'created_at':
+          home['createdAt'] ?? DateTime.now().toUtc().toIso8601String(),
+      'updated_at':
+          home['updatedAt'] ?? DateTime.now().toUtc().toIso8601String(),
     });
   }
 
@@ -235,8 +252,10 @@ Map<String, List<Map<String, dynamic>>> transformData(
       'enabled': hub['enabled'] ?? true,
       'token': hub['token'],
       'last_connected': hub['lastConnected'],
-      'created_at': hub['createdAt'] ?? DateTime.now().toUtc().toIso8601String(),
-      'updated_at': hub['updatedAt'] ?? DateTime.now().toUtc().toIso8601String(),
+      'created_at':
+          hub['createdAt'] ?? DateTime.now().toUtc().toIso8601String(),
+      'updated_at':
+          hub['updatedAt'] ?? DateTime.now().toUtc().toIso8601String(),
     });
   }
 
@@ -304,14 +323,24 @@ Future<Map<String, dynamic>> httpGet(String url, String token) async {
 }
 
 /// HTTP POST request
-Future<HttpClientResponse> httpPost(
+Future<HttpPostResponse> httpPost(
   String url,
   Map<String, String> headers,
   dynamic body,
 ) async {
   final client = HttpClient();
-  final request = await client.postUrl(Uri.parse(url));
-  headers.forEach((k, v) => request.headers.set(k, v));
-  request.write(json.encode(body));
-  return request.close();
+  try {
+    final request = await client.postUrl(Uri.parse(url));
+    headers.forEach((k, v) => request.headers.set(k, v));
+    request.write(json.encode(body));
+
+    final response = await request.close();
+    final responseBody = await response.transform(utf8.decoder).join();
+    return HttpPostResponse(
+      statusCode: response.statusCode,
+      body: responseBody,
+    );
+  } finally {
+    client.close();
+  }
 }

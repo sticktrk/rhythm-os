@@ -43,7 +43,7 @@ class ServerSyncProvider extends ChangeNotifier {
 
   StreamSubscription<RhythmHello>? _helloSub;
   StreamSubscription<RhythmRoomState>? _rhythmStateSub;
-  StreamSubscription<String>? _hubEventSub;
+  StreamSubscription<({String event, String? hubType})>? _hubEventSub;
   StreamSubscription<RoomSourceDto>? _sourceChangedSub;
   StreamSubscription<RhythmMotionTimer>? _motionTimerSub;
   StreamSubscription<void>? _newRoomsSub;
@@ -70,6 +70,9 @@ class ServerSyncProvider extends ChangeNotifier {
   /// All hub infos from the last server hello: [{type, address, connected}, ...].
   List<Map<String, dynamic>> _lastHubInfos = [];
 
+  /// Cooldown: last time a hub-connected event triggered a re-hello.
+  DateTime? _lastHubReconnectTime;
+
   /// Cached rooms from the last RhythmHello (includes typed devices from registry).
   List<RhythmRoom> _helloRooms = [];
 
@@ -92,11 +95,11 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Whether power-save mode is active on the server.
   bool _powerSave = false;
 
-  /// Active curve module ID from the server (e.g. "rhythm", "sleep").
-  String? _activeCurveModule;
+  /// Active global mode from the server (`day` / `sleep`).
+  RhythmMode? _activeMode;
 
-  /// Available curve modules reported by the server.
-  List<CurveModule> _availableCurveModules = [];
+  /// Active resolved profile ID from `/api/state.active_profile`.
+  String? _activeProfileId;
 
   /// Rhythm update interval in seconds from server settings.
   int _rhythmIntervalSecs = 60;
@@ -137,14 +140,14 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Whether power-save mode is active on the server.
   bool get powerSave => _powerSave;
 
-  /// Whether sleep mode is active on the server (derived from active curve module).
-  bool get sleepMode => _activeCurveModule == 'sleep';
+  /// Whether sleep mode is active on the server.
+  bool get sleepMode => _activeMode == RhythmMode.sleep;
 
-  /// Active curve module ID (e.g. "rhythm", "sleep").
-  String? get activeCurveModule => _activeCurveModule;
+  /// Active global mode.
+  RhythmMode? get activeMode => _activeMode;
 
-  /// Available curve modules reported by the server.
-  List<CurveModule> get availableCurveModules => _availableCurveModules;
+  /// Active resolved profile ID for display/edit sync.
+  String? get activeProfileId => _activeProfileId;
 
   /// Rhythm update interval in seconds.
   int get rhythmIntervalSecs => _rhythmIntervalSecs;
@@ -187,6 +190,21 @@ class ServerSyncProvider extends ChangeNotifier {
       .where((h) => h['type'] != null && h['type'] != 'none')
       .map((h) => h['type'] as String)
       .toSet();
+
+  /// Whether a room's hub is currently connected on the server.
+  bool isRoomHubConnected(RoomSourceDto source) {
+    final hubType = switch (source) {
+      RoomSourceDto.hue => 'hue',
+      RoomSourceDto.homeAssistant => 'homeassistant',
+      RoomSourceDto.esp32 => 'esp32',
+      _ => null,
+    };
+    // If we don't know the hub type, or have no hub info yet, assume connected.
+    if (hubType == null || _lastHubInfos.isEmpty) return true;
+    // If this hub type isn't even configured, assume connected (local-only).
+    if (!configuredHubTypes.contains(hubType)) return true;
+    return connectedHubTypes.contains(hubType);
+  }
 
   /// Whether the server needs a location (has a Hue hub and runs as HA addon).
   bool get serverNeedsLocation {
@@ -383,7 +401,7 @@ class ServerSyncProvider extends ChangeNotifier {
     debugPrint('ServerSync: Server location: ${hello.location}');
     for (final r in hello.rooms) {
       debugPrint(
-          'ServerSync: Server room "${r.name}" rhythm=${r.rhythmEnabled} offset=${r.timeOffset} softOff=${r.softOff}');
+          'ServerSync: Server room "${r.name}" rhythm=${r.rhythmEnabled} offset=${r.timeOffset} state=${r.state.wireValue}');
     }
     _firmwareVersion = hello.version;
     _serverPlatformType = hello.platformType;
@@ -396,10 +414,10 @@ class ServerSyncProvider extends ChangeNotifier {
         debugPrint('ServerSync: Failed to parse active profile config: $e');
       }
     }
-    activeProfileConfig ??= hello.settings?.activeProfileConfig;
     _powerSave = hello.settings?.powerSave ?? false;
-    _activeCurveModule = hello.settings?.activeCurveModule;
-    _availableCurveModules = hello.settings?.availableCurveModules ?? [];
+    _activeMode = hello.mode?.active;
+    _activeProfileId = hello.activeProfile['id'] as String? ??
+        hello.mode?.activeConfig?.activeProfileId;
     _rhythmIntervalSecs = activeProfileConfig?.rhythmIntervalSecs ?? 60;
     _effectiveFadeMs = activeProfileConfig?.fadeMs ?? hello.effectiveFadeMs;
     _effectiveMotionTimeoutSecs = activeProfileConfig?.motionTimeoutSecs ??
@@ -538,7 +556,7 @@ class ServerSyncProvider extends ChangeNotifier {
     }
 
     // Apply runtime state from server atomically (rhythmEnabled, timeOffset,
-    // brightnessOffset, softOff) — single save + notify per room.
+    // brightnessOffset, room state) — single save + notify per room.
     _receivingFromServer = true;
     try {
       for (final sr in validRooms) {
@@ -548,7 +566,7 @@ class ServerSyncProvider extends ChangeNotifier {
             rhythmEnabled: sr.rhythmEnabled,
             timeOffset: sr.timeOffset,
             brightnessOffset: sr.brightnessOffset,
-            softOff: sr.softOff,
+            state: sr.state,
             lightsOn: sr.lightsOn,
             brightness: sr.brightness,
             kelvin: sr.kelvin,
@@ -586,7 +604,8 @@ class ServerSyncProvider extends ChangeNotifier {
         rhythmEnabled: state.rhythmEnabled,
         timeOffset: state.timeOffset,
         brightnessOffset: state.brightnessOffset,
-        softOff: state.softOff,
+        state: state.state,
+        mode: state.mode,
         lightsOn: state.lightsOn,
         brightness: state.brightness,
         kelvin: state.kelvin,
@@ -633,19 +652,37 @@ class ServerSyncProvider extends ChangeNotifier {
   ///
   /// When a hub connects, trigger a re-hello to pick up newly discovered
   /// rooms. When a hub disconnects, just update the UI.
-  void _onHubEvent(String event) {
-    debugPrint('ServerSync: hub_status=$event');
-    // Update the primary hub's connected state for backward compat.
-    if (_lastHubInfos.isNotEmpty) {
+  void _onHubEvent(({String event, String? hubType}) hubEvent) {
+    final (:event, :hubType) = hubEvent;
+    debugPrint('ServerSync: hub_status=$event hub=$hubType');
+    // Update the specific hub's connected state in _lastHubInfos.
+    // If hubType is null (legacy/aggregate event), ignore it — the hello
+    // provides authoritative per-hub status and we can't safely guess
+    // which hub this event refers to.
+    if (_lastHubInfos.isNotEmpty && hubType != null) {
       _lastHubInfos = [
-        {..._lastHubInfos.first, 'connected': event == 'connected'},
-        ..._lastHubInfos.skip(1),
+        for (final h in _lastHubInfos)
+          if (h['type'] == hubType)
+            {...h, 'connected': event == 'connected'}
+          else
+            h,
       ];
+      notifyListeners();
     }
-    notifyListeners();
 
     // A hub just connected — re-fetch full state to pick up new rooms.
+    // Guard against rapid re-entry: if we already triggered a re-hello
+    // within the last 5 seconds, skip — the previous hello will have
+    // picked up the new state.
     if (event == 'connected') {
+      final now = DateTime.now();
+      if (_lastHubReconnectTime != null &&
+          now.difference(_lastHubReconnectTime!).inSeconds < 5) {
+        debugPrint(
+            'ServerSync: Hub connected — skipping re-hello (cooldown)');
+        return;
+      }
+      _lastHubReconnectTime = now;
       debugPrint(
           'ServerSync: Hub connected — triggering re-hello for room sync');
       _connection.reconnect();
@@ -690,8 +727,8 @@ class ServerSyncProvider extends ChangeNotifier {
       _serverPlatformType = 'desktop';
       _serverPlatformContext = 'server';
       _powerSave = false;
-      _activeCurveModule = null;
-      _availableCurveModules = [];
+      _activeMode = null;
+      _activeProfileId = null;
       _helloRooms = [];
       _lastHubInfos = [];
       _rhythmIntervalSecs = 60;
@@ -750,7 +787,7 @@ class ServerSyncProvider extends ChangeNotifier {
         rhythmEnabled: _roomProvider.getRoom(roomId)?.rhythmEnabled ?? true,
         timeOffset: 0,
         brightnessOffset: 0,
-        softOff: false,
+        state: RoomModeState.active,
         lightsOn: true,
         brightness: brightness,
         kelvin: _roomProvider.getKelvin(roomId),
@@ -764,16 +801,16 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Push room preferences to the server (user-state only, no topology).
   void pushRoomPreferences(String roomId,
-      {bool? rhythmEnabled, bool? disabled, bool? softOff}) {
+      {bool? rhythmEnabled, bool? disabled, RoomModeState? state}) {
     if (HueServiceLocator.isDemoMode) return; // optimistic UI already applied
     if (!_connection.connected || _receivingFromServer) return;
     debugPrint(
-        'ServerSync: pushRoomPreferences $roomId rhythmEnabled=$rhythmEnabled disabled=$disabled softOff=$softOff');
+        'ServerSync: pushRoomPreferences $roomId rhythmEnabled=$rhythmEnabled disabled=$disabled state=${state?.wireValue}');
     _connection.api.roomPreferencesSet(
       roomId: roomId,
       rhythmEnabled: rhythmEnabled,
       disabled: disabled,
-      softOff: softOff,
+      state: state,
     );
   }
 
@@ -796,7 +833,7 @@ class ServerSyncProvider extends ChangeNotifier {
         rhythmEnabled: _roomProvider.getRoom(roomId)?.rhythmEnabled ?? true,
         timeOffset: 0,
         brightnessOffset: 0,
-        softOff: false,
+        state: RoomModeState.active,
         lightsOn: true,
         brightness: 75,
         kelvin: _roomProvider.getKelvin(roomId) ?? 3200,
@@ -826,7 +863,7 @@ class ServerSyncProvider extends ChangeNotifier {
             rhythmEnabled: true,
             timeOffset: 0,
             brightnessOffset: 0,
-            softOff: false,
+            state: RoomModeState.active,
             lightsOn: true,
             brightness: 75,
             kelvin: 3200,
@@ -847,24 +884,23 @@ class ServerSyncProvider extends ChangeNotifier {
     return states;
   }
 
-  /// Set the active curve module on the server.
-  Future<void> dispatchSetCurveModule(String id) async {
-    if (id == 'idle') return;
+  /// Set the active global mode on the server.
+  Future<void> dispatchSetActiveMode(RhythmMode mode) async {
     if (!_connection.connected) return;
-    _activeCurveModule = id;
+    _activeMode = mode;
     notifyListeners();
-    await _connection.api.setCurveModule(id);
+    await _connection.api.setActiveMode(mode);
     await fullRefresh();
   }
 
   /// Activate sleep mode on the server.
   Future<void> dispatchSleep() async {
-    await dispatchSetCurveModule('sleep');
+    await dispatchSetActiveMode(RhythmMode.sleep);
   }
 
   /// Deactivate sleep mode (wake) on the server.
   Future<void> dispatchWake() async {
-    await dispatchSetCurveModule('rhythm');
+    await dispatchSetActiveMode(RhythmMode.day);
   }
 
   /// Trigger server-side room discovery from the connected hub.

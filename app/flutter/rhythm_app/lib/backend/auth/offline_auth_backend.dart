@@ -27,7 +27,7 @@ class OfflineAuthBackend implements AuthBackend {
     _authController.close();
   }
 
-  @override
+  // This backend is always ready after construction.
   bool get isInitialized => true;
 
   @override
@@ -70,12 +70,14 @@ class OfflineAuthBackend implements AuthBackend {
   }
 
   @override
-  Future<AuthUser?> signInWithEmailPassword(String email, String password) async {
+  Future<AuthUser?> signInWithEmailPassword(
+      String email, String password) async {
     throw UnsupportedError('Email sign-in requires an online connection');
   }
 
   @override
-  Future<AuthUser?> createAccountWithEmailPassword(String email, String password) async {
+  Future<AuthUser?> createAccountWithEmailPassword(
+      String email, String password) async {
     throw UnsupportedError('Account creation requires an online connection');
   }
 

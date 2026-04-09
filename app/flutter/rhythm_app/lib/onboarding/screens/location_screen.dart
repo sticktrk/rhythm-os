@@ -92,7 +92,8 @@ class _LocationScreenState extends State<LocationScreen>
     setState(() => _isSearching = true);
 
     _debounceTimer = Timer(const Duration(milliseconds: 300), () async {
-      final results = await _geocodingService.searchPlaces(_searchController.text);
+      final results =
+          await _geocodingService.searchPlaces(_searchController.text);
       if (mounted) {
         setState(() {
           _searchResults = results;
@@ -103,6 +104,7 @@ class _LocationScreenState extends State<LocationScreen>
   }
 
   Future<void> _selectPlace(PlaceResult place) async {
+    final onboardingProvider = context.read<OnboardingProvider>();
     _searchFocusNode.unfocus();
     _searchController.clear();
     setState(() {
@@ -113,7 +115,8 @@ class _LocationScreenState extends State<LocationScreen>
     _successController.forward(from: 0);
 
     final timezone = (await FlutterTimezone.getLocalTimezone()).identifier;
-    context.read<OnboardingProvider>().setLocation(
+    if (!mounted) return;
+    onboardingProvider.setLocation(
       place.latitude,
       place.longitude,
       timezone,
@@ -125,6 +128,7 @@ class _LocationScreenState extends State<LocationScreen>
   }
 
   Future<void> _useCurrentLocation() async {
+    final onboardingProvider = context.read<OnboardingProvider>();
     setState(() {
       _isLoadingGps = true;
       _errorMessage = null;
@@ -134,7 +138,8 @@ class _LocationScreenState extends State<LocationScreen>
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
         setState(() {
-          _errorMessage = 'Location services are disabled. Please enable them in settings.';
+          _errorMessage =
+              'Location services are disabled. Please enable them in settings.';
           _isLoadingGps = false;
         });
         return;
@@ -154,14 +159,17 @@ class _LocationScreenState extends State<LocationScreen>
 
       if (permission == LocationPermission.deniedForever) {
         setState(() {
-          _errorMessage = 'Location permission permanently denied. Please enable in Settings.';
+          _errorMessage =
+              'Location permission permanently denied. Please enable in Settings.';
           _isLoadingGps = false;
         });
         return;
       }
 
       final position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.low,
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.low,
+        ),
       );
 
       // Try to reverse geocode for city name
@@ -175,29 +183,29 @@ class _LocationScreenState extends State<LocationScreen>
       }
 
       final timezone = (await FlutterTimezone.getLocalTimezone()).identifier;
+      if (!mounted) return;
 
-      if (mounted) {
-        setState(() {
-          _isLoadingGps = false;
-          _confirmedLocation = PlaceResult(
-            city: locationName ?? 'Current Location',
-            latitude: position.latitude,
-            longitude: position.longitude,
-          );
-        });
-        _successController.forward(from: 0);
-
-        context.read<OnboardingProvider>().setLocation(
-          position.latitude,
-          position.longitude,
-          timezone,
-          locationName ?? 'Current Location',
+      setState(() {
+        _isLoadingGps = false;
+        _confirmedLocation = PlaceResult(
+          city: locationName ?? 'Current Location',
+          latitude: position.latitude,
+          longitude: position.longitude,
         );
+      });
+      _successController.forward(from: 0);
 
-        // Track location method
-        AnalyticsService().logOnboardingLocationMethod('gps');
-      }
+      onboardingProvider.setLocation(
+        position.latitude,
+        position.longitude,
+        timezone,
+        locationName ?? 'Current Location',
+      );
+
+      // Track location method
+      AnalyticsService().logOnboardingLocationMethod('gps');
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _errorMessage = 'Failed to get location. Please try again.';
         _isLoadingGps = false;
@@ -209,7 +217,9 @@ class _LocationScreenState extends State<LocationScreen>
     if (widget.onComplete != null) {
       // This is the final screen (login disabled) - save preferences and complete
       final onboardingProvider = context.read<OnboardingProvider>();
-      await context.read<AuthProvider>().savePreferences(onboardingProvider.preferences);
+      await context
+          .read<AuthProvider>()
+          .savePreferences(onboardingProvider.preferences);
       widget.onComplete!();
     } else {
       // Continue to account screen
@@ -290,8 +300,10 @@ class _LocationScreenState extends State<LocationScreen>
                   shape: BoxShape.circle,
                   gradient: RadialGradient(
                     colors: [
-                      OnboardingColors.sunWarm.withValues(alpha: _pulseAnimation.value),
-                      OnboardingColors.sunWarm.withValues(alpha: _pulseAnimation.value * 0.3),
+                      OnboardingColors.sunWarm
+                          .withValues(alpha: _pulseAnimation.value),
+                      OnboardingColors.sunWarm
+                          .withValues(alpha: _pulseAnimation.value * 0.3),
                       Colors.transparent,
                     ],
                   ),
@@ -571,110 +583,116 @@ class _CitySearchSheetState extends State<_CitySearchSheet> {
             const Text(
               'Search City',
               style: TextStyle(
-              color: OnboardingColors.textPrimary,
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 20),
-          // Search field
-          Container(
-            decoration: BoxDecoration(
-              color: OnboardingColors.backgroundDark,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(
-                color: OnboardingColors.orbitRing.withValues(alpha: 0.5),
-                width: 1.5,
-              ),
-            ),
-            child: TextField(
-              controller: widget.searchController,
-              focusNode: widget.searchFocusNode,
-              style: const TextStyle(
                 color: OnboardingColors.textPrimary,
-                fontSize: 16,
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
               ),
-              decoration: InputDecoration(
-                hintText: 'Enter city name...',
-                hintStyle: TextStyle(
-                  color: OnboardingColors.textSecondary.withValues(alpha: 0.6),
+            ),
+            const SizedBox(height: 20),
+            // Search field
+            Container(
+              decoration: BoxDecoration(
+                color: OnboardingColors.backgroundDark,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: OnboardingColors.orbitRing.withValues(alpha: 0.5),
+                  width: 1.5,
+                ),
+              ),
+              child: TextField(
+                controller: widget.searchController,
+                focusNode: widget.searchFocusNode,
+                style: const TextStyle(
+                  color: OnboardingColors.textPrimary,
                   fontSize: 16,
                 ),
-                prefixIcon: Icon(
-                  Icons.search_rounded,
-                  color: OnboardingColors.textSecondary.withValues(alpha: 0.6),
+                decoration: InputDecoration(
+                  hintText: 'Enter city name...',
+                  hintStyle: TextStyle(
+                    color:
+                        OnboardingColors.textSecondary.withValues(alpha: 0.6),
+                    fontSize: 16,
+                  ),
+                  prefixIcon: Icon(
+                    Icons.search_rounded,
+                    color:
+                        OnboardingColors.textSecondary.withValues(alpha: 0.6),
+                  ),
+                  suffixIcon: widget.searchController.text.isNotEmpty
+                      ? IconButton(
+                          icon: Icon(
+                            Icons.clear_rounded,
+                            color: OnboardingColors.textSecondary
+                                .withValues(alpha: 0.6),
+                          ),
+                          onPressed: widget.onClearSearch,
+                        )
+                      : null,
+                  border: InputBorder.none,
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 16,
+                  ),
                 ),
-                suffixIcon: widget.searchController.text.isNotEmpty
-                    ? IconButton(
-                        icon: Icon(
-                          Icons.clear_rounded,
-                          color: OnboardingColors.textSecondary.withValues(alpha: 0.6),
+              ),
+            ),
+            const SizedBox(height: 16),
+            // Results
+            if (widget.searchResults.isNotEmpty)
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 250),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: widget.searchResults.length,
+                  itemBuilder: (context, index) {
+                    final place = widget.searchResults[index];
+                    return ListTile(
+                      leading: Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color:
+                              OnboardingColors.sunWarm.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(10),
                         ),
-                        onPressed: widget.onClearSearch,
-                      )
-                    : null,
-                border: InputBorder.none,
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 16,
+                        child: const Icon(
+                          Icons.location_city_rounded,
+                          color: OnboardingColors.sunWarm,
+                          size: 20,
+                        ),
+                      ),
+                      title: Text(
+                        place.shortName,
+                        style: const TextStyle(
+                          color: OnboardingColors.textPrimary,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      trailing: Icon(
+                        Icons.arrow_forward_ios_rounded,
+                        color: OnboardingColors.textSecondary
+                            .withValues(alpha: 0.4),
+                        size: 16,
+                      ),
+                      onTap: () => widget.onSelectPlace(place),
+                    );
+                  },
+                ),
+              )
+            else if (widget.searchController.text.length >= 2)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 24),
+                child: Text(
+                  'No cities found',
+                  style: TextStyle(
+                    color:
+                        OnboardingColors.textSecondary.withValues(alpha: 0.6),
+                    fontSize: 14,
+                  ),
                 ),
               ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          // Results
-          if (widget.searchResults.isNotEmpty)
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 250),
-              child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: widget.searchResults.length,
-                itemBuilder: (context, index) {
-                  final place = widget.searchResults[index];
-                  return ListTile(
-                    leading: Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: OnboardingColors.sunWarm.withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: const Icon(
-                        Icons.location_city_rounded,
-                        color: OnboardingColors.sunWarm,
-                        size: 20,
-                      ),
-                    ),
-                    title: Text(
-                      place.shortName,
-                      style: const TextStyle(
-                        color: OnboardingColors.textPrimary,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    trailing: Icon(
-                      Icons.arrow_forward_ios_rounded,
-                      color: OnboardingColors.textSecondary.withValues(alpha: 0.4),
-                      size: 16,
-                    ),
-                    onTap: () => widget.onSelectPlace(place),
-                  );
-                },
-              ),
-            )
-          else if (widget.searchController.text.length >= 2)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 24),
-              child: Text(
-                'No cities found',
-                style: TextStyle(
-                  color: OnboardingColors.textSecondary.withValues(alpha: 0.6),
-                  fontSize: 14,
-                ),
-              ),
-            ),
-          const SizedBox(height: 8),
-        ],
+            const SizedBox(height: 8),
+          ],
         ),
       ),
     );

@@ -15,7 +15,7 @@ import '../models/config_model.dart';
 import '../providers/home_provider.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmRoom;
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmRoom, RoomModeState;
 import '../services/settings_service.dart';
 
 // =============================================================================
@@ -165,11 +165,11 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
                   id: r.id,
                   name: r.name,
                   groupedLightId: '',
+                  state: RoomModeState.active,
                   rhythmEnabled: r.rhythmEnabled,
                   disabled: r.disabled,
                   timeOffset: r.timeOffsetMinutes,
                   brightnessOffset: r.brightnessOffset,
-                  softOff: false,
                   deviceIds: r.deviceIds,
                 ))
             .toList();
@@ -188,12 +188,14 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
       // Build light info from device_ids.
       // device_ids contains all devices; typed devices are buttons/motion only.
       // The difference is the light count.
-      final roomDataList = <({String id, String name, List<_LightInfo> lights})>[];
+      final roomDataList =
+          <({String id, String name, List<_LightInfo> lights})>[];
       for (final room in serverRooms) {
         final lightCount = room.lightCount > 0 ? room.lightCount : 1;
         // Extract light device IDs: everything in deviceIds that isn't a typed device
         final typedIds = room.devices.map((d) => d.id).toSet();
-        final lightIds = room.deviceIds.where((id) => !typedIds.contains(id)).toList();
+        final lightIds =
+            room.deviceIds.where((id) => !typedIds.contains(id)).toList();
         final lights = <_LightInfo>[];
         for (int i = 0; i < lightCount; i++) {
           lights.add(_LightInfo(
@@ -230,7 +232,8 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
   }
 
   _PowerUsageData _calculatePower({
-    required List<({String id, String name, List<_LightInfo> lights})> roomDataList,
+    required List<({String id, String name, List<_LightInfo> lights})>
+        roomDataList,
     required CurveConfigDto curveConfig,
     required double latitude,
     required double longitude,
@@ -255,8 +258,7 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
     var totalLights = 0;
 
     for (final room in roomDataList) {
-      final roomWatts =
-          room.lights.fold(0.0, (s, l) => s + l.estimatedWatts);
+      final roomWatts = room.lights.fold(0.0, (s, l) => s + l.estimatedWatts);
       totalWattsAtPeak += roomWatts;
       totalLights += room.lights.length;
 
@@ -284,12 +286,10 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
     final hourlyHours = <double>[];
     for (int i = 0; i < curveData.hours.length; i++) {
       hourlyHours.add(curveData.hours[i]);
-      hourlyWatts
-          .add((curveData.brightness[i] / 100.0) * totalWattsAtPeak);
+      hourlyWatts.add((curveData.brightness[i] / 100.0) * totalWattsAtPeak);
     }
 
-    final totalDailyKwh =
-        roomPowerList.fold(0.0, (s, r) => s + r.dailyKwh);
+    final totalDailyKwh = roomPowerList.fold(0.0, (s, r) => s + r.dailyKwh);
 
     return _PowerUsageData(
       rooms: roomPowerList,
@@ -408,8 +408,7 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
-                  Icons.bolt, color: _P.warm.withValues(alpha: 0.5), size: 48),
+              Icon(Icons.bolt, color: _P.warm.withValues(alpha: 0.5), size: 48),
               const SizedBox(height: 16),
               Text(
                 _error!,
@@ -505,7 +504,7 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
                 ),
                 const SizedBox(height: 3),
                 Text(
-                  'Disables all idle lighting functionality',
+                  'Disables all standby lighting functionality',
                   style: TextStyle(
                     color: _P.textSecondary.withValues(alpha: 0.7),
                     fontSize: 12,
@@ -745,9 +744,8 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
   }
 
   Widget _buildRoomCard(_RoomPowerData room) {
-    final fraction = _data!.totalDailyKwh > 0
-        ? room.dailyKwh / _data!.totalDailyKwh
-        : 0.0;
+    final fraction =
+        _data!.totalDailyKwh > 0 ? room.dailyKwh / _data!.totalDailyKwh : 0.0;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 8),

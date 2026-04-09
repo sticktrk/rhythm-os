@@ -8,6 +8,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmMode, RoomModeState;
 import '../services/analytics_service.dart';
 import '../services/settings_service.dart';
 
@@ -137,19 +138,18 @@ class RoomProvider extends ChangeNotifier {
   /// flicker the UI back.
   final Map<String, DateTime> _lightsOnLockedUntil = {};
 
-  /// Per-room lock timestamps to suppress stale external soft_off overrides.
+  /// Per-room lock timestamps to suppress stale external room-state overrides.
   ///
-  /// Same pattern as [_lightsOnLockedUntil] — when the user toggles idle mode
-  /// locally, the room is locked for 3s so that a stale periodic tick SSE event
-  /// (still carrying the old soft_off value) doesn't immediately flip the UI.
-  final Map<String, DateTime> _softOffLockedUntil = {};
+  /// Same pattern as [_lightsOnLockedUntil] — when the user toggles idle or
+  /// hard-off locally, the room is locked for 3s so stale server state does
+  /// not immediately flip the UI back.
+  final Map<String, DateTime> _roomStateLockedUntil = {};
 
-  /// Per-room idle (soft-off) state. Tracked in Dart only — not in RoomDto.
-  ///
-  /// When idle, lights stay physically on at a very low brightness (soft-off)
-  /// with rhythm disabled. This allows the lights to maintain color temperature
-  /// readiness while appearing nearly off.
-  final Map<String, bool> _roomIdleState = {};
+  /// Per-room mode state from the server, tracked separately from RoomDto.
+  final Map<String, RoomModeState> _roomStates = {};
+
+  /// Per-room live mode from SSE (`day` / `sleep`).
+  final Map<String, RhythmMode> _roomModes = {};
 
   /// Per-room brightness from server (effective brightness after offsets).
   final Map<String, int> _roomBrightness = {};
@@ -171,23 +171,28 @@ class RoomProvider extends ChangeNotifier {
   Stream<RoomSourceDto> get onSourceRoomsChanged =>
       _sourceChangedController.stream;
 
-  // Idle state getters
-  /// Whether a room is in idle (soft-off) mode.
-  bool isRoomIdle(String roomId) => _roomIdleState[roomId] ?? false;
+  /// Effective room state, falling back to lights-on state before server sync.
+  RoomModeState getRoomState(String roomId) {
+    final state = _roomStates[roomId];
+    if (state != null) return state;
+    final room = getRoom(roomId);
+    if (room == null) return RoomModeState.active;
+    return room.lightsOn ? RoomModeState.active : RoomModeState.hardOff;
+  }
 
-  /// Set idle state for a room (local UI toggle).
-  ///
-  /// Locks the room for 3s to prevent stale SSE events from overwriting
-  /// the optimistic value before the server has processed the preference.
-  void setRoomIdle(String roomId, bool idle) {
-    final wasIdle = _roomIdleState[roomId] ?? false;
-    if (wasIdle == idle) return;
-    _softOffLockedUntil[roomId] = DateTime.now().add(const Duration(seconds: 3));
-    if (idle) {
-      _roomIdleState[roomId] = true;
-    } else {
-      _roomIdleState.remove(roomId);
-    }
+  /// Whether a room is in idle mode.
+  bool isRoomIdle(String roomId) => getRoomState(roomId) == RoomModeState.idle;
+
+  /// Latest live mode for a room from SSE, when available.
+  RhythmMode? getRoomMode(String roomId) => _roomModes[roomId];
+
+  /// Set room state locally with a 3s optimistic lock.
+  void setRoomStateLocal(String roomId, RoomModeState state) {
+    final previous = getRoomState(roomId);
+    if (previous == state) return;
+    _roomStateLockedUntil[roomId] =
+        DateTime.now().add(const Duration(seconds: 3));
+    _roomStates[roomId] = state;
     notifyListeners();
   }
 
@@ -300,7 +305,8 @@ class RoomProvider extends ChangeNotifier {
   ///
   /// Removes all existing rooms from this source first, then adds the new ones.
   /// This ensures a clean sync without duplicates.
-  Future<void> addRoomsFromSource(RoomSourceDto source, List<RoomDto> rooms) async {
+  Future<void> addRoomsFromSource(
+      RoomSourceDto source, List<RoomDto> rooms) async {
     _state = replaceRoomsPreservingUserState(
       _state,
       source: source,
@@ -396,8 +402,10 @@ class RoomProvider extends ChangeNotifier {
 
   /// Toggle the disabled state of a room.
   Future<void> toggleDisabled(String roomId) async {
-    final room = rooms.firstWhere((r) => r.id == roomId, orElse: () => throw Exception('Room not found'));
-    _state = runnerSetRoomDisabled(state: _state, roomId: roomId, disabled: !room.disabled);
+    final room = rooms.firstWhere((r) => r.id == roomId,
+        orElse: () => throw Exception('Room not found'));
+    _state = runnerSetRoomDisabled(
+        state: _state, roomId: roomId, disabled: !room.disabled);
     await _save();
     notifyListeners();
     _sourceChangedController.add(room.source);
@@ -405,8 +413,10 @@ class RoomProvider extends ChangeNotifier {
 
   /// Set the disabled state of a room.
   Future<void> setRoomDisabled(String roomId, bool disabled) async {
-    final room = rooms.firstWhere((r) => r.id == roomId, orElse: () => throw Exception('Room not found'));
-    _state = runnerSetRoomDisabled(state: _state, roomId: roomId, disabled: disabled);
+    final room = rooms.firstWhere((r) => r.id == roomId,
+        orElse: () => throw Exception('Room not found'));
+    _state = runnerSetRoomDisabled(
+        state: _state, roomId: roomId, disabled: disabled);
     await _save();
     notifyListeners();
     _sourceChangedController.add(room.source);
@@ -416,14 +426,16 @@ class RoomProvider extends ChangeNotifier {
   ///
   /// Pass `null` to use the global configuration.
   Future<void> setRoomCurveConfig(String roomId, CurveConfigDto? config) async {
-    _state = runnerSetRoomCurveConfig(state: _state, roomId: roomId, config: config);
+    _state =
+        runnerSetRoomCurveConfig(state: _state, roomId: roomId, config: config);
     await _save();
     notifyListeners();
   }
 
   /// Update room devices.
   Future<void> setRoomDevices(String roomId, List<String> deviceIds) async {
-    _state = runnerSetRoomDevices(state: _state, roomId: roomId, deviceIds: deviceIds);
+    _state = runnerSetRoomDevices(
+        state: _state, roomId: roomId, deviceIds: deviceIds);
     await _save();
     notifyListeners();
   }
@@ -441,7 +453,8 @@ class RoomProvider extends ChangeNotifier {
     required bool rhythmEnabled,
     required double timeOffset,
     required double brightnessOffset,
-    required bool softOff,
+    required RoomModeState state,
+    RhythmMode? mode,
     bool? lightsOn,
     int? brightness,
     int? kelvin,
@@ -458,40 +471,38 @@ class RoomProvider extends ChangeNotifier {
     }
 
     if (room.rhythmEnabled != rhythmEnabled) {
-      _state = runnerSetRoomRhythmEnabled(state: _state, roomId: roomId, rhythmEnabled: rhythmEnabled);
+      _state = runnerSetRoomRhythmEnabled(
+          state: _state, roomId: roomId, rhythmEnabled: rhythmEnabled);
       changed = true;
     }
     if (room.timeOffsetMinutes != timeOffset) {
-      _state = runnerSetRoomTimeOffset(state: _state, roomId: roomId, timeOffsetMinutes: timeOffset);
+      _state = runnerSetRoomTimeOffset(
+          state: _state, roomId: roomId, timeOffsetMinutes: timeOffset);
       changed = true;
     }
     if (room.brightnessOffset != brightnessOffset) {
-      _state = runnerSetRoomBrightnessOffset(state: _state, roomId: roomId, brightnessOffset: brightnessOffset);
+      _state = runnerSetRoomBrightnessOffset(
+          state: _state, roomId: roomId, brightnessOffset: brightnessOffset);
       changed = true;
     }
-    // Update soft_off / idle state (respecting the 3s lock for optimistic UI)
-    final softOffLocked = _softOffLockedUntil[roomId];
-    final softOffUnlocked = softOffLocked == null || DateTime.now().isAfter(softOffLocked);
-    if (softOffUnlocked) {
-      final wasIdle = _roomIdleState[roomId] ?? false;
-      if (wasIdle != softOff) {
-        if (softOff) {
-          _roomIdleState[roomId] = true;
-        } else {
-          _roomIdleState.remove(roomId);
-        }
-        changed = true;
-      }
+    final roomStateLocked = _roomStateLockedUntil[roomId];
+    final roomStateUnlocked =
+        roomStateLocked == null || DateTime.now().isAfter(roomStateLocked);
+    if (roomStateUnlocked && _roomStates[roomId] != state) {
+      _roomStates[roomId] = state;
+      changed = true;
+    }
+    if (mode != null && _roomModes[roomId] != mode) {
+      _roomModes[roomId] = mode;
+      changed = true;
     }
     // Update lights_on (respecting the 3s lock for optimistic UI)
     if (lightsOn != null) {
       final lockedUntil = _lightsOnLockedUntil[roomId];
       if (lockedUntil == null || DateTime.now().isAfter(lockedUntil)) {
         if (room.lightsOn != lightsOn) {
-          _state = runnerSetRoomLightsOn(state: _state, roomId: roomId, lightsOn: lightsOn);
-          // Only clear idle if soft_off is also unlocked — don't let a stale
-          // lightsOn:false clobber an optimistic idle toggle.
-          if (!lightsOn && softOffUnlocked && !softOff) _roomIdleState.remove(roomId);
+          _state = runnerSetRoomLightsOn(
+              state: _state, roomId: roomId, lightsOn: lightsOn);
           changed = true;
         }
       }
@@ -520,7 +531,8 @@ class RoomProvider extends ChangeNotifier {
 
   /// Set rhythm enabled/disabled for a room.
   Future<void> setRoomRhythmEnabled(String roomId, bool enabled) async {
-    _state = runnerSetRoomRhythmEnabled(state: _state, roomId: roomId, rhythmEnabled: enabled);
+    _state = runnerSetRoomRhythmEnabled(
+        state: _state, roomId: roomId, rhythmEnabled: enabled);
     await _save();
     notifyListeners();
   }
@@ -535,12 +547,10 @@ class RoomProvider extends ChangeNotifier {
     if (lockedUntil != null && DateTime.now().isBefore(lockedUntil)) {
       return; // suppress stale external override
     }
-    // Clear idle only when lights turn off externally (e.g. physical switch).
-    // When lights are on, idle state is managed by ESP32 sync / UI toggle.
-    if (!lightsOn) {
-      _roomIdleState.remove(roomId);
-    }
-    _state = runnerSetRoomLightsOn(state: _state, roomId: roomId, lightsOn: lightsOn);
+    _roomStates[roomId] =
+        lightsOn ? RoomModeState.active : RoomModeState.hardOff;
+    _state = runnerSetRoomLightsOn(
+        state: _state, roomId: roomId, lightsOn: lightsOn);
     await _save();
     notifyListeners();
   }
@@ -551,15 +561,22 @@ class RoomProvider extends ChangeNotifier {
   /// immediately overwrite the optimistic value before the bridge
   /// has processed the command.
   Future<void> setRoomLightsOnLocal(String roomId, bool lightsOn) async {
-    _lightsOnLockedUntil[roomId] = DateTime.now().add(const Duration(seconds: 3));
-    _state = runnerSetRoomLightsOn(state: _state, roomId: roomId, lightsOn: lightsOn);
+    _lightsOnLockedUntil[roomId] =
+        DateTime.now().add(const Duration(seconds: 3));
+    _roomStateLockedUntil[roomId] =
+        DateTime.now().add(const Duration(seconds: 3));
+    _roomStates[roomId] =
+        lightsOn ? RoomModeState.active : RoomModeState.hardOff;
+    _state = runnerSetRoomLightsOn(
+        state: _state, roomId: roomId, lightsOn: lightsOn);
     await _save();
     notifyListeners();
   }
 
   /// Set time offset for a room (from dragging the blue dot).
   Future<void> setRoomTimeOffset(String roomId, double offsetMinutes) async {
-    _state = runnerSetRoomTimeOffset(state: _state, roomId: roomId, timeOffsetMinutes: offsetMinutes);
+    _state = runnerSetRoomTimeOffset(
+        state: _state, roomId: roomId, timeOffsetMinutes: offsetMinutes);
     await _save();
     notifyListeners();
   }
@@ -663,8 +680,9 @@ class RoomProvider extends ChangeNotifier {
     _motionTimers.clear();
     _roomsWithSensors.clear();
     _lightsOnLockedUntil.clear();
-    _softOffLockedUntil.clear();
-    _roomIdleState.clear();
+    _roomStateLockedUntil.clear();
+    _roomStates.clear();
+    _roomModes.clear();
     _roomBrightness.clear();
     _roomKelvin.clear();
     _roomColor.clear();
@@ -685,8 +703,9 @@ class RoomProvider extends ChangeNotifier {
     _motionTimers.clear();
     _roomsWithSensors.clear();
     _lightsOnLockedUntil.clear();
-    _softOffLockedUntil.clear();
-    _roomIdleState.clear();
+    _roomStateLockedUntil.clear();
+    _roomStates.clear();
+    _roomModes.clear();
     _roomBrightness.clear();
     _roomKelvin.clear();
     _roomColor.clear();

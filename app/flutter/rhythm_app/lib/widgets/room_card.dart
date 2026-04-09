@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RoomModeState;
 import '../providers/server_sync_provider.dart';
 import '../providers/room_provider.dart';
 import 'room_settings_sheet.dart';
@@ -52,45 +53,41 @@ class _RoomCardState extends State<RoomCard> {
 
     final serverSync = context.read<ServerSyncProvider>();
 
-    // Capture previous state before optimistic updates
-    final wasIdle = roomProvider.isRoomIdle(widget.roomId);
-    final wasOn = room.lightsOn;
-
     // Optimistic local state update
     switch (newMode) {
       case RoomMode.on:
         HapticFeedback.mediumImpact();
         roomProvider.setRoomLightsOnLocal(widget.roomId, true);
         roomProvider.setRoomRhythmEnabled(widget.roomId, true);
-        roomProvider.setRoomIdle(widget.roomId, false);
+        roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.active);
       case RoomMode.idle:
         HapticFeedback.lightImpact();
         roomProvider.setRoomRhythmEnabled(widget.roomId, true);
-        roomProvider.setRoomIdle(widget.roomId, true);
+        roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.idle);
       case RoomMode.off:
         HapticFeedback.heavyImpact();
         roomProvider.setRoomLightsOnLocal(widget.roomId, false);
-        roomProvider.setRoomIdle(widget.roomId, false);
+        roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.hardOff);
     }
 
     switch (newMode) {
       case RoomMode.on:
-        // If was idle (soft-off), clear soft_off via preferences — the
-        // server will immediately turn on at full adaptive values.
-        // Otherwise dispatch a normal 'on' action.
-        if (wasOn && wasIdle) {
-          serverSync.pushRoomPreferences(widget.roomId,
-              rhythmEnabled: true, softOff: false);
-        } else {
-          serverSync.dispatchAction(widget.roomId, 'on');
-        }
+        serverSync.pushRoomPreferences(
+          widget.roomId,
+          rhythmEnabled: true,
+          state: RoomModeState.active,
+        );
       case RoomMode.idle:
-        // Push soft_off preference — server immediately applies
-        // soft-off brightness via soft_off_tick.
-        serverSync.pushRoomPreferences(widget.roomId,
-            rhythmEnabled: true, softOff: true);
+        serverSync.pushRoomPreferences(
+          widget.roomId,
+          rhythmEnabled: true,
+          state: RoomModeState.idle,
+        );
       case RoomMode.off:
-        serverSync.dispatchAction(widget.roomId, 'lights_off');
+        serverSync.pushRoomPreferences(
+          widget.roomId,
+          state: RoomModeState.hardOff,
+        );
     }
 
     setState(() {
@@ -116,20 +113,45 @@ class _RoomCardState extends State<RoomCard> {
 
   @override
   Widget build(BuildContext context) {
-    return Selector<RoomProvider, (RoomDto?, int, MotionTimerInfo?, bool, int?, int?, (int, int, int)?, bool)>(
+    return Selector<
+        RoomProvider,
+        (
+          RoomDto?,
+          int,
+          MotionTimerInfo?,
+          RoomModeState,
+          int?,
+          int?,
+          (int, int, int)?,
+          bool
+        )>(
       selector: (_, p) => (
         p.getRoom(widget.roomId),
         p.resetGeneration,
         p.getMotionTimer(widget.roomId),
-        p.isRoomIdle(widget.roomId),
+        p.getRoomState(widget.roomId),
         p.getBrightness(widget.roomId),
         p.getKelvin(widget.roomId),
         p.getRoomColor(widget.roomId),
         p.hasMotionSensor(widget.roomId),
       ),
       builder: (context, data, _) {
-        final (room, resetGen, motionTimer, isIdle, serverBrightness, serverKelvin, serverColor, hasSensor) = data;
+        final (
+          room,
+          resetGen,
+          motionTimer,
+          roomState,
+          serverBrightness,
+          serverKelvin,
+          serverColor,
+          hasSensor
+        ) = data;
         if (room == null) return const SizedBox.shrink();
+
+        // Check if this room's hub is reachable.
+        final hubConnected = context
+            .select<ServerSyncProvider, bool>(
+                (p) => p.isRoomHubConnected(room.source));
 
         // External reset bumps the generation counter — drop local overrides
         if (resetGen != _lastResetGen) {
@@ -137,12 +159,15 @@ class _RoomCardState extends State<RoomCard> {
           _sliderBrightness = null;
         }
 
-        // Determine room mode (power save skips idle)
-        final mode = (!widget.powerSave && isIdle)
-            ? RoomMode.idle
-            : !room.lightsOn
-                ? RoomMode.off
-                : RoomMode.on;
+        final idleLikeState = roomState == RoomModeState.idle ||
+            roomState == RoomModeState.warning;
+        final mode = switch (roomState) {
+          RoomModeState.hardOff => RoomMode.off,
+          RoomModeState.idle ||
+          RoomModeState.warning =>
+            widget.powerSave ? RoomMode.off : RoomMode.idle,
+          RoomModeState.wake || RoomModeState.active => RoomMode.on,
+        };
 
         // Use server-provided brightness and kelvin
         final brightness = serverBrightness ?? 50;
@@ -156,7 +181,8 @@ class _RoomCardState extends State<RoomCard> {
         };
 
         final cctColor = serverColor != null
-            ? Color.fromARGB(255, serverColor.$1, serverColor.$2, serverColor.$3)
+            ? Color.fromARGB(
+                255, serverColor.$1, serverColor.$2, serverColor.$3)
             : ColorUtils.cctToColor(kelvin);
 
         // Use CCT color directly, lightly softened with white
@@ -214,7 +240,12 @@ class _RoomCardState extends State<RoomCard> {
         // Warm amber on dark cards, contrast-aware dark tone on light cards
         final glowColor = onLight ? iconColor : CelestialColors.sunWarm;
 
-        return GestureDetector(
+        return IgnorePointer(
+          ignoring: !hubConnected,
+          child: AnimatedOpacity(
+            opacity: hubConnected ? 1.0 : 0.35,
+            duration: const Duration(milliseconds: 400),
+            child: GestureDetector(
           onTap: () => RoomSettingsSheet.show(context, room),
           // Only register double-tap when off-curve to avoid tap delay on normal cards
           onDoubleTap: offCurve ? _resetRoom : null,
@@ -266,7 +297,9 @@ class _RoomCardState extends State<RoomCard> {
                                     child: _MotionIndicator(
                                       info: motionTimer,
                                       color: iconColor,
-                                      onExpired: () => context.read<RoomProvider>().clearMotionTimer(widget.roomId),
+                                      onExpired: () => context
+                                          .read<RoomProvider>()
+                                          .clearMotionTimer(widget.roomId),
                                     ),
                                   )
                                 else if (hasSensor)
@@ -293,7 +326,7 @@ class _RoomCardState extends State<RoomCard> {
                               ],
                             ),
                           ),
-                          if (mode == RoomMode.idle)
+                          if (idleLikeState)
                             Padding(
                               padding: const EdgeInsets.only(right: 8),
                               child: _IdlePill(
@@ -375,6 +408,8 @@ class _RoomCardState extends State<RoomCard> {
                 ),
               ],
             ),
+          ),
+        ),
           ),
         );
       },
@@ -517,7 +552,7 @@ class _CelestialToggle extends StatelessWidget {
   }
 }
 
-/// Idle indicator pill — dim-light icon + "Idle" label.
+/// Standby indicator pill — dim-light icon + "Standby" label.
 class _IdlePill extends StatelessWidget {
   final Color color;
   final Color bgColor;
@@ -542,7 +577,7 @@ class _IdlePill extends StatelessWidget {
           ),
           const SizedBox(width: 4),
           Text(
-            'Idle',
+            'Standby',
             style: TextStyle(
               color: color,
               fontSize: 13,
@@ -561,7 +596,8 @@ class _MotionIndicator extends StatefulWidget {
   final Color color;
   final VoidCallback? onExpired;
 
-  const _MotionIndicator({required this.info, required this.color, this.onExpired});
+  const _MotionIndicator(
+      {required this.info, required this.color, this.onExpired});
 
   @override
   State<_MotionIndicator> createState() => _MotionIndicatorState();
@@ -754,4 +790,3 @@ class _RhythmBorderGlow extends StatelessWidget {
     );
   }
 }
-

@@ -152,14 +152,12 @@ class _PolarDayEditorState extends State<PolarDayEditor>
         // Radial drag adjusts width (transition speed)
         // Outward = slower/gentler transition (more gradual wake-up)
         // Inward = faster/steeper transition (quicker ramp)
-        final newWidth =
-            (_dragStartValue! + radialDelta * 3.0).clamp(0.3, 2.0);
+        final newWidth = (_dragStartValue! + radialDelta * 3.0).clamp(0.3, 2.0);
         newConfig = widget.config.copyWith(widthLeftBri: newWidth);
         break;
 
       case _DragTarget.sunsetTransition:
-        final newWidth =
-            (_dragStartValue! + radialDelta * 3.0).clamp(0.3, 2.0);
+        final newWidth = (_dragStartValue! + radialDelta * 3.0).clamp(0.3, 2.0);
         newConfig = widget.config.copyWith(widthRightBri: newWidth);
         break;
 
@@ -173,10 +171,8 @@ class _PolarDayEditorState extends State<PolarDayEditor>
         break;
     }
 
-    if (newConfig != null) {
-      HapticFeedback.selectionClick();
-      widget.onConfigChanged?.call(newConfig);
-    }
+    HapticFeedback.selectionClick();
+    widget.onConfigChanged?.call(newConfig);
   }
 
   void _onPanEnd(DragEndDetails details) {
@@ -209,7 +205,8 @@ class _PolarDayEditorState extends State<PolarDayEditor>
       } else {
         normalizedParam = ((paramValue - 0.3) / 1.7).clamp(0.0, 1.0);
       }
-      final handleRadius = minHandleRadius + (maxHandleRadius - minHandleRadius) * normalizedParam;
+      final handleRadius = minHandleRadius +
+          (maxHandleRadius - minHandleRadius) * normalizedParam;
       final angle = _hourToAngle(hour);
       return Offset(
         center.dx + handleRadius * math.cos(angle),
@@ -238,19 +235,6 @@ class _PolarDayEditorState extends State<PolarDayEditor>
     return null;
   }
 
-  bool _isInAngularZone(double hour, double start, double end) {
-    // Handle wrap-around at midnight
-    if (start < 0) start += 24;
-    if (end > 24) end -= 24;
-
-    if (start < end) {
-      return hour >= start && hour <= end;
-    } else {
-      // Wraps around midnight
-      return hour >= start || hour <= end;
-    }
-  }
-
   double _getValueForTarget(_DragTarget target) {
     switch (target) {
       case _DragTarget.sunriseTransition:
@@ -260,13 +244,6 @@ class _PolarDayEditorState extends State<PolarDayEditor>
       case _DragTarget.peakShape:
         return widget.config.shapeP;
     }
-  }
-
-  double _angleToHour(double angle) {
-    // Add PI/2 to shift so top is 0, then normalize to 0-24
-    double normalizedAngle = angle + math.pi / 2;
-    if (normalizedAngle < 0) normalizedAngle += 2 * math.pi;
-    return (normalizedAngle / (2 * math.pi)) * 24;
   }
 
   double _hourToAngle(double hour) {
@@ -332,13 +309,10 @@ class _PolarDayPainter extends CustomPainter {
   static const _voidColor = Color(0xFF0A0B14);
   static const _nightCore = Color(0xFF13152A);
   static const _nightDeep = Color(0xFF2A2D4E);
-  static const _twilight = Color(0xFF7B6B99);
-  static const _sunriseWarm = Color(0xFFFF9B6A);
   static const _sunsetAmber = Color(0xFFE8734A);
   static const _sunGlow = Color(0xFFFFBE5C);
   static const _sunCore = Color(0xFFFFF8E7);
   static const _textMuted = Color(0x66FFF8E7);
-  static const _textHint = Color(0x33FFF8E7);
 
   _PolarDayPainter({
     required this.curveData,
@@ -500,16 +474,18 @@ class _PolarDayPainter extends CustomPainter {
       final tickPaint = Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = isMajor ? 2 : 1
-        ..color = _textMuted.withValues(alpha: (isMajor ? 0.5 : 0.25) * entryValue);
+        ..color =
+            _textMuted.withValues(alpha: (isMajor ? 0.5 : 0.25) * entryValue);
 
       canvas.drawLine(
-        Offset(center.dx + tickRadius * math.cos(angle), center.dy + tickRadius * math.sin(angle)),
-        Offset(center.dx + (tickRadius + tickLength) * math.cos(angle), center.dy + (tickRadius + tickLength) * math.sin(angle)),
+        Offset(center.dx + tickRadius * math.cos(angle),
+            center.dy + tickRadius * math.sin(angle)),
+        Offset(center.dx + (tickRadius + tickLength) * math.cos(angle),
+            center.dy + (tickRadius + tickLength) * math.sin(angle)),
         tickPaint,
       );
     }
   }
-
 
   void _drawCentralSun(Canvas canvas, Offset center, double maxRadius) {
     // Get CCT color for current time
@@ -675,7 +651,8 @@ class _PolarDayPainter extends CustomPainter {
     // Handle position varies based on parameter value
     // Range: from ring inward toward center
     final minHandleRadius = maxRadius * 0.35; // Closest to center (fastest)
-    final maxHandleRadius = ringRadius - maxRadius * 0.02; // Near ring (slowest)
+    final maxHandleRadius =
+        ringRadius - maxRadius * 0.02; // Near ring (slowest)
 
     double paramValue;
     if (type == 'morning') {
@@ -698,7 +675,8 @@ class _PolarDayPainter extends CustomPainter {
     normalizedParam = normalizedParam.clamp(0.0, 1.0);
 
     // Map to radius: higher value = further from center
-    final handleRadius = minHandleRadius + (maxHandleRadius - minHandleRadius) * normalizedParam;
+    final handleRadius =
+        minHandleRadius + (maxHandleRadius - minHandleRadius) * normalizedParam;
 
     final x = center.dx + handleRadius * math.cos(angle);
     final y = center.dy + handleRadius * math.sin(angle);
@@ -709,9 +687,9 @@ class _PolarDayPainter extends CustomPainter {
       ..strokeWidth = 2;
     canvas.drawLine(
       Offset(center.dx + minHandleRadius * 0.8 * math.cos(angle),
-             center.dy + minHandleRadius * 0.8 * math.sin(angle)),
+          center.dy + minHandleRadius * 0.8 * math.sin(angle)),
       Offset(center.dx + ringRadius * math.cos(angle),
-             center.dy + ringRadius * math.sin(angle)),
+          center.dy + ringRadius * math.sin(angle)),
       linePaint,
     );
 
@@ -738,9 +716,9 @@ class _PolarDayPainter extends CustomPainter {
     canvas.drawCircle(Offset(x, y), size, handlePaint);
 
     // Inner highlight
-    final highlightPaint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.6);
-    canvas.drawCircle(Offset(x - size * 0.2, y - size * 0.2), size * 0.3, highlightPaint);
+    final highlightPaint = Paint()..color = Colors.white.withValues(alpha: 0.6);
+    canvas.drawCircle(
+        Offset(x - size * 0.2, y - size * 0.2), size * 0.3, highlightPaint);
 
     // Label at the ring edge
     if (!isActive && type != 'peak') {
@@ -783,7 +761,8 @@ class _PolarDayPainter extends CustomPainter {
       ..strokeWidth = 2
       ..shader = ui.Gradient.linear(
         center,
-        Offset(center.dx + ringRadius * math.cos(angle), center.dy + ringRadius * math.sin(angle)),
+        Offset(center.dx + ringRadius * math.cos(angle),
+            center.dy + ringRadius * math.sin(angle)),
         [
           _sunCore.withValues(alpha: 0.0),
           _sunCore.withValues(alpha: 0.3 * entryValue),
@@ -793,8 +772,10 @@ class _PolarDayPainter extends CustomPainter {
       );
 
     canvas.drawLine(
-      Offset(center.dx + maxRadius * 0.2 * math.cos(angle), center.dy + maxRadius * 0.2 * math.sin(angle)),
-      Offset(center.dx + ringRadius * math.cos(angle), center.dy + ringRadius * math.sin(angle)),
+      Offset(center.dx + maxRadius * 0.2 * math.cos(angle),
+          center.dy + maxRadius * 0.2 * math.sin(angle)),
+      Offset(center.dx + ringRadius * math.cos(angle),
+          center.dy + ringRadius * math.sin(angle)),
       linePaint,
     );
 

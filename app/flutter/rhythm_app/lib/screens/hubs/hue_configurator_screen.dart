@@ -198,8 +198,10 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
       }
     });
 
-    _pairingPollTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
-      final username = await HueServiceLocator.instance.pair(_selectedBridgeIp!);
+    _pairingPollTimer =
+        Timer.periodic(const Duration(seconds: 2), (timer) async {
+      final username =
+          await HueServiceLocator.instance.pair(_selectedBridgeIp!);
       if (username != null) {
         timer.cancel();
         _countdownTimer?.cancel();
@@ -262,7 +264,8 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
       if (!mounted) return;
       setState(() {
         _status = HueLinkingStatus.error;
-        _errorMessage = homeProvider.error ?? 'Failed to save hub configuration';
+        _errorMessage =
+            homeProvider.error ?? 'Failed to save hub configuration';
       });
       return;
     }
@@ -307,6 +310,10 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
   }
 
   Future<void> _disconnect() async {
+    final syncProvider = context.read<ServerSyncProvider>();
+    final hubConnectionProvider = context.read<HubConnectionProvider>();
+    final roomProvider = context.read<RoomProvider>();
+    final homeProvider = context.read<HomeProvider>();
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -342,15 +349,12 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
       AnalyticsService().logHubDisconnected('hue');
       AnalyticsService().setHubType(null);
 
-      if (mounted) {
-        // Tell the server to drop hub + rooms first (before local cleanup
-        // triggers source-changed events that would re-push credentials).
-        await context.read<ServerSyncProvider>().disconnectHub();
-        context.read<HubConnectionProvider>().disconnect();
-        await context.read<RoomProvider>().clearRoomsBySource(RoomSourceDto.hue);
-      }
-
-      final homeProvider = context.read<HomeProvider>();
+      if (!mounted) return;
+      // Tell the server to drop hub + rooms first (before local cleanup
+      // triggers source-changed events that would re-push credentials).
+      await syncProvider.disconnectHub();
+      hubConnectionProvider.disconnect();
+      await roomProvider.clearRoomsBySource(RoomSourceDto.hue);
 
       final hueHub = homeProvider.getFirstHubOfType(HubType.hue);
       if (hueHub != null) {
@@ -557,8 +561,10 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
                       child: CircularProgressIndicator(
                         value: _countdownSeconds / 30.0,
                         strokeWidth: 4,
-                        backgroundColor: CelestialColors.orbitRing.withValues(alpha: 0.3),
-                        valueColor: const AlwaysStoppedAnimation(Color(0xFFFFB900)),
+                        backgroundColor:
+                            CelestialColors.orbitRing.withValues(alpha: 0.3),
+                        valueColor:
+                            const AlwaysStoppedAnimation(Color(0xFFFFB900)),
                       ),
                     ),
                   Container(
@@ -573,7 +579,8 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
                       ),
                       boxShadow: [
                         BoxShadow(
-                          color: const Color(0xFFFFB900).withValues(alpha: glowIntensity),
+                          color: const Color(0xFFFFB900)
+                              .withValues(alpha: glowIntensity),
                           blurRadius: isWaiting ? 32 : 24,
                           spreadRadius: isWaiting ? 4 : 2,
                         ),
@@ -818,7 +825,8 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
                   Text(
                     ip,
                     style: TextStyle(
-                      color: CelestialColors.textSecondary.withValues(alpha: 0.8),
+                      color:
+                          CelestialColors.textSecondary.withValues(alpha: 0.8),
                       fontSize: 13,
                       fontFamily: 'monospace',
                     ),
@@ -992,7 +1000,9 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
                 )
               : null,
           color: isPrimary
-              ? (isEnabled ? null : CelestialColors.orbitRing.withValues(alpha: 0.3))
+              ? (isEnabled
+                  ? null
+                  : CelestialColors.orbitRing.withValues(alpha: 0.3))
               : (isDestructive
                   ? Colors.red.shade400.withValues(alpha: 0.1)
                   : CelestialColors.backgroundCard),
@@ -1022,7 +1032,9 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
                   ? (isEnabled
                       ? Colors.white
                       : CelestialColors.textSecondary.withValues(alpha: 0.5))
-                  : (isDestructive ? Colors.red.shade400 : CelestialColors.textSecondary),
+                  : (isDestructive
+                      ? Colors.red.shade400
+                      : CelestialColors.textSecondary),
               size: 20,
             ),
             const SizedBox(width: 10),
@@ -1033,7 +1045,9 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
                     ? (isEnabled
                         ? Colors.white
                         : CelestialColors.textSecondary.withValues(alpha: 0.5))
-                    : (isDestructive ? Colors.red.shade400 : CelestialColors.textPrimary),
+                    : (isDestructive
+                        ? Colors.red.shade400
+                        : CelestialColors.textPrimary),
                 fontSize: 15,
                 fontWeight: FontWeight.w600,
               ),

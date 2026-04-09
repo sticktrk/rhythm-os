@@ -5,8 +5,6 @@ import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
-import '../widgets/solar_orbit.dart';
-import '../onboarding/widgets/onboarding_orbit.dart';
 import '../providers/home_provider.dart';
 import '../providers/server_sync_provider.dart';
 
@@ -51,7 +49,6 @@ class _LocationSettingsScreenState extends State<LocationSettingsScreen>
     with TickerProviderStateMixin {
   double? _latitude;
   double? _longitude;
-  String? _timezone;
   String? _locationName;
 
   _PermissionState _permissionState = _PermissionState.unknown;
@@ -98,7 +95,6 @@ class _LocationSettingsScreenState extends State<LocationSettingsScreen>
         _latitude = home!.location!.latitude;
         _longitude = home.location!.longitude;
         _locationName = home.location!.cityName;
-        _timezone = home.timezone;
       });
     }
   }
@@ -179,6 +175,8 @@ class _LocationSettingsScreenState extends State<LocationSettingsScreen>
   }
 
   Future<void> _detectLocation() async {
+    final homeProvider = context.read<HomeProvider>();
+    final serverSyncProvider = context.read<ServerSyncProvider>();
     setState(() {
       _isLoading = true;
       _statusMessage = 'Finding your location...';
@@ -186,8 +184,10 @@ class _LocationSettingsScreenState extends State<LocationSettingsScreen>
 
     try {
       final position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.low,
-        timeLimit: const Duration(seconds: 15),
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.low,
+          timeLimit: Duration(seconds: 15),
+        ),
       );
 
       final timezone = (await FlutterTimezone.getLocalTimezone()).identifier;
@@ -216,8 +216,9 @@ class _LocationSettingsScreenState extends State<LocationSettingsScreen>
         // Geocoding failed silently - coordinates still work
       }
 
+      if (!mounted) return;
+
       // Save to HomeProvider (syncs to cloud)
-      final homeProvider = context.read<HomeProvider>();
       final location = HomeLocation(
         latitude: position.latitude,
         longitude: position.longitude,
@@ -237,23 +238,21 @@ class _LocationSettingsScreenState extends State<LocationSettingsScreen>
 
       // Push to connected server (explicit user action — this is the only
       // path that should override the server's house location).
-      if (context.mounted) {
-        context.read<ServerSyncProvider>().pushLocation(
-          lat: position.latitude,
-          lon: position.longitude,
-          timezoneName: timezone,
-        );
-      }
+      serverSyncProvider.pushLocation(
+        lat: position.latitude,
+        lon: position.longitude,
+        timezoneName: timezone,
+      );
 
       setState(() {
         _latitude = position.latitude;
         _longitude = position.longitude;
-        _timezone = timezone;
         _locationName = placeName;
         _statusMessage = 'Location updated';
         _isLoading = false;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _statusMessage = 'Could not get location';
         _isLoading = false;
@@ -386,7 +385,9 @@ class _LocationSettingsScreenState extends State<LocationSettingsScreen>
                       ),
                       boxShadow: [
                         BoxShadow(
-                          color: (hasLocation ? _Palette.success : _Palette.warm)
+                          color: (hasLocation
+                                  ? _Palette.success
+                                  : _Palette.warm)
                               .withValues(alpha: _pulseAnimation.value * 0.4),
                           blurRadius: 20,
                           spreadRadius: 0,
@@ -830,5 +831,6 @@ class _OrbitPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _OrbitPainter oldDelegate) =>
-      oldDelegate.progress != progress || oldDelegate.hasLocation != hasLocation;
+      oldDelegate.progress != progress ||
+      oldDelegate.hasLocation != hasLocation;
 }

@@ -1,4 +1,4 @@
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -79,19 +79,20 @@ void main() async {
 
     // If remote API isn't available, fall back to local-only mode
     if (!await client.healthCheck()) {
-      print('Remote API not available, using local-only mode');
+      debugPrint('Remote API not available, using local-only mode');
       client = client.toLocalOnly();
     }
 
     // Fail explicitly if local brain isn't available (except on web,
     // where the app works as a remote client to rhythm-server/ESP32)
     if (!client.hasLocalBrain && !kIsWeb) {
-      initError = 'WASM brain failed to initialize. The Rust WASM module must be built and loaded for the app to function.';
+      initError =
+          'WASM brain failed to initialize. The Rust WASM module must be built and loaded for the app to function.';
     }
   } catch (e) {
     // If hybrid fails, try local-only mode
     try {
-      print('Hybrid init failed, trying local-only: $e');
+      debugPrint('Hybrid init failed, trying local-only: $e');
       client = await HybridApiClient.localOnly();
       if (!client.hasLocalBrain && !kIsWeb) {
         initError = 'WASM brain failed to initialize.';
@@ -99,7 +100,7 @@ void main() async {
     } catch (e2) {
       if (kIsWeb) {
         // Web can proceed without local brain — it'll connect to a remote device
-        print('Web: proceeding without local brain: $e2');
+        debugPrint('Web: proceeding without local brain: $e2');
       } else {
         initError = 'Failed to initialize: $e2';
       }
@@ -144,7 +145,8 @@ class RhythmApp extends StatelessWidget {
         title: 'Rhythm Lighting - Error',
         debugShowCheckedModeBanner: false,
         theme: theme,
-        home: _InitErrorScreen(error: initError ?? 'Client failed to initialize'),
+        home:
+            _InitErrorScreen(error: initError ?? 'Client failed to initialize'),
       );
     }
 
@@ -170,9 +172,11 @@ class RhythmApp extends StatelessWidget {
         // Room page assignments (multi-screen room organization)
         ChangeNotifierProvider(create: (_) => RoomPageProvider()..initialize()),
         // Server connection (transport layer — SDK)
-        Provider(create: (_) => RhythmConnection(), dispose: (_, c) => c.dispose()),
+        Provider(
+            create: (_) => RhythmConnection(), dispose: (_, c) => c.dispose()),
         // Server sync provider (bridges SDK connection with app state)
-        ChangeNotifierProxyProvider3<RhythmConnection, RoomProvider, HomeProvider, ServerSyncProvider>(
+        ChangeNotifierProxyProvider3<RhythmConnection, RoomProvider,
+            HomeProvider, ServerSyncProvider>(
           lazy: false,
           create: (context) => ServerSyncProvider(
             connection: context.read<RhythmConnection>(),
@@ -189,7 +193,7 @@ class RhythmApp extends StatelessWidget {
         title: 'Rhythm Lighting',
         debugShowCheckedModeBanner: false,
         theme: theme,
-        home: const AuthGate(),
+        home: AuthGate(key: AuthGate.globalKey),
       ),
     );
   }
@@ -200,7 +204,8 @@ class AuthGate extends StatefulWidget {
   const AuthGate({super.key});
 
   /// Global key to access AuthGate state for reset functionality.
-  static final GlobalKey<_AuthGateState> globalKey = GlobalKey<_AuthGateState>();
+  static final GlobalKey<State<AuthGate>> globalKey =
+      GlobalKey<State<AuthGate>>();
 
   /// Stream controller for reset events
   static final _resetController = ValueNotifier<int>(0);
@@ -208,10 +213,10 @@ class AuthGate extends StatefulWidget {
   /// Reset the app and show onboarding again.
   static void resetToOnboarding() {
     debugPrint('AuthGate.resetToOnboarding called');
-    // Try GlobalKey first
-    if (globalKey.currentState != null) {
+    final state = globalKey.currentState;
+    if (state case _AuthGateState authGateState) {
       debugPrint('Using GlobalKey to reset');
-      globalKey.currentState!._resetToOnboarding();
+      authGateState._resetToOnboarding();
     } else {
       debugPrint('GlobalKey.currentState is null, using ValueNotifier');
       // Fallback: increment the notifier to trigger listeners
@@ -277,9 +282,9 @@ class _AuthGateState extends State<AuthGate> {
       }
 
       // Trigger app state refresh to load homes/rooms
-      if (mounted) {
-        await AppStateRefresh.sync(context);
-      }
+      if (!mounted) return;
+      await AppStateRefresh.sync(context);
+      if (!mounted) return;
 
       setState(() {
         _showOnboarding = false;
@@ -292,7 +297,8 @@ class _AuthGateState extends State<AuthGate> {
     final authService = AuthService();
     if (authService.currentUser != null) {
       // User exists - trust the Keychain session, they completed onboarding before
-      debugPrint('Recovering session from Keychain: ${authService.currentUserId}');
+      debugPrint(
+          'Recovering session from Keychain: ${authService.currentUserId}');
 
       // Identify user for analytics
       if (authService.currentUserId != null) {
@@ -309,9 +315,9 @@ class _AuthGateState extends State<AuthGate> {
       await SettingsService.instance.setOnboardingComplete(true);
 
       // Trigger app state refresh to load homes/rooms
-      if (mounted) {
-        await AppStateRefresh.sync(context);
-      }
+      if (!mounted) return;
+      await AppStateRefresh.sync(context);
+      if (!mounted) return;
 
       setState(() {
         _showOnboarding = false;
@@ -350,7 +356,8 @@ class _AuthGateState extends State<AuthGate> {
     final authService = AuthService();
     var user = authService.currentUser;
     if (user == null) {
-      debugPrint('No user at onboarding completion, creating anonymous user...');
+      debugPrint(
+          'No user at onboarding completion, creating anonymous user...');
       try {
         user = await authService.signInAnonymously();
         debugPrint('Created anonymous user: ${user?.id}');
@@ -362,13 +369,14 @@ class _AuthGateState extends State<AuthGate> {
     // Identify user for analytics and set initial account status
     if (user != null) {
       AnalyticsService().identifyUser(user.id);
-      AnalyticsService().setAccountStatus(user.isAnonymous ? 'anonymous' : 'email');
+      AnalyticsService()
+          .setAccountStatus(user.isAnonymous ? 'anonymous' : 'email');
     }
 
     // Initialize app state after onboarding
-    if (mounted) {
-      await AppStateRefresh.sync(context);
-    }
+    if (!mounted) return;
+    await AppStateRefresh.sync(context);
+    if (!mounted) return;
 
     setState(() {
       _showOnboarding = false;
@@ -377,7 +385,8 @@ class _AuthGateState extends State<AuthGate> {
 
   /// Reset to onboarding flow (called from settings).
   void _resetToOnboarding() {
-    debugPrint('_resetToOnboarding: setting _showOnboarding=true, key=${_onboardingKey + 1}');
+    debugPrint(
+        '_resetToOnboarding: setting _showOnboarding=true, key=${_onboardingKey + 1}');
     setState(() {
       _showOnboarding = true;
       _onboardingKey++; // Force OnboardingFlow to recreate with fresh state
@@ -431,9 +440,9 @@ class _InitErrorScreen extends StatelessWidget {
               Text(
                 'Initialization Failed',
                 style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                ),
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                    ),
               ),
               const SizedBox(height: 16),
               Text(
@@ -454,14 +463,16 @@ class _InitErrorScreen extends StatelessWidget {
                   children: const [
                     Text(
                       'To fix this, build the WASM module:',
-                      style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold),
+                      style: TextStyle(
+                          color: Colors.white70, fontWeight: FontWeight.bold),
                     ),
                     SizedBox(height: 8),
                     Text(
                       '1. Install wasm-pack: cargo install wasm-pack\n'
                       '2. Build WASM: dart run flutter_rust_bridge build-web\n'
                       '3. Rebuild Flutter web: flutter build web',
-                      style: TextStyle(color: Colors.white54, fontFamily: 'monospace'),
+                      style: TextStyle(
+                          color: Colors.white54, fontFamily: 'monospace'),
                     ),
                   ],
                 ),

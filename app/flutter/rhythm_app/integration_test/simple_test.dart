@@ -5,6 +5,7 @@
 /// - integration_test/app_startup_test.dart
 /// - integration_test/room_navigation_test.dart
 /// - integration_test/kiosk_mode_test.dart
+library;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';

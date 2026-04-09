@@ -61,7 +61,8 @@ class SettingsService {
     _settings = _localDataSource!.getSettings();
     _initialized = true;
 
-    debugPrint('SettingsService: Initialized (onboardingComplete=${_settings.onboardingComplete})');
+    debugPrint(
+        'SettingsService: Initialized (onboardingComplete=${_settings.onboardingComplete})');
   }
 
   /// Migrate settings from SharedPreferences to Hive.
@@ -76,7 +77,8 @@ class SettingsService {
       // Read all SP values
       final use24HourFormat = prefs.getBool('use24HourFormat') ?? false;
       final onboardingComplete = prefs.getBool('onboardingComplete') ?? false;
-      final notificationsEnabled = prefs.getBool('notificationsEnabled') ?? false;
+      final notificationsEnabled =
+          prefs.getBool('notificationsEnabled') ?? false;
       final hueSseEnabled = prefs.getBool('hue_sse_enabled') ?? true;
 
       // Read JSON data
@@ -194,7 +196,7 @@ class SettingsService {
     await _save();
   }
 
-  /// Get Hue grouped_light map as Map<roomId, groupedLightId>.
+  /// Get the Hue `grouped_light` map keyed by room ID.
   Map<String, String>? getHueGroupedLightMap() {
     final json = _settings.hueGroupedLightMapJson;
     if (json == null) return null;
@@ -234,7 +236,8 @@ class SettingsService {
 
   /// Save curve config.
   Future<void> saveCurveConfig(RawConfig config) async {
-    _settings = _settings.copyWith(curveConfigJson: jsonEncode(config.toJson()));
+    _settings =
+        _settings.copyWith(curveConfigJson: jsonEncode(config.toJson()));
     await _save();
   }
 
