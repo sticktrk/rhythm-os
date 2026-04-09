@@ -4,7 +4,10 @@
 //! `format!()` string concatenation. Field names match the SSE types
 //! in `server_event.rs` — one canonical naming convention.
 
-use rhythm_core::{runtime::hub_registry::DeviceType, LightProfileConfig, RoomProfileSettings};
+use rhythm_core::{
+    runtime::hub_registry::DeviceType, LightProfileConfig, ModeConfig, ModeTransitionConfig,
+    RhythmMode, RoomModeState, RoomProfileSettings,
+};
 use serde::Serialize;
 
 // ---------------------------------------------------------------------------
@@ -19,14 +22,18 @@ pub struct RoomRhythmState {
     /// Which hub types have lights in this room (e.g. ["hue"], ["hue", "matter"]).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hub_types: Vec<String>,
+    pub state: RoomModeState,
     pub rhythm_enabled: bool,
     pub time_offset: f32,
     pub brightness_offset: f32,
-    pub soft_off: bool,
     pub lights_on: bool,
     pub brightness: u8,
     pub kelvin: u16,
-    #[serde(rename = "room_profile", default, skip_serializing_if = "RoomProfileSettings::is_empty")]
+    #[serde(
+        rename = "room_profile",
+        default,
+        skip_serializing_if = "RoomProfileSettings::is_empty"
+    )]
     pub room_profile: RoomProfileSettings,
 }
 
@@ -117,15 +124,22 @@ pub struct LocationDto {
     pub latitude: Option<f32>,
     pub longitude: Option<f32>,
     pub utc_offset_hours: f32,
+    pub solar_noon: f32,
+    pub solar_midnight: f32,
+    pub current_solar_time: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timezone_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub twilight: Option<TwilightResponse>,
 }
 
 /// Settings in state snapshot and `GET /api/settings`.
 #[derive(Debug, Serialize)]
 pub struct SettingsDto {
+    pub active_mode: RhythmMode,
     pub power_save: bool,
-    pub active_light_profile: String,
+    pub modes: Vec<ModeConfig>,
+    pub mode_transitions: Vec<ModeTransitionConfig>,
     pub profiles: Vec<LightProfileConfig>,
 }
 
@@ -295,10 +309,10 @@ mod tests {
         RoomRhythmState {
             id: "room1".into(),
             hub_types: vec!["hue".into()],
+            state: rhythm_core::RoomModeState::Active,
             rhythm_enabled: true,
             time_offset: 5.0,
             brightness_offset: -10.0,
-            soft_off: false,
             lights_on: true,
             brightness: 80,
             kelvin: 4000,
@@ -313,10 +327,10 @@ mod tests {
         let state = sample_rhythm_state();
         let json: Value = serde_json::to_value(&state).unwrap();
         assert_eq!(json["id"], "room1");
+        assert_eq!(json["state"], "active");
         assert_eq!(json["rhythm_enabled"], true);
         assert_eq!(json["time_offset"], 5.0);
         assert_eq!(json["brightness_offset"], -10.0);
-        assert_eq!(json["soft_off"], false);
         assert_eq!(json["lights_on"], true);
         assert_eq!(json["brightness"], 80);
         assert_eq!(json["kelvin"], 4000);
@@ -449,16 +463,22 @@ mod tests {
     #[test]
     fn settings_dto_serializes() {
         let dto = SettingsDto {
+            active_mode: rhythm_core::RhythmMode::Day,
             power_save: true,
-            active_light_profile: "rhythm".into(),
+            modes: rhythm_core::default_mode_configs(),
+            mode_transitions: rhythm_core::default_mode_transition_configs(),
             profiles: vec![
                 rhythm_core::default_rhythm_profile(),
                 rhythm_core::default_sleep_profile(),
             ],
         };
         let json: Value = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["active_mode"], "day");
         assert_eq!(json["power_save"], true);
-        assert_eq!(json["active_light_profile"], "rhythm");
+        assert_eq!(json["modes"].as_array().unwrap().len(), 2);
+        assert_eq!(json["mode_transitions"].as_array().unwrap().len(), 2);
+        assert_eq!(json["mode_transitions"][0]["trigger"], "sunrise");
+        assert_eq!(json["mode_transitions"][1]["trigger"], "nautical_twilight");
         assert_eq!(json["profiles"].as_array().unwrap().len(), 2);
         assert_eq!(json["profiles"][0]["id"], "rhythm");
     }
@@ -502,13 +522,33 @@ mod tests {
             latitude: Some(35.6),
             longitude: Some(-97.5),
             utc_offset_hours: -6.0,
+            solar_noon: 12.3,
+            solar_midnight: 0.3,
+            current_solar_time: 5.7,
             timezone_name: Some("America/Chicago".into()),
+            twilight: Some(TwilightResponse {
+                dawn: TwilightPhaseResponse {
+                    civil: Some(6.0),
+                    nautical: Some(5.5),
+                    astronomical: Some(5.0),
+                },
+                dusk: TwilightPhaseResponse {
+                    civil: Some(18.0),
+                    nautical: Some(18.5),
+                    astronomical: Some(19.0),
+                },
+            }),
         };
         let json: Value = serde_json::to_value(&loc).unwrap();
         assert_eq!(json["latitude"], 35.6_f32 as f64);
         assert_eq!(json["longitude"], -97.5_f32 as f64);
         assert_eq!(json["utc_offset_hours"], -6.0_f32 as f64);
+        assert_eq!(json["solar_noon"], 12.3_f32 as f64);
+        assert_eq!(json["solar_midnight"], 0.3_f32 as f64);
+        assert_eq!(json["current_solar_time"], 5.7_f32 as f64);
         assert_eq!(json["timezone_name"], "America/Chicago");
+        assert_eq!(json["twilight"]["dawn"]["civil"], 6.0);
+        assert_eq!(json["twilight"]["dusk"]["nautical"], 18.5);
     }
 
     #[test]
@@ -518,12 +558,20 @@ mod tests {
             latitude: None,
             longitude: None,
             utc_offset_hours: 0.0,
+            solar_noon: 12.0,
+            solar_midnight: 0.0,
+            current_solar_time: 18.0,
             timezone_name: None,
+            twilight: None,
         };
         let json: Value = serde_json::to_value(&loc).unwrap();
         assert!(json["latitude"].is_null());
         assert!(json["longitude"].is_null());
+        assert_eq!(json["solar_noon"], 12.0);
+        assert_eq!(json["solar_midnight"], 0.0);
+        assert_eq!(json["current_solar_time"], 18.0);
         assert!(json.get("timezone_name").is_none());
+        assert!(json.get("twilight").is_none());
     }
 
     // ---- TypedDeviceDto ----
@@ -614,11 +662,17 @@ mod tests {
                 latitude: None,
                 longitude: None,
                 utc_offset_hours: 0.0,
+                solar_noon: 12.0,
+                solar_midnight: 0.0,
+                current_solar_time: 18.0,
                 timezone_name: None,
+                twilight: None,
             },
             settings: SettingsDto {
+                active_mode: rhythm_core::RhythmMode::Day,
                 power_save: false,
-                active_light_profile: "rhythm".into(),
+                modes: rhythm_core::default_mode_configs(),
+                mode_transitions: rhythm_core::default_mode_transition_configs(),
                 profiles: vec![
                     rhythm_core::default_rhythm_profile(),
                     rhythm_core::default_sleep_profile(),
@@ -640,6 +694,9 @@ mod tests {
         );
         assert!(json["rooms"].as_array().unwrap().is_empty());
         assert!(json["location"]["current_local_time"].is_string());
+        assert_eq!(json["location"]["solar_noon"], 12.0);
+        assert_eq!(json["location"]["solar_midnight"], 0.0);
+        assert_eq!(json["location"]["current_solar_time"], 18.0);
     }
 
     #[test]
@@ -667,11 +724,28 @@ mod tests {
                 latitude: Some(35.0),
                 longitude: Some(-97.0),
                 utc_offset_hours: -6.0,
+                solar_noon: 12.4,
+                solar_midnight: 0.4,
+                current_solar_time: 8.1,
                 timezone_name: Some("America/Chicago".into()),
+                twilight: Some(TwilightResponse {
+                    dawn: TwilightPhaseResponse {
+                        civil: Some(6.0),
+                        nautical: Some(5.5),
+                        astronomical: Some(5.0),
+                    },
+                    dusk: TwilightPhaseResponse {
+                        civil: Some(18.0),
+                        nautical: Some(18.5),
+                        astronomical: Some(19.0),
+                    },
+                }),
             },
             settings: SettingsDto {
+                active_mode: rhythm_core::RhythmMode::Day,
                 power_save: false,
-                active_light_profile: "rhythm".into(),
+                modes: rhythm_core::default_mode_configs(),
+                mode_transitions: rhythm_core::default_mode_transition_configs(),
                 profiles: vec![
                     rhythm_core::default_rhythm_profile(),
                     rhythm_core::default_sleep_profile(),
@@ -693,5 +767,9 @@ mod tests {
         assert_eq!(json["rooms"][0]["name"], "Office");
         assert_eq!(json["hubs"][0]["type"], "hue");
         assert_eq!(json["last_tick_epoch_ms"], 1700000000000u64);
+        assert_eq!(json["location"]["solar_noon"], 12.4_f32 as f64);
+        assert_eq!(json["location"]["solar_midnight"], 0.4_f32 as f64);
+        assert_eq!(json["location"]["current_solar_time"], 8.1_f32 as f64);
+        assert_eq!(json["location"]["twilight"]["dusk"]["astronomical"], 19.0);
     }
 }

@@ -410,6 +410,11 @@ impl HubDeviceRegistry {
         !self.room_names.is_empty()
     }
 
+    /// Look up the display name for a room ID.
+    pub fn room_name(&self, room_id: &str) -> Option<&str> {
+        self.room_names.get(room_id).map(String::as_str)
+    }
+
     /// Convert to rhythm-core Room objects.
     pub fn rooms(&self) -> Vec<Room> {
         self.room_names

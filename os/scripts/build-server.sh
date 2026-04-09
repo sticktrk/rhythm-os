@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build the rhythm-server binary
 #
-# Usage: ./scripts/build-server.sh [--release] [--target <target>] [--clean] [--run [-- args...]]
+# Usage: ./scripts/build-server.sh [--release|--debug] [--target <target>] [--clean] [--run [-- args...]]
 # Output: dist/bin/{os}-{arch}/rhythm-server
 
 set -e
@@ -10,17 +10,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Defaults
-RELEASE=false
+BUILD_MODE="auto"
 TARGET="native"
 CLEAN=false
 RUN=false
+DEBUG_LOG=false
 SERVER_ARGS=()
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
         --release)
-            RELEASE=true
+            BUILD_MODE="release"
+            DEBUG_LOG=false
+            shift
+            ;;
+        --debug)
+            BUILD_MODE="debug"
+            DEBUG_LOG=true
             shift
             ;;
         --target)
@@ -44,10 +51,11 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --release           Build in release mode (default: debug)"
+            echo "  --release           Build in release mode"
+            echo "  --debug             Build in debug mode; with --run, sets --log-level debug"
             echo "  --target <target>   Target platform (default: native)"
             echo "  --clean             Clean before building"
-            echo "  --run               Run the server after building (native only)"
+            echo "  --run               Run the server after building (native only; default: release)"
             echo "  -h, --help          Show this help"
             echo ""
             echo "Targets:"
@@ -71,13 +79,41 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Determine build flags
-if [ "$RELEASE" = true ]; then
-    PROFILE="release"
-    CARGO_FLAGS="--release"
-else
-    PROFILE="debug"
-    CARGO_FLAGS=""
-fi
+case "$BUILD_MODE" in
+    release)
+        PROFILE="release"
+        CARGO_FLAGS="--release"
+        ;;
+    debug)
+        PROFILE="debug"
+        CARGO_FLAGS=""
+        ;;
+    auto)
+        if [ "$RUN" = true ]; then
+            PROFILE="release"
+            CARGO_FLAGS="--release"
+        else
+            PROFILE="debug"
+            CARGO_FLAGS=""
+        fi
+        ;;
+    *)
+        echo "Unknown build mode: $BUILD_MODE"
+        exit 1
+        ;;
+esac
+
+server_args_include_log_level() {
+    local arg
+    for arg in "${SERVER_ARGS[@]}"; do
+        case "$arg" in
+            --log-level|--log-level=*)
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
 
 # Map target names to Rust target triples
 get_rust_target() {
@@ -184,14 +220,33 @@ build_for_target() {
 
 build_native() {
     echo "Building for native target..."
-    cargo build $CARGO_FLAGS -p rhythm-server
+
+    local bins=(rhythm-server rhythm-cli)
+    local cargo_bin_flags=()
+    local bin
+
+    if [ "$RUN" = true ]; then
+        bins=(rhythm-server)
+    fi
+
+    for bin in "${bins[@]}"; do
+        cargo_bin_flags+=(--bin "$bin")
+    done
+
+    cargo build $CARGO_FLAGS -p rhythm-server "${cargo_bin_flags[@]}"
+
+    if [ "$RUN" = true ]; then
+        echo "Built: target/$PROFILE/rhythm-server"
+        return
+    fi
 
     local output_dir_name
     output_dir_name=$(get_native_output_dir)
     local output_dir="$PROJECT_ROOT/dist/bin/$output_dir_name"
     mkdir -p "$output_dir"
-    cp "$PROJECT_ROOT/target/$PROFILE/rhythm-server" "$output_dir/"
-    cp "$PROJECT_ROOT/target/$PROFILE/rhythm-cli" "$output_dir/"
+    for bin in "${bins[@]}"; do
+        cp "$PROJECT_ROOT/target/$PROFILE/$bin" "$output_dir/"
+    done
     echo "Output: dist/bin/$output_dir_name/{rhythm-server,rhythm-cli}"
 }
 
@@ -242,7 +297,9 @@ if [ "$RUN" = true ]; then
         echo "Error: --run only works with native target"
         exit 1
     fi
-    local_dir="$PROJECT_ROOT/dist/bin/$(get_native_output_dir)"
+    if [ "$DEBUG_LOG" = true ] && ! server_args_include_log_level; then
+        SERVER_ARGS=(--log-level debug "${SERVER_ARGS[@]}")
+    fi
     echo "Running rhythm-server..."
-    exec "$local_dir/rhythm-server" "${SERVER_ARGS[@]}"
+    exec "$PROJECT_ROOT/target/$PROFILE/rhythm-server" "${SERVER_ARGS[@]}"
 fi

@@ -13,9 +13,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::room::RoomManager;
-use crate::{
-    default_idle_profile, default_rhythm_profile, default_sleep_profile, LightProfileConfig,
-};
+use crate::{default_builtin_profiles, LightProfileConfig};
 
 /// Errors that can occur with persistence operations.
 #[derive(Error, Debug)]
@@ -103,11 +101,7 @@ pub trait PersistenceProvider: Send + Sync {
 
 fn default_light_profiles() -> BTreeMap<String, LightProfileConfig> {
     let mut profiles = BTreeMap::new();
-    for profile in [
-        default_rhythm_profile(),
-        default_sleep_profile(),
-        default_idle_profile(),
-    ] {
+    for profile in default_builtin_profiles() {
         profiles.insert(profile.id.clone(), profile);
     }
     profiles
@@ -177,7 +171,8 @@ mod tests {
         let profiles = provider.load_light_profiles().await.unwrap();
         assert!(profiles.contains_key(crate::RHYTHM_PROFILE_ID));
         assert!(profiles.contains_key(crate::SLEEP_PROFILE_ID));
-        assert!(profiles.contains_key(crate::IDLE_PROFILE_ID));
+        assert!(profiles.contains_key(crate::DAY_IDLE_PROFILE_ID));
+        assert!(profiles.contains_key(crate::SLEEP_IDLE_PROFILE_ID));
 
         // Save operations should succeed silently
         provider.save_rooms(&RoomManager::new()).await.unwrap();

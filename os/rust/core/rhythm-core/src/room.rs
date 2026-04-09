@@ -6,10 +6,279 @@
 
 use std::collections::HashMap;
 
-use crate::light_profile::{LightProfileConfig, TimerSetting};
+use crate::light_profile::{
+    is_builtin_state_profile_id, LightProfileConfig, TimerSetting, DAY_IDLE_PROFILE_ID,
+    RHYTHM_PROFILE_ID, SLEEP_IDLE_PROFILE_ID, SLEEP_PROFILE_ID,
+};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
+
+const REMOVED_LEGACY_IDLE_PROFILE_ID: &str = "idle";
+
+fn is_removed_legacy_idle_profile_id(id: &str) -> bool {
+    id == REMOVED_LEGACY_IDLE_PROFILE_ID
+}
+
+/// High-level global mode selected by the user.
+///
+/// This currently maps onto the built-in active profiles:
+/// - `day` -> any non-sleep active profile
+/// - `sleep` -> the built-in sleep profile
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum RhythmMode {
+    #[default]
+    Day,
+    Sleep,
+}
+
+impl RhythmMode {
+    pub const ALL: [Self; 2] = [Self::Day, Self::Sleep];
+
+    /// Resolve the current high-level mode from the active profile ID.
+    pub fn from_profile_id(profile_id: &str) -> Self {
+        if profile_id == SLEEP_PROFILE_ID {
+            Self::Sleep
+        } else {
+            Self::Day
+        }
+    }
+
+    /// Built-in fallback active profile for this mode.
+    pub fn default_active_profile_id(self) -> &'static str {
+        match self {
+            Self::Day => RHYTHM_PROFILE_ID,
+            Self::Sleep => SLEEP_PROFILE_ID,
+        }
+    }
+
+    /// Built-in fallback idle profile for this mode.
+    pub fn default_idle_profile_id(self) -> &'static str {
+        match self {
+            Self::Day => DAY_IDLE_PROFILE_ID,
+            Self::Sleep => SLEEP_IDLE_PROFILE_ID,
+        }
+    }
+}
+
+/// User-facing room state within the current mode.
+///
+/// This is intentionally separate from the stored room config so the runtime
+/// can evolve toward mode-specific states (for example `wake`) without
+/// hard-coding behavior into the room struct itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum RoomModeState {
+    #[default]
+    Active,
+    Idle,
+    Wake,
+    Warning,
+    HardOff,
+}
+
+impl RoomModeState {
+    /// Derive the current user-facing room state from existing runtime flags.
+    pub fn from_flags(hard_off: bool, soft_off: bool, warning_active: bool) -> Self {
+        if hard_off {
+            Self::HardOff
+        } else if warning_active {
+            Self::Warning
+        } else if soft_off {
+            Self::Idle
+        } else {
+            Self::Active
+        }
+    }
+}
+
+/// Profile mapping for the room states inside one high-level mode.
+///
+/// The active state continues to respect the currently selected active profile
+/// when it already belongs to this mode. The stored `active_profile_id` acts as
+/// the shareable fallback/default for this mode when needed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct ModeConfig {
+    pub mode: RhythmMode,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub active_profile_id: Option<String>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub idle_profile_id: Option<String>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub wake_profile_id: Option<String>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub warning_profile_id: Option<String>,
+}
+
+impl ModeConfig {
+    /// Normalize invalid profile selections into mode-specific built-ins.
+    ///
+    /// Active profiles must never point at state-only profiles.
+    pub fn normalize_profile_ids(&mut self) -> bool {
+        let mut changed = false;
+
+        if self.active_profile_id.as_deref().is_some_and(|id| {
+            is_builtin_state_profile_id(id) || is_removed_legacy_idle_profile_id(id)
+        }) {
+            self.active_profile_id = Some(self.mode.default_active_profile_id().to_string());
+            changed = true;
+        }
+
+        if self
+            .idle_profile_id
+            .as_deref()
+            .is_some_and(is_removed_legacy_idle_profile_id)
+        {
+            self.idle_profile_id = None;
+            changed = true;
+        }
+
+        changed
+    }
+
+    pub fn default_for_mode(mode: RhythmMode) -> Self {
+        Self {
+            mode,
+            active_profile_id: Some(mode.default_active_profile_id().to_string()),
+            idle_profile_id: None,
+            wake_profile_id: None,
+            warning_profile_id: None,
+        }
+    }
+
+    /// Resolve which stored profile ID should back the requested room state.
+    pub fn resolve_state_profile_id<'a>(
+        &'a self,
+        state: RoomModeState,
+        active_profile_id: &'a str,
+    ) -> Option<&'a str> {
+        match state {
+            RoomModeState::Active => Some(
+                self.active_profile_id
+                    .as_deref()
+                    .filter(|id| {
+                        !is_builtin_state_profile_id(id) && !is_removed_legacy_idle_profile_id(id)
+                    })
+                    .unwrap_or(active_profile_id),
+            ),
+            RoomModeState::Idle => self
+                .idle_profile_id
+                .as_deref()
+                .filter(|id| !is_removed_legacy_idle_profile_id(id)),
+            RoomModeState::Wake => {
+                Some(self.wake_profile_id.as_deref().unwrap_or(active_profile_id))
+            }
+            RoomModeState::Warning => Some(
+                self.warning_profile_id
+                    .as_deref()
+                    .unwrap_or(active_profile_id),
+            ),
+            RoomModeState::HardOff => self
+                .idle_profile_id
+                .as_deref()
+                .filter(|id| !is_removed_legacy_idle_profile_id(id)),
+        }
+    }
+}
+
+pub fn default_mode_configs() -> Vec<ModeConfig> {
+    RhythmMode::ALL
+        .into_iter()
+        .map(ModeConfig::default_for_mode)
+        .collect()
+}
+
+/// Trigger that initiates a configured mode transition.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum ModeTransitionTrigger {
+    #[default]
+    Manual,
+    Sunrise,
+    Sunset,
+    CivilTwilight,
+    NauticalTwilight,
+    AstronomicalTwilight,
+}
+
+fn default_preserve_hard_off() -> bool {
+    true
+}
+
+fn default_mode_transition_duration_ms() -> u32 {
+    5_000
+}
+
+/// Configured transition between two high-level modes.
+///
+/// Transitions operate in rendered output space: the runtime captures the
+/// current visible room output and fades it to the target mode/state output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct ModeTransitionConfig {
+    pub from_mode: RhythmMode,
+    pub to_mode: RhythmMode,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub trigger: ModeTransitionTrigger,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default = "default_mode_transition_duration_ms")
+    )]
+    pub duration_ms: u32,
+    #[cfg_attr(feature = "serde", serde(default = "default_preserve_hard_off"))]
+    pub preserve_hard_off: bool,
+}
+
+impl ModeTransitionConfig {
+    pub fn new(from_mode: RhythmMode, to_mode: RhythmMode, duration_ms: u32) -> Self {
+        Self {
+            from_mode,
+            to_mode,
+            trigger: ModeTransitionTrigger::Manual,
+            duration_ms,
+            preserve_hard_off: true,
+        }
+    }
+
+    pub fn with_trigger(mut self, trigger: ModeTransitionTrigger) -> Self {
+        self.trigger = trigger;
+        self
+    }
+}
+
+pub fn default_mode_transition_configs() -> Vec<ModeTransitionConfig> {
+    vec![
+        ModeTransitionConfig::new(
+            RhythmMode::Sleep,
+            RhythmMode::Day,
+            default_mode_transition_duration_ms(),
+        )
+            .with_trigger(ModeTransitionTrigger::Sunrise),
+        ModeTransitionConfig::new(
+            RhythmMode::Day,
+            RhythmMode::Sleep,
+            default_mode_transition_duration_ms(),
+        )
+            .with_trigger(ModeTransitionTrigger::NauticalTwilight),
+    ]
+}
 
 /// Per-room light profile selection and timer overrides.
 ///
@@ -97,10 +366,21 @@ pub struct Room {
     #[cfg_attr(feature = "serde", serde(default))]
     pub soft_off: bool,
 
+    /// Whether this room is intentionally fully off.
+    ///
+    /// Unlike `soft_off`, this is a true off state entered by explicit actions
+    /// such as a bottom-button long press.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub hard_off: bool,
+
     /// Optional per-room base profile selection and timer overrides.
     #[cfg_attr(
         feature = "serde",
-        serde(default, rename = "room_profile", skip_serializing_if = "RoomProfileSettings::is_empty")
+        serde(
+            default,
+            rename = "room_profile",
+            skip_serializing_if = "RoomProfileSettings::is_empty"
+        )
     )]
     pub profile_settings: RoomProfileSettings,
 }
@@ -116,6 +396,7 @@ impl Room {
             time_offset_minutes: 0.0,
             brightness_offset: 0.0,
             soft_off: false,
+            hard_off: false,
             profile_settings: RoomProfileSettings::default(),
         }
     }
@@ -188,6 +469,7 @@ impl Default for Room {
             time_offset_minutes: 0.0,
             brightness_offset: 0.0,
             soft_off: false,
+            hard_off: false,
             profile_settings: RoomProfileSettings::default(),
         }
     }
@@ -346,6 +628,7 @@ mod tests {
         assert_eq!(room.time_offset_minutes, 0.0);
         assert_eq!(room.brightness_offset, 0.0);
         assert!(!room.soft_off);
+        assert!(!room.hard_off);
         assert!(room.profile_settings.is_empty());
     }
 
@@ -408,7 +691,142 @@ mod tests {
 
         assert_eq!(settings.resolved_profile_id("rhythm"), "sleep");
         assert_eq!(config.fade_ms, TimerSetting::Fixed { value: 250 });
-        assert_eq!(config.motion_timeout_secs, TimerSetting::Fixed { value: 42 });
+        assert_eq!(
+            config.motion_timeout_secs,
+            TimerSetting::Fixed { value: 42 }
+        );
+    }
+
+    #[test]
+    fn test_rhythm_mode_from_profile_id() {
+        assert_eq!(RhythmMode::from_profile_id("rhythm"), RhythmMode::Day);
+        assert_eq!(RhythmMode::from_profile_id("custom"), RhythmMode::Day);
+        assert_eq!(RhythmMode::from_profile_id("sleep"), RhythmMode::Sleep);
+    }
+
+    #[test]
+    fn test_room_mode_state_from_flags() {
+        assert_eq!(
+            RoomModeState::from_flags(false, false, false),
+            RoomModeState::Active
+        );
+        assert_eq!(
+            RoomModeState::from_flags(false, true, false),
+            RoomModeState::Idle
+        );
+        assert_eq!(
+            RoomModeState::from_flags(false, false, true),
+            RoomModeState::Warning
+        );
+        assert_eq!(
+            RoomModeState::from_flags(true, false, false),
+            RoomModeState::HardOff
+        );
+    }
+
+    #[test]
+    fn test_default_mode_configs_cover_day_and_sleep() {
+        let configs = default_mode_configs();
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0].mode, RhythmMode::Day);
+        assert_eq!(configs[0].active_profile_id.as_deref(), Some("rhythm"));
+        assert_eq!(configs[0].idle_profile_id, None);
+        assert_eq!(configs[1].mode, RhythmMode::Sleep);
+        assert_eq!(configs[1].active_profile_id.as_deref(), Some("sleep"));
+        assert_eq!(configs[1].idle_profile_id, None);
+    }
+
+    #[test]
+    fn test_default_mode_transitions_use_short_testing_fade() {
+        let configs = default_mode_transition_configs();
+        assert_eq!(configs.len(), 2);
+        assert!(configs.iter().all(|config| config.duration_ms == 5_000));
+    }
+
+    #[test]
+    fn test_mode_config_resolve_state_profile_id_uses_state_specific_defaults() {
+        let config = ModeConfig::default_for_mode(RhythmMode::Sleep);
+
+        assert_eq!(
+            config.resolve_state_profile_id(RoomModeState::Active, "custom-sleep"),
+            Some("sleep")
+        );
+        assert_eq!(
+            config.resolve_state_profile_id(RoomModeState::Idle, "custom-sleep"),
+            None
+        );
+        assert_eq!(
+            config.resolve_state_profile_id(RoomModeState::Wake, "custom-sleep"),
+            Some("custom-sleep")
+        );
+        assert_eq!(
+            config.resolve_state_profile_id(RoomModeState::Warning, "custom-sleep"),
+            Some("custom-sleep")
+        );
+        assert_eq!(
+            config.resolve_state_profile_id(RoomModeState::HardOff, "custom-sleep"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_day_mode_default_idle_profile_id() {
+        assert_eq!(RhythmMode::Day.default_idle_profile_id(), "day_idle");
+        assert_eq!(RhythmMode::Sleep.default_idle_profile_id(), "sleep_idle");
+    }
+
+    #[test]
+    fn test_mode_config_normalizes_invalid_active_state_profile() {
+        let mut config = ModeConfig {
+            mode: RhythmMode::Day,
+            active_profile_id: Some(DAY_IDLE_PROFILE_ID.into()),
+            idle_profile_id: Some(DAY_IDLE_PROFILE_ID.into()),
+            wake_profile_id: None,
+            warning_profile_id: None,
+        };
+
+        assert!(config.normalize_profile_ids());
+        assert_eq!(config.active_profile_id.as_deref(), Some("rhythm"));
+        assert_eq!(config.idle_profile_id.as_deref(), Some("day_idle"));
+    }
+
+    #[test]
+    fn test_mode_config_normalizes_removed_legacy_idle_profile_ids() {
+        let mut config = ModeConfig {
+            mode: RhythmMode::Sleep,
+            active_profile_id: Some("idle".into()),
+            idle_profile_id: Some("idle".into()),
+            wake_profile_id: None,
+            warning_profile_id: None,
+        };
+
+        assert!(config.normalize_profile_ids());
+        assert_eq!(config.active_profile_id.as_deref(), Some("sleep"));
+        assert_eq!(config.idle_profile_id, None);
+    }
+
+    #[test]
+    fn test_mode_config_resolve_state_profile_id_ignores_removed_legacy_idle() {
+        let config = ModeConfig {
+            mode: RhythmMode::Day,
+            active_profile_id: Some("idle".into()),
+            idle_profile_id: Some("idle".into()),
+            wake_profile_id: None,
+            warning_profile_id: None,
+        };
+
+        assert_eq!(
+            config.resolve_state_profile_id(RoomModeState::Active, "rhythm"),
+            Some("rhythm")
+        );
+        assert_eq!(
+            config.resolve_state_profile_id(RoomModeState::Idle, "rhythm"),
+            None
+        );
+        assert_eq!(
+            config.resolve_state_profile_id(RoomModeState::HardOff, "rhythm"),
+            None
+        );
     }
 
     #[test]
@@ -535,6 +953,36 @@ mod tests {
             assert_eq!(room.id, "room1");
             assert!(!room.disabled); // default
             assert!(!room.soft_off); // default
+            assert!(!room.hard_off); // default
+        }
+
+        #[test]
+        fn test_mode_enums_serialize_snake_case() {
+            assert_eq!(
+                serde_json::to_string(&RhythmMode::Sleep).unwrap(),
+                "\"sleep\""
+            );
+            assert_eq!(
+                serde_json::to_string(&RoomModeState::Warning).unwrap(),
+                "\"warning\""
+            );
+            assert_eq!(
+                serde_json::to_string(&RoomModeState::HardOff).unwrap(),
+                "\"hard_off\""
+            );
+        }
+
+        #[test]
+        fn test_mode_transition_deserialize_defaults_duration_and_preserve_hard_off() {
+            let json = r#"{
+                "from_mode": "sleep",
+                "to_mode": "day",
+                "trigger": "sunrise"
+            }"#;
+
+            let config: ModeTransitionConfig = serde_json::from_str(json).unwrap();
+            assert_eq!(config.duration_ms, 5_000);
+            assert!(config.preserve_hard_off);
         }
 
         #[test]

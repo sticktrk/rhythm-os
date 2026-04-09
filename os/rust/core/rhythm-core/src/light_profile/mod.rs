@@ -18,10 +18,11 @@ mod profile;
 mod registry;
 
 pub use defaults::{
-    default_idle_profile, default_rhythm_profile, default_sleep_profile, IDLE_PROFILE_ID,
-    IDLE_PROFILE_NAME, RHYTHM_PROFILE_ID, RHYTHM_PROFILE_NAME, SLEEP_DEFAULT_COLOR_TEMP,
-    SLEEP_DEFAULT_MAX_BRIGHTNESS, SLEEP_DEFAULT_MIN_BRIGHTNESS, SLEEP_PROFILE_ID,
-    SLEEP_PROFILE_NAME, SLEEP_XY_X, SLEEP_XY_Y,
+    default_builtin_profiles, default_day_idle_profile, default_rhythm_profile,
+    default_sleep_idle_profile, default_sleep_profile, is_builtin_state_profile_id,
+    normalize_builtin_state_profile_config, DAY_IDLE_PROFILE_ID, DAY_IDLE_PROFILE_NAME,
+    RHYTHM_PROFILE_ID, RHYTHM_PROFILE_NAME, SLEEP_DEFAULT_BRIGHTNESS, SLEEP_DEFAULT_RGB,
+    SLEEP_IDLE_PROFILE_ID, SLEEP_IDLE_PROFILE_NAME, SLEEP_PROFILE_ID, SLEEP_PROFILE_NAME,
 };
 pub use profile::LightProfile;
 pub use registry::LightProfileRegistry;

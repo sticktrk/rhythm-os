@@ -188,7 +188,7 @@ impl<'de> Deserialize<'de> for TimerSetting {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct LightProfileConfig {
-    /// Unique identifier (e.g., "rhythm", "sleep", "idle")
+    /// Unique identifier (e.g., "rhythm", "sleep", "day_idle")
     pub id: String,
 
     /// Human-readable display name
@@ -411,8 +411,8 @@ mod tests {
         #[test]
         fn test_palette_profile_roundtrip() {
             let config = LightProfileConfig {
-                id: "idle".into(),
-                name: "Idle".into(),
+                id: "day_idle".into(),
+                name: "Day Idle".into(),
                 curve: LightCurveShape::default_idle_palette(),
                 min_brightness: 1,
                 max_brightness: 1,

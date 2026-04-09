@@ -43,6 +43,18 @@ pub fn resolve_room_target(
         .ok_or_else(|| LightControlError::RoomNotFound(format!("No target for room {}", room_id)))
 }
 
+/// Build a user-friendly room label for logs.
+pub fn format_room_label(registry: &Arc<Mutex<HubDeviceRegistry>>, room_id: &str) -> String {
+    match registry.lock() {
+        Ok(registry) => match registry.room_name(room_id) {
+            Some(name) if name != room_id => format!("{} ({})", name, room_id),
+            Some(name) => name.to_string(),
+            None => room_id.to_string(),
+        },
+        Err(_) => room_id.to_string(),
+    }
+}
+
 /// Convert a `LightingCommand` into a capability-aware normalized command.
 pub fn adapt_lighting_command(
     caps: &LightCapabilities,
@@ -175,5 +187,17 @@ mod tests {
         assert_eq!(caps.min_kelvin, Some(2200));
         assert_eq!(caps.max_kelvin, Some(6500));
         assert!(!caps.supports_xy_color());
+    }
+
+    #[test]
+    fn format_room_label_prefers_room_name() {
+        let registry = Arc::new(Mutex::new(HubDeviceRegistry::new()));
+        registry
+            .lock()
+            .unwrap()
+            .upsert_room("room1", "Living Room", "gl-room1", &[]);
+
+        assert_eq!(format_room_label(&registry, "room1"), "Living Room (room1)");
+        assert_eq!(format_room_label(&registry, "unknown"), "unknown");
     }
 }

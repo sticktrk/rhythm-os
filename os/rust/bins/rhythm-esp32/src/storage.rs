@@ -491,11 +491,7 @@ impl rhythm_os::storage::Storage for NvsStorage {
 
         Ok(rhythm_os::storage::StoredLightProfiles {
             solar_noon_hour: 12.5,
-            profiles: vec![
-                rhythm_core::default_rhythm_profile(),
-                rhythm_core::default_sleep_profile(),
-                rhythm_core::default_idle_profile(),
-            ],
+            profiles: rhythm_core::default_builtin_profiles().into(),
         })
     }
 

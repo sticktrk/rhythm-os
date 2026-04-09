@@ -52,6 +52,7 @@ impl<H: HaTransport> HaLightController<H> {
 #[async_trait]
 impl<H: HaTransport + 'static> LightController for HaLightController<H> {
     async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
+        let room_label = rhythm_os::controller_helpers::format_room_label(&self.registry, room_id);
         // Verify room exists in registry (for HA, target == room_id == area_id)
         let area_id = rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
         let caps = rhythm_os::controller_helpers::resolve_room_capabilities(
@@ -89,7 +90,7 @@ impl<H: HaTransport + 'static> LightController for HaLightController<H> {
         self.client
             .call_service("light", "turn_on", &data)
             .map_err(|e| {
-                log::warn!(target: "cmd", "HA turn_on failed: room={} err={}", room_id, e);
+                log::warn!(target: "cmd", "HA turn_on failed: room={} err={}", room_label, e);
                 LightControlError::CommandFailed(format!(
                     "Failed to turn on room {}: {}",
                     room_id, e
@@ -99,23 +100,24 @@ impl<H: HaTransport + 'static> LightController for HaLightController<H> {
         if let Some((x, y)) = adapted.xy {
             info!(target: "cmd",
                 "HA turn_on: room={} bri={} xy=({:.3},{:.3}) rgb=({},{},{})",
-                room_id, adapted.brightness.unwrap_or(0),
+                room_label, adapted.brightness.unwrap_or(0),
                 x, y,
                 command.rgb.r, command.rgb.g, command.rgb.b,
             );
         } else if let Some(kelvin) = adapted.kelvin {
             info!(target: "cmd",
                 "HA turn_on: room={} bri={} kelvin={}",
-                room_id, adapted.brightness.unwrap_or(0), kelvin
+                room_label, adapted.brightness.unwrap_or(0), kelvin
             );
         } else {
-            info!(target: "cmd", "HA turn_on: room={} bri={}", room_id, adapted.brightness.unwrap_or(0));
+            info!(target: "cmd", "HA turn_on: room={} bri={}", room_label, adapted.brightness.unwrap_or(0));
         }
 
         Ok(())
     }
 
     async fn turn_off(&self, room_id: &str) -> LightControlResult<()> {
+        let room_label = rhythm_os::controller_helpers::format_room_label(&self.registry, room_id);
         let data = serde_json::json!({
             "area_id": room_id,
         });
@@ -123,14 +125,14 @@ impl<H: HaTransport + 'static> LightController for HaLightController<H> {
         self.client
             .call_service("light", "turn_off", &data)
             .map_err(|e| {
-                log::warn!(target: "cmd", "HA turn_off failed: room={} err={}", room_id, e);
+                log::warn!(target: "cmd", "HA turn_off failed: room={} err={}", room_label, e);
                 LightControlError::CommandFailed(format!(
                     "Failed to turn off room {}: {}",
                     room_id, e
                 ))
             })?;
 
-        info!(target: "cmd", "HA turn_off: room={}", room_id);
+        info!(target: "cmd", "HA turn_off: room={}", room_label);
 
         Ok(())
     }

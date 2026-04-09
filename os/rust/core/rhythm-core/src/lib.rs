@@ -60,12 +60,14 @@ pub use groups::{
     GroupResult, LightGroup, NoOpGroupController, GROUP_PREFIX,
 };
 pub use light_profile::{
-    default_idle_profile, default_rhythm_profile, default_sleep_profile, CommonCurveConfig,
-    CurveContext, HourBreakpoint, LightCurveShape, LightDirectColor, LightPaletteKeyframe,
-    LightProfile, LightProfileConfig, LightProfileModule, LightProfileRegistry, TimerSetting,
-    IDLE_PROFILE_ID, IDLE_PROFILE_NAME, RHYTHM_PROFILE_ID, RHYTHM_PROFILE_NAME,
-    SLEEP_DEFAULT_COLOR_TEMP, SLEEP_DEFAULT_MAX_BRIGHTNESS, SLEEP_DEFAULT_MIN_BRIGHTNESS,
-    SLEEP_PROFILE_ID, SLEEP_PROFILE_NAME, SLEEP_XY_X, SLEEP_XY_Y,
+    default_builtin_profiles, default_day_idle_profile, default_rhythm_profile,
+    default_sleep_idle_profile, default_sleep_profile, is_builtin_state_profile_id,
+    normalize_builtin_state_profile_config, CommonCurveConfig, CurveContext, HourBreakpoint,
+    LightCurveShape, LightDirectColor, LightPaletteKeyframe, LightProfile, LightProfileConfig,
+    LightProfileModule, LightProfileRegistry, TimerSetting, DAY_IDLE_PROFILE_ID,
+    DAY_IDLE_PROFILE_NAME, RHYTHM_PROFILE_ID, RHYTHM_PROFILE_NAME, SLEEP_DEFAULT_BRIGHTNESS,
+    SLEEP_DEFAULT_RGB, SLEEP_IDLE_PROFILE_ID, SLEEP_IDLE_PROFILE_NAME, SLEEP_PROFILE_ID,
+    SLEEP_PROFILE_NAME,
 };
 pub use lighting::LightingCommand;
 pub use midpoint::MidpointValue;
@@ -73,7 +75,10 @@ pub use persistence::{
     NoOpPersistenceProvider, PersistenceError, PersistenceProvider, PersistenceResult,
 };
 pub use primitives::{crossed_solar_midnight, PeriodicTickResult, RhythmEngine};
-pub use room::{Room, RoomManager, RoomProfileSettings};
+pub use room::{
+    default_mode_configs, default_mode_transition_configs, ModeConfig, ModeTransitionConfig,
+    ModeTransitionTrigger, RhythmMode, Room, RoomManager, RoomModeState, RoomProfileSettings,
+};
 pub use solar::{
     calculate_solar_noon, calculate_solar_noon_from_offset, calculate_sun_times, calculate_sunrise,
     calculate_sunset, calculate_twilight_times, solar_time_from_location, SolarTime, SunTimes,

@@ -61,6 +61,8 @@ impl<T: MatterTransport> MatterLightController<T> {
 #[async_trait]
 impl<T: MatterTransport + 'static> LightController for MatterLightController<T> {
     async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
+        let room_label =
+            rhythm_os::controller_helpers::format_room_label(&self.hub_data.registry, room_id);
         // Verify room exists (for Matter, grouped_light_id == room_id)
         let _target =
             rhythm_os::controller_helpers::resolve_room_target(&self.hub_data.registry, room_id)?;
@@ -79,9 +81,12 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
         })?;
 
         // Fan out to each device with capability-aware command adaptation
+        let mut successful_devices = 0usize;
+        let mut failed_devices = 0usize;
         for device_id in &device_ids {
             let Some((node_id, endpoint)) = Self::parse_device_id(device_id) else {
                 warn!(target: "cmd", "Matter: invalid device ID format: {}", device_id);
+                failed_devices += 1;
                 continue;
             };
 
@@ -97,6 +102,8 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
                 .map(|ms| (ms / 100) as u16)
                 .unwrap_or(0);
 
+            let mut any_success = false;
+
             // Send level if device supports dimming
             if let Some(brightness) = adapted.brightness {
                 let level = clusters::brightness_to_level(brightness);
@@ -108,11 +115,15 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
                     transition_tenths,
                 ) {
                     warn!(target: "cmd", "Matter: level command failed for node {}: {}", node_id, e);
+                } else {
+                    any_success = true;
                 }
             } else if adapted.on {
                 // OnOff-only device: just send on
                 if let Err(e) = clusters::send_on(&*self.transport, node_id, endpoint) {
                     warn!(target: "cmd", "Matter: on command failed for node {}: {}", node_id, e);
+                } else {
+                    any_success = true;
                 }
             }
 
@@ -128,6 +139,8 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
                     transition_tenths,
                 ) {
                     warn!(target: "cmd", "Matter: color xy command failed for node {}: {}", node_id, e);
+                } else {
+                    any_success = true;
                 }
             } else if let Some(kelvin) = adapted.kelvin {
                 let mireds = clusters::kelvin_to_mireds(kelvin);
@@ -139,14 +152,38 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
                     transition_tenths,
                 ) {
                     warn!(target: "cmd", "Matter: color temperature command failed for node {}: {}", node_id, e);
+                } else {
+                    any_success = true;
                 }
+            }
+
+            if any_success {
+                successful_devices += 1;
+            } else {
+                failed_devices += 1;
             }
         }
 
-        if command.is_direct_color || command.kelvin == 0 {
+        if successful_devices == 0 && !device_ids.is_empty() {
+            return Err(LightControlError::CommandFailed(format!(
+                "Matter turn_on failed for room {} ({} target devices)",
+                room_label,
+                failed_devices,
+            )));
+        }
+
+        if failed_devices > 0 {
+            warn!(
+                target: "cmd",
+                "Matter turn_on partial: room={} ok={} failed={}",
+                room_label,
+                successful_devices,
+                failed_devices,
+            );
+        } else if command.is_direct_color || command.kelvin == 0 {
             info!(target: "cmd",
                 "Matter turn_on: room={} bri={} xy=({:.3},{:.3}) rgb=({},{},{}) devices={}",
-                room_id, command.brightness,
+                room_label, command.brightness,
                 command.xy.x, command.xy.y,
                 command.rgb.r, command.rgb.g, command.rgb.b,
                 device_ids.len(),
@@ -154,7 +191,7 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
         } else {
             info!(target: "cmd",
                 "Matter turn_on: room={} bri={} kelvin={} devices={}",
-                room_id, command.brightness, command.kelvin, device_ids.len()
+                room_label, command.brightness, command.kelvin, device_ids.len()
             );
         }
 
@@ -162,6 +199,8 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
     }
 
     async fn turn_off(&self, room_id: &str) -> LightControlResult<()> {
+        let room_label =
+            rhythm_os::controller_helpers::format_room_label(&self.hub_data.registry, room_id);
         let device_ids = {
             let registry = self.hub_data.registry.lock().map_err(|e| {
                 LightControlError::Internal(format!("Failed to lock registry: {}", e))
@@ -169,16 +208,40 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
             registry.get_light_entities(room_id)
         };
 
+        let mut successful_devices = 0usize;
+        let mut failed_devices = 0usize;
         for device_id in &device_ids {
             let Some((node_id, endpoint)) = Self::parse_device_id(device_id) else {
+                failed_devices += 1;
                 continue;
             };
             if let Err(e) = clusters::send_off(&*self.transport, node_id, endpoint) {
                 warn!(target: "cmd", "Matter: off command failed for node {}: {}", node_id, e);
+                failed_devices += 1;
+            } else {
+                successful_devices += 1;
             }
         }
 
-        info!(target: "cmd", "Matter turn_off: room={} devices={}", room_id, device_ids.len());
+        if successful_devices == 0 && !device_ids.is_empty() {
+            return Err(LightControlError::CommandFailed(format!(
+                "Matter turn_off failed for room {} ({} target devices)",
+                room_label,
+                failed_devices,
+            )));
+        }
+
+        if failed_devices > 0 {
+            warn!(
+                target: "cmd",
+                "Matter turn_off partial: room={} ok={} failed={}",
+                room_label,
+                successful_devices,
+                failed_devices,
+            );
+        }
+
+        info!(target: "cmd", "Matter turn_off: room={} devices={}", room_label, device_ids.len());
         Ok(())
     }
 
@@ -470,5 +533,30 @@ mod tests {
         // (payload format depends on feature gate, but we can verify the command was sent)
         let calls = spy.commands();
         assert_eq!(calls.len(), 2); // level + CT
+    }
+
+    #[test]
+    fn turn_on_returns_error_when_all_devices_fail() {
+        let (controller, spy, _) = make_controller();
+        spy.fail_node(42);
+        spy.fail_node(43);
+
+        let cmd = LightingCommand::new(50, 3000);
+        let result = block_on(controller.turn_on("kitchen", cmd));
+
+        assert!(matches!(result, Err(LightControlError::CommandFailed(_))));
+    }
+
+    #[test]
+    fn turn_on_succeeds_when_at_least_one_device_succeeds() {
+        let (controller, spy, _) = make_controller();
+        spy.fail_node(42);
+
+        let cmd = LightingCommand::new(50, 3000);
+        block_on(controller.turn_on("kitchen", cmd)).unwrap();
+
+        let node_ids: Vec<u64> = spy.commands().iter().map(|c| c.node_id).collect();
+        assert!(!node_ids.contains(&42));
+        assert!(node_ids.contains(&43));
     }
 }

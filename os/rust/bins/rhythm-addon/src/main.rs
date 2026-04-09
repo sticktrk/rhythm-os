@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use log::{info, warn};
-use rhythm_os::state::{AppState, SharedState};
+use rhythm_os::state::{AppState, SharedState, WorkItem};
 use rhythm_os::storage::FileStorage;
 
 /// Format tracing timestamps in local time instead of UTC.
@@ -90,6 +90,54 @@ fn main() -> Result<()> {
         s.hub_credentials_interceptor = Some(rhythm_os::hub::combined_credentials_interceptor(
             hub::INTEGRATIONS,
         ));
+    }
+
+    let (work_tx, work_rx) = std::sync::mpsc::sync_channel::<WorkItem>(64);
+    let (periodic_tx, periodic_rx) = std::sync::mpsc::sync_channel::<WorkItem>(64);
+    {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.work_tx = Some(work_tx);
+        s.periodic_work_tx = Some(periodic_tx);
+    }
+
+    {
+        let worker_state = state.clone();
+        std::thread::Builder::new()
+            .name("cmd-worker".to_string())
+            .spawn(move || {
+                info!(target: "sys", "cmd-worker started");
+                loop {
+                    match work_rx.recv() {
+                        Ok(item) => rhythm_os::event_loop::process_work_item(&worker_state, item),
+                        Err(_) => {
+                            warn!(target: "sys", "cmd-worker: channel disconnected");
+                            return;
+                        }
+                    }
+                }
+            })
+            .expect("Failed to spawn cmd-worker thread");
+    }
+
+    {
+        let periodic_worker_state = state.clone();
+        std::thread::Builder::new()
+            .name("periodic-worker".to_string())
+            .spawn(move || {
+                info!(target: "sys", "periodic-worker started");
+                loop {
+                    match periodic_rx.recv() {
+                        Ok(item) => {
+                            rhythm_os::event_loop::process_work_item(&periodic_worker_state, item)
+                        }
+                        Err(_) => {
+                            warn!(target: "sys", "periodic-worker: channel disconnected");
+                            return;
+                        }
+                    }
+                }
+            })
+            .expect("Failed to spawn periodic-worker thread");
     }
 
     info!(target: "sys", "Data directory: {}", data_dir);

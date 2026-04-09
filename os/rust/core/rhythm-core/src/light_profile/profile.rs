@@ -19,7 +19,8 @@ use crate::curves::{inverse_super_gaussian, map_super_gaussian};
 
 /// A generic, config-driven light profile.
 ///
-/// All profile types (rhythm, sleep, idle, custom) use this single struct.
+/// All profile types (rhythm, sleep, day_idle, sleep_idle, custom) use this
+/// single struct.
 /// The [`LightCurveShape`] in the config determines the curve math;
 /// the rest of the config provides output ranges and timer settings.
 #[derive(Debug, Clone)]
@@ -88,6 +89,68 @@ impl LightProfile {
             long
         } else {
             short
+        }
+    }
+
+    fn calculate_brightness_value(&self, ctx: &CurveContext) -> f32 {
+        match &self.config.curve {
+            LightCurveShape::SuperGaussian { .. } => {
+                let (wlb, wrb, _, _, sp) = self.config.curve.effective_sg_params().unwrap();
+                let sun_times_ref = ctx.sun_times.as_ref();
+                let sunrise = Self::get_sunrise(sun_times_ref);
+                let sunset = Self::get_sunset(sun_times_ref);
+
+                map_super_gaussian(
+                    ctx.current_hour,
+                    sunrise,
+                    sunset,
+                    wlb,
+                    wrb,
+                    sp,
+                    self.config.min_brightness as f32,
+                    self.config.max_brightness as f32,
+                )
+            }
+            LightCurveShape::Palette { .. } => self.config.min_brightness as f32,
+            LightCurveShape::InheritActive => self.constant_brightness() as f32,
+            LightCurveShape::Constant { brightness, .. } => {
+                let range = self.config.max_brightness as f32 - self.config.min_brightness as f32;
+                (self.config.min_brightness as f32 + range * brightness).clamp(
+                    self.config.min_brightness as f32,
+                    self.config.max_brightness as f32,
+                )
+            }
+        }
+    }
+
+    fn calculate_color_temperature_value(&self, ctx: &CurveContext) -> f32 {
+        match &self.config.curve {
+            LightCurveShape::SuperGaussian { .. } => {
+                let (_, _, wlc, wrc, sp) = self.config.curve.effective_sg_params().unwrap();
+                let sun_times_ref = ctx.sun_times.as_ref();
+                let sunrise = Self::get_sunrise(sun_times_ref);
+                let sunset = Self::get_sunset(sun_times_ref);
+
+                map_super_gaussian(
+                    ctx.current_hour,
+                    sunrise,
+                    sunset,
+                    wlc,
+                    wrc,
+                    sp,
+                    self.config.min_color_temp as f32,
+                    self.config.max_color_temp as f32,
+                )
+            }
+            LightCurveShape::Palette { .. } => 0.0,
+            LightCurveShape::InheritActive => self.config.min_color_temp as f32,
+            LightCurveShape::Constant { color_temp, .. } => {
+                let range = self.config.max_color_temp as f32 - self.config.min_color_temp as f32;
+                (self.config.min_color_temp as f32 + range * color_temp).clamp(
+                    self.config.min_color_temp as f32,
+                    self.config.max_color_temp as f32,
+                )
+            }
         }
     }
 
@@ -256,79 +319,17 @@ impl LightProfileModule for LightProfile {
     }
 
     fn calculate_brightness(&self, ctx: &CurveContext) -> u8 {
-        match &self.config.curve {
-            LightCurveShape::SuperGaussian { .. } => {
-                let (wlb, wrb, _, _, sp) = self.config.curve.effective_sg_params().unwrap();
-                let sun_times_ref = ctx.sun_times.as_ref();
-                let sunrise = Self::get_sunrise(sun_times_ref);
-                let sunset = Self::get_sunset(sun_times_ref);
-
-                let value = map_super_gaussian(
-                    ctx.current_hour,
-                    sunrise,
-                    sunset,
-                    wlb,
-                    wrb,
-                    sp,
-                    self.config.min_brightness as f32,
-                    self.config.max_brightness as f32,
-                );
-
-                value.round().clamp(
-                    self.config.min_brightness as f32,
-                    self.config.max_brightness as f32,
-                ) as u8
-            }
-            LightCurveShape::Palette { .. } => self.config.min_brightness,
-            LightCurveShape::InheritActive => self.constant_brightness(),
-            LightCurveShape::Constant { brightness, .. } => {
-                let range = self.config.max_brightness as f32 - self.config.min_brightness as f32;
-                (self.config.min_brightness as f32 + range * brightness)
-                    .round()
-                    .clamp(
-                        self.config.min_brightness as f32,
-                        self.config.max_brightness as f32,
-                    ) as u8
-            }
-        }
+        self.calculate_brightness_value(ctx).round().clamp(
+            self.config.min_brightness as f32,
+            self.config.max_brightness as f32,
+        ) as u8
     }
 
     fn calculate_color_temperature(&self, ctx: &CurveContext) -> u16 {
-        match &self.config.curve {
-            LightCurveShape::SuperGaussian { .. } => {
-                let (_, _, wlc, wrc, sp) = self.config.curve.effective_sg_params().unwrap();
-                let sun_times_ref = ctx.sun_times.as_ref();
-                let sunrise = Self::get_sunrise(sun_times_ref);
-                let sunset = Self::get_sunset(sun_times_ref);
-
-                let value = map_super_gaussian(
-                    ctx.current_hour,
-                    sunrise,
-                    sunset,
-                    wlc,
-                    wrc,
-                    sp,
-                    self.config.min_color_temp as f32,
-                    self.config.max_color_temp as f32,
-                );
-
-                value.round().clamp(
-                    self.config.min_color_temp as f32,
-                    self.config.max_color_temp as f32,
-                ) as u16
-            }
-            LightCurveShape::Palette { .. } => 0,
-            LightCurveShape::InheritActive => self.config.min_color_temp,
-            LightCurveShape::Constant { color_temp, .. } => {
-                let range = self.config.max_color_temp as f32 - self.config.min_color_temp as f32;
-                (self.config.min_color_temp as f32 + range * color_temp)
-                    .round()
-                    .clamp(
-                        self.config.min_color_temp as f32,
-                        self.config.max_color_temp as f32,
-                    ) as u16
-            }
-        }
+        self.calculate_color_temperature_value(ctx).round().clamp(
+            self.config.min_color_temp as f32,
+            self.config.max_color_temp as f32,
+        ) as u16
     }
 
     fn calculate_with_offset(&self, ctx: &CurveContext, offset_minutes: f32) -> LightingValues {
@@ -466,6 +467,9 @@ impl LightProfileModule for LightProfile {
     fn suggested_tick_interval(&self, ctx: &CurveContext) -> Option<u16> {
         match &self.config.curve {
             LightCurveShape::SuperGaussian { .. } => {
+                let sun_times_ref = ctx.sun_times.as_ref();
+                let sunrise = Self::get_sunrise(sun_times_ref);
+                let sunset = Self::get_sunset(sun_times_ref);
                 let delta = 1.0 / 60.0;
                 let ctx_ahead = CurveContext::new(
                     (ctx.current_hour + delta).rem_euclid(24.0),
@@ -473,21 +477,60 @@ impl LightProfileModule for LightProfile {
                     ctx.sun_times,
                 );
 
-                let bri_now = self.calculate_brightness(ctx) as f32;
-                let bri_ahead = self.calculate_brightness(&ctx_ahead) as f32;
-                let rate = (bri_ahead - bri_now).abs();
+                let bri_now = self.calculate_brightness_value(ctx);
+                let bri_ahead = self.calculate_brightness_value(&ctx_ahead);
+                let bri_delta = bri_ahead - bri_now;
+                let bri_range = self
+                    .config
+                    .max_brightness
+                    .saturating_sub(self.config.min_brightness)
+                    .max(1) as f32;
+                let bri_rate = bri_delta.abs() / bri_range;
 
-                let secs = if rate < 0.01 {
+                let cct_now = self.calculate_color_temperature_value(ctx);
+                let cct_ahead = self.calculate_color_temperature_value(&ctx_ahead);
+                let cct_delta = cct_ahead - cct_now;
+                let cct_range = self
+                    .config
+                    .max_color_temp
+                    .saturating_sub(self.config.min_color_temp)
+                    .max(1) as f32;
+                let cct_rate = cct_delta.abs() / cct_range;
+
+                let rate = bri_rate.max(cct_rate);
+
+                let secs = if rate < 0.001 {
                     180
-                } else if rate < 0.1 {
+                } else if rate < 0.003 {
                     120
-                } else if rate < 0.3 {
+                } else if rate < 0.006 {
                     60
-                } else if rate < 0.5 {
+                } else if rate < 0.012 {
                     30
                 } else {
                     15
                 };
+
+                log::debug!(
+                    target: "curve",
+                    "tick interval math profile='{}' hour={:.3}->{:.3} sunrise={:.3} sunset={:.3} bri={:.3}->{:.3} delta={:.6} range={:.3} rate={:.6} cct={:.3}->{:.3} delta={:.6} range={:.3} rate={:.6} chosen={}s",
+                    self.id(),
+                    ctx.current_hour,
+                    ctx_ahead.current_hour,
+                    sunrise,
+                    sunset,
+                    bri_now,
+                    bri_ahead,
+                    bri_delta,
+                    bri_range,
+                    bri_rate,
+                    cct_now,
+                    cct_ahead,
+                    cct_delta,
+                    cct_range,
+                    cct_rate,
+                    secs
+                );
 
                 Some(secs)
             }
@@ -500,7 +543,8 @@ impl LightProfileModule for LightProfile {
 mod tests {
     use super::*;
     use crate::light_profile::defaults::{
-        default_idle_profile, default_rhythm_profile, default_sleep_profile,
+        default_day_idle_profile, default_rhythm_profile, default_sleep_idle_profile,
+        default_sleep_profile, SLEEP_DEFAULT_RGB,
     };
     use rhythm_profile::{solar::SolarTime, TimerSetting};
 
@@ -517,6 +561,18 @@ mod tests {
             hour,
             SolarTime::new(12.0, 35.0, 172),
             Some(test_sun_times()),
+        )
+    }
+
+    fn test_context_with_sun_times(hour: f32, sunrise: f32, sunset: f32) -> CurveContext {
+        CurveContext::new(
+            hour,
+            SolarTime::new((sunrise + sunset) / 2.0, 35.0, 172),
+            Some(SunTimes {
+                sunrise,
+                sunset,
+                day_length: sunset - sunrise,
+            }),
         )
     }
 
@@ -557,6 +613,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_rhythm_tick_interval_considers_color_temp_change() {
+        let mut config = default_rhythm_profile();
+        config.min_brightness = 20;
+        config.max_brightness = 20;
+        let profile = LightProfile::new(config);
+
+        let interval = profile.suggested_tick_interval(&test_context(7.0)).unwrap();
+        assert!(
+            interval < 180,
+            "Color temperature change should keep cadence faster than the plateau interval"
+        );
+    }
+
+    #[test]
+    fn test_rhythm_tick_interval_uses_continuous_evening_slope() {
+        let profile = LightProfile::new(default_rhythm_profile());
+        let sunset_ramp = profile
+            .suggested_tick_interval(&test_context_with_sun_times(19.64, 6.0, 20.0))
+            .unwrap();
+
+        assert!(
+            sunset_ramp < 180,
+            "Sunset ramp should stay faster than the plateau cadence"
+        );
+    }
+
     // ── Sleep profile tests ─────────────────────────────────────
 
     #[test]
@@ -567,35 +650,63 @@ mod tests {
     }
 
     #[test]
-    fn test_sleep_brightness_capped() {
+    fn test_sleep_brightness_is_constant_one_percent() {
         let profile = LightProfile::new(default_sleep_profile());
-        let bri = profile.calculate_brightness(&test_context(12.0));
-        assert!(bri <= 40, "Sleep max should be 40, got {}", bri);
+        let noon = profile.calculate(&test_context(12.0));
+        let midnight = profile.calculate(&test_context(0.0));
+        assert_eq!(noon.brightness, 1);
+        assert_eq!(midnight.brightness, 1);
+    }
+
+    #[test]
+    fn test_sleep_color_is_constant_red() {
+        let profile = LightProfile::new(default_sleep_profile());
+        let noon = profile.calculate(&test_context(12.0));
+        let midnight = profile.calculate(&test_context(0.0));
+        assert_eq!(noon.rgb, SLEEP_DEFAULT_RGB);
+        assert_eq!(midnight.rgb, SLEEP_DEFAULT_RGB);
+        assert_eq!(noon.xy, midnight.xy);
     }
 
     // ── Idle profile tests ──────────────────────────────────────
 
     #[test]
-    fn test_idle_always_1_percent() {
-        let profile = LightProfile::new(default_idle_profile());
+    fn test_day_idle_always_1_percent() {
+        let profile = LightProfile::new(default_day_idle_profile());
         let values = profile.calculate(&test_context(12.0));
         assert_eq!(values.brightness, 1);
         assert!(values.is_direct_color);
     }
 
     #[test]
-    fn test_idle_uses_fallback_color_when_unresolved() {
-        let profile = LightProfile::new(default_idle_profile());
+    fn test_day_idle_uses_fallback_color_when_unresolved() {
+        let profile = LightProfile::new(default_day_idle_profile());
         let midnight = profile.calculate(&test_context(0.0));
         let noon = profile.calculate(&test_context(12.0));
         assert_eq!(midnight.rgb, noon.rgb);
     }
 
     #[test]
-    fn test_idle_step_at_boundary() {
-        let profile = LightProfile::new(default_idle_profile());
+    fn test_day_idle_step_at_boundary() {
+        let profile = LightProfile::new(default_day_idle_profile());
         let result = profile.calculate_step(&test_context(12.0), StepAction::Brighten);
         assert!(result.at_boundary);
+    }
+
+    #[test]
+    fn test_sleep_idle_always_1_percent() {
+        let profile = LightProfile::new(default_sleep_idle_profile());
+        let values = profile.calculate(&test_context(12.0));
+        assert_eq!(values.brightness, 1);
+        assert!(values.is_direct_color);
+    }
+
+    #[test]
+    fn test_sleep_idle_uses_fallback_color_when_unresolved() {
+        let profile = LightProfile::new(default_sleep_idle_profile());
+        let midnight = profile.calculate(&test_context(0.0));
+        let noon = profile.calculate(&test_context(12.0));
+        assert_eq!(midnight.rgb, noon.rgb);
     }
 
     // ── Constant profile tests ──────────────────────────────────

@@ -1,1 +1,4 @@
-configuration: {}
+configuration:
+  log_level:
+    name: Log Level
+    description: Control how verbose the add-on logs are. Use debug while troubleshooting.

@@ -14,7 +14,7 @@
 mod harness;
 
 use harness::{room, TestHarness};
-use rhythm_core::{default_idle_profile, LightCurveShape, LightPaletteKeyframe, Rgb};
+use rhythm_core::{default_day_idle_profile, LightCurveShape, LightPaletteKeyframe, Rgb};
 
 // ============================================================================
 // Scenario: Enabling power_save turns off rooms that were in soft-off
@@ -181,11 +181,11 @@ fn power_save_toggle_no_soft_off_rooms_safe() {
 }
 
 // ============================================================================
-// Scenario: soft-off uses the dedicated idle profile
+// Scenario: soft-off uses the mode-specific idle profile
 // ============================================================================
 
-/// The dedicated idle profile drives soft-off mode,
-/// so soft-off always uses direct color from the idle palette.
+/// The default day idle profile inherits the active profile's color behavior,
+/// so soft-off keeps kelvin output when the active profile is kelvin-based.
 #[test]
 fn soft_off_uses_idle_profile() {
     let (harness, spy) = TestHarness::with_spy_controller();
@@ -201,27 +201,34 @@ fn soft_off_uses_idle_profile() {
     assert!(!on_calls.is_empty(), "soft-off should send turn_on");
     let (_, cmd) = &on_calls[0];
     assert!(
-        cmd.is_direct_color,
-        "soft-off should use idle curve (direct color)"
+        !cmd.is_direct_color,
+        "inherit-active idle should preserve kelvin output"
     );
     assert_eq!(
         cmd.brightness, 1,
         "soft-off brightness comes from idle curve (1%)"
     );
-    assert_eq!(cmd.kelvin, 0, "direct color has kelvin=0");
+    assert!(cmd.kelvin > 0, "kelvin should come from the active curve");
     assert!(cmd.xy.x > 0.0, "should have valid xy coordinates");
     assert!(cmd.xy.y > 0.0);
 }
 
-/// Saving an explicit idle palette should override the default inherit-active
+/// Saving an explicit day idle palette should override the default inherit-active
 /// behavior and drive soft-off with the stored idle color.
 #[test]
 fn soft_off_uses_explicit_idle_palette_override() {
     let (harness, spy) = TestHarness::with_spy_controller();
     let harness = harness.with_discovery(vec![room("kitchen", "Kitchen")], vec![]);
     harness.sync();
+    harness.set_mode_configs(vec![rhythm_core::ModeConfig {
+        mode: rhythm_core::RhythmMode::Day,
+        active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+        idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+        wake_profile_id: None,
+        warning_profile_id: None,
+    }]);
 
-    let mut idle = default_idle_profile();
+    let mut idle = default_day_idle_profile();
     idle.curve = LightCurveShape::Palette {
         keyframes: vec![
             LightPaletteKeyframe {
@@ -238,7 +245,7 @@ fn soft_off_uses_explicit_idle_palette_override() {
             },
         ],
     };
-    harness.set_config_for(rhythm_core::IDLE_PROFILE_ID, idle);
+    harness.set_config_for(rhythm_core::DAY_IDLE_PROFILE_ID, idle);
 
     harness.action("kitchen", "on").unwrap();
     let active_calls = spy.turn_on_calls();
@@ -261,5 +268,63 @@ fn soft_off_uses_explicit_idle_palette_override() {
     assert_ne!(
         cmd.rgb, active_rgb,
         "explicit idle palette should no longer inherit active profile color"
+    );
+}
+
+/// Saving an explicit day idle constant direct color should stop inheriting the
+/// active profile color and use the stored direct color instead.
+#[test]
+fn soft_off_uses_explicit_idle_constant_override() {
+    let (harness, spy) = TestHarness::with_spy_controller();
+    let harness = harness.with_discovery(vec![room("kitchen", "Kitchen")], vec![]);
+    harness.sync();
+    harness.set_mode_configs(vec![rhythm_core::ModeConfig {
+        mode: rhythm_core::RhythmMode::Day,
+        active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+        idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+        wake_profile_id: None,
+        warning_profile_id: None,
+    }]);
+
+    let mut idle = default_day_idle_profile();
+    idle.curve = LightCurveShape::Constant {
+        brightness: 15.0,
+        color_temp: 0.0,
+        direct_color: Some(rhythm_core::LightDirectColor {
+            xy: rhythm_core::XyColor {
+                x: 0.2041,
+                y: 0.2444,
+            },
+            rgb: Rgb::new(38, 191, 255),
+        }),
+    };
+    idle.min_brightness = 15;
+    idle.max_brightness = 15;
+    harness.set_config_for(rhythm_core::DAY_IDLE_PROFILE_ID, idle);
+
+    harness.action("kitchen", "on").unwrap();
+    let active_calls = spy.turn_on_calls();
+    assert!(!active_calls.is_empty(), "on should produce turn_on");
+    let active_rgb = active_calls[0].1.rgb;
+
+    spy.reset();
+    harness.action("kitchen", "off").unwrap();
+
+    let soft_off_calls = spy.turn_on_calls();
+    assert!(!soft_off_calls.is_empty(), "soft-off should send turn_on");
+    let (_, cmd) = &soft_off_calls[0];
+    assert!(cmd.is_direct_color, "soft-off should use direct color");
+    assert_eq!(
+        cmd.brightness, 1,
+        "idle default brightness should normalize to 1%"
+    );
+    assert_eq!(
+        cmd.rgb,
+        Rgb::new(38, 191, 255),
+        "stored direct color should win"
+    );
+    assert_ne!(
+        cmd.rgb, active_rgb,
+        "explicit idle constant should no longer inherit active profile color"
     );
 }

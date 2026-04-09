@@ -2,7 +2,11 @@
 
 ## Settings
 
-All lighting curve behaviour is configured via the REST API. Use the **Color Output** setting to choose how commands are sent to your lights:
+Most lighting curve behaviour is configured via the REST API. The add-on exposes one runtime setting in Home Assistant:
+
+- **Log Level** - Controls how verbose the add-on logs are. Use `debug` when troubleshooting, otherwise keep the default `info`.
+
+Use the **Color Output** setting in the API to choose how commands are sent to your lights:
 
 - `kelvin` (default) – Sends color temperature values (most compatible across bulbs).
 - `rgb` – Sends RGB color values.

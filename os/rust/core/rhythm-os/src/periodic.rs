@@ -12,10 +12,11 @@
 
 #[cfg(feature = "blocking")]
 use std::thread;
+use std::time::Duration;
 #[cfg(feature = "blocking")]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use log::{info, warn};
+use log::{debug, info, warn};
 #[cfg(feature = "blocking")]
 use rhythm_core::{BlockingTimeProvider, TimeProvider};
 
@@ -29,8 +30,7 @@ use crate::state::WorkItem;
 #[cfg(feature = "blocking")]
 use crate::storage::StoredLocation;
 
-#[cfg(feature = "blocking")]
-fn stable_room_phase_key(room_id: &str) -> u64 {
+pub(crate) fn stable_room_phase_key(room_id: &str) -> u64 {
     const FNV_OFFSET: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x100000001b3;
 
@@ -39,8 +39,7 @@ fn stable_room_phase_key(room_id: &str) -> u64 {
     })
 }
 
-#[cfg(feature = "blocking")]
-fn dispatch_spacing(cycle_duration: Duration, room_count: usize) -> Duration {
+pub(crate) fn dispatch_spacing(cycle_duration: Duration, room_count: usize) -> Duration {
     if room_count == 0 {
         Duration::ZERO
     } else {
@@ -48,6 +47,131 @@ fn dispatch_spacing(cycle_duration: Duration, room_count: usize) -> Duration {
             .checked_div(room_count as u32)
             .unwrap_or(Duration::ZERO)
     }
+}
+
+fn periodic_room_state(
+    room: &rhythm_core::RoomSnapshot,
+    power_save: bool,
+) -> Option<rhythm_core::RoomModeState> {
+    if !room.rhythm_enabled || room.hard_off {
+        return None;
+    }
+
+    Some(if room.soft_off && !power_save {
+        rhythm_core::RoomModeState::Idle
+    } else {
+        rhythm_core::RoomModeState::Active
+    })
+}
+
+pub(crate) fn effective_cycle_duration(
+    profile_registry: &rhythm_core::LightProfileRegistry,
+    ctx: &rhythm_core::CurveContext,
+    room_snapshots: &[rhythm_core::RoomSnapshot],
+    update_interval: Duration,
+    power_save: bool,
+) -> Duration {
+    let fallback_values = profile_registry.active_profile().calculate(ctx);
+    let fallback_secs = fallback_values
+        .suggested_tick_interval_secs
+        .map(u64::from)
+        .unwrap_or(update_interval.as_secs());
+
+    let mut room_suggestions = Vec::new();
+    for room in room_snapshots {
+        let Some(room_state) = periodic_room_state(room, power_save) else {
+            continue;
+        };
+        let room_ctx = ctx.with_offset(room.time_offset_minutes);
+        let suggested_secs = profile_registry
+            .profile_for_room_state(
+                profile_registry.active_mode(),
+                room_state,
+                Some(&room.profile_settings),
+            )
+            .calculate(&room_ctx)
+            .suggested_tick_interval_secs
+            .map(u64::from);
+        room_suggestions.push((
+            room.id.clone(),
+            room_state,
+            room_ctx.current_hour,
+            room.time_offset_minutes,
+            suggested_secs,
+        ));
+    }
+
+    let suggested_secs = room_suggestions
+        .iter()
+        .filter_map(|(_, _, _, _, suggested_secs)| *suggested_secs)
+        .min()
+        .unwrap_or(fallback_secs);
+
+    let chosen_secs = suggested_secs.max(update_interval.as_secs());
+
+    if log::log_enabled!(log::Level::Debug) {
+        let rooms = if room_suggestions.is_empty() {
+            "none".to_string()
+        } else {
+            room_suggestions
+                .iter()
+                .map(
+                    |(room_id, room_state, room_hour, time_offset_minutes, suggested_secs)| {
+                        format!(
+                            "{}({:?})@{:.3}/offset={:.1}m=>{}",
+                            room_id,
+                            room_state,
+                            room_hour,
+                            time_offset_minutes,
+                            suggested_secs
+                                .map(|secs| format!("{secs}s"))
+                                .unwrap_or_else(|| "None".to_string())
+                        )
+                    },
+                )
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        debug!(
+            target: "curve",
+            "effective cycle math mode={:?} base_hour={:.3} fallback={}s update_interval={}s room_count={} chosen={}s rooms=[{}]",
+            profile_registry.active_mode(),
+            ctx.current_hour,
+            fallback_secs,
+            update_interval.as_secs(),
+            room_snapshots.len(),
+            chosen_secs,
+            rooms
+        );
+    }
+
+    Duration::from_secs(chosen_secs)
+}
+
+#[cfg(feature = "blocking")]
+fn resolve_periodic_sun_times(
+    latitude: Option<f32>,
+    longitude: Option<f32>,
+    timezone_name: Option<&str>,
+    utc_offset: f32,
+) -> Option<rhythm_core::SunTimes> {
+    let lat = latitude?;
+    let lon = longitude?;
+    let tz_name = timezone_name?;
+
+    let local_now =
+        chrono::Utc::now().naive_utc() + chrono::Duration::seconds((utc_offset * 3600.0) as i64);
+    let (year, month, day) = (
+        chrono::Datelike::year(&local_now.date()),
+        chrono::Datelike::month(&local_now.date()),
+        chrono::Datelike::day(&local_now.date()),
+    );
+    let tz = rhythm_core::Timezone::new(tz_name);
+
+    Some(rhythm_core::calculate_sun_times(
+        lat, lon, year, month, day, &tz,
+    ))
 }
 
 #[cfg(feature = "blocking")]
@@ -63,7 +187,15 @@ fn enqueue_periodic_tick(
         };
         match s.pending_periodic_ticks.entry(room_id.to_string()) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let previous_hour = *entry.get();
                 entry.insert(current_hour);
+                debug!(
+                    target: "sys",
+                    "Periodic tick already pending for '{}', coalescing {:.2} -> {:.2}",
+                    room_id,
+                    previous_hour,
+                    current_hour
+                );
                 false
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
@@ -116,27 +248,43 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
     );
 
     loop {
-        let (utc_offset, profile_registry, solar_noon, lat, lon, update_interval, timezone_name) = {
+        let (
+            utc_offset,
+            profile_registry,
+            solar_noon,
+            latitude,
+            longitude,
+            update_interval,
+            timezone_name,
+            power_save,
+        ) = {
             let Ok(s) = state.lock() else {
                 thread::sleep(Duration::from_secs(60));
                 continue;
             };
+            let active_profile_id = s.active_mode_profile_id();
+            let mut profile_registry = rhythm_core::LightProfileRegistry::with_profiles(
+                s.light_profile_configs
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                &active_profile_id,
+            );
+            profile_registry.set_mode_configs(s.mode_configs());
             (
                 s.utc_offset_hours,
-                rhythm_core::LightProfileRegistry::with_profiles(
-                    s.light_profile_configs
-                        .values()
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                    &s.active_light_profile_id,
-                ),
+                profile_registry,
                 s.solar_noon_hour(),
-                s.latitude.unwrap_or(35.0),
-                s.longitude.unwrap_or(-80.84),
+                s.latitude,
+                s.longitude,
                 Duration::from_secs(s.runtime_config.update_interval_secs),
                 s.timezone_name.clone(),
+                s.power_save,
             )
         };
+
+        let lat = latitude.unwrap_or(35.0);
+        let lon = longitude.unwrap_or(-80.84);
 
         let doy = BlockingTimeProvider::new(utc_offset).day_of_year();
 
@@ -153,38 +301,62 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
 
         let time_provider = BlockingTimeProvider::new(utc_offset);
         let current_hour = time_provider.current_hour();
+        let sun_times =
+            resolve_periodic_sun_times(latitude, longitude, timezone_name.as_deref(), utc_offset);
 
         // Calculate generic curve values (no offset) for logging
         let solar = rhythm_core::SolarTime::new(solar_noon, lat, doy);
-        let ctx = rhythm_core::light_profile::CurveContext::new(current_hour, solar, None);
+        let ctx = rhythm_core::light_profile::CurveContext::new(current_hour, solar, sun_times);
         let module = profile_registry.active_profile();
         let values = module.calculate(&ctx);
 
         // Get rhythm-enabled room IDs, skipping rooms in warning-dim state
-        let (mut room_ids, warning_skipped, periodic_work_tx, work_tx) = {
-            let Ok(s) = state.lock() else {
+        let (
+            mut room_snapshots,
+            warning_skipped,
+            transition_skipped,
+            rhythm_disabled_skipped,
+            hard_off_rooms,
+            expired_transitions,
+            periodic_work_tx,
+            work_tx,
+        ) = {
+            let Ok(mut s) = state.lock() else {
                 thread::sleep(update_interval);
                 continue;
             };
-            let all_ids: Vec<String> = s
+            let now = Instant::now();
+            let transitions_before = s.room_mode_transitions.len();
+            s.room_mode_transitions
+                .retain(|_, transition| transition.ends_at > now);
+            let expired_transitions = transitions_before - s.room_mode_transitions.len();
+            let all_rooms: Vec<rhythm_core::RoomSnapshot> = s
                 .hub_runtime()
-                .map(|rt| {
-                    rt.engine_all_room_snapshots()
-                        .iter()
-                        .filter(|r| r.rhythm_enabled)
-                        .map(|r| r.id.clone())
-                        .collect()
-                })
+                .map(|rt| rt.engine_all_room_snapshots())
                 .unwrap_or_default();
-            let mut skipped = 0usize;
-            let ids: Vec<String> = all_ids
+            let mut warning_skipped = 0usize;
+            let mut transition_skipped = 0usize;
+            let mut rhythm_disabled_skipped = 0usize;
+            let mut hard_off_rooms = 0usize;
+            let rooms: Vec<rhythm_core::RoomSnapshot> = all_rooms
                 .into_iter()
-                .filter(|id| {
+                .filter(|room| {
+                    if !room.rhythm_enabled {
+                        rhythm_disabled_skipped += 1;
+                        return false;
+                    }
+                    if room.hard_off {
+                        hard_off_rooms += 1;
+                    }
+                    if s.room_mode_transitions.contains_key(&room.id) {
+                        transition_skipped += 1;
+                        return false;
+                    }
                     if s.motion_snapshots
-                        .get(id)
+                        .get(&room.id)
                         .is_some_and(|ms| ms.warning_active)
                     {
-                        skipped += 1;
+                        warning_skipped += 1;
                         false
                     } else {
                         true
@@ -192,14 +364,36 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                 })
                 .collect();
             (
-                ids,
-                skipped,
+                rooms,
+                warning_skipped,
+                transition_skipped,
+                rhythm_disabled_skipped,
+                hard_off_rooms,
+                expired_transitions,
                 s.periodic_work_tx.clone(),
                 s.work_tx.clone(),
             )
         };
 
-        room_ids.sort_by_key(|id| stable_room_phase_key(id));
+        room_snapshots.sort_by_key(|room| stable_room_phase_key(&room.id));
+        let room_ids: Vec<String> = room_snapshots.iter().map(|room| room.id.clone()).collect();
+
+        if transition_skipped > 0
+            || rhythm_disabled_skipped > 0
+            || hard_off_rooms > 0
+            || expired_transitions > 0
+        {
+            debug!(
+                target: "sys",
+                "Periodic tick detail: dispatch={} warning_skipped={} transition_skipped={} rhythm_disabled={} hard_off={} expired_transitions={}",
+                room_ids.len(),
+                warning_skipped,
+                transition_skipped,
+                rhythm_disabled_skipped,
+                hard_off_rooms,
+                expired_transitions
+            );
+        }
 
         if warning_skipped > 0 {
             info!(
@@ -230,10 +424,13 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             cb();
         }
 
-        let cycle_duration = values
-            .suggested_tick_interval_secs
-            .map(|s| Duration::from_secs(s as u64).max(update_interval))
-            .unwrap_or(update_interval);
+        let cycle_duration = effective_cycle_duration(
+            &profile_registry,
+            &ctx,
+            &room_snapshots,
+            update_interval,
+            power_save,
+        );
         let phase_gap = dispatch_spacing(cycle_duration, room_ids.len());
         let cycle_started = Instant::now();
 
@@ -278,6 +475,12 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                         thread::sleep(phase_gap);
                     }
                 }
+            } else if !room_ids.is_empty() {
+                debug!(
+                    target: "sys",
+                    "Periodic tick skipped {} queued room(s): no runtime available",
+                    room_ids.len()
+                );
             }
         }
 
@@ -286,7 +489,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
         let current_hour = BlockingTimeProvider::new(utc_offset).current_hour();
         check_solar_midnight(&state, current_hour);
         if let Some(last) = last_hour {
-            check_sunrise_sleep_deactivate(&state, last, current_hour);
+            check_solar_mode_transitions(&state, last, current_hour);
         }
 
         let elapsed = cycle_started.elapsed();
@@ -332,6 +535,11 @@ pub fn check_solar_midnight(state: &SharedState, current_hour: f32) {
         s.last_check_hour = Some(current_hour);
 
         let Some(last) = last_hour else {
+            debug!(
+                target: "sys",
+                "Solar midnight check seeded at hour {:.2}",
+                current_hour
+            );
             return;
         };
 
@@ -357,6 +565,7 @@ pub fn check_solar_midnight(state: &SharedState, current_hour: f32) {
                     0.0,
                     0.0,
                     snap.soft_off,
+                    snap.hard_off,
                     snap.profile_settings.clone(),
                 );
             }
@@ -379,61 +588,172 @@ pub fn check_solar_midnight(state: &SharedState, current_hour: f32) {
     }
 }
 
-/// Auto-deactivate sleep mode at sunrise.
-///
-/// Uses the same crossing detection as `check_solar_midnight`.
-/// Sunrise is computed from lat/lon/timezone if available, otherwise
-/// estimated as solar_noon - 6 hours.
-pub fn check_sunrise_sleep_deactivate(state: &SharedState, last_hour: f32, current_hour: f32) {
-    let (sleep_active, sunrise) = {
-        let Ok(s) = state.lock() else { return };
-
-        if s.active_light_profile_id != rhythm_core::SLEEP_PROFILE_ID {
-            return;
-        }
-
-        // Compute sunrise hour from location
-        let sunrise = if let (Some(lat), Some(lon)) = (s.latitude, s.longitude) {
-            use chrono::Datelike;
-            let now = chrono::Utc::now().naive_utc();
-            let (year, month, day) = (now.date().year(), now.date().month(), now.date().day());
-            if let Some(ref tz_name) = s.timezone_name {
-                let tz = rhythm_core::Timezone::new(tz_name);
-                let st = rhythm_core::calculate_sun_times(lat, lon, year, month, day, &tz);
-                st.sunrise
-            } else {
-                // Estimate: sunrise ≈ solar_noon - 6h
-                (s.solar_noon_hour() - 6.0).rem_euclid(24.0)
-            }
+fn estimated_twilight_hour(
+    trigger: rhythm_core::ModeTransitionTrigger,
+    target_mode: rhythm_core::RhythmMode,
+    sunrise: f32,
+    sunset: f32,
+) -> Option<f32> {
+    let toward_day = target_mode == rhythm_core::RhythmMode::Day;
+    match trigger {
+        rhythm_core::ModeTransitionTrigger::Manual => None,
+        rhythm_core::ModeTransitionTrigger::Sunrise => Some(sunrise),
+        rhythm_core::ModeTransitionTrigger::Sunset => Some(sunset),
+        rhythm_core::ModeTransitionTrigger::CivilTwilight => Some(if toward_day {
+            (sunrise - 0.5).rem_euclid(24.0)
         } else {
-            rhythm_core::config::FALLBACK_SUNRISE_HOUR
-        };
+            (sunset + 0.5).rem_euclid(24.0)
+        }),
+        rhythm_core::ModeTransitionTrigger::NauticalTwilight => Some(if toward_day {
+            (sunrise - 1.0).rem_euclid(24.0)
+        } else {
+            (sunset + 1.0).rem_euclid(24.0)
+        }),
+        rhythm_core::ModeTransitionTrigger::AstronomicalTwilight => Some(if toward_day {
+            (sunrise - 1.5).rem_euclid(24.0)
+        } else {
+            (sunset + 1.5).rem_euclid(24.0)
+        }),
+    }
+}
 
-        (true, sunrise)
+fn solar_trigger_hour(
+    trigger: rhythm_core::ModeTransitionTrigger,
+    target_mode: rhythm_core::RhythmMode,
+    solar_noon: f32,
+    latitude: Option<f32>,
+    longitude: Option<f32>,
+    timezone_name: Option<&str>,
+) -> Option<f32> {
+    let estimated_sunrise = if latitude.is_some() && longitude.is_some() {
+        (solar_noon - 6.0).rem_euclid(24.0)
+    } else {
+        rhythm_core::config::FALLBACK_SUNRISE_HOUR
+    };
+    let estimated_sunset = if latitude.is_some() && longitude.is_some() {
+        (solar_noon + 6.0).rem_euclid(24.0)
+    } else {
+        rhythm_core::config::FALLBACK_SUNSET_HOUR
     };
 
-    if !sleep_active {
-        return;
-    }
+    let Some(lat) = latitude else {
+        return estimated_twilight_hour(trigger, target_mode, estimated_sunrise, estimated_sunset);
+    };
+    let Some(lon) = longitude else {
+        return estimated_twilight_hour(trigger, target_mode, estimated_sunrise, estimated_sunset);
+    };
+    let Some(tz_name) = timezone_name else {
+        return estimated_twilight_hour(trigger, target_mode, estimated_sunrise, estimated_sunset);
+    };
 
-    let crossed = rhythm_core::crossed_solar_midnight(last_hour, current_hour, sunrise);
-    log::debug!(
-        "Sleep sunrise check: last={:.2}, now={:.2}, sunrise={:.2}, crossed={}",
+    use chrono::Datelike;
+    let now = chrono::Utc::now().naive_utc();
+    let (year, month, day) = (now.date().year(), now.date().month(), now.date().day());
+    let tz = rhythm_core::Timezone::new(tz_name);
+    let sun = rhythm_core::calculate_sun_times(lat, lon, year, month, day, &tz);
+    let twilight = rhythm_core::calculate_twilight_times(lat, lon, year, month, day, &tz);
+
+    match trigger {
+        rhythm_core::ModeTransitionTrigger::Manual => None,
+        rhythm_core::ModeTransitionTrigger::Sunrise => Some(sun.sunrise),
+        rhythm_core::ModeTransitionTrigger::Sunset => Some(sun.sunset),
+        rhythm_core::ModeTransitionTrigger::CivilTwilight => {
+            Some(if target_mode == rhythm_core::RhythmMode::Day {
+                twilight
+                    .dawn
+                    .civil
+                    .unwrap_or((sun.sunrise - 0.5).rem_euclid(24.0))
+            } else {
+                twilight
+                    .dusk
+                    .civil
+                    .unwrap_or((sun.sunset + 0.5).rem_euclid(24.0))
+            })
+        }
+        rhythm_core::ModeTransitionTrigger::NauticalTwilight => {
+            Some(if target_mode == rhythm_core::RhythmMode::Day {
+                twilight
+                    .dawn
+                    .nautical
+                    .unwrap_or((sun.sunrise - 1.0).rem_euclid(24.0))
+            } else {
+                twilight
+                    .dusk
+                    .nautical
+                    .unwrap_or((sun.sunset + 1.0).rem_euclid(24.0))
+            })
+        }
+        rhythm_core::ModeTransitionTrigger::AstronomicalTwilight => {
+            Some(if target_mode == rhythm_core::RhythmMode::Day {
+                twilight
+                    .dawn
+                    .astronomical
+                    .unwrap_or((sun.sunrise - 1.5).rem_euclid(24.0))
+            } else {
+                twilight
+                    .dusk
+                    .astronomical
+                    .unwrap_or((sun.sunset + 1.5).rem_euclid(24.0))
+            })
+        }
+    }
+}
+
+/// Trigger configured solar mode transitions when their event time is crossed.
+pub fn check_solar_mode_transitions(state: &SharedState, last_hour: f32, current_hour: f32) {
+    let candidate = {
+        let Ok(s) = state.lock() else { return };
+
+        let active_mode = s.active_mode;
+        let solar_noon = s.solar_noon_hour();
+        let latitude = s.latitude;
+        let longitude = s.longitude;
+        let timezone_name = s.timezone_name.clone();
+
+        s.mode_transition_configs().into_iter().find_map(|config| {
+            if config.from_mode != active_mode
+                || config.trigger == rhythm_core::ModeTransitionTrigger::Manual
+            {
+                return None;
+            }
+
+            let trigger_hour = solar_trigger_hour(
+                config.trigger,
+                config.to_mode,
+                solar_noon,
+                latitude,
+                longitude,
+                timezone_name.as_deref(),
+            )?;
+
+            if rhythm_core::crossed_solar_midnight(last_hour, current_hour, trigger_hour) {
+                Some((config.to_mode, config.trigger, trigger_hour))
+            } else {
+                None
+            }
+        })
+    };
+
+    let Some((target_mode, trigger, trigger_hour)) = candidate else {
+        return;
+    };
+
+    info!(
+        "Solar mode transition {:?} -> {:?} on {:?} at {:.2} (last={:.2}, now={:.2})",
+        state
+            .lock()
+            .ok()
+            .map(|s| s.active_mode)
+            .unwrap_or(target_mode),
+        target_mode,
+        trigger,
+        trigger_hour,
         last_hour,
-        current_hour,
-        sunrise,
-        crossed
+        current_hour
     );
 
-    if crossed {
-        info!(
-            "Sunrise crossed (last={:.2}, now={:.2}, sunrise={:.2}) - auto-deactivating sleep mode",
-            last_hour, current_hour, sunrise
-        );
-        if let Err(e) = crate::commands::do_set_light_profile(state, rhythm_core::RHYTHM_PROFILE_ID)
-        {
-            warn!("Failed to auto-deactivate sleep mode: {}", e);
-        }
+    if let Err(e) = crate::commands::do_set_active_mode_with_trigger(state, target_mode, trigger) {
+        warn!("Failed to apply solar mode transition: {}", e);
     }
 }
 
@@ -526,23 +846,83 @@ pub fn refresh_dst_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rhythm_core::{
+        default_rhythm_profile, CurveContext, LightProfileRegistry, RoomProfileSettings,
+    };
     use std::sync::Mutex;
 
     fn make_state() -> SharedState {
         Arc::new(Mutex::new(crate::state::AppState::default()))
     }
 
+    fn make_room(id: &str, time_offset_minutes: f32) -> rhythm_core::RoomSnapshot {
+        rhythm_core::RoomSnapshot {
+            id: id.to_string(),
+            name: id.to_string(),
+            rhythm_enabled: true,
+            disabled: false,
+            time_offset_minutes,
+            brightness_offset: 0.0,
+            soft_off: false,
+            hard_off: false,
+            profile_settings: RoomProfileSettings::default(),
+        }
+    }
+
     #[test]
     fn stable_room_phase_key_is_deterministic() {
-        assert_eq!(stable_room_phase_key("room-a"), stable_room_phase_key("room-a"));
-        assert_ne!(stable_room_phase_key("room-a"), stable_room_phase_key("room-b"));
+        assert_eq!(
+            stable_room_phase_key("room-a"),
+            stable_room_phase_key("room-a")
+        );
+        assert_ne!(
+            stable_room_phase_key("room-a"),
+            stable_room_phase_key("room-b")
+        );
     }
 
     #[test]
     fn dispatch_spacing_spreads_rooms_across_cycle() {
         assert_eq!(dispatch_spacing(Duration::from_secs(60), 0), Duration::ZERO);
-        assert_eq!(dispatch_spacing(Duration::from_secs(60), 1), Duration::from_secs(60));
-        assert_eq!(dispatch_spacing(Duration::from_secs(60), 5), Duration::from_secs(12));
+        assert_eq!(
+            dispatch_spacing(Duration::from_secs(60), 1),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            dispatch_spacing(Duration::from_secs(60), 5),
+            Duration::from_secs(12)
+        );
+    }
+
+    #[test]
+    fn effective_cycle_duration_uses_fastest_room_offset() {
+        let registry = LightProfileRegistry::with_profiles(
+            vec![default_rhythm_profile()],
+            rhythm_core::RHYTHM_PROFILE_ID,
+        );
+        let ctx = CurveContext::new(12.0, rhythm_core::SolarTime::new(12.0, 35.0, 172), None);
+        let midday_only = vec![make_room("midday", 0.0)];
+        let mixed_offsets = vec![make_room("midday", 0.0), make_room("morning", -300.0)];
+
+        let midday_cycle = effective_cycle_duration(
+            &registry,
+            &ctx,
+            &midday_only,
+            Duration::from_secs(60),
+            false,
+        );
+        let mixed_cycle = effective_cycle_duration(
+            &registry,
+            &ctx,
+            &mixed_offsets,
+            Duration::from_secs(60),
+            false,
+        );
+
+        assert!(
+            mixed_cycle < midday_cycle,
+            "A room still on its ramp should force a faster shared cadence"
+        );
     }
 
     #[test]
@@ -555,14 +935,20 @@ mod tests {
 
         let item = rx.try_recv().expect("first periodic item should be queued");
         match item {
-            WorkItem::PeriodicRoomTick { room_id, current_hour } => {
+            WorkItem::PeriodicRoomTick {
+                room_id,
+                current_hour,
+            } => {
                 assert_eq!(room_id, "room1");
                 assert!((current_hour - 10.0).abs() < f32::EPSILON);
             }
             _ => panic!("unexpected work item"),
         }
 
-        assert!(rx.try_recv().is_err(), "duplicate periodic item should be coalesced");
+        assert!(
+            rx.try_recv().is_err(),
+            "duplicate periodic item should be coalesced"
+        );
 
         let pending = state.lock().unwrap();
         let latest = pending
@@ -747,6 +1133,9 @@ mod tests {
             fn set_light_profile_config(&self, _: LightProfileConfig) -> anyhow::Result<()> {
                 Ok(())
             }
+            fn set_mode_configs(&self, _: Vec<rhythm_core::ModeConfig>) -> anyhow::Result<()> {
+                Ok(())
+            }
             fn periodic_tick_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
                 Ok(())
             }
@@ -769,6 +1158,7 @@ mod tests {
                 time_offset: f32,
                 bri_offset: f32,
                 _: bool,
+                _: bool,
                 _: rhythm_core::RoomProfileSettings,
             ) {
                 self.restore_calls.lock().unwrap().push((
@@ -783,6 +1173,13 @@ mod tests {
                 Ok(())
             }
             fn turn_on_room(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn apply_room_command(
+                &self,
+                _: &str,
+                _: rhythm_core::LightingCommand,
+            ) -> anyhow::Result<()> {
                 Ok(())
             }
             fn set_power_save(&self, _: bool) -> Vec<String> {
@@ -832,6 +1229,7 @@ mod tests {
                 time_offset_minutes: 30.0,
                 brightness_offset: 10.0,
                 soft_off: false,
+                hard_off: false,
                 profile_settings: rhythm_core::RoomProfileSettings::default(),
             }]),
             restore_calls: StdMutex::new(Vec::new()),
@@ -903,5 +1301,55 @@ mod tests {
         let state = make_state();
         // Default RuntimeConfig has 60s interval
         assert_eq!(update_interval_secs(&state), 60);
+    }
+
+    #[test]
+    fn solar_mode_transition_requires_matching_trigger() {
+        let state = make_state();
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = rhythm_core::RhythmMode::Sleep;
+            s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
+                rhythm_core::RhythmMode::Sleep,
+                rhythm_core::RhythmMode::Day,
+                1000,
+            )]);
+        }
+
+        let sunrise = rhythm_core::config::FALLBACK_SUNRISE_HOUR;
+        check_solar_mode_transitions(&state, sunrise - 0.1, sunrise + 0.1);
+
+        assert_eq!(
+            state.lock().unwrap().active_mode,
+            rhythm_core::RhythmMode::Sleep
+        );
+    }
+
+    #[test]
+    fn sunrise_sleep_transition_switches_mode_when_trigger_configured() {
+        let state = make_state();
+        state.lock().unwrap().active_mode = rhythm_core::RhythmMode::Sleep;
+
+        let sunrise = rhythm_core::config::FALLBACK_SUNRISE_HOUR;
+        check_solar_mode_transitions(&state, sunrise - 0.1, sunrise + 0.1);
+
+        assert_eq!(
+            state.lock().unwrap().active_mode,
+            rhythm_core::RhythmMode::Day
+        );
+    }
+
+    #[test]
+    fn nautical_twilight_day_to_sleep_transition_switches_mode() {
+        let state = make_state();
+        state.lock().unwrap().active_mode = rhythm_core::RhythmMode::Day;
+
+        let nautical_dusk = (rhythm_core::config::FALLBACK_SUNSET_HOUR + 1.0).rem_euclid(24.0);
+        check_solar_mode_transitions(&state, nautical_dusk - 0.1, nautical_dusk + 0.1);
+
+        assert_eq!(
+            state.lock().unwrap().active_mode,
+            rhythm_core::RhythmMode::Sleep
+        );
     }
 }

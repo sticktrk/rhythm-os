@@ -30,8 +30,9 @@ use rhythm_core::runtime::RuntimeConfig;
 use rhythm_core::spy_controller::SpyLightController;
 use rhythm_core::HubRegistry;
 use rhythm_core::{
-    default_idle_profile, default_rhythm_profile, default_sleep_profile, LightProfileConfig,
-    IDLE_PROFILE_ID, RHYTHM_PROFILE_ID, SLEEP_PROFILE_ID,
+    default_day_idle_profile, default_rhythm_profile, default_sleep_idle_profile,
+    default_sleep_profile, LightProfileConfig, ModeConfig, DAY_IDLE_PROFILE_ID, RHYTHM_PROFILE_ID,
+    SLEEP_IDLE_PROFILE_ID, SLEEP_PROFILE_ID,
 };
 
 use rhythm_os::canonical::identity::HubKey;
@@ -46,7 +47,8 @@ fn default_profile_for_id(profile_id: &str) -> LightProfileConfig {
     match profile_id {
         RHYTHM_PROFILE_ID => default_rhythm_profile(),
         SLEEP_PROFILE_ID => default_sleep_profile(),
-        IDLE_PROFILE_ID => default_idle_profile(),
+        DAY_IDLE_PROFILE_ID => default_day_idle_profile(),
+        SLEEP_IDLE_PROFILE_ID => default_sleep_idle_profile(),
         _ => panic!("unknown built-in profile: {}", profile_id),
     }
 }
@@ -535,12 +537,19 @@ impl TestHarness {
         soft_off: Option<bool>,
     ) {
         let resolved = self.resolve(room_id);
+        let target_state = soft_off.map(|soft_off| {
+            if soft_off {
+                rhythm_core::RoomModeState::Idle
+            } else {
+                rhythm_core::RoomModeState::Active
+            }
+        });
         commands::do_room_preferences_set(
             &self.state,
             &resolved,
             rhythm_enabled,
             disabled,
-            soft_off,
+            target_state,
             None,
             false,
         )
@@ -560,12 +569,19 @@ impl TestHarness {
 
     /// Update global settings (mirrors "Settings → Preferences" screen).
     pub fn set_settings(&self, power_save: Option<bool>) -> String {
-        commands::do_settings_set(&self.state, power_save).expect("do_settings_set failed")
+        commands::do_settings_set(&self.state, power_save, None, None, None)
+            .expect("do_settings_set failed")
+    }
+
+    /// Replace the persisted mode profile mappings.
+    pub fn set_mode_configs(&self, configs: Vec<ModeConfig>) {
+        commands::do_settings_set(&self.state, None, None, Some(configs), None)
+            .expect("do_settings_set failed");
     }
 
     /// Push a new light profile config to the active profile (mirrors "Designer → Save").
     pub fn set_config(&self, config: LightProfileConfig) {
-        let active_id = self.state.lock().unwrap().active_light_profile_id.clone();
+        let active_id = self.state.lock().unwrap().active_mode_profile_id();
         self.set_config_for(&active_id, config);
     }
 
@@ -581,7 +597,7 @@ impl TestHarness {
 
     /// Reset the active light profile config to built-in defaults.
     pub fn reset_config(&self) {
-        let active_id = self.state.lock().unwrap().active_light_profile_id.clone();
+        let active_id = self.state.lock().unwrap().active_mode_profile_id();
         self.set_config(default_profile_for_id(&active_id));
     }
 
@@ -600,7 +616,7 @@ impl TestHarness {
 
     /// Read the current active light profile config from state.
     pub fn config(&self) -> LightProfileConfig {
-        let active_id = self.state.lock().unwrap().active_light_profile_id.clone();
+        let active_id = self.state.lock().unwrap().active_mode_profile_id();
         self.config_for(&active_id)
     }
 

@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use log::{info, warn};
+use log::{debug, info, warn};
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::HubRegistry;
 
@@ -206,10 +206,26 @@ fn sync_with_discovery(
                 })
             })
             .unwrap_or_else(|| room.id.clone());
-        let (rhythm_enabled, disabled, soft_off) =
+        let (rhythm_enabled, disabled, room_state) =
             if let Some(snap) = current_snapshots.get(&engine_id) {
-                (snap.rhythm_enabled, snap.disabled, Some(snap.soft_off))
+                let room_state =
+                    rhythm_core::RoomModeState::from_flags(snap.hard_off, snap.soft_off, false);
+                debug!(
+                    target: "room_sync",
+                    "Preserving room '{}' via engine '{}': rhythm={} disabled={} state={:?}",
+                    room.id,
+                    engine_id,
+                    snap.rhythm_enabled,
+                    snap.disabled,
+                    room_state
+                );
+                (snap.rhythm_enabled, snap.disabled, Some(room_state))
             } else {
+                debug!(
+                    target: "room_sync",
+                    "New room '{}' discovered, defaulting rhythm_enabled=true",
+                    room.id
+                );
                 (true, false, None) // New rooms default to rhythm_enabled=true
             };
 
@@ -219,7 +235,7 @@ fn sync_with_discovery(
             grouped_light_id: room.grouped_light_id.clone(),
             rhythm_enabled,
             disabled,
-            soft_off,
+            state: room_state,
             device_ids: room.device_ids.clone(),
         };
 
@@ -227,7 +243,7 @@ fn sync_with_discovery(
             Ok(_) => {
                 // After the first do_room_set triggers runtime creation,
                 // re-capture engine snapshots so remaining rooms preserve
-                // their persisted preferences (rhythm_enabled, disabled, soft_off).
+                // their persisted preferences (rhythm_enabled, disabled, state).
                 if current_snapshots.is_empty() {
                     if let Some(runtime) = state.lock().ok().and_then(|s| s.hub_runtime()) {
                         current_snapshots = runtime
@@ -235,6 +251,11 @@ fn sync_with_discovery(
                             .into_iter()
                             .map(|snap| (snap.id.clone(), snap))
                             .collect();
+                        debug!(
+                            target: "room_sync",
+                            "Captured {} engine snapshots after runtime creation",
+                            current_snapshots.len()
+                        );
                     }
                 }
 

@@ -5,10 +5,14 @@
 //! without writing platform-specific code.
 
 use std::mem::ManuallyDrop;
+use std::time::Duration;
 
 use crate::api_types::{HueV2GroupedLight, HueV2Response};
 use crate::transport::HueTransport;
 use anyhow::Result;
+
+const HUE_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const HUE_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Hue bridge transport using `reqwest` with rustls.
 ///
@@ -38,6 +42,10 @@ impl ReqwestHueTransport {
     pub fn new(bridge_ip: &str) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .danger_accept_invalid_certs(true)
+            // These blocking requests run while runtime operations hold the engine lock.
+            // A dead bridge must fail fast instead of hanging buttons and /api/state.
+            .connect_timeout(HUE_HTTP_CONNECT_TIMEOUT)
+            .timeout(HUE_HTTP_REQUEST_TIMEOUT)
             .build()?;
 
         Ok(Self {

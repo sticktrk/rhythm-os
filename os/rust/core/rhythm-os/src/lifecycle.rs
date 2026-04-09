@@ -9,7 +9,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use crate::canonical::identity::HubKey;
 use crate::hub::{ActiveHub, HubCredentials, HubEvent, HubType};
@@ -106,7 +106,8 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
 
     let (
         light_profiles,
-        active_light_profile_id,
+        mode_configs,
+        active_profile_id,
         runtime_config,
         utc_offset,
         latitude,
@@ -130,7 +131,8 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
                 .values()
                 .cloned()
                 .collect::<Vec<_>>(),
-            s.active_light_profile_id.clone(),
+            s.mode_configs(),
+            s.active_mode_profile_id(),
             s.runtime_config.clone(),
             s.utc_offset_hours,
             s.latitude,
@@ -142,6 +144,14 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
     };
 
     info!(target: "sys", "Creating Rhythm runtime...");
+    debug!(
+        target: "sys",
+        "Runtime bootstrap: profiles={} mode_configs={} active_profile='{}' tz={:?}",
+        light_profiles.len(),
+        mode_configs.len(),
+        active_profile_id,
+        timezone_name
+    );
 
     // Run warmup if provided and eager warmup is enabled
     if eager_warmup {
@@ -225,10 +235,20 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
             .set_light_profile_config(profile)
             .map_err(|e| anyhow::anyhow!("Failed to set profile config: {}", e))?;
     }
-    if !runtime.set_light_profile(&active_light_profile_id) {
+    let mode_config_count = mode_configs.len();
+    runtime
+        .set_mode_configs(mode_configs)
+        .map_err(|e| anyhow::anyhow!("Failed to set mode configs: {}", e))?;
+    info!(
+        target: "sys",
+        "Runtime mode config applied: {} modes, active_profile={}",
+        mode_config_count,
+        active_profile_id
+    );
+    if !runtime.set_light_profile(&active_profile_id) {
         return Err(anyhow::anyhow!(
             "Failed to activate light profile '{}'",
-            active_light_profile_id
+            active_profile_id
         ));
     }
 
@@ -275,6 +295,7 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
                                 0.0,
                                 0.0,
                                 false,
+                                false,
                                 rhythm_core::RoomProfileSettings::default(),
                             );
                         }
@@ -287,12 +308,14 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
                                 room.time_offset_minutes,
                                 room.brightness_offset,
                                 room.soft_off,
+                                room.hard_off,
                                 room.profile_settings.clone(),
                             );
                             info!(target: "sys",
-                                "Restored room '{}': rhythm={}, disabled={}, time_offset={}, bri_offset={}, soft_off={}",
+                                "Restored room '{}': rhythm={}, disabled={}, time_offset={}, bri_offset={}, soft_off={}, hard_off={}, room_profile={}",
                                 room.id, room.rhythm_enabled, room.disabled,
-                                room.time_offset_minutes, room.brightness_offset, room.soft_off
+                                room.time_offset_minutes, room.brightness_offset, room.soft_off,
+                                room.hard_off, !room.profile_settings.is_empty()
                             );
                         }
                     }
@@ -306,6 +329,7 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
                             false,
                             0.0,
                             0.0,
+                            false,
                             false,
                             rhythm_core::RoomProfileSettings::default(),
                         );
@@ -323,7 +347,7 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
         runtime.set_power_save(s.power_save);
-        info!(target: "sys", "Active light profile: {}", s.active_light_profile_id);
+        info!(target: "sys", "Active mode: {:?}", s.active_mode);
         info!(target: "sys", "Power save: {}", s.power_save);
     }
 
@@ -424,7 +448,8 @@ pub fn ensure_composite_runtime(
 
     let (
         light_profiles,
-        active_light_profile_id,
+        mode_configs,
+        active_profile_id,
         runtime_config,
         utc_offset,
         latitude,
@@ -445,7 +470,8 @@ pub fn ensure_composite_runtime(
                 .values()
                 .cloned()
                 .collect::<Vec<_>>(),
-            s.active_light_profile_id.clone(),
+            s.mode_configs(),
+            s.active_mode_profile_id(),
             s.runtime_config.clone(),
             s.utc_offset_hours,
             s.latitude,
@@ -569,10 +595,20 @@ pub fn ensure_composite_runtime(
             .set_light_profile_config(profile)
             .map_err(|e| anyhow::anyhow!("set profile config: {}", e))?;
     }
-    if !runtime.set_light_profile(&active_light_profile_id) {
+    let mode_config_count = mode_configs.len();
+    runtime
+        .set_mode_configs(mode_configs)
+        .map_err(|e| anyhow::anyhow!("set mode configs: {}", e))?;
+    info!(
+        target: "sys",
+        "Runtime mode config applied: {} modes, active_profile={}",
+        mode_config_count,
+        active_profile_id
+    );
+    if !runtime.set_light_profile(&active_profile_id) {
         return Err(anyhow::anyhow!(
             "Failed to activate light profile '{}'",
-            active_light_profile_id
+            active_profile_id
         ));
     }
 
@@ -621,6 +657,7 @@ pub fn ensure_composite_runtime(
                                 0.0,
                                 0.0,
                                 false,
+                                false,
                                 rhythm_core::RoomProfileSettings::default(),
                             );
                         }
@@ -633,12 +670,26 @@ pub fn ensure_composite_runtime(
                                 room.time_offset_minutes,
                                 room.brightness_offset,
                                 room.soft_off,
+                                room.hard_off,
                                 room.profile_settings.clone(),
+                            );
+                            debug!(
+                                target: "sys",
+                                "Restored room '{}': rhythm={} disabled={} time_offset={} bri_offset={} soft_off={} hard_off={} room_profile={}",
+                                room.id,
+                                room.rhythm_enabled,
+                                room.disabled,
+                                room.time_offset_minutes,
+                                room.brightness_offset,
+                                room.soft_off,
+                                room.hard_off,
+                                !room.profile_settings.is_empty()
                             );
                         }
                     }
                 }
-                Err(_) => {
+                Err(e) => {
+                    warn!(target: "sys", "No persisted rooms (first boot?): {}", e);
                     for snap in runtime.engine_all_room_snapshots() {
                         runtime.restore_room_state(
                             &snap.id,
@@ -646,6 +697,7 @@ pub fn ensure_composite_runtime(
                             false,
                             0.0,
                             0.0,
+                            false,
                             false,
                             rhythm_core::RoomProfileSettings::default(),
                         );

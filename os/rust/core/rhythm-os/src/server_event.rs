@@ -5,7 +5,7 @@
 
 use serde::Serialize;
 
-use rhythm_core::{RoomProfileSettings, RoomSnapshot};
+use rhythm_core::{RhythmMode, RoomModeState, RoomProfileSettings, RoomSnapshot};
 
 use crate::state::MotionSnapshot;
 
@@ -50,10 +50,11 @@ pub enum ServerEvent {
 #[derive(Clone, Debug, Serialize)]
 pub struct RoomStateEvent {
     pub id: String,
+    pub mode: RhythmMode,
+    pub state: RoomModeState,
     pub rhythm_enabled: bool,
     pub time_offset: f32,
     pub brightness_offset: f32,
-    pub soft_off: bool,
     /// Whether lights are currently on in this room.
     pub lights_on: bool,
     /// Effective brightness percentage (1-100) after offsets.
@@ -64,7 +65,11 @@ pub struct RoomStateEvent {
     /// Absent (or `false`) for user actions, polls, and other state changes.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub tick: bool,
-    #[serde(rename = "room_profile", default, skip_serializing_if = "RoomProfileSettings::is_empty")]
+    #[serde(
+        rename = "room_profile",
+        default,
+        skip_serializing_if = "RoomProfileSettings::is_empty"
+    )]
     pub room_profile: RoomProfileSettings,
 }
 
@@ -72,6 +77,8 @@ impl RoomStateEvent {
     /// Build from an engine room snapshot with display values.
     pub fn from_snapshot(
         snap: &RoomSnapshot,
+        mode: RhythmMode,
+        state: RoomModeState,
         lights_on: bool,
         brightness: u8,
         kelvin: u16,
@@ -79,10 +86,11 @@ impl RoomStateEvent {
     ) -> Self {
         Self {
             id: snap.id.clone(),
+            mode,
+            state,
             rhythm_enabled: snap.rhythm_enabled,
             time_offset: snap.time_offset_minutes,
             brightness_offset: snap.brightness_offset,
-            soft_off: snap.soft_off,
             lights_on,
             brightness,
             kelvin,

@@ -559,6 +559,10 @@ mod tests {
             Ok(())
         }
 
+        fn set_mode_configs(&self, _: Vec<rhythm_core::ModeConfig>) -> anyhow::Result<()> {
+            Ok(())
+        }
+
         fn periodic_tick_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
             Ok(())
         }
@@ -582,6 +586,7 @@ mod tests {
             _: f32,
             _: f32,
             _: bool,
+            _: bool,
             _: rhythm_core::RoomProfileSettings,
         ) {
         }
@@ -595,6 +600,14 @@ mod tests {
         }
 
         fn turn_on_room(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn apply_room_command(
+            &self,
+            _: &str,
+            _: rhythm_core::LightingCommand,
+        ) -> anyhow::Result<()> {
             Ok(())
         }
 
@@ -742,6 +755,7 @@ mod tests {
                 time_offset_minutes: 15.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                hard_off: false,
                 profile_settings: rhythm_core::RoomProfileSettings::default(),
             }],
             current_hour: 8.0,
@@ -823,15 +837,19 @@ mod tests {
                 time_offset_minutes: 15.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                hard_off: false,
                 profile_settings: rhythm_core::RoomProfileSettings::default(),
             }],
             current_hour: 8.0,
         });
         let state = test_state_with_runtime(runtime, &[]);
-        let before_sleep = state
+        let mut day_alt = rhythm_core::default_rhythm_profile();
+        day_alt.id = "day_alt".into();
+        state.lock().unwrap().set_light_profile_config(day_alt);
+        let before_day_alt = state
             .lock()
             .unwrap()
-            .light_profile_config(rhythm_core::SLEEP_PROFILE_ID)
+            .light_profile_config("day_alt")
             .unwrap()
             .clone();
         let before_rhythm = state
@@ -845,7 +863,7 @@ mod tests {
         let status = call_json_route(
             app,
             HttpMethod::POST,
-            "/api/config/absorb-offset?id=sleep",
+            "/api/config/absorb-offset?id=day_alt",
             json!({ "offset_minutes": 30.0 }),
         )
         .await;
@@ -853,10 +871,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let state = state.lock().unwrap();
         assert_ne!(
-            state
-                .light_profile_config(rhythm_core::SLEEP_PROFILE_ID)
-                .unwrap(),
-            &before_sleep
+            state.light_profile_config("day_alt").unwrap(),
+            &before_day_alt
         );
         assert_eq!(
             state
@@ -884,6 +900,7 @@ mod tests {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                hard_off: false,
                 profile_settings: rhythm_core::RoomProfileSettings::default(),
             }],
             current_hour: 12.0,
@@ -899,12 +916,12 @@ mod tests {
             .unwrap();
         let status = app.oneshot(req).await.unwrap().status();
 
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
         let calls = calls.lock().unwrap();
-        assert!(calls
+        assert!(!calls
             .iter()
             .any(|call| call == "set_light_profile@http-handler"));
-        assert!(calls.iter().any(|call| call == "handle_event@http-handler"));
+        assert!(!calls.iter().any(|call| call == "handle_event@http-handler"));
     }
 
     #[tokio::test]
@@ -920,6 +937,7 @@ mod tests {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                hard_off: false,
                 profile_settings: rhythm_core::RoomProfileSettings::default(),
             }],
             current_hour: 12.0,
@@ -935,11 +953,11 @@ mod tests {
             .unwrap();
         let status = app.oneshot(req).await.unwrap().status();
 
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
         let calls = calls.lock().unwrap();
-        assert!(calls
+        assert!(!calls
             .iter()
             .any(|call| call == "set_light_profile@http-handler"));
-        assert!(calls.iter().any(|call| call == "handle_event@http-handler"));
+        assert!(!calls.iter().any(|call| call == "handle_event@http-handler"));
     }
 }

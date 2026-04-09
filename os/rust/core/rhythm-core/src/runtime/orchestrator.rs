@@ -10,6 +10,7 @@ use tracing::{debug, info};
 use crate::controller::LightController;
 use crate::light_profile::LightProfileConfig;
 use crate::primitives::RhythmEngine;
+use crate::room::ModeConfig;
 use crate::solar::{SolarTime, SunTimes};
 
 use crate::runtime::config::RuntimeConfig;
@@ -120,11 +121,26 @@ where
             .engine
             .write()
             .map_err(|e| RuntimeError::Internal(format!("Failed to lock engine: {}", e)))?;
-        if !engine.set_light_profile_config(config) {
-            return Err(RuntimeError::ConfigError(
-                "Unknown light profile".to_string(),
-            ));
+        let config_id = config.id.clone();
+        if !engine.set_light_profile_config(config.clone()) {
+            debug!("Runtime registering custom light profile '{}'", config_id);
+            engine.profile_registry_mut().register_config(config);
         }
+        Ok(())
+    }
+
+    /// Replace the mode/state profile mappings on the engine.
+    pub fn set_mode_configs<I>(&self, configs: I) -> RuntimeResult<()>
+    where
+        I: IntoIterator<Item = ModeConfig>,
+    {
+        let configs: Vec<_> = configs.into_iter().collect();
+        let mut engine = self
+            .engine
+            .write()
+            .map_err(|e| RuntimeError::Internal(format!("Failed to lock engine: {}", e)))?;
+        engine.set_mode_configs(configs.iter().cloned());
+        debug!("Runtime mode configs updated: {} entries", configs.len());
         Ok(())
     }
 
@@ -421,6 +437,10 @@ mod tests {
         let result = runtime.handle_event(&event).await;
         assert!(result.is_ok());
         assert!(!result.unwrap());
+        let engine = runtime.engine().read().unwrap();
+        let room = engine.rooms().get("living_room").unwrap();
+        assert!(room.hard_off);
+        assert!(!room.soft_off);
     }
 
     #[test]
@@ -430,6 +450,23 @@ mod tests {
         config.max_brightness = 90;
         let result = runtime.set_light_profile_config(config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_set_light_profile_config_registers_custom_profile() {
+        let runtime = test_runtime();
+        let mut config = crate::default_rhythm_profile();
+        config.id = "day_alt".into();
+        config.name = "Day Alt".into();
+        config.max_brightness = 77;
+
+        let result = runtime.set_light_profile_config(config.clone());
+        assert!(result.is_ok());
+
+        let engine = runtime.engine().read().unwrap();
+        let stored = engine.profile_registry().profile_config("day_alt").unwrap();
+        assert_eq!(stored.name, "Day Alt");
+        assert_eq!(stored.max_brightness, 77);
     }
 
     #[test]

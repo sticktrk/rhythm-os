@@ -67,6 +67,7 @@ impl<H: HueTransport> HueLightController<H> {
 #[async_trait]
 impl<H: HueTransport + 'static> LightController for HueLightController<H> {
     async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
+        let room_label = rhythm_os::controller_helpers::format_room_label(&self.registry, room_id);
         let grouped_light_id =
             rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
 
@@ -94,7 +95,7 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
                 dynamics.filter(|ms| *ms > 0),
             )
             .map_err(|e| {
-                log::warn!(target: "cmd", "Hue turn_on failed: room={} err={}", room_id, e);
+                log::warn!(target: "cmd", "Hue turn_on failed: room={} err={}", room_label, e);
                 LightControlError::CommandFailed(format!(
                     "Failed to turn on room {}: {}",
                     room_id, e
@@ -103,20 +104,20 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
 
         if let Some((x, y)) = adapted.xy {
             info!(target: "cmd",
-                "Hue turn_on: room={} grouped_light={} bri={} xy=({:.3},{:.3}) rgb=({},{},{})",
-                room_id, grouped_light_id, adapted.brightness.unwrap_or(0),
+                "Hue turn_on: room={} bri={} xy=({:.3},{:.3}) rgb=({},{},{})",
+                room_label, adapted.brightness.unwrap_or(0),
                 x, y,
                 command.rgb.r, command.rgb.g, command.rgb.b,
             );
         } else if let Some(kelvin) = adapted.kelvin {
             info!(target: "cmd",
-                "Hue turn_on: room={} grouped_light={} bri={} kelvin={}",
-                room_id, grouped_light_id, adapted.brightness.unwrap_or(0), kelvin
+                "Hue turn_on: room={} bri={} kelvin={}",
+                room_label, adapted.brightness.unwrap_or(0), kelvin
             );
         } else {
             info!(target: "cmd",
-                "Hue turn_on: room={} grouped_light={} bri={}",
-                room_id, grouped_light_id, adapted.brightness.unwrap_or(0)
+                "Hue turn_on: room={} bri={}",
+                room_label, adapted.brightness.unwrap_or(0)
             );
         }
 
@@ -124,6 +125,7 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
     }
 
     async fn turn_off(&self, room_id: &str) -> LightControlResult<()> {
+        let room_label = rhythm_os::controller_helpers::format_room_label(&self.registry, room_id);
         let grouped_light_id =
             rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
 
@@ -138,17 +140,15 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
                 None,
             )
             .map_err(|e| {
-                log::warn!(target: "cmd", "Hue turn_off failed: room={} err={}", room_id, e);
+                log::warn!(target: "cmd", "Hue turn_off failed: room={} err={}", room_label, e);
                 LightControlError::CommandFailed(format!(
                     "Failed to turn off room {}: {}",
                     room_id, e
                 ))
             })?;
 
-        info!(target: "cmd",
-            "Hue turn_off: room={} grouped_light={}",
-            room_id, grouped_light_id
-        );
+        let _ = grouped_light_id;
+        info!(target: "cmd", "Hue turn_off: room={}", room_label);
 
         Ok(())
     }

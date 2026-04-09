@@ -7,10 +7,10 @@
 use anyhow::Context;
 use anyhow::Result;
 use chrono::{Datelike, Timelike};
-use log::info;
+use log::{debug, info, warn};
 use rhythm_core::room::RoomManager;
-use rhythm_core::LightProfileConfig;
 use rhythm_core::RuntimeConfig;
+use rhythm_core::{LightProfileConfig, ModeConfig, ModeTransitionConfig, RhythmMode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -117,8 +117,16 @@ impl StoredLightProfiles {
         runtime_config: &mut RuntimeConfig,
     ) {
         profiles.clear();
+        for profile in rhythm_core::default_builtin_profiles() {
+            profiles.insert(profile.id.clone(), profile);
+        }
         for profile in &self.profiles {
-            profiles.insert(profile.id.clone(), profile.clone());
+            if profile.id == "idle" {
+                continue;
+            }
+            let mut normalized = profile.clone();
+            rhythm_core::normalize_builtin_state_profile_config(&mut normalized);
+            profiles.insert(normalized.id.clone(), normalized);
         }
         runtime_config.solar_noon_hour = self.solar_noon_hour;
     }
@@ -174,7 +182,11 @@ impl StoredLocation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredSettings {
     pub power_save: bool,
-    pub active_light_profile: String,
+    pub active_mode: RhythmMode,
+    #[serde(default)]
+    pub modes: Vec<ModeConfig>,
+    #[serde(default)]
+    pub mode_transitions: Vec<ModeTransitionConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -304,9 +316,24 @@ impl Storage for FileStorage {
 
     fn load_hub_registry_for(&self, key: &HubKey) -> Result<Option<Value>> {
         let filename = format!("hub_registry_{}.json", sanitize_hub_key(key));
+        let path = self.file_path(&filename);
         match self.read_json::<Value>(&filename) {
             Ok(v) => Ok(Some(v)),
-            Err(_) => {
+            Err(e) => {
+                if path.exists() {
+                    warn!(
+                        target: "sys",
+                        "Failed to load hub registry {}: {}. Falling back to legacy hub_registry.json",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    debug!(
+                        target: "sys",
+                        "No keyed hub registry found at {}",
+                        path.display()
+                    );
+                }
                 // Fallback to legacy un-keyed file
                 self.load_hub_registry()
             }
@@ -320,9 +347,22 @@ impl Storage for FileStorage {
     }
 
     fn load_hub_registry(&self) -> Result<Option<serde_json::Value>> {
+        let path = self.file_path("hub_registry.json");
         match self.read_json::<serde_json::Value>("hub_registry.json") {
             Ok(v) => Ok(Some(v)),
-            Err(_) => Ok(None),
+            Err(e) => {
+                if path.exists() {
+                    warn!(
+                        target: "sys",
+                        "Failed to load hub registry {}: {}",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    debug!(target: "sys", "No persisted hub registry at {}", path.display());
+                }
+                Ok(None)
+            }
         }
     }
 
@@ -332,9 +372,26 @@ impl Storage for FileStorage {
     }
 
     fn load_canonical_registry(&self) -> Result<Option<serde_json::Value>> {
+        let path = self.file_path("canonical_registry.json");
         match self.read_json::<serde_json::Value>("canonical_registry.json") {
             Ok(v) => Ok(Some(v)),
-            Err(_) => Ok(None),
+            Err(e) => {
+                if path.exists() {
+                    warn!(
+                        target: "sys",
+                        "Failed to load canonical registry {}: {}",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    debug!(
+                        target: "sys",
+                        "No persisted canonical registry at {}",
+                        path.display()
+                    );
+                }
+                Ok(None)
+            }
         }
     }
 
@@ -344,9 +401,22 @@ impl Storage for FileStorage {
     }
 
     fn load_topology(&self) -> Result<Option<serde_json::Value>> {
+        let path = self.file_path("topology.json");
         match self.read_json::<serde_json::Value>("topology.json") {
             Ok(v) => Ok(Some(v)),
-            Err(_) => Ok(None),
+            Err(e) => {
+                if path.exists() {
+                    warn!(
+                        target: "sys",
+                        "Failed to load topology {}: {}",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    debug!(target: "sys", "No persisted topology at {}", path.display());
+                }
+                Ok(None)
+            }
         }
     }
 
@@ -380,42 +450,79 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
     }
 
     if let Some(storage) = s.storage.as_ref() {
-        if let Ok(configs) = storage.load_light_profiles() {
-            configs.apply_to_state(&mut s.light_profile_configs, &mut s.runtime_config);
-            s.ensure_active_light_profile();
-            s.sync_active_light_profile_runtime_overrides();
-            info!(
-                target: "sys",
-                "Loaded light profiles: {} profiles, solar_noon={}",
-                s.light_profile_configs.len(),
-                s.runtime_config.solar_noon_hour
-            );
+        match storage.load_light_profiles() {
+            Ok(configs) => {
+                configs.apply_to_state(&mut s.light_profile_configs, &mut s.runtime_config);
+                s.sync_active_mode_runtime_overrides();
+                info!(
+                    target: "sys",
+                    "Loaded light profiles: {} profiles, solar_noon={}",
+                    s.light_profile_configs.len(),
+                    s.runtime_config.solar_noon_hour
+                );
+            }
+            Err(e) => {
+                debug!(target: "sys", "No persisted light profiles loaded: {}", e);
+            }
         }
     }
 
     if let Some(storage) = s.storage.as_ref() {
-        if let Ok(loc) = storage.load_location() {
-            loc.apply_to_state(
-                &mut s.latitude,
-                &mut s.longitude,
-                &mut s.utc_offset_hours,
-                &mut s.runtime_config,
-                &mut s.timezone_name,
-            );
+        match storage.load_location() {
+            Ok(loc) => {
+                loc.apply_to_state(
+                    &mut s.latitude,
+                    &mut s.longitude,
+                    &mut s.utc_offset_hours,
+                    &mut s.runtime_config,
+                    &mut s.timezone_name,
+                );
+            }
+            Err(e) => {
+                debug!(target: "sys", "No persisted location loaded: {}", e);
+            }
         }
     }
 
-    if let Some(storage) = s.storage.as_ref() {
-        if let Ok(settings) = storage.load_settings() {
-            s.power_save = settings.power_save;
-            s.active_light_profile_id = settings.active_light_profile;
-            s.ensure_active_light_profile();
-            s.sync_active_light_profile_runtime_overrides();
-            info!(
-                target: "sys",
-                "Loaded settings: active_light_profile={}",
-                s.active_light_profile_id
-            );
+    let loaded_settings = s.storage.as_ref().map(|storage| storage.load_settings());
+    if let Some(result) = loaded_settings {
+        match result {
+            Ok(settings) => {
+                let loaded_modes = settings.modes.clone();
+                s.power_save = settings.power_save;
+                s.active_mode = settings.active_mode;
+                s.set_mode_configs(settings.modes);
+                s.set_mode_transition_configs(settings.mode_transitions);
+                s.sync_active_mode_runtime_overrides();
+                let normalized_modes = s.mode_configs();
+                if normalized_modes != loaded_modes {
+                    info!(target: "sys", "Normalized invalid mode profile IDs during settings load");
+                    if let Some(storage) = s.storage.as_ref() {
+                        if let Err(e) = storage.save_settings(&StoredSettings {
+                            power_save: s.power_save,
+                            active_mode: s.active_mode,
+                            modes: normalized_modes.clone(),
+                            mode_transitions: s.mode_transition_configs(),
+                        }) {
+                            warn!(
+                                target: "sys",
+                                "Failed to persist normalized mode settings: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+                info!(
+                    target: "sys",
+                    "Loaded settings: active_mode={:?}, modes={}, transitions={}",
+                    s.active_mode,
+                    s.mode_configs.len(),
+                    s.mode_transition_configs.len()
+                );
+            }
+            Err(e) => {
+                debug!(target: "sys", "No persisted settings loaded: {}", e);
+            }
         }
     }
 
@@ -426,6 +533,21 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                     info!(target: "sys", "Loaded hub credentials: type={:?}, addr={}", creds.hub_type, creds.address);
                     if let Some(key) = creds.hub_key() {
                         s.hub_credentials.insert(key, creds);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    target: "sys",
+                    "Failed to load multi-hub credentials: {}. Falling back to legacy credentials",
+                    e
+                );
+                if let Ok(creds) = storage.load_hub_credentials() {
+                    if creds.is_configured() {
+                        info!(target: "sys", "Loaded hub credentials: type={:?}, addr={}", creds.hub_type, creds.address);
+                        if let Some(key) = creds.hub_key() {
+                            s.hub_credentials.insert(key, creds);
+                        }
                     }
                 }
             }
@@ -452,7 +574,7 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                     info!(target: "sys", "Loaded canonical registry: {} devices", count);
                 }
                 Err(e) => {
-                    info!(target: "sys", "Failed to parse canonical registry (will start fresh): {}", e);
+                    warn!(target: "sys", "Failed to parse canonical registry (will start fresh): {}", e);
                 }
             }
         }
@@ -468,7 +590,7 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                     info!(target: "sys", "Loaded topology: {} rooms", count);
                 }
                 Err(e) => {
-                    info!(target: "sys", "Failed to parse topology (will start fresh): {}", e);
+                    warn!(target: "sys", "Failed to parse topology (will start fresh): {}", e);
                 }
             }
         }
@@ -481,12 +603,14 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
 mod tests {
     use super::*;
     use crate::hub::HubCredentials;
+    use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
     struct TestStorage {
         light_profiles: Option<StoredLightProfiles>,
         location: Option<StoredLocation>,
         settings: Option<StoredSettings>,
+        saved_settings: Arc<Mutex<Vec<StoredSettings>>>,
     }
 
     impl Storage for TestStorage {
@@ -525,6 +649,7 @@ mod tests {
         }
 
         fn save_settings(&self, _settings: &StoredSettings) -> Result<()> {
+            self.saved_settings.lock().unwrap().push(_settings.clone());
             Ok(())
         }
 
@@ -573,7 +698,82 @@ mod tests {
             config2.motion_timeout_secs,
             rhythm_core::TimerSetting::Fixed { value: 300 }
         );
+        assert!(profiles2.contains_key(rhythm_core::SLEEP_PROFILE_ID));
+        assert!(profiles2.contains_key(rhythm_core::DAY_IDLE_PROFILE_ID));
+        assert!(profiles2.contains_key(rhythm_core::SLEEP_IDLE_PROFILE_ID));
         assert!((runtime_config2.solar_noon_hour - 12.8).abs() < 0.01);
+    }
+
+    #[test]
+    fn stored_light_profiles_apply_state_seeds_builtins_and_drops_legacy_idle() {
+        let legacy_idle = rhythm_core::LightProfileConfig {
+            id: "idle".into(),
+            name: "Idle".into(),
+            ..rhythm_core::default_day_idle_profile()
+        };
+        let stored = StoredLightProfiles {
+            solar_noon_hour: 12.5,
+            profiles: vec![rhythm_core::default_rhythm_profile(), legacy_idle],
+        };
+
+        let mut profiles = std::collections::BTreeMap::new();
+        let mut runtime_config = rhythm_core::RuntimeConfig::default();
+        stored.apply_to_state(&mut profiles, &mut runtime_config);
+
+        assert!(profiles.contains_key(rhythm_core::RHYTHM_PROFILE_ID));
+        assert!(profiles.contains_key(rhythm_core::SLEEP_PROFILE_ID));
+        assert!(profiles.contains_key(rhythm_core::DAY_IDLE_PROFILE_ID));
+        assert!(profiles.contains_key(rhythm_core::SLEEP_IDLE_PROFILE_ID));
+        assert!(!profiles.contains_key("idle"));
+    }
+
+    #[test]
+    fn stored_light_profiles_normalize_bad_day_idle_constant_defaults() {
+        let stored = StoredLightProfiles {
+            solar_noon_hour: 12.5,
+            profiles: vec![
+                rhythm_core::default_rhythm_profile(),
+                rhythm_core::default_sleep_profile(),
+                rhythm_core::default_sleep_idle_profile(),
+                rhythm_core::LightProfileConfig {
+                    id: rhythm_core::DAY_IDLE_PROFILE_ID.into(),
+                    name: rhythm_core::DAY_IDLE_PROFILE_NAME.into(),
+                    curve: rhythm_core::LightCurveShape::Constant {
+                        brightness: 15.0,
+                        color_temp: 0.0,
+                        direct_color: Some(rhythm_core::LightDirectColor {
+                            xy: rhythm_core::rgb_to_xy(rhythm_core::Rgb::new(38, 191, 255)),
+                            rgb: rhythm_core::Rgb::new(38, 191, 255),
+                        }),
+                    },
+                    min_brightness: 15,
+                    max_brightness: 15,
+                    min_color_temp: 0,
+                    max_color_temp: 0,
+                    max_dim_steps: 1,
+                    fade_ms: rhythm_core::TimerSetting::Auto,
+                    motion_timeout_secs: rhythm_core::TimerSetting::Auto,
+                    rhythm_interval_secs: rhythm_core::TimerSetting::Auto,
+                },
+            ],
+        };
+
+        let mut profiles = std::collections::BTreeMap::new();
+        let mut runtime_config = rhythm_core::RuntimeConfig::default();
+        stored.apply_to_state(&mut profiles, &mut runtime_config);
+
+        let config = profiles
+            .get(rhythm_core::DAY_IDLE_PROFILE_ID)
+            .expect("day_idle missing");
+        assert_eq!(config.min_brightness, 1);
+        assert_eq!(config.max_brightness, 1);
+        assert!(matches!(
+            config.curve,
+            rhythm_core::LightCurveShape::Constant {
+                brightness: 1.0,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -581,15 +781,13 @@ mod tests {
         let storage = TestStorage {
             light_profiles: Some(StoredLightProfiles {
                 solar_noon_hour: 12.5,
-                profiles: vec![
-                    rhythm_core::default_rhythm_profile(),
-                    rhythm_core::default_sleep_profile(),
-                    rhythm_core::default_idle_profile(),
-                ],
+                profiles: rhythm_core::default_builtin_profiles().into(),
             }),
             settings: Some(StoredSettings {
                 power_save: false,
-                active_light_profile: "missing-profile".to_string(),
+                active_mode: RhythmMode::Day,
+                modes: vec![],
+                mode_transitions: vec![],
             }),
             ..Default::default()
         };
@@ -598,23 +796,28 @@ mod tests {
         app.storage = Some(Box::new(storage));
         load_persisted_state(&mut app);
 
-        assert_eq!(app.active_light_profile_id, rhythm_core::RHYTHM_PROFILE_ID);
+        assert_eq!(app.active_mode, RhythmMode::Day);
+        assert_eq!(app.active_mode_profile_id(), rhythm_core::RHYTHM_PROFILE_ID);
     }
 
     #[test]
-    fn load_persisted_state_idle_active_profile_falls_back_to_rhythm() {
+    fn load_persisted_state_day_idle_active_profile_falls_back_to_rhythm() {
         let storage = TestStorage {
             light_profiles: Some(StoredLightProfiles {
                 solar_noon_hour: 12.5,
-                profiles: vec![
-                    rhythm_core::default_rhythm_profile(),
-                    rhythm_core::default_sleep_profile(),
-                    rhythm_core::default_idle_profile(),
-                ],
+                profiles: rhythm_core::default_builtin_profiles().into(),
             }),
             settings: Some(StoredSettings {
                 power_save: false,
-                active_light_profile: rhythm_core::IDLE_PROFILE_ID.to_string(),
+                active_mode: RhythmMode::Day,
+                modes: vec![rhythm_core::ModeConfig {
+                    mode: RhythmMode::Day,
+                    active_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                    idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                    wake_profile_id: None,
+                    warning_profile_id: None,
+                }],
+                mode_transitions: vec![],
             }),
             ..Default::default()
         };
@@ -623,7 +826,85 @@ mod tests {
         app.storage = Some(Box::new(storage));
         load_persisted_state(&mut app);
 
-        assert_eq!(app.active_light_profile_id, rhythm_core::RHYTHM_PROFILE_ID);
+        assert_eq!(app.active_mode, RhythmMode::Day);
+        assert_eq!(app.active_mode_profile_id(), rhythm_core::RHYTHM_PROFILE_ID);
+    }
+
+    #[test]
+    fn load_persisted_state_sleep_idle_active_profile_falls_back_to_sleep() {
+        let storage = TestStorage {
+            light_profiles: Some(StoredLightProfiles {
+                solar_noon_hour: 12.5,
+                profiles: rhythm_core::default_builtin_profiles().into(),
+            }),
+            settings: Some(StoredSettings {
+                power_save: false,
+                active_mode: RhythmMode::Sleep,
+                modes: vec![rhythm_core::ModeConfig {
+                    mode: RhythmMode::Sleep,
+                    active_profile_id: Some(rhythm_core::SLEEP_IDLE_PROFILE_ID.into()),
+                    idle_profile_id: Some(rhythm_core::SLEEP_IDLE_PROFILE_ID.into()),
+                    wake_profile_id: None,
+                    warning_profile_id: None,
+                }],
+                mode_transitions: vec![],
+            }),
+            ..Default::default()
+        };
+
+        let mut app = crate::state::AppState::default();
+        app.storage = Some(Box::new(storage));
+        load_persisted_state(&mut app);
+
+        assert_eq!(app.active_mode, RhythmMode::Sleep);
+        assert_eq!(app.active_mode_profile_id(), rhythm_core::SLEEP_PROFILE_ID);
+    }
+
+    #[test]
+    fn load_persisted_state_legacy_idle_mode_mapping_is_normalized_and_persisted() {
+        let saved_settings = Arc::new(Mutex::new(Vec::new()));
+        let storage = TestStorage {
+            light_profiles: Some(StoredLightProfiles {
+                solar_noon_hour: 12.5,
+                profiles: rhythm_core::default_builtin_profiles().into(),
+            }),
+            settings: Some(StoredSettings {
+                power_save: false,
+                active_mode: RhythmMode::Day,
+                modes: vec![
+                    rhythm_core::ModeConfig {
+                        mode: RhythmMode::Day,
+                        active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                        idle_profile_id: Some("idle".into()),
+                        wake_profile_id: None,
+                        warning_profile_id: None,
+                    },
+                    rhythm_core::ModeConfig {
+                        mode: RhythmMode::Sleep,
+                        active_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
+                        idle_profile_id: Some("idle".into()),
+                        wake_profile_id: None,
+                        warning_profile_id: None,
+                    },
+                ],
+                mode_transitions: vec![],
+            }),
+            saved_settings: saved_settings.clone(),
+            ..Default::default()
+        };
+
+        let mut app = crate::state::AppState::default();
+        app.storage = Some(Box::new(storage));
+        load_persisted_state(&mut app);
+
+        let modes = app.mode_configs();
+        assert_eq!(modes[0].idle_profile_id, None);
+        assert_eq!(modes[1].idle_profile_id, None);
+
+        let persisted = saved_settings.lock().unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].modes[0].idle_profile_id, None);
+        assert_eq!(persisted[0].modes[1].idle_profile_id, None);
     }
 
     #[test]
@@ -638,12 +919,15 @@ mod tests {
                 profiles: vec![
                     rhythm_core::default_rhythm_profile(),
                     sleep,
-                    rhythm_core::default_idle_profile(),
+                    rhythm_core::default_day_idle_profile(),
+                    rhythm_core::default_sleep_idle_profile(),
                 ],
             }),
             settings: Some(StoredSettings {
                 power_save: false,
-                active_light_profile: rhythm_core::SLEEP_PROFILE_ID.to_string(),
+                active_mode: RhythmMode::Sleep,
+                modes: vec![],
+                mode_transitions: vec![],
             }),
             ..Default::default()
         };
@@ -652,14 +936,15 @@ mod tests {
         app.storage = Some(Box::new(storage));
         load_persisted_state(&mut app);
 
-        assert_eq!(app.active_light_profile_id, rhythm_core::SLEEP_PROFILE_ID);
+        assert_eq!(app.active_mode, RhythmMode::Sleep);
+        assert_eq!(app.active_mode_profile_id(), rhythm_core::SLEEP_PROFILE_ID);
         assert_eq!(app.default_motion_timeout_secs, 42);
         assert_eq!(app.runtime_config.update_interval_secs, 17);
     }
 
     #[test]
     fn load_persisted_state_restores_idle_palette_override() {
-        let mut idle = rhythm_core::default_idle_profile();
+        let mut idle = rhythm_core::default_day_idle_profile();
         idle.curve = rhythm_core::LightCurveShape::Palette {
             keyframes: vec![
                 rhythm_core::LightPaletteKeyframe {
@@ -683,12 +968,15 @@ mod tests {
                 profiles: vec![
                     rhythm_core::default_rhythm_profile(),
                     rhythm_core::default_sleep_profile(),
+                    rhythm_core::default_sleep_idle_profile(),
                     idle.clone(),
                 ],
             }),
             settings: Some(StoredSettings {
                 power_save: false,
-                active_light_profile: rhythm_core::RHYTHM_PROFILE_ID.to_string(),
+                active_mode: RhythmMode::Day,
+                modes: vec![],
+                mode_transitions: vec![],
             }),
             ..Default::default()
         };
@@ -698,7 +986,7 @@ mod tests {
         load_persisted_state(&mut app);
 
         assert_eq!(
-            app.light_profile_config(rhythm_core::IDLE_PROFILE_ID)
+            app.light_profile_config(rhythm_core::DAY_IDLE_PROFILE_ID)
                 .unwrap(),
             &idle
         );
@@ -785,12 +1073,24 @@ mod tests {
             let (storage, path) = temp_storage();
             let settings = StoredSettings {
                 power_save: true,
-                active_light_profile: rhythm_core::SLEEP_PROFILE_ID.to_string(),
+                active_mode: RhythmMode::Sleep,
+                modes: rhythm_core::default_mode_configs(),
+                mode_transitions: rhythm_core::default_mode_transition_configs(),
             };
             storage.save_settings(&settings).unwrap();
             let loaded = storage.load_settings().unwrap();
             assert!(loaded.power_save);
-            assert_eq!(loaded.active_light_profile, rhythm_core::SLEEP_PROFILE_ID);
+            assert_eq!(loaded.active_mode, RhythmMode::Sleep);
+            assert_eq!(loaded.modes.len(), 2);
+            assert_eq!(loaded.mode_transitions.len(), 2);
+            assert_eq!(
+                loaded.mode_transitions[0].trigger,
+                rhythm_core::ModeTransitionTrigger::Sunrise
+            );
+            assert_eq!(
+                loaded.mode_transitions[1].trigger,
+                rhythm_core::ModeTransitionTrigger::NauticalTwilight
+            );
             cleanup(&path);
         }
 

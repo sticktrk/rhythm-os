@@ -47,17 +47,14 @@ pub fn map_hue_button(button_index: u8, event_type: HueButtonEventType) -> Optio
         // long press = plain on (adaptive lighting with current offsets preserved).
         (1, HueButtonEventType::InitialPress) => Some(ButtonAction::Reset),
         (1, HueButtonEventType::LongRelease) => Some(ButtonAction::OnPress),
-        // Buttons 2-3: trigger on InitialPress for instant response.
-        // The Hue bridge sends initial_press immediately on button-down,
-        // but delays short_release until the button is released and
-        // confirmed not to be a long press (~300-500ms later).
+        // Buttons 1-3 trigger on button-down for immediate response.
         (2, HueButtonEventType::InitialPress) => Some(ButtonAction::UpPress),
         (2, HueButtonEventType::Repeat) => Some(ButtonAction::UpHold),
         (3, HueButtonEventType::InitialPress) => Some(ButtonAction::DownPress),
         (3, HueButtonEventType::Repeat) => Some(ButtonAction::DownHold),
         // Button 4 (bottom): short press = soft off (dim to 1%), long press = lights fully off.
-        // LongPress fires as soon as hold threshold is reached (no wait for release).
-        (4, HueButtonEventType::InitialPress) => Some(ButtonAction::OffPress),
+        // Keep short press on release so a hold can promote cleanly to LongPress.
+        (4, HueButtonEventType::ShortRelease) => Some(ButtonAction::OffPress),
         (4, HueButtonEventType::LongPress) => Some(ButtonAction::LightsOff),
         _ => None,
     }
@@ -172,9 +169,9 @@ mod tests {
     }
 
     #[test]
-    fn map_button4_initial_press_off() {
+    fn map_button4_short_release_off() {
         assert_eq!(
-            map_hue_button(4, HueButtonEventType::InitialPress),
+            map_hue_button(4, HueButtonEventType::ShortRelease),
             Some(ButtonAction::OffPress)
         );
     }

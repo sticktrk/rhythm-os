@@ -37,6 +37,29 @@ if [ -z "${HA_TOKEN:-}" ]; then
     exit 1
 fi
 
+requested_log_level="${LOG_LEVEL:-$(bashio::config 'log_level')}"
+case "${requested_log_level:-info}" in
+    trace|debug|info|warn|error)
+        export LOG_LEVEL="${requested_log_level:-info}"
+        ;;
+    warning)
+        export LOG_LEVEL="warn"
+        bashio::log.info "Translating log level 'warning' to 'warn'"
+        ;;
+    notice)
+        export LOG_LEVEL="info"
+        bashio::log.info "Translating log level 'notice' to 'info'"
+        ;;
+    fatal)
+        export LOG_LEVEL="error"
+        bashio::log.info "Translating log level 'fatal' to 'error'"
+        ;;
+    *)
+        export LOG_LEVEL="info"
+        bashio::log.warning "Invalid log level '${requested_log_level}', defaulting to info"
+        ;;
+esac
+
 # Log startup
 bashio::log.info "Starting Rhythm OS (Rust)..."
 bashio::log.info "Mode: ${MODE}"
@@ -45,6 +68,7 @@ bashio::log.info "HA Host: ${HA_HOST}:${HA_PORT}"
 # Set API port
 export PORT="${PORT:-54448}"
 bashio::log.info "API port: ${PORT}"
+bashio::log.info "Log level: ${LOG_LEVEL}"
 
 # Run the Rust binary
 exec /usr/local/bin/rhythm-addon

@@ -1,5 +1,6 @@
 //! Test support — no-op and spy transport implementations.
 
+use std::collections::HashSet;
 use std::sync::Mutex;
 
 use anyhow::Result;
@@ -72,6 +73,7 @@ pub struct SpyTransport {
     commands: Mutex<Vec<RecordedCommand>>,
     devices: Mutex<Vec<MatterDeviceInfo>>,
     on_off_state: Mutex<std::collections::HashMap<u64, bool>>,
+    failing_nodes: Mutex<HashSet<u64>>,
 }
 
 impl SpyTransport {
@@ -80,6 +82,7 @@ impl SpyTransport {
             commands: Mutex::new(Vec::new()),
             devices: Mutex::new(Vec::new()),
             on_off_state: Mutex::new(std::collections::HashMap::new()),
+            failing_nodes: Mutex::new(HashSet::new()),
         }
     }
 
@@ -98,6 +101,10 @@ impl SpyTransport {
 
     pub fn set_on_off(&self, node_id: u64, is_on: bool) {
         self.on_off_state.lock().unwrap().insert(node_id, is_on);
+    }
+
+    pub fn fail_node(&self, node_id: u64) {
+        self.failing_nodes.lock().unwrap().insert(node_id);
     }
 }
 
@@ -131,6 +138,9 @@ impl MatterTransport for SpyTransport {
         cmd_id: u8,
         payload: &[u8],
     ) -> Result<()> {
+        if self.failing_nodes.lock().unwrap().contains(&node_id) {
+            anyhow::bail!("device {} not found in registry", node_id);
+        }
         self.commands.lock().unwrap().push(RecordedCommand {
             node_id,
             endpoint,

@@ -546,6 +546,43 @@ impl RoomTopologyStore {
         affected
     }
 
+    /// Remove a canonical device from every topology room.
+    pub fn remove_device_everywhere(&mut self, device_id: &str) -> Vec<String> {
+        let mut affected = Vec::new();
+
+        for (room_id, room) in &mut self.rooms {
+            let had_devices = room.devices.len();
+            room.remove_device(device_id);
+            if room.devices.len() < had_devices {
+                affected.push(room_id.clone());
+            }
+        }
+
+        affected
+    }
+
+    /// Remove a hub target from every topology room and clear the room index.
+    pub fn remove_hub_target_everywhere(
+        &mut self,
+        hub_key: &HubKey,
+        hub_room_id: &str,
+    ) -> Vec<String> {
+        let mut affected = Vec::new();
+
+        for (room_id, room) in &mut self.rooms {
+            let had_targets = room.hub_targets.len();
+            room.remove_hub_target(hub_key, hub_room_id);
+            if room.hub_targets.len() < had_targets {
+                affected.push(room_id.clone());
+            }
+        }
+
+        self.hub_room_index
+            .remove(&(hub_key.to_string(), hub_room_id.to_string()));
+
+        affected
+    }
+
     // ---- Query methods ----
 
     /// Get all rooms.

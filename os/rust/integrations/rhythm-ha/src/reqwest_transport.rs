@@ -4,10 +4,14 @@
 //! so desktop targets get HA communication without platform-specific code.
 
 use std::mem::ManuallyDrop;
+use std::time::Duration;
 
 use anyhow::Result;
 
 use crate::transport::{EntityState, HaConnectionConfig, HaTransport};
+
+const HA_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const HA_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// HA transport using `reqwest` with blocking HTTP client.
 ///
@@ -32,7 +36,12 @@ impl Drop for ReqwestHaTransport {
 impl ReqwestHaTransport {
     /// Create a new transport with the given HA connection config.
     pub fn new(config: HaConnectionConfig) -> Result<Self> {
-        let client = reqwest::blocking::Client::builder().build()?;
+        let client = reqwest::blocking::Client::builder()
+            // These blocking requests run while runtime operations hold the engine lock.
+            // A dead HA call must fail fast instead of hanging buttons and /api/state.
+            .connect_timeout(HA_HTTP_CONNECT_TIMEOUT)
+            .timeout(HA_HTTP_REQUEST_TIMEOUT)
+            .build()?;
 
         Ok(Self {
             client: ManuallyDrop::new(client),

@@ -177,7 +177,7 @@ pub fn handle_put_devices(state: &SharedState, body: &Value, persist: bool) -> A
 }
 
 pub fn handle_delete_device(state: &SharedState, id: &str) -> ApiResponse {
-    match commands::do_device_remove(state, id, None) {
+    match commands::do_device_hard_remove(state, id, None) {
         Ok(()) => ApiResponse::no_content(),
         Err(e) => ApiResponse::server_error(e),
     }
@@ -222,7 +222,9 @@ fn parse_timer_patch_value(
     }
 }
 
-fn parse_room_profile_patch(value: Option<&Value>) -> Result<Option<commands::RoomProfileSettingsPatch>, String> {
+fn parse_room_profile_patch(
+    value: Option<&Value>,
+) -> Result<Option<commands::RoomProfileSettingsPatch>, String> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -260,11 +262,13 @@ fn default_profile_config_for(
     requested_id: Option<&str>,
 ) -> Result<rhythm_core::LightProfileConfig, String> {
     let s = state.lock().map_err(|_| "lock".to_string())?;
-    let id = requested_id.unwrap_or(&s.active_light_profile_id);
+    let active_profile_id = s.active_mode_profile_id();
+    let id = requested_id.unwrap_or(active_profile_id.as_str());
     match id {
         rhythm_core::RHYTHM_PROFILE_ID => Ok(rhythm_core::default_rhythm_profile()),
         rhythm_core::SLEEP_PROFILE_ID => Ok(rhythm_core::default_sleep_profile()),
-        rhythm_core::IDLE_PROFILE_ID => Ok(rhythm_core::default_idle_profile()),
+        rhythm_core::DAY_IDLE_PROFILE_ID => Ok(rhythm_core::default_day_idle_profile()),
+        rhythm_core::SLEEP_IDLE_PROFILE_ID => Ok(rhythm_core::default_sleep_idle_profile()),
         _ => Err(format!("Unknown light profile: {}", id)),
     }
 }
@@ -433,23 +437,42 @@ pub fn handle_put_settings(state: &SharedState, body: &Value) -> ApiResponse {
             "rhythm_interval_secs now belongs in light profile config",
         );
     }
+    let active_mode = match body.get("active_mode").cloned() {
+        Some(value) => match serde_json::from_value::<rhythm_core::RhythmMode>(value) {
+            Ok(mode) => Some(mode),
+            Err(_) => return ApiResponse::bad_request("Invalid active_mode"),
+        },
+        None => None,
+    };
+    let modes = match body.get("modes").cloned() {
+        Some(value) => match serde_json::from_value::<Vec<rhythm_core::ModeConfig>>(value) {
+            Ok(modes) => Some(modes),
+            Err(_) => return ApiResponse::bad_request("Invalid modes"),
+        },
+        None => None,
+    };
+    let mode_transitions = match body.get("mode_transitions").cloned() {
+        Some(value) => {
+            match serde_json::from_value::<Vec<rhythm_core::ModeTransitionConfig>>(value) {
+                Ok(transitions) => Some(transitions),
+                Err(_) => return ApiResponse::bad_request("Invalid mode_transitions"),
+            }
+        }
+        None => None,
+    };
     let power_save = body.get("power_save").and_then(|v| v.as_bool());
 
-    match commands::do_settings_set(state, power_save) {
+    match commands::do_settings_set(state, power_save, active_mode, modes, mode_transitions) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
     }
 }
 
 pub fn handle_put_light_profile(state: &SharedState, body: &Value) -> ApiResponse {
-    let id = match body.get("id").and_then(|v| v.as_str()) {
-        Some(id) => id,
-        None => return ApiResponse::bad_request("Missing id"),
-    };
-    match commands::do_set_light_profile(state, id) {
-        Ok(()) => ApiResponse::no_content(),
-        Err(e) => ApiResponse::server_error(e),
-    }
+    let _ = (state, body);
+    ApiResponse::bad_request(
+        "Global light-profile selection has been replaced by settings.active_mode",
+    )
 }
 
 pub fn handle_put_hub_credentials(state: &SharedState, body: &Value) -> ApiResponse {
@@ -648,7 +671,13 @@ pub fn handle_put_room_preferences(
         let room_id = commands::resolve_room_id(state, raw_room_id);
         let rhythm_enabled = item.get("rhythm_enabled").and_then(|v| v.as_bool());
         let disabled = item.get("disabled").and_then(|v| v.as_bool());
-        let soft_off = item.get("soft_off").and_then(|v| v.as_bool());
+        let room_state = match item.get("state").cloned() {
+            Some(value) => match serde_json::from_value::<rhythm_core::RoomModeState>(value) {
+                Ok(state) => Some(state),
+                Err(_) => return ApiResponse::bad_request("Invalid room state"),
+            },
+            None => None,
+        };
         let room_profile = match parse_room_profile_patch(item.get("room_profile")) {
             Ok(patch) => patch,
             Err(e) => return ApiResponse::bad_request(&e),
@@ -660,7 +689,7 @@ pub fn handle_put_room_preferences(
             &room_id,
             rhythm_enabled,
             disabled,
-            soft_off,
+            room_state,
             room_profile.as_ref(),
             per_item_persist,
         ) {
@@ -788,28 +817,14 @@ pub fn handle_unpair_device(
             log::info!(target: "pair", "Unpairing result: status={:?} error={:?}", result.status, result.error);
             if result.status == crate::pairing::PairingStatus::Complete {
                 if let Some(device_id) = &result.device_id {
-                    // Remove from hub device registry
                     let hub_key = crate::canonical::identity::HubKey::new(
                         crate::hub::HubType::new(&request.hub_type),
                         "local",
                     );
-                    let _ = commands::do_device_remove(state, device_id, Some(&hub_key));
-
-                    // Soft-remove from canonical registry
-                    commands::do_canonical_soft_remove(state, device_id, &hub_key);
-                }
-
-                // Persist registries
-                commands::persist_registry(state);
-
-                // Notify SSE clients
-                #[cfg(feature = "desktop")]
-                {
-                    commands::emit_triage_changed(state);
-                    crate::state::emit_server_event(
-                        state,
-                        crate::server_event::ServerEvent::RoomsChanged,
-                    );
+                    if let Err(e) = commands::do_device_hard_remove(state, device_id, Some(&hub_key))
+                    {
+                        return ApiResponse::server_error(e);
+                    }
                 }
             }
             match serde_json::to_string(&result) {
@@ -1001,7 +1016,14 @@ pub fn handle_put_topology_move_device(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canonical::identity::{DiscoveredIdentity, HardwareId, HubKey};
+    use crate::canonical::registry::ResolveResult;
+    use crate::hub::{ActiveHub, HubType};
+    use crate::pairing::{PairingStatus, UnpairingRequest, UnpairingResult};
+    use crate::registry::HubDeviceRegistry;
     use crate::state::AppState;
+    use crate::topology::HubControlTarget;
+    use rhythm_core::runtime::hub_registry::DeviceType;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
@@ -1180,6 +1202,9 @@ mod tests {
             fn set_light_profile_config(&self, _: LightProfileConfig) -> anyhow::Result<()> {
                 Ok(())
             }
+            fn set_mode_configs(&self, _: Vec<rhythm_core::ModeConfig>) -> anyhow::Result<()> {
+                Ok(())
+            }
             fn periodic_tick_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
                 Ok(())
             }
@@ -1197,6 +1222,7 @@ mod tests {
                 _: f32,
                 _: f32,
                 _: bool,
+                _: bool,
                 _: rhythm_core::RoomProfileSettings,
             ) {
             }
@@ -1206,6 +1232,13 @@ mod tests {
                 Ok(())
             }
             fn turn_on_room(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn apply_room_command(
+                &self,
+                _: &str,
+                _: rhythm_core::LightingCommand,
+            ) -> anyhow::Result<()> {
                 Ok(())
             }
             fn set_power_save(&self, _: bool) -> Vec<String> {
@@ -1256,6 +1289,7 @@ mod tests {
                     time_offset_minutes: 0.0,
                     brightness_offset: 0.0,
                     soft_off: false,
+                    hard_off: false,
                     profile_settings: rhythm_core::RoomProfileSettings::default(),
                 },
                 RoomSnapshot {
@@ -1266,6 +1300,7 @@ mod tests {
                     time_offset_minutes: 0.0,
                     brightness_offset: 0.0,
                     soft_off: false,
+                    hard_off: false,
                     profile_settings: rhythm_core::RoomProfileSettings::default(),
                 },
             ],
@@ -1286,6 +1321,80 @@ mod tests {
             },
         );
         Arc::new(Mutex::new(app))
+    }
+
+    fn handler_state_with_canonical_light() -> (
+        SharedState,
+        Arc<Mutex<HubDeviceRegistry>>,
+        String,
+        String,
+        HubKey,
+    ) {
+        let registry = Arc::new(Mutex::new(HubDeviceRegistry::with_options(true)));
+        let mut app = AppState::default();
+        let hub_type = HubType::new("mock");
+        let hub_key = HubKey::new(hub_type.clone(), "local");
+        app.hubs.insert(
+            hub_key.clone(),
+            ActiveHub {
+                hub_type,
+                hub_key: hub_key.clone(),
+                runtime: None,
+                hub_data: Box::new(()),
+                registry: Some(registry.clone()),
+                discovery: None,
+                shutdown: Default::default(),
+            },
+        );
+
+        let room_id = app.topology.create_room("Office");
+        let identity = DiscoveredIdentity {
+            native_id: "device-1".to_string(),
+            room_id: "device-1".to_string(),
+            room_name: "Office Lamp".to_string(),
+            name: "Office Lamp".to_string(),
+            device_type: DeviceType::Light,
+            hardware_ids: vec![HardwareId::matter("100")],
+            manufacturer: None,
+            model: None,
+        };
+        let canonical_id = match app.canonical_registry.resolve(&identity, &hub_key, 1) {
+            ResolveResult::AlreadyKnown { canonical_id }
+            | ResolveResult::ReApproved { canonical_id }
+            | ResolveResult::Created { canonical_id } => canonical_id,
+            ResolveResult::Queued { .. } => panic!("unexpected triage for test device"),
+        };
+        app.canonical_registry
+            .assign_room(&canonical_id, Some(&room_id));
+        app.topology
+            .get_mut(&room_id)
+            .unwrap()
+            .add_device_hub_default(&canonical_id);
+        app.topology
+            .get_mut(&room_id)
+            .unwrap()
+            .upsert_hub_target(HubControlTarget {
+                hub_key: hub_key.clone(),
+                hub_room_id: "device-1".to_string(),
+                control_id: "device-1".to_string(),
+                light_device_ids: vec!["device-1".to_string()],
+                topology_aligned: false,
+            });
+
+        registry.lock().unwrap().upsert_room(
+            "device-1",
+            "Office Lamp",
+            "device-1",
+            &["device-1".to_string()],
+        );
+
+        (
+            Arc::new(Mutex::new(app)),
+            registry,
+            canonical_id,
+            room_id,
+            hub_key,
+        )
     }
 
     // -- Void mutations return 204 --
@@ -1344,7 +1453,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert_eq!(parsed["id"], rhythm_core::SLEEP_PROFILE_ID);
         assert_eq!(parsed["name"], rhythm_core::SLEEP_PROFILE_NAME);
-        assert_eq!(parsed["curve"]["type"], "super-gaussian");
+        assert_eq!(parsed["curve"]["type"], "constant");
         assert_eq!(parsed["curve"]["direct_color"]["rgb"]["r"], 255);
         assert!(parsed.get("direct_color").is_none());
     }
@@ -1386,12 +1495,117 @@ mod tests {
     }
 
     #[test]
-    fn reset_config_for_idle_returns_inherit_active_default() {
+    fn put_config_day_idle_default_fifteen_artifact_normalizes_to_one_percent() {
         let state = handler_state_with_runtime();
-        let r = handle_reset_config(&state, Some(rhythm_core::IDLE_PROFILE_ID));
+        let r = handle_put_config(
+            &state,
+            Some(rhythm_core::DAY_IDLE_PROFILE_ID),
+            &json!({
+                "id": "day_idle",
+                "name": "Day Idle",
+                "curve": {
+                    "type": "constant",
+                    "brightness": 15,
+                    "color_temp": 0,
+                    "direct_color": {
+                        "xy": { "x": 0.2041, "y": 0.2444 },
+                        "rgb": { "r": 38, "g": 191, "b": 255 }
+                    }
+                },
+                "min_brightness": 15,
+                "max_brightness": 15,
+                "min_color_temp": 0,
+                "max_color_temp": 0,
+                "max_dim_steps": 1,
+                "fade_ms": { "mode": "auto" },
+                "motion_timeout_secs": { "mode": "auto" },
+                "rhythm_interval_secs": { "mode": "auto" }
+            }),
+        );
+        assert_eq!(r.status, 204);
+
+        let stored = state
+            .lock()
+            .unwrap()
+            .light_profile_config(rhythm_core::DAY_IDLE_PROFILE_ID)
+            .unwrap()
+            .clone();
+        assert_eq!(stored.min_brightness, 1);
+        assert_eq!(stored.max_brightness, 1);
+        assert!(matches!(
+            stored.curve,
+            rhythm_core::LightCurveShape::Constant {
+                brightness: 1.0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn put_config_day_idle_custom_brightness_is_preserved() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_config(
+            &state,
+            Some(rhythm_core::DAY_IDLE_PROFILE_ID),
+            &json!({
+                "id": "day_idle",
+                "name": "Day Idle",
+                "curve": {
+                    "type": "constant",
+                    "brightness": 1.0,
+                    "color_temp": 0,
+                    "direct_color": {
+                        "xy": { "x": 0.2041, "y": 0.2444 },
+                        "rgb": { "r": 38, "g": 191, "b": 255 }
+                    }
+                },
+                "min_brightness": 20,
+                "max_brightness": 20,
+                "min_color_temp": 0,
+                "max_color_temp": 0,
+                "max_dim_steps": 1,
+                "fade_ms": { "mode": "auto" },
+                "motion_timeout_secs": { "mode": "auto" },
+                "rhythm_interval_secs": { "mode": "auto" }
+            }),
+        );
+        assert_eq!(r.status, 204);
+
+        let stored = state
+            .lock()
+            .unwrap()
+            .light_profile_config(rhythm_core::DAY_IDLE_PROFILE_ID)
+            .unwrap()
+            .clone();
+        assert_eq!(stored.min_brightness, 20);
+        assert_eq!(stored.max_brightness, 20);
+        assert!(matches!(
+            stored.curve,
+            rhythm_core::LightCurveShape::Constant {
+                brightness: 1.0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn reset_config_for_day_idle_returns_inherit_active_default() {
+        let state = handler_state_with_runtime();
+        let r = handle_reset_config(&state, Some(rhythm_core::DAY_IDLE_PROFILE_ID));
         assert_eq!(r.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
-        assert_eq!(parsed["id"], rhythm_core::IDLE_PROFILE_ID);
+        assert_eq!(parsed["id"], rhythm_core::DAY_IDLE_PROFILE_ID);
+        assert_eq!(parsed["curve"]["type"], "inherit-active");
+        assert_eq!(parsed["min_brightness"], 1);
+    }
+
+    #[test]
+    fn reset_config_for_sleep_idle_returns_inherit_active_default() {
+        let state = handler_state_with_runtime();
+        let r = handle_reset_config(&state, Some(rhythm_core::SLEEP_IDLE_PROFILE_ID));
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["id"], rhythm_core::SLEEP_IDLE_PROFILE_ID);
         assert_eq!(parsed["curve"]["type"], "inherit-active");
         assert_eq!(parsed["min_brightness"], 1);
     }
@@ -1440,6 +1654,67 @@ mod tests {
         );
         assert_eq!(r.status, 204);
         assert!(r.body.is_empty());
+    }
+
+    #[test]
+    fn delete_device_hard_removes_canonical_topology_and_registry_entries() {
+        let (state, registry, canonical_id, room_id, hub_key) = handler_state_with_canonical_light();
+
+        let r = handle_delete_device(&state, "device-1");
+        assert_eq!(r.status, 204);
+
+        let s = state.lock().unwrap();
+        assert!(s.canonical_registry.get(&canonical_id).is_none());
+        let room = s.topology.get(&room_id).unwrap();
+        assert!(!room.devices.iter().any(|d| d.device_id == canonical_id));
+        assert!(!room
+            .hub_targets
+            .iter()
+            .any(|t| t.hub_key == hub_key && t.hub_room_id == "device-1"));
+        drop(s);
+
+        let reg = registry.lock().unwrap();
+        assert!(reg.get_light_entities("device-1").is_empty());
+        assert!(!reg.rooms().iter().any(|room| room.id == "device-1"));
+    }
+
+    #[test]
+    fn unpair_completion_uses_hard_remove_cleanup() {
+        let (state, registry, canonical_id, room_id, hub_key) = handler_state_with_canonical_light();
+        {
+            let mut s = state.lock().unwrap();
+            s.start_unpairing_fn = Some(Arc::new(|_, _, _| {
+                Ok(UnpairingResult {
+                    hub_type: "mock".to_string(),
+                    status: PairingStatus::Complete,
+                    device_id: Some("device-1".to_string()),
+                    error: None,
+                })
+            }));
+        }
+
+        let r = handle_unpair_device(
+            &state,
+            &UnpairingRequest {
+                hub_type: "mock".to_string(),
+                params: json!({ "device_id": "device-1", "force": true }),
+            },
+        );
+        assert_eq!(r.status, 200);
+
+        let s = state.lock().unwrap();
+        assert!(s.canonical_registry.get(&canonical_id).is_none());
+        let room = s.topology.get(&room_id).unwrap();
+        assert!(!room.devices.iter().any(|d| d.device_id == canonical_id));
+        assert!(!room
+            .hub_targets
+            .iter()
+            .any(|t| t.hub_key == hub_key && t.hub_room_id == "device-1"));
+        drop(s);
+
+        let reg = registry.lock().unwrap();
+        assert!(reg.get_light_entities("device-1").is_empty());
+        assert!(!reg.rooms().iter().any(|room| room.id == "device-1"));
     }
 
     // -- Single room action returns {"rooms":[...]} --

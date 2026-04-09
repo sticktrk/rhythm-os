@@ -6,7 +6,8 @@
 
 use crate::controller::LightController;
 use crate::light_profile::LightProfileConfig;
-use crate::room::RoomProfileSettings;
+use crate::lighting::LightingCommand;
+use crate::room::{ModeConfig, RoomModeState, RoomProfileSettings};
 use crate::solar::SolarTime;
 use anyhow::Result;
 
@@ -37,6 +38,9 @@ pub trait RuntimeHandle: Send + Sync {
     /// Update a light profile configuration.
     fn set_light_profile_config(&self, config: LightProfileConfig) -> Result<()>;
 
+    /// Replace the mode/state profile mappings.
+    fn set_mode_configs(&self, configs: Vec<ModeConfig>) -> Result<()>;
+
     /// Run a periodic update for a single room. Holds the engine lock only
     /// for this one room (~200-500ms) instead of all rooms at once.
     fn periodic_tick_room(&self, room_id: &str, current_hour: f32) -> Result<()>;
@@ -56,6 +60,7 @@ pub trait RuntimeHandle: Send + Sync {
         time_offset: f32,
         bri_offset: f32,
         soft_off: bool,
+        hard_off: bool,
         profile_settings: RoomProfileSettings,
     );
 
@@ -72,6 +77,9 @@ pub trait RuntimeHandle: Send + Sync {
     /// Turn on a room with adaptive lighting. Always sends ON — never toggles.
     /// Used by motion detection to avoid the `any_lights_on` round-trip.
     fn turn_on_room(&self, room_id: &str) -> Result<()>;
+
+    /// Apply an explicit rendered lighting command to a room.
+    fn apply_room_command(&self, room_id: &str, command: LightingCommand) -> Result<()>;
 
     /// Set power save mode on the engine. Returns room IDs that were soft_off
     /// (caller must turn them truly off when switching power_save ON).
@@ -127,6 +135,7 @@ pub struct RoomSnapshot {
     pub time_offset_minutes: f32,
     pub brightness_offset: f32,
     pub soft_off: bool,
+    pub hard_off: bool,
     pub profile_settings: RoomProfileSettings,
 }
 
@@ -161,6 +170,10 @@ where
         Ok(RhythmRuntime::set_light_profile_config(self, config)?)
     }
 
+    fn set_mode_configs(&self, configs: Vec<ModeConfig>) -> Result<()> {
+        Ok(RhythmRuntime::set_mode_configs(self, configs)?)
+    }
+
     fn periodic_tick_room(&self, room_id: &str, current_hour: f32) -> Result<()> {
         let mut engine = self
             .engine()
@@ -173,7 +186,44 @@ where
 
         match result {
             crate::primitives::PeriodicTickResult::Updated => {
-                log::info!(target: "sys", "Periodic room tick: '{}' updated", room_id);
+                if let Some(room) = engine.rooms().get(room_id) {
+                    let room_state = RoomModeState::from_flags(room.hard_off, room.soft_off, false);
+                    let room_state_label = match room_state {
+                        RoomModeState::Active => "active",
+                        RoomModeState::Idle => "idle",
+                        RoomModeState::Wake => "wake",
+                        RoomModeState::Warning => "warning",
+                        RoomModeState::HardOff => "hard_off",
+                    };
+                    let room_label = if room.name != room.id {
+                        format!("{} ({})", room.name, room.id)
+                    } else {
+                        room.id.clone()
+                    };
+                    let mode = engine.profile_registry().active_mode();
+                    let profile_id = engine
+                        .profile_registry()
+                        .profile_for_room_state(mode, room_state, Some(&room.profile_settings))
+                        .id()
+                        .to_string();
+
+                    if room_state == RoomModeState::Active {
+                        log::debug!(
+                            target: "sys",
+                            "Periodic tick: room={} state=active profile={}",
+                            room_label,
+                            profile_id
+                        );
+                    } else {
+                        log::info!(
+                            target: "sys",
+                            "Periodic tick: room={} state={} profile={}",
+                            room_label,
+                            room_state_label,
+                            profile_id
+                        );
+                    }
+                }
             }
             crate::primitives::PeriodicTickResult::Error(e) => {
                 log::warn!(target: "sys", "Periodic room tick failed: {}", e);
@@ -194,6 +244,7 @@ where
             time_offset_minutes: room.time_offset_minutes,
             brightness_offset: room.brightness_offset,
             soft_off: room.soft_off,
+            hard_off: room.hard_off,
             profile_settings: room.profile_settings.clone(),
         })
     }
@@ -213,6 +264,7 @@ where
                 time_offset_minutes: room.time_offset_minutes,
                 brightness_offset: room.brightness_offset,
                 soft_off: room.soft_off,
+                hard_off: room.hard_off,
                 profile_settings: room.profile_settings.clone(),
             })
             .collect()
@@ -226,17 +278,36 @@ where
         time_offset: f32,
         bri_offset: f32,
         soft_off: bool,
+        hard_off: bool,
         profile_settings: RoomProfileSettings,
     ) {
+        let has_room_profile = !profile_settings.is_empty();
         if let Ok(mut engine) = self.engine().write() {
+            let mut restored = false;
             if let Some(room) = engine.rooms_mut().get_mut(room_id) {
                 room.rhythm_enabled = rhythm_enabled;
                 room.disabled = disabled;
                 room.time_offset_minutes = time_offset;
                 room.brightness_offset = bri_offset;
                 room.soft_off = soft_off;
+                room.hard_off = hard_off;
                 room.profile_settings = profile_settings;
+                restored = true;
+            }
+            if restored {
                 engine.reset_restored_room_state(room_id);
+                log::debug!(
+                    target: "sys",
+                    "restore_room_state: '{}' rhythm={} disabled={} time_offset={} bri_offset={} soft_off={} hard_off={} room_profile={}",
+                    room_id,
+                    rhythm_enabled,
+                    disabled,
+                    time_offset,
+                    bri_offset,
+                    soft_off,
+                    hard_off,
+                    has_room_profile
+                );
             }
         }
     }
@@ -271,6 +342,24 @@ where
             .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
         crate::runtime::executor::block_on(engine.turn_on(room_id, current_hour))
             .map_err(|e| anyhow::anyhow!("turn_on failed: {}", e))
+    }
+
+    fn apply_room_command(&self, room_id: &str, command: LightingCommand) -> Result<()> {
+        log::debug!(
+            target: "cmd",
+            "apply_room_command: room='{}' bri={} kelvin={} transition_ms={:?} direct_color={}",
+            room_id,
+            command.brightness,
+            command.kelvin,
+            command.transition_ms,
+            command.is_direct_color
+        );
+        let mut engine = self
+            .engine()
+            .write()
+            .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
+        crate::runtime::executor::block_on(engine.apply_room_command(room_id, command))
+            .map_err(|e| anyhow::anyhow!("apply_room_command failed: {}", e))
     }
 
     fn set_power_save(&self, enabled: bool) -> Vec<String> {
@@ -455,6 +544,7 @@ mod tests {
             30.0,
             5.0,
             true,
+            false,
             crate::RoomProfileSettings::default(),
         );
 
@@ -464,6 +554,7 @@ mod tests {
         assert!((snap.time_offset_minutes - 30.0).abs() < f32::EPSILON);
         assert!((snap.brightness_offset - 5.0).abs() < f32::EPSILON);
         assert!(snap.soft_off);
+        assert!(!snap.hard_off);
     }
 
     // Tests that call block_on() internally require the tokio feature flag.

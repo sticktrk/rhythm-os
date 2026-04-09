@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use log::{info, warn};
+use log::{debug, info, warn};
 use rhythm_core::{ButtonAction, InputEvent};
 
 use crate::commands;
@@ -138,9 +138,16 @@ pub fn process_button_inline(
     match runtime.handle_event(&event) {
         Ok(turned_on) => {
             info!(target: "evt", "Inline: {:?} room '{}' -> on={}", action, room_id, turned_on);
-            crate::commands::sync_active_profile_from_runtime(state, &runtime);
+            crate::commands::sync_active_mode_from_runtime(state, &runtime);
             // Track lights_on state
             if let Ok(mut s) = state.lock() {
+                if s.room_mode_transitions.remove(room_id).is_some() {
+                    debug!(
+                        target: "evt",
+                        "Inline: cleared mode transition for room '{}'",
+                        room_id
+                    );
+                }
                 s.room_lights_on.insert(room_id.to_string(), turned_on);
             }
             true
@@ -197,6 +204,13 @@ pub fn turn_on_room_inline(state: &SharedState, room_id: &str) -> bool {
         Ok(()) => {
             info!(target: "evt", "Motion: turn_on room '{}'", room_id);
             if let Ok(mut s) = state.lock() {
+                if s.room_mode_transitions.remove(room_id).is_some() {
+                    debug!(
+                        target: "evt",
+                        "Motion: cleared mode transition for room '{}'",
+                        room_id
+                    );
+                }
                 s.room_lights_on.insert(room_id.to_string(), true);
             }
             true
@@ -717,14 +731,48 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             match runtime.handle_event(&event) {
                 Ok(turned_on) => {
                     info!(target: "evt", "Worker: {:?} room '{}' -> on={}", action, room_id, turned_on);
-                    crate::commands::sync_active_profile_from_runtime(state, &runtime);
+                    crate::commands::sync_active_mode_from_runtime(state, &runtime);
                     if let Ok(mut s) = state.lock() {
+                        if s.room_mode_transitions.remove(&room_id).is_some() {
+                            debug!(
+                                target: "evt",
+                                "Worker: cleared mode transition for room '{}'",
+                                room_id
+                            );
+                        }
                         s.room_lights_on.insert(room_id.clone(), turned_on);
                     }
                 }
                 Err(e) => {
                     warn!(target: "evt", "Worker: {:?} room '{}' failed: {}", action, room_id, e);
                 }
+            }
+        }
+        WorkItem::ApplyRoomCommand { room_id, command } => {
+            let runtime = {
+                let Ok(s) = state.lock() else { return };
+                s.hub_runtime()
+            };
+            let Some(runtime) = runtime else { return };
+
+            if let Err(e) = runtime.apply_room_command(&room_id, command) {
+                warn!(
+                    target: "cmd",
+                    "Worker: apply_room_command for '{}' failed: {}",
+                    room_id,
+                    e
+                );
+                return;
+            }
+
+            #[cfg(feature = "desktop")]
+            if let Some(snap) = runtime.engine_room_snapshot(&room_id) {
+                crate::state::emit_server_event(
+                    state,
+                    crate::server_event::ServerEvent::RoomState {
+                        rooms: vec![crate::commands::build_room_state_event(state, &snap)],
+                    },
+                );
             }
         }
         WorkItem::PeriodicRoomTick {
@@ -761,12 +809,12 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::{Arc, Mutex};
-    use std::collections::HashMap;
-    use std::time::{Duration, Instant};
     use rhythm_core::runtime::{RoomSnapshot, RuntimeHandle};
     use rhythm_core::{LightProfileConfig, RoomProfileSettings, TimerSetting};
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
     use crate::canonical::identity::HubKey;
     use crate::hub::{ActiveHub, HubType};
@@ -1008,11 +1056,17 @@ mod tests {
         fn set_light_profile_config(&self, _: LightProfileConfig) -> anyhow::Result<()> {
             Ok(())
         }
+        fn set_mode_configs(&self, _: Vec<rhythm_core::ModeConfig>) -> anyhow::Result<()> {
+            Ok(())
+        }
         fn periodic_tick_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
             Ok(())
         }
         fn engine_room_snapshot(&self, room_id: &str) -> Option<RoomSnapshot> {
-            self.snapshots.iter().find(|snap| snap.id == room_id).cloned()
+            self.snapshots
+                .iter()
+                .find(|snap| snap.id == room_id)
+                .cloned()
         }
         fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot> {
             self.snapshots.clone()
@@ -1025,6 +1079,7 @@ mod tests {
             _: f32,
             _: f32,
             _: bool,
+            _: bool,
             _: RoomProfileSettings,
         ) {
         }
@@ -1034,6 +1089,13 @@ mod tests {
             Ok(())
         }
         fn turn_on_room(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn apply_room_command(
+            &self,
+            _: &str,
+            _: rhythm_core::LightingCommand,
+        ) -> anyhow::Result<()> {
             Ok(())
         }
         fn set_power_save(&self, _: bool) -> Vec<String> {
@@ -1093,8 +1155,11 @@ mod tests {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                hard_off: false,
                 profile_settings: RoomProfileSettings {
-                    motion_timeout_secs: Some(TimerSetting::Fixed { value: timeout_secs }),
+                    motion_timeout_secs: Some(TimerSetting::Fixed {
+                        value: timeout_secs,
+                    }),
                     ..Default::default()
                 },
             }],
