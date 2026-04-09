@@ -34,6 +34,10 @@ pub fn translate_sse_event(
     use rhythm_os::hue_buttons::map_hue_button_str;
 
     match event {
+        HueSseEvent::Connected => {
+            vec![HubEvent::Connected { hub_key: None }]
+        }
+
         HueSseEvent::ButtonEvent {
             button_id,
             event_type,

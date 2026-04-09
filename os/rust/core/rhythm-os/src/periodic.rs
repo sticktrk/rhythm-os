@@ -397,13 +397,19 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
 
         if warning_skipped > 0 {
             info!(
-                "Periodic tick at hour {:.2} - bri={}% kelvin={} ({} rooms in rhythm, {} skipped: warning-dim)",
-                current_hour, values.brightness, values.kelvin, room_ids.len(), warning_skipped
+                "Periodic tick at local_hour {:.2} (solar_time {:.2}) - bri={}% kelvin={} ({} rooms in rhythm, {} skipped: warning-dim)",
+                current_hour,
+                values.solar_time,
+                values.brightness,
+                values.kelvin,
+                room_ids.len(),
+                warning_skipped
             );
         } else {
             info!(
-                "Periodic tick at hour {:.2} - bri={}% kelvin={} ({} rooms in rhythm)",
+                "Periodic tick at local_hour {:.2} (solar_time {:.2}) - bri={}% kelvin={} ({} rooms in rhythm)",
                 current_hour,
+                values.solar_time,
                 values.brightness,
                 values.kelvin,
                 room_ids.len()
@@ -490,6 +496,8 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
         check_solar_midnight(&state, current_hour);
         if let Some(last) = last_hour {
             check_solar_mode_transitions(&state, last, current_hour);
+        } else {
+            replay_missed_solar_mode_transitions(&state);
         }
 
         let elapsed = cycle_started.elapsed();
@@ -537,7 +545,7 @@ pub fn check_solar_midnight(state: &SharedState, current_hour: f32) {
         let Some(last) = last_hour else {
             debug!(
                 target: "sys",
-                "Solar midnight check seeded at hour {:.2}",
+                "Solar midnight check seeded at local_hour {:.2}",
                 current_hour
             );
             return;
@@ -547,7 +555,7 @@ pub fn check_solar_midnight(state: &SharedState, current_hour: f32) {
 
         if crossed {
             info!(
-                "Solar midnight crossed (last={:.2}, now={:.2}, midnight={:.2}) - resetting offsets",
+                "Solar midnight crossed (last_local={:.2}, now_local={:.2}, trigger_local={:.2}) - resetting offsets",
                 last, current_hour, solar_midnight
             );
         }
@@ -617,13 +625,16 @@ fn estimated_twilight_hour(
     }
 }
 
-fn solar_trigger_hour(
+fn solar_trigger_hour_for_local_date(
     trigger: rhythm_core::ModeTransitionTrigger,
     target_mode: rhythm_core::RhythmMode,
     solar_noon: f32,
     latitude: Option<f32>,
     longitude: Option<f32>,
     timezone_name: Option<&str>,
+    year: i32,
+    month: u32,
+    day: u32,
 ) -> Option<f32> {
     let estimated_sunrise = if latitude.is_some() && longitude.is_some() {
         (solar_noon - 6.0).rem_euclid(24.0)
@@ -646,9 +657,6 @@ fn solar_trigger_hour(
         return estimated_twilight_hour(trigger, target_mode, estimated_sunrise, estimated_sunset);
     };
 
-    use chrono::Datelike;
-    let now = chrono::Utc::now().naive_utc();
-    let (year, month, day) = (now.date().year(), now.date().month(), now.date().day());
     let tz = rhythm_core::Timezone::new(tz_name);
     let sun = rhythm_core::calculate_sun_times(lat, lon, year, month, day, &tz);
     let twilight = rhythm_core::calculate_twilight_times(lat, lon, year, month, day, &tz);
@@ -699,6 +707,220 @@ fn solar_trigger_hour(
     }
 }
 
+fn solar_trigger_hour(
+    trigger: rhythm_core::ModeTransitionTrigger,
+    target_mode: rhythm_core::RhythmMode,
+    solar_noon: f32,
+    latitude: Option<f32>,
+    longitude: Option<f32>,
+    timezone_name: Option<&str>,
+) -> Option<f32> {
+    if let Some(tz_name) = timezone_name {
+        let tz = rhythm_core::Timezone::new(tz_name);
+        let (year, month, day) = tz.local_date_from_utc(chrono::Utc::now().naive_utc());
+        solar_trigger_hour_for_local_date(
+            trigger,
+            target_mode,
+            solar_noon,
+            latitude,
+            longitude,
+            Some(tz_name),
+            year,
+            month,
+            day,
+        )
+    } else {
+        solar_trigger_hour_for_local_date(
+            trigger,
+            target_mode,
+            solar_noon,
+            latitude,
+            longitude,
+            None,
+            1970,
+            1,
+            1,
+        )
+    }
+}
+
+fn local_datetime_from_utc(
+    utc: chrono::NaiveDateTime,
+    utc_offset: f32,
+    timezone_name: Option<&str>,
+) -> chrono::NaiveDateTime {
+    if let Some(tz_name) = timezone_name {
+        rhythm_core::Timezone::new(tz_name).local_datetime_from_utc(utc)
+    } else {
+        utc + chrono::Duration::seconds((utc_offset * 3600.0) as i64)
+    }
+}
+
+fn utc_datetime_from_local(
+    local: chrono::NaiveDateTime,
+    utc_offset: f32,
+    timezone_name: Option<&str>,
+) -> Option<chrono::NaiveDateTime> {
+    if let Some(tz_name) = timezone_name {
+        rhythm_core::Timezone::new(tz_name).utc_datetime_from_local(local)
+    } else {
+        Some(local - chrono::Duration::seconds((utc_offset * 3600.0) as i64))
+    }
+}
+
+fn resolved_replayed_solar_mode_transition(
+    start_mode: rhythm_core::RhythmMode,
+    start_utc: chrono::NaiveDateTime,
+    end_utc: chrono::NaiveDateTime,
+    solar_noon: f32,
+    utc_offset: f32,
+    latitude: Option<f32>,
+    longitude: Option<f32>,
+    timezone_name: Option<&str>,
+    configs: &[rhythm_core::ModeTransitionConfig],
+) -> Option<(rhythm_core::RhythmMode, rhythm_core::ModeTransitionTrigger)> {
+    if end_utc <= start_utc {
+        return None;
+    }
+
+    let start_local = local_datetime_from_utc(start_utc, utc_offset, timezone_name);
+    let end_local = local_datetime_from_utc(end_utc, utc_offset, timezone_name);
+    let mut date = start_local.date();
+    let end_date = end_local.date();
+    let mut events = Vec::new();
+
+    while date <= end_date {
+        let Some(local_midnight) = date.and_hms_opt(0, 0, 0) else {
+            break;
+        };
+
+        for config in configs
+            .iter()
+            .filter(|config| config.trigger != rhythm_core::ModeTransitionTrigger::Manual)
+        {
+            let Some(trigger_hour) = solar_trigger_hour_for_local_date(
+                config.trigger,
+                config.to_mode,
+                solar_noon,
+                latitude,
+                longitude,
+                timezone_name,
+                chrono::Datelike::year(&date),
+                chrono::Datelike::month(&date),
+                chrono::Datelike::day(&date),
+            ) else {
+                continue;
+            };
+
+            let trigger_seconds =
+                ((trigger_hour.rem_euclid(24.0)) * 3600.0).round() as i64 % 86_400;
+            let event_local = local_midnight + chrono::Duration::seconds(trigger_seconds);
+            let Some(event_utc) = utc_datetime_from_local(event_local, utc_offset, timezone_name)
+            else {
+                continue;
+            };
+
+            if event_utc > start_utc && event_utc <= end_utc {
+                events.push((event_utc, config.from_mode, config.to_mode, config.trigger));
+            }
+        }
+
+        let Some(next_date) = date.succ_opt() else {
+            break;
+        };
+        date = next_date;
+    }
+
+    if events.is_empty() {
+        return None;
+    }
+
+    events.sort_by_key(|(event_utc, _, _, _)| *event_utc);
+
+    let mut mode = start_mode;
+    let mut final_trigger = None;
+    for (_, from_mode, to_mode, trigger) in events {
+        if mode == from_mode {
+            mode = to_mode;
+            final_trigger = Some(trigger);
+        }
+    }
+
+    let Some(trigger) = final_trigger else {
+        return None;
+    };
+    if mode == start_mode {
+        return None;
+    }
+
+    Some((mode, trigger))
+}
+
+fn replay_missed_solar_mode_transitions(state: &SharedState) {
+    let (
+        start_mode,
+        start_trigger,
+        start_change_utc_ms,
+        solar_noon,
+        utc_offset,
+        latitude,
+        longitude,
+        timezone_name,
+        configs,
+    ) = {
+        let Ok(s) = state.lock() else { return };
+        (
+            s.active_mode,
+            s.last_active_mode_trigger,
+            s.last_active_mode_change_utc_ms,
+            s.solar_noon_hour(),
+            s.utc_offset_hours,
+            s.latitude,
+            s.longitude,
+            s.timezone_name.clone(),
+            s.mode_transition_configs(),
+        )
+    };
+
+    if start_trigger == rhythm_core::ModeTransitionTrigger::Manual {
+        return;
+    }
+
+    let Some(start_change_utc_ms) = start_change_utc_ms else {
+        return;
+    };
+    let Some(start_utc) =
+        chrono::DateTime::<chrono::Utc>::from_timestamp_millis(start_change_utc_ms)
+            .map(|dt| dt.naive_utc())
+    else {
+        return;
+    };
+
+    let now_utc = chrono::Utc::now().naive_utc();
+    let Some((mode, trigger)) = resolved_replayed_solar_mode_transition(
+        start_mode,
+        start_utc,
+        now_utc,
+        solar_noon,
+        utc_offset,
+        latitude,
+        longitude,
+        timezone_name.as_deref(),
+        &configs,
+    ) else {
+        return;
+    };
+
+    info!(
+        "Replaying missed solar mode transition {:?} -> {:?} on {:?} after restart/downtime",
+        start_mode, mode, trigger
+    );
+
+    if let Err(e) = crate::commands::do_set_active_mode_with_trigger(state, mode, trigger) {
+        warn!("Failed to replay missed solar mode transition: {}", e);
+    }
+}
+
 /// Trigger configured solar mode transitions when their event time is crossed.
 pub fn check_solar_mode_transitions(state: &SharedState, last_hour: f32, current_hour: f32) {
     let candidate = {
@@ -739,7 +961,7 @@ pub fn check_solar_mode_transitions(state: &SharedState, last_hour: f32, current
     };
 
     info!(
-        "Solar mode transition {:?} -> {:?} on {:?} at {:.2} (last={:.2}, now={:.2})",
+        "Solar mode transition {:?} -> {:?} on {:?} at trigger_local {:.2} (last_local={:.2}, now_local={:.2})",
         state
             .lock()
             .ok()
@@ -784,16 +1006,13 @@ pub fn refresh_dst_offset(
     doy: u32,
     timezone_name: Option<&str>,
 ) -> (f32, f32, u32) {
-    use chrono::{Datelike, Timelike};
-
     let Some(tz_name) = timezone_name else {
         return (current_offset, current_solar_noon, doy);
     };
 
     let tz = rhythm_core::Timezone::new(tz_name);
-    let now = chrono::Utc::now().naive_utc();
-    let (year, month, day) = (now.date().year(), now.date().month(), now.date().day());
-    let fresh_offset = tz.utc_offset(year, month, day, now.time().hour());
+    let (year, month, day, hour) = tz.local_date_hour_from_utc(chrono::Utc::now().naive_utc());
+    let fresh_offset = tz.utc_offset(year, month, day, hour);
 
     if (fresh_offset - current_offset).abs() < 0.01 {
         return (current_offset, current_solar_noon, doy);
@@ -846,6 +1065,7 @@ pub fn refresh_dst_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::NaiveDate;
     use rhythm_core::{
         default_rhythm_profile, CurveContext, LightProfileRegistry, RoomProfileSettings,
     };
@@ -973,18 +1193,11 @@ mod tests {
     /// the function returns the same values (no state mutation).
     #[test]
     fn test_refresh_same_offset_is_noop() {
-        use chrono::{Datelike, Timelike};
-
         let state = make_state();
         let tz_name = "America/New_York";
         let tz = rhythm_core::Timezone::new(tz_name);
-        let now = chrono::Utc::now().naive_utc();
-        let current_offset = tz.utc_offset(
-            now.date().year(),
-            now.date().month(),
-            now.date().day(),
-            now.time().hour(),
-        );
+        let (year, month, day, hour) = tz.local_date_hour_from_utc(chrono::Utc::now().naive_utc());
+        let current_offset = tz.utc_offset(year, month, day, hour);
 
         let (offset, noon, doy) = refresh_dst_offset(
             &state,
@@ -1007,18 +1220,11 @@ mod tests {
     /// the function updates offset, solar noon, and state.
     #[test]
     fn test_refresh_detects_stale_offset() {
-        use chrono::{Datelike, Timelike};
-
         let state = make_state();
         let tz_name = "America/New_York";
         let tz = rhythm_core::Timezone::new(tz_name);
-        let now = chrono::Utc::now().naive_utc();
-        let current_offset = tz.utc_offset(
-            now.date().year(),
-            now.date().month(),
-            now.date().day(),
-            now.time().hour(),
-        );
+        let (year, month, day, hour) = tz.local_date_hour_from_utc(chrono::Utc::now().naive_utc());
+        let current_offset = tz.utc_offset(year, month, day, hour);
 
         // Deliberately pass a wrong offset (off by 1 hour, simulating a DST miss)
         let stale_offset = current_offset + 1.0;
@@ -1326,12 +1532,12 @@ mod tests {
     }
 
     #[test]
-    fn sunrise_sleep_transition_switches_mode_when_trigger_configured() {
+    fn astronomical_twilight_sleep_transition_switches_mode_when_trigger_configured() {
         let state = make_state();
         state.lock().unwrap().active_mode = rhythm_core::RhythmMode::Sleep;
 
-        let sunrise = rhythm_core::config::FALLBACK_SUNRISE_HOUR;
-        check_solar_mode_transitions(&state, sunrise - 0.1, sunrise + 0.1);
+        let astronomical_dawn = (rhythm_core::config::FALLBACK_SUNRISE_HOUR - 1.5).rem_euclid(24.0);
+        check_solar_mode_transitions(&state, astronomical_dawn - 0.1, astronomical_dawn + 0.1);
 
         assert_eq!(
             state.lock().unwrap().active_mode,
@@ -1346,6 +1552,91 @@ mod tests {
 
         let nautical_dusk = (rhythm_core::config::FALLBACK_SUNSET_HOUR + 1.0).rem_euclid(24.0);
         check_solar_mode_transitions(&state, nautical_dusk - 0.1, nautical_dusk + 0.1);
+
+        assert_eq!(
+            state.lock().unwrap().active_mode,
+            rhythm_core::RhythmMode::Sleep
+        );
+    }
+
+    #[test]
+    fn resolved_replay_applies_missed_astronomical_dawn_transition() {
+        let tz_name = "America/New_York";
+        let tz = rhythm_core::Timezone::new(tz_name);
+        let start_local = NaiveDate::from_ymd_opt(2026, 4, 8)
+            .unwrap()
+            .and_hms_opt(22, 0, 0)
+            .unwrap();
+        let end_local = NaiveDate::from_ymd_opt(2026, 4, 9)
+            .unwrap()
+            .and_hms_opt(9, 0, 0)
+            .unwrap();
+        let start_utc = tz.utc_datetime_from_local(start_local).unwrap();
+        let end_utc = tz.utc_datetime_from_local(end_local).unwrap();
+
+        let resolved = resolved_replayed_solar_mode_transition(
+            rhythm_core::RhythmMode::Sleep,
+            start_utc,
+            end_utc,
+            12.5,
+            -4.0,
+            Some(35.804102),
+            Some(-78.7992983),
+            Some(tz_name),
+            &rhythm_core::default_mode_transition_configs(),
+        );
+
+        assert_eq!(
+            resolved,
+            Some((
+                rhythm_core::RhythmMode::Day,
+                rhythm_core::ModeTransitionTrigger::AstronomicalTwilight
+            ))
+        );
+    }
+
+    #[test]
+    fn resolved_replay_skips_when_mode_returns_to_starting_state() {
+        let tz_name = "America/New_York";
+        let tz = rhythm_core::Timezone::new(tz_name);
+        let start_local = NaiveDate::from_ymd_opt(2026, 4, 8)
+            .unwrap()
+            .and_hms_opt(22, 0, 0)
+            .unwrap();
+        let end_local = NaiveDate::from_ymd_opt(2026, 4, 9)
+            .unwrap()
+            .and_hms_opt(23, 0, 0)
+            .unwrap();
+        let start_utc = tz.utc_datetime_from_local(start_local).unwrap();
+        let end_utc = tz.utc_datetime_from_local(end_local).unwrap();
+
+        let resolved = resolved_replayed_solar_mode_transition(
+            rhythm_core::RhythmMode::Sleep,
+            start_utc,
+            end_utc,
+            12.5,
+            -4.0,
+            Some(35.804102),
+            Some(-78.7992983),
+            Some(tz_name),
+            &rhythm_core::default_mode_transition_configs(),
+        );
+
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn replay_wrapper_ignores_manual_mode_changes() {
+        let state = make_state();
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = rhythm_core::RhythmMode::Sleep;
+            s.last_active_mode_trigger = rhythm_core::ModeTransitionTrigger::Manual;
+            s.last_active_mode_change_utc_ms =
+                Some(chrono::Utc::now().timestamp_millis() - 12 * 60 * 60 * 1000);
+        }
+
+        replay_missed_solar_mode_transitions(&state);
 
         assert_eq!(
             state.lock().unwrap().active_mode,

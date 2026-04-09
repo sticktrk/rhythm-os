@@ -43,6 +43,8 @@ pub struct HueSseConfig {
 /// Events parsed from the Hue SSE stream.
 #[derive(Debug, Clone)]
 pub enum HueSseEvent {
+    /// SSE transport established or re-established.
+    Connected,
     /// A button was pressed/released on a Hue device.
     ButtonEvent {
         button_id: String,

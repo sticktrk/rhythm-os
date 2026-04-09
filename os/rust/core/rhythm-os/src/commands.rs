@@ -21,7 +21,8 @@ use rhythm_core::{
 use serde_json::Value;
 
 use crate::api_types::{
-    ActiveProfileDto, ActiveProfileEffectiveDto, FixResponse, HubDto, LocationDto, RoomFullState,
+    ActiveProfileDto, ActiveProfileEffectiveDto, FixResponse, HubDto, LocationDto,
+    ModeLastChangeDto, ModeSettingsDto, ModeTransitionsDto, ProfilesDto, RoomFullState,
     RoomPollState, RoomRhythmState, RoomsPollResponse, SettingsDto, StateSnapshot, TypedDeviceDto,
 };
 use crate::canonical::identity::HubKey;
@@ -46,12 +47,13 @@ pub fn compute_room_display_values(
 ) -> (u8, u16) {
     use rhythm_core::{LightProfile, LightProfileModule, SolarTime};
 
-    let now = chrono::Utc::now().naive_utc();
-    let (year, month, day) = (now.date().year(), now.date().month(), now.date().day());
+    let local = current_local_datetime(utc_offset);
+    let (year, month, day) = (
+        local.date().year(),
+        local.date().month(),
+        local.date().day(),
+    );
     let day_of_year = rhythm_core::timezone::day_of_year(year, month, day);
-
-    let offset_secs = (utc_offset * 3600.0) as i64;
-    let local = now + chrono::Duration::seconds(offset_secs);
     let t = local.time();
     let current_hour = t.hour() as f32 + t.minute() as f32 / 60.0 + t.second() as f32 / 3600.0;
 
@@ -213,12 +215,13 @@ fn compute_room_display_values_for_settings_from_parts(
         return (0, 0);
     }
 
-    let now = chrono::Utc::now().naive_utc();
-    let (year, month, day) = (now.date().year(), now.date().month(), now.date().day());
+    let local = current_local_datetime(utc_offset);
+    let (year, month, day) = (
+        local.date().year(),
+        local.date().month(),
+        local.date().day(),
+    );
     let day_of_year = rhythm_core::timezone::day_of_year(year, month, day);
-
-    let offset_secs = (utc_offset * 3600.0) as i64;
-    let local = now + chrono::Duration::seconds(offset_secs);
     let t = local.time();
     let current_hour = t.hour() as f32 + t.minute() as f32 / 60.0 + t.second() as f32 / 3600.0;
 
@@ -306,11 +309,16 @@ fn resolved_room_motion_timeout_secs_from_parts(
     active_mode: RhythmMode,
     solar_noon: f32,
     latitude: f32,
+    utc_offset: f32,
     settings: &RoomProfileSettings,
     current_hour: f32,
 ) -> u64 {
-    let now = chrono::Utc::now().naive_utc();
-    let (year, month, day) = (now.date().year(), now.date().month(), now.date().day());
+    let local = current_local_datetime(utc_offset);
+    let (year, month, day) = (
+        local.date().year(),
+        local.date().month(),
+        local.date().day(),
+    );
     let day_of_year = rhythm_core::timezone::day_of_year(year, month, day);
     let solar = rhythm_core::SolarTime::new(solar_noon, latitude, day_of_year);
     let registry =
@@ -524,6 +532,8 @@ fn persist_settings_locked(s: &AppState) {
         if let Err(e) = storage.save_settings(&crate::storage::StoredSettings {
             power_save: s.power_save,
             active_mode: s.active_mode,
+            last_active_mode_trigger: s.last_active_mode_trigger,
+            last_active_mode_change_utc_ms: s.last_active_mode_change_utc_ms,
             modes: s.mode_configs(),
             mode_transitions: s.mode_transition_configs(),
         }) {
@@ -554,6 +564,8 @@ pub(crate) fn sync_active_mode_from_runtime(
                 active
             );
             s.active_mode = active;
+            s.last_active_mode_trigger = ModeTransitionTrigger::Manual;
+            s.last_active_mode_change_utc_ms = Some(chrono::Utc::now().timestamp_millis());
             s.sync_active_mode_runtime_overrides();
             persist_settings_locked(&s);
         } else if matched_mode.is_none() {
@@ -640,6 +652,9 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         mut active_profile_effective,
         location_dto,
         settings_dto,
+        mode_dto,
+        transitions_dto,
+        profiles_dto,
         firmware_version,
         platform_type,
         platform_ctx,
@@ -676,7 +691,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
                     .map(|t| t.as_str().to_string())
                     .unwrap_or_else(|| "none".to_string()),
                 address: Some(creds.address.clone()),
-                connected: s.hubs.contains_key(key),
+                connected: s.hub_is_connected(key),
             })
             .collect();
 
@@ -728,17 +743,27 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
 
         let location_dto = LocationDto {
             current_local_time,
+            current_local_hour: current_hour,
             latitude: s.latitude,
             longitude: s.longitude,
             utc_offset_hours: s.utc_offset_hours,
             solar_noon: resolved_solar.solar.solar_noon_hour,
+            solar_noon_local_time: local_time_string_from_decimal_hour(
+                resolved_solar.solar.solar_noon_hour,
+            ),
             solar_midnight: resolved_solar.solar.solar_midnight_hour(),
+            solar_midnight_local_time: local_time_string_from_decimal_hour(
+                resolved_solar.solar.solar_midnight_hour(),
+            ),
             current_solar_time,
             timezone_name: s.timezone_name.clone(),
             twilight: build_twilight_response(resolved_solar.twilight.as_ref()),
         };
 
         let settings_dto = build_settings_dto_inner(&s);
+        let mode_dto = build_mode_dto_inner(&s);
+        let transitions_dto = build_transitions_dto_inner(&s);
+        let profiles_dto = build_profiles_dto_inner(&s);
 
         let fw_version = s.firmware_version;
         let platform_type = s.platform_type;
@@ -825,6 +850,9 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             active_profile_effective,
             location_dto,
             settings_dto,
+            mode_dto,
+            transitions_dto,
+            profiles_dto,
             fw_version,
             platform_type,
             platform_ctx,
@@ -1117,6 +1145,9 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         },
         location: location_dto,
         settings: settings_dto,
+        mode: mode_dto,
+        transitions: transitions_dto.transitions,
+        profiles: profiles_dto.profiles,
         rooms,
         last_tick_epoch_ms,
     };
@@ -1150,7 +1181,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
         let lights = s.room_lights_on.clone();
         let sensor_rooms = s.motion_sensor_room_ids();
         (
-            s.has_any_hub(),
+            s.has_any_connected_hub(),
             runtime,
             storage_rooms,
             motion,
@@ -1224,6 +1255,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                         active_mode,
                         solar_noon,
                         latitude,
+                        utc_offset,
                         &snap.profile_settings,
                         runtime.as_ref().map(|rt| rt.current_hour()).unwrap_or(12.0),
                     );
@@ -1348,14 +1380,37 @@ pub fn build_config(state: &SharedState, profile_id: Option<&str>) -> Result<Str
 
 /// Build `SettingsDto` from an already-locked `AppState`.
 fn build_settings_dto_inner(s: &AppState) -> SettingsDto {
-    let profiles = s.light_profile_configs.values().cloned().collect();
-
     SettingsDto {
-        active_mode: s.active_mode,
         power_save: s.power_save,
-        modes: s.mode_configs(),
-        mode_transitions: s.mode_transition_configs(),
-        profiles,
+    }
+}
+
+/// Build `ModeSettingsDto` from an already-locked `AppState`.
+fn build_mode_dto_inner(s: &AppState) -> ModeSettingsDto {
+    let last_change_utc_ms = s
+        .last_active_mode_change_utc_ms
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+    ModeSettingsDto {
+        active: s.active_mode,
+        last_change: ModeLastChangeDto {
+            trigger: s.last_active_mode_trigger,
+            epoch_ms: last_change_utc_ms,
+        },
+        configs: s.mode_configs(),
+    }
+}
+
+/// Build `ModeTransitionsDto` from an already-locked `AppState`.
+fn build_transitions_dto_inner(s: &AppState) -> ModeTransitionsDto {
+    ModeTransitionsDto {
+        transitions: s.mode_transition_configs(),
+    }
+}
+
+/// Build `ProfilesDto` from an already-locked `AppState`.
+fn build_profiles_dto_inner(s: &AppState) -> ProfilesDto {
+    ProfilesDto {
+        profiles: s.light_profile_configs.values().cloned().collect(),
     }
 }
 
@@ -1371,10 +1426,59 @@ pub fn build_settings(state: &SharedState) -> Result<String> {
     serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize settings: {}", e))
 }
 
+/// Build the current mode state and policy.
+pub fn build_mode_dto(state: &SharedState) -> Result<ModeSettingsDto> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    Ok(build_mode_dto_inner(&s))
+}
+
+/// Build the current mode state and policy as a JSON string.
+pub fn build_mode(state: &SharedState) -> Result<String> {
+    let dto = build_mode_dto(state)?;
+    serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize mode: {}", e))
+}
+
+/// Build the current mode transition policy.
+pub fn build_transitions_dto(state: &SharedState) -> Result<ModeTransitionsDto> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    Ok(build_transitions_dto_inner(&s))
+}
+
+/// Build the current mode transition policy as a JSON string.
+pub fn build_transitions(state: &SharedState) -> Result<String> {
+    let dto = build_transitions_dto(state)?;
+    serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize transitions: {}", e))
+}
+
+/// Build the current light profile list.
+pub fn build_profiles_dto(state: &SharedState) -> Result<ProfilesDto> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    Ok(build_profiles_dto_inner(&s))
+}
+
+/// Build the current light profile list as a JSON string.
+pub fn build_profiles(state: &SharedState) -> Result<String> {
+    let dto = build_profiles_dto(state)?;
+    serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize profiles: {}", e))
+}
+
 fn current_local_datetime(utc_offset: f32) -> chrono::NaiveDateTime {
     let now = chrono::Utc::now().naive_utc();
     let offset_secs = (utc_offset * 3600.0) as i64;
     now + chrono::Duration::seconds(offset_secs)
+}
+
+fn local_time_string_from_decimal_hour(hour: f32) -> String {
+    let total_seconds = ((hour.rem_euclid(24.0)) * 3600.0).round() as i64;
+    let wrapped_seconds = total_seconds.rem_euclid(24 * 3600);
+    let hours = wrapped_seconds / 3600;
+    let minutes = (wrapped_seconds % 3600) / 60;
+    let seconds = wrapped_seconds % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+fn optional_local_time_string_from_decimal_hour(hour: Option<f32>) -> Option<String> {
+    hour.map(local_time_string_from_decimal_hour)
 }
 
 fn mode_apply_cycle_duration(
@@ -1824,7 +1928,12 @@ fn do_settings_set_internal(
         let mut mode_changed = false;
         if let Some(mode) = active_mode {
             mode_changed = s.active_mode != mode;
-            s.active_mode = mode;
+            if mode_changed {
+                s.active_mode = mode;
+                s.last_active_mode_trigger =
+                    transition_trigger.unwrap_or(ModeTransitionTrigger::Manual);
+                s.last_active_mode_change_utc_ms = Some(chrono::Utc::now().timestamp_millis());
+            }
         }
         let selected_mode = s.active_mode;
         let should_reapply_mode_outputs = modes_updated || mode_changed;
@@ -1965,6 +2074,32 @@ pub fn do_settings_set(
         mode_transitions,
         active_mode.map(|_| ModeTransitionTrigger::Manual),
     )
+}
+
+/// Update mode state and policy (partial: only provided fields are changed).
+pub fn do_mode_set(
+    state: &SharedState,
+    active_mode: Option<RhythmMode>,
+    mode_configs: Option<Vec<ModeConfig>>,
+) -> Result<String> {
+    do_settings_set_internal(
+        state,
+        None,
+        active_mode,
+        mode_configs,
+        None,
+        active_mode.map(|_| ModeTransitionTrigger::Manual),
+    )?;
+    build_mode(state)
+}
+
+/// Update mode transition policy (partial: only provided fields are changed).
+pub fn do_transitions_set(
+    state: &SharedState,
+    mode_transitions: Option<Vec<rhythm_core::ModeTransitionConfig>>,
+) -> Result<String> {
+    do_settings_set_internal(state, None, None, None, mode_transitions, None)?;
+    build_transitions(state)
 }
 
 pub fn do_set_active_mode(state: &SharedState, mode: RhythmMode) -> Result<()> {
@@ -2811,6 +2946,7 @@ pub(crate) fn resolved_room_motion_timeout_map(
         active_mode,
         solar_noon,
         latitude,
+        utc_offset,
         sensor_rooms,
     ) = {
         let Ok(s) = state.lock() else {
@@ -2823,6 +2959,7 @@ pub(crate) fn resolved_room_motion_timeout_map(
             s.active_mode,
             s.solar_noon_hour(),
             s.latitude.unwrap_or(35.0),
+            s.utc_offset_hours,
             s.motion_sensor_room_ids(),
         )
     };
@@ -2843,6 +2980,7 @@ pub(crate) fn resolved_room_motion_timeout_map(
                 active_mode,
                 solar_noon,
                 latitude,
+                utc_offset,
                 &snap.profile_settings,
                 current_hour,
             ),
@@ -2943,11 +3081,9 @@ pub fn do_absorb_time_offset(
 
         // Compute sunrise/sunset from location, or use fallbacks
         let (sunrise, sunset) = if let (Some(lat), Some(lon)) = (s.latitude, s.longitude) {
-            let now = chrono::Utc::now().naive_utc();
-            let (year, month, day) = (now.date().year(), now.date().month(), now.date().day());
-
             if let Some(ref tz_name) = s.timezone_name {
                 let tz = rhythm_core::Timezone::new(tz_name);
+                let (year, month, day) = tz.local_date_from_utc(chrono::Utc::now().naive_utc());
                 let st = rhythm_core::solar::calculate_sun_times(lat, lon, year, month, day, &tz);
                 (st.sunrise, st.sunset)
             } else {
@@ -2972,9 +3108,7 @@ pub fn do_absorb_time_offset(
         rt.current_hour()
     } else {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        let now = chrono::Utc::now().naive_utc();
-        let offset_secs = (s.utc_offset_hours * 3600.0) as i64;
-        let local = now + chrono::Duration::seconds(offset_secs);
+        let local = current_local_datetime(s.utc_offset_hours);
         let t = local.time();
         t.hour() as f32 + t.minute() as f32 / 60.0 + t.second() as f32 / 3600.0
     };
@@ -3073,16 +3207,32 @@ pub fn do_location_set(
 
         // Compute solar noon: prefer timezone-aware calculation
         let now = chrono::Utc::now().naive_utc();
-        let (year, month, day) = (now.date().year(), now.date().month(), now.date().day());
-        let day_of_year = rhythm_core::timezone::day_of_year(year, month, day);
-
-        let solar_noon = if let Some(ref tz_name) = timezone_name {
+        let (solar_noon, day_of_year) = if let Some(ref tz_name) = timezone_name {
             let tz = rhythm_core::Timezone::new(tz_name);
+            let local_now = tz.local_datetime_from_utc(now);
+            let (year, month, day) = (
+                local_now.date().year(),
+                local_now.date().month(),
+                local_now.date().day(),
+            );
+            let day_of_year = rhythm_core::timezone::day_of_year(year, month, day);
             // Also refresh utc_offset from timezone
-            s.utc_offset_hours = tz.utc_offset(year, month, day, now.time().hour());
-            rhythm_core::calculate_solar_noon(lon, year, month, day, &tz)
+            s.utc_offset_hours = tz.utc_offset(year, month, day, local_now.time().hour());
+            (
+                rhythm_core::calculate_solar_noon(lon, year, month, day, &tz),
+                day_of_year,
+            )
         } else {
-            rhythm_core::calculate_solar_noon_from_offset(lon, s.utc_offset_hours, day_of_year)
+            let local_now = current_local_datetime(s.utc_offset_hours);
+            let day_of_year = rhythm_core::timezone::day_of_year(
+                local_now.date().year(),
+                local_now.date().month(),
+                local_now.date().day(),
+            );
+            (
+                rhythm_core::calculate_solar_noon_from_offset(lon, s.utc_offset_hours, day_of_year),
+                day_of_year,
+            )
         };
         s.runtime_config.solar_noon_hour = solar_noon;
 
@@ -3156,12 +3306,15 @@ pub fn do_hub_credentials(
     // panics if used inside a tokio runtime context (spawn_blocking from HTTP handler).
     {
         let sync_state = state.clone();
+        let sync_hub_key = hub_key.clone();
         let _ = std::thread::Builder::new()
             .name("hub-sync".to_string())
             .spawn(move || {
-                if let Err(e) =
-                    crate::room_sync::sync_from_hub_for_key(&sync_state, &hub_key, discover_devices)
-                {
+                if let Err(e) = crate::room_sync::sync_from_hub_for_key(
+                    &sync_state,
+                    &sync_hub_key,
+                    discover_devices,
+                ) {
                     warn!(target: "cmd", "Auto-sync after hub configure failed: {}", e);
                 }
                 crate::room_sync::poll_initial_light_state(&sync_state);
@@ -3177,7 +3330,11 @@ pub fn do_hub_credentials(
 
     #[cfg(feature = "desktop")]
     {
-        let hub_connected = state.lock().ok().map(|s| s.has_any_hub()).unwrap_or(false);
+        let hub_connected = state
+            .lock()
+            .ok()
+            .map(|s| s.hub_is_connected(&hub_key))
+            .unwrap_or(false);
         crate::state::emit_server_event(
             state,
             crate::server_event::ServerEvent::HubStatus {
@@ -3203,6 +3360,7 @@ pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
         old_hubs = std::mem::take(&mut s.hubs);
+        s.hub_connection_status.clear();
 
         s.hub_credentials.clear();
         if let Some(ref storage) = s.storage {
@@ -3295,6 +3453,7 @@ pub fn do_hub_disconnect_one(state: &SharedState, hub_type_str: &str, address: &
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
         old_hub = s.hubs.remove(&key);
+        s.clear_hub_connected(&key);
         s.hub_credentials.remove(&key);
 
         if let Some(ref storage) = s.storage {
@@ -4254,20 +4413,40 @@ fn build_solar_response(resolved: &ResolvedSolar) -> crate::api_types::SolarResp
 
     SolarResponse {
         sunrise: resolved.sun_times.map(|st| st.sunrise),
+        sunrise_local_time: resolved
+            .sun_times
+            .map(|st| local_time_string_from_decimal_hour(st.sunrise)),
         sunset: resolved.sun_times.map(|st| st.sunset),
+        sunset_local_time: resolved
+            .sun_times
+            .map(|st| local_time_string_from_decimal_hour(st.sunset)),
         solar_noon: resolved.solar.solar_noon_hour,
+        solar_noon_local_time: local_time_string_from_decimal_hour(resolved.solar.solar_noon_hour),
         solar_midnight: resolved.solar.solar_midnight_hour(),
+        solar_midnight_local_time: local_time_string_from_decimal_hour(
+            resolved.solar.solar_midnight_hour(),
+        ),
         day_length: resolved.sun_times.map(|st| st.day_length),
         twilight: resolved.twilight.as_ref().map(|tw| TwilightResponse {
             dawn: TwilightPhaseResponse {
                 civil: tw.dawn.civil,
+                civil_local_time: optional_local_time_string_from_decimal_hour(tw.dawn.civil),
                 nautical: tw.dawn.nautical,
+                nautical_local_time: optional_local_time_string_from_decimal_hour(tw.dawn.nautical),
                 astronomical: tw.dawn.astronomical,
+                astronomical_local_time: optional_local_time_string_from_decimal_hour(
+                    tw.dawn.astronomical,
+                ),
             },
             dusk: TwilightPhaseResponse {
                 civil: tw.dusk.civil,
+                civil_local_time: optional_local_time_string_from_decimal_hour(tw.dusk.civil),
                 nautical: tw.dusk.nautical,
+                nautical_local_time: optional_local_time_string_from_decimal_hour(tw.dusk.nautical),
                 astronomical: tw.dusk.astronomical,
+                astronomical_local_time: optional_local_time_string_from_decimal_hour(
+                    tw.dusk.astronomical,
+                ),
             },
         }),
     }
@@ -4281,18 +4460,28 @@ fn build_twilight_response(
     twilight.map(|tw| TwilightResponse {
         dawn: TwilightPhaseResponse {
             civil: tw.dawn.civil,
+            civil_local_time: optional_local_time_string_from_decimal_hour(tw.dawn.civil),
             nautical: tw.dawn.nautical,
+            nautical_local_time: optional_local_time_string_from_decimal_hour(tw.dawn.nautical),
             astronomical: tw.dawn.astronomical,
+            astronomical_local_time: optional_local_time_string_from_decimal_hour(
+                tw.dawn.astronomical,
+            ),
         },
         dusk: TwilightPhaseResponse {
             civil: tw.dusk.civil,
+            civil_local_time: optional_local_time_string_from_decimal_hour(tw.dusk.civil),
             nautical: tw.dusk.nautical,
+            nautical_local_time: optional_local_time_string_from_decimal_hour(tw.dusk.nautical),
             astronomical: tw.dusk.astronomical,
+            astronomical_local_time: optional_local_time_string_from_decimal_hour(
+                tw.dusk.astronomical,
+            ),
         },
     })
 }
 
-/// Parse an optional `YYYY-MM-DD` date string, falling back to today (UTC).
+/// Parse an optional `YYYY-MM-DD` date string, falling back to today in local time.
 fn parse_date_or_today(date: Option<&str>, utc_offset: f32) -> Result<(i32, u32, u32)> {
     if let Some(d) = date {
         let parts: Vec<&str> = d.split('-').collect();
@@ -4313,9 +4502,7 @@ fn parse_date_or_today(date: Option<&str>, utc_offset: f32) -> Result<(i32, u32,
         }
         Ok((year, month, day))
     } else {
-        let now = chrono::Utc::now().naive_utc();
-        let offset_secs = (utc_offset * 3600.0) as i64;
-        let local = now + chrono::Duration::seconds(offset_secs);
+        let local = current_local_datetime(utc_offset);
         Ok((
             local.date().year(),
             local.date().month(),
@@ -4326,9 +4513,7 @@ fn parse_date_or_today(date: Option<&str>, utc_offset: f32) -> Result<(i32, u32,
 
 /// Compute the current local hour from UTC + offset.
 fn current_local_hour(utc_offset: f32) -> f32 {
-    let now = chrono::Utc::now().naive_utc();
-    let offset_secs = (utc_offset * 3600.0) as i64;
-    let local = now + chrono::Duration::seconds(offset_secs);
+    let local = current_local_datetime(utc_offset);
     let t = local.time();
     t.hour() as f32 + t.minute() as f32 / 60.0 + t.second() as f32 / 3600.0
 }
@@ -4436,9 +4621,7 @@ pub fn build_curve_now(
 
     let hour = hour_override.unwrap_or_else(|| current_local_hour(utc_offset));
 
-    let now = chrono::Utc::now().naive_utc();
-    let offset_secs = (utc_offset * 3600.0) as i64;
-    let local = now + chrono::Duration::seconds(offset_secs);
+    let local = current_local_datetime(utc_offset);
     let (year, month, day) = (
         local.date().year(),
         local.date().month(),
@@ -5196,6 +5379,7 @@ mod tests {
         let result = do_settings_set(&state, Some(true), None, None, None).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert!(parsed["power_save"].is_boolean());
+        assert!(parsed.get("mode").is_none());
         // No status wrapper
         assert!(parsed.get("status").is_none());
     }
@@ -5206,9 +5390,44 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             s.power_save = true;
+            s.last_active_mode_trigger = ModeTransitionTrigger::AstronomicalTwilight;
+            s.last_active_mode_change_utc_ms = Some(1_700_000_000_000);
         }
         let dto = build_settings_dto(&state).unwrap();
         assert!(dto.power_save);
+    }
+
+    #[test]
+    fn build_mode_dto_matches_state() {
+        let (state, _rt) = setup_state(vec![]);
+        {
+            let mut s = state.lock().unwrap();
+            s.last_active_mode_trigger = ModeTransitionTrigger::AstronomicalTwilight;
+            s.last_active_mode_change_utc_ms = Some(1_700_000_000_000);
+        }
+        let dto = build_mode_dto(&state).unwrap();
+        assert_eq!(
+            dto.last_change.trigger,
+            ModeTransitionTrigger::AstronomicalTwilight
+        );
+        assert_eq!(dto.last_change.epoch_ms, 1_700_000_000_000);
+    }
+
+    #[test]
+    fn build_transitions_dto_matches_state() {
+        let (state, _rt) = setup_state(vec![]);
+        let dto = build_transitions_dto(&state).unwrap();
+        assert_eq!(
+            dto.transitions,
+            rhythm_core::default_mode_transition_configs()
+        );
+    }
+
+    #[test]
+    fn build_profiles_dto_matches_state() {
+        let (state, _rt) = setup_state(vec![]);
+        let dto = build_profiles_dto(&state).unwrap();
+        assert!(!dto.profiles.is_empty());
     }
 
     #[test]
@@ -5364,6 +5583,9 @@ mod tests {
         assert!(parsed["active_profile"]["effective"].is_object());
         assert!(parsed["location"].is_object());
         assert!(parsed["settings"].is_object());
+        assert!(parsed["mode"].is_object());
+        assert!(parsed["transitions"].is_array());
+        assert!(parsed["profiles"].is_array());
         assert!(parsed["rooms"].is_array());
         // No status wrapper
         assert!(parsed.get("status").is_none());
@@ -5379,6 +5601,10 @@ mod tests {
         let result = build_state_snapshot(&state).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["settings"]["power_save"], true);
+        assert!(parsed["settings"].get("mode").is_none());
+        assert!(parsed["mode"].is_object());
+        assert!(parsed["mode"].get("transitions").is_none());
+        assert!(parsed["transitions"].is_array());
     }
 
     #[test]
@@ -5440,9 +5666,26 @@ mod tests {
             parsed["location"]["solar_noon"].as_f64().unwrap() as f32,
             expected.1.solar_noon_hour
         );
+        assert!(
+            ((parsed["location"]["current_local_hour"].as_f64().unwrap() as f32) - current_hour)
+                .abs()
+                < 0.001
+        );
+        assert_eq!(
+            parsed["location"]["solar_noon_local_time"]
+                .as_str()
+                .unwrap(),
+            local_time_string_from_decimal_hour(expected.1.solar_noon_hour)
+        );
         assert_eq!(
             parsed["location"]["solar_midnight"].as_f64().unwrap() as f32,
             expected.1.solar_midnight_hour()
+        );
+        assert_eq!(
+            parsed["location"]["solar_midnight_local_time"]
+                .as_str()
+                .unwrap(),
+            local_time_string_from_decimal_hour(expected.1.solar_midnight_hour())
         );
         assert_eq!(
             parsed["location"]["current_solar_time"].as_f64().unwrap() as f32,

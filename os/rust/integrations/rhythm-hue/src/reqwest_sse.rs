@@ -120,6 +120,7 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
             match event {
                 Ok(Event::Open) => {
                     info!(target: "sse", "SSE connected (conn #{})", connect_count);
+                    let _ = tx.try_send(HueSseEvent::Connected);
                     connected = true;
                     backoff = Duration::from_secs(1);
                     last_data_event = Instant::now();

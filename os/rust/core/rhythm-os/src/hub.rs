@@ -33,6 +33,8 @@ use crate::state::SharedState;
 /// in multi-hub configurations.
 #[derive(Debug, Clone)]
 pub enum HubEvent {
+    /// Connection established or re-established.
+    Connected { hub_key: Option<HubKey> },
     /// A button was pressed on a hub device.
     Button {
         hub_key: Option<HubKey>,
@@ -67,6 +69,7 @@ impl HubEvent {
     /// Get the hub key for this event, if tagged.
     pub fn hub_key(&self) -> Option<&HubKey> {
         match self {
+            HubEvent::Connected { hub_key } => hub_key.as_ref(),
             HubEvent::Button { hub_key, .. } => hub_key.as_ref(),
             HubEvent::Motion { hub_key, .. } => hub_key.as_ref(),
             HubEvent::Heartbeat { hub_key } => hub_key.as_ref(),
@@ -78,6 +81,7 @@ impl HubEvent {
     /// Tag this event with a hub key (returns self for chaining).
     pub fn with_hub_key(mut self, key: HubKey) -> Self {
         match &mut self {
+            HubEvent::Connected { hub_key } => *hub_key = Some(key),
             HubEvent::Button { hub_key, .. } => *hub_key = Some(key),
             HubEvent::Motion { hub_key, .. } => *hub_key = Some(key),
             HubEvent::Heartbeat { hub_key } => *hub_key = Some(key),

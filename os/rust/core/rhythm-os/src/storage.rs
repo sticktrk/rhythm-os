@@ -6,11 +6,12 @@
 #[cfg(feature = "desktop")]
 use anyhow::Context;
 use anyhow::Result;
-use chrono::{Datelike, Timelike};
 use log::{debug, info, warn};
 use rhythm_core::room::RoomManager;
 use rhythm_core::RuntimeConfig;
-use rhythm_core::{LightProfileConfig, ModeConfig, ModeTransitionConfig, RhythmMode};
+use rhythm_core::{
+    LightProfileConfig, ModeConfig, ModeTransitionConfig, ModeTransitionTrigger, RhythmMode,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -161,9 +162,9 @@ impl StoredLocation {
 
         if let Some(ref tz_name) = self.timezone_name {
             let tz = rhythm_core::Timezone::new(tz_name);
-            let now = chrono::Utc::now().naive_utc();
-            let (year, month, day) = (now.date().year(), now.date().month(), now.date().day());
-            *utc_offset_hours = tz.utc_offset(year, month, day, now.time().hour());
+            let (year, month, day, hour) =
+                tz.local_date_hour_from_utc(chrono::Utc::now().naive_utc());
+            *utc_offset_hours = tz.utc_offset(year, month, day, hour);
             if let Some(lon) = self.longitude {
                 runtime_config.solar_noon_hour =
                     rhythm_core::calculate_solar_noon(lon, year, month, day, &tz);
@@ -183,6 +184,10 @@ impl StoredLocation {
 pub struct StoredSettings {
     pub power_save: bool,
     pub active_mode: RhythmMode,
+    #[serde(default)]
+    pub last_active_mode_trigger: ModeTransitionTrigger,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_active_mode_change_utc_ms: Option<i64>,
     #[serde(default)]
     pub modes: Vec<ModeConfig>,
     #[serde(default)]
@@ -489,18 +494,27 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
         match result {
             Ok(settings) => {
                 let loaded_modes = settings.modes.clone();
+                let missing_mode_change_timestamp =
+                    settings.last_active_mode_change_utc_ms.is_none();
+                let last_active_mode_change_utc_ms = settings
+                    .last_active_mode_change_utc_ms
+                    .or_else(|| Some(chrono::Utc::now().timestamp_millis()));
                 s.power_save = settings.power_save;
                 s.active_mode = settings.active_mode;
+                s.last_active_mode_trigger = settings.last_active_mode_trigger;
+                s.last_active_mode_change_utc_ms = last_active_mode_change_utc_ms;
                 s.set_mode_configs(settings.modes);
                 s.set_mode_transition_configs(settings.mode_transitions);
                 s.sync_active_mode_runtime_overrides();
                 let normalized_modes = s.mode_configs();
-                if normalized_modes != loaded_modes {
-                    info!(target: "sys", "Normalized invalid mode profile IDs during settings load");
+                if normalized_modes != loaded_modes || missing_mode_change_timestamp {
+                    info!(target: "sys", "Normalized persisted mode settings during load");
                     if let Some(storage) = s.storage.as_ref() {
                         if let Err(e) = storage.save_settings(&StoredSettings {
                             power_save: s.power_save,
                             active_mode: s.active_mode,
+                            last_active_mode_trigger: s.last_active_mode_trigger,
+                            last_active_mode_change_utc_ms,
                             modes: normalized_modes.clone(),
                             mode_transitions: s.mode_transition_configs(),
                         }) {
@@ -786,6 +800,8 @@ mod tests {
             settings: Some(StoredSettings {
                 power_save: false,
                 active_mode: RhythmMode::Day,
+                last_active_mode_trigger: ModeTransitionTrigger::Manual,
+                last_active_mode_change_utc_ms: None,
                 modes: vec![],
                 mode_transitions: vec![],
             }),
@@ -798,6 +814,7 @@ mod tests {
 
         assert_eq!(app.active_mode, RhythmMode::Day);
         assert_eq!(app.active_mode_profile_id(), rhythm_core::RHYTHM_PROFILE_ID);
+        assert!(app.last_active_mode_change_utc_ms.is_some());
     }
 
     #[test]
@@ -810,6 +827,8 @@ mod tests {
             settings: Some(StoredSettings {
                 power_save: false,
                 active_mode: RhythmMode::Day,
+                last_active_mode_trigger: ModeTransitionTrigger::Manual,
+                last_active_mode_change_utc_ms: None,
                 modes: vec![rhythm_core::ModeConfig {
                     mode: RhythmMode::Day,
                     active_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
@@ -840,6 +859,8 @@ mod tests {
             settings: Some(StoredSettings {
                 power_save: false,
                 active_mode: RhythmMode::Sleep,
+                last_active_mode_trigger: ModeTransitionTrigger::Manual,
+                last_active_mode_change_utc_ms: None,
                 modes: vec![rhythm_core::ModeConfig {
                     mode: RhythmMode::Sleep,
                     active_profile_id: Some(rhythm_core::SLEEP_IDLE_PROFILE_ID.into()),
@@ -871,6 +892,8 @@ mod tests {
             settings: Some(StoredSettings {
                 power_save: false,
                 active_mode: RhythmMode::Day,
+                last_active_mode_trigger: ModeTransitionTrigger::Manual,
+                last_active_mode_change_utc_ms: None,
                 modes: vec![
                     rhythm_core::ModeConfig {
                         mode: RhythmMode::Day,
@@ -926,6 +949,8 @@ mod tests {
             settings: Some(StoredSettings {
                 power_save: false,
                 active_mode: RhythmMode::Sleep,
+                last_active_mode_trigger: ModeTransitionTrigger::Manual,
+                last_active_mode_change_utc_ms: None,
                 modes: vec![],
                 mode_transitions: vec![],
             }),
@@ -975,6 +1000,8 @@ mod tests {
             settings: Some(StoredSettings {
                 power_save: false,
                 active_mode: RhythmMode::Day,
+                last_active_mode_trigger: ModeTransitionTrigger::Manual,
+                last_active_mode_change_utc_ms: None,
                 modes: vec![],
                 mode_transitions: vec![],
             }),
@@ -1074,6 +1101,8 @@ mod tests {
             let settings = StoredSettings {
                 power_save: true,
                 active_mode: RhythmMode::Sleep,
+                last_active_mode_trigger: ModeTransitionTrigger::Sunrise,
+                last_active_mode_change_utc_ms: Some(1_234_567_890),
                 modes: rhythm_core::default_mode_configs(),
                 mode_transitions: rhythm_core::default_mode_transition_configs(),
             };
@@ -1081,11 +1110,16 @@ mod tests {
             let loaded = storage.load_settings().unwrap();
             assert!(loaded.power_save);
             assert_eq!(loaded.active_mode, RhythmMode::Sleep);
+            assert_eq!(
+                loaded.last_active_mode_trigger,
+                ModeTransitionTrigger::Sunrise
+            );
+            assert_eq!(loaded.last_active_mode_change_utc_ms, Some(1_234_567_890));
             assert_eq!(loaded.modes.len(), 2);
             assert_eq!(loaded.mode_transitions.len(), 2);
             assert_eq!(
                 loaded.mode_transitions[0].trigger,
-                rhythm_core::ModeTransitionTrigger::Sunrise
+                rhythm_core::ModeTransitionTrigger::AstronomicalTwilight
             );
             assert_eq!(
                 loaded.mode_transitions[1].trigger,

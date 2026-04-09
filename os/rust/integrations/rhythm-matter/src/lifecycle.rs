@@ -47,6 +47,9 @@ pub fn connect_matter<T: MatterTransport + 'static>(
     // Create event channel — tx is held by MatterHubData (keeps channel alive),
     // rx goes to the event loop. Later, subscription handling can send real events.
     let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let _ = event_tx.send(HubEvent::Connected {
+        hub_key: Some(hub_key.clone()),
+    });
 
     rhythm_os::lifecycle::connect_hub(
         state,

@@ -60,7 +60,8 @@ where
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let key = hub.hub_key.clone();
-        s.hubs.insert(key, hub);
+        s.hubs.insert(key.clone(), hub);
+        s.set_hub_connected(&key, false);
     }
 
     // Room sync: fetch rooms from the bridge to populate device_rooms with all

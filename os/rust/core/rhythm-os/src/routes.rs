@@ -82,6 +82,18 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["GET", "PUT"],
     },
     SharedRoute {
+        path: "/api/mode",
+        methods: &["GET", "PUT"],
+    },
+    SharedRoute {
+        path: "/api/transitions",
+        methods: &["GET", "PUT"],
+    },
+    SharedRoute {
+        path: "/api/profiles",
+        methods: &["GET"],
+    },
+    SharedRoute {
         path: "/api/hub/credentials",
         methods: &["PUT", "DELETE"],
     },

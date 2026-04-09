@@ -270,13 +270,13 @@ pub fn default_mode_transition_configs() -> Vec<ModeTransitionConfig> {
             RhythmMode::Day,
             default_mode_transition_duration_ms(),
         )
-            .with_trigger(ModeTransitionTrigger::Sunrise),
+        .with_trigger(ModeTransitionTrigger::AstronomicalTwilight),
         ModeTransitionConfig::new(
             RhythmMode::Day,
             RhythmMode::Sleep,
             default_mode_transition_duration_ms(),
         )
-            .with_trigger(ModeTransitionTrigger::NauticalTwilight),
+        .with_trigger(ModeTransitionTrigger::NauticalTwilight),
     ]
 }
 
@@ -741,6 +741,11 @@ mod tests {
         let configs = default_mode_transition_configs();
         assert_eq!(configs.len(), 2);
         assert!(configs.iter().all(|config| config.duration_ms == 5_000));
+        assert_eq!(
+            configs[0].trigger,
+            ModeTransitionTrigger::AstronomicalTwilight
+        );
+        assert_eq!(configs[1].trigger, ModeTransitionTrigger::NauticalTwilight);
     }
 
     #[test]

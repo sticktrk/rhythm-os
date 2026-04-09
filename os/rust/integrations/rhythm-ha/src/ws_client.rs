@@ -139,6 +139,7 @@ async fn run_ws_loop(
                 "auth_ok" => {
                     info!(target: "ws", "HA WebSocket authenticated");
                     authenticated = true;
+                    let _ = tx.try_send(HaWsEvent::Connected);
 
                     // Subscribe to rhythm_service_event
                     let sub_msg = serde_json::json!({

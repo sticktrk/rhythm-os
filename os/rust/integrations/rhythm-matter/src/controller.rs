@@ -167,8 +167,7 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
         if successful_devices == 0 && !device_ids.is_empty() {
             return Err(LightControlError::CommandFailed(format!(
                 "Matter turn_on failed for room {} ({} target devices)",
-                room_label,
-                failed_devices,
+                room_label, failed_devices,
             )));
         }
 
@@ -226,8 +225,7 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
         if successful_devices == 0 && !device_ids.is_empty() {
             return Err(LightControlError::CommandFailed(format!(
                 "Matter turn_off failed for room {} ({} target devices)",
-                room_label,
-                failed_devices,
+                room_label, failed_devices,
             )));
         }
 

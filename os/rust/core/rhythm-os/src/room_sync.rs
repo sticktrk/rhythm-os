@@ -23,11 +23,39 @@ use crate::state::SharedState;
 use crate::topology::{DiscoveredTopologyRoom, SyncAction};
 
 /// Summary of what changed during a sync.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SyncReport {
     pub rooms_added: usize,
     pub rooms_updated: usize,
     pub rooms_removed: usize,
     pub devices_synced: usize,
+}
+
+struct HubSyncGuard {
+    state: SharedState,
+    hub_key: HubKey,
+}
+
+impl Drop for HubSyncGuard {
+    fn drop(&mut self) {
+        if let Ok(mut s) = self.state.lock() {
+            s.finish_hub_sync(&self.hub_key);
+        }
+    }
+}
+
+fn try_acquire_hub_sync_guard(
+    state: &SharedState,
+    hub_key: &HubKey,
+) -> Result<Option<HubSyncGuard>> {
+    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    if !s.begin_hub_sync(hub_key) {
+        return Ok(None);
+    }
+    Ok(Some(HubSyncGuard {
+        state: state.clone(),
+        hub_key: hub_key.clone(),
+    }))
 }
 
 /// Discover rooms and devices from the hub and sync into engine + registry.
@@ -49,27 +77,22 @@ pub fn sync_all_hubs(state: &SharedState) -> Result<SyncReport> {
         s.platform.full_device_discovery
     };
 
-    let hub_discoveries: Vec<_> = {
+    let hub_keys: Vec<_> = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.hubs
             .iter()
-            .filter_map(|(key, hub)| hub.discovery.as_ref().map(|d| (key.clone(), d.clone())))
+            .filter_map(|(key, hub)| hub.discovery.as_ref().map(|_| key.clone()))
             .collect()
     };
 
-    if hub_discoveries.is_empty() {
+    if hub_keys.is_empty() {
         return Err(anyhow::anyhow!("No hub discovery available"));
     }
 
-    let mut combined = SyncReport {
-        rooms_added: 0,
-        rooms_updated: 0,
-        rooms_removed: 0,
-        devices_synced: 0,
-    };
+    let mut combined = SyncReport::default();
 
-    for (key, discovery) in &hub_discoveries {
-        match sync_with_discovery(state, Some(key), discovery.as_ref(), discover_devices) {
+    for key in &hub_keys {
+        match sync_from_hub_for_key(state, key, discover_devices) {
             Ok(report) => {
                 info!(target: "room_sync", "Hub {} sync: +{} ~{} -{} devices={}",
                     key, report.rooms_added, report.rooms_updated,
@@ -97,16 +120,16 @@ pub fn sync_from_hub_with_options(
     state: &SharedState,
     discover_devices: bool,
 ) -> Result<SyncReport> {
-    // Extract discovery + hub key from active hub
-    let (hub_key, discovery) = {
+    // Extract the first active hub key
+    let hub_key = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.hubs
             .iter()
-            .find_map(|(key, h)| h.discovery.as_ref().map(|d| (key.clone(), d.clone())))
+            .find_map(|(key, h)| h.discovery.as_ref().map(|_| key.clone()))
     }
     .ok_or_else(|| anyhow::anyhow!("No hub discovery available"))?;
 
-    sync_with_discovery(state, Some(&hub_key), discovery.as_ref(), discover_devices)
+    sync_from_hub_for_key(state, &hub_key, discover_devices)
 }
 
 /// Sync rooms and devices from a specific hub identified by key.
@@ -119,6 +142,11 @@ pub fn sync_from_hub_for_key(
     hub_key: &HubKey,
     discover_devices: bool,
 ) -> Result<SyncReport> {
+    let Some(_guard) = try_acquire_hub_sync_guard(state, hub_key)? else {
+        debug!(target: "room_sync", "Skipping sync for {}: already in progress", hub_key);
+        return Ok(SyncReport::default());
+    };
+
     let discovery = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.hubs

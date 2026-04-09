@@ -55,7 +55,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --debug             Build in debug mode; with --run, sets --log-level debug"
             echo "  --target <target>   Target platform (default: native)"
             echo "  --clean             Clean before building"
-            echo "  --run               Run the server after building (native only; default: release)"
+            echo "  --run               Run the server after building (native only; default: debug)"
             echo "  -h, --help          Show this help"
             echo ""
             echo "Targets:"
@@ -89,13 +89,8 @@ case "$BUILD_MODE" in
         CARGO_FLAGS=""
         ;;
     auto)
-        if [ "$RUN" = true ]; then
-            PROFILE="release"
-            CARGO_FLAGS="--release"
-        else
-            PROFILE="debug"
-            CARGO_FLAGS=""
-        fi
+        PROFILE="debug"
+        CARGO_FLAGS=""
         ;;
     *)
         echo "Unknown build mode: $BUILD_MODE"

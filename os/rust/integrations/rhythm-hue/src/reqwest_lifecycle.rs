@@ -46,7 +46,8 @@ pub fn connect_and_start(state: SharedState, key: &HubKey) -> Result<Receiver<Hu
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let key = hub.hub_key.clone();
-        s.hubs.insert(key, hub);
+        s.hubs.insert(key.clone(), hub);
+        s.set_hub_connected(&key, false);
     }
 
     // Runtime creation is deferred to room sync (do_room_set → commands::ensure_runtime),

@@ -252,13 +252,92 @@ fn translate_room_id(
         .unwrap_or_else(|| room_id.to_string())
 }
 
+fn spawn_reconnect_sync(state: &SharedState, hub_key: &crate::canonical::identity::HubKey) {
+    let discover_devices = state
+        .lock()
+        .ok()
+        .map(|s| s.platform.full_device_discovery)
+        .unwrap_or(false);
+    let sync_state = state.clone();
+    let sync_hub_key = hub_key.clone();
+    let thread_name = format!("hub-resync-{}", sync_hub_key.hub_type.as_str());
+
+    let spawn_result = std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            match crate::room_sync::sync_from_hub_for_key(
+                &sync_state,
+                &sync_hub_key,
+                discover_devices,
+            ) {
+                Ok(report) => {
+                    info!(
+                        target: "conn",
+                        "Hub {} resync: +{} ~{} -{} devices={}",
+                        sync_hub_key,
+                        report.rooms_added,
+                        report.rooms_updated,
+                        report.rooms_removed,
+                        report.devices_synced
+                    );
+                    crate::room_sync::poll_initial_light_state(&sync_state);
+                }
+                Err(e) => {
+                    warn!(target: "conn", "Hub {} resync failed: {}", sync_hub_key, e);
+                }
+            }
+        });
+
+    if let Err(e) = spawn_result {
+        warn!(
+            target: "conn",
+            "Failed to spawn reconnect sync thread for {}: {}",
+            hub_key,
+            e
+        );
+    }
+}
+
 /// Handle a hub-agnostic event from the event stream.
 ///
 /// Routes events through `RuntimeHandle` regardless of which hub produced them.
 /// Button/motion events are processed inline (zero queue delay), with persist
 /// deferred to the cmd-worker thread.
 pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut MotionTimerState) {
+    let hub_key = event.hub_key().cloned();
+    let connected = !matches!(&event, HubEvent::Disconnected { .. });
+    let became_connected = if let Some(ref key) = hub_key {
+        if let Ok(mut s) = state.lock() {
+            let was_connected = s.hub_is_connected(key);
+            s.set_hub_connected(key, connected);
+            connected && !was_connected
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     match event {
+        HubEvent::Connected { .. } => {
+            info!(target: "conn", "Hub connected");
+            if became_connected {
+                if let Some(ref key) = hub_key {
+                    spawn_reconnect_sync(state, key);
+                }
+            }
+
+            #[cfg(feature = "desktop")]
+            crate::state::emit_server_event(
+                state,
+                crate::server_event::ServerEvent::HubStatus {
+                    hub_type: hub_key.as_ref().map(|k| k.hub_type.as_str().to_string()),
+                    address: hub_key.as_ref().map(|k| k.address.clone()),
+                    connected: true,
+                },
+            );
+        }
+
         HubEvent::Button {
             ref hub_key,
             ref room_id,
@@ -373,13 +452,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             }
         }
 
-        HubEvent::Disconnected {
-            reason,
-            #[cfg(feature = "desktop")]
-            ref hub_key,
-            #[cfg(not(feature = "desktop"))]
-                hub_key: _,
-        } => {
+        HubEvent::Disconnected { reason, .. } => {
             warn!(target: "conn", "Hub disconnected: {}", reason);
 
             // Motion timers are local state (Instant timestamps) — they keep
@@ -809,8 +882,9 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discovery::{DiscoveredDevice, DiscoveredRoom, HubDiscovery};
     use rhythm_core::runtime::{RoomSnapshot, RuntimeHandle};
-    use rhythm_core::{LightProfileConfig, RoomProfileSettings, TimerSetting};
+    use rhythm_core::{HubRegistry, LightProfileConfig, RoomProfileSettings, TimerSetting};
     use std::collections::HashMap;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
@@ -818,6 +892,7 @@ mod tests {
 
     use crate::canonical::identity::HubKey;
     use crate::hub::{ActiveHub, HubType};
+    use crate::registry::{RegistrySnapshot, SnapshotRoom};
 
     #[test]
     fn new_is_empty() {
@@ -1180,6 +1255,108 @@ mod tests {
         );
 
         Arc::new(Mutex::new(app))
+    }
+
+    struct ReconnectTestDiscovery;
+
+    impl HubDiscovery for ReconnectTestDiscovery {
+        fn discover_rooms(&self) -> anyhow::Result<Vec<DiscoveredRoom>> {
+            Ok(vec![DiscoveredRoom {
+                id: "room_a".into(),
+                name: "Room A".into(),
+                grouped_light_id: "gl_room_a".into(),
+                device_ids: vec!["light-1".into()],
+            }])
+        }
+
+        fn discover_devices(&self) -> anyhow::Result<Vec<DiscoveredDevice>> {
+            Ok(vec![])
+        }
+    }
+
+    #[test]
+    fn connected_event_resyncs_room_devices_for_api_state() {
+        let state = make_state();
+        let hub_type = HubType::new("test");
+        let hub_key = HubKey::new(hub_type.clone(), "hub.local");
+
+        let mut registry = crate::registry::HubDeviceRegistry::new();
+        registry.restore_from_snapshot(RegistrySnapshot {
+            rooms: vec![SnapshotRoom {
+                id: "room_a".into(),
+                name: "Room A".into(),
+                grouped_light_id: "gl_room_a".into(),
+            }],
+            devices: vec![],
+            buttons: HashMap::new(),
+            area_lights: HashMap::new(),
+        });
+        let registry: Arc<Mutex<dyn HubRegistry>> = Arc::new(Mutex::new(registry));
+
+        {
+            let mut s = state.lock().unwrap();
+            s.hubs.insert(
+                hub_key.clone(),
+                ActiveHub {
+                    hub_type,
+                    hub_key: hub_key.clone(),
+                    runtime: None,
+                    hub_data: Box::new(()),
+                    registry: Some(registry),
+                    discovery: Some(Arc::new(ReconnectTestDiscovery)),
+                    shutdown: Arc::new(AtomicBool::new(false)),
+                },
+            );
+            s.set_hub_connected(&hub_key, false);
+        }
+
+        let before: serde_json::Value =
+            serde_json::from_str(&crate::commands::build_state_snapshot(&state).unwrap()).unwrap();
+        let before_room = before["rooms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|room| room["name"] == "Room A")
+            .unwrap();
+        assert_eq!(before_room["device_ids"], serde_json::json!([]));
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Connected {
+                hub_key: Some(hub_key.clone()),
+            },
+            &mut MotionTimerState::new(),
+        );
+
+        let mut after: Option<serde_json::Value> = None;
+        for _ in 0..50 {
+            std::thread::sleep(Duration::from_millis(20));
+            let parsed: serde_json::Value =
+                serde_json::from_str(&crate::commands::build_state_snapshot(&state).unwrap())
+                    .unwrap();
+            let room = parsed["rooms"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|candidate| candidate["name"] == "Room A")
+                .cloned()
+                .unwrap();
+            if room["device_ids"] == serde_json::json!(["light-1"]) {
+                after = Some(parsed);
+                break;
+            }
+        }
+
+        let after = after.expect("connected event should repopulate room device_ids");
+        let after_room = after["rooms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|room| room["name"] == "Room A")
+            .unwrap();
+        assert_eq!(after_room["device_ids"], serde_json::json!(["light-1"]));
+        assert_eq!(after_room["devices"][0]["id"], "light-1");
+        assert_eq!(after_room["devices"][0]["type"], "light");
     }
 
     #[test]

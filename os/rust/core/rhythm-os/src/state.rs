@@ -2,13 +2,14 @@
 //!
 //! Platform-agnostic `AppState` with `dyn Storage` instead of NVS.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use rhythm_core::{
     default_builtin_profiles, default_mode_configs, default_mode_transition_configs, ButtonAction,
-    LightProfileConfig, ModeConfig, ModeTransitionConfig, RhythmMode, RuntimeConfig, RuntimeHandle,
+    LightProfileConfig, ModeConfig, ModeTransitionConfig, ModeTransitionTrigger, RhythmMode,
+    RuntimeConfig, RuntimeHandle,
 };
 use rhythm_profile::profile_config::DEFAULT_FADE_MS;
 
@@ -144,6 +145,10 @@ pub struct AppState {
     pub mode_transition_configs: Vec<ModeTransitionConfig>,
     /// The currently active global mode.
     pub active_mode: RhythmMode,
+    /// Trigger that last changed the active mode.
+    pub last_active_mode_trigger: ModeTransitionTrigger,
+    /// UTC timestamp of the most recent active mode change.
+    pub last_active_mode_change_utc_ms: Option<i64>,
     /// Runtime configuration.
     pub runtime_config: RuntimeConfig,
     /// UTC offset in hours (e.g., -5.0 for EST, -8.0 for PST).
@@ -159,6 +164,16 @@ pub struct AppState {
     // ---- Hub abstraction ----
     /// Active hubs keyed by HubKey. Supports multiple simultaneous hubs.
     pub hubs: HashMap<HubKey, ActiveHub>,
+    /// Live connection status keyed by HubKey.
+    ///
+    /// A hub can remain configured and active in-process while its transport
+    /// is temporarily disconnected and reconnecting.
+    pub hub_connection_status: HashMap<HubKey, bool>,
+    /// Per-hub room syncs currently running in background threads.
+    ///
+    /// Used to avoid racing the initial bootstrap sync against reconnect-
+    /// triggered syncs after the event stream comes back.
+    pub hub_sync_in_progress: HashSet<HubKey>,
     /// Hub credentials keyed by HubKey. Supports multiple simultaneous hubs.
     pub hub_credentials: HashMap<HubKey, HubCredentials>,
 
@@ -333,17 +348,22 @@ impl Default for AppState {
     fn default() -> Self {
         let default_motion_timeout = rhythm_core::config::DEFAULT_MOTION_TIMEOUT_SECS as u64;
         let default_fade = DEFAULT_FADE_MS as u32;
+        let now_utc_ms = chrono::Utc::now().timestamp_millis();
         let mut state = Self {
             light_profile_configs: default_light_profile_configs(),
             mode_configs: default_mode_config_map(),
             mode_transition_configs: default_mode_transition_configs(),
             active_mode: RhythmMode::Day,
+            last_active_mode_trigger: ModeTransitionTrigger::Manual,
+            last_active_mode_change_utc_ms: Some(now_utc_ms),
             runtime_config: RuntimeConfig::default().with_solar_noon(12.5),
             utc_offset_hours: 0.0,
             latitude: None,
             longitude: None,
             timezone_name: None,
             hubs: HashMap::new(),
+            hub_connection_status: HashMap::new(),
+            hub_sync_in_progress: HashSet::new(),
             hub_credentials: HashMap::new(),
             canonical_registry: CanonicalRegistry::new(),
             topology: RoomTopologyStore::new(),
@@ -587,6 +607,42 @@ impl AppState {
         !self.hubs.is_empty()
     }
 
+    /// Check whether a specific hub transport is currently live.
+    pub fn hub_is_connected(&self, key: &HubKey) -> bool {
+        self.hub_connection_status
+            .get(key)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Check if any active hub transport is currently live.
+    pub fn has_any_connected_hub(&self) -> bool {
+        self.hubs.keys().any(|key| self.hub_is_connected(key))
+    }
+
+    /// Update the live connection state for a hub.
+    pub fn set_hub_connected(&mut self, key: &HubKey, connected: bool) {
+        self.hub_connection_status.insert(key.clone(), connected);
+    }
+
+    /// Forget the live connection state for a hub.
+    pub fn clear_hub_connected(&mut self, key: &HubKey) {
+        self.hub_connection_status.remove(key);
+    }
+
+    /// Mark a per-hub room sync as running.
+    ///
+    /// Returns `true` when this call acquired the sync slot and the caller
+    /// should proceed. Returns `false` when another sync is already running.
+    pub fn begin_hub_sync(&mut self, key: &HubKey) -> bool {
+        self.hub_sync_in_progress.insert(key.clone())
+    }
+
+    /// Mark a per-hub room sync as finished.
+    pub fn finish_hub_sync(&mut self, key: &HubKey) {
+        self.hub_sync_in_progress.remove(key);
+    }
+
     /// Get the first configured hub credentials (for legacy single-hub callers).
     pub fn first_hub_credentials(&self) -> Option<&HubCredentials> {
         self.hub_credentials.values().next()
@@ -662,6 +718,7 @@ mod tests {
         assert!(state.longitude.is_none());
         assert_eq!(state.utc_offset_hours, 0.0);
         assert!(state.room_lights_on.is_empty());
+        assert!(state.last_active_mode_change_utc_ms.is_some());
         assert_eq!(state.firmware_version, "0.0.0");
         assert_eq!(state.platform_type, "desktop");
         assert_eq!(state.platform_context, "server");

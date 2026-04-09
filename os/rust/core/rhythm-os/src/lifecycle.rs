@@ -55,8 +55,10 @@ where
     let registry = Arc::new(Mutex::new(registry));
     let shutdown = Arc::new(AtomicBool::new(false));
 
-    // Start event stream via hub-specific closure
-    let event_rx = start_event_stream(registry.clone(), shutdown.clone());
+    // Start event stream via hub-specific closure, then tag every event with
+    // the concrete hub key so downstream status and topology updates stay per-hub.
+    let raw_event_rx = start_event_stream(registry.clone(), shutdown.clone());
+    let event_rx = tag_hub_events(raw_event_rx, hub_key.clone());
 
     // Build hub-specific data
     let hub_data = hub_data_builder(registry.clone());
@@ -71,8 +73,32 @@ where
         shutdown,
     };
 
-    info!(target: "sys", "Hub connected (runtime deferred until rooms are discovered)");
+    info!(
+        target: "sys",
+        "Hub initialized (runtime deferred until rooms are discovered)"
+    );
     Ok((hub, event_rx))
+}
+
+fn tag_hub_events(raw_rx: Receiver<HubEvent>, hub_key: HubKey) -> Receiver<HubEvent> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<HubEvent>(32);
+
+    std::thread::Builder::new()
+        .name(format!("hub-tag-{}", hub_key))
+        .spawn(move || {
+            while let Ok(event) = raw_rx.recv() {
+                match tx.try_send(event.with_hub_key(hub_key.clone())) {
+                    Ok(()) => {}
+                    Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                        warn!(target: "evt", "Hub event channel full, dropping tagged event");
+                    }
+                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return,
+                }
+            }
+        })
+        .expect("Failed to spawn hub event tagger thread");
+
+    rx
 }
 
 // ============================================================================
@@ -165,18 +191,17 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
     // Calculate solar noon — prefer timezone-aware when IANA name is available
     let lat = latitude.unwrap_or(35.22);
     let lon = longitude.unwrap_or(-80.84);
-    let day_of_year = BlockingTimeProvider::new(utc_offset).day_of_year();
-    let (utc_offset, solar_noon) = if let Some(ref tz_name) = timezone_name {
-        use chrono::{Datelike, Timelike};
+    let (utc_offset, solar_noon, day_of_year) = if let Some(ref tz_name) = timezone_name {
         let tz = rhythm_core::Timezone::new(tz_name);
-        let now = chrono::Utc::now().naive_utc();
-        let (year, month, day) = (now.date().year(), now.date().month(), now.date().day());
-        let fresh_offset = tz.utc_offset(year, month, day, now.time().hour());
+        let (year, month, day, hour) = tz.local_date_hour_from_utc(chrono::Utc::now().naive_utc());
+        let fresh_offset = tz.utc_offset(year, month, day, hour);
         let noon = rhythm_core::calculate_solar_noon(lon, year, month, day, &tz);
-        (fresh_offset, noon)
+        let doy = rhythm_core::timezone::day_of_year(year, month, day);
+        (fresh_offset, noon, doy)
     } else {
+        let day_of_year = BlockingTimeProvider::new(utc_offset).day_of_year();
         let noon = rhythm_core::calculate_solar_noon_from_offset(lon, utc_offset, day_of_year);
-        (utc_offset, noon)
+        (utc_offset, noon, day_of_year)
     };
     let time_provider = BlockingTimeProvider::new(utc_offset);
 
@@ -535,18 +560,17 @@ pub fn ensure_composite_runtime(
     // Calculate solar noon
     let lat = latitude.unwrap_or(35.22);
     let lon = longitude.unwrap_or(-80.84);
-    let day_of_year = BlockingTimeProvider::new(utc_offset).day_of_year();
-    let (utc_offset, solar_noon) = if let Some(ref tz_name) = timezone_name {
-        use chrono::{Datelike, Timelike};
+    let (utc_offset, solar_noon, day_of_year) = if let Some(ref tz_name) = timezone_name {
         let tz = rhythm_core::Timezone::new(tz_name);
-        let now = chrono::Utc::now().naive_utc();
-        let (year, month, day) = (now.date().year(), now.date().month(), now.date().day());
-        let fresh_offset = tz.utc_offset(year, month, day, now.time().hour());
+        let (year, month, day, hour) = tz.local_date_hour_from_utc(chrono::Utc::now().naive_utc());
+        let fresh_offset = tz.utc_offset(year, month, day, hour);
         let noon = rhythm_core::calculate_solar_noon(lon, year, month, day, &tz);
-        (fresh_offset, noon)
+        let doy = rhythm_core::timezone::day_of_year(year, month, day);
+        (fresh_offset, noon, doy)
     } else {
+        let day_of_year = BlockingTimeProvider::new(utc_offset).day_of_year();
         let noon = rhythm_core::calculate_solar_noon_from_offset(lon, utc_offset, day_of_year);
-        (utc_offset, noon)
+        (utc_offset, noon, day_of_year)
     };
     let time_provider = BlockingTimeProvider::new(utc_offset);
 
@@ -777,7 +801,9 @@ where
             let mut s = state
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
-            s.hubs.remove(key)
+            let old_hub = s.hubs.remove(key);
+            s.clear_hub_connected(key);
+            old_hub
         };
         if let Some(old_hub) = old_hub {
             info!(target: "sys", "Signaling old hub {} to shut down", key);
@@ -814,10 +840,14 @@ where
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
         let key = hub.hub_key.clone();
-        s.hubs.insert(key, hub);
+        s.hubs.insert(key.clone(), hub);
+        s.set_hub_connected(&key, false);
         s.pending_hub_event_rxs.push(event_rx);
     }
 
-    info!(target: "sys", "Hub configured (connected, runtime deferred)");
+    info!(
+        target: "sys",
+        "Hub configured (transport starting, runtime deferred)"
+    );
     Ok(())
 }

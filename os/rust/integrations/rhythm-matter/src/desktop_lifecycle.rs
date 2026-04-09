@@ -69,7 +69,8 @@ pub fn connect_and_start(state: SharedState, _key: &HubKey) -> Result<Receiver<H
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let key = HubKey::new(HubType::new("matter"), "local");
-        s.hubs.insert(key, hub);
+        s.hubs.insert(key.clone(), hub);
+        s.set_hub_connected(&key, false);
     }
 
     Ok(event_rx)
@@ -311,7 +312,10 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
 
         match rhythm_os::commands::do_hub_credentials(state, "matter", "local", &credentials) {
             Ok(()) => {
-                let hub_connected = state.lock().map(|s| s.has_any_hub()).unwrap_or(false);
+                let hub_connected = state
+                    .lock()
+                    .map(|s| s.has_any_connected_hub())
+                    .unwrap_or(false);
 
                 let hub_key = HubKey::new(HubType::new("matter"), "local");
                 self.post_connect(state, &hub_key);

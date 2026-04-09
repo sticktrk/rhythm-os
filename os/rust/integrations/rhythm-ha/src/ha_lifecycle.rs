@@ -132,6 +132,7 @@ pub fn start_event_translator(
     rhythm_os::lifecycle::start_event_translator(
         ws_rx,
         move |event| match event {
+            HaWsEvent::Connected => vec![HubEvent::Connected { hub_key: None }],
             HaWsEvent::ServiceEvent { event_type, data } => {
                 crate::events::translate_ws_event(event_type, data, &registry, &device_area_cache)
             }
@@ -151,6 +152,8 @@ pub fn start_event_translator(
 /// Raw event from the HA WebSocket connection.
 #[derive(Debug, Clone)]
 pub enum HaWsEvent {
+    /// WebSocket authenticated and ready for event subscriptions.
+    Connected,
     /// A subscribed event was received.
     ServiceEvent {
         event_type: String,

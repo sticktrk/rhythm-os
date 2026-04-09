@@ -58,6 +58,12 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/config/reset", post(reset_config))
         .route("/api/location", put(put_location))
         .route("/api/settings", get(get_settings).put(put_settings))
+        .route("/api/mode", get(get_mode).put(put_mode))
+        .route(
+            "/api/transitions",
+            get(get_transitions).put(put_transitions),
+        )
+        .route("/api/profiles", get(get_profiles))
         .route(
             "/api/hub/credentials",
             put(put_hub_credentials).delete(delete_hub),
@@ -199,6 +205,26 @@ async fn get_settings(State(state): State<SharedState>) -> ApiResponse {
 
 async fn put_settings(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {
     run_blocking(move || handlers::handle_put_settings(&state, &body)).await
+}
+
+async fn get_mode(State(state): State<SharedState>) -> ApiResponse {
+    handlers::handle_get_mode(&state)
+}
+
+async fn put_mode(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {
+    run_blocking(move || handlers::handle_put_mode(&state, &body)).await
+}
+
+async fn get_transitions(State(state): State<SharedState>) -> ApiResponse {
+    handlers::handle_get_transitions(&state)
+}
+
+async fn put_transitions(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {
+    run_blocking(move || handlers::handle_put_transitions(&state, &body)).await
+}
+
+async fn get_profiles(State(state): State<SharedState>) -> ApiResponse {
+    handlers::handle_get_profiles(&state)
 }
 
 async fn put_room_preferences(

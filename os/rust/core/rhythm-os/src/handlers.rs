@@ -437,32 +437,130 @@ pub fn handle_put_settings(state: &SharedState, body: &Value) -> ApiResponse {
             "rhythm_interval_secs now belongs in light profile config",
         );
     }
-    let active_mode = match body.get("active_mode").cloned() {
+    if body.get("transitions").is_some() || body.get("mode_transitions").is_some() {
+        return ApiResponse::bad_request("Transitions moved to /api/transitions");
+    }
+    if body.get("mode").is_some()
+        || body.get("active_mode").is_some()
+        || body.get("modes").is_some()
+        || body.get("last_active_mode_trigger").is_some()
+        || body.get("last_active_mode_change_utc_ms").is_some()
+    {
+        return ApiResponse::bad_request("Mode fields moved to /api/mode");
+    }
+    if body.get("profiles").is_some() {
+        return ApiResponse::bad_request("Profiles moved to /api/profiles and /api/config");
+    }
+    let power_save = body.get("power_save").and_then(|v| v.as_bool());
+
+    match commands::do_settings_set(state, power_save, None, None, None) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_get_mode(state: &SharedState) -> ApiResponse {
+    match commands::build_mode(state) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_put_mode(state: &SharedState, body: &Value) -> ApiResponse {
+    if body.get("rhythm_interval_secs").is_some() {
+        return ApiResponse::bad_request(
+            "rhythm_interval_secs now belongs in light profile config",
+        );
+    }
+    if body.get("mode").is_some()
+        || body.get("active_mode").is_some()
+        || body.get("modes").is_some()
+    {
+        return ApiResponse::bad_request("Use active/configs in /api/mode");
+    }
+    if body.get("transitions").is_some() || body.get("mode_transitions").is_some() {
+        return ApiResponse::bad_request("Use /api/transitions");
+    }
+    if body.get("last_change").is_some() {
+        return ApiResponse::bad_request("last_change is read-only");
+    }
+    if body.get("power_save").is_some() {
+        return ApiResponse::bad_request("power_save belongs in /api/settings");
+    }
+    if body.get("profiles").is_some() {
+        return ApiResponse::bad_request("Profiles moved to /api/profiles and /api/config");
+    }
+    let active_mode = match body.get("active").cloned() {
         Some(value) => match serde_json::from_value::<rhythm_core::RhythmMode>(value) {
             Ok(mode) => Some(mode),
-            Err(_) => return ApiResponse::bad_request("Invalid active_mode"),
+            Err(_) => return ApiResponse::bad_request("Invalid active"),
         },
         None => None,
     };
-    let modes = match body.get("modes").cloned() {
+    let modes = match body.get("configs").cloned() {
         Some(value) => match serde_json::from_value::<Vec<rhythm_core::ModeConfig>>(value) {
             Ok(modes) => Some(modes),
-            Err(_) => return ApiResponse::bad_request("Invalid modes"),
+            Err(_) => return ApiResponse::bad_request("Invalid configs"),
         },
         None => None,
     };
-    let mode_transitions = match body.get("mode_transitions").cloned() {
+    match commands::do_mode_set(state, active_mode, modes) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_get_transitions(state: &SharedState) -> ApiResponse {
+    match commands::build_transitions(state) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_put_transitions(state: &SharedState, body: &Value) -> ApiResponse {
+    if body.get("rhythm_interval_secs").is_some() {
+        return ApiResponse::bad_request(
+            "rhythm_interval_secs now belongs in light profile config",
+        );
+    }
+    if body.get("power_save").is_some() {
+        return ApiResponse::bad_request("power_save belongs in /api/settings");
+    }
+    if body.get("active").is_some()
+        || body.get("configs").is_some()
+        || body.get("last_change").is_some()
+        || body.get("mode").is_some()
+        || body.get("active_mode").is_some()
+        || body.get("modes").is_some()
+        || body.get("last_active_mode_trigger").is_some()
+        || body.get("last_active_mode_change_utc_ms").is_some()
+    {
+        return ApiResponse::bad_request("Mode fields belong in /api/mode");
+    }
+    if body.get("profiles").is_some() {
+        return ApiResponse::bad_request("Profiles moved to /api/profiles and /api/config");
+    }
+    if body.get("mode_transitions").is_some() {
+        return ApiResponse::bad_request("Use transitions in /api/transitions");
+    }
+    let mode_transitions = match body.get("transitions").cloned() {
         Some(value) => {
             match serde_json::from_value::<Vec<rhythm_core::ModeTransitionConfig>>(value) {
                 Ok(transitions) => Some(transitions),
-                Err(_) => return ApiResponse::bad_request("Invalid mode_transitions"),
+                Err(_) => return ApiResponse::bad_request("Invalid transitions"),
             }
         }
         None => None,
     };
-    let power_save = body.get("power_save").and_then(|v| v.as_bool());
 
-    match commands::do_settings_set(state, power_save, active_mode, modes, mode_transitions) {
+    match commands::do_transitions_set(state, mode_transitions) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_get_profiles(state: &SharedState) -> ApiResponse {
+    match commands::build_profiles(state) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
     }
@@ -502,7 +600,10 @@ pub fn handle_put_hub_credentials(state: &SharedState, body: &Value) -> ApiRespo
 
     match commands::do_hub_credentials(state, hub_type, address, &credentials) {
         Ok(()) => {
-            let hub_connected = state.lock().map(|s| s.has_any_hub()).unwrap_or(false);
+            let hub_connected = state
+                .lock()
+                .map(|s| s.has_any_connected_hub())
+                .unwrap_or(false);
             let resp = HubCredentialsResponse { hub_connected };
             match serde_json::to_string(&resp) {
                 Ok(json) => ApiResponse::json_ok(json),
@@ -821,7 +922,8 @@ pub fn handle_unpair_device(
                         crate::hub::HubType::new(&request.hub_type),
                         "local",
                     );
-                    if let Err(e) = commands::do_device_hard_remove(state, device_id, Some(&hub_key))
+                    if let Err(e) =
+                        commands::do_device_hard_remove(state, device_id, Some(&hub_key))
                     {
                         return ApiResponse::server_error(e);
                     }
@@ -1658,7 +1760,8 @@ mod tests {
 
     #[test]
     fn delete_device_hard_removes_canonical_topology_and_registry_entries() {
-        let (state, registry, canonical_id, room_id, hub_key) = handler_state_with_canonical_light();
+        let (state, registry, canonical_id, room_id, hub_key) =
+            handler_state_with_canonical_light();
 
         let r = handle_delete_device(&state, "device-1");
         assert_eq!(r.status, 204);
@@ -1680,7 +1783,8 @@ mod tests {
 
     #[test]
     fn unpair_completion_uses_hard_remove_cleanup() {
-        let (state, registry, canonical_id, room_id, hub_key) = handler_state_with_canonical_light();
+        let (state, registry, canonical_id, room_id, hub_key) =
+            handler_state_with_canonical_light();
         {
             let mut s = state.lock().unwrap();
             s.start_unpairing_fn = Some(Arc::new(|_, _, _| {
@@ -1812,6 +1916,7 @@ mod tests {
         assert_eq!(r.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert_eq!(parsed["power_save"], true);
+        assert!(parsed.get("mode").is_none());
         assert!(parsed.get("status").is_none());
     }
 
@@ -1822,7 +1927,99 @@ mod tests {
         assert_eq!(r.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert!(parsed["power_save"].is_boolean());
+        assert!(parsed.get("mode").is_none());
         assert!(parsed.get("status").is_none());
+    }
+
+    #[test]
+    fn put_settings_rejects_mode_payload() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_settings(&state, &json!({"mode": {"active": "sleep"}}));
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("Mode fields moved to /api/mode"));
+    }
+
+    #[test]
+    fn put_settings_rejects_transitions_payload() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_settings(&state, &json!({"transitions": []}));
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("Transitions moved to /api/transitions"));
+    }
+
+    #[test]
+    fn get_mode_returns_raw_mode() {
+        let state = handler_state_with_runtime();
+        let r = handle_get_mode(&state);
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert!(parsed["active"].is_string());
+        assert!(parsed["configs"].is_array());
+        assert!(parsed.get("transitions").is_none());
+        assert!(parsed.get("status").is_none());
+    }
+
+    #[test]
+    fn put_mode_returns_raw_mode() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_mode(&state, &json!({"active": "sleep"}));
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["active"], "sleep");
+        assert!(parsed["last_change"].is_object());
+    }
+
+    #[test]
+    fn put_mode_rejects_read_only_last_change() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_mode(&state, &json!({"last_change": {"trigger": "manual"}}));
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("last_change is read-only"));
+    }
+
+    #[test]
+    fn put_mode_rejects_transitions_payload() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_mode(&state, &json!({"transitions": []}));
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("Use /api/transitions"));
+    }
+
+    #[test]
+    fn get_transitions_returns_wrapper() {
+        let state = handler_state_with_runtime();
+        let r = handle_get_transitions(&state);
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert!(parsed["transitions"].is_array());
+        assert!(parsed.get("status").is_none());
+    }
+
+    #[test]
+    fn put_transitions_returns_wrapper() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_transitions(&state, &json!({"transitions": []}));
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["transitions"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn put_transitions_rejects_legacy_mode_transitions_payload() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_transitions(&state, &json!({"mode_transitions": []}));
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("Use transitions in /api/transitions"));
+    }
+
+    #[test]
+    fn get_profiles_returns_profiles_wrapper() {
+        let state = handler_state_with_runtime();
+        let r = handle_get_profiles(&state);
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert!(parsed["profiles"].is_array());
+        assert!(!parsed["profiles"].as_array().unwrap().is_empty());
     }
 
     #[test]
