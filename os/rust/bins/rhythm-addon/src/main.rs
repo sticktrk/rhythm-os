@@ -70,6 +70,7 @@ fn main() -> Result<()> {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.event_tx = Some(event_tx);
         s.firmware_version = Box::leak(VERSION.to_string().into_boxed_str());
+        s.platform_type = "desktop";
         s.platform_context = "ha_addon";
         s.listen_port = Some(port);
         s.data_dir = data_dir.clone();
@@ -142,88 +143,13 @@ fn main() -> Result<()> {
 
     info!(target: "sys", "Data directory: {}", data_dir);
 
-    // Connect to all configured hubs.
-    // Must happen BEFORE the tokio runtime starts — reqwest::blocking::Client
-    // cannot be created inside an async context.
-    let hub_event_rxs = {
-        let all_creds: Vec<(rhythm_os::canonical::identity::HubKey, String)> = {
-            let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-            s.hub_credentials
-                .iter()
-                .filter_map(|(key, creds)| {
-                    creds
-                        .hub_type
-                        .as_ref()
-                        .map(|ht| (key.clone(), ht.as_str().to_string()))
-                })
-                .collect()
-        };
-
-        if all_creds.is_empty() {
-            info!(target: "sys", "No hub configured, waiting for credentials via HTTP");
-        }
-
-        // Refresh credentials before connecting (e.g., HA supervisor token rotation)
-        for (key, hub_type_str) in &all_creds {
-            if let Some(integration) = hub::find_integration(hub::INTEGRATIONS, hub_type_str) {
-                integration.refresh_credentials(&state, key);
-            }
-        }
-
-        let mut rxs = Vec::new();
-        for (key, hub_type_str) in &all_creds {
-            if let Some(integration) = hub::find_integration(hub::INTEGRATIONS, hub_type_str) {
-                info!(target: "sys", "Connecting hub {} (type={})...", key, hub_type_str);
-                match integration.connect_and_start(state.clone(), key) {
-                    Ok(rx) => rxs.push(rx),
-                    Err(e) => {
-                        warn!(target: "sys", "Failed to connect hub {}: {} (will retry on credential push)", key, e);
-                    }
-                }
-            } else {
-                warn!(target: "sys", "No integration for hub type '{}', skipping {}", hub_type_str, key);
-            }
-        }
-        rxs
-    };
-
-    // Auto-sync rooms from all connected hubs.
-    {
-        let has_hub = state.lock().map(|s| s.has_any_hub()).unwrap_or(false);
-        if has_hub {
-            if let Err(e) = rhythm_os::room_sync::sync_all_hubs(&state) {
-                warn!(target: "sys", "Initial room sync failed: {}", e);
-            }
-            rhythm_os::room_sync::poll_initial_light_state(&state);
-
-            // Run integration-specific post-connect for each hub
-            let hub_entries: Vec<(String, rhythm_os::canonical::identity::HubKey)> = {
-                let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-                s.hub_credentials
-                    .iter()
-                    .filter_map(|(key, creds)| {
-                        creds
-                            .hub_type
-                            .as_ref()
-                            .map(|ht| (ht.as_str().to_string(), key.clone()))
-                    })
-                    .collect()
-            };
-            for (ht, key) in &hub_entries {
-                if let Some(i) = hub::find_integration(hub::INTEGRATIONS, ht) {
-                    i.post_connect(&state, key);
-                }
-            }
-        }
-    }
-
     // Spawn event loop on a dedicated std::thread (not tokio)
     {
         let event_state = state.clone();
         std::thread::Builder::new()
             .name("event-loop".to_string())
             .spawn(move || {
-                rhythm_os::event_loop::run_event_loop(event_state, hub_event_rxs);
+                rhythm_os::event_loop::run_event_loop(event_state, Vec::new());
             })
             .expect("Failed to spawn event loop thread");
     }
@@ -259,7 +185,115 @@ async fn run_server(state: SharedState, port: u16) -> Result<()> {
     // Register mDNS service for auto-discovery by clients
     let _mdns = rhythm_os::mdns::register_mdns_service(port, "addon", VERSION, "rhythm-addon");
 
+    // Bootstrap configured hubs on a blocking background thread after the
+    // listener is up so clients can connect immediately during hub sync.
+    spawn_hub_bootstrap(state.clone());
+
     axum::serve(listener, server).await?;
 
     Ok(())
+}
+
+fn spawn_hub_bootstrap(state: SharedState) {
+    info!(
+        target: "sys",
+        "Starting hub bootstrap in background; HTTP startup will not wait for hub sync"
+    );
+
+    std::thread::Builder::new()
+        .name("hub-bootstrap".to_string())
+        .spawn(move || bootstrap_hubs(&state))
+        .expect("Failed to spawn hub bootstrap thread");
+}
+
+fn bootstrap_hubs(state: &SharedState) {
+    let all_creds: Vec<(rhythm_os::canonical::identity::HubKey, String)> = match state.lock() {
+        Ok(s) => s
+            .hub_credentials
+            .iter()
+            .filter_map(|(key, creds)| {
+                creds
+                    .hub_type
+                    .as_ref()
+                    .map(|ht| (key.clone(), ht.as_str().to_string()))
+            })
+            .collect(),
+        Err(_) => {
+            warn!(target: "sys", "Hub bootstrap aborted: state lock poisoned");
+            return;
+        }
+    };
+
+    if all_creds.is_empty() {
+        info!(target: "sys", "No hub configured, waiting for credentials via HTTP");
+        return;
+    }
+
+    for (key, hub_type_str) in &all_creds {
+        if let Some(integration) = hub::find_integration(hub::INTEGRATIONS, hub_type_str) {
+            integration.refresh_credentials(state, key);
+        }
+    }
+
+    for (key, hub_type_str) in &all_creds {
+        if let Some(integration) = hub::find_integration(hub::INTEGRATIONS, hub_type_str) {
+            info!(target: "sys", "Connecting hub {} (type={})...", key, hub_type_str);
+            match integration.connect_and_start(state.clone(), key) {
+                Ok(rx) => {
+                    if let Ok(mut s) = state.lock() {
+                        s.pending_hub_event_rxs.push(rx);
+                    } else {
+                        warn!(
+                            target: "sys",
+                            "Connected hub {} but failed to register its event stream",
+                            key
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        target: "sys",
+                        "Failed to connect hub {}: {} (will retry on credential push)",
+                        key,
+                        e
+                    );
+                }
+            }
+        } else {
+            warn!(
+                target: "sys",
+                "No integration for hub type '{}', skipping {}",
+                hub_type_str,
+                key
+            );
+        }
+    }
+
+    let has_hub = state.lock().map(|s| s.has_any_hub()).unwrap_or(false);
+    if !has_hub {
+        return;
+    }
+
+    if let Err(e) = rhythm_os::room_sync::sync_all_hubs(state) {
+        warn!(target: "sys", "Initial room sync failed: {}", e);
+    }
+    rhythm_os::room_sync::poll_initial_light_state(state);
+
+    let hub_entries: Vec<(String, rhythm_os::canonical::identity::HubKey)> = match state.lock() {
+        Ok(s) => s
+            .hubs
+            .iter()
+            .map(|(key, hub)| (hub.hub_type.as_str().to_string(), key.clone()))
+            .collect(),
+        Err(_) => {
+            warn!(target: "sys", "Skipping post-connect hooks: state lock poisoned");
+            return;
+        }
+    };
+
+    for (hub_type_str, key) in &hub_entries {
+        if let Some(integration) = hub::find_integration(hub::INTEGRATIONS, hub_type_str) {
+            integration.post_connect(state, key);
+        }
+    }
 }

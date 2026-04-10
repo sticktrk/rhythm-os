@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use rhythm_core::{
-    default_builtin_profiles, default_mode_configs, default_mode_transition_configs, ButtonAction,
-    LightProfileConfig, ModeConfig, ModeTransitionConfig, ModeTransitionTrigger, RhythmMode,
-    RuntimeConfig, RuntimeHandle,
+    default_builtin_profiles, default_mode_configs, default_mode_transition_configs,
+    normalize_mode_transition_configs, ButtonAction, LightProfileConfig, ModeChangeCause,
+    ModeConfig, ModeTransitionConfig, RhythmMode, RuntimeConfig, RuntimeHandle,
 };
 use rhythm_profile::profile_config::DEFAULT_FADE_MS;
 
@@ -145,8 +145,10 @@ pub struct AppState {
     pub mode_transition_configs: Vec<ModeTransitionConfig>,
     /// The currently active global mode.
     pub active_mode: RhythmMode,
-    /// Trigger that last changed the active mode.
-    pub last_active_mode_trigger: ModeTransitionTrigger,
+    /// Cause of the most recent active mode change.
+    pub last_active_mode_cause: ModeChangeCause,
+    /// Saved transition that most recently changed the active mode, if any.
+    pub last_active_mode_transition_id: Option<String>,
     /// UTC timestamp of the most recent active mode change.
     pub last_active_mode_change_utc_ms: Option<i64>,
     /// Runtime configuration.
@@ -354,7 +356,8 @@ impl Default for AppState {
             mode_configs: default_mode_config_map(),
             mode_transition_configs: default_mode_transition_configs(),
             active_mode: RhythmMode::Day,
-            last_active_mode_trigger: ModeTransitionTrigger::Manual,
+            last_active_mode_cause: ModeChangeCause::Manual,
+            last_active_mode_transition_id: None,
             last_active_mode_change_utc_ms: Some(now_utc_ms),
             runtime_config: RuntimeConfig::default().with_solar_noon(12.5),
             utc_offset_hours: 0.0,
@@ -441,7 +444,7 @@ impl AppState {
     where
         I: IntoIterator<Item = ModeTransitionConfig>,
     {
-        self.mode_transition_configs = configs.into_iter().collect();
+        self.mode_transition_configs = normalize_mode_transition_configs(configs);
     }
 
     /// Resolve the selected base profile ID for a mode, falling back to the

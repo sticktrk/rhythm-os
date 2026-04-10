@@ -90,6 +90,10 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["GET", "PUT"],
     },
     SharedRoute {
+        path: "/api/transitions/:id/trigger",
+        methods: &["POST"],
+    },
+    SharedRoute {
         path: "/api/profiles",
         methods: &["GET"],
     },

@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use log::info;
+use log::debug;
 use rhythm_core::controller::{LightControlError, LightControlResult, LightController};
 use rhythm_core::lighting::LightingCommand;
 use rhythm_core::room::Room;
@@ -98,19 +98,19 @@ impl<H: HaTransport + 'static> LightController for HaLightController<H> {
             })?;
 
         if let Some((x, y)) = adapted.xy {
-            info!(target: "cmd",
+            debug!(target: "cmd",
                 "HA turn_on: room={} bri={} xy=({:.3},{:.3}) rgb=({},{},{})",
                 room_label, adapted.brightness.unwrap_or(0),
                 x, y,
                 command.rgb.r, command.rgb.g, command.rgb.b,
             );
         } else if let Some(kelvin) = adapted.kelvin {
-            info!(target: "cmd",
+            debug!(target: "cmd",
                 "HA turn_on: room={} bri={} kelvin={}",
                 room_label, adapted.brightness.unwrap_or(0), kelvin
             );
         } else {
-            info!(target: "cmd", "HA turn_on: room={} bri={}", room_label, adapted.brightness.unwrap_or(0));
+            debug!(target: "cmd", "HA turn_on: room={} bri={}", room_label, adapted.brightness.unwrap_or(0));
         }
 
         Ok(())
@@ -132,7 +132,7 @@ impl<H: HaTransport + 'static> LightController for HaLightController<H> {
                 ))
             })?;
 
-        info!(target: "cmd", "HA turn_off: room={}", room_label);
+        debug!(target: "cmd", "HA turn_off: room={}", room_label);
 
         Ok(())
     }

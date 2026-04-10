@@ -7,7 +7,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use log::info;
+use log::debug;
 use rhythm_core::controller::{LightControlError, LightControlResult, LightController};
 use rhythm_core::lighting::LightingCommand;
 use rhythm_core::room::Room;
@@ -103,21 +103,22 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
             })?;
 
         if let Some((x, y)) = adapted.xy {
-            info!(target: "cmd",
-                "Hue turn_on: room={} bri={} xy=({:.3},{:.3}) rgb=({},{},{})",
+            debug!(target: "cmd",
+                "Hue turn_on: room={} bri={} transition_ms={:?} xy=({:.3},{:.3}) rgb=({},{},{})",
                 room_label, adapted.brightness.unwrap_or(0),
+                adapted.transition_ms,
                 x, y,
                 command.rgb.r, command.rgb.g, command.rgb.b,
             );
         } else if let Some(kelvin) = adapted.kelvin {
-            info!(target: "cmd",
-                "Hue turn_on: room={} bri={} kelvin={}",
-                room_label, adapted.brightness.unwrap_or(0), kelvin
+            debug!(target: "cmd",
+                "Hue turn_on: room={} bri={} kelvin={} transition_ms={:?}",
+                room_label, adapted.brightness.unwrap_or(0), kelvin, adapted.transition_ms
             );
         } else {
-            info!(target: "cmd",
-                "Hue turn_on: room={} bri={}",
-                room_label, adapted.brightness.unwrap_or(0)
+            debug!(target: "cmd",
+                "Hue turn_on: room={} bri={} transition_ms={:?}",
+                room_label, adapted.brightness.unwrap_or(0), adapted.transition_ms
             );
         }
 
@@ -148,7 +149,7 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
             })?;
 
         let _ = grouped_light_id;
-        info!(target: "cmd", "Hue turn_off: room={}", room_label);
+        debug!(target: "cmd", "Hue turn_off: room={}", room_label);
 
         Ok(())
     }

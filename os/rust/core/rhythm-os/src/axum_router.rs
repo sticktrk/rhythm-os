@@ -63,6 +63,10 @@ fn shared_routes() -> Router<SharedState> {
             "/api/transitions",
             get(get_transitions).put(put_transitions),
         )
+        .route(
+            "/api/transitions/:id/trigger",
+            post(post_transition_trigger),
+        )
         .route("/api/profiles", get(get_profiles))
         .route(
             "/api/hub/credentials",
@@ -221,6 +225,13 @@ async fn get_transitions(State(state): State<SharedState>) -> ApiResponse {
 
 async fn put_transitions(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {
     run_blocking(move || handlers::handle_put_transitions(&state, &body)).await
+}
+
+async fn post_transition_trigger(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_post_transition_trigger(&state, &id)).await
 }
 
 async fn get_profiles(State(state): State<SharedState>) -> ApiResponse {

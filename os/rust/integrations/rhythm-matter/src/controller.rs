@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use log::{info, warn};
+use log::{debug, warn};
 use rhythm_core::controller::{LightControlError, LightControlResult, LightController};
 use rhythm_core::lighting::LightingCommand;
 use rhythm_core::room::Room;
@@ -180,7 +180,7 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
                 failed_devices,
             );
         } else if command.is_direct_color || command.kelvin == 0 {
-            info!(target: "cmd",
+            debug!(target: "cmd",
                 "Matter turn_on: room={} bri={} xy=({:.3},{:.3}) rgb=({},{},{}) devices={}",
                 room_label, command.brightness,
                 command.xy.x, command.xy.y,
@@ -188,7 +188,7 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
                 device_ids.len(),
             );
         } else {
-            info!(target: "cmd",
+            debug!(target: "cmd",
                 "Matter turn_on: room={} bri={} kelvin={} devices={}",
                 room_label, command.brightness, command.kelvin, device_ids.len()
             );
@@ -239,7 +239,7 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
             );
         }
 
-        info!(target: "cmd", "Matter turn_off: room={} devices={}", room_label, device_ids.len());
+        debug!(target: "cmd", "Matter turn_off: room={} devices={}", room_label, device_ids.len());
         Ok(())
     }
 

@@ -15,8 +15,8 @@ use log::{debug, info, warn};
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::{
     ButtonAction, HubRegistry, InputEvent, LightProfileConfig, LightProfileRegistry,
-    LightingCommand, ModeConfig, ModeTransitionTrigger, RhythmMode, RoomModeState,
-    RoomProfileSettings, RuntimeHandle, TimerSetting,
+    LightingCommand, ModeChangeCause, ModeConfig, ModeTransitionConfig, ModeTransitionTrigger,
+    RhythmMode, RoomModeState, RoomProfileSettings, RuntimeHandle, TimerSetting,
 };
 use serde_json::Value;
 
@@ -156,6 +156,24 @@ impl ModeOutputApplyScope {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ModeChangeContext {
+    cause: ModeChangeCause,
+    transition: Option<ModeTransitionConfig>,
+}
+
+impl ModeChangeContext {
+    fn new(cause: ModeChangeCause, transition: Option<ModeTransitionConfig>) -> Self {
+        Self { cause, transition }
+    }
+
+    fn transition_id(&self) -> Option<String> {
+        self.transition
+            .as_ref()
+            .map(|transition| transition.id.clone())
+    }
+}
+
 fn mode_output_apply_scope(
     mode_changed: bool,
     previous_config: &ModeConfig,
@@ -177,6 +195,26 @@ fn warning_uses_custom_profile(mode_configs: &[ModeConfig], mode: RhythmMode) ->
     mode_config_for_mode(mode_configs, mode)
         .and_then(|config| config.warning_profile_id.as_deref())
         .is_some()
+}
+
+fn mode_change_cause_from_trigger(trigger: ModeTransitionTrigger) -> ModeChangeCause {
+    if trigger.is_manual() {
+        ModeChangeCause::Manual
+    } else {
+        ModeChangeCause::Schedule
+    }
+}
+
+fn matching_mode_transition(
+    state: &SharedState,
+    from_mode: RhythmMode,
+    to_mode: RhythmMode,
+    trigger: ModeTransitionTrigger,
+) -> Option<ModeTransitionConfig> {
+    let Ok(s) = state.lock() else { return None };
+    s.mode_transition_configs().into_iter().find(|config| {
+        config.from_mode == from_mode && config.to_mode == to_mode && config.trigger == trigger
+    })
 }
 
 fn resolved_active_profile_id_for_mode_from_parts(
@@ -532,7 +570,8 @@ fn persist_settings_locked(s: &AppState) {
         if let Err(e) = storage.save_settings(&crate::storage::StoredSettings {
             power_save: s.power_save,
             active_mode: s.active_mode,
-            last_active_mode_trigger: s.last_active_mode_trigger,
+            last_active_mode_cause: s.last_active_mode_cause,
+            last_active_mode_transition_id: s.last_active_mode_transition_id.clone(),
             last_active_mode_change_utc_ms: s.last_active_mode_change_utc_ms,
             modes: s.mode_configs(),
             mode_transitions: s.mode_transition_configs(),
@@ -564,7 +603,8 @@ pub(crate) fn sync_active_mode_from_runtime(
                 active
             );
             s.active_mode = active;
-            s.last_active_mode_trigger = ModeTransitionTrigger::Manual;
+            s.last_active_mode_cause = ModeChangeCause::Manual;
+            s.last_active_mode_transition_id = None;
             s.last_active_mode_change_utc_ms = Some(chrono::Utc::now().timestamp_millis());
             s.sync_active_mode_runtime_overrides();
             persist_settings_locked(&s);
@@ -1393,7 +1433,8 @@ fn build_mode_dto_inner(s: &AppState) -> ModeSettingsDto {
     ModeSettingsDto {
         active: s.active_mode,
         last_change: ModeLastChangeDto {
-            trigger: s.last_active_mode_trigger,
+            cause: s.last_active_mode_cause,
+            transition_id: s.last_active_mode_transition_id.clone(),
             epoch_ms: last_change_utc_ms,
         },
         configs: s.mode_configs(),
@@ -1554,6 +1595,7 @@ fn apply_room_commands_inline(
     let room_count = room_commands.len();
 
     for (idx, (room_id, command)) in room_commands.into_iter().enumerate() {
+        log_room_command_dispatch(runtime.as_ref(), &room_id, &command);
         if let Err(e) = runtime.apply_room_command(&room_id, command) {
             warn!(target: "cmd", "active_mode_apply: room '{}' failed: {}", room_id, e);
             continue;
@@ -1563,6 +1605,59 @@ fn apply_room_commands_inline(
             std::thread::sleep(phase_gap);
         }
     }
+}
+
+fn room_command_log_label(runtime: &dyn RuntimeHandle, room_id: &str) -> String {
+    runtime
+        .engine_room_snapshot(room_id)
+        .map(|room| {
+            if room.name != room.id {
+                format!("{} ({})", room.name, room.id)
+            } else {
+                room.id
+            }
+        })
+        .unwrap_or_else(|| room_id.to_string())
+}
+
+fn room_command_log_payload(command: &LightingCommand) -> String {
+    if command.is_direct_color {
+        format!(
+            "bri={} rgb=({},{},{}) xy=({:.3},{:.3}) transition_ms={:?} direct_color=true",
+            command.brightness,
+            command.rgb.r,
+            command.rgb.g,
+            command.rgb.b,
+            command.xy.x,
+            command.xy.y,
+            command.transition_ms
+        )
+    } else {
+        format!(
+            "bri={} kelvin={} rgb=({},{},{}) xy=({:.3},{:.3}) transition_ms={:?} direct_color=false",
+            command.brightness,
+            command.kelvin,
+            command.rgb.r,
+            command.rgb.g,
+            command.rgb.b,
+            command.xy.x,
+            command.xy.y,
+            command.transition_ms
+        )
+    }
+}
+
+pub(crate) fn log_room_command_dispatch(
+    runtime: &dyn RuntimeHandle,
+    room_id: &str,
+    command: &LightingCommand,
+) {
+    info!(
+        target: "cmd",
+        "room_command_dispatch: room={} {}",
+        room_command_log_label(runtime, room_id),
+        room_command_log_payload(command),
+    );
 }
 
 fn dispatch_room_commands(
@@ -1686,15 +1781,13 @@ fn apply_active_mode_outputs(
     state: &SharedState,
     previous_mode: RhythmMode,
     target_mode: RhythmMode,
-    mode_changed: bool,
-    transition_trigger: Option<ModeTransitionTrigger>,
+    transition: Option<ModeTransitionConfig>,
     apply_scope: ModeOutputApplyScope,
 ) {
     let (
         runtime,
         light_profile_configs,
         mode_configs,
-        mode_transition_configs,
         solar_noon,
         latitude,
         utc_offset,
@@ -1708,7 +1801,6 @@ fn apply_active_mode_outputs(
             s.hub_runtime(),
             s.light_profile_configs.clone(),
             s.mode_configs(),
-            s.mode_transition_configs(),
             s.solar_noon_hour(),
             s.latitude.unwrap_or(35.0),
             s.utc_offset_hours,
@@ -1721,11 +1813,10 @@ fn apply_active_mode_outputs(
 
     debug!(
         target: "cmd",
-        "active_mode_apply: {:?} -> {:?} changed={} trigger={:?}",
+        "active_mode_apply: {:?} -> {:?} transition_id={:?}",
         previous_mode,
         target_mode,
-        mode_changed,
-        transition_trigger
+        transition.as_ref().map(|config| config.id.as_str())
     );
 
     let Some(runtime) = runtime else {
@@ -1739,15 +1830,6 @@ fn apply_active_mode_outputs(
         return;
     };
 
-    let transition = if mode_changed {
-        mode_transition_configs.into_iter().find(|config| {
-            config.from_mode == previous_mode
-                && config.to_mode == target_mode
-                && transition_trigger.is_some_and(|trigger| config.trigger == trigger)
-        })
-    } else {
-        None
-    };
     let transition_duration_ms = transition
         .as_ref()
         .map(|config| config.duration_ms)
@@ -1762,16 +1844,6 @@ fn apply_active_mode_outputs(
     let mut preserved_hard_off = 0usize;
     let mut hidden_rooms = 0usize;
     let mut unresolved_rooms = 0usize;
-
-    if mode_changed && transition.is_none() {
-        debug!(
-            target: "cmd",
-            "active_mode_apply: no matching transition config for {:?} -> {:?} with trigger {:?}",
-            previous_mode,
-            target_mode,
-            transition_trigger
-        );
-    }
 
     for snap in &snapshots {
         let room_state = room_mode_state_from_flags(
@@ -1885,10 +1957,14 @@ fn do_settings_set_internal(
     active_mode: Option<RhythmMode>,
     mode_configs: Option<Vec<ModeConfig>>,
     mode_transitions: Option<Vec<rhythm_core::ModeTransitionConfig>>,
-    transition_trigger: Option<ModeTransitionTrigger>,
+    mode_change: Option<ModeChangeContext>,
+    force_reapply_outputs: bool,
 ) -> Result<String> {
     let requested_mode_config_count = mode_configs.as_ref().map(Vec::len);
     let requested_transition_count = mode_transitions.as_ref().map(Vec::len);
+    let transition_for_apply = mode_change
+        .as_ref()
+        .and_then(|change| change.transition.clone());
     let (
         rooms_to_off,
         runtimes,
@@ -1898,6 +1974,7 @@ fn do_settings_set_internal(
         selected_mode,
         mode_changed,
         reapply_scope,
+        mode_change,
     ) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let previous_mode = s.active_mode;
@@ -1928,15 +2005,18 @@ fn do_settings_set_internal(
         let mut mode_changed = false;
         if let Some(mode) = active_mode {
             mode_changed = s.active_mode != mode;
-            if mode_changed {
+            if mode_changed || force_reapply_outputs {
                 s.active_mode = mode;
-                s.last_active_mode_trigger =
-                    transition_trigger.unwrap_or(ModeTransitionTrigger::Manual);
+                let change = mode_change
+                    .clone()
+                    .unwrap_or_else(|| ModeChangeContext::new(ModeChangeCause::Manual, None));
+                s.last_active_mode_cause = change.cause;
+                s.last_active_mode_transition_id = change.transition_id();
                 s.last_active_mode_change_utc_ms = Some(chrono::Utc::now().timestamp_millis());
             }
         }
         let selected_mode = s.active_mode;
-        let should_reapply_mode_outputs = modes_updated || mode_changed;
+        let should_reapply_mode_outputs = modes_updated || mode_changed || force_reapply_outputs;
         let mut active_profile_id = None;
         let mut updated_mode_configs = None;
         let mut runtimes = Vec::new();
@@ -1950,8 +2030,11 @@ fn do_settings_set_internal(
                 .and_then(|configs| configs.iter().find(|config| config.mode == selected_mode))
                 .cloned()
                 .unwrap_or_else(|| ModeConfig::default_for_mode(selected_mode));
-            reapply_scope =
-                mode_output_apply_scope(mode_changed, &previous_mode_config, &updated_mode_config);
+            reapply_scope = if force_reapply_outputs {
+                ModeOutputApplyScope::all_visible()
+            } else {
+                mode_output_apply_scope(mode_changed, &previous_mode_config, &updated_mode_config)
+            };
             runtimes = s
                 .hubs
                 .values()
@@ -1969,6 +2052,7 @@ fn do_settings_set_internal(
             selected_mode,
             mode_changed,
             reapply_scope,
+            mode_change,
         )
     };
 
@@ -1978,13 +2062,17 @@ fn do_settings_set_internal(
     if let Some(count) = requested_transition_count {
         info!(target: "cmd", "settings: updated {} mode transitions", count);
     }
-    if mode_changed {
+    if mode_changed || force_reapply_outputs {
         info!(
             target: "cmd",
-            "settings: active_mode {:?} -> {:?} ({:?})",
+            "settings: active_mode {:?} -> {:?} cause={:?} transition_id={:?}",
             previous_mode,
             selected_mode,
-            transition_trigger.unwrap_or(ModeTransitionTrigger::Manual)
+            mode_change
+                .as_ref()
+                .map(|change| change.cause)
+                .unwrap_or(ModeChangeCause::Manual),
+            mode_change.as_ref().and_then(|change| change.transition_id())
         );
     }
 
@@ -2040,8 +2128,7 @@ fn do_settings_set_internal(
                 state,
                 previous_mode,
                 selected_mode,
-                mode_changed,
-                transition_trigger,
+                transition_for_apply,
                 reapply_scope,
             );
         } else {
@@ -2072,7 +2159,14 @@ pub fn do_settings_set(
         active_mode,
         mode_configs,
         mode_transitions,
-        active_mode.map(|_| ModeTransitionTrigger::Manual),
+        active_mode.map(|mode| {
+            let previous_mode = state.lock().ok().map(|s| s.active_mode).unwrap_or(mode);
+            ModeChangeContext::new(
+                ModeChangeCause::Manual,
+                matching_mode_transition(state, previous_mode, mode, ModeTransitionTrigger::Manual),
+            )
+        }),
+        false,
     )
 }
 
@@ -2082,13 +2176,21 @@ pub fn do_mode_set(
     active_mode: Option<RhythmMode>,
     mode_configs: Option<Vec<ModeConfig>>,
 ) -> Result<String> {
+    let mode_change = active_mode.map(|mode| {
+        let previous_mode = state.lock().ok().map(|s| s.active_mode).unwrap_or(mode);
+        ModeChangeContext::new(
+            ModeChangeCause::Manual,
+            matching_mode_transition(state, previous_mode, mode, ModeTransitionTrigger::Manual),
+        )
+    });
     do_settings_set_internal(
         state,
         None,
         active_mode,
         mode_configs,
         None,
-        active_mode.map(|_| ModeTransitionTrigger::Manual),
+        mode_change,
+        false,
     )?;
     build_mode(state)
 }
@@ -2098,7 +2200,7 @@ pub fn do_transitions_set(
     state: &SharedState,
     mode_transitions: Option<Vec<rhythm_core::ModeTransitionConfig>>,
 ) -> Result<String> {
-    do_settings_set_internal(state, None, None, None, mode_transitions, None)?;
+    do_settings_set_internal(state, None, None, None, mode_transitions, None, false)?;
     build_transitions(state)
 }
 
@@ -2111,7 +2213,44 @@ pub fn do_set_active_mode_with_trigger(
     mode: RhythmMode,
     trigger: ModeTransitionTrigger,
 ) -> Result<()> {
-    do_settings_set_internal(state, None, Some(mode), None, None, Some(trigger)).map(|_| ())
+    let previous_mode = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .active_mode;
+    let transition = matching_mode_transition(state, previous_mode, mode, trigger);
+    let mode_change = ModeChangeContext::new(mode_change_cause_from_trigger(trigger), transition);
+    do_settings_set_internal(
+        state,
+        None,
+        Some(mode),
+        None,
+        None,
+        Some(mode_change),
+        false,
+    )
+    .map(|_| ())
+}
+
+pub fn do_trigger_transition(state: &SharedState, transition_id: &str) -> Result<String> {
+    let transition = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.mode_transition_configs()
+            .into_iter()
+            .find(|config| config.id == transition_id)
+    }
+    .ok_or_else(|| anyhow::anyhow!("Unknown transition '{}'", transition_id))?;
+
+    let mode_change = ModeChangeContext::new(ModeChangeCause::Manual, Some(transition.clone()));
+    do_settings_set_internal(
+        state,
+        None,
+        Some(transition.to_mode),
+        None,
+        None,
+        Some(mode_change),
+        true,
+    )?;
+    build_mode(state)
 }
 
 // ============================================================================
@@ -5390,7 +5529,8 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             s.power_save = true;
-            s.last_active_mode_trigger = ModeTransitionTrigger::AstronomicalTwilight;
+            s.last_active_mode_cause = ModeChangeCause::Schedule;
+            s.last_active_mode_transition_id = Some("sleep_to_day".into());
             s.last_active_mode_change_utc_ms = Some(1_700_000_000_000);
         }
         let dto = build_settings_dto(&state).unwrap();
@@ -5402,13 +5542,15 @@ mod tests {
         let (state, _rt) = setup_state(vec![]);
         {
             let mut s = state.lock().unwrap();
-            s.last_active_mode_trigger = ModeTransitionTrigger::AstronomicalTwilight;
+            s.last_active_mode_cause = ModeChangeCause::Schedule;
+            s.last_active_mode_transition_id = Some("sleep_to_day".into());
             s.last_active_mode_change_utc_ms = Some(1_700_000_000_000);
         }
         let dto = build_mode_dto(&state).unwrap();
+        assert_eq!(dto.last_change.cause, ModeChangeCause::Schedule);
         assert_eq!(
-            dto.last_change.trigger,
-            ModeTransitionTrigger::AstronomicalTwilight
+            dto.last_change.transition_id.as_deref(),
+            Some("sleep_to_day")
         );
         assert_eq!(dto.last_change.epoch_ms, 1_700_000_000_000);
     }
@@ -5975,6 +6117,41 @@ mod tests {
             .unwrap()
             .room_mode_transitions
             .contains_key("r1"));
+    }
+
+    #[test]
+    fn triggering_transition_by_id_reapplies_saved_transition() {
+        let (state, runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
+        let transition_id = {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Sleep;
+            s.room_lights_on.insert("r1".into(), true);
+            s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
+                RhythmMode::Day,
+                RhythmMode::Sleep,
+                4_000,
+            )
+            .with_trigger(ModeTransitionTrigger::NauticalTwilight)]);
+            s.mode_transition_configs()[0].id.clone()
+        };
+
+        let json = do_trigger_transition(&state, &transition_id).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["active"], "sleep");
+        assert_eq!(parsed["last_change"]["cause"], "manual");
+        assert_eq!(parsed["last_change"]["transition_id"], transition_id);
+
+        let applied = runtime.applied_commands();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].0, "r1");
+        assert_eq!(applied[0].1.transition_ms, Some(4_000));
+
+        let s = state.lock().unwrap();
+        assert_eq!(s.last_active_mode_cause, ModeChangeCause::Manual);
+        assert_eq!(
+            s.last_active_mode_transition_id.as_deref(),
+            Some(transition_id.as_str())
+        );
     }
 
     #[test]

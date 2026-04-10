@@ -16,6 +16,7 @@ use crate::reqwest_transport::ReqwestHaTransport;
 use crate::transport::HaConnectionConfig;
 use crate::ws_client::start_ha_ws;
 
+use rhythm_os::button_resolve::RawButtonEvent;
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::hub::{ActiveHub, ExternalLightHubIntegration, HubEvent, HubProvider, HubType};
 use rhythm_os::state::SharedState;
@@ -380,6 +381,30 @@ fn start_event_stream(
     device_area_cache: Arc<Mutex<HashMap<String, String>>>,
 ) -> Receiver<HubEvent> {
     let ws_rx = start_ha_ws(config, shutdown.clone());
+    let button_registry = registry.clone();
+    let button_cache = device_area_cache.clone();
+    let on_unknown_button: Arc<dyn Fn(&RawButtonEvent) + Send + Sync> =
+        Arc::new(move |evt: &RawButtonEvent| {
+            crate::events::register_unknown_button_from_cache(evt, &button_registry, &button_cache);
+        });
 
-    crate::ha_lifecycle::start_event_translator(ws_rx, registry, device_area_cache, shutdown, None)
+    let motion_registry = registry.clone();
+    let motion_cache = device_area_cache;
+    let on_unknown_motion: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |sensor_id: &str| {
+        crate::events::register_unknown_motion_from_cache(
+            sensor_id,
+            &motion_registry,
+            &motion_cache,
+        );
+    });
+
+    crate::ha_lifecycle::start_event_translator(
+        ws_rx,
+        registry,
+        shutdown,
+        None,
+        Some(on_unknown_button),
+        Some(on_unknown_motion),
+        None,
+    )
 }

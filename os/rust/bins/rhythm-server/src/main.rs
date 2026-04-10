@@ -76,6 +76,8 @@ fn main() -> Result<()> {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.event_tx = Some(event_tx);
         s.firmware_version = Box::leak(VERSION.to_string().into_boxed_str());
+        s.platform_type = "desktop";
+        s.platform_context = "server";
         s.listen_port = Some(args.port);
         s.data_dir = data_dir.clone();
         s.storage = Some(Box::new(file_storage));

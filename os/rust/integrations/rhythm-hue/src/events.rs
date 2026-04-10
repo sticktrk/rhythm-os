@@ -10,27 +10,19 @@ use std::sync::{Arc, Mutex};
 
 use log::info;
 
+use rhythm_os::button_resolve::RawButtonEvent;
 use rhythm_os::hub::HubEvent;
 use rhythm_os::registry::HubDeviceRegistry;
 
-/// Translate a raw Hue SSE event into zero or more hub-agnostic events.
-///
-/// For button events: uses the shared `resolve_button_event` pattern —
-/// registry lookup → discovery if unknown → map to `ButtonAction` → emit.
-///
-/// If `on_unknown_device` is provided, it is called when a button_id or
-/// motion_id is not found in the registry. The callback receives the
-/// resource_id and resource_type ("button" or "motion") so it can call
-/// `discover_device()`. After the callback returns, the registry is re-checked.
-pub fn translate_sse_event(
+fn translate_sse_event_with_hooks(
     registry: &Arc<Mutex<HubDeviceRegistry>>,
     event: crate::sse::HueSseEvent,
     on_activity: Option<&dyn Fn()>,
-    on_unknown_button: Option<&dyn Fn(&str)>,
+    on_unknown_button: Option<&dyn Fn(&RawButtonEvent)>,
     on_unknown_motion: Option<&dyn Fn(&str)>,
 ) -> Vec<HubEvent> {
     use crate::sse::HueSseEvent;
-    use rhythm_os::button_resolve::{resolve_button_event, RawButtonEvent};
+    use rhythm_os::button_resolve::resolve_button_event;
     use rhythm_os::hue_buttons::map_hue_button_str;
 
     match event {
@@ -53,19 +45,7 @@ pub fn translate_sse_event(
                 device_hint: None,
             };
 
-            // Adapt the old-style Fn(&str) callback to the new Fn(&RawButtonEvent)
-            let adapter = on_unknown_button.map(|cb| {
-                move |evt: &RawButtonEvent| {
-                    cb(evt.button_id);
-                }
-            });
-
-            resolve_button_event(
-                registry,
-                &raw,
-                adapter.as_ref().map(|f| f as &dyn Fn(&RawButtonEvent)),
-                &map_hue_button_str,
-            )
+            resolve_button_event(registry, &raw, on_unknown_button, &map_hue_button_str)
         }
 
         HueSseEvent::MotionEvent {
@@ -129,6 +109,37 @@ pub fn translate_sse_event(
     }
 }
 
+/// Translate a raw Hue SSE event into zero or more hub-agnostic events.
+///
+/// For button events: uses the shared `resolve_button_event` pattern —
+/// registry lookup → discovery if unknown → map to `ButtonAction` → emit.
+///
+/// If `on_unknown_device` is provided, it is called when a button_id or
+/// motion_id is not found in the registry. The callback receives the
+/// resource_id and resource_type ("button" or "motion") so it can call
+/// `discover_device()`. After the callback returns, the registry is re-checked.
+pub fn translate_sse_event(
+    registry: &Arc<Mutex<HubDeviceRegistry>>,
+    event: crate::sse::HueSseEvent,
+    on_activity: Option<&dyn Fn()>,
+    on_unknown_button: Option<&dyn Fn(&str)>,
+    on_unknown_motion: Option<&dyn Fn(&str)>,
+) -> Vec<HubEvent> {
+    let adapter = on_unknown_button.map(|cb| {
+        move |evt: &RawButtonEvent| {
+            cb(evt.button_id);
+        }
+    });
+
+    translate_sse_event_with_hooks(
+        registry,
+        event,
+        on_activity,
+        adapter.as_ref().map(|f| f as &dyn Fn(&RawButtonEvent)),
+        on_unknown_motion,
+    )
+}
+
 /// Spawn a translator thread that converts raw SSE events to hub-agnostic `HubEvent`s.
 ///
 /// Takes a `Receiver<HueSseEvent>` (from the platform's SSE reader) and spawns
@@ -140,7 +151,7 @@ pub fn start_event_translator(
     registry: Arc<Mutex<HubDeviceRegistry>>,
     shutdown: Arc<AtomicBool>,
     on_activity: Option<Arc<dyn Fn() + Send + Sync>>,
-    on_unknown_button: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    on_unknown_button: Option<Arc<dyn Fn(&RawButtonEvent) + Send + Sync>>,
     on_unknown_motion: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     stack_size: Option<usize>,
 ) -> Receiver<HubEvent> {
@@ -149,13 +160,13 @@ pub fn start_event_translator(
         move |event| {
             let activity_ref: Option<&dyn Fn()> =
                 on_activity.as_ref().map(|f| f.as_ref() as &dyn Fn());
-            let unknown_ref: Option<&dyn Fn(&str)> = on_unknown_button
+            let unknown_ref: Option<&dyn Fn(&RawButtonEvent)> = on_unknown_button
                 .as_ref()
-                .map(|f| f.as_ref() as &dyn Fn(&str));
+                .map(|f| f.as_ref() as &dyn Fn(&RawButtonEvent));
             let motion_ref: Option<&dyn Fn(&str)> = on_unknown_motion
                 .as_ref()
                 .map(|f| f.as_ref() as &dyn Fn(&str));
-            translate_sse_event(
+            translate_sse_event_with_hooks(
                 &registry,
                 event.clone(),
                 activity_ref,

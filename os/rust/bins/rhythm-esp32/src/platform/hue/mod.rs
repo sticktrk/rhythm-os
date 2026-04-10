@@ -91,44 +91,46 @@ pub fn start_event_stream(
     let btn_state = discovery_state.clone();
     let btn_ensure = ensure_transport.clone();
 
-    let on_unknown_button: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |button_id: &str| {
-        info!(target: "evt", "SSE: Unknown button {}, attempting on-demand discovery...", button_id);
+    let on_unknown_button: Arc<dyn Fn(&rhythm_os::button_resolve::RawButtonEvent) + Send + Sync> =
+        Arc::new(move |button: &rhythm_os::button_resolve::RawButtonEvent| {
+            let button_id = button.button_id;
+            info!(target: "evt", "SSE: Unknown button {}, attempting on-demand discovery...", button_id);
 
-        if !btn_ensure() {
-            return;
-        }
+            if !btn_ensure() {
+                return;
+            }
 
-        let result = {
-            let guard = match btn_transport.lock() {
-                Ok(g) => g,
-                Err(_) => return,
+            let result = {
+                let guard = match btn_transport.lock() {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                let transport = match guard.as_ref() {
+                    Some(t) => t,
+                    None => return,
+                };
+                rhythm_hue::discovery::discover_device(
+                    transport,
+                    &btn_username,
+                    button_id,
+                    "button",
+                    &btn_registry,
+                )
             };
-            let transport = match guard.as_ref() {
-                Some(t) => t,
-                None => return,
-            };
-            rhythm_hue::discovery::discover_device(
-                transport,
-                &btn_username,
-                button_id,
-                "button",
-                &btn_registry,
-            )
-        };
 
-        match result {
-            Ok(true) => {
-                info!(target: "evt", "SSE: On-demand discovery succeeded for button {}", button_id);
-                rhythm_os::commands::persist_registry(&btn_state);
+            match result {
+                Ok(true) => {
+                    info!(target: "evt", "SSE: On-demand discovery succeeded for button {}", button_id);
+                    rhythm_os::commands::persist_registry(&btn_state);
+                }
+                Ok(false) => {
+                    info!(target: "evt", "SSE: Button {} device not in any known room", button_id);
+                }
+                Err(e) => {
+                    warn!(target: "evt", "SSE: On-demand discovery failed for button {}: {}", button_id, e);
+                }
             }
-            Ok(false) => {
-                info!(target: "evt", "SSE: Button {} device not in any known room", button_id);
-            }
-            Err(e) => {
-                warn!(target: "evt", "SSE: On-demand discovery failed for button {}: {}", button_id, e);
-            }
-        }
-    });
+        });
 
     // On-demand motion sensor discovery closure
     let motion_transport = discovery_transport;

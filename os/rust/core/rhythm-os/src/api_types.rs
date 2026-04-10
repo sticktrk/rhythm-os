@@ -5,8 +5,8 @@
 //! in `server_event.rs` — one canonical naming convention.
 
 use rhythm_core::{
-    runtime::hub_registry::DeviceType, LightProfileConfig, ModeConfig, ModeTransitionConfig,
-    ModeTransitionTrigger, RhythmMode, RoomModeState, RoomProfileSettings,
+    runtime::hub_registry::DeviceType, LightProfileConfig, ModeChangeCause, ModeConfig,
+    ModeTransitionConfig, RhythmMode, RoomModeState, RoomProfileSettings,
 };
 use serde::Serialize;
 
@@ -163,7 +163,9 @@ pub struct ModeSettingsDto {
 /// Metadata about the most recent mode change.
 #[derive(Debug, Serialize)]
 pub struct ModeLastChangeDto {
-    pub trigger: ModeTransitionTrigger,
+    pub cause: ModeChangeCause,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transition_id: Option<String>,
     pub epoch_ms: i64,
 }
 
@@ -536,13 +538,15 @@ mod tests {
         let dto = ModeSettingsDto {
             active: rhythm_core::RhythmMode::Day,
             last_change: ModeLastChangeDto {
-                trigger: rhythm_core::ModeTransitionTrigger::Manual,
+                cause: rhythm_core::ModeChangeCause::Manual,
+                transition_id: None,
                 epoch_ms: 1_700_000_000_000,
             },
             configs: rhythm_core::default_mode_configs(),
         };
         let json: Value = serde_json::to_value(&dto).unwrap();
-        assert_eq!(json["last_change"]["trigger"], "manual");
+        assert_eq!(json["last_change"]["cause"], "manual");
+        assert!(json["last_change"].get("transition_id").is_none());
         assert_eq!(json["last_change"]["epoch_ms"], 1_700_000_000_000i64);
         assert!(json.get("transitions").is_none());
     }
@@ -781,7 +785,8 @@ mod tests {
             mode: ModeSettingsDto {
                 active: rhythm_core::RhythmMode::Day,
                 last_change: ModeLastChangeDto {
-                    trigger: rhythm_core::ModeTransitionTrigger::Manual,
+                    cause: rhythm_core::ModeChangeCause::Manual,
+                    transition_id: None,
                     epoch_ms: 1_700_000_000_000,
                 },
                 configs: rhythm_core::default_mode_configs(),
@@ -871,7 +876,8 @@ mod tests {
             mode: ModeSettingsDto {
                 active: rhythm_core::RhythmMode::Day,
                 last_change: ModeLastChangeDto {
-                    trigger: rhythm_core::ModeTransitionTrigger::NauticalTwilight,
+                    cause: rhythm_core::ModeChangeCause::Schedule,
+                    transition_id: Some("day_to_sleep".into()),
                     epoch_ms: 1_700_000_000_000,
                 },
                 configs: rhythm_core::default_mode_configs(),
@@ -909,7 +915,8 @@ mod tests {
         );
         assert_eq!(json["settings"]["power_save"], false);
         assert_eq!(json["mode"]["active"], "day");
-        assert_eq!(json["mode"]["last_change"]["trigger"], "nautical_twilight");
+        assert_eq!(json["mode"]["last_change"]["cause"], "schedule");
+        assert_eq!(json["mode"]["last_change"]["transition_id"], "day_to_sleep");
         assert_eq!(
             json["mode"]["last_change"]["epoch_ms"],
             1_700_000_000_000i64

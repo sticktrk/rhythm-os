@@ -58,6 +58,101 @@ pub fn translate_service_event(event_data: &Value, _registry: &HaDeviceRegistry)
         .collect()
 }
 
+pub(crate) fn register_unknown_button_from_cache(
+    evt: &RawButtonEvent,
+    registry: &Arc<Mutex<HaDeviceRegistry>>,
+    device_area_cache: &Arc<Mutex<HashMap<String, String>>>,
+) {
+    let (cache_key, device_id, controls): (&str, String, Vec<(String, u8)>) =
+        match (evt.device_hint, evt.fallback_control_id) {
+            // HA native Hue event: cache key is HA device_id, registry device is HA device_id.
+            (Some(device_hint), Some(control_id)) => (
+                device_hint,
+                device_hint.to_string(),
+                vec![(evt.button_id.to_string(), control_id)],
+            ),
+            // ZHA event: cache key is HA device_id, registry device is IEEE address.
+            (Some(device_hint), None) => (device_hint, evt.button_id.to_string(), Vec::new()),
+            // Event entities: entity_id is both cache key and registry device id.
+            (None, Some(control_id)) => (
+                evt.button_id,
+                evt.button_id.to_string(),
+                vec![(evt.button_id.to_string(), control_id)],
+            ),
+            (None, None) => (evt.button_id, evt.button_id.to_string(), Vec::new()),
+        };
+
+    let area_id = match device_area_cache
+        .lock()
+        .ok()
+        .and_then(|c| c.get(cache_key).cloned())
+    {
+        Some(a) => a,
+        None => {
+            info!(
+                target: "evt",
+                "Button event {} (hint={:?}) not in area cache, cannot auto-register",
+                evt.button_id,
+                evt.device_hint
+            );
+            return;
+        }
+    };
+
+    if let Ok(mut reg) = registry.lock() {
+        reg.upsert_device(&device_id, &area_id, &controls, DeviceType::Button);
+        if let Some((button_id, control_id)) = controls.first() {
+            info!(
+                target: "evt",
+                "On-demand registered button {} (device={}, area={}, control={})",
+                button_id,
+                device_id,
+                area_id,
+                control_id
+            );
+        } else {
+            info!(
+                target: "evt",
+                "On-demand registered button device {} for area {}",
+                device_id,
+                area_id
+            );
+        }
+    }
+}
+
+pub(crate) fn register_unknown_motion_from_cache(
+    sensor_id: &str,
+    registry: &Arc<Mutex<HaDeviceRegistry>>,
+    device_area_cache: &Arc<Mutex<HashMap<String, String>>>,
+) {
+    let area_id = match device_area_cache
+        .lock()
+        .ok()
+        .and_then(|c| c.get(sensor_id).cloned())
+    {
+        Some(a) => a,
+        None => {
+            info!(
+                target: "evt",
+                "Motion sensor {} not in area cache, cannot auto-register",
+                sensor_id
+            );
+            return;
+        }
+    };
+
+    if let Ok(mut reg) = registry.lock() {
+        reg.upsert_device(sensor_id, &area_id, &[], DeviceType::Motion);
+        info!(
+            target: "evt",
+            "On-demand registered motion sensor {} for room {}",
+            sensor_id,
+            area_id
+        );
+    }
+}
+
 /// Translate a ZHA event from Home Assistant.
 ///
 /// Uses on-demand discovery: if the device is unknown, looks up the HA
@@ -77,6 +172,18 @@ pub fn translate_zha_event(
     registry: &Arc<Mutex<HaDeviceRegistry>>,
     device_area_cache: &Arc<Mutex<HashMap<String, String>>>,
 ) -> Vec<HubEvent> {
+    let on_unknown = |evt: &RawButtonEvent| {
+        register_unknown_button_from_cache(evt, registry, device_area_cache);
+    };
+    translate_zha_event_with_hooks(event_data, registry, None, Some(&on_unknown))
+}
+
+fn translate_zha_event_with_hooks(
+    event_data: &Value,
+    registry: &Arc<Mutex<HaDeviceRegistry>>,
+    on_activity: Option<&dyn Fn()>,
+    on_unknown_button: Option<&dyn Fn(&RawButtonEvent)>,
+) -> Vec<HubEvent> {
     let device_ieee = match event_data.get("device_ieee").and_then(|v| v.as_str()) {
         Some(d) => d,
         None => return Vec::new(),
@@ -85,6 +192,19 @@ pub fn translate_zha_event(
     let command = match event_data.get("command").and_then(|v| v.as_str()) {
         Some(c) => c,
         None => return Vec::new(),
+    };
+
+    let ha_device_id = event_data.get("device_id").and_then(|v| v.as_str());
+
+    if let Some(cb) = on_activity {
+        cb();
+    }
+
+    let raw = RawButtonEvent {
+        button_id: device_ieee,
+        event_type: command,
+        fallback_control_id: None,
+        device_hint: ha_device_id,
     };
 
     // Look up room for this device
@@ -99,31 +219,8 @@ pub fn translate_zha_event(
     let room_id = match room_id {
         Some(r) => r,
         None => {
-            // On-demand discovery: look up HA device_id in the area cache
-            let ha_device_id = match event_data.get("device_id").and_then(|v| v.as_str()) {
-                Some(id) => id,
-                None => {
-                    info!(target: "evt", "ZHA event from unknown device {} (no device_id), ignoring", device_ieee);
-                    return Vec::new();
-                }
-            };
-
-            let area_id = match device_area_cache
-                .lock()
-                .ok()
-                .and_then(|c| c.get(ha_device_id).cloned())
-            {
-                Some(a) => a,
-                None => {
-                    info!(target: "evt", "ZHA event: device {} (ha_id={}) not in area cache, cannot auto-register", device_ieee, ha_device_id);
-                    return Vec::new();
-                }
-            };
-
-            // Auto-register the ZHA device
-            if let Ok(mut reg) = registry.lock() {
-                reg.upsert_device(device_ieee, &area_id, &[], DeviceType::Button);
-                info!(target: "evt", "On-demand registered ZHA device {} (ha_id={}) for area {}", device_ieee, ha_device_id, area_id);
+            if let Some(cb) = on_unknown_button {
+                cb(&raw);
             }
 
             // Re-lookup after registration
@@ -133,7 +230,15 @@ pub fn translate_zha_event(
                 .and_then(|r| r.get_room_for_device(device_ieee))
             {
                 Some(r) => r,
-                None => return Vec::new(),
+                None => {
+                    info!(
+                        target: "evt",
+                        "ZHA event from unknown device {} (ha_id={:?}), ignoring",
+                        device_ieee,
+                        ha_device_id
+                    );
+                    return Vec::new();
+                }
             }
         }
     };
@@ -200,6 +305,18 @@ pub fn translate_hue_event(
     registry: &Arc<Mutex<HaDeviceRegistry>>,
     device_area_cache: &Arc<Mutex<HashMap<String, String>>>,
 ) -> Vec<HubEvent> {
+    let on_unknown = |evt: &RawButtonEvent| {
+        register_unknown_button_from_cache(evt, registry, device_area_cache);
+    };
+    translate_hue_event_with_hooks(event_data, registry, None, Some(&on_unknown))
+}
+
+fn translate_hue_event_with_hooks(
+    event_data: &Value,
+    registry: &Arc<Mutex<HaDeviceRegistry>>,
+    on_activity: Option<&dyn Fn()>,
+    on_unknown_button: Option<&dyn Fn(&RawButtonEvent)>,
+) -> Vec<HubEvent> {
     let button_id = match event_data.get("id").and_then(|v| v.as_str()) {
         Some(id) => id,
         None => return Vec::new(),
@@ -217,6 +334,10 @@ pub fn translate_hue_event(
         .unwrap_or(0) as u8;
     let ha_device_id = event_data.get("device_id").and_then(|v| v.as_str());
 
+    if let Some(cb) = on_activity {
+        cb();
+    }
+
     // HA hue_event uses the same `id` for all buttons on a device,
     // differentiated only by `subtype`. Synthesize a unique button_id
     // so each physical button gets its own registry entry.
@@ -229,36 +350,7 @@ pub fn translate_hue_event(
         device_hint: ha_device_id,
     };
 
-    // Build on-demand discovery callback using the device_area_cache
-    let cache = device_area_cache.clone();
-    let reg = registry.clone();
-    let on_unknown = |evt: &RawButtonEvent| {
-        let device_hint = match evt.device_hint {
-            Some(d) => d,
-            None => return,
-        };
-        let area_id = match cache.lock().ok().and_then(|c| c.get(device_hint).cloned()) {
-            Some(a) => a,
-            None => {
-                info!(target: "evt", "Hue event: device {} not in area cache, cannot auto-register", device_hint);
-                return;
-            }
-        };
-        let button_id = evt.button_id.to_string();
-        let control_id = evt.fallback_control_id.unwrap_or(1);
-        if let Ok(mut r) = reg.lock() {
-            r.upsert_device(
-                device_hint,
-                &area_id,
-                &[(button_id, control_id)],
-                DeviceType::Button,
-            );
-            info!(target: "evt", "On-demand registered button {} (device={}, area={}, control={})",
-                evt.button_id, device_hint, area_id, control_id);
-        }
-    };
-
-    resolve_button_event(registry, &raw, Some(&on_unknown), &map_hue_button_str)
+    resolve_button_event(registry, &raw, on_unknown_button, &map_hue_button_str)
 }
 
 /// Translate a `state_changed` event for motion sensors.
@@ -282,6 +374,41 @@ fn translate_state_changed(
     registry: &Arc<Mutex<HaDeviceRegistry>>,
     cache: &Arc<Mutex<HashMap<String, String>>>,
 ) -> Vec<HubEvent> {
+    if event_data
+        .get("entity_id")
+        .and_then(|v| v.as_str())
+        .is_some_and(|entity_id| entity_id.starts_with("event."))
+    {
+        return translate_event_entity(
+            event_data["entity_id"].as_str().unwrap_or_default(),
+            event_data,
+            registry,
+            cache,
+        );
+    }
+
+    let on_unknown_button = |evt: &RawButtonEvent| {
+        register_unknown_button_from_cache(evt, registry, cache);
+    };
+    let on_unknown_motion = |sensor_id: &str| {
+        register_unknown_motion_from_cache(sensor_id, registry, cache);
+    };
+    translate_state_changed_with_hooks(
+        event_data,
+        registry,
+        None,
+        Some(&on_unknown_button),
+        Some(&on_unknown_motion),
+    )
+}
+
+fn translate_state_changed_with_hooks(
+    event_data: &Value,
+    registry: &Arc<Mutex<HaDeviceRegistry>>,
+    on_activity: Option<&dyn Fn()>,
+    on_unknown_button: Option<&dyn Fn(&RawButtonEvent)>,
+    on_unknown_motion: Option<&dyn Fn(&str)>,
+) -> Vec<HubEvent> {
     let entity_id = match event_data.get("entity_id").and_then(|v| v.as_str()) {
         Some(id) => id,
         None => return Vec::new(),
@@ -289,7 +416,15 @@ fn translate_state_changed(
 
     // Route event.* entities to button handler
     if entity_id.starts_with("event.") {
-        return translate_event_entity(entity_id, event_data, registry, cache);
+        if let Some(cb) = on_activity {
+            cb();
+        }
+        return translate_event_entity_with_hooks(
+            entity_id,
+            event_data,
+            registry,
+            on_unknown_button,
+        );
     }
 
     // Fast filter: only process binary_sensor entities
@@ -307,7 +442,12 @@ fn translate_state_changed(
     };
 
     let room_id = match room_id {
-        Some(r) => r,
+        Some(r) => {
+            if let Some(cb) = on_activity {
+                cb();
+            }
+            r
+        }
         None => {
             // On-demand discovery: check if this is a motion/occupancy sensor
             let device_class = event_data
@@ -320,25 +460,30 @@ fn translate_state_changed(
                 return Vec::new();
             }
 
-            let area_id = match cache.lock().ok().and_then(|c| c.get(entity_id).cloned()) {
-                Some(a) => a,
-                None => {
-                    info!(target: "evt",
-                        "Motion sensor {} (class={:?}) not in entity cache, cannot auto-register",
-                        entity_id, device_class);
-                    return Vec::new();
-                }
-            };
-
-            // Auto-register as Motion device
-            if let Ok(mut reg) = registry.lock() {
-                reg.upsert_device(entity_id, &area_id, &[], DeviceType::Motion);
-                info!(target: "evt",
-                    "On-demand registered motion sensor {} for room {}",
-                    entity_id, area_id);
+            if let Some(cb) = on_activity {
+                cb();
             }
 
-            area_id
+            if let Some(cb) = on_unknown_motion {
+                cb(entity_id);
+            }
+
+            match registry
+                .lock()
+                .ok()
+                .and_then(|r| r.get_room_for_motion_sensor(entity_id))
+            {
+                Some(r) => r,
+                None => {
+                    info!(
+                        target: "evt",
+                        "Motion sensor {} (class={:?}) still unknown after discovery",
+                        entity_id,
+                        device_class
+                    );
+                    return Vec::new();
+                }
+            }
         }
     };
 
@@ -394,6 +539,18 @@ fn translate_event_entity(
     registry: &Arc<Mutex<HaDeviceRegistry>>,
     cache: &Arc<Mutex<HashMap<String, String>>>,
 ) -> Vec<HubEvent> {
+    let on_unknown = |evt: &RawButtonEvent| {
+        register_unknown_button_from_cache(evt, registry, cache);
+    };
+    translate_event_entity_with_hooks(entity_id, event_data, registry, Some(&on_unknown))
+}
+
+fn translate_event_entity_with_hooks(
+    entity_id: &str,
+    event_data: &Value,
+    registry: &Arc<Mutex<HaDeviceRegistry>>,
+    on_unknown_button: Option<&dyn Fn(&RawButtonEvent)>,
+) -> Vec<HubEvent> {
     // Extract event_type from new_state.attributes.event_type
     let event_type = match event_data
         .get("new_state")
@@ -414,37 +571,7 @@ fn translate_event_entity(
         device_hint: None, // entity_id is looked up directly in the cache
     };
 
-    // Build on-demand discovery callback
-    let cache_clone = cache.clone();
-    let reg_clone = registry.clone();
-    let entity_owned = entity_id.to_string();
-    let on_unknown = move |evt: &RawButtonEvent| {
-        let area_id = match cache_clone
-            .lock()
-            .ok()
-            .and_then(|c| c.get(&entity_owned).cloned())
-        {
-            Some(a) => a,
-            None => {
-                info!(target: "evt", "Event entity {} not in area cache, cannot auto-register", entity_owned);
-                return;
-            }
-        };
-        let button_id = evt.button_id.to_string();
-        let ctl = evt.fallback_control_id.unwrap_or(1);
-        if let Ok(mut r) = reg_clone.lock() {
-            r.upsert_device(
-                &entity_owned,
-                &area_id,
-                &[(button_id, ctl)],
-                DeviceType::Button,
-            );
-            info!(target: "evt", "On-demand registered event entity {} for area {} (control={})",
-                entity_owned, area_id, ctl);
-        }
-    };
-
-    resolve_button_event(registry, &raw, Some(&on_unknown), &map_event_entity_action)
+    resolve_button_event(registry, &raw, on_unknown_button, &map_event_entity_action)
 }
 
 /// Map an HA event entity action to a `ButtonAction`.
@@ -508,6 +635,41 @@ pub fn translate_ws_event(
         "hue_event" => translate_hue_event(event_data, registry, device_area_cache),
         "zha_event" => translate_zha_event(event_data, registry, device_area_cache),
         "state_changed" => translate_state_changed(event_data, registry, device_area_cache),
+        _ => {
+            let reg = match registry.lock() {
+                Ok(r) => r,
+                Err(_) => return Vec::new(),
+            };
+            match event_type {
+                "rhythm_service_event" => translate_service_event(event_data, &reg),
+                _ => Vec::new(),
+            }
+        }
+    }
+}
+
+pub(crate) fn translate_ws_event_with_hooks(
+    event_type: &str,
+    event_data: &Value,
+    registry: &Arc<Mutex<HaDeviceRegistry>>,
+    on_activity: Option<&dyn Fn()>,
+    on_unknown_button: Option<&dyn Fn(&RawButtonEvent)>,
+    on_unknown_motion: Option<&dyn Fn(&str)>,
+) -> Vec<HubEvent> {
+    match event_type {
+        "hue_event" => {
+            translate_hue_event_with_hooks(event_data, registry, on_activity, on_unknown_button)
+        }
+        "zha_event" => {
+            translate_zha_event_with_hooks(event_data, registry, on_activity, on_unknown_button)
+        }
+        "state_changed" => translate_state_changed_with_hooks(
+            event_data,
+            registry,
+            on_activity,
+            on_unknown_button,
+            on_unknown_motion,
+        ),
         _ => {
             let reg = match registry.lock() {
                 Ok(r) => r,

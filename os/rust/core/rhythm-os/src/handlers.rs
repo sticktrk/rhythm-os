@@ -559,6 +559,16 @@ pub fn handle_put_transitions(state: &SharedState, body: &Value) -> ApiResponse 
     }
 }
 
+pub fn handle_post_transition_trigger(state: &SharedState, transition_id: &str) -> ApiResponse {
+    match commands::do_trigger_transition(state, transition_id) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) if e.to_string().contains("Unknown transition") => {
+            ApiResponse::bad_request(&e.to_string())
+        }
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
 pub fn handle_get_profiles(state: &SharedState) -> ApiResponse {
     match commands::build_profiles(state) {
         Ok(json) => ApiResponse::json_ok(json),

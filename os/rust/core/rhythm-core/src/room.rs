@@ -4,7 +4,7 @@
 //! that can have Rhythm lighting enabled, along with `RoomManager` for
 //! tracking multiple rooms.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::light_profile::{
     is_builtin_state_profile_id, LightProfileConfig, TimerSetting, DAY_IDLE_PROFILE_ID,
@@ -12,7 +12,7 @@ use crate::light_profile::{
 };
 
 #[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 const REMOVED_LEGACY_IDLE_PROFILE_ID: &str = "idle";
 
@@ -205,9 +205,7 @@ pub fn default_mode_configs() -> Vec<ModeConfig> {
 }
 
 /// Trigger that initiates a configured mode transition.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum ModeTransitionTrigger {
     #[default]
     Manual,
@@ -216,6 +214,149 @@ pub enum ModeTransitionTrigger {
     CivilTwilight,
     NauticalTwilight,
     AstronomicalTwilight,
+}
+
+impl ModeTransitionTrigger {
+    pub const fn is_manual(self) -> bool {
+        matches!(self, Self::Manual)
+    }
+
+    pub const fn kind(self) -> &'static str {
+        if self.is_manual() {
+            "manual"
+        } else {
+            "solar"
+        }
+    }
+
+    pub const fn event(self) -> Option<&'static str> {
+        match self {
+            Self::Manual => None,
+            Self::Sunrise => Some("sunrise"),
+            Self::Sunset => Some("sunset"),
+            Self::CivilTwilight => Some("civil_twilight"),
+            Self::NauticalTwilight => Some("nautical_twilight"),
+            Self::AstronomicalTwilight => Some("astronomical_twilight"),
+        }
+    }
+
+    pub const fn id_suffix(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Sunrise => "sunrise",
+            Self::Sunset => "sunset",
+            Self::CivilTwilight => "civil_twilight",
+            Self::NauticalTwilight => "nautical_twilight",
+            Self::AstronomicalTwilight => "astronomical_twilight",
+        }
+    }
+
+    pub const fn label_suffix(self) -> Option<&'static str> {
+        match self {
+            Self::Manual => None,
+            Self::Sunrise => Some("Sunrise"),
+            Self::Sunset => Some("Sunset"),
+            Self::CivilTwilight => Some("Civil Twilight"),
+            Self::NauticalTwilight => Some("Nautical Twilight"),
+            Self::AstronomicalTwilight => Some("Astronomical Twilight"),
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl Serialize for ModeTransitionTrigger {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        struct TriggerRepr<'a> {
+            kind: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            event: Option<&'a str>,
+        }
+
+        TriggerRepr {
+            kind: self.kind(),
+            event: self.event(),
+        }
+        .serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> Deserialize<'de> for ModeTransitionTrigger {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum LegacyTrigger {
+            Manual,
+            Sunrise,
+            Sunset,
+            CivilTwilight,
+            NauticalTwilight,
+            AstronomicalTwilight,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum TriggerKind {
+            Manual,
+            Solar,
+        }
+
+        #[derive(Deserialize)]
+        struct TriggerObject {
+            kind: TriggerKind,
+            #[serde(default)]
+            event: Option<LegacyTrigger>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum TriggerRepr {
+            Object(TriggerObject),
+            Legacy(LegacyTrigger),
+        }
+
+        let repr = TriggerRepr::deserialize(deserializer)?;
+        match repr {
+            TriggerRepr::Legacy(trigger) => Ok(match trigger {
+                LegacyTrigger::Manual => Self::Manual,
+                LegacyTrigger::Sunrise => Self::Sunrise,
+                LegacyTrigger::Sunset => Self::Sunset,
+                LegacyTrigger::CivilTwilight => Self::CivilTwilight,
+                LegacyTrigger::NauticalTwilight => Self::NauticalTwilight,
+                LegacyTrigger::AstronomicalTwilight => Self::AstronomicalTwilight,
+            }),
+            TriggerRepr::Object(TriggerObject { kind, event }) => match kind {
+                TriggerKind::Manual => Ok(Self::Manual),
+                TriggerKind::Solar => match event {
+                    Some(LegacyTrigger::Sunrise) => Ok(Self::Sunrise),
+                    Some(LegacyTrigger::Sunset) => Ok(Self::Sunset),
+                    Some(LegacyTrigger::CivilTwilight) => Ok(Self::CivilTwilight),
+                    Some(LegacyTrigger::NauticalTwilight) => Ok(Self::NauticalTwilight),
+                    Some(LegacyTrigger::AstronomicalTwilight) => Ok(Self::AstronomicalTwilight),
+                    Some(LegacyTrigger::Manual) | None => Err(serde::de::Error::custom(
+                        "solar trigger requires a solar event",
+                    )),
+                },
+            },
+        }
+    }
+}
+
+/// Why the active mode changed most recently.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum ModeChangeCause {
+    #[default]
+    Manual,
+    Schedule,
 }
 
 fn default_preserve_hard_off() -> bool {
@@ -233,6 +374,10 @@ fn default_mode_transition_duration_ms() -> u32 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ModeTransitionConfig {
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub id: String,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub label: String,
     pub from_mode: RhythmMode,
     pub to_mode: RhythmMode,
     #[cfg_attr(feature = "serde", serde(default))]
@@ -249,6 +394,8 @@ pub struct ModeTransitionConfig {
 impl ModeTransitionConfig {
     pub fn new(from_mode: RhythmMode, to_mode: RhythmMode, duration_ms: u32) -> Self {
         Self {
+            id: String::new(),
+            label: String::new(),
             from_mode,
             to_mode,
             trigger: ModeTransitionTrigger::Manual,
@@ -261,23 +408,177 @@ impl ModeTransitionConfig {
         self.trigger = trigger;
         self
     }
+
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = id.into();
+        self
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
+    }
+
+    fn default_id_base(&self) -> String {
+        format!(
+            "{}_to_{}_{}",
+            self.from_mode.id_fragment(),
+            self.to_mode.id_fragment(),
+            self.trigger.id_suffix()
+        )
+    }
+
+    fn default_label(&self) -> String {
+        match self.trigger.label_suffix() {
+            Some(trigger) => format!(
+                "{} to {} ({})",
+                self.from_mode.display_name(),
+                self.to_mode.display_name(),
+                trigger
+            ),
+            None => format!(
+                "{} to {}",
+                self.from_mode.display_name(),
+                self.to_mode.display_name()
+            ),
+        }
+    }
+}
+
+impl RhythmMode {
+    fn id_fragment(self) -> &'static str {
+        match self {
+            Self::Day => "day",
+            Self::Sleep => "sleep",
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::Day => "Day",
+            Self::Sleep => "Sleep",
+        }
+    }
+}
+
+fn slugify_id(input: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_sep = false;
+    for ch in input.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            last_was_sep = false;
+            ch.to_ascii_lowercase()
+        } else {
+            if !last_was_sep && !out.is_empty() {
+                out.push('_');
+            }
+            last_was_sep = true;
+            continue;
+        };
+        out.push(mapped);
+    }
+    out.trim_matches('_').to_string()
+}
+
+fn reserved_default_transition_id(
+    from_mode: RhythmMode,
+    to_mode: RhythmMode,
+) -> Option<&'static str> {
+    match (from_mode, to_mode) {
+        (RhythmMode::Sleep, RhythmMode::Day) => Some("sleep_to_day"),
+        (RhythmMode::Day, RhythmMode::Sleep) => Some("day_to_sleep"),
+        _ => None,
+    }
+}
+
+fn reserved_default_transition_label(
+    from_mode: RhythmMode,
+    to_mode: RhythmMode,
+) -> Option<&'static str> {
+    match (from_mode, to_mode) {
+        (RhythmMode::Sleep, RhythmMode::Day) => Some("Sleep to Day"),
+        (RhythmMode::Day, RhythmMode::Sleep) => Some("Day to Sleep"),
+        _ => None,
+    }
+}
+
+pub fn normalize_mode_transition_configs<I>(configs: I) -> Vec<ModeTransitionConfig>
+where
+    I: IntoIterator<Item = ModeTransitionConfig>,
+{
+    let configs: Vec<_> = configs.into_iter().collect();
+    let mut pair_counts: HashMap<(RhythmMode, RhythmMode), usize> = HashMap::new();
+    for config in &configs {
+        *pair_counts
+            .entry((config.from_mode, config.to_mode))
+            .or_insert(0) += 1;
+    }
+
+    let mut seen_ids = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for mut config in configs {
+        let requested_id = slugify_id(config.id.trim());
+        let pair_count = pair_counts
+            .get(&(config.from_mode, config.to_mode))
+            .copied()
+            .unwrap_or(0);
+        let reserved_default = reserved_default_transition_id(config.from_mode, config.to_mode)
+            .filter(|reserved| {
+                pair_count == 1
+                    && (requested_id.is_empty()
+                        || requested_id == *reserved
+                        || requested_id.starts_with(&format!("{}_", reserved)))
+            });
+
+        if let Some(label) = reserved_default_transition_label(config.from_mode, config.to_mode)
+            .filter(|_| reserved_default.is_some())
+        {
+            config.label = label.to_string();
+        } else if config.label.trim().is_empty() {
+            config.label = config.default_label();
+        }
+
+        let base_id = reserved_default.map(str::to_string).unwrap_or_else(|| {
+            if requested_id.is_empty() {
+                config.default_id_base()
+            } else {
+                requested_id
+            }
+        });
+
+        let mut candidate = base_id.clone();
+        let mut suffix = 2usize;
+        while !seen_ids.insert(candidate.clone()) {
+            candidate = format!("{}_{}", base_id, suffix);
+            suffix += 1;
+        }
+        config.id = candidate;
+        normalized.push(config);
+    }
+
+    normalized
 }
 
 pub fn default_mode_transition_configs() -> Vec<ModeTransitionConfig> {
-    vec![
+    normalize_mode_transition_configs(vec![
         ModeTransitionConfig::new(
             RhythmMode::Sleep,
             RhythmMode::Day,
             default_mode_transition_duration_ms(),
         )
+        .with_id("sleep_to_day")
+        .with_label("Sleep to Day")
         .with_trigger(ModeTransitionTrigger::AstronomicalTwilight),
         ModeTransitionConfig::new(
             RhythmMode::Day,
             RhythmMode::Sleep,
             default_mode_transition_duration_ms(),
         )
+        .with_id("day_to_sleep")
+        .with_label("Day to Sleep")
         .with_trigger(ModeTransitionTrigger::NauticalTwilight),
-    ]
+    ])
 }
 
 /// Per-room light profile selection and timer overrides.
@@ -741,6 +1042,10 @@ mod tests {
         let configs = default_mode_transition_configs();
         assert_eq!(configs.len(), 2);
         assert!(configs.iter().all(|config| config.duration_ms == 5_000));
+        assert_eq!(configs[0].id, "sleep_to_day");
+        assert_eq!(configs[1].id, "day_to_sleep");
+        assert_eq!(configs[0].label, "Sleep to Day");
+        assert_eq!(configs[1].label, "Day to Sleep");
         assert_eq!(
             configs[0].trigger,
             ModeTransitionTrigger::AstronomicalTwilight
@@ -988,6 +1293,78 @@ mod tests {
             let config: ModeTransitionConfig = serde_json::from_str(json).unwrap();
             assert_eq!(config.duration_ms, 5_000);
             assert!(config.preserve_hard_off);
+        }
+
+        #[test]
+        fn test_mode_transition_trigger_serializes_as_object() {
+            let json = serde_json::to_value(ModeTransitionTrigger::NauticalTwilight).unwrap();
+            assert_eq!(json["kind"], "solar");
+            assert_eq!(json["event"], "nautical_twilight");
+
+            let manual = serde_json::to_value(ModeTransitionTrigger::Manual).unwrap();
+            assert_eq!(manual["kind"], "manual");
+            assert!(manual.get("event").is_none());
+        }
+
+        #[test]
+        fn test_normalize_mode_transition_configs_backfills_identity() {
+            let configs = normalize_mode_transition_configs(vec![ModeTransitionConfig {
+                id: String::new(),
+                label: String::new(),
+                from_mode: RhythmMode::Day,
+                to_mode: RhythmMode::Sleep,
+                trigger: ModeTransitionTrigger::NauticalTwilight,
+                duration_ms: 2_000,
+                preserve_hard_off: true,
+            }]);
+
+            assert_eq!(configs.len(), 1);
+            assert_eq!(configs[0].id, "day_to_sleep");
+            assert_eq!(configs[0].label, "Day to Sleep");
+        }
+
+        #[test]
+        fn test_normalize_mode_transition_configs_migrates_legacy_default_ids() {
+            let configs = normalize_mode_transition_configs(vec![ModeTransitionConfig {
+                id: "sleep_to_day_sunrise".into(),
+                label: "Sleep to Day (Sunrise)".into(),
+                from_mode: RhythmMode::Sleep,
+                to_mode: RhythmMode::Day,
+                trigger: ModeTransitionTrigger::Sunrise,
+                duration_ms: 10_000,
+                preserve_hard_off: true,
+            }]);
+
+            assert_eq!(configs.len(), 1);
+            assert_eq!(configs[0].id, "sleep_to_day");
+            assert_eq!(configs[0].label, "Sleep to Day");
+        }
+
+        #[test]
+        fn test_normalize_mode_transition_configs_preserves_custom_duplicate_pair_ids() {
+            let configs = normalize_mode_transition_configs(vec![
+                ModeTransitionConfig {
+                    id: "day_to_sleep_custom".into(),
+                    label: "Bedtime".into(),
+                    from_mode: RhythmMode::Day,
+                    to_mode: RhythmMode::Sleep,
+                    trigger: ModeTransitionTrigger::Manual,
+                    duration_ms: 1_000,
+                    preserve_hard_off: true,
+                },
+                ModeTransitionConfig {
+                    id: "day_to_sleep_nautical_twilight".into(),
+                    label: "Night".into(),
+                    from_mode: RhythmMode::Day,
+                    to_mode: RhythmMode::Sleep,
+                    trigger: ModeTransitionTrigger::NauticalTwilight,
+                    duration_ms: 2_000,
+                    preserve_hard_off: true,
+                },
+            ]);
+
+            assert_eq!(configs[0].id, "day_to_sleep_custom");
+            assert_eq!(configs[1].id, "day_to_sleep_nautical_twilight");
         }
 
         #[test]

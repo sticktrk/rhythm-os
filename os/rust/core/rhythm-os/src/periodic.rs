@@ -778,7 +778,7 @@ fn resolved_replayed_solar_mode_transition(
     longitude: Option<f32>,
     timezone_name: Option<&str>,
     configs: &[rhythm_core::ModeTransitionConfig],
-) -> Option<(rhythm_core::RhythmMode, rhythm_core::ModeTransitionTrigger)> {
+) -> Option<rhythm_core::ModeTransitionConfig> {
     if end_utc <= start_utc {
         return None;
     }
@@ -821,7 +821,7 @@ fn resolved_replayed_solar_mode_transition(
             };
 
             if event_utc > start_utc && event_utc <= end_utc {
-                events.push((event_utc, config.from_mode, config.to_mode, config.trigger));
+                events.push((event_utc, config.clone()));
             }
         }
 
@@ -835,31 +835,31 @@ fn resolved_replayed_solar_mode_transition(
         return None;
     }
 
-    events.sort_by_key(|(event_utc, _, _, _)| *event_utc);
+    events.sort_by_key(|(event_utc, _)| *event_utc);
 
     let mut mode = start_mode;
-    let mut final_trigger = None;
-    for (_, from_mode, to_mode, trigger) in events {
-        if mode == from_mode {
-            mode = to_mode;
-            final_trigger = Some(trigger);
+    let mut final_transition = None;
+    for (_, transition) in events {
+        if mode == transition.from_mode {
+            mode = transition.to_mode;
+            final_transition = Some(transition);
         }
     }
 
-    let Some(trigger) = final_trigger else {
+    let Some(transition) = final_transition else {
         return None;
     };
     if mode == start_mode {
         return None;
     }
 
-    Some((mode, trigger))
+    Some(transition)
 }
 
 fn replay_missed_solar_mode_transitions(state: &SharedState) {
     let (
         start_mode,
-        start_trigger,
+        start_cause,
         start_change_utc_ms,
         solar_noon,
         utc_offset,
@@ -871,7 +871,7 @@ fn replay_missed_solar_mode_transitions(state: &SharedState) {
         let Ok(s) = state.lock() else { return };
         (
             s.active_mode,
-            s.last_active_mode_trigger,
+            s.last_active_mode_cause,
             s.last_active_mode_change_utc_ms,
             s.solar_noon_hour(),
             s.utc_offset_hours,
@@ -882,7 +882,7 @@ fn replay_missed_solar_mode_transitions(state: &SharedState) {
         )
     };
 
-    if start_trigger == rhythm_core::ModeTransitionTrigger::Manual {
+    if start_cause == rhythm_core::ModeChangeCause::Manual {
         return;
     }
 
@@ -897,7 +897,7 @@ fn replay_missed_solar_mode_transitions(state: &SharedState) {
     };
 
     let now_utc = chrono::Utc::now().naive_utc();
-    let Some((mode, trigger)) = resolved_replayed_solar_mode_transition(
+    let Some(transition) = resolved_replayed_solar_mode_transition(
         start_mode,
         start_utc,
         now_utc,
@@ -913,10 +913,14 @@ fn replay_missed_solar_mode_transitions(state: &SharedState) {
 
     info!(
         "Replaying missed solar mode transition {:?} -> {:?} on {:?} after restart/downtime",
-        start_mode, mode, trigger
+        start_mode, transition.to_mode, transition.trigger
     );
 
-    if let Err(e) = crate::commands::do_set_active_mode_with_trigger(state, mode, trigger) {
+    if let Err(e) = crate::commands::do_set_active_mode_with_trigger(
+        state,
+        transition.to_mode,
+        transition.trigger,
+    ) {
         warn!("Failed to replay missed solar mode transition: {}", e);
     }
 }
@@ -949,14 +953,14 @@ pub fn check_solar_mode_transitions(state: &SharedState, last_hour: f32, current
             )?;
 
             if rhythm_core::crossed_solar_midnight(last_hour, current_hour, trigger_hour) {
-                Some((config.to_mode, config.trigger, trigger_hour))
+                Some((config, trigger_hour))
             } else {
                 None
             }
         })
     };
 
-    let Some((target_mode, trigger, trigger_hour)) = candidate else {
+    let Some((transition, trigger_hour)) = candidate else {
         return;
     };
 
@@ -966,15 +970,19 @@ pub fn check_solar_mode_transitions(state: &SharedState, last_hour: f32, current
             .lock()
             .ok()
             .map(|s| s.active_mode)
-            .unwrap_or(target_mode),
-        target_mode,
-        trigger,
+            .unwrap_or(transition.to_mode),
+        transition.to_mode,
+        transition.trigger,
         trigger_hour,
         last_hour,
         current_hour
     );
 
-    if let Err(e) = crate::commands::do_set_active_mode_with_trigger(state, target_mode, trigger) {
+    if let Err(e) = crate::commands::do_set_active_mode_with_trigger(
+        state,
+        transition.to_mode,
+        transition.trigger,
+    ) {
         warn!("Failed to apply solar mode transition: {}", e);
     }
 }
@@ -1586,12 +1594,11 @@ mod tests {
             &rhythm_core::default_mode_transition_configs(),
         );
 
+        let transition = resolved.expect("expected replayed solar transition");
+        assert_eq!(transition.to_mode, rhythm_core::RhythmMode::Day);
         assert_eq!(
-            resolved,
-            Some((
-                rhythm_core::RhythmMode::Day,
-                rhythm_core::ModeTransitionTrigger::AstronomicalTwilight
-            ))
+            transition.trigger,
+            rhythm_core::ModeTransitionTrigger::AstronomicalTwilight
         );
     }
 
@@ -1631,7 +1638,7 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             s.active_mode = rhythm_core::RhythmMode::Sleep;
-            s.last_active_mode_trigger = rhythm_core::ModeTransitionTrigger::Manual;
+            s.last_active_mode_cause = rhythm_core::ModeChangeCause::Manual;
             s.last_active_mode_change_utc_ms =
                 Some(chrono::Utc::now().timestamp_millis() - 12 * 60 * 60 * 1000);
         }

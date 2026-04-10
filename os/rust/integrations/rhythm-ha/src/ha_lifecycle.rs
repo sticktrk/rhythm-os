@@ -21,6 +21,7 @@ use crate::hub_state::HaHubData;
 use crate::registry::HaDeviceRegistry;
 use crate::transport::HaConnectionConfig;
 
+use rhythm_os::button_resolve::RawButtonEvent;
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::hub::{ActiveHub, HubEvent, HubType};
 use rhythm_os::registry::RegistrySnapshot;
@@ -120,32 +121,54 @@ pub fn ensure_ha_runtime<H: crate::transport::HaTransport + 'static>(
 
 /// Spawn a translator thread that converts raw HA WS events to hub-agnostic `HubEvent`s.
 ///
-/// The `device_area_cache` is threaded through to `translate_ws_event` so that
-/// `hue_event` button events can use on-demand discovery.
+/// Like Hue, discovery behavior is provided via callbacks. Desktop/server
+/// wrappers can build cache-backed callbacks, while tests and future platforms
+/// can inject custom registration logic directly.
+#[allow(clippy::type_complexity)]
 pub fn start_event_translator(
     ws_rx: Receiver<HaWsEvent>,
     registry: Arc<Mutex<HaDeviceRegistry>>,
-    device_area_cache: Arc<Mutex<HashMap<String, String>>>,
     shutdown: Arc<AtomicBool>,
+    on_activity: Option<Arc<dyn Fn() + Send + Sync>>,
+    on_unknown_button: Option<Arc<dyn Fn(&RawButtonEvent) + Send + Sync>>,
+    on_unknown_motion: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     stack_size: Option<usize>,
 ) -> Receiver<HubEvent> {
     rhythm_os::lifecycle::start_event_translator(
         ws_rx,
-        move |event| match event {
-            HaWsEvent::Connected => vec![HubEvent::Connected { hub_key: None }],
-            HaWsEvent::ServiceEvent { event_type, data } => {
-                crate::events::translate_ws_event(event_type, data, &registry, &device_area_cache)
+        move |event| {
+            let activity_ref: Option<&dyn Fn()> =
+                on_activity.as_ref().map(|f| f.as_ref() as &dyn Fn());
+            let unknown_button_ref: Option<&dyn Fn(&RawButtonEvent)> = on_unknown_button
+                .as_ref()
+                .map(|f| f.as_ref() as &dyn Fn(&RawButtonEvent));
+            let unknown_motion_ref: Option<&dyn Fn(&str)> = on_unknown_motion
+                .as_ref()
+                .map(|f| f.as_ref() as &dyn Fn(&str));
+
+            match event {
+                HaWsEvent::Connected => vec![HubEvent::Connected { hub_key: None }],
+                HaWsEvent::ServiceEvent { event_type, data } => {
+                    crate::events::translate_ws_event_with_hooks(
+                        event_type,
+                        data,
+                        &registry,
+                        activity_ref,
+                        unknown_button_ref,
+                        unknown_motion_ref,
+                    )
+                }
+                HaWsEvent::Heartbeat => vec![HubEvent::Heartbeat { hub_key: None }],
+                HaWsEvent::Disconnected(reason) => vec![HubEvent::Disconnected {
+                    hub_key: None,
+                    reason: reason.clone(),
+                }],
             }
-            HaWsEvent::Heartbeat => vec![HubEvent::Heartbeat { hub_key: None }],
-            HaWsEvent::Disconnected(reason) => vec![HubEvent::Disconnected {
-                hub_key: None,
-                reason: reason.clone(),
-            }],
         },
         shutdown,
         "ha-evt",
         stack_size,
-        None,
+        None, // activity is handled inside the translate closure
     )
 }
 

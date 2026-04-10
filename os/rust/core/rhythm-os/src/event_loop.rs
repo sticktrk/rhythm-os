@@ -828,6 +828,7 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             };
             let Some(runtime) = runtime else { return };
 
+            crate::commands::log_room_command_dispatch(runtime.as_ref(), &room_id, &command);
             if let Err(e) = runtime.apply_room_command(&room_id, command) {
                 warn!(
                     target: "cmd",

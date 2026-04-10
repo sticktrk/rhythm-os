@@ -76,8 +76,9 @@ pub use persistence::{
 };
 pub use primitives::{crossed_solar_midnight, PeriodicTickResult, RhythmEngine};
 pub use room::{
-    default_mode_configs, default_mode_transition_configs, ModeConfig, ModeTransitionConfig,
-    ModeTransitionTrigger, RhythmMode, Room, RoomManager, RoomModeState, RoomProfileSettings,
+    default_mode_configs, default_mode_transition_configs, normalize_mode_transition_configs,
+    ModeChangeCause, ModeConfig, ModeTransitionConfig, ModeTransitionTrigger, RhythmMode, Room,
+    RoomManager, RoomModeState, RoomProfileSettings,
 };
 pub use solar::{
     calculate_solar_noon, calculate_solar_noon_from_offset, calculate_sun_times, calculate_sunrise,

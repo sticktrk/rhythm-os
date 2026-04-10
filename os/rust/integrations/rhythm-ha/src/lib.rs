@@ -24,3 +24,6 @@ pub mod post_connect;
 pub mod reqwest_transport;
 #[cfg(feature = "desktop")]
 pub mod ws_client;
+
+#[cfg(feature = "desktop")]
+pub use desktop_lifecycle as reqwest_lifecycle;
