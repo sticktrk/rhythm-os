@@ -33,6 +33,7 @@ export 'models/hub.dart';
 
 // Utilities
 export 'utils/color_utils.dart';
+export 'utils/solar_utils.dart';
 
 // API
 export 'api/rhythm_api.dart';

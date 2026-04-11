@@ -72,8 +72,7 @@ class SolarOrbit extends StatefulWidget {
   State<SolarOrbit> createState() => _SolarOrbitState();
 }
 
-class _SolarOrbitState extends State<SolarOrbit>
-    with TickerProviderStateMixin {
+class _SolarOrbitState extends State<SolarOrbit> with TickerProviderStateMixin {
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
   late AnimationController _glowController;
@@ -369,18 +368,23 @@ class _SolarOrbitState extends State<SolarOrbit>
     final rhythmPulse = widget.isRhythmMode;
 
     final indicatorWidget = AnimatedBuilder(
-      animation: rhythmPulse ? _pulseAnimation : const AlwaysStoppedAnimation(0),
+      animation:
+          rhythmPulse ? _pulseAnimation : const AlwaysStoppedAnimation(0),
       builder: (context, _) {
         // Pulse ranges from 1.0 to 1.05, remap to a more visible 0..1 range
         final pulseT = rhythmPulse
             ? ((_pulseAnimation.value - 1.0) / 0.05).clamp(0.0, 1.0)
             : 0.0;
         final pulseScale = rhythmPulse ? 1.0 + pulseT * 0.5 : 1.0;
-        final pulseGlow = rhythmPulse ? 0.6 + pulseT * 0.4 : (isActive ? 0.8 : 0.6);
-        final pulseBlur = rhythmPulse ? 8.0 + pulseT * 10.0 : (isActive ? 12.0 : 8.0);
-        final pulseSpread = rhythmPulse ? 2.0 + pulseT * 5.0 : (isActive ? 4.0 : 2.0);
+        final pulseGlow =
+            rhythmPulse ? 0.6 + pulseT * 0.4 : (isActive ? 0.8 : 0.6);
+        final pulseBlur =
+            rhythmPulse ? 8.0 + pulseT * 10.0 : (isActive ? 12.0 : 8.0);
+        final pulseSpread =
+            rhythmPulse ? 2.0 + pulseT * 5.0 : (isActive ? 4.0 : 2.0);
 
-        final dotSize = isActive ? indicatorSize * 1.3 : indicatorSize * pulseScale;
+        final dotSize =
+            isActive ? indicatorSize * 1.3 : indicatorSize * pulseScale;
 
         return Container(
           width: hitAreaSize,
@@ -396,7 +400,8 @@ class _SolarOrbitState extends State<SolarOrbit>
               color: CelestialColors.accentBlue,
               boxShadow: [
                 BoxShadow(
-                  color: CelestialColors.accentBlue.withValues(alpha: pulseGlow),
+                  color:
+                      CelestialColors.accentBlue.withValues(alpha: pulseGlow),
                   blurRadius: pulseBlur,
                   spreadRadius: pulseSpread,
                 ),
@@ -429,8 +434,8 @@ class _SolarOrbitState extends State<SolarOrbit>
                   final box = context.findRenderObject() as RenderBox?;
                   if (box == null) return;
 
-                  final hour =
-                      _globalPositionToHour(details.globalPosition, center, box);
+                  final hour = _globalPositionToHour(
+                      details.globalPosition, center, box);
                   final snappedHour = (hour * 4).round() / 4;
                   final clampedHour = snappedHour.clamp(0.0, 23.99);
 
@@ -690,10 +695,10 @@ class _OrbitalRingPainter extends CustomPainter {
 
     for (int i = 0; i < segments; i++) {
       final hour = (i / segments) * 24;
-      final brightness =
-          _interpolateValue(curveData!.hours, curveData!.brightness, hour);
-      final kelvin =
-          _interpolateValue(curveData!.hours, curveData!.kelvin, hour);
+      final brightness = SolarUtils.interpolateValue(
+          curveData!.hours, curveData!.brightness, hour);
+      final kelvin = SolarUtils.interpolateValue(
+          curveData!.hours, curveData!.kelvin, hour);
 
       final color = ColorUtils.curveColorForCCT(kelvin.toInt());
       // Opacity based on brightness
@@ -706,56 +711,6 @@ class _OrbitalRingPainter extends CustomPainter {
 
       canvas.drawArc(rect, startAngle, sweepAngle + 0.02, false, paint);
     }
-  }
-
-  double _interpolateValue(
-      List<double> hours, List<int> values, double targetHour) {
-    if (hours.isEmpty) return 50.0;
-    if (hours.length == 1) return values[0].toDouble();
-
-    // Find surrounding points
-    var lowerIdx = 0;
-    var upperIdx = hours.length - 1;
-
-    for (int i = 0; i < hours.length - 1; i++) {
-      if (hours[i] <= targetHour && hours[i + 1] >= targetHour) {
-        lowerIdx = i;
-        upperIdx = i + 1;
-        break;
-      }
-    }
-
-    // Handle wrap-around at midnight
-    if (targetHour < hours.first) {
-      lowerIdx = hours.length - 1;
-      upperIdx = 0;
-    } else if (targetHour > hours.last) {
-      lowerIdx = hours.length - 1;
-      upperIdx = 0;
-    }
-
-    final lowerHour = hours[lowerIdx];
-    final upperHour = hours[upperIdx];
-    final lowerValue = values[lowerIdx];
-    final upperValue = values[upperIdx];
-
-    // Handle same values
-    if (lowerHour == upperHour) return lowerValue.toDouble();
-
-    // Linear interpolation
-    double t;
-    if (upperIdx == 0 && lowerIdx == hours.length - 1) {
-      // Wrap-around case
-      final totalSpan = (24 - lowerHour) + upperHour;
-      final position = targetHour >= lowerHour
-          ? targetHour - lowerHour
-          : (24 - lowerHour) + targetHour;
-      t = position / totalSpan;
-    } else {
-      t = (targetHour - lowerHour) / (upperHour - lowerHour);
-    }
-
-    return lowerValue + (upperValue - lowerValue) * t;
   }
 
   @override

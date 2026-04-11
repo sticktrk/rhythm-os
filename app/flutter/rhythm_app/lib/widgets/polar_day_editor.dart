@@ -387,8 +387,9 @@ class _PolarDayPainter extends CustomPainter {
     // First pass: Draw glow extending inward based on brightness
     for (int i = 0; i < segments; i++) {
       final hour = (i / segments) * 24;
-      final brightness = _interpolateValue(data.hours, data.brightness, hour);
-      final kelvin = _interpolateValue(data.hours, data.kelvin, hour);
+      final brightness =
+          SolarUtils.interpolateValue(data.hours, data.brightness, hour);
+      final kelvin = SolarUtils.interpolateValue(data.hours, data.kelvin, hour);
 
       final normBri = (brightness - config.minBrightness) /
           (config.maxBrightness - config.minBrightness);
@@ -443,8 +444,9 @@ class _PolarDayPainter extends CustomPainter {
 
     for (int i = 0; i < segments; i++) {
       final hour = (i / segments) * 24;
-      final brightness = _interpolateValue(data.hours, data.brightness, hour);
-      final kelvin = _interpolateValue(data.hours, data.kelvin, hour);
+      final brightness =
+          SolarUtils.interpolateValue(data.hours, data.brightness, hour);
+      final kelvin = SolarUtils.interpolateValue(data.hours, data.kelvin, hour);
 
       final cctColor = ColorUtils.curveColorForCCT(kelvin.round());
       // Ring opacity based on brightness (matching SolarOrbit style)
@@ -827,53 +829,6 @@ class _PolarDayPainter extends CustomPainter {
   double _hourToAngle(double hour) {
     // Map 0-24 hours to 0-2*PI, starting from top (-PI/2)
     return (hour / 24) * 2 * math.pi - math.pi / 2;
-  }
-
-  double _interpolateValue(
-      List<double> hours, List<int> values, double targetHour) {
-    if (hours.isEmpty) return 50.0;
-    if (hours.length == 1) return values[0].toDouble();
-
-    // Find surrounding points
-    var lowerIdx = 0;
-    var upperIdx = hours.length - 1;
-
-    for (int i = 0; i < hours.length - 1; i++) {
-      if (hours[i] <= targetHour && hours[i + 1] >= targetHour) {
-        lowerIdx = i;
-        upperIdx = i + 1;
-        break;
-      }
-    }
-
-    // Handle wrap-around at midnight
-    if (targetHour < hours.first) {
-      lowerIdx = hours.length - 1;
-      upperIdx = 0;
-    } else if (targetHour > hours.last) {
-      lowerIdx = hours.length - 1;
-      upperIdx = 0;
-    }
-
-    final lowerHour = hours[lowerIdx];
-    final upperHour = hours[upperIdx];
-    final lowerValue = values[lowerIdx];
-    final upperValue = values[upperIdx];
-
-    if (lowerHour == upperHour) return lowerValue.toDouble();
-
-    double t;
-    if (upperIdx == 0 && lowerIdx == hours.length - 1) {
-      final totalSpan = (24 - lowerHour) + upperHour;
-      final position = targetHour >= lowerHour
-          ? targetHour - lowerHour
-          : (24 - lowerHour) + targetHour;
-      t = position / totalSpan;
-    } else {
-      t = (targetHour - lowerHour) / (upperHour - lowerHour);
-    }
-
-    return lowerValue + (upperValue - lowerValue) * t;
   }
 
   @override
