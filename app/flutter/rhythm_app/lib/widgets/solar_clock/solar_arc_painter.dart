@@ -12,9 +12,11 @@ class SolarArcPainter extends CustomPainter {
   final bool use24;
   final SolarCurveSamples? curveData;
   final double arcStrokeWidth;
+  final bool showUpperArc;
   final bool showEventMarkers;
   final bool showHourLabels;
   final bool showLowerArc;
+  final bool showFullLowerArc;
 
   const SolarArcPainter({
     required this.data,
@@ -22,14 +24,16 @@ class SolarArcPainter extends CustomPainter {
     required this.use24,
     this.curveData,
     this.arcStrokeWidth = 4.0,
+    this.showUpperArc = true,
     this.showEventMarkers = true,
     this.showHourLabels = true,
     this.showLowerArc = true,
+    this.showFullLowerArc = false,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
-    _drawUpperArc(canvas);
+    if (showUpperArc) _drawUpperArc(canvas);
     if (showLowerArc) _drawLowerArc(canvas);
     if (showHourLabels) _drawHourLabels(canvas);
     if (showEventMarkers && !data.isPolarDay && !data.isPolarNight) {
@@ -89,18 +93,13 @@ class SolarArcPainter extends CustomPainter {
       ..strokeWidth = 3.0
       ..strokeCap = StrokeCap.round;
 
+    if (showFullLowerArc) {
+      _drawFullLowerArc(canvas, rect, dashPaint);
+      return;
+    }
+
     if (data.isPolarDay || data.isPolarNight) {
-      final segments = (geometry.radius * math.pi / 8.0).round();
-      for (int i = 0; i < segments; i++) {
-        dashPaint.color = Colors.white.withValues(alpha: 0.20);
-        canvas.drawArc(
-          rect,
-          (i / segments) * math.pi,
-          math.pi / segments * 0.4,
-          false,
-          dashPaint,
-        );
-      }
+      _drawFullLowerArc(canvas, rect, dashPaint);
       return;
     }
 
@@ -143,6 +142,24 @@ class SolarArcPainter extends CustomPainter {
         dashPaint.color = color.withValues(alpha: opacity * 0.5);
         canvas.drawArc(rect, dashStart, dashSweep * 0.4, false, dashPaint);
       }
+    }
+  }
+
+  void _drawFullLowerArc(Canvas canvas, Rect rect, Paint dashPaint) {
+    final segments = (geometry.radius * math.pi / 8.0).round().clamp(1, 140);
+    final dashSweep = math.pi / segments;
+
+    for (int i = 0; i < segments; i++) {
+      final dashStart = (i / segments) * math.pi;
+      final midHour = SolarUtils.angleToHour(
+        dashStart + dashSweep * 0.2,
+        data.solarNoon,
+      );
+      final (color, opacity) = _curveStyleAt(midHour);
+      dashPaint.color = curveData == null || curveData!.isEmpty
+          ? Colors.white.withValues(alpha: 0.20)
+          : color.withValues(alpha: opacity * 0.5);
+      canvas.drawArc(rect, dashStart, dashSweep * 0.4, false, dashPaint);
     }
   }
 
@@ -364,8 +381,10 @@ class SolarArcPainter extends CustomPainter {
         use24 != oldDelegate.use24 ||
         curveData != oldDelegate.curveData ||
         arcStrokeWidth != oldDelegate.arcStrokeWidth ||
+        showUpperArc != oldDelegate.showUpperArc ||
         showEventMarkers != oldDelegate.showEventMarkers ||
         showHourLabels != oldDelegate.showHourLabels ||
-        showLowerArc != oldDelegate.showLowerArc;
+        showLowerArc != oldDelegate.showLowerArc ||
+        showFullLowerArc != oldDelegate.showFullLowerArc;
   }
 }

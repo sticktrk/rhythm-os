@@ -55,6 +55,7 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
   late Animation<double> _flowAnimation;
   SolarClockData? _solarClockData;
   RhythmMode? _dragMode;
+  double? _dragPreviewHour;
 
   SunTimesDto? get _sunTimes => _solarClockData?.sunTimes;
   TwilightTimesDto? get _twilightTimes => _solarClockData?.twilightTimes;
@@ -408,7 +409,7 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
     }
 
     return SizedBox(
-      height: 360,
+      height: 380,
       child: AnimatedBuilder(
         animation: Listenable.merge([_flowAnimation, _breatheAnimation]),
         builder: (context, _) {
@@ -418,9 +419,10 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
             showEventMarkers: true,
             showHourLabels: true,
             showLowerArc: true,
-            horizonFactor: 0.56,
-            radiusWidthFactor: 0.41,
-            radiusHeightFactor: 0.68,
+            showFullLowerArc: true,
+            horizonFactor: 0.58,
+            radiusWidthFactor: 0.44,
+            radiusHeightFactor: 0.76,
             overlayBuilder: (context, geometry) => _buildClockOverlay(
               geometry: geometry,
               dayColor: dayColor,
@@ -649,7 +651,7 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
       mode: mode,
       event: active.event,
       label: _modeLabel(mode),
-      hour: active.hour,
+      hour: _displayHourForMode(mode, fallback: active.hour),
       color: color,
     );
   }
@@ -734,6 +736,7 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
     setState(() {
       _dragMode = mode;
       _selectedMode = mode;
+      _dragPreviewHour = handleByMode[mode]?.hour;
     });
   }
 
@@ -744,20 +747,28 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
     final anchors = _triggerAnchorsForMode(mode);
     if (anchors.isEmpty) return;
 
+    final draggedHour = _constrainedDragHourForMode(
+      mode,
+      geometry.hourFromPosition(position),
+      anchors,
+    );
+
     final next = anchors.reduce((best, candidate) {
-      final bestCenter = _orbCenterForHour(best.hour, geometry);
-      final candidateCenter = _orbCenterForHour(candidate.hour, geometry);
-      final bestDistance = (position - bestCenter).distanceSquared;
-      final candidateDistance = (position - candidateCenter).distanceSquared;
+      final bestDistance = (draggedHour - best.hour).abs();
+      final candidateDistance = (draggedHour - candidate.hour).abs();
       return candidateDistance < bestDistance ? candidate : best;
     });
 
+    setState(() => _dragPreviewHour = draggedHour);
     _setModeTrigger(mode, next.event);
   }
 
   void _handleClockPanEnd() {
     if (_dragMode == null) return;
-    setState(() => _dragMode = null);
+    setState(() {
+      _dragMode = null;
+      _dragPreviewHour = null;
+    });
   }
 
   RhythmMode? _hitTestHandle(
@@ -773,6 +784,31 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
       }
     }
     return null;
+  }
+
+  double _displayHourForMode(RhythmMode mode, {required double fallback}) {
+    if (_dragMode == mode && _dragPreviewHour != null) {
+      return _dragPreviewHour!;
+    }
+    return fallback;
+  }
+
+  double _constrainedDragHourForMode(
+    RhythmMode mode,
+    double rawHour,
+    List<_TriggerAnchor> anchors,
+  ) {
+    if (anchors.isEmpty) return rawHour;
+    final minHour = anchors.first.hour;
+    final maxHour = anchors.last.hour;
+    final normalized = SolarUtils.normalizeHour(rawHour);
+
+    if (mode == RhythmMode.day) {
+      final adjusted = normalized > 12 ? normalized - 24 : normalized;
+      return adjusted.clamp(minHour, maxHour).toDouble();
+    }
+
+    return normalized.clamp(minHour, maxHour).toDouble();
   }
 
   Offset _orbCenterForHour(
@@ -831,6 +867,10 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
   // ──────────────────────────────────────────────────────────────────────────
 
   double? _triggerTimeHours() {
+    if (_config.trigger.isScheduled) {
+      final scheduledTime = _config.trigger.time;
+      if (scheduledTime != null) return _scheduledTimeToHour(scheduledTime);
+    }
     final event = _config.trigger.event;
     if (event == null || _config.trigger.kind != 'solar') return null;
     return _eventTimeHours(event);
@@ -1901,6 +1941,7 @@ String _formatDuration(int ms) {
 }
 
 String _shortTriggerLabel(RhythmTransitionTrigger trigger) {
+  if (trigger.isScheduled) return trigger.time ?? 'Scheduled';
   if (trigger.kind == 'manual') return 'Manual';
   return switch (trigger.event) {
     'sunrise' => 'Sunrise',
@@ -1913,6 +1954,7 @@ String _shortTriggerLabel(RhythmTransitionTrigger trigger) {
 }
 
 IconData _triggerIcon(RhythmTransitionTrigger trigger) {
+  if (trigger.isScheduled) return Icons.schedule;
   if (trigger.kind == 'manual') return Icons.schedule;
   return switch (trigger.event) {
     'sunrise' => Icons.wb_sunny_rounded,
@@ -1925,6 +1967,7 @@ IconData _triggerIcon(RhythmTransitionTrigger trigger) {
 }
 
 Color _triggerColor(RhythmTransitionTrigger trigger) {
+  if (trigger.isScheduled) return CelestialColors.accentBlue;
   if (trigger.kind == 'manual') return CelestialColors.accentBlue;
   return switch (trigger.event) {
     'sunrise' => const Color(0xFFF9A825),
@@ -1950,3 +1993,13 @@ String _modeLabel(RhythmMode mode) => switch (mode) {
       RhythmMode.day => 'Day',
       RhythmMode.sleep => 'Sleep',
     };
+
+double? _scheduledTimeToHour(String time) {
+  final parts = time.split(':');
+  if (parts.length != 2) return null;
+  final hours = int.tryParse(parts[0]);
+  final minutes = int.tryParse(parts[1]);
+  if (hours == null || minutes == null) return null;
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+  return hours + minutes / 60.0;
+}

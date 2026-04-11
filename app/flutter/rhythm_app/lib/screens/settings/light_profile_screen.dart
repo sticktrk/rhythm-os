@@ -65,6 +65,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   final Map<String, sdk.RhythmCurveConfig> _profileConfigs = {};
   List<sdk.RhythmModeConfig> _modeConfigs = const [];
   sdk.RhythmMode? _serverActiveMode;
+  Timer? _roomDefaultsDebounce;
 
   // Light transition duration (from selected profile config).
   double _fadeMs = 500;
@@ -142,6 +143,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
 
   @override
   void dispose() {
+    _roomDefaultsDebounce?.cancel();
     _glowController.dispose();
     super.dispose();
   }
@@ -2573,7 +2575,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     };
   }
 
-  Future<void> _onRoomDefaultChanged(String roomId, String? newState) async {
+  void _onRoomDefaultChanged(String roomId, String? newState) {
     final defaults = Map<String, String>.from(_roomDefaultsForCurrentMode());
     if (newState == null) {
       defaults.remove(roomId);
@@ -2605,10 +2607,14 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       ];
     }
 
+    // Update UI immediately, debounce the server push.
     setState(() => _modeConfigs = updatedConfigs);
 
-    final api = context.read<ServerSyncProvider>().api;
-    await api.modeSet(configs: updatedConfigs);
+    _roomDefaultsDebounce?.cancel();
+    _roomDefaultsDebounce = Timer(const Duration(milliseconds: 800), () {
+      if (!mounted) return;
+      context.read<ServerSyncProvider>().api.modeSet(configs: _modeConfigs);
+    });
   }
 
   Widget _buildRoomDefaultsSection() {
@@ -3314,7 +3320,7 @@ class _DefaultStateToggle extends StatelessWidget {
       case _RoomDefaultMode.idle:
         onModeChanged(_RoomDefaultMode.active);
       case _RoomDefaultMode.off:
-        onModeChanged(_RoomDefaultMode.active);
+        onModeChanged(_RoomDefaultMode.none);
     }
   }
 
