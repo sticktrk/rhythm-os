@@ -8,6 +8,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../../providers/home_provider.dart';
 import '../../providers/server_sync_provider.dart';
+import '../../widgets/solar_clock/solar_clock_exports.dart';
 import '../../widgets/solar_orbit.dart';
 
 /// Full-screen designer for editing a mode transition.
@@ -46,18 +47,24 @@ class TransitionEditScreen extends StatefulWidget {
 
 class _TransitionEditScreenState extends State<TransitionEditScreen>
     with TickerProviderStateMixin {
-  late RhythmModeTransitionConfig _config;
+  late Map<RhythmMode, RhythmModeTransitionConfig> _transitionConfigs;
+  late RhythmMode _selectedMode;
   late AnimationController _breatheController;
   late Animation<double> _breatheAnimation;
   late AnimationController _flowController;
   late Animation<double> _flowAnimation;
-  SunTimesDto? _sunTimes;
-  TwilightTimesDto? _twilightTimes;
+  SolarClockData? _solarClockData;
+  RhythmMode? _dragMode;
+
+  SunTimesDto? get _sunTimes => _solarClockData?.sunTimes;
+  TwilightTimesDto? get _twilightTimes => _solarClockData?.twilightTimes;
+  RhythmModeTransitionConfig get _config => _transitionConfigs[_selectedMode]!;
 
   @override
   void initState() {
     super.initState();
-    _config = widget.transition;
+    _transitionConfigs = _initialTransitionConfigs();
+    _selectedMode = widget.transition.toMode;
     _breatheController = AnimationController(
       duration: const Duration(milliseconds: 3500),
       vsync: this,
@@ -80,9 +87,9 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
     try {
       final loc = context.read<HomeProvider>().currentHome?.location;
       if (loc == null) return;
-      final tz = _tzFromLongitude(loc.longitude);
+      final tz = SolarUtils.timezoneFromLongitude(loc.longitude);
       final now = DateTime.now();
-      _sunTimes = getSunTimes(
+      final sunTimes = getSunTimes(
         latitude: loc.latitude,
         longitude: loc.longitude,
         year: now.year,
@@ -90,17 +97,65 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
         day: now.day,
         timezone: tz,
       );
-      _twilightTimes = getTwilightTimes(
+      final twilightTimes = getTwilightTimes(
         latitude: loc.latitude,
         longitude: loc.longitude,
         year: now.year,
         month: now.month,
         day: now.day,
         timezone: tz,
+      );
+      _solarClockData = SolarClockData(
+        sunTimes: sunTimes,
+        twilightTimes: twilightTimes,
       );
     } catch (_) {
       // Solar times unavailable — trigger time won't display.
     }
+  }
+
+  Map<RhythmMode, RhythmModeTransitionConfig> _initialTransitionConfigs() {
+    final transitions = context.read<ServerSyncProvider>().modeTransitions;
+    final configs = <RhythmMode, RhythmModeTransitionConfig>{};
+
+    for (final transition in transitions) {
+      if (_isSupportedTransition(transition)) {
+        configs[transition.toMode] = transition;
+      }
+    }
+
+    if (_isSupportedTransition(widget.transition)) {
+      configs[widget.transition.toMode] = widget.transition;
+    }
+
+    configs.putIfAbsent(
+      RhythmMode.day,
+      () => _defaultTransitionForMode(RhythmMode.day),
+    );
+    configs.putIfAbsent(
+      RhythmMode.sleep,
+      () => _defaultTransitionForMode(RhythmMode.sleep),
+    );
+
+    return configs;
+  }
+
+  bool _isSupportedTransition(RhythmModeTransitionConfig transition) {
+    return (transition.fromMode == RhythmMode.sleep &&
+            transition.toMode == RhythmMode.day) ||
+        (transition.fromMode == RhythmMode.day &&
+            transition.toMode == RhythmMode.sleep);
+  }
+
+  RhythmModeTransitionConfig _defaultTransitionForMode(RhythmMode mode) {
+    final isDay = mode == RhythmMode.day;
+    return RhythmModeTransitionConfig(
+      fromMode: isDay ? RhythmMode.sleep : RhythmMode.day,
+      toMode: mode,
+      trigger: RhythmTransitionTrigger.solar(isDay ? 'sunrise' : 'sunset'),
+      duration: const TransitionDuration.auto(),
+      preserveHardOff: true,
+    );
   }
 
   @override
@@ -111,19 +166,36 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
   }
 
   void _updateConfig(RhythmModeTransitionConfig updated) {
-    setState(() => _config = updated);
+    setState(() {
+      _transitionConfigs[updated.toMode] = updated;
+      _selectedMode = updated.toMode;
+    });
     context.read<ServerSyncProvider>().dispatchUpdateTransition(updated);
   }
 
-  void _toggleMode({required bool isFrom}) {
-    final current = isFrom ? _config.fromMode : _config.toMode;
-    final next = current == RhythmMode.day ? RhythmMode.sleep : RhythmMode.day;
-    HapticFeedback.lightImpact();
-    if (isFrom) {
-      _updateConfig(_config.copyWith(fromMode: next));
-    } else {
-      _updateConfig(_config.copyWith(toMode: next));
+  void _focusMode(RhythmMode mode) {
+    if (_selectedMode == mode) return;
+    HapticFeedback.selectionClick();
+    setState(() => _selectedMode = mode);
+  }
+
+  void _setModeTrigger(RhythmMode mode, String event) {
+    final current = _transitionConfigs[mode];
+    if (current == null) return;
+    final unchanged = current.trigger.isSolar && current.trigger.event == event;
+    if (unchanged) {
+      if (_selectedMode != mode) {
+        setState(() => _selectedMode = mode);
+      }
+      return;
     }
+
+    HapticFeedback.selectionClick();
+    _updateConfig(
+      current.copyWith(
+        trigger: RhythmTransitionTrigger.solar(event),
+      ),
+    );
   }
 
   @override
@@ -205,6 +277,10 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
 
   Widget _buildHero() {
     final accentColor = _triggerColor(_config.trigger);
+    final dayColor = widget.profileColors[RhythmMode.day] ??
+        _fallbackModeColor(RhythmMode.day);
+    final sleepColor = widget.profileColors[RhythmMode.sleep] ??
+        _fallbackModeColor(RhythmMode.sleep);
     final fromColor = widget.profileColors[_config.fromMode] ??
         _fallbackModeColor(_config.fromMode);
     final toColor = widget.profileColors[_config.toMode] ??
@@ -217,26 +293,51 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Title — custom label or "Day to Sleep" / "Sleep to Day"
             GestureDetector(
               onTap: _showLabelDialog,
-              child: Text(
-                _config.label.isNotEmpty
-                    ? _config.label
-                    : '${_modeLabel(_config.fromMode)} to ${_modeLabel(_config.toMode)}',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: CelestialColors.textPrimary
-                      .withValues(alpha: 0.85),
-                  fontSize: 20,
-                  fontWeight: FontWeight.w300,
-                  letterSpacing: 1.0,
-                ),
+              child: Column(
+                children: [
+                  Text(
+                    _config.label.isNotEmpty
+                        ? _config.label
+                        : '${_modeLabel(_config.fromMode)} to ${_modeLabel(_config.toMode)}',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color:
+                          CelestialColors.textPrimary.withValues(alpha: 0.85),
+                      fontSize: 20,
+                      fontWeight: FontWeight.w300,
+                      letterSpacing: 1.0,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Drag Day and Sleep around the solar clock',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color:
+                          CelestialColors.textSecondary.withValues(alpha: 0.62),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                      letterSpacing: 0.4,
+                    ),
+                  ),
+                ],
               ),
             ),
             const SizedBox(height: 20),
-            // Transition arc with trigger marker
-            _buildTransitionFlow(fromColor, toColor, accentColor),
+            if (_solarClockData != null)
+              _buildInteractiveTransitionFlow(
+                dayColor: dayColor,
+                sleepColor: sleepColor,
+              )
+            else
+              _buildLegacyTransitionFlow(fromColor, toColor, accentColor),
+            const SizedBox(height: 14),
+            _buildFocusedTransitionSummary(
+              dayColor: dayColor,
+              sleepColor: sleepColor,
+            ),
           ],
         ),
       ),
@@ -250,7 +351,22 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
           clipBehavior: Clip.antiAlias,
           child: Stack(
             children: [
-              // Directional atmosphere: from-color left → to-color right
+              Positioned.fill(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: RadialGradient(
+                      center: const Alignment(0, -0.6),
+                      radius: 1.15,
+                      colors: [
+                        accentColor.withValues(alpha: 0.12 + breathe * 0.04),
+                        CelestialColors.backgroundCard,
+                        CelestialColors.backgroundDark,
+                      ],
+                      stops: const [0.0, 0.55, 1.0],
+                    ),
+                  ),
+                ),
+              ),
               Positioned.fill(
                 child: DecoratedBox(
                   decoration: BoxDecoration(
@@ -258,12 +374,10 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
                       begin: Alignment.centerLeft,
                       end: Alignment.centerRight,
                       colors: [
-                        fromColor.withValues(
-                            alpha: 0.12 + breathe * 0.05),
-                        fromColor.withValues(alpha: 0.0),
-                        toColor.withValues(alpha: 0.0),
-                        toColor.withValues(
-                            alpha: 0.12 + breathe * 0.05),
+                        sleepColor.withValues(alpha: 0.10 + breathe * 0.04),
+                        Colors.transparent,
+                        Colors.transparent,
+                        dayColor.withValues(alpha: 0.10 + breathe * 0.04),
                       ],
                       stops: const [0.0, 0.35, 0.65, 1.0],
                     ),
@@ -278,7 +392,107 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
     );
   }
 
-  Widget _buildTransitionFlow(
+  Widget _buildInteractiveTransitionFlow({
+    required Color dayColor,
+    required Color sleepColor,
+  }) {
+    final solarClockData = _solarClockData;
+    if (solarClockData == null) {
+      return _buildLegacyTransitionFlow(
+        widget.profileColors[_config.fromMode] ??
+            _fallbackModeColor(_config.fromMode),
+        widget.profileColors[_config.toMode] ??
+            _fallbackModeColor(_config.toMode),
+        _triggerColor(_config.trigger),
+      );
+    }
+
+    return SizedBox(
+      height: 360,
+      child: AnimatedBuilder(
+        animation: Listenable.merge([_flowAnimation, _breatheAnimation]),
+        builder: (context, _) {
+          return SolarClock(
+            data: solarClockData,
+            use24: MediaQuery.alwaysUse24HourFormatOf(context),
+            showEventMarkers: true,
+            showHourLabels: true,
+            showLowerArc: true,
+            horizonFactor: 0.56,
+            radiusWidthFactor: 0.41,
+            radiusHeightFactor: 0.68,
+            overlayBuilder: (context, geometry) => _buildClockOverlay(
+              geometry: geometry,
+              dayColor: dayColor,
+              sleepColor: sleepColor,
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildFocusedTransitionSummary({
+    required Color dayColor,
+    required Color sleepColor,
+  }) {
+    final modeColor = _selectedMode == RhythmMode.day ? dayColor : sleepColor;
+    final triggerHour = _triggerTimeHours();
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: modeColor.withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: modeColor.withValues(alpha: 0.25)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(_modeIcon(_selectedMode), size: 14, color: modeColor),
+              const SizedBox(width: 6),
+              Text(
+                _modeLabel(_selectedMode),
+                style: TextStyle(
+                  color: modeColor,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.3,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 10),
+        Text(
+          _shortTriggerLabel(_config.trigger).toUpperCase(),
+          style: TextStyle(
+            color: modeColor.withValues(alpha: 0.8),
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 1.2,
+          ),
+        ),
+        if (triggerHour != null) ...[
+          const SizedBox(width: 8),
+          Text(
+            _fmtTime(triggerHour),
+            style: TextStyle(
+              color: CelestialColors.textPrimary.withValues(alpha: 0.76),
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              letterSpacing: 0.2,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildLegacyTransitionFlow(
       Color fromColor, Color toColor, Color accentColor) {
     return SizedBox(
       height: 130,
@@ -295,9 +509,7 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
               animation: Listenable.merge([_flowAnimation, _breatheAnimation]),
               builder: (context, _) {
                 final isDawn = _config.fromMode == RhythmMode.sleep;
-                final ref = isDawn
-                    ? _sunTimes?.sunrise
-                    : _sunTimes?.sunset;
+                final ref = isDawn ? _sunTimes?.sunrise : _sunTimes?.sunset;
                 final triggerH = _triggerTimeHours();
                 return CustomPaint(
                   painter: _TransitionArcPainter(
@@ -307,16 +519,12 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
                     triggerLabel: _shortTriggerLabel(_config.trigger),
                     triggerIconCodePoint:
                         _triggerIcon(_config.trigger).codePoint,
-                    triggerTime: triggerH != null
-                        ? _fmtTime(triggerH)
-                        : null,
+                    triggerTime: triggerH != null ? _fmtTime(triggerH) : null,
                     triggerPosition: _triggerArcPosition(),
                     flowProgress: _flowAnimation.value,
                     pulse: _breatheAnimation.value,
-                    arcStartHour:
-                        ref != null ? ref - 2.0 : null,
-                    arcEndHour:
-                        ref != null ? ref + 2.0 : null,
+                    arcStartHour: ref != null ? ref - 2.0 : null,
+                    arcEndHour: ref != null ? ref + 2.0 : null,
                     use24: MediaQuery.alwaysUse24HourFormatOf(context),
                   ),
                 );
@@ -330,7 +538,7 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
             child: _ModeOrb(
               mode: _config.fromMode,
               color: fromColor,
-              onTap: () => _toggleMode(isFrom: true),
+              onTap: () => _focusMode(_config.fromMode),
             ),
           ),
           // To mode orb — right, circle center at arc right endpoint
@@ -340,11 +548,247 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
             child: _ModeOrb(
               mode: _config.toMode,
               color: toColor,
-              onTap: () => _toggleMode(isFrom: false),
+              onTap: () => _focusMode(_config.toMode),
             ),
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildClockOverlay({
+    required SolarClockGeometry geometry,
+    required Color dayColor,
+    required Color sleepColor,
+  }) {
+    final handles = _handleSpecs(dayColor: dayColor, sleepColor: sleepColor);
+    final handleByMode = {
+      for (final handle in handles) handle.mode: handle,
+    };
+
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTapUp: (details) =>
+          _handleClockTap(details.localPosition, geometry, handleByMode),
+      onPanStart: (details) =>
+          _handleClockPanStart(details.localPosition, geometry, handleByMode),
+      onPanUpdate: (details) =>
+          _handleClockPanUpdate(details.localPosition, geometry),
+      onPanEnd: (_) => _handleClockPanEnd(),
+      onPanCancel: _handleClockPanEnd,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Positioned.fill(
+            child: CustomPaint(
+              painter: _ClockHandlesPainter(
+                geometry: geometry,
+                handles: handles,
+                selectedMode: _selectedMode,
+                flowProgress: _flowAnimation.value,
+              ),
+            ),
+          ),
+          for (final handle in handles)
+            _buildPositionedHandle(
+              handle: handle,
+              geometry: geometry,
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPositionedHandle({
+    required _TransitionHandleSpec handle,
+    required SolarClockGeometry geometry,
+  }) {
+    final center = _orbCenterForHour(
+      handle.hour,
+      geometry,
+      outwardDistance: handle.mode == _selectedMode ? 18 : 14,
+    );
+    final size = handle.mode == _selectedMode ? 70.0 : 62.0;
+
+    return Positioned(
+      left: center.dx - size / 2,
+      top: center.dy - size / 2,
+      child: _ClockModeOrb(
+        mode: handle.mode,
+        color: handle.color,
+        label: handle.label,
+        timeLabel: _fmtTime(handle.hour),
+        selected: handle.mode == _selectedMode,
+      ),
+    );
+  }
+
+  List<_TransitionHandleSpec> _handleSpecs({
+    required Color dayColor,
+    required Color sleepColor,
+  }) {
+    return [
+      _handleSpecForMode(RhythmMode.day, dayColor),
+      _handleSpecForMode(RhythmMode.sleep, sleepColor),
+    ].whereType<_TransitionHandleSpec>().toList();
+  }
+
+  _TransitionHandleSpec? _handleSpecForMode(RhythmMode mode, Color color) {
+    final config = _transitionConfigs[mode];
+    if (config == null) return null;
+
+    final anchors = _triggerAnchorsForMode(mode);
+    if (anchors.isEmpty) return null;
+
+    final active = anchors.firstWhere(
+      (anchor) => anchor.event == config.trigger.event,
+      orElse: () => anchors.first,
+    );
+
+    return _TransitionHandleSpec(
+      mode: mode,
+      event: active.event,
+      label: _modeLabel(mode),
+      hour: active.hour,
+      color: color,
+    );
+  }
+
+  List<_TriggerAnchor> _triggerAnchorsForMode(RhythmMode mode) {
+    final tw = _twilightTimes;
+    final st = _sunTimes;
+    if (tw == null || st == null) return const [];
+
+    if (mode == RhythmMode.day) {
+      return [
+        if (tw.dawn.astronomical != null)
+          _TriggerAnchor(
+            event: 'astronomical_twilight',
+            label: 'Astro Dawn',
+            hour: tw.dawn.astronomical!,
+          ),
+        if (tw.dawn.nautical != null)
+          _TriggerAnchor(
+            event: 'nautical_twilight',
+            label: 'Nautical Dawn',
+            hour: tw.dawn.nautical!,
+          ),
+        if (tw.dawn.civil != null)
+          _TriggerAnchor(
+            event: 'civil_twilight',
+            label: 'Civil Dawn',
+            hour: tw.dawn.civil!,
+          ),
+        _TriggerAnchor(
+          event: 'sunrise',
+          label: 'Sunrise',
+          hour: st.sunrise,
+        ),
+      ];
+    }
+
+    return [
+      _TriggerAnchor(
+        event: 'sunset',
+        label: 'Sunset',
+        hour: st.sunset,
+      ),
+      if (tw.dusk.civil != null)
+        _TriggerAnchor(
+          event: 'civil_twilight',
+          label: 'Civil Dusk',
+          hour: tw.dusk.civil!,
+        ),
+      if (tw.dusk.nautical != null)
+        _TriggerAnchor(
+          event: 'nautical_twilight',
+          label: 'Nautical Dusk',
+          hour: tw.dusk.nautical!,
+        ),
+      if (tw.dusk.astronomical != null)
+        _TriggerAnchor(
+          event: 'astronomical_twilight',
+          label: 'Astro Dusk',
+          hour: tw.dusk.astronomical!,
+        ),
+    ];
+  }
+
+  void _handleClockTap(
+    Offset position,
+    SolarClockGeometry geometry,
+    Map<RhythmMode, _TransitionHandleSpec> handleByMode,
+  ) {
+    final mode = _hitTestHandle(position, geometry, handleByMode);
+    if (mode != null) _focusMode(mode);
+  }
+
+  void _handleClockPanStart(
+    Offset position,
+    SolarClockGeometry geometry,
+    Map<RhythmMode, _TransitionHandleSpec> handleByMode,
+  ) {
+    final mode = _hitTestHandle(position, geometry, handleByMode);
+    if (mode == null) return;
+    HapticFeedback.lightImpact();
+    setState(() {
+      _dragMode = mode;
+      _selectedMode = mode;
+    });
+  }
+
+  void _handleClockPanUpdate(Offset position, SolarClockGeometry geometry) {
+    final mode = _dragMode;
+    if (mode == null) return;
+
+    final anchors = _triggerAnchorsForMode(mode);
+    if (anchors.isEmpty) return;
+
+    final next = anchors.reduce((best, candidate) {
+      final bestCenter = _orbCenterForHour(best.hour, geometry);
+      final candidateCenter = _orbCenterForHour(candidate.hour, geometry);
+      final bestDistance = (position - bestCenter).distanceSquared;
+      final candidateDistance = (position - candidateCenter).distanceSquared;
+      return candidateDistance < bestDistance ? candidate : best;
+    });
+
+    _setModeTrigger(mode, next.event);
+  }
+
+  void _handleClockPanEnd() {
+    if (_dragMode == null) return;
+    setState(() => _dragMode = null);
+  }
+
+  RhythmMode? _hitTestHandle(
+    Offset position,
+    SolarClockGeometry geometry,
+    Map<RhythmMode, _TransitionHandleSpec> handleByMode,
+  ) {
+    const threshold = 38.0;
+    for (final entry in handleByMode.entries) {
+      final center = _orbCenterForHour(entry.value.hour, geometry);
+      if ((position - center).distance <= threshold) {
+        return entry.key;
+      }
+    }
+    return null;
+  }
+
+  Offset _orbCenterForHour(
+    double hour,
+    SolarClockGeometry geometry, {
+    double outwardDistance = 14,
+  }) {
+    final anchor = geometry.positionForHour(hour);
+    final vector = anchor - geometry.center;
+    final distance = vector.distance;
+    if (distance == 0) return anchor;
+    final dx = vector.dx / distance;
+    final dy = vector.dy / distance;
+    return Offset(
+      anchor.dx + dx * outwardDistance,
+      anchor.dy + dy * outwardDistance,
     );
   }
 
@@ -409,19 +853,10 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
   }
 
   String _fmtTime(double h) {
-    final use24 = MediaQuery.alwaysUse24HourFormatOf(context);
-    var hr = h.floor() % 24;
-    var mn = ((h - h.floor()) * 60).round();
-    if (mn >= 60) {
-      hr = (hr + 1) % 24;
-      mn = 0;
-    }
-    if (use24) {
-      return '${hr.toString().padLeft(2, '0')}:${mn.toString().padLeft(2, '0')}';
-    }
-    final p = hr < 12 ? 'a' : 'p';
-    final h12 = hr == 0 ? 12 : (hr > 12 ? hr - 12 : hr);
-    return '$h12:${mn.toString().padLeft(2, '0')}$p';
+    return SolarUtils.formatHour(
+      h,
+      use24: MediaQuery.alwaysUse24HourFormatOf(context),
+    );
   }
 
   Widget _buildTriggerSelector() {
@@ -430,15 +865,63 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
     // (event, label, subtitle, icon, color)
     final events = <(String, String, String?, IconData, Color)>[
       if (isDawn) ...[
-        ('astronomical_twilight', 'Astro', 'Twilight', Icons.dark_mode_rounded, const Color(0xFF5C6BC0)),
-        ('nautical_twilight', 'Nautical', 'Twilight', Icons.nights_stay_rounded, const Color(0xFF7C4DFF)),
-        ('civil_twilight', 'Civil', 'Twilight', Icons.wb_twilight_rounded, const Color(0xFFFFB74D)),
-        ('sunrise', 'Sunrise', null, Icons.wb_sunny_rounded, const Color(0xFFF9A825)),
+        (
+          'astronomical_twilight',
+          'Astro',
+          'Twilight',
+          Icons.dark_mode_rounded,
+          const Color(0xFF5C6BC0)
+        ),
+        (
+          'nautical_twilight',
+          'Nautical',
+          'Twilight',
+          Icons.nights_stay_rounded,
+          const Color(0xFF7C4DFF)
+        ),
+        (
+          'civil_twilight',
+          'Civil',
+          'Twilight',
+          Icons.wb_twilight_rounded,
+          const Color(0xFFFFB74D)
+        ),
+        (
+          'sunrise',
+          'Sunrise',
+          null,
+          Icons.wb_sunny_rounded,
+          const Color(0xFFF9A825)
+        ),
       ] else ...[
-        ('sunset', 'Sunset', null, Icons.wb_twilight_rounded, const Color(0xFFFF7043)),
-        ('civil_twilight', 'Civil', 'Twilight', Icons.wb_twilight_rounded, const Color(0xFFFFB74D)),
-        ('nautical_twilight', 'Nautical', 'Twilight', Icons.nights_stay_rounded, const Color(0xFF7C4DFF)),
-        ('astronomical_twilight', 'Astro', 'Twilight', Icons.dark_mode_rounded, const Color(0xFF5C6BC0)),
+        (
+          'sunset',
+          'Sunset',
+          null,
+          Icons.wb_twilight_rounded,
+          const Color(0xFFFF7043)
+        ),
+        (
+          'civil_twilight',
+          'Civil',
+          'Twilight',
+          Icons.wb_twilight_rounded,
+          const Color(0xFFFFB74D)
+        ),
+        (
+          'nautical_twilight',
+          'Nautical',
+          'Twilight',
+          Icons.nights_stay_rounded,
+          const Color(0xFF7C4DFF)
+        ),
+        (
+          'astronomical_twilight',
+          'Astro',
+          'Twilight',
+          Icons.dark_mode_rounded,
+          const Color(0xFF5C6BC0)
+        ),
       ],
     ];
 
@@ -455,9 +938,7 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
               return _TriggerChip(
                 label: label,
                 subtitle: subtitle,
-                time: selected && timeH != null
-                    ? _fmtTime(timeH)
-                    : null,
+                time: selected && timeH != null ? _fmtTime(timeH) : null,
                 icon: icon,
                 color: color,
                 selected: selected,
@@ -504,8 +985,7 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
                   shape: BoxShape.circle,
                   color: accentColor.withValues(alpha: 0.1),
                 ),
-                child: Icon(Icons.timer_outlined,
-                    color: accentColor, size: 15),
+                child: Icon(Icons.timer_outlined, color: accentColor, size: 15),
               ),
               const SizedBox(width: 12),
               const Expanded(
@@ -531,8 +1011,8 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
                   }
                 },
                 child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 8, vertical: 4),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   decoration: BoxDecoration(
                     color: _durationAuto
                         ? accentColor.withValues(alpha: 0.12)
@@ -577,8 +1057,7 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
                             inactiveTrackColor:
                                 accentColor.withValues(alpha: 0.12),
                             thumbColor: accentColor,
-                            overlayColor:
-                                accentColor.withValues(alpha: 0.12),
+                            overlayColor: accentColor.withValues(alpha: 0.12),
                             trackHeight: 4,
                             thumbShape: const RoundSliderThumbShape(
                                 enabledThumbRadius: 8),
@@ -586,8 +1065,8 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
                                 overlayRadius: 18),
                           ),
                           child: Slider(
-                            value: (_config.durationMs / 1000.0)
-                                .clamp(1.0, 120.0),
+                            value:
+                                (_config.durationMs / 1000.0).clamp(1.0, 120.0),
                             min: 1,
                             max: 120,
                             divisions: 119,
@@ -600,22 +1079,18 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
                           ),
                         ),
                         Padding(
-                          padding:
-                              const EdgeInsets.symmetric(horizontal: 6),
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
                           child: Row(
-                            mainAxisAlignment:
-                                MainAxisAlignment.spaceBetween,
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
                               Text('1s',
                                   style: TextStyle(
-                                      color: CelestialColors
-                                          .textSecondary
+                                      color: CelestialColors.textSecondary
                                           .withValues(alpha: 0.4),
                                       fontSize: 11)),
                               Text('2m',
                                   style: TextStyle(
-                                      color: CelestialColors
-                                          .textSecondary
+                                      color: CelestialColors.textSecondary
                                           .withValues(alpha: 0.4),
                                       fontSize: 11)),
                             ],
@@ -658,8 +1133,7 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
           decoration: InputDecoration(
             hintText: 'e.g. Morning Wake',
             hintStyle: TextStyle(
-              color:
-                  CelestialColors.textSecondary.withValues(alpha: 0.5),
+              color: CelestialColors.textSecondary.withValues(alpha: 0.5),
             ),
             enabledBorder: UnderlineInputBorder(
               borderSide: BorderSide(
@@ -667,8 +1141,7 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
               ),
             ),
             focusedBorder: const UnderlineInputBorder(
-              borderSide:
-                  BorderSide(color: CelestialColors.accentBlue),
+              borderSide: BorderSide(color: CelestialColors.accentBlue),
             ),
           ),
           autofocus: true,
@@ -684,15 +1157,13 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
             child: Text(
               'Cancel',
               style: TextStyle(
-                color: CelestialColors.textSecondary
-                    .withValues(alpha: 0.7),
+                color: CelestialColors.textSecondary.withValues(alpha: 0.7),
               ),
             ),
           ),
           TextButton(
             onPressed: () {
-              _updateConfig(
-                  _config.copyWith(label: controller.text.trim()));
+              _updateConfig(_config.copyWith(label: controller.text.trim()));
               Navigator.pop(ctx);
             },
             child: const Text(
@@ -707,7 +1178,205 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
       ),
     );
   }
+}
 
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Interactive solar-clock handle models
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class _TransitionHandleSpec {
+  final RhythmMode mode;
+  final String event;
+  final String label;
+  final double hour;
+  final Color color;
+
+  const _TransitionHandleSpec({
+    required this.mode,
+    required this.event,
+    required this.label,
+    required this.hour,
+    required this.color,
+  });
+}
+
+class _TriggerAnchor {
+  final String event;
+  final String label;
+  final double hour;
+
+  const _TriggerAnchor({
+    required this.event,
+    required this.label,
+    required this.hour,
+  });
+}
+
+class _ClockModeOrb extends StatelessWidget {
+  final RhythmMode mode;
+  final Color color;
+  final String label;
+  final String timeLabel;
+  final bool selected;
+
+  const _ClockModeOrb({
+    required this.mode,
+    required this.color,
+    required this.label,
+    required this.timeLabel,
+    required this.selected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final size = selected ? 70.0 : 62.0;
+    final orbSize = selected ? 44.0 : 40.0;
+
+    return SizedBox(
+      width: size,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: orbSize,
+            height: orbSize,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: color.withValues(alpha: selected ? 0.18 : 0.12),
+              border: Border.all(
+                color: color.withValues(alpha: selected ? 0.55 : 0.35),
+                width: selected ? 1.6 : 1.2,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: color.withValues(alpha: selected ? 0.28 : 0.18),
+                  blurRadius: selected ? 16 : 12,
+                ),
+              ],
+            ),
+            child: Icon(
+              _modeIcon(mode),
+              size: selected ? 20 : 18,
+              color: color,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            label,
+            style: TextStyle(
+              color: color.withValues(alpha: selected ? 0.96 : 0.88),
+              fontSize: selected ? 11.5 : 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.3,
+            ),
+          ),
+          const SizedBox(height: 1),
+          Text(
+            timeLabel,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: selected ? 0.72 : 0.52),
+              fontSize: 9.5,
+              fontWeight: FontWeight.w500,
+              letterSpacing: 0.2,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ClockHandlesPainter extends CustomPainter {
+  final SolarClockGeometry geometry;
+  final List<_TransitionHandleSpec> handles;
+  final RhythmMode selectedMode;
+  final double flowProgress;
+
+  const _ClockHandlesPainter({
+    required this.geometry,
+    required this.handles,
+    required this.selectedMode,
+    required this.flowProgress,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (final handle in handles) {
+      final isSelected = handle.mode == selectedMode;
+      final anchor = geometry.positionForHour(handle.hour);
+      final orbCenter = _orbCenterForHour(
+        handle.hour,
+        outwardDistance: isSelected ? 18 : 14,
+      );
+
+      canvas.drawLine(
+        anchor,
+        orbCenter,
+        Paint()
+          ..color = handle.color.withValues(alpha: isSelected ? 0.28 : 0.16)
+          ..strokeWidth = isSelected ? 2.0 : 1.4
+          ..strokeCap = StrokeCap.round,
+      );
+
+      canvas.drawCircle(
+        anchor,
+        isSelected ? 4.0 : 3.0,
+        Paint()
+          ..color = handle.color.withValues(alpha: isSelected ? 0.95 : 0.75),
+      );
+
+      canvas.drawCircle(
+        anchor,
+        isSelected ? 8 : 6,
+        Paint()
+          ..color = handle.color.withValues(alpha: isSelected ? 0.18 : 0.10)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6),
+      );
+
+      if (isSelected) {
+        final shimmer = Offset.lerp(
+          anchor,
+          orbCenter,
+          0.3 + 0.2 * math.sin(flowProgress * math.pi * 2),
+        );
+        if (shimmer != null) {
+          canvas.drawCircle(
+            shimmer,
+            3.0,
+            Paint()..color = Colors.white.withValues(alpha: 0.82),
+          );
+          canvas.drawCircle(
+            shimmer,
+            8.0,
+            Paint()
+              ..color = handle.color.withValues(alpha: 0.18)
+              ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5),
+          );
+        }
+      }
+    }
+  }
+
+  Offset _orbCenterForHour(double hour, {double outwardDistance = 14}) {
+    final anchor = geometry.positionForHour(hour);
+    final vector = anchor - geometry.center;
+    final distance = vector.distance;
+    if (distance == 0) return anchor;
+    final dx = vector.dx / distance;
+    final dy = vector.dy / distance;
+    return Offset(
+      anchor.dx + dx * outwardDistance,
+      anchor.dy + dy * outwardDistance,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _ClockHandlesPainter oldDelegate) {
+    return geometry != oldDelegate.geometry ||
+        handles != oldDelegate.handles ||
+        selectedMode != oldDelegate.selectedMode ||
+        flowProgress != oldDelegate.flowProgress;
+  }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -804,9 +1473,7 @@ class _TriggerChip extends StatelessWidget {
         curve: Curves.easeOut,
         padding: const EdgeInsets.symmetric(vertical: 10),
         decoration: BoxDecoration(
-          color: selected
-              ? color.withValues(alpha: 0.12)
-              : Colors.transparent,
+          color: selected ? color.withValues(alpha: 0.12) : Colors.transparent,
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
             color: selected
@@ -849,8 +1516,7 @@ class _TriggerChip extends StatelessWidget {
                   style: TextStyle(
                     color: selected
                         ? color.withValues(alpha: 0.5)
-                        : CelestialColors.textSecondary
-                            .withValues(alpha: 0.25),
+                        : CelestialColors.textSecondary.withValues(alpha: 0.25),
                     fontSize: 9,
                     fontWeight: FontWeight.w400,
                     letterSpacing: 0.2,
@@ -996,15 +1662,13 @@ class _TransitionArcPainter extends CustomPainter {
         segColor = toColor;
         segAlpha = 0.40 + 0.30 * ((1 - t) / (1 - triggerPosition));
       } else {
-        final blend =
-            ((t - triggerPosition + 0.08) / 0.16).clamp(0.0, 1.0);
+        final blend = ((t - triggerPosition + 0.08) / 0.16).clamp(0.0, 1.0);
         segColor = Color.lerp(fromColor, toColor, blend)!;
         segAlpha = 0.70;
       }
 
       arcPaint.color = segColor.withValues(alpha: segAlpha);
-      canvas.drawArc(
-          arcRect, segStart, segSweep + 0.01, false, arcPaint);
+      canvas.drawArc(arcRect, segStart, segSweep + 0.01, false, arcPaint);
     }
 
     // ── 3b. Time ticks ──────────────────────────────
@@ -1046,11 +1710,13 @@ class _TransitionArcPainter extends CustomPainter {
         final mn = ((tickH - tickH.floor()) * 60).round();
         String label;
         if (use24) {
-          label = '${hr.toString().padLeft(2, '0')}:${mn.toString().padLeft(2, '0')}';
+          label =
+              '${hr.toString().padLeft(2, '0')}:${mn.toString().padLeft(2, '0')}';
         } else {
           final p = hr < 12 ? 'a' : 'p';
           final h12 = hr == 0 ? 12 : (hr > 12 ? hr - 12 : hr);
-          label = mn == 0 ? '$h12$p' : '$h12:${mn.toString().padLeft(2, '0')}$p';
+          label =
+              mn == 0 ? '$h12$p' : '$h12:${mn.toString().padLeft(2, '0')}$p';
         }
 
         final tp = TextPainter(
@@ -1155,8 +1821,7 @@ class _TransitionArcPainter extends CustomPainter {
       labelTp.paint(
         canvas,
         Offset(
-          (iconCenter.dx - labelTp.width / 2)
-              .clamp(0, w - labelTp.width),
+          (iconCenter.dx - labelTp.width / 2).clamp(0, w - labelTp.width),
           iconCenter.dy + 9,
         ),
       );
@@ -1178,8 +1843,7 @@ class _TransitionArcPainter extends CustomPainter {
         timeTp.paint(
           canvas,
           Offset(
-            (iconCenter.dx - timeTp.width / 2)
-                .clamp(0, w - timeTp.width),
+            (iconCenter.dx - timeTp.width / 2).clamp(0, w - timeTp.width),
             iconCenter.dy + 21,
           ),
         );
@@ -1202,8 +1866,7 @@ class _TransitionArcPainter extends CustomPainter {
       canvas.drawCircle(
         dotPt,
         2.5,
-        Paint()
-          ..color = Color.fromRGBO(255, 255, 255, 0.85 * dotOpacity),
+        Paint()..color = Color.fromRGBO(255, 255, 255, 0.85 * dotOpacity),
       );
     }
   }
@@ -1227,23 +1890,6 @@ class _TransitionArcPainter extends CustomPainter {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Helpers
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-String _tzFromLongitude(double longitude) {
-  final o = (longitude / 15).round();
-  const m = {
-    -10: 'Pacific/Honolulu', -9: 'America/Anchorage',
-    -8: 'America/Los_Angeles', -7: 'America/Denver',
-    -6: 'America/Chicago', -5: 'America/New_York',
-    -4: 'America/Halifax', -3: 'America/Sao_Paulo',
-    -2: 'Atlantic/South_Georgia', -1: 'Atlantic/Azores',
-    0: 'Europe/London', 1: 'Europe/Paris', 2: 'Europe/Helsinki',
-    3: 'Europe/Moscow', 4: 'Asia/Dubai', 5: 'Asia/Karachi',
-    6: 'Asia/Dhaka', 7: 'Asia/Bangkok', 8: 'Asia/Shanghai',
-    9: 'Asia/Tokyo', 10: 'Australia/Sydney', 11: 'Pacific/Noumea',
-    12: 'Pacific/Auckland',
-  };
-  return m[o] ?? 'UTC';
-}
 
 String _formatDuration(int ms) {
   final seconds = ms ~/ 1000;

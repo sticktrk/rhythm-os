@@ -210,10 +210,10 @@ class _GradientBarPainter extends CustomPainter {
 
     for (int i = 0; i < segments; i++) {
       final hour = (i / segments) * 24;
-      final brightness =
-          _interpolateValue(curveData!.hours, curveData!.brightness, hour);
-      final kelvin =
-          _interpolateValue(curveData!.hours, curveData!.kelvin, hour);
+      final brightness = SolarUtils.interpolateValue(
+          curveData!.hours, curveData!.brightness, hour);
+      final kelvin = SolarUtils.interpolateValue(
+          curveData!.hours, curveData!.kelvin, hour);
 
       final color = ColorUtils.cctToColor(kelvin.toInt());
       final opacity = 0.4 + (brightness / 100) * 0.6;
@@ -234,53 +234,6 @@ class _GradientBarPainter extends CustomPainter {
       ..color = CelestialColors.orbitRing.withValues(alpha: 0.5)
       ..strokeWidth = 1;
     canvas.drawRRect(rect, borderPaint);
-  }
-
-  double _interpolateValue(
-      List<double> hours, List<int> values, double targetHour) {
-    if (hours.isEmpty) return 50.0;
-    if (hours.length == 1) return values[0].toDouble();
-
-    // Find surrounding points
-    int lowerIdx = 0;
-    int upperIdx = hours.length - 1;
-
-    for (int i = 0; i < hours.length - 1; i++) {
-      if (hours[i] <= targetHour && hours[i + 1] >= targetHour) {
-        lowerIdx = i;
-        upperIdx = i + 1;
-        break;
-      }
-    }
-
-    // Handle wrap-around at midnight
-    if (targetHour < hours.first) {
-      lowerIdx = hours.length - 1;
-      upperIdx = 0;
-    } else if (targetHour > hours.last) {
-      lowerIdx = hours.length - 1;
-      upperIdx = 0;
-    }
-
-    final lowerHour = hours[lowerIdx];
-    final upperHour = hours[upperIdx];
-    final lowerValue = values[lowerIdx];
-    final upperValue = values[upperIdx];
-
-    if (lowerHour == upperHour) return lowerValue.toDouble();
-
-    double t;
-    if (upperIdx == 0 && lowerIdx == hours.length - 1) {
-      final totalSpan = (24 - lowerHour) + upperHour;
-      final position = targetHour >= lowerHour
-          ? targetHour - lowerHour
-          : (24 - lowerHour) + targetHour;
-      t = position / totalSpan;
-    } else {
-      t = (targetHour - lowerHour) / (upperHour - lowerHour);
-    }
-
-    return lowerValue + (upperValue - lowerValue) * t;
   }
 
   @override
