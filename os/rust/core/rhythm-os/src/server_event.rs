@@ -57,6 +57,8 @@ pub struct RoomStateEvent {
     pub brightness_offset: f32,
     /// Whether lights are currently on in this room.
     pub lights_on: bool,
+    /// Whether a global mode transition fade is currently in progress.
+    pub transitioning: bool,
     /// Effective brightness percentage (1-100) after offsets.
     pub brightness: u8,
     /// Effective color temperature in Kelvin.
@@ -80,6 +82,7 @@ impl RoomStateEvent {
         mode: RhythmMode,
         state: RoomModeState,
         lights_on: bool,
+        transitioning: bool,
         brightness: u8,
         kelvin: u16,
         room_profile: RoomProfileSettings,
@@ -92,6 +95,7 @@ impl RoomStateEvent {
             time_offset: snap.time_offset_minutes,
             brightness_offset: snap.brightness_offset,
             lights_on,
+            transitioning,
             brightness,
             kelvin,
             tick: false,

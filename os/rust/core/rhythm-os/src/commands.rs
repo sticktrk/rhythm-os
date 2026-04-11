@@ -197,6 +197,26 @@ fn warning_uses_custom_profile(mode_configs: &[ModeConfig], mode: RhythmMode) ->
         .is_some()
 }
 
+pub(crate) fn validate_mode_configs(configs: &[ModeConfig]) -> Result<()> {
+    for config in configs {
+        for room_default in &config.room_defaults {
+            if room_default.state.is_mode_default_target() {
+                continue;
+            }
+
+            return Err(anyhow::anyhow!(
+                "Mode {:?} room_default for room '{}' cannot use runtime-only state {}",
+                config.mode,
+                room_default.room_id,
+                serde_json::to_string(&room_default.state)
+                    .unwrap_or_else(|_| "\"invalid\"".to_string())
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn mode_change_cause_from_trigger(trigger: ModeTransitionTrigger) -> ModeChangeCause {
     if trigger.is_manual() {
         ModeChangeCause::Manual
@@ -321,6 +341,27 @@ fn persistent_room_state_from_flags(hard_off: bool, soft_off: bool) -> RoomModeS
     room_mode_state_from_flags(hard_off, soft_off, false)
 }
 
+fn room_mode_transition_active(
+    transitions: &HashMap<String, crate::state::RoomModeTransition>,
+    room_id: &str,
+    now: std::time::Instant,
+) -> bool {
+    transitions
+        .get(room_id)
+        .is_some_and(|transition| transition.ends_at > now)
+}
+
+fn active_transition_room_ids(
+    transitions: &HashMap<String, crate::state::RoomModeTransition>,
+    now: std::time::Instant,
+) -> HashSet<String> {
+    transitions
+        .iter()
+        .filter(|(_, transition)| transition.ends_at > now)
+        .map(|(room_id, _)| room_id.clone())
+        .collect()
+}
+
 fn room_flags_for_target_state(state: RoomModeState) -> Result<(bool, bool)> {
     match state {
         RoomModeState::Active => Ok((false, false)),
@@ -411,7 +452,8 @@ pub fn build_room_state_event(
     state: &SharedState,
     snap: &rhythm_core::RoomSnapshot,
 ) -> crate::server_event::RoomStateEvent {
-    let (mode, room_state, lights_on, brightness, kelvin) = {
+    let now = std::time::Instant::now();
+    let (mode, room_state, lights_on, transitioning, brightness, kelvin) = {
         let s = state.lock().unwrap_or_else(|e| e.into_inner());
         let mode = s.active_mode;
         let room_state = room_mode_state_from_flags(
@@ -422,6 +464,7 @@ pub fn build_room_state_event(
                 .is_some_and(|motion| motion.warning_active),
         );
         let lights_on = s.room_lights_on.get(&snap.id).copied().unwrap_or(false);
+        let transitioning = room_mode_transition_active(&s.room_mode_transitions, &snap.id, now);
         let (curve_brightness, kelvin) = compute_room_display_values_for_settings(
             &s,
             &snap.profile_settings,
@@ -429,13 +472,21 @@ pub fn build_room_state_event(
             snap.time_offset_minutes,
             snap.brightness_offset,
         );
-        (mode, room_state, lights_on, curve_brightness, kelvin)
+        (
+            mode,
+            room_state,
+            lights_on,
+            transitioning,
+            curve_brightness,
+            kelvin,
+        )
     };
     crate::server_event::RoomStateEvent::from_snapshot(
         snap,
         mode,
         room_state,
         lights_on,
+        transitioning,
         brightness,
         kelvin,
         snap.profile_settings.clone(),
@@ -998,8 +1049,10 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         disp_utc,
         disp_lights,
         disp_motion,
+        disp_transitioning,
     ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let now = std::time::Instant::now();
         (
             s.light_profile_configs.clone(),
             s.mode_configs(),
@@ -1009,6 +1062,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             s.utc_offset_hours,
             s.room_lights_on.clone(),
             s.motion_snapshots.clone(),
+            active_transition_room_ids(&s.room_mode_transitions, now),
         )
     };
 
@@ -1161,6 +1215,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
                 time_offset,
                 brightness_offset: bri_offset,
                 lights_on,
+                transitioning: runtime.is_some() && disp_transitioning.contains(&info.topology_id),
                 brightness: curve_brightness,
                 kelvin,
                 room_profile,
@@ -1209,8 +1264,10 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
         latitude,
         utc_offset,
         rooms_with_sensors,
+        transitioning_rooms,
     ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let now = std::time::Instant::now();
         let runtime = s.hub_runtime();
         let storage_rooms = if runtime.is_none() {
             s.storage.as_ref().and_then(|st| st.load_rooms().ok())
@@ -1233,6 +1290,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
             s.latitude.unwrap_or(35.0),
             s.utc_offset_hours,
             sensor_rooms,
+            active_transition_room_ids(&s.room_mode_transitions, now),
         )
     };
 
@@ -1274,6 +1332,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                 time_offset: snap.time_offset_minutes,
                 brightness_offset: snap.brightness_offset,
                 lights_on,
+                transitioning: transitioning_rooms.contains(&snap.id),
                 brightness: curve_brightness,
                 kelvin,
                 room_profile: snap.profile_settings.clone(),
@@ -1336,6 +1395,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                     time_offset: room.time_offset_minutes,
                     brightness_offset: room.brightness_offset,
                     lights_on: false,
+                    transitioning: false,
                     brightness: curve_brightness,
                     kelvin,
                     room_profile: room.profile_settings.clone(),
@@ -1358,7 +1418,8 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
 
 /// Build a `RoomRhythmState` for a single room from engine state.
 pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<RoomRhythmState> {
-    let (runtime, lights_on, warning_active) = {
+    let now = std::time::Instant::now();
+    let (runtime, lights_on, warning_active, transitioning) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             s.hub_runtime(),
@@ -1366,6 +1427,7 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
             s.motion_snapshots
                 .get(room_id)
                 .is_some_and(|motion| motion.warning_active),
+            room_mode_transition_active(&s.room_mode_transitions, room_id, now),
         )
     };
 
@@ -1393,6 +1455,7 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
         time_offset: snap.time_offset_minutes,
         brightness_offset: snap.brightness_offset,
         lights_on,
+        transitioning,
         brightness: curve_brightness,
         kelvin,
         room_profile: snap.profile_settings.clone(),
@@ -1586,6 +1649,106 @@ fn emit_room_state_event_after_apply(
     let _ = (state, runtime, room_id);
 }
 
+fn apply_room_mode_defaults(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    mode_configs: &[ModeConfig],
+    target_mode: RhythmMode,
+    snapshots: &[rhythm_core::RoomSnapshot],
+) -> bool {
+    let Some(mode_config) = mode_config_for_mode(mode_configs, target_mode) else {
+        return false;
+    };
+    if mode_config.room_defaults.is_empty() {
+        return false;
+    }
+
+    let snapshots_by_id: HashMap<&str, &rhythm_core::RoomSnapshot> = snapshots
+        .iter()
+        .map(|snap| (snap.id.as_str(), snap))
+        .collect();
+    let mut changed_room_ids = Vec::new();
+    let mut hard_off_room_ids = Vec::new();
+    let mut lights_on_updates = Vec::new();
+    let mut missing_rooms = 0usize;
+
+    for room_default in &mode_config.room_defaults {
+        let Some(snap) = snapshots_by_id.get(room_default.room_id.as_str()).copied() else {
+            missing_rooms += 1;
+            continue;
+        };
+
+        let current_state = persistent_room_state_from_flags(snap.hard_off, snap.soft_off);
+        if current_state == room_default.state {
+            continue;
+        }
+
+        let Ok((soft_off, hard_off)) = room_flags_for_target_state(room_default.state) else {
+            warn!(
+                target: "cmd",
+                "active_mode_apply: ignoring invalid room default state for room '{}'",
+                room_default.room_id
+            );
+            continue;
+        };
+
+        runtime.restore_room_state(
+            &snap.id,
+            if soft_off { true } else { snap.rhythm_enabled },
+            snap.disabled,
+            snap.time_offset_minutes,
+            snap.brightness_offset,
+            soft_off,
+            hard_off,
+            snap.profile_settings.clone(),
+        );
+
+        match room_default.state {
+            RoomModeState::Active | RoomModeState::Idle => {
+                lights_on_updates.push((snap.id.clone(), true));
+            }
+            RoomModeState::HardOff => {
+                lights_on_updates.push((snap.id.clone(), false));
+                hard_off_room_ids.push(snap.id.clone());
+            }
+            RoomModeState::Wake | RoomModeState::Warning => {}
+        }
+
+        changed_room_ids.push(snap.id.clone());
+    }
+
+    if let Ok(mut s) = state.lock() {
+        for (room_id, lights_on) in lights_on_updates {
+            s.room_lights_on.insert(room_id, lights_on);
+        }
+    }
+
+    for room_id in &hard_off_room_ids {
+        let event = InputEvent::new(room_id, ButtonAction::LightsOff);
+        if let Err(e) = runtime.handle_event(&event) {
+            warn!(
+                target: "cmd",
+                "active_mode_apply: lights_off for '{}' failed after room default apply: {}",
+                room_id,
+                e
+            );
+        }
+        emit_room_state_event_after_apply(state, runtime, room_id);
+    }
+
+    if !changed_room_ids.is_empty() || missing_rooms > 0 {
+        debug!(
+            target: "cmd",
+            "active_mode_apply: applied {} room defaults for {:?}, {} missing room ids",
+            changed_room_ids.len(),
+            target_mode,
+            missing_rooms
+        );
+    }
+
+    !changed_room_ids.is_empty()
+}
+
 fn apply_room_commands_inline(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
@@ -1723,7 +1886,7 @@ fn build_room_command_from_values(
     }
 }
 
-fn resolve_room_command_for_state_at_from_parts(
+fn resolve_room_output_for_state_at_from_parts(
     light_profile_configs: &BTreeMap<String, LightProfileConfig>,
     mode_configs: &[ModeConfig],
     target_mode: RhythmMode,
@@ -1734,8 +1897,7 @@ fn resolve_room_command_for_state_at_from_parts(
     time_offset_minutes: f32,
     brightness_offset: f32,
     sample_at: chrono::NaiveDateTime,
-    transition_ms_override: Option<u32>,
-) -> Option<LightingCommand> {
+) -> Option<(rhythm_core::LightingValues, u8)> {
     if room_state == RoomModeState::HardOff {
         return None;
     }
@@ -1769,6 +1931,133 @@ fn resolve_room_command_for_state_at_from_parts(
         RoomModeState::Active | RoomModeState::Wake | RoomModeState::Warning => adjusted_brightness,
         RoomModeState::HardOff => return None,
     };
+
+    Some((values, brightness))
+}
+
+const DEFAULT_AUTO_MODE_TRANSITION_DURATION_MS: u32 = 5_000;
+
+fn resolved_profile_config_for_room_state_from_parts(
+    light_profile_configs: &BTreeMap<String, LightProfileConfig>,
+    mode_configs: &[ModeConfig],
+    target_mode: RhythmMode,
+    settings: &RoomProfileSettings,
+    room_state: RoomModeState,
+) -> LightProfileConfig {
+    let active_profile_id = resolved_active_profile_id_for_mode_from_parts(
+        light_profile_configs,
+        mode_configs,
+        target_mode,
+    );
+    let requested_id = settings.resolved_profile_id(active_profile_id.as_str());
+    let base_id = if !rhythm_core::is_builtin_state_profile_id(requested_id)
+        && light_profile_configs.contains_key(requested_id)
+    {
+        requested_id
+    } else {
+        active_profile_id.as_str()
+    };
+
+    let mut active_config = light_profile_configs
+        .get(base_id)
+        .cloned()
+        .or_else(|| {
+            light_profile_configs
+                .get(active_profile_id.as_str())
+                .cloned()
+        })
+        .unwrap_or_else(|| {
+            if target_mode == RhythmMode::Sleep {
+                rhythm_core::default_sleep_profile()
+            } else {
+                rhythm_core::default_rhythm_profile()
+            }
+        });
+    settings.apply_to_config(&mut active_config);
+
+    if room_state == RoomModeState::Active {
+        return active_config;
+    }
+
+    let mode_config = mode_config_for_mode(mode_configs, target_mode)
+        .cloned()
+        .unwrap_or_else(|| ModeConfig::default_for_mode(target_mode));
+
+    mode_config
+        .resolve_state_profile_id(room_state, active_profile_id.as_str())
+        .and_then(|target_id| light_profile_configs.get(target_id).cloned())
+        .unwrap_or_else(|| {
+            if matches!(room_state, RoomModeState::Idle | RoomModeState::HardOff) {
+                if target_mode == RhythmMode::Sleep {
+                    rhythm_core::default_sleep_idle_profile()
+                } else {
+                    rhythm_core::default_day_idle_profile()
+                }
+            } else {
+                active_config.clone()
+            }
+        })
+}
+
+fn resolve_mode_transition_duration_ms_for_room_from_parts(
+    transition: &ModeTransitionConfig,
+    light_profile_configs: &BTreeMap<String, LightProfileConfig>,
+    mode_configs: &[ModeConfig],
+    target_mode: RhythmMode,
+    _solar_noon: f32,
+    _latitude: f32,
+    settings: &RoomProfileSettings,
+    room_state: RoomModeState,
+    _time_offset_minutes: f32,
+    _brightness_offset: f32,
+    transition_started_at: chrono::NaiveDateTime,
+) -> Option<u32> {
+    let started_at_time = transition_started_at.time();
+    let started_at_hour = started_at_time.hour() as f32
+        + started_at_time.minute() as f32 / 60.0
+        + started_at_time.second() as f32 / 3600.0;
+
+    if let Some(duration_ms) = transition.duration_ms.resolve(started_at_hour) {
+        return Some(duration_ms);
+    }
+
+    resolved_profile_config_for_room_state_from_parts(
+        light_profile_configs,
+        mode_configs,
+        target_mode,
+        settings,
+        room_state,
+    )
+    .fade_ms
+    .resolve(started_at_hour)
+    .or(Some(DEFAULT_AUTO_MODE_TRANSITION_DURATION_MS))
+}
+
+fn resolve_room_command_for_state_at_from_parts(
+    light_profile_configs: &BTreeMap<String, LightProfileConfig>,
+    mode_configs: &[ModeConfig],
+    target_mode: RhythmMode,
+    solar_noon: f32,
+    latitude: f32,
+    settings: &RoomProfileSettings,
+    room_state: RoomModeState,
+    time_offset_minutes: f32,
+    brightness_offset: f32,
+    sample_at: chrono::NaiveDateTime,
+    transition_ms_override: Option<u32>,
+) -> Option<LightingCommand> {
+    let (values, brightness) = resolve_room_output_for_state_at_from_parts(
+        light_profile_configs,
+        mode_configs,
+        target_mode,
+        solar_noon,
+        latitude,
+        settings,
+        room_state,
+        time_offset_minutes,
+        brightness_offset,
+        sample_at,
+    )?;
     let transition_ms = transition_ms_override.unwrap_or(values.transition_ms);
     Some(build_room_command_from_values(
         &values,
@@ -1791,7 +2080,7 @@ fn apply_active_mode_outputs(
         solar_noon,
         latitude,
         utc_offset,
-        room_lights_on,
+        mut room_lights_on,
         motion_snapshots,
         update_interval,
         power_save,
@@ -1830,16 +2119,23 @@ fn apply_active_mode_outputs(
         return;
     };
 
-    let transition_duration_ms = transition
-        .as_ref()
-        .map(|config| config.duration_ms)
-        .unwrap_or(0);
-    let sample_at = current_local_datetime(utc_offset)
-        + chrono::Duration::milliseconds(i64::from(transition_duration_ms));
+    let transition_started_at = current_local_datetime(utc_offset);
     let snapshots = runtime.engine_all_room_snapshots();
+    let room_defaults_changed =
+        apply_room_mode_defaults(state, &runtime, &mode_configs, target_mode, &snapshots);
+    if room_defaults_changed {
+        if let Ok(s) = state.lock() {
+            room_lights_on = s.room_lights_on.clone();
+        }
+    }
+    let snapshots = if room_defaults_changed {
+        runtime.engine_all_room_snapshots()
+    } else {
+        snapshots
+    };
     let mut room_commands = Vec::new();
     let mut dispatch_snapshots = Vec::new();
-    let mut transitioned_room_ids = Vec::new();
+    let mut transitioned_rooms = Vec::new();
     let mut changed_room_ids = Vec::new();
     let mut preserved_hard_off = 0usize;
     let mut hidden_rooms = 0usize;
@@ -1879,6 +2175,26 @@ fn apply_active_mode_outputs(
             continue;
         }
 
+        let room_transition_ms = transition
+            .as_ref()
+            .and_then(|config| {
+                resolve_mode_transition_duration_ms_for_room_from_parts(
+                    config,
+                    &light_profile_configs,
+                    &mode_configs,
+                    target_mode,
+                    solar_noon,
+                    latitude,
+                    &snap.profile_settings,
+                    room_state,
+                    snap.time_offset_minutes,
+                    snap.brightness_offset,
+                    transition_started_at,
+                )
+            })
+            .unwrap_or(0);
+        let sample_at =
+            transition_started_at + chrono::Duration::milliseconds(i64::from(room_transition_ms));
         let Some(command) = resolve_room_command_for_state_at_from_parts(
             &light_profile_configs,
             &mode_configs,
@@ -1890,7 +2206,7 @@ fn apply_active_mode_outputs(
             snap.time_offset_minutes,
             snap.brightness_offset,
             sample_at,
-            (transition_duration_ms > 0).then_some(transition_duration_ms),
+            (room_transition_ms > 0).then_some(room_transition_ms),
         ) else {
             unresolved_rooms += 1;
             debug!(
@@ -1905,17 +2221,17 @@ fn apply_active_mode_outputs(
         room_commands.push((snap.id.clone(), command));
         dispatch_snapshots.push(snap.clone());
         changed_room_ids.push(snap.id.clone());
-        if transition_duration_ms > 0 {
-            transitioned_room_ids.push(snap.id.clone());
+        if room_transition_ms > 0 {
+            transitioned_rooms.push((snap.id.clone(), room_transition_ms));
         }
     }
 
     if let Ok(mut s) = state.lock() {
         s.room_mode_transitions.clear();
-        if transition_duration_ms > 0 {
-            let ends_at = std::time::Instant::now()
-                + std::time::Duration::from_millis(u64::from(transition_duration_ms));
-            for room_id in &transitioned_room_ids {
+        if !transitioned_rooms.is_empty() {
+            let now = std::time::Instant::now();
+            for (room_id, transition_ms) in &transitioned_rooms {
+                let ends_at = now + std::time::Duration::from_millis(u64::from(*transition_ms));
                 s.room_mode_transitions.insert(
                     room_id.clone(),
                     crate::state::RoomModeTransition { ends_at },
@@ -1929,7 +2245,7 @@ fn apply_active_mode_outputs(
         "active_mode_apply: {} rooms scanned, {} changed, {} transitioning, {} hidden, {} preserved hard-off, {} unresolved",
         snapshots.len(),
         changed_room_ids.len(),
-        transitioned_room_ids.len(),
+        transitioned_rooms.len(),
         hidden_rooms,
         preserved_hard_off,
         unresolved_rooms
@@ -1960,6 +2276,10 @@ fn do_settings_set_internal(
     mode_change: Option<ModeChangeContext>,
     force_reapply_outputs: bool,
 ) -> Result<String> {
+    if let Some(configs) = mode_configs.as_ref() {
+        validate_mode_configs(configs)?;
+    }
+
     let requested_mode_config_count = mode_configs.as_ref().map(Vec::len);
     let requested_transition_count = mode_transitions.as_ref().map(Vec::len);
     let transition_for_apply = mode_change
@@ -4827,10 +5147,12 @@ mod tests {
 
     /// Mock runtime that returns configurable room snapshots and tracks events.
     struct MockRuntime {
-        snapshots: Vec<RoomSnapshot>,
+        snapshots: Mutex<Vec<RoomSnapshot>>,
         events: Mutex<Vec<(String, ButtonAction)>>,
         applied_commands: Mutex<Vec<(String, rhythm_core::LightingCommand)>>,
+        applied_states: Mutex<Vec<(String, RoomModeState)>>,
         config_updates: Mutex<Vec<LightProfileConfig>>,
+        restore_calls: Mutex<Vec<(String, bool, bool)>>,
         time_offset_updates: Mutex<Vec<(String, f32)>>,
         current_hour: f32,
     }
@@ -4838,10 +5160,12 @@ mod tests {
     impl MockRuntime {
         fn new(snapshots: Vec<RoomSnapshot>, current_hour: f32) -> Self {
             Self {
-                snapshots,
+                snapshots: Mutex::new(snapshots),
                 events: Mutex::new(Vec::new()),
                 applied_commands: Mutex::new(Vec::new()),
+                applied_states: Mutex::new(Vec::new()),
                 config_updates: Mutex::new(Vec::new()),
+                restore_calls: Mutex::new(Vec::new()),
                 time_offset_updates: Mutex::new(Vec::new()),
                 current_hour,
             }
@@ -4855,8 +5179,16 @@ mod tests {
             self.applied_commands.lock().unwrap().clone()
         }
 
+        fn applied_states(&self) -> Vec<(String, RoomModeState)> {
+            self.applied_states.lock().unwrap().clone()
+        }
+
         fn config_updates(&self) -> Vec<LightProfileConfig> {
             self.config_updates.lock().unwrap().clone()
+        }
+
+        fn restore_calls(&self) -> Vec<(String, bool, bool)> {
+            self.restore_calls.lock().unwrap().clone()
         }
 
         fn time_offset_updates(&self) -> Vec<(String, f32)> {
@@ -4893,22 +5225,46 @@ mod tests {
             Ok(())
         }
         fn engine_room_snapshot(&self, room_id: &str) -> Option<RoomSnapshot> {
-            self.snapshots.iter().find(|s| s.id == room_id).cloned()
+            self.snapshots
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|s| s.id == room_id)
+                .cloned()
         }
         fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot> {
-            self.snapshots.clone()
+            self.snapshots.lock().unwrap().clone()
         }
         fn restore_room_state(
             &self,
-            _: &str,
-            _: bool,
-            _: bool,
-            _: f32,
-            _: f32,
-            _: bool,
-            _: bool,
-            _: rhythm_core::RoomProfileSettings,
+            room_id: &str,
+            rhythm_enabled: bool,
+            disabled: bool,
+            time_offset: f32,
+            bri_offset: f32,
+            soft_off: bool,
+            hard_off: bool,
+            profile_settings: rhythm_core::RoomProfileSettings,
         ) {
+            if let Some(snap) = self
+                .snapshots
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|snap| snap.id == room_id)
+            {
+                snap.rhythm_enabled = rhythm_enabled;
+                snap.disabled = disabled;
+                snap.time_offset_minutes = time_offset;
+                snap.brightness_offset = bri_offset;
+                snap.soft_off = soft_off;
+                snap.hard_off = hard_off;
+                snap.profile_settings = profile_settings;
+            }
+            self.restore_calls
+                .lock()
+                .unwrap()
+                .push((room_id.to_string(), soft_off, hard_off));
         }
         fn add_room(&self, _: &str, _: &str) {}
         fn remove_room(&self, _: &str) {}
@@ -4923,10 +5279,18 @@ mod tests {
             room_id: &str,
             command: rhythm_core::LightingCommand,
         ) -> anyhow::Result<()> {
+            let room_state = self
+                .engine_room_snapshot(room_id)
+                .map(|snap| persistent_room_state_from_flags(snap.hard_off, snap.soft_off))
+                .unwrap_or(RoomModeState::Active);
             self.applied_commands
                 .lock()
                 .unwrap()
                 .push((room_id.to_string(), command));
+            self.applied_states
+                .lock()
+                .unwrap()
+                .push((room_id.to_string(), room_state));
             Ok(())
         }
         fn set_power_save(&self, _: bool) -> Vec<String> {
@@ -5010,6 +5374,23 @@ mod tests {
             },
         );
         (Arc::new(Mutex::new(app)), runtime)
+    }
+
+    fn setup_state_with_registry(snapshots: Vec<RoomSnapshot>) -> (SharedState, Arc<MockRuntime>) {
+        let (state, runtime) = setup_state(snapshots);
+        let mut registry = crate::registry::HubDeviceRegistry::new();
+        let device_ids: Vec<String> = Vec::new();
+        for snap in runtime.engine_all_room_snapshots() {
+            registry.upsert_room(&snap.id, &snap.name, "", &device_ids);
+        }
+        let registry: Arc<Mutex<dyn HubRegistry>> = Arc::new(Mutex::new(registry));
+
+        let mut app = state.lock().unwrap();
+        let hub_key = app.hubs.keys().next().cloned().unwrap();
+        app.hubs.get_mut(&hub_key).unwrap().registry = Some(registry);
+        drop(app);
+
+        (state, runtime)
     }
 
     #[test]
@@ -5410,6 +5791,7 @@ mod tests {
         assert_eq!(room_state.id, "r1");
         assert!(room_state.rhythm_enabled);
         assert!(room_state.lights_on);
+        assert!(!room_state.transitioning);
         assert_eq!(room_state.state, RoomModeState::Active);
     }
 
@@ -5485,6 +5867,60 @@ mod tests {
     }
 
     #[test]
+    fn build_room_rhythm_state_marks_active_mode_transition() {
+        let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
+        state.lock().unwrap().room_mode_transitions.insert(
+            "r1".into(),
+            crate::state::RoomModeTransition {
+                ends_at: std::time::Instant::now() + std::time::Duration::from_secs(5),
+            },
+        );
+
+        let room_state = build_room_rhythm_state(&state, "r1").unwrap();
+
+        assert!(room_state.transitioning);
+    }
+
+    #[test]
+    fn build_room_rhythm_state_ignores_expired_mode_transition() {
+        let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
+        state.lock().unwrap().room_mode_transitions.insert(
+            "r1".into(),
+            crate::state::RoomModeTransition {
+                ends_at: std::time::Instant::now() - std::time::Duration::from_millis(1),
+            },
+        );
+
+        let room_state = build_room_rhythm_state(&state, "r1").unwrap();
+
+        assert!(!room_state.transitioning);
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn build_room_state_event_marks_active_mode_transition() {
+        let (state, rt) = setup_state(vec![make_snapshot("r1", false, false)]);
+        state
+            .lock()
+            .unwrap()
+            .room_lights_on
+            .insert("r1".into(), true);
+        state.lock().unwrap().room_mode_transitions.insert(
+            "r1".into(),
+            crate::state::RoomModeTransition {
+                ends_at: std::time::Instant::now() + std::time::Duration::from_secs(5),
+            },
+        );
+        let snap = rt.engine_room_snapshot("r1").unwrap();
+
+        let event = build_room_state_event(&state, &snap);
+        let json = serde_json::to_value(&event).unwrap();
+
+        assert!(event.transitioning);
+        assert_eq!(json["transitioning"], true);
+    }
+
+    #[test]
     fn build_room_rhythm_state_hard_off_uses_zero_brightness() {
         let mut snapshot = make_snapshot("r1", false, false);
         snapshot.hard_off = true;
@@ -5508,6 +5944,7 @@ mod tests {
         assert!(parsed["brightness"].is_number());
         assert!(parsed["kelvin"].is_number());
         assert!(parsed["lights_on"].is_boolean());
+        assert!(parsed["transitioning"].is_boolean());
         // No status wrapper
         assert!(parsed.get("status").is_none());
     }
@@ -5612,6 +6049,7 @@ mod tests {
         // SSE-aligned field names
         assert_eq!(room["state"], "warning");
         assert_eq!(room["brightness"], expected_warning);
+        assert_eq!(room["transitioning"], false);
         assert_eq!(room["remaining_secs"], 45);
         assert_eq!(room["timeout_secs"], 300);
         assert_eq!(room["warning_active"], true);
@@ -5640,6 +6078,23 @@ mod tests {
         assert!(room.get("remaining_secs").is_none());
         assert!(room.get("timeout_secs").is_none());
         assert!(room.get("warning_active").is_none());
+        assert_eq!(room["transitioning"], false);
+    }
+
+    #[test]
+    fn build_rooms_state_marks_active_mode_transition() {
+        let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
+        state.lock().unwrap().room_mode_transitions.insert(
+            "r1".into(),
+            crate::state::RoomModeTransition {
+                ends_at: std::time::Instant::now() + std::time::Duration::from_secs(5),
+            },
+        );
+
+        let result = build_rooms_state(&state).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["rooms"][0]["transitioning"], true);
     }
 
     #[test]
@@ -5711,7 +6166,7 @@ mod tests {
 
     #[test]
     fn build_state_snapshot_valid_json() {
-        let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
+        let (state, _rt) = setup_state_with_registry(vec![make_snapshot("r1", false, false)]);
         let result = build_state_snapshot(&state).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
 
@@ -5729,8 +6184,25 @@ mod tests {
         assert!(parsed["transitions"].is_array());
         assert!(parsed["profiles"].is_array());
         assert!(parsed["rooms"].is_array());
+        assert!(parsed["rooms"][0]["transitioning"].is_boolean());
         // No status wrapper
         assert!(parsed.get("status").is_none());
+    }
+
+    #[test]
+    fn build_state_snapshot_marks_active_mode_transition() {
+        let (state, _rt) = setup_state_with_registry(vec![make_snapshot("r1", false, false)]);
+        state.lock().unwrap().room_mode_transitions.insert(
+            "r1".into(),
+            crate::state::RoomModeTransition {
+                ends_at: std::time::Instant::now() + std::time::Duration::from_secs(5),
+            },
+        );
+
+        let result = build_state_snapshot(&state).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["rooms"][0]["transitioning"], true);
     }
 
     #[test]
@@ -5775,6 +6247,36 @@ mod tests {
             let active_profile_cfg = active_profile_config(&s);
             let resolved_solar =
                 resolve_solar(&s, local_now.year(), local_now.month(), local_now.day());
+            let mut profile_registry = LightProfileRegistry::with_profiles(
+                s.light_profile_configs
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                &s.active_mode_profile_id(),
+            );
+            profile_registry.set_mode_configs(s.mode_configs());
+            let periodic_ctx = rhythm_core::CurveContext::new(
+                current_hour,
+                resolved_solar.solar,
+                resolved_solar.sun_times.clone(),
+            );
+            let periodic_room_snapshots = s
+                .hub_runtime()
+                .map(|rt| {
+                    rt.engine_all_room_snapshots()
+                        .into_iter()
+                        .filter(|room| room.rhythm_enabled)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let effective_rhythm_interval_secs = crate::periodic::effective_cycle_duration(
+                &profile_registry,
+                &periodic_ctx,
+                &periodic_room_snapshots,
+                std::time::Duration::from_secs(s.runtime_config.update_interval_secs),
+                s.power_save,
+            )
+            .as_secs();
             (
                 active_profile_effective_values(
                     &active_profile_cfg,
@@ -5782,6 +6284,7 @@ mod tests {
                     resolved_solar.solar,
                     resolved_solar.sun_times,
                 ),
+                effective_rhythm_interval_secs,
                 resolved_solar.solar,
             )
         };
@@ -5802,11 +6305,11 @@ mod tests {
             parsed["active_profile"]["effective"]["rhythm_interval_secs"]
                 .as_u64()
                 .unwrap(),
-            expected.0.rhythm_interval_secs
+            expected.1
         );
         assert_eq!(
             parsed["location"]["solar_noon"].as_f64().unwrap() as f32,
-            expected.1.solar_noon_hour
+            expected.2.solar_noon_hour
         );
         assert!(
             ((parsed["location"]["current_local_hour"].as_f64().unwrap() as f32) - current_hour)
@@ -5817,21 +6320,21 @@ mod tests {
             parsed["location"]["solar_noon_local_time"]
                 .as_str()
                 .unwrap(),
-            local_time_string_from_decimal_hour(expected.1.solar_noon_hour)
+            local_time_string_from_decimal_hour(expected.2.solar_noon_hour)
         );
         assert_eq!(
             parsed["location"]["solar_midnight"].as_f64().unwrap() as f32,
-            expected.1.solar_midnight_hour()
+            expected.2.solar_midnight_hour()
         );
         assert_eq!(
             parsed["location"]["solar_midnight_local_time"]
                 .as_str()
                 .unwrap(),
-            local_time_string_from_decimal_hour(expected.1.solar_midnight_hour())
+            local_time_string_from_decimal_hour(expected.2.solar_midnight_hour())
         );
         assert_eq!(
             parsed["location"]["current_solar_time"].as_f64().unwrap() as f32,
-            expected.1.get_solar_time(current_hour)
+            expected.2.get_solar_time(current_hour)
         );
         assert_ne!(
             parsed["active_profile"]["effective"]["fade_ms"]
@@ -5932,6 +6435,7 @@ mod tests {
             assert!(room["brightness"].is_number());
             assert!(room["kelvin"].is_number());
             assert!(room["lights_on"].is_boolean());
+            assert!(room["transitioning"].is_boolean());
         }
     }
 
@@ -6120,6 +6624,80 @@ mod tests {
     }
 
     #[test]
+    fn mode_transition_auto_uses_target_profile_fade() {
+        let (state, runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
+        {
+            let mut s = state.lock().unwrap();
+            let mut rhythm = s
+                .light_profile_configs
+                .get("rhythm")
+                .cloned()
+                .unwrap_or_else(rhythm_core::default_rhythm_profile);
+            rhythm.fade_ms = TimerSetting::Fixed { value: 1_234 };
+            s.set_light_profile_config(rhythm);
+            s.active_mode = RhythmMode::Sleep;
+            s.room_lights_on.insert("r1".into(), true);
+            s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
+                RhythmMode::Sleep,
+                RhythmMode::Day,
+                5_000,
+            )
+            .with_duration(TimerSetting::Auto)
+            .with_trigger(ModeTransitionTrigger::Sunrise)]);
+        }
+
+        do_set_active_mode_with_trigger(&state, RhythmMode::Day, ModeTransitionTrigger::Sunrise)
+            .unwrap();
+
+        let applied = runtime.applied_commands();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].0, "r1");
+        assert_eq!(applied[0].1.transition_ms, Some(1_234));
+        assert!(state
+            .lock()
+            .unwrap()
+            .room_mode_transitions
+            .contains_key("r1"));
+    }
+
+    #[test]
+    fn mode_transition_auto_falls_back_to_five_seconds_when_target_fade_is_auto() {
+        let (state, runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
+        {
+            let mut s = state.lock().unwrap();
+            let mut rhythm = s
+                .light_profile_configs
+                .get("rhythm")
+                .cloned()
+                .unwrap_or_else(rhythm_core::default_rhythm_profile);
+            rhythm.fade_ms = TimerSetting::Auto;
+            s.set_light_profile_config(rhythm);
+            s.active_mode = RhythmMode::Sleep;
+            s.room_lights_on.insert("r1".into(), true);
+            s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
+                RhythmMode::Sleep,
+                RhythmMode::Day,
+                5_000,
+            )
+            .with_duration(TimerSetting::Auto)
+            .with_trigger(ModeTransitionTrigger::Sunrise)]);
+        }
+
+        do_set_active_mode_with_trigger(&state, RhythmMode::Day, ModeTransitionTrigger::Sunrise)
+            .unwrap();
+
+        let applied = runtime.applied_commands();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].0, "r1");
+        assert_eq!(applied[0].1.transition_ms, Some(5_000));
+        assert!(state
+            .lock()
+            .unwrap()
+            .room_mode_transitions
+            .contains_key("r1"));
+    }
+
+    #[test]
     fn triggering_transition_by_id_reapplies_saved_transition() {
         let (state, runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
         let transition_id = {
@@ -6183,6 +6761,7 @@ mod tests {
                 idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
                 wake_profile_id: None,
                 warning_profile_id: None,
+                room_defaults: vec![],
             }]);
         }
 
@@ -6196,6 +6775,7 @@ mod tests {
                 idle_profile_id: None,
                 wake_profile_id: None,
                 warning_profile_id: None,
+                room_defaults: vec![],
             }]),
             None,
         )
@@ -6225,12 +6805,152 @@ mod tests {
                 idle_profile_id: Some(rhythm_core::SLEEP_IDLE_PROFILE_ID.into()),
                 wake_profile_id: None,
                 warning_profile_id: None,
+                room_defaults: vec![],
             }]),
             None,
         )
         .unwrap();
 
         assert!(runtime.applied_commands().is_empty());
+    }
+
+    #[test]
+    fn mode_change_applies_room_defaults_before_lighting_recalc() {
+        let (state, runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Day;
+            s.room_lights_on.insert("r1".into(), true);
+            s.set_mode_configs(vec![ModeConfig {
+                mode: RhythmMode::Sleep,
+                active_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::SLEEP_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "r1".into(),
+                    state: RoomModeState::Idle,
+                }],
+            }]);
+        }
+
+        do_set_active_mode(&state, RhythmMode::Sleep).unwrap();
+
+        assert_eq!(runtime.restore_calls(), vec![("r1".into(), true, false)]);
+        assert_eq!(
+            runtime.applied_states(),
+            vec![("r1".into(), RoomModeState::Idle)]
+        );
+
+        let snap = runtime.engine_room_snapshot("r1").unwrap();
+        assert!(snap.soft_off);
+        assert!(!snap.hard_off);
+    }
+
+    #[test]
+    fn room_default_overrides_preserve_hard_off_for_explicit_room() {
+        let mut snapshot = make_snapshot("r1", false, false);
+        snapshot.hard_off = true;
+        let (state, runtime) = setup_state(vec![snapshot]);
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Day;
+            s.room_lights_on.insert("r1".into(), false);
+            s.set_mode_configs(vec![ModeConfig {
+                mode: RhythmMode::Sleep,
+                active_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::SLEEP_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "r1".into(),
+                    state: RoomModeState::Active,
+                }],
+            }]);
+            s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
+                RhythmMode::Day,
+                RhythmMode::Sleep,
+                5_000,
+            )
+            .with_trigger(ModeTransitionTrigger::NauticalTwilight)]);
+        }
+
+        do_set_active_mode_with_trigger(
+            &state,
+            RhythmMode::Sleep,
+            ModeTransitionTrigger::NauticalTwilight,
+        )
+        .unwrap();
+
+        assert_eq!(runtime.restore_calls(), vec![("r1".into(), false, false)]);
+        assert_eq!(
+            runtime.applied_states(),
+            vec![("r1".into(), RoomModeState::Active)]
+        );
+        assert_eq!(state.lock().unwrap().room_lights_on.get("r1"), Some(&true));
+    }
+
+    #[test]
+    fn active_mode_room_default_change_does_not_reapply_outputs() {
+        let (state, runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Day;
+            s.room_lights_on.insert("r1".into(), true);
+        }
+
+        do_settings_set(
+            &state,
+            None,
+            None,
+            Some(vec![ModeConfig {
+                mode: RhythmMode::Day,
+                active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                idle_profile_id: None,
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "r1".into(),
+                    state: RoomModeState::Idle,
+                }],
+            }]),
+            None,
+        )
+        .unwrap();
+
+        assert!(runtime.restore_calls().is_empty());
+        assert!(runtime.applied_states().is_empty());
+
+        let snap = runtime.engine_room_snapshot("r1").unwrap();
+        assert!(
+            !snap.soft_off,
+            "room defaults should not apply until mode activation"
+        );
+        assert!(!snap.hard_off);
+    }
+
+    #[test]
+    fn mode_set_rejects_runtime_only_room_defaults() {
+        let (state, _runtime) = setup_state(vec![]);
+
+        let err = do_mode_set(
+            &state,
+            None,
+            Some(vec![ModeConfig {
+                mode: RhythmMode::Sleep,
+                active_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
+                idle_profile_id: None,
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "r1".into(),
+                    state: RoomModeState::Warning,
+                }],
+            }]),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("runtime-only state"));
     }
 
     // ========================================================================

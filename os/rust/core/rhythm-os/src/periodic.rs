@@ -495,9 +495,9 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
         let current_hour = BlockingTimeProvider::new(utc_offset).current_hour();
         check_solar_midnight(&state, current_hour);
         if let Some(last) = last_hour {
-            check_solar_mode_transitions(&state, last, current_hour);
+            check_mode_transitions(&state, last, current_hour);
         } else {
-            replay_missed_solar_mode_transitions(&state);
+            replay_missed_mode_transitions(&state);
         }
 
         let elapsed = cycle_started.elapsed();
@@ -596,7 +596,7 @@ pub fn check_solar_midnight(state: &SharedState, current_hour: f32) {
     }
 }
 
-fn estimated_twilight_hour(
+fn fallback_solar_trigger_hour(
     trigger: rhythm_core::ModeTransitionTrigger,
     target_mode: rhythm_core::RhythmMode,
     sunrise: f32,
@@ -605,6 +605,7 @@ fn estimated_twilight_hour(
     let toward_day = target_mode == rhythm_core::RhythmMode::Day;
     match trigger {
         rhythm_core::ModeTransitionTrigger::Manual => None,
+        rhythm_core::ModeTransitionTrigger::Scheduled(time) => Some(time.local_hour()),
         rhythm_core::ModeTransitionTrigger::Sunrise => Some(sunrise),
         rhythm_core::ModeTransitionTrigger::Sunset => Some(sunset),
         rhythm_core::ModeTransitionTrigger::CivilTwilight => Some(if toward_day {
@@ -625,7 +626,7 @@ fn estimated_twilight_hour(
     }
 }
 
-fn solar_trigger_hour_for_local_date(
+fn trigger_hour_for_local_date(
     trigger: rhythm_core::ModeTransitionTrigger,
     target_mode: rhythm_core::RhythmMode,
     solar_noon: f32,
@@ -636,6 +637,10 @@ fn solar_trigger_hour_for_local_date(
     month: u32,
     day: u32,
 ) -> Option<f32> {
+    if let rhythm_core::ModeTransitionTrigger::Scheduled(time) = trigger {
+        return Some(time.local_hour());
+    }
+
     let estimated_sunrise = if latitude.is_some() && longitude.is_some() {
         (solar_noon - 6.0).rem_euclid(24.0)
     } else {
@@ -648,13 +653,28 @@ fn solar_trigger_hour_for_local_date(
     };
 
     let Some(lat) = latitude else {
-        return estimated_twilight_hour(trigger, target_mode, estimated_sunrise, estimated_sunset);
+        return fallback_solar_trigger_hour(
+            trigger,
+            target_mode,
+            estimated_sunrise,
+            estimated_sunset,
+        );
     };
     let Some(lon) = longitude else {
-        return estimated_twilight_hour(trigger, target_mode, estimated_sunrise, estimated_sunset);
+        return fallback_solar_trigger_hour(
+            trigger,
+            target_mode,
+            estimated_sunrise,
+            estimated_sunset,
+        );
     };
     let Some(tz_name) = timezone_name else {
-        return estimated_twilight_hour(trigger, target_mode, estimated_sunrise, estimated_sunset);
+        return fallback_solar_trigger_hour(
+            trigger,
+            target_mode,
+            estimated_sunrise,
+            estimated_sunset,
+        );
     };
 
     let tz = rhythm_core::Timezone::new(tz_name);
@@ -663,6 +683,7 @@ fn solar_trigger_hour_for_local_date(
 
     match trigger {
         rhythm_core::ModeTransitionTrigger::Manual => None,
+        rhythm_core::ModeTransitionTrigger::Scheduled(time) => Some(time.local_hour()),
         rhythm_core::ModeTransitionTrigger::Sunrise => Some(sun.sunrise),
         rhythm_core::ModeTransitionTrigger::Sunset => Some(sun.sunset),
         rhythm_core::ModeTransitionTrigger::CivilTwilight => {
@@ -707,7 +728,7 @@ fn solar_trigger_hour_for_local_date(
     }
 }
 
-fn solar_trigger_hour(
+fn trigger_hour(
     trigger: rhythm_core::ModeTransitionTrigger,
     target_mode: rhythm_core::RhythmMode,
     solar_noon: f32,
@@ -718,7 +739,7 @@ fn solar_trigger_hour(
     if let Some(tz_name) = timezone_name {
         let tz = rhythm_core::Timezone::new(tz_name);
         let (year, month, day) = tz.local_date_from_utc(chrono::Utc::now().naive_utc());
-        solar_trigger_hour_for_local_date(
+        trigger_hour_for_local_date(
             trigger,
             target_mode,
             solar_noon,
@@ -730,7 +751,7 @@ fn solar_trigger_hour(
             day,
         )
     } else {
-        solar_trigger_hour_for_local_date(
+        trigger_hour_for_local_date(
             trigger,
             target_mode,
             solar_noon,
@@ -768,7 +789,7 @@ fn utc_datetime_from_local(
     }
 }
 
-fn resolved_replayed_solar_mode_transition(
+fn resolved_replayed_mode_transition(
     start_mode: rhythm_core::RhythmMode,
     start_utc: chrono::NaiveDateTime,
     end_utc: chrono::NaiveDateTime,
@@ -798,7 +819,7 @@ fn resolved_replayed_solar_mode_transition(
             .iter()
             .filter(|config| config.trigger != rhythm_core::ModeTransitionTrigger::Manual)
         {
-            let Some(trigger_hour) = solar_trigger_hour_for_local_date(
+            let Some(trigger_hour) = trigger_hour_for_local_date(
                 config.trigger,
                 config.to_mode,
                 solar_noon,
@@ -856,7 +877,7 @@ fn resolved_replayed_solar_mode_transition(
     Some(transition)
 }
 
-fn replay_missed_solar_mode_transitions(state: &SharedState) {
+fn replay_missed_mode_transitions(state: &SharedState) {
     let (
         start_mode,
         start_cause,
@@ -897,7 +918,7 @@ fn replay_missed_solar_mode_transitions(state: &SharedState) {
     };
 
     let now_utc = chrono::Utc::now().naive_utc();
-    let Some(transition) = resolved_replayed_solar_mode_transition(
+    let Some(transition) = resolved_replayed_mode_transition(
         start_mode,
         start_utc,
         now_utc,
@@ -912,7 +933,7 @@ fn replay_missed_solar_mode_transitions(state: &SharedState) {
     };
 
     info!(
-        "Replaying missed solar mode transition {:?} -> {:?} on {:?} after restart/downtime",
+        "Replaying missed mode transition {:?} -> {:?} on {:?} after restart/downtime",
         start_mode, transition.to_mode, transition.trigger
     );
 
@@ -921,12 +942,12 @@ fn replay_missed_solar_mode_transitions(state: &SharedState) {
         transition.to_mode,
         transition.trigger,
     ) {
-        warn!("Failed to replay missed solar mode transition: {}", e);
+        warn!("Failed to replay missed mode transition: {}", e);
     }
 }
 
-/// Trigger configured solar mode transitions when their event time is crossed.
-pub fn check_solar_mode_transitions(state: &SharedState, last_hour: f32, current_hour: f32) {
+/// Trigger configured scheduled mode transitions when their event time is crossed.
+pub fn check_mode_transitions(state: &SharedState, last_hour: f32, current_hour: f32) {
     let candidate = {
         let Ok(s) = state.lock() else { return };
 
@@ -943,7 +964,7 @@ pub fn check_solar_mode_transitions(state: &SharedState, last_hour: f32, current
                 return None;
             }
 
-            let trigger_hour = solar_trigger_hour(
+            let trigger_hour = trigger_hour(
                 config.trigger,
                 config.to_mode,
                 solar_noon,
@@ -965,7 +986,7 @@ pub fn check_solar_mode_transitions(state: &SharedState, last_hour: f32, current
     };
 
     info!(
-        "Solar mode transition {:?} -> {:?} on {:?} at trigger_local {:.2} (last_local={:.2}, now_local={:.2})",
+        "Mode transition {:?} -> {:?} on {:?} at trigger_local {:.2} (last_local={:.2}, now_local={:.2})",
         state
             .lock()
             .ok()
@@ -983,7 +1004,7 @@ pub fn check_solar_mode_transitions(state: &SharedState, last_hour: f32, current
         transition.to_mode,
         transition.trigger,
     ) {
-        warn!("Failed to apply solar mode transition: {}", e);
+        warn!("Failed to apply mode transition: {}", e);
     }
 }
 
@@ -1518,7 +1539,7 @@ mod tests {
     }
 
     #[test]
-    fn solar_mode_transition_requires_matching_trigger() {
+    fn mode_transition_requires_matching_trigger() {
         let state = make_state();
         {
             let mut s = state.lock().unwrap();
@@ -1531,7 +1552,7 @@ mod tests {
         }
 
         let sunrise = rhythm_core::config::FALLBACK_SUNRISE_HOUR;
-        check_solar_mode_transitions(&state, sunrise - 0.1, sunrise + 0.1);
+        check_mode_transitions(&state, sunrise - 0.1, sunrise + 0.1);
 
         assert_eq!(
             state.lock().unwrap().active_mode,
@@ -1545,7 +1566,7 @@ mod tests {
         state.lock().unwrap().active_mode = rhythm_core::RhythmMode::Sleep;
 
         let astronomical_dawn = (rhythm_core::config::FALLBACK_SUNRISE_HOUR - 1.5).rem_euclid(24.0);
-        check_solar_mode_transitions(&state, astronomical_dawn - 0.1, astronomical_dawn + 0.1);
+        check_mode_transitions(&state, astronomical_dawn - 0.1, astronomical_dawn + 0.1);
 
         assert_eq!(
             state.lock().unwrap().active_mode,
@@ -1559,7 +1580,31 @@ mod tests {
         state.lock().unwrap().active_mode = rhythm_core::RhythmMode::Day;
 
         let nautical_dusk = (rhythm_core::config::FALLBACK_SUNSET_HOUR + 1.0).rem_euclid(24.0);
-        check_solar_mode_transitions(&state, nautical_dusk - 0.1, nautical_dusk + 0.1);
+        check_mode_transitions(&state, nautical_dusk - 0.1, nautical_dusk + 0.1);
+
+        assert_eq!(
+            state.lock().unwrap().active_mode,
+            rhythm_core::RhythmMode::Sleep
+        );
+    }
+
+    #[test]
+    fn scheduled_day_to_sleep_transition_switches_mode() {
+        let state = make_state();
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = rhythm_core::RhythmMode::Day;
+            s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
+                rhythm_core::RhythmMode::Day,
+                rhythm_core::RhythmMode::Sleep,
+                1_000,
+            )
+            .with_trigger(rhythm_core::ModeTransitionTrigger::Scheduled(
+                rhythm_core::ModeTransitionTime::from_hour_minute(22, 0).unwrap(),
+            ))]);
+        }
+
+        check_mode_transitions(&state, 21.9, 22.1);
 
         assert_eq!(
             state.lock().unwrap().active_mode,
@@ -1582,7 +1627,7 @@ mod tests {
         let start_utc = tz.utc_datetime_from_local(start_local).unwrap();
         let end_utc = tz.utc_datetime_from_local(end_local).unwrap();
 
-        let resolved = resolved_replayed_solar_mode_transition(
+        let resolved = resolved_replayed_mode_transition(
             rhythm_core::RhythmMode::Sleep,
             start_utc,
             end_utc,
@@ -1617,7 +1662,7 @@ mod tests {
         let start_utc = tz.utc_datetime_from_local(start_local).unwrap();
         let end_utc = tz.utc_datetime_from_local(end_local).unwrap();
 
-        let resolved = resolved_replayed_solar_mode_transition(
+        let resolved = resolved_replayed_mode_transition(
             rhythm_core::RhythmMode::Sleep,
             start_utc,
             end_utc,
@@ -1633,6 +1678,52 @@ mod tests {
     }
 
     #[test]
+    fn resolved_replay_applies_missed_scheduled_transition() {
+        let tz_name = "America/New_York";
+        let tz = rhythm_core::Timezone::new(tz_name);
+        let start_local = NaiveDate::from_ymd_opt(2026, 4, 8)
+            .unwrap()
+            .and_hms_opt(21, 0, 0)
+            .unwrap();
+        let end_local = NaiveDate::from_ymd_opt(2026, 4, 8)
+            .unwrap()
+            .and_hms_opt(23, 0, 0)
+            .unwrap();
+        let start_utc = tz.utc_datetime_from_local(start_local).unwrap();
+        let end_utc = tz.utc_datetime_from_local(end_local).unwrap();
+
+        let configs = vec![rhythm_core::ModeTransitionConfig::new(
+            rhythm_core::RhythmMode::Day,
+            rhythm_core::RhythmMode::Sleep,
+            1_000,
+        )
+        .with_trigger(rhythm_core::ModeTransitionTrigger::Scheduled(
+            rhythm_core::ModeTransitionTime::from_hour_minute(22, 0).unwrap(),
+        ))];
+
+        let resolved = resolved_replayed_mode_transition(
+            rhythm_core::RhythmMode::Day,
+            start_utc,
+            end_utc,
+            12.5,
+            -4.0,
+            Some(35.804102),
+            Some(-78.7992983),
+            Some(tz_name),
+            &configs,
+        );
+
+        let transition = resolved.expect("expected replayed scheduled transition");
+        assert_eq!(transition.to_mode, rhythm_core::RhythmMode::Sleep);
+        assert_eq!(
+            transition.trigger,
+            rhythm_core::ModeTransitionTrigger::Scheduled(
+                rhythm_core::ModeTransitionTime::from_hour_minute(22, 0).unwrap(),
+            )
+        );
+    }
+
+    #[test]
     fn replay_wrapper_ignores_manual_mode_changes() {
         let state = make_state();
         {
@@ -1643,7 +1734,7 @@ mod tests {
                 Some(chrono::Utc::now().timestamp_millis() - 12 * 60 * 60 * 1000);
         }
 
-        replay_missed_solar_mode_transitions(&state);
+        replay_missed_mode_transitions(&state);
 
         assert_eq!(
             state.lock().unwrap().active_mode,

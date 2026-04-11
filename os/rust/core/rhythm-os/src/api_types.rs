@@ -27,6 +27,7 @@ pub struct RoomRhythmState {
     pub time_offset: f32,
     pub brightness_offset: f32,
     pub lights_on: bool,
+    pub transitioning: bool,
     pub brightness: u8,
     pub kelvin: u16,
     #[serde(
@@ -378,6 +379,7 @@ mod tests {
             time_offset: 5.0,
             brightness_offset: -10.0,
             lights_on: true,
+            transitioning: true,
             brightness: 80,
             kelvin: 4000,
             room_profile: rhythm_core::RoomProfileSettings::default(),
@@ -396,6 +398,7 @@ mod tests {
         assert_eq!(json["time_offset"], 5.0);
         assert_eq!(json["brightness_offset"], -10.0);
         assert_eq!(json["lights_on"], true);
+        assert_eq!(json["transitioning"], true);
         assert_eq!(json["brightness"], 80);
         assert_eq!(json["kelvin"], 4000);
         // No status wrapper

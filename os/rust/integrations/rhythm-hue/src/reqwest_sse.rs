@@ -1,7 +1,9 @@
-//! SSE reader for Hue bridge event streams using `reqwest-eventsource`.
+//! SSE reader for Hue bridge event streams using raw `reqwest` streaming.
 //!
-//! Enabled by the `desktop` feature flag. Uses a proper SSE client that
-//! handles reconnection, chunked transfer encoding, and keep-alive natively.
+//! Enabled by the `desktop` feature flag. We stream raw response bytes and
+//! feed them through the shared SSE line parser so Hue heartbeat comments
+//! (`: hi`) count as real activity. `reqwest-eventsource` only surfaces
+//! parsed message events, which made quiet-but-healthy streams look stalled.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender};
@@ -10,14 +12,12 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use log::{info, warn};
-use reqwest_eventsource::retry;
-use reqwest_eventsource::{Event, EventSource};
 
-use crate::sse::{process_sse_line, HueSseConfig, HueSseEvent, SseParseState};
+use crate::sse::{drain_sse_lines, HueSseConfig, HueSseEvent, SseParseState};
 
-/// Maximum seconds without any SSE data (including heartbeats) before
-/// assuming the connection is stalled and reconnecting. Hue bridges send
-/// heartbeat comments every ~10s, so 45s ≈ 4 missed heartbeats.
+/// Maximum seconds without any SSE bytes before assuming the connection is
+/// stalled and reconnecting. Hue bridges send heartbeat comment frames every
+/// ~10s, so 45s ≈ 4 missed heartbeats.
 const SSE_IDLE_TIMEOUT_SECS: u64 = 45;
 
 /// Log an "SSE alive" message at this interval during idle periods.
@@ -47,7 +47,7 @@ pub fn start_reqwest_sse(
     rx
 }
 
-/// SSE event loop using reqwest-eventsource.
+/// SSE event loop using raw reqwest response streaming.
 async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutdown: &AtomicBool) {
     let url = format!("https://{}/eventstream/clip/v2", config.bridge_ip);
 
@@ -81,91 +81,89 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
             .header("hue-application-key", &config.username)
             .header("Accept", "text/event-stream");
 
-        let mut es = EventSource::new(request).unwrap();
-        // Disable auto-reconnection. The library would send Last-Event-ID
-        // on retry, causing the bridge to replay missed events — which is
-        // the root cause of button-press bundling after idle. Our outer
-        // loop handles reconnection with fresh EventSource instances.
-        es.set_retry_policy(Box::new(retry::Never));
+        let response = match request.send().await {
+            Ok(response) => match response.error_for_status() {
+                Ok(response) => response,
+                Err(e) => {
+                    warn!(target: "sse", "SSE connect failed: {}", e);
+                    info!(target: "sse", "Reconnecting SSE in {:?}...", backoff);
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(max_backoff);
+                    continue;
+                }
+            },
+            Err(e) => {
+                warn!(target: "sse", "SSE request failed: {}", e);
+                info!(target: "sse", "Reconnecting SSE in {:?}...", backoff);
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(max_backoff);
+                continue;
+            }
+        };
 
         let mut connected = false;
-        let mut last_data_event = Instant::now();
+        let mut last_byte_event = Instant::now();
         let mut last_alive_log = Instant::now();
-        let mut msg_since_data: u32 = 0;
+        let mut chunks_since_alive: u32 = 0;
+        let mut line_buf = Vec::with_capacity(4096);
+        let mut stream = response.bytes_stream();
+
+        info!(target: "sse", "SSE connected (conn #{})", connect_count);
+        let _ = tx.try_send(HueSseEvent::Connected);
+        connected = true;
+        backoff = Duration::from_secs(1);
+        last_byte_event = Instant::now();
+        last_alive_log = Instant::now();
 
         loop {
-            let event =
-                match tokio::time::timeout(Duration::from_secs(SSE_IDLE_TIMEOUT_SECS), es.next())
-                    .await
-                {
-                    Ok(Some(event)) => event,
-                    Ok(None) => break, // stream ended naturally
-                    Err(_) => {
-                        // No data (not even heartbeats) for SSE_IDLE_TIMEOUT_SECS
-                        warn!(
-                            target: "sse",
-                            "SSE: No data for {}s (stall detected), reconnecting",
-                            SSE_IDLE_TIMEOUT_SECS
-                        );
-                        es.close();
-                        break;
-                    }
-                };
-
             if shutdown.load(Ordering::Relaxed) {
-                es.close();
                 return;
             }
 
-            match event {
-                Ok(Event::Open) => {
-                    info!(target: "sse", "SSE connected (conn #{})", connect_count);
-                    let _ = tx.try_send(HueSseEvent::Connected);
-                    connected = true;
-                    backoff = Duration::from_secs(1);
-                    last_data_event = Instant::now();
-                    last_alive_log = Instant::now();
-                }
-                Ok(Event::Message(msg)) => {
-                    let data = msg.data;
-                    if data.is_empty() {
-                        // Empty SSE message (keepalive). Log periodically
-                        // so we can verify the connection was alive during
-                        // idle periods.
-                        msg_since_data += 1;
-                        if last_alive_log.elapsed().as_secs() >= ALIVE_LOG_INTERVAL_SECS {
-                            info!(
-                                target: "sse",
-                                "SSE: alive (idle {}m, {} msgs since last data)",
-                                last_data_event.elapsed().as_secs() / 60,
-                                msg_since_data
-                            );
-                            last_alive_log = Instant::now();
-                        }
-                        continue;
-                    }
-
-                    // Log gap if we've been idle for a while
-                    let idle_secs = last_data_event.elapsed().as_secs();
+            match tokio::time::timeout(Duration::from_secs(SSE_IDLE_TIMEOUT_SECS), stream.next())
+                .await
+            {
+                Ok(Some(Ok(chunk))) => {
+                    let idle_secs = last_byte_event.elapsed().as_secs();
                     if idle_secs > 60 {
                         info!(
                             target: "sse",
-                            "SSE: data event after {}m{}s idle ({} msgs during gap)",
-                            idle_secs / 60, idle_secs % 60, msg_since_data
+                            "SSE: bytes after {}m{}s idle",
+                            idle_secs / 60,
+                            idle_secs % 60
                         );
                     }
-                    last_data_event = Instant::now();
-                    msg_since_data = 0;
 
-                    process_sse_line(&format!("data: {}", data), tx, &mut parse_state);
+                    last_byte_event = Instant::now();
+                    chunks_since_alive = chunks_since_alive.saturating_add(1);
+                    line_buf.extend_from_slice(&chunk);
+                    drain_sse_lines(&mut line_buf, tx, &mut parse_state);
+
+                    if last_alive_log.elapsed().as_secs() >= ALIVE_LOG_INTERVAL_SECS {
+                        info!(
+                            target: "sse",
+                            "SSE: alive ({} chunks in last {}m)",
+                            chunks_since_alive,
+                            ALIVE_LOG_INTERVAL_SECS / 60
+                        );
+                        last_alive_log = Instant::now();
+                        chunks_since_alive = 0;
+                    }
                 }
-                Err(reqwest_eventsource::Error::StreamEnded) => {
+                Ok(Some(Err(e))) => {
+                    warn!(target: "sse", "SSE error: {}", e);
+                    break;
+                }
+                Ok(None) => {
                     info!(target: "sse", "SSE stream ended");
                     break;
                 }
-                Err(e) => {
-                    warn!(target: "sse", "SSE error: {}", e);
-                    es.close();
+                Err(_) => {
+                    warn!(
+                        target: "sse",
+                        "SSE: No bytes for {}s (stall detected), reconnecting",
+                        SSE_IDLE_TIMEOUT_SECS
+                    );
                     break;
                 }
             }

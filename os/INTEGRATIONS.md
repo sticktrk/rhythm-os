@@ -128,7 +128,7 @@ The hub layer in rhythm-os provides the glue between integration crates and the 
 | `ActiveHub` | `rhythm-os/src/hub.rs` | Running hub with type-erased runtime + registry |
 | `HubProvider` | `rhythm-os/src/hub.rs` | Trait for hub configuration |
 | `Storage` | `rhythm-os/src/storage.rs` | Persistence trait (NVS, filesystem, etc.) |
-| `AppState` | `rhythm-os/src/state.rs` | Shared state with `active_hub: Option<ActiveHub>` |
+| `AppState` | `rhythm-os/src/state.rs` | Shared state with `hubs: HashMap<HubKey, ActiveHub>` and per-hub credentials |
 
 ## How rhythm-hue Implements This
 
@@ -174,26 +174,25 @@ pub fn get_hub_provider(hub_type: HubType) -> &'static dyn HubProvider {
     static HUE: crate::platform::hue::HueHubProvider = crate::platform::hue::HueHubProvider;
     match hub_type.as_str() {
         HubType::HUE => &HUE,
-        // "ikea" => &IKEA,   // add new integrations here
         _ => &HUE,
     }
 }
 
 // rhythm-server/src/hub.rs
-pub fn get_hub_provider(_hub_type: HubType) -> &'static dyn HubProvider {
-    rhythm_hue::reqwest_lifecycle::get_hub_provider()
-}
+pub static INTEGRATIONS: &[&dyn ExternalLightHubIntegration] = &[
+    &rhythm_hue::reqwest_lifecycle::INTEGRATION,
+    &rhythm_ha::reqwest_lifecycle::INTEGRATION,
+    &rhythm_matter::desktop_lifecycle::INTEGRATION,
+];
 ```
 
-The `ensure_runtime_fn` and `get_hub_provider_fn` callbacks on `AppState` connect these to the command layer:
+The integration registry callbacks on `AppState` connect these to the command layer:
 
 ```rust
-s.ensure_runtime_fn = Some(Arc::new(|state| {
-    rhythm_hue::reqwest_lifecycle::ensure_runtime(state)
-}));
-s.get_hub_provider_fn = Some(Arc::new(|hub_type| {
-    hub::get_hub_provider(hub_type)
-}));
+let callbacks = rhythm_os::hub::integration_callbacks(hub::INTEGRATIONS);
+s.ensure_runtime_fn = Some(callbacks.ensure_runtime_fn);
+s.get_hub_provider_fn = Some(callbacks.get_hub_provider_fn);
+s.register_controller_fn = Some(callbacks.register_controller_fn);
 ```
 
 ## Platform-Specific Transport
@@ -220,12 +219,12 @@ rhythm-{name}/
     registry.rs         -- HubRegistry + DeviceRegistry impl
     transport.rs        -- communication trait (platform-abstracted)
     provider.rs         -- configure_{name}_hub() shared validation + init
-    lifecycle.rs        -- connect/disconnect + ensure_runtime helpers
+    lifecycle.rs        -- generic lifecycle helpers shared across platforms
     events.rs           -- native events -> HubEvent translation
     buttons.rs          -- native buttons -> ButtonAction mapping (if applicable)
     hub_state.rs        -- integration data stored in ActiveHub::hub_data
-    embedded.rs         -- ESP32-specific (feature = "embedded")
-    desktop.rs          -- Server-specific (feature = "desktop")
+    embedded_lifecycle.rs   -- optional first-party embedded wrapper (feature = "embedded")
+    desktop_lifecycle.rs    -- optional first-party desktop wrapper (feature = "desktop")
 ```
 
 Feature flag pattern:
@@ -236,6 +235,8 @@ blocking = ["rhythm-core/blocking", "rhythm-os/blocking"]
 embedded = ["blocking"]
 desktop = ["blocking", "dep:reqwest"]
 ```
+
+The `embedded` feature means the crate remains embeddable and can be linked into an embedded platform crate. Some integrations also provide a first-party `embedded_lifecycle.rs`; others only expose the generic lifecycle plus transport traits until an embedded transport exists.
 
 ## Minimal Integration Checklist
 
@@ -324,13 +325,13 @@ Shared protocol crates abstract radio/transport access for multiple integrations
 ### WiFi/HTTP
 No crate needed -- just std networking (`reqwest` on desktop, `esp-idf-svc` on ESP32). Already handled by feature flags in integration crates.
 
-## Multi-Integration Support (Future)
+## Multi-Integration Support
 
-### Current: Single Active Hub
-`AppState.active_hub: Option<ActiveHub>` -- works for all near-term use cases.
+### Current: Multiple Active Hubs
+`AppState` already supports multiple active hubs, per-hub credentials, and composite controller registration. That is the current production architecture.
 
-### Future: Multiple Active Integrations
-When a user has Hue bridge for some rooms + IKEA Zigbee for others:
+### Future: Richer Integration Orchestration
+When a user has Hue bridge for some rooms + IKEA Zigbee for others + local Matter:
 
 ```rust
 pub struct IntegrationManager {
@@ -339,9 +340,9 @@ pub struct IntegrationManager {
 }
 ```
 
-A `CompositeController` wraps multiple controllers, routing `room_id` to the correct integration based on room-to-integration mapping.
+A `CompositeController` wraps multiple controllers, routing topology room IDs to the correct hub-native targets.
 
-**Deferred until we have two working integrations.** Single-hub works for every concrete near-term use case.
+Future work, if needed, is around richer orchestration policy and tooling, not replacing a single-hub state model.
 
 ## Sensors in the Architecture
 
@@ -363,7 +364,7 @@ pub enum HubEvent {
 ### Phase 1: Document & Codify (current)
 - This document captures the architecture
 - No code changes to traits or existing crates
-- rhythm-hue serves as the reference implementation
+- rhythm-hue and rhythm-ha serve as the primary reference implementations
 
 ### Phase 2: First Protocol Crate
 When Zigbee work starts: create `rhythm-zigbee` with coordinator trait + ZCL basics.
@@ -372,7 +373,7 @@ When Zigbee work starts: create `rhythm-zigbee` with coordinator trait + ZCL bas
 Build next integration (IKEA? LIFX?) using the template. Validates the contract works for non-Hue. This is where Hue-specific names (like `grouped_light_id`) get generalized.
 
 ### Phase 4: Multi-Integration Orchestration
-`IntegrationManager` replaces `active_hub: Option<ActiveHub>`. Only needed when someone runs Hue + another integration simultaneously.
+Refine the existing multi-hub model only if a future platform needs additional orchestration layers beyond today's `AppState.hubs` + `CompositeController`.
 
 ## Key Files Reference
 
@@ -384,7 +385,7 @@ Build next integration (IKEA? LIFX?) using the template. Validates the contract 
 | `rust/core/rhythm-core/src/runtime/handle.rs` | `RuntimeHandle` type erasure |
 | `rust/core/rhythm-os/src/hub.rs` | `HubProvider`, `ActiveHub`, `HubEvent`, `HubType`, `HubCredentials` |
 | `rust/core/rhythm-os/src/controller_helpers.rs` | `rooms_from_registry()`, `resolve_room_target()` |
-| `rust/core/rhythm-os/src/state.rs` | `AppState` with `active_hub` |
+| `rust/core/rhythm-os/src/state.rs` | `AppState` with `hubs`, per-hub credentials, and platform metadata |
 | `rust/core/rhythm-os/src/commands.rs` | Hub-agnostic command handlers |
 | `rust/core/rhythm-os/src/event_loop.rs` | Generic `HubEvent` processing |
 | `rust/core/rhythm-os/src/storage.rs` | `Storage` persistence trait |

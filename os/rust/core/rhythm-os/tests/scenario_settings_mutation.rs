@@ -226,6 +226,7 @@ fn soft_off_uses_explicit_idle_palette_override() {
         idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
         wake_profile_id: None,
         warning_profile_id: None,
+        room_defaults: vec![],
     }]);
 
     let mut idle = default_day_idle_profile();
@@ -284,6 +285,7 @@ fn soft_off_uses_explicit_idle_constant_override() {
         idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
         wake_profile_id: None,
         warning_profile_id: None,
+        room_defaults: vec![],
     }]);
 
     let mut idle = default_day_idle_profile();

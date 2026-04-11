@@ -664,6 +664,7 @@ mod tests {
             idle_profile_id: Some("idle".into()),
             wake_profile_id: None,
             warning_profile_id: None,
+            room_defaults: vec![],
         }]);
 
         let idle = registry
@@ -673,7 +674,7 @@ mod tests {
         assert_eq!(idle.brightness, 1);
         assert_eq!(idle.rgb, active.rgb);
         assert_eq!(idle.xy, active.xy);
-        assert!(idle.is_direct_color);
+        assert_eq!(idle.is_direct_color, active.is_direct_color);
     }
 
     #[test]
@@ -701,6 +702,7 @@ mod tests {
             idle_profile_id: None,
             wake_profile_id: None,
             warning_profile_id: None,
+            room_defaults: vec![],
         }]);
 
         let idle = registry

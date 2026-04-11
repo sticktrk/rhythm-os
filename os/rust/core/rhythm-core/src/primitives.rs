@@ -294,7 +294,15 @@ impl<C: LightController> RhythmEngine<C> {
         command: LightingCommand,
     ) -> LightControlResult<()> {
         self.clear_periodic_dedupe(room_id);
-        self.controller.turn_on(room_id, command).await
+        self.controller.turn_on(room_id, command.clone()).await?;
+        self.periodic_command_cache.insert(
+            room_id.to_string(),
+            PeriodicCommandCacheEntry {
+                command,
+                skipped_cycles: 0,
+            },
+        );
+        Ok(())
     }
 
     async fn send_non_periodic_turn_off(&mut self, room_id: &str) -> LightControlResult<()> {
@@ -1552,7 +1560,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_manual_command_clears_periodic_dedupe_cache() {
+    async fn test_manual_turn_on_seeds_periodic_dedupe_cache() {
         let (mut engine, spy) = spy_engine();
 
         engine.rhythm_on("room1").await.unwrap();
@@ -1574,9 +1582,9 @@ mod tests {
         spy.reset();
         assert!(matches!(
             engine.periodic_tick_single_room("room1", 12.0).await,
-            PeriodicTickResult::Updated
+            PeriodicTickResult::Skipped
         ));
-        assert_eq!(spy.turn_on_count(), 1);
+        assert_eq!(spy.turn_on_count(), 0);
     }
 
     #[tokio::test]

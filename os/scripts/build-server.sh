@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build the rhythm-server binary
 #
-# Usage: ./scripts/build-server.sh [--release|--debug] [--target <target>] [--clean] [--run [-- args...]]
+# Usage: ./scripts/build-server.sh [--release|--debug] [--target <target>] [--clean] [--run] [--data-dir <path>] [-- args...]
 # Output: dist/bin/{os}-{arch}/rhythm-server
 
 set -e
@@ -42,9 +42,13 @@ while [[ $# -gt 0 ]]; do
             RUN=true
             shift
             ;;
+        --data-dir)
+            SERVER_ARGS+=(--data-dir "$2")
+            shift 2
+            ;;
         --)
             shift
-            SERVER_ARGS=("$@")
+            SERVER_ARGS+=("$@")
             break
             ;;
         -h|--help)
@@ -56,6 +60,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --target <target>   Target platform (default: native)"
             echo "  --clean             Clean before building"
             echo "  --run               Run the server after building (native only; default: debug)"
+            echo "  --data-dir <path>   Override server data directory when used with --run"
             echo "  -h, --help          Show this help"
             echo ""
             echo "Targets:"
@@ -69,6 +74,10 @@ while [[ $# -gt 0 ]]; do
             echo "  all                 All 4 targets"
             echo ""
             echo "Output: dist/bin/{os}-{arch}/rhythm-server"
+            echo ""
+            echo "Examples:"
+            echo "  $0 --run --data-dir /tmp/rhythm-dev"
+            echo "  $0 --run -- --port 54449"
             exit 0
             ;;
         *)

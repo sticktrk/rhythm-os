@@ -926,6 +926,7 @@ mod tests {
             idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
             wake_profile_id: None,
             warning_profile_id: None,
+            room_defaults: vec![],
         }]);
 
         assert_eq!(

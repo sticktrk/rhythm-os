@@ -504,6 +504,11 @@ pub fn handle_put_mode(state: &SharedState, body: &Value) -> ApiResponse {
         },
         None => None,
     };
+    if let Some(ref modes) = modes {
+        if let Err(e) = commands::validate_mode_configs(modes) {
+            return ApiResponse::bad_request(&e.to_string());
+        }
+    }
     match commands::do_mode_set(state, active_mode, modes) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
@@ -1996,6 +2001,26 @@ mod tests {
     }
 
     #[test]
+    fn put_mode_rejects_runtime_only_room_default_states() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_mode(
+            &state,
+            &json!({
+                "configs": [{
+                    "mode": "sleep",
+                    "active_profile_id": "sleep",
+                    "room_defaults": [{
+                        "room_id": "office",
+                        "state": "warning"
+                    }]
+                }]
+            }),
+        );
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("runtime-only state"));
+    }
+
+    #[test]
     fn get_transitions_returns_wrapper() {
         let state = handler_state_with_runtime();
         let r = handle_get_transitions(&state);
@@ -2012,6 +2037,47 @@ mod tests {
         assert_eq!(r.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert_eq!(parsed["transitions"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn put_transitions_accepts_auto_duration() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_transitions(
+            &state,
+            &json!({
+                "transitions": [{
+                    "from_mode": "sleep",
+                    "to_mode": "day",
+                    "trigger": {"kind": "solar", "event": "sunrise"},
+                    "duration_ms": {"mode": "auto"}
+                }]
+            }),
+        );
+        assert_eq!(r.status, 200);
+
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["transitions"][0]["duration_ms"]["mode"], "auto");
+    }
+
+    #[test]
+    fn put_transitions_accepts_scheduled_trigger() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_transitions(
+            &state,
+            &json!({
+                "transitions": [{
+                    "from_mode": "day",
+                    "to_mode": "sleep",
+                    "trigger": {"kind": "scheduled", "time": "22:00"},
+                    "duration_ms": 5000
+                }]
+            }),
+        );
+        assert_eq!(r.status, 200);
+
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["transitions"][0]["trigger"]["kind"], "scheduled");
+        assert_eq!(parsed["transitions"][0]["trigger"]["time"], "22:00");
     }
 
     #[test]

@@ -81,6 +81,11 @@ pub enum RoomModeState {
 }
 
 impl RoomModeState {
+    /// Whether this state can be stored as a mode default target.
+    pub const fn is_mode_default_target(self) -> bool {
+        matches!(self, Self::Active | Self::Idle | Self::HardOff)
+    }
+
     /// Derive the current user-facing room state from existing runtime flags.
     pub fn from_flags(hard_off: bool, soft_off: bool, warning_active: bool) -> Self {
         if hard_off {
@@ -93,6 +98,14 @@ impl RoomModeState {
             Self::Active
         }
     }
+}
+
+/// Target room state when a mode activates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct RoomModeDefault {
+    pub room_id: String,
+    pub state: RoomModeState,
 }
 
 /// Profile mapping for the room states inside one high-level mode.
@@ -124,14 +137,39 @@ pub struct ModeConfig {
         serde(default, skip_serializing_if = "Option::is_none")
     )]
     pub warning_profile_id: Option<String>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Vec::is_empty")
+    )]
+    pub room_defaults: Vec<RoomModeDefault>,
 }
 
 impl ModeConfig {
+    fn normalize_room_defaults(&mut self) -> bool {
+        let original = self.room_defaults.clone();
+        let mut seen_room_ids = HashSet::new();
+        let mut normalized = Vec::with_capacity(self.room_defaults.len());
+
+        for default in self.room_defaults.iter().rev() {
+            if !default.state.is_mode_default_target() {
+                continue;
+            }
+            if seen_room_ids.insert(default.room_id.clone()) {
+                normalized.push(default.clone());
+            }
+        }
+
+        normalized.reverse();
+        let changed = normalized != original;
+        self.room_defaults = normalized;
+        changed
+    }
+
     /// Normalize invalid profile selections into mode-specific built-ins.
     ///
     /// Active profiles must never point at state-only profiles.
     pub fn normalize_profile_ids(&mut self) -> bool {
-        let mut changed = false;
+        let mut changed = self.normalize_room_defaults();
 
         if self.active_profile_id.as_deref().is_some_and(|id| {
             is_builtin_state_profile_id(id) || is_removed_legacy_idle_profile_id(id)
@@ -159,6 +197,7 @@ impl ModeConfig {
             idle_profile_id: None,
             wake_profile_id: None,
             warning_profile_id: None,
+            room_defaults: Vec::new(),
         }
     }
 
@@ -204,6 +243,111 @@ pub fn default_mode_configs() -> Vec<ModeConfig> {
         .collect()
 }
 
+/// Local wall-clock time for a scheduled mode transition.
+///
+/// Stored internally as whole minutes after midnight so transition triggers
+/// remain hashable and comparable across persisted configs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ModeTransitionTime {
+    minutes_since_midnight: u16,
+}
+
+impl ModeTransitionTime {
+    pub const fn from_hour_minute(hour: u8, minute: u8) -> Option<Self> {
+        if hour >= 24 || minute >= 60 {
+            return None;
+        }
+
+        Some(Self {
+            minutes_since_midnight: (hour as u16) * 60 + (minute as u16),
+        })
+    }
+
+    pub const fn hour(self) -> u8 {
+        (self.minutes_since_midnight / 60) as u8
+    }
+
+    pub const fn minute(self) -> u8 {
+        (self.minutes_since_midnight % 60) as u8
+    }
+
+    pub const fn minutes_since_midnight(self) -> u16 {
+        self.minutes_since_midnight
+    }
+
+    pub fn local_hour(self) -> f32 {
+        self.minutes_since_midnight as f32 / 60.0
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        let mut parts = value.split(':');
+        let hour = parts
+            .next()
+            .ok_or_else(|| "scheduled time must use HH:MM".to_string())?;
+        let minute = parts
+            .next()
+            .ok_or_else(|| "scheduled time must use HH:MM".to_string())?;
+        let second = parts.next();
+        if parts.next().is_some() {
+            return Err("scheduled time must use HH:MM".to_string());
+        }
+
+        let hour = hour
+            .parse::<u8>()
+            .map_err(|_| "scheduled time hour must be a number".to_string())?;
+        let minute = minute
+            .parse::<u8>()
+            .map_err(|_| "scheduled time minute must be a number".to_string())?;
+
+        if let Some(second) = second {
+            let second = second
+                .parse::<u8>()
+                .map_err(|_| "scheduled time second must be a number".to_string())?;
+            if second != 0 {
+                return Err("scheduled time does not support seconds".to_string());
+            }
+        }
+
+        Self::from_hour_minute(hour, minute)
+            .ok_or_else(|| "scheduled time must be between 00:00 and 23:59".to_string())
+    }
+
+    pub fn display(self) -> String {
+        format!("{:02}:{:02}", self.hour(), self.minute())
+    }
+
+    pub fn id_suffix(self) -> String {
+        format!("scheduled_{:02}{:02}", self.hour(), self.minute())
+    }
+}
+
+impl core::fmt::Display for ModeTransitionTime {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:02}:{:02}", self.hour(), self.minute())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl Serialize for ModeTransitionTime {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.display())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> Deserialize<'de> for ModeTransitionTime {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Trigger that initiates a configured mode transition.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum ModeTransitionTrigger {
@@ -214,6 +358,7 @@ pub enum ModeTransitionTrigger {
     CivilTwilight,
     NauticalTwilight,
     AstronomicalTwilight,
+    Scheduled(ModeTransitionTime),
 }
 
 impl ModeTransitionTrigger {
@@ -222,10 +367,10 @@ impl ModeTransitionTrigger {
     }
 
     pub const fn kind(self) -> &'static str {
-        if self.is_manual() {
-            "manual"
-        } else {
-            "solar"
+        match self {
+            Self::Manual => "manual",
+            Self::Scheduled(_) => "scheduled",
+            _ => "solar",
         }
     }
 
@@ -237,28 +382,38 @@ impl ModeTransitionTrigger {
             Self::CivilTwilight => Some("civil_twilight"),
             Self::NauticalTwilight => Some("nautical_twilight"),
             Self::AstronomicalTwilight => Some("astronomical_twilight"),
+            Self::Scheduled(_) => None,
         }
     }
 
-    pub const fn id_suffix(self) -> &'static str {
+    pub const fn scheduled_time(self) -> Option<ModeTransitionTime> {
         match self {
-            Self::Manual => "manual",
-            Self::Sunrise => "sunrise",
-            Self::Sunset => "sunset",
-            Self::CivilTwilight => "civil_twilight",
-            Self::NauticalTwilight => "nautical_twilight",
-            Self::AstronomicalTwilight => "astronomical_twilight",
+            Self::Scheduled(time) => Some(time),
+            _ => None,
         }
     }
 
-    pub const fn label_suffix(self) -> Option<&'static str> {
+    pub fn id_suffix(self) -> String {
+        match self {
+            Self::Manual => "manual".to_string(),
+            Self::Sunrise => "sunrise".to_string(),
+            Self::Sunset => "sunset".to_string(),
+            Self::CivilTwilight => "civil_twilight".to_string(),
+            Self::NauticalTwilight => "nautical_twilight".to_string(),
+            Self::AstronomicalTwilight => "astronomical_twilight".to_string(),
+            Self::Scheduled(time) => time.id_suffix(),
+        }
+    }
+
+    pub fn label_suffix(self) -> Option<String> {
         match self {
             Self::Manual => None,
-            Self::Sunrise => Some("Sunrise"),
-            Self::Sunset => Some("Sunset"),
-            Self::CivilTwilight => Some("Civil Twilight"),
-            Self::NauticalTwilight => Some("Nautical Twilight"),
-            Self::AstronomicalTwilight => Some("Astronomical Twilight"),
+            Self::Sunrise => Some("Sunrise".to_string()),
+            Self::Sunset => Some("Sunset".to_string()),
+            Self::CivilTwilight => Some("Civil Twilight".to_string()),
+            Self::NauticalTwilight => Some("Nautical Twilight".to_string()),
+            Self::AstronomicalTwilight => Some("Astronomical Twilight".to_string()),
+            Self::Scheduled(time) => Some(time.display()),
         }
     }
 }
@@ -274,11 +429,14 @@ impl Serialize for ModeTransitionTrigger {
             kind: &'a str,
             #[serde(skip_serializing_if = "Option::is_none")]
             event: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            time: Option<ModeTransitionTime>,
         }
 
         TriggerRepr {
             kind: self.kind(),
             event: self.event(),
+            time: self.scheduled_time(),
         }
         .serialize(serializer)
     }
@@ -306,6 +464,7 @@ impl<'de> Deserialize<'de> for ModeTransitionTrigger {
         enum TriggerKind {
             Manual,
             Solar,
+            Scheduled,
         }
 
         #[derive(Deserialize)]
@@ -313,6 +472,8 @@ impl<'de> Deserialize<'de> for ModeTransitionTrigger {
             kind: TriggerKind,
             #[serde(default)]
             event: Option<LegacyTrigger>,
+            #[serde(default)]
+            time: Option<ModeTransitionTime>,
         }
 
         #[derive(Deserialize)]
@@ -332,7 +493,7 @@ impl<'de> Deserialize<'de> for ModeTransitionTrigger {
                 LegacyTrigger::NauticalTwilight => Self::NauticalTwilight,
                 LegacyTrigger::AstronomicalTwilight => Self::AstronomicalTwilight,
             }),
-            TriggerRepr::Object(TriggerObject { kind, event }) => match kind {
+            TriggerRepr::Object(TriggerObject { kind, event, time }) => match kind {
                 TriggerKind::Manual => Ok(Self::Manual),
                 TriggerKind::Solar => match event {
                     Some(LegacyTrigger::Sunrise) => Ok(Self::Sunrise),
@@ -344,6 +505,9 @@ impl<'de> Deserialize<'de> for ModeTransitionTrigger {
                         "solar trigger requires a solar event",
                     )),
                 },
+                TriggerKind::Scheduled => time
+                    .map(Self::Scheduled)
+                    .ok_or_else(|| serde::de::Error::custom("scheduled trigger requires time")),
             },
         }
     }
@@ -363,15 +527,39 @@ fn default_preserve_hard_off() -> bool {
     true
 }
 
-fn default_mode_transition_duration_ms() -> u32 {
-    5_000
+fn default_mode_transition_duration_ms() -> TimerSetting {
+    TimerSetting::Fixed { value: 5_000 }
+}
+
+#[cfg(feature = "serde")]
+fn serialize_mode_transition_duration_ms<S>(
+    duration_ms: &TimerSetting,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match duration_ms {
+        TimerSetting::Fixed { value } => serializer.serialize_u32(*value),
+        _ => duration_ms.serialize(serializer),
+    }
+}
+
+#[cfg(feature = "serde")]
+fn deserialize_mode_transition_duration_ms<'de, D>(
+    deserializer: D,
+) -> Result<TimerSetting, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    TimerSetting::deserialize(deserializer)
 }
 
 /// Configured transition between two high-level modes.
 ///
 /// Transitions operate in rendered output space: the runtime captures the
 /// current visible room output and fades it to the target mode/state output.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ModeTransitionConfig {
     #[cfg_attr(feature = "serde", serde(default))]
@@ -384,9 +572,13 @@ pub struct ModeTransitionConfig {
     pub trigger: ModeTransitionTrigger,
     #[cfg_attr(
         feature = "serde",
-        serde(default = "default_mode_transition_duration_ms")
+        serde(
+            default = "default_mode_transition_duration_ms",
+            serialize_with = "serialize_mode_transition_duration_ms",
+            deserialize_with = "deserialize_mode_transition_duration_ms"
+        )
     )]
-    pub duration_ms: u32,
+    pub duration_ms: TimerSetting,
     #[cfg_attr(feature = "serde", serde(default = "default_preserve_hard_off"))]
     pub preserve_hard_off: bool,
 }
@@ -399,9 +591,14 @@ impl ModeTransitionConfig {
             from_mode,
             to_mode,
             trigger: ModeTransitionTrigger::Manual,
-            duration_ms,
+            duration_ms: TimerSetting::Fixed { value: duration_ms },
             preserve_hard_off: true,
         }
+    }
+
+    pub fn with_duration(mut self, duration_ms: TimerSetting) -> Self {
+        self.duration_ms = duration_ms;
+        self
     }
 
     pub fn with_trigger(mut self, trigger: ModeTransitionTrigger) -> Self {
@@ -562,22 +759,14 @@ where
 
 pub fn default_mode_transition_configs() -> Vec<ModeTransitionConfig> {
     normalize_mode_transition_configs(vec![
-        ModeTransitionConfig::new(
-            RhythmMode::Sleep,
-            RhythmMode::Day,
-            default_mode_transition_duration_ms(),
-        )
-        .with_id("sleep_to_day")
-        .with_label("Sleep to Day")
-        .with_trigger(ModeTransitionTrigger::AstronomicalTwilight),
-        ModeTransitionConfig::new(
-            RhythmMode::Day,
-            RhythmMode::Sleep,
-            default_mode_transition_duration_ms(),
-        )
-        .with_id("day_to_sleep")
-        .with_label("Day to Sleep")
-        .with_trigger(ModeTransitionTrigger::NauticalTwilight),
+        ModeTransitionConfig::new(RhythmMode::Sleep, RhythmMode::Day, 5_000)
+            .with_id("sleep_to_day")
+            .with_label("Sleep to Day")
+            .with_trigger(ModeTransitionTrigger::AstronomicalTwilight),
+        ModeTransitionConfig::new(RhythmMode::Day, RhythmMode::Sleep, 5_000)
+            .with_id("day_to_sleep")
+            .with_label("Day to Sleep")
+            .with_trigger(ModeTransitionTrigger::NauticalTwilight),
     ])
 }
 
@@ -1023,6 +1212,11 @@ mod tests {
             RoomModeState::from_flags(true, false, false),
             RoomModeState::HardOff
         );
+        assert!(RoomModeState::Active.is_mode_default_target());
+        assert!(RoomModeState::Idle.is_mode_default_target());
+        assert!(RoomModeState::HardOff.is_mode_default_target());
+        assert!(!RoomModeState::Wake.is_mode_default_target());
+        assert!(!RoomModeState::Warning.is_mode_default_target());
     }
 
     #[test]
@@ -1032,16 +1226,20 @@ mod tests {
         assert_eq!(configs[0].mode, RhythmMode::Day);
         assert_eq!(configs[0].active_profile_id.as_deref(), Some("rhythm"));
         assert_eq!(configs[0].idle_profile_id, None);
+        assert!(configs[0].room_defaults.is_empty());
         assert_eq!(configs[1].mode, RhythmMode::Sleep);
         assert_eq!(configs[1].active_profile_id.as_deref(), Some("sleep"));
         assert_eq!(configs[1].idle_profile_id, None);
+        assert!(configs[1].room_defaults.is_empty());
     }
 
     #[test]
     fn test_default_mode_transitions_use_short_testing_fade() {
         let configs = default_mode_transition_configs();
         assert_eq!(configs.len(), 2);
-        assert!(configs.iter().all(|config| config.duration_ms == 5_000));
+        assert!(configs
+            .iter()
+            .all(|config| { config.duration_ms == TimerSetting::Fixed { value: 5_000 } }));
         assert_eq!(configs[0].id, "sleep_to_day");
         assert_eq!(configs[1].id, "day_to_sleep");
         assert_eq!(configs[0].label, "Sleep to Day");
@@ -1093,6 +1291,7 @@ mod tests {
             idle_profile_id: Some(DAY_IDLE_PROFILE_ID.into()),
             wake_profile_id: None,
             warning_profile_id: None,
+            room_defaults: vec![],
         };
 
         assert!(config.normalize_profile_ids());
@@ -1108,6 +1307,7 @@ mod tests {
             idle_profile_id: Some("idle".into()),
             wake_profile_id: None,
             warning_profile_id: None,
+            room_defaults: vec![],
         };
 
         assert!(config.normalize_profile_ids());
@@ -1123,6 +1323,7 @@ mod tests {
             idle_profile_id: Some("idle".into()),
             wake_profile_id: None,
             warning_profile_id: None,
+            room_defaults: vec![],
         };
 
         assert_eq!(
@@ -1291,8 +1492,43 @@ mod tests {
             }"#;
 
             let config: ModeTransitionConfig = serde_json::from_str(json).unwrap();
-            assert_eq!(config.duration_ms, 5_000);
+            assert_eq!(config.duration_ms, TimerSetting::Fixed { value: 5_000 });
             assert!(config.preserve_hard_off);
+        }
+
+        #[test]
+        fn test_mode_transition_deserialize_auto_duration() {
+            let json = r#"{
+                "from_mode": "sleep",
+                "to_mode": "day",
+                "duration_ms": {"mode": "auto"}
+            }"#;
+
+            let config: ModeTransitionConfig = serde_json::from_str(json).unwrap();
+            assert_eq!(config.duration_ms, TimerSetting::Auto);
+        }
+
+        #[test]
+        fn test_mode_transition_serialize_fixed_duration_as_number() {
+            let json = serde_json::to_value(ModeTransitionConfig::new(
+                RhythmMode::Sleep,
+                RhythmMode::Day,
+                5_000,
+            ))
+            .unwrap();
+
+            assert_eq!(json["duration_ms"], 5_000);
+        }
+
+        #[test]
+        fn test_mode_transition_serialize_auto_duration_as_object() {
+            let json = serde_json::to_value(
+                ModeTransitionConfig::new(RhythmMode::Sleep, RhythmMode::Day, 5_000)
+                    .with_duration(TimerSetting::Auto),
+            )
+            .unwrap();
+
+            assert_eq!(json["duration_ms"]["mode"], "auto");
         }
 
         #[test]
@@ -1307,6 +1543,89 @@ mod tests {
         }
 
         #[test]
+        fn test_mode_transition_trigger_serializes_scheduled_as_object() {
+            let json = serde_json::to_value(ModeTransitionTrigger::Scheduled(
+                ModeTransitionTime::from_hour_minute(22, 0).unwrap(),
+            ))
+            .unwrap();
+
+            assert_eq!(json["kind"], "scheduled");
+            assert_eq!(json["time"], "22:00");
+            assert!(json.get("event").is_none());
+        }
+
+        #[test]
+        fn test_mode_transition_trigger_deserializes_scheduled_object() {
+            let trigger: ModeTransitionTrigger =
+                serde_json::from_str(r#"{"kind":"scheduled","time":"06:30"}"#).unwrap();
+
+            assert_eq!(
+                trigger,
+                ModeTransitionTrigger::Scheduled(
+                    ModeTransitionTime::from_hour_minute(6, 30).unwrap(),
+                )
+            );
+        }
+
+        #[test]
+        fn test_mode_transition_trigger_rejects_scheduled_without_time() {
+            let err = serde_json::from_str::<ModeTransitionTrigger>(r#"{"kind":"scheduled"}"#)
+                .unwrap_err();
+
+            assert!(err.to_string().contains("scheduled trigger requires time"));
+        }
+
+        #[test]
+        fn test_mode_transition_time_rejects_invalid_values() {
+            assert!(ModeTransitionTime::parse("24:00").is_err());
+            assert!(ModeTransitionTime::parse("22:60").is_err());
+            assert!(ModeTransitionTime::parse("22:00:01").is_err());
+        }
+
+        #[test]
+        fn test_mode_config_room_defaults_round_trip_and_skip_empty() {
+            let config = ModeConfig {
+                mode: RhythmMode::Sleep,
+                active_profile_id: Some("sleep".into()),
+                idle_profile_id: None,
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![
+                    RoomModeDefault {
+                        room_id: "kitchen".into(),
+                        state: RoomModeState::Idle,
+                    },
+                    RoomModeDefault {
+                        room_id: "office".into(),
+                        state: RoomModeState::HardOff,
+                    },
+                ],
+            };
+
+            let json = serde_json::to_value(&config).unwrap();
+            assert_eq!(json["room_defaults"][0]["room_id"], "kitchen");
+            assert_eq!(json["room_defaults"][0]["state"], "idle");
+
+            let decoded: ModeConfig = serde_json::from_value(json).unwrap();
+            assert_eq!(decoded, config);
+
+            let empty_json =
+                serde_json::to_value(ModeConfig::default_for_mode(RhythmMode::Day)).unwrap();
+            assert!(empty_json.get("room_defaults").is_none());
+        }
+
+        #[test]
+        fn test_mode_config_deserialize_missing_room_defaults_as_empty() {
+            let json = r#"{
+                "mode": "sleep",
+                "active_profile_id": "sleep"
+            }"#;
+
+            let config: ModeConfig = serde_json::from_str(json).unwrap();
+            assert!(config.room_defaults.is_empty());
+        }
+
+        #[test]
         fn test_normalize_mode_transition_configs_backfills_identity() {
             let configs = normalize_mode_transition_configs(vec![ModeTransitionConfig {
                 id: String::new(),
@@ -1314,7 +1633,7 @@ mod tests {
                 from_mode: RhythmMode::Day,
                 to_mode: RhythmMode::Sleep,
                 trigger: ModeTransitionTrigger::NauticalTwilight,
-                duration_ms: 2_000,
+                duration_ms: TimerSetting::Fixed { value: 2_000 },
                 preserve_hard_off: true,
             }]);
 
@@ -1331,13 +1650,77 @@ mod tests {
                 from_mode: RhythmMode::Sleep,
                 to_mode: RhythmMode::Day,
                 trigger: ModeTransitionTrigger::Sunrise,
-                duration_ms: 10_000,
+                duration_ms: TimerSetting::Fixed { value: 10_000 },
                 preserve_hard_off: true,
             }]);
 
             assert_eq!(configs.len(), 1);
             assert_eq!(configs[0].id, "sleep_to_day");
             assert_eq!(configs[0].label, "Sleep to Day");
+        }
+
+        #[test]
+        fn test_mode_config_normalize_room_defaults_last_wins_and_drops_runtime_only_states() {
+            let mut config = ModeConfig {
+                mode: RhythmMode::Sleep,
+                active_profile_id: Some("sleep".into()),
+                idle_profile_id: None,
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![
+                    RoomModeDefault {
+                        room_id: "kitchen".into(),
+                        state: RoomModeState::Active,
+                    },
+                    RoomModeDefault {
+                        room_id: "office".into(),
+                        state: RoomModeState::Warning,
+                    },
+                    RoomModeDefault {
+                        room_id: "kitchen".into(),
+                        state: RoomModeState::Idle,
+                    },
+                ],
+            };
+
+            assert!(config.normalize_profile_ids());
+            assert_eq!(
+                config.room_defaults,
+                vec![RoomModeDefault {
+                    room_id: "kitchen".into(),
+                    state: RoomModeState::Idle,
+                }]
+            );
+        }
+
+        #[test]
+        fn test_normalize_mode_transition_configs_uses_scheduled_suffix_for_duplicate_pairs() {
+            let configs = normalize_mode_transition_configs(vec![
+                ModeTransitionConfig {
+                    id: String::new(),
+                    label: String::new(),
+                    from_mode: RhythmMode::Day,
+                    to_mode: RhythmMode::Sleep,
+                    trigger: ModeTransitionTrigger::Manual,
+                    duration_ms: TimerSetting::Fixed { value: 1_000 },
+                    preserve_hard_off: true,
+                },
+                ModeTransitionConfig {
+                    id: String::new(),
+                    label: String::new(),
+                    from_mode: RhythmMode::Day,
+                    to_mode: RhythmMode::Sleep,
+                    trigger: ModeTransitionTrigger::Scheduled(
+                        ModeTransitionTime::from_hour_minute(22, 0).unwrap(),
+                    ),
+                    duration_ms: TimerSetting::Fixed { value: 2_000 },
+                    preserve_hard_off: true,
+                },
+            ]);
+
+            assert_eq!(configs[0].id, "day_to_sleep_manual");
+            assert_eq!(configs[1].id, "day_to_sleep_scheduled_2200");
+            assert_eq!(configs[1].label, "Day to Sleep (22:00)");
         }
 
         #[test]
@@ -1349,7 +1732,7 @@ mod tests {
                     from_mode: RhythmMode::Day,
                     to_mode: RhythmMode::Sleep,
                     trigger: ModeTransitionTrigger::Manual,
-                    duration_ms: 1_000,
+                    duration_ms: TimerSetting::Fixed { value: 1_000 },
                     preserve_hard_off: true,
                 },
                 ModeTransitionConfig {
@@ -1358,7 +1741,7 @@ mod tests {
                     from_mode: RhythmMode::Day,
                     to_mode: RhythmMode::Sleep,
                     trigger: ModeTransitionTrigger::NauticalTwilight,
-                    duration_ms: 2_000,
+                    duration_ms: TimerSetting::Fixed { value: 2_000 },
                     preserve_hard_off: true,
                 },
             ]);
