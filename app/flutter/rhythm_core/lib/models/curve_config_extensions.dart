@@ -1,4 +1,5 @@
 import '../src/rust/api/dto/curve.dart' show CurveConfigDto;
+import 'curve_defaults.dart' show curveConfigFromJson;
 
 /// Extension on generated CurveConfigDto to add convenience methods.
 ///
@@ -70,22 +71,8 @@ extension CurveConfigDtoX on CurveConfigDto {
   }
 
   /// Create from JSON (REST API response, snake_case keys).
-  /// Uses Rust defaults for any missing fields.
+  /// Uses shared Dart defaults for any missing fields.
   static CurveConfigDto fromJson(Map<String, dynamic> json) {
-    final d = CurveConfigDto.default_();
-    return CurveConfigDto(
-      minColorTemp: (json['min_color_temp'] as num?)?.toInt() ?? d.minColorTemp,
-      maxColorTemp: (json['max_color_temp'] as num?)?.toInt() ?? d.maxColorTemp,
-      minBrightness: (json['min_brightness'] as num?)?.toInt() ?? d.minBrightness,
-      maxBrightness: (json['max_brightness'] as num?)?.toInt() ?? d.maxBrightness,
-      widthLeftBri: (json['width_left_bri'] as num?)?.toDouble() ?? d.widthLeftBri,
-      widthRightBri: (json['width_right_bri'] as num?)?.toDouble() ?? d.widthRightBri,
-      widthLeftCct: (json['width_left_cct'] as num?)?.toDouble() ?? d.widthLeftCct,
-      widthRightCct: (json['width_right_cct'] as num?)?.toDouble() ?? d.widthRightCct,
-      shapeP: (json['shape_p'] as num?)?.toDouble() ?? d.shapeP,
-      maxDimSteps: (json['max_dim_steps'] as num?)?.toInt() ?? d.maxDimSteps,
-      fadeMs: (json['fade_ms'] as num?)?.toInt() ?? d.fadeMs,
-      motionTimeoutSecs: (json['motion_timeout_secs'] as num?)?.toInt() ?? d.motionTimeoutSecs,
-    );
+    return curveConfigFromJson(json);
   }
 }

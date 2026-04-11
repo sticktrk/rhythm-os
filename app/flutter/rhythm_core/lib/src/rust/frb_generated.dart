@@ -4,7 +4,6 @@
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
 import 'api/curve.dart';
-import 'api/dto/action.dart';
 import 'api/dto/color.dart';
 import 'api/dto/curve.dart';
 import 'api/dto/hue.dart';
@@ -14,7 +13,6 @@ import 'api/dto/solar.dart';
 import 'api/helpers.dart';
 import 'api/hue.dart';
 import 'api/hue_registry.dart';
-import 'api/runner.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'frb_generated.dart';
@@ -79,7 +77,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 470141064;
+  int get rustContentHash => 1692632949;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -116,15 +114,6 @@ abstract class RustLibApi extends BaseApi {
   BehaviorRemoveResultDto crateApiHueRegistryBehaviorTrackerRemove(
       {required HueBehaviorTrackerDto tracker, required String behaviorId});
 
-  ActionResultDto crateApiRunnerCalculateActionResult(
-      {required CurveConfigDto config,
-      required double solarNoonHour,
-      required double latitude,
-      required int dayOfYear,
-      required double currentHour,
-      required RhythmActionDto action,
-      required RoomStateDto roomState});
-
   LightingValuesDto crateApiCurveCalculateLighting(
       {required CurveConfigDto config,
       required double solarNoonHour,
@@ -149,8 +138,6 @@ abstract class RustLibApi extends BaseApi {
 
   HueRoomDto crateApiHueRegistryCreateRoom(
       {required String id, required String name});
-
-  RunnerStateDto crateApiRunnerCreateRunnerState();
 
   HueSwitchDeviceDto crateApiHueRegistryCreateSwitchDevice(
       {required String id,
@@ -242,70 +229,6 @@ abstract class RustLibApi extends BaseApi {
       {required String id,
       required String name,
       required RoomSourceDto source});
-
-  RoomStateDto crateApiDtoActionRoomStateDtoDefault();
-
-  RunnerStateDto crateApiRunnerRunnerAddRoom(
-      {required RunnerStateDto state, required RoomDto room});
-
-  List<RoomDto> crateApiRunnerRunnerGetEnabledRooms(
-      {required RunnerStateDto state});
-
-  RoomDto? crateApiRunnerRunnerGetRoom(
-      {required RunnerStateDto state, required String roomId});
-
-  List<String> crateApiRunnerRunnerGetRoomIds({required RunnerStateDto state});
-
-  List<RoomDto> crateApiRunnerRunnerGetRoomsBySource(
-      {required RunnerStateDto state, required RoomSourceDto source});
-
-  RunnerActionResultDto crateApiRunnerRunnerHandleAction(
-      {required RunnerStateDto state,
-      required CurveConfigDto config,
-      required double solarNoonHour,
-      required double latitude,
-      required int dayOfYear,
-      required double currentHour,
-      required String roomId,
-      required RhythmActionDto action});
-
-  RunnerStateDto crateApiRunnerRunnerRemoveRoom(
-      {required RunnerStateDto state, required String roomId});
-
-  RunnerStateDto crateApiRunnerRunnerSetRoomBrightnessOffset(
-      {required RunnerStateDto state,
-      required String roomId,
-      required double brightnessOffset});
-
-  RunnerStateDto crateApiRunnerRunnerSetRoomCurveConfig(
-      {required RunnerStateDto state,
-      required String roomId,
-      CurveConfigDto? config});
-
-  RunnerStateDto crateApiRunnerRunnerSetRoomDevices(
-      {required RunnerStateDto state,
-      required String roomId,
-      required List<String> deviceIds});
-
-  RunnerStateDto crateApiRunnerRunnerSetRoomDisabled(
-      {required RunnerStateDto state,
-      required String roomId,
-      required bool disabled});
-
-  RunnerStateDto crateApiRunnerRunnerSetRoomLightsOn(
-      {required RunnerStateDto state,
-      required String roomId,
-      required bool lightsOn});
-
-  RunnerStateDto crateApiRunnerRunnerSetRoomRhythmEnabled(
-      {required RunnerStateDto state,
-      required String roomId,
-      required bool rhythmEnabled});
-
-  RunnerStateDto crateApiRunnerRunnerSetRoomTimeOffset(
-      {required RunnerStateDto state,
-      required String roomId,
-      required double timeOffsetMinutes});
 
   RunnerStateDto crateApiDtoRunnerRunnerStateDtoDefault();
 }
@@ -530,59 +453,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  ActionResultDto crateApiRunnerCalculateActionResult(
-      {required CurveConfigDto config,
-      required double solarNoonHour,
-      required double latitude,
-      required int dayOfYear,
-      required double currentHour,
-      required RhythmActionDto action,
-      required RoomStateDto roomState}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_box_autoadd_curve_config_dto(config);
-        var arg1 = cst_encode_f_64(solarNoonHour);
-        var arg2 = cst_encode_f_64(latitude);
-        var arg3 = cst_encode_i_32(dayOfYear);
-        var arg4 = cst_encode_f_64(currentHour);
-        var arg5 = cst_encode_rhythm_action_dto(action);
-        var arg6 = cst_encode_box_autoadd_room_state_dto(roomState);
-        return wire.wire__crate__api__runner__calculate_action_result(
-            arg0, arg1, arg2, arg3, arg4, arg5, arg6);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_action_result_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiRunnerCalculateActionResultConstMeta,
-      argValues: [
-        config,
-        solarNoonHour,
-        latitude,
-        dayOfYear,
-        currentHour,
-        action,
-        roomState
-      ],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiRunnerCalculateActionResultConstMeta =>
-      const TaskConstMeta(
-        debugName: "calculate_action_result",
-        argNames: [
-          "config",
-          "solarNoonHour",
-          "latitude",
-          "dayOfYear",
-          "currentHour",
-          "action",
-          "roomState"
-        ],
-      );
-
-  @override
   LightingValuesDto crateApiCurveCalculateLighting(
       {required CurveConfigDto config,
       required double solarNoonHour,
@@ -744,28 +614,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(
         debugName: "create_room",
         argNames: ["id", "name"],
-      );
-
-  @override
-  RunnerStateDto crateApiRunnerCreateRunnerState() {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        return wire.wire__crate__api__runner__create_runner_state();
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_runner_state_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiRunnerCreateRunnerStateConstMeta,
-      argValues: [],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiRunnerCreateRunnerStateConstMeta =>
-      const TaskConstMeta(
-        debugName: "create_runner_state",
-        argNames: [],
       );
 
   @override
@@ -1417,436 +1265,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  RoomStateDto crateApiDtoActionRoomStateDtoDefault() {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        return wire.wire__crate__api__dto__action__room_state_dto_default();
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_room_state_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiDtoActionRoomStateDtoDefaultConstMeta,
-      argValues: [],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiDtoActionRoomStateDtoDefaultConstMeta =>
-      const TaskConstMeta(
-        debugName: "room_state_dto_default",
-        argNames: [],
-      );
-
-  @override
-  RunnerStateDto crateApiRunnerRunnerAddRoom(
-      {required RunnerStateDto state, required RoomDto room}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_box_autoadd_runner_state_dto(state);
-        var arg1 = cst_encode_box_autoadd_room_dto(room);
-        return wire.wire__crate__api__runner__runner_add_room(arg0, arg1);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_runner_state_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiRunnerRunnerAddRoomConstMeta,
-      argValues: [state, room],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiRunnerRunnerAddRoomConstMeta =>
-      const TaskConstMeta(
-        debugName: "runner_add_room",
-        argNames: ["state", "room"],
-      );
-
-  @override
-  List<RoomDto> crateApiRunnerRunnerGetEnabledRooms(
-      {required RunnerStateDto state}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_box_autoadd_runner_state_dto(state);
-        return wire.wire__crate__api__runner__runner_get_enabled_rooms(arg0);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_list_room_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiRunnerRunnerGetEnabledRoomsConstMeta,
-      argValues: [state],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiRunnerRunnerGetEnabledRoomsConstMeta =>
-      const TaskConstMeta(
-        debugName: "runner_get_enabled_rooms",
-        argNames: ["state"],
-      );
-
-  @override
-  RoomDto? crateApiRunnerRunnerGetRoom(
-      {required RunnerStateDto state, required String roomId}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_box_autoadd_runner_state_dto(state);
-        var arg1 = cst_encode_String(roomId);
-        return wire.wire__crate__api__runner__runner_get_room(arg0, arg1);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_opt_box_autoadd_room_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiRunnerRunnerGetRoomConstMeta,
-      argValues: [state, roomId],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiRunnerRunnerGetRoomConstMeta =>
-      const TaskConstMeta(
-        debugName: "runner_get_room",
-        argNames: ["state", "roomId"],
-      );
-
-  @override
-  List<String> crateApiRunnerRunnerGetRoomIds({required RunnerStateDto state}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_box_autoadd_runner_state_dto(state);
-        return wire.wire__crate__api__runner__runner_get_room_ids(arg0);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_list_String,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiRunnerRunnerGetRoomIdsConstMeta,
-      argValues: [state],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiRunnerRunnerGetRoomIdsConstMeta =>
-      const TaskConstMeta(
-        debugName: "runner_get_room_ids",
-        argNames: ["state"],
-      );
-
-  @override
-  List<RoomDto> crateApiRunnerRunnerGetRoomsBySource(
-      {required RunnerStateDto state, required RoomSourceDto source}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_box_autoadd_runner_state_dto(state);
-        var arg1 = cst_encode_room_source_dto(source);
-        return wire.wire__crate__api__runner__runner_get_rooms_by_source(
-            arg0, arg1);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_list_room_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiRunnerRunnerGetRoomsBySourceConstMeta,
-      argValues: [state, source],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiRunnerRunnerGetRoomsBySourceConstMeta =>
-      const TaskConstMeta(
-        debugName: "runner_get_rooms_by_source",
-        argNames: ["state", "source"],
-      );
-
-  @override
-  RunnerActionResultDto crateApiRunnerRunnerHandleAction(
-      {required RunnerStateDto state,
-      required CurveConfigDto config,
-      required double solarNoonHour,
-      required double latitude,
-      required int dayOfYear,
-      required double currentHour,
-      required String roomId,
-      required RhythmActionDto action}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_box_autoadd_runner_state_dto(state);
-        var arg1 = cst_encode_box_autoadd_curve_config_dto(config);
-        var arg2 = cst_encode_f_64(solarNoonHour);
-        var arg3 = cst_encode_f_64(latitude);
-        var arg4 = cst_encode_i_32(dayOfYear);
-        var arg5 = cst_encode_f_64(currentHour);
-        var arg6 = cst_encode_String(roomId);
-        var arg7 = cst_encode_rhythm_action_dto(action);
-        return wire.wire__crate__api__runner__runner_handle_action(
-            arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_runner_action_result_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiRunnerRunnerHandleActionConstMeta,
-      argValues: [
-        state,
-        config,
-        solarNoonHour,
-        latitude,
-        dayOfYear,
-        currentHour,
-        roomId,
-        action
-      ],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiRunnerRunnerHandleActionConstMeta =>
-      const TaskConstMeta(
-        debugName: "runner_handle_action",
-        argNames: [
-          "state",
-          "config",
-          "solarNoonHour",
-          "latitude",
-          "dayOfYear",
-          "currentHour",
-          "roomId",
-          "action"
-        ],
-      );
-
-  @override
-  RunnerStateDto crateApiRunnerRunnerRemoveRoom(
-      {required RunnerStateDto state, required String roomId}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_box_autoadd_runner_state_dto(state);
-        var arg1 = cst_encode_String(roomId);
-        return wire.wire__crate__api__runner__runner_remove_room(arg0, arg1);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_runner_state_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiRunnerRunnerRemoveRoomConstMeta,
-      argValues: [state, roomId],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiRunnerRunnerRemoveRoomConstMeta =>
-      const TaskConstMeta(
-        debugName: "runner_remove_room",
-        argNames: ["state", "roomId"],
-      );
-
-  @override
-  RunnerStateDto crateApiRunnerRunnerSetRoomBrightnessOffset(
-      {required RunnerStateDto state,
-      required String roomId,
-      required double brightnessOffset}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_box_autoadd_runner_state_dto(state);
-        var arg1 = cst_encode_String(roomId);
-        var arg2 = cst_encode_f_64(brightnessOffset);
-        return wire.wire__crate__api__runner__runner_set_room_brightness_offset(
-            arg0, arg1, arg2);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_runner_state_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiRunnerRunnerSetRoomBrightnessOffsetConstMeta,
-      argValues: [state, roomId, brightnessOffset],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiRunnerRunnerSetRoomBrightnessOffsetConstMeta =>
-      const TaskConstMeta(
-        debugName: "runner_set_room_brightness_offset",
-        argNames: ["state", "roomId", "brightnessOffset"],
-      );
-
-  @override
-  RunnerStateDto crateApiRunnerRunnerSetRoomCurveConfig(
-      {required RunnerStateDto state,
-      required String roomId,
-      CurveConfigDto? config}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_box_autoadd_runner_state_dto(state);
-        var arg1 = cst_encode_String(roomId);
-        var arg2 = cst_encode_opt_box_autoadd_curve_config_dto(config);
-        return wire.wire__crate__api__runner__runner_set_room_curve_config(
-            arg0, arg1, arg2);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_runner_state_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiRunnerRunnerSetRoomCurveConfigConstMeta,
-      argValues: [state, roomId, config],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiRunnerRunnerSetRoomCurveConfigConstMeta =>
-      const TaskConstMeta(
-        debugName: "runner_set_room_curve_config",
-        argNames: ["state", "roomId", "config"],
-      );
-
-  @override
-  RunnerStateDto crateApiRunnerRunnerSetRoomDevices(
-      {required RunnerStateDto state,
-      required String roomId,
-      required List<String> deviceIds}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_box_autoadd_runner_state_dto(state);
-        var arg1 = cst_encode_String(roomId);
-        var arg2 = cst_encode_list_String(deviceIds);
-        return wire.wire__crate__api__runner__runner_set_room_devices(
-            arg0, arg1, arg2);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_runner_state_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiRunnerRunnerSetRoomDevicesConstMeta,
-      argValues: [state, roomId, deviceIds],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiRunnerRunnerSetRoomDevicesConstMeta =>
-      const TaskConstMeta(
-        debugName: "runner_set_room_devices",
-        argNames: ["state", "roomId", "deviceIds"],
-      );
-
-  @override
-  RunnerStateDto crateApiRunnerRunnerSetRoomDisabled(
-      {required RunnerStateDto state,
-      required String roomId,
-      required bool disabled}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_box_autoadd_runner_state_dto(state);
-        var arg1 = cst_encode_String(roomId);
-        var arg2 = cst_encode_bool(disabled);
-        return wire.wire__crate__api__runner__runner_set_room_disabled(
-            arg0, arg1, arg2);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_runner_state_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiRunnerRunnerSetRoomDisabledConstMeta,
-      argValues: [state, roomId, disabled],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiRunnerRunnerSetRoomDisabledConstMeta =>
-      const TaskConstMeta(
-        debugName: "runner_set_room_disabled",
-        argNames: ["state", "roomId", "disabled"],
-      );
-
-  @override
-  RunnerStateDto crateApiRunnerRunnerSetRoomLightsOn(
-      {required RunnerStateDto state,
-      required String roomId,
-      required bool lightsOn}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_box_autoadd_runner_state_dto(state);
-        var arg1 = cst_encode_String(roomId);
-        var arg2 = cst_encode_bool(lightsOn);
-        return wire.wire__crate__api__runner__runner_set_room_lights_on(
-            arg0, arg1, arg2);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_runner_state_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiRunnerRunnerSetRoomLightsOnConstMeta,
-      argValues: [state, roomId, lightsOn],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiRunnerRunnerSetRoomLightsOnConstMeta =>
-      const TaskConstMeta(
-        debugName: "runner_set_room_lights_on",
-        argNames: ["state", "roomId", "lightsOn"],
-      );
-
-  @override
-  RunnerStateDto crateApiRunnerRunnerSetRoomRhythmEnabled(
-      {required RunnerStateDto state,
-      required String roomId,
-      required bool rhythmEnabled}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_box_autoadd_runner_state_dto(state);
-        var arg1 = cst_encode_String(roomId);
-        var arg2 = cst_encode_bool(rhythmEnabled);
-        return wire.wire__crate__api__runner__runner_set_room_rhythm_enabled(
-            arg0, arg1, arg2);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_runner_state_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiRunnerRunnerSetRoomRhythmEnabledConstMeta,
-      argValues: [state, roomId, rhythmEnabled],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiRunnerRunnerSetRoomRhythmEnabledConstMeta =>
-      const TaskConstMeta(
-        debugName: "runner_set_room_rhythm_enabled",
-        argNames: ["state", "roomId", "rhythmEnabled"],
-      );
-
-  @override
-  RunnerStateDto crateApiRunnerRunnerSetRoomTimeOffset(
-      {required RunnerStateDto state,
-      required String roomId,
-      required double timeOffsetMinutes}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_box_autoadd_runner_state_dto(state);
-        var arg1 = cst_encode_String(roomId);
-        var arg2 = cst_encode_f_64(timeOffsetMinutes);
-        return wire.wire__crate__api__runner__runner_set_room_time_offset(
-            arg0, arg1, arg2);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_runner_state_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiRunnerRunnerSetRoomTimeOffsetConstMeta,
-      argValues: [state, roomId, timeOffsetMinutes],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiRunnerRunnerSetRoomTimeOffsetConstMeta =>
-      const TaskConstMeta(
-        debugName: "runner_set_room_time_offset",
-        argNames: ["state", "roomId", "timeOffsetMinutes"],
-      );
-
-  @override
   RunnerStateDto crateApiDtoRunnerRunnerStateDtoDefault() {
     return handler.executeSync(SyncTask(
       callFfi: () {
@@ -1872,21 +1290,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   String dco_decode_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as String;
-  }
-
-  @protected
-  ActionResultDto dco_decode_action_result_dto(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
-    return ActionResultDto(
-      lighting: dco_decode_opt_box_autoadd_lighting_values_dto(arr[0]),
-      newState: dco_decode_room_state_dto(arr[1]),
-      shouldTurnOff: dco_decode_bool(arr[2]),
-      shouldTurnOn: dco_decode_bool(arr[3]),
-      stateChanged: dco_decode_bool(arr[4]),
-    );
   }
 
   @protected
@@ -1952,33 +1355,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  LightingValuesDto dco_decode_box_autoadd_lighting_values_dto(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return dco_decode_lighting_values_dto(raw);
-  }
-
-  @protected
   RhythmActionDto dco_decode_box_autoadd_rhythm_action_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_rhythm_action_dto(raw);
-  }
-
-  @protected
-  RoomDto dco_decode_box_autoadd_room_dto(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return dco_decode_room_dto(raw);
-  }
-
-  @protected
-  RoomStateDto dco_decode_box_autoadd_room_state_dto(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return dco_decode_room_state_dto(raw);
-  }
-
-  @protected
-  RunnerStateDto dco_decode_box_autoadd_runner_state_dto(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return dco_decode_runner_state_dto(raw);
   }
 
   @protected
@@ -2213,22 +1592,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  LightingValuesDto? dco_decode_opt_box_autoadd_lighting_values_dto(
-      dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw == null ? null : dco_decode_box_autoadd_lighting_values_dto(raw);
-  }
-
-  @protected
   RhythmActionDto? dco_decode_opt_box_autoadd_rhythm_action_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_rhythm_action_dto(raw);
-  }
-
-  @protected
-  RoomDto? dco_decode_opt_box_autoadd_room_dto(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw == null ? null : dco_decode_box_autoadd_room_dto(raw);
   }
 
   @protected
@@ -2280,20 +1646,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   RoomSourceDto dco_decode_room_source_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return RoomSourceDto.values[raw as int];
-  }
-
-  @protected
-  RoomStateDto dco_decode_room_state_dto(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
-    return RoomStateDto(
-      rhythmEnabled: dco_decode_bool(arr[0]),
-      lightsOn: dco_decode_bool(arr[1]),
-      timeOffsetMinutes: dco_decode_f_64(arr[2]),
-      brightnessOffset: dco_decode_f_64(arr[3]),
-    );
   }
 
   @protected
@@ -2435,23 +1787,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  ActionResultDto sse_decode_action_result_dto(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_lighting =
-        sse_decode_opt_box_autoadd_lighting_values_dto(deserializer);
-    var var_newState = sse_decode_room_state_dto(deserializer);
-    var var_shouldTurnOff = sse_decode_bool(deserializer);
-    var var_shouldTurnOn = sse_decode_bool(deserializer);
-    var var_stateChanged = sse_decode_bool(deserializer);
-    return ActionResultDto(
-        lighting: var_lighting,
-        newState: var_newState,
-        shouldTurnOff: var_shouldTurnOff,
-        shouldTurnOn: var_shouldTurnOn,
-        stateChanged: var_stateChanged);
-  }
-
-  @protected
   BehaviorMappingDto sse_decode_behavior_mapping_dto(
       SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -2511,37 +1846,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  LightingValuesDto sse_decode_box_autoadd_lighting_values_dto(
-      SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return (sse_decode_lighting_values_dto(deserializer));
-  }
-
-  @protected
   RhythmActionDto sse_decode_box_autoadd_rhythm_action_dto(
       SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_rhythm_action_dto(deserializer));
-  }
-
-  @protected
-  RoomDto sse_decode_box_autoadd_room_dto(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return (sse_decode_room_dto(deserializer));
-  }
-
-  @protected
-  RoomStateDto sse_decode_box_autoadd_room_state_dto(
-      SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return (sse_decode_room_state_dto(deserializer));
-  }
-
-  @protected
-  RunnerStateDto sse_decode_box_autoadd_runner_state_dto(
-      SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return (sse_decode_runner_state_dto(deserializer));
   }
 
   @protected
@@ -2848,35 +2156,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  LightingValuesDto? sse_decode_opt_box_autoadd_lighting_values_dto(
-      SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    if (sse_decode_bool(deserializer)) {
-      return (sse_decode_box_autoadd_lighting_values_dto(deserializer));
-    } else {
-      return null;
-    }
-  }
-
-  @protected
   RhythmActionDto? sse_decode_opt_box_autoadd_rhythm_action_dto(
       SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_rhythm_action_dto(deserializer));
-    } else {
-      return null;
-    }
-  }
-
-  @protected
-  RoomDto? sse_decode_opt_box_autoadd_room_dto(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    if (sse_decode_bool(deserializer)) {
-      return (sse_decode_box_autoadd_room_dto(deserializer));
     } else {
       return null;
     }
@@ -2942,20 +2227,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_i_32(deserializer);
     return RoomSourceDto.values[inner];
-  }
-
-  @protected
-  RoomStateDto sse_decode_room_state_dto(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_rhythmEnabled = sse_decode_bool(deserializer);
-    var var_lightsOn = sse_decode_bool(deserializer);
-    var var_timeOffsetMinutes = sse_decode_f_64(deserializer);
-    var var_brightnessOffset = sse_decode_f_64(deserializer);
-    return RoomStateDto(
-        rhythmEnabled: var_rhythmEnabled,
-        lightsOn: var_lightsOn,
-        timeOffsetMinutes: var_timeOffsetMinutes,
-        brightnessOffset: var_brightnessOffset);
   }
 
   @protected
@@ -3136,17 +2407,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_action_result_dto(
-      ActionResultDto self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_opt_box_autoadd_lighting_values_dto(self.lighting, serializer);
-    sse_encode_room_state_dto(self.newState, serializer);
-    sse_encode_bool(self.shouldTurnOff, serializer);
-    sse_encode_bool(self.shouldTurnOn, serializer);
-    sse_encode_bool(self.stateChanged, serializer);
-  }
-
-  @protected
   void sse_encode_behavior_mapping_dto(
       BehaviorMappingDto self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -3202,37 +2462,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_box_autoadd_lighting_values_dto(
-      LightingValuesDto self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_lighting_values_dto(self, serializer);
-  }
-
-  @protected
   void sse_encode_box_autoadd_rhythm_action_dto(
       RhythmActionDto self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_rhythm_action_dto(self, serializer);
-  }
-
-  @protected
-  void sse_encode_box_autoadd_room_dto(RoomDto self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_room_dto(self, serializer);
-  }
-
-  @protected
-  void sse_encode_box_autoadd_room_state_dto(
-      RoomStateDto self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_room_state_dto(self, serializer);
-  }
-
-  @protected
-  void sse_encode_box_autoadd_runner_state_dto(
-      RunnerStateDto self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_runner_state_dto(self, serializer);
   }
 
   @protected
@@ -3478,17 +2711,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_opt_box_autoadd_lighting_values_dto(
-      LightingValuesDto? self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    sse_encode_bool(self != null, serializer);
-    if (self != null) {
-      sse_encode_box_autoadd_lighting_values_dto(self, serializer);
-    }
-  }
-
-  @protected
   void sse_encode_opt_box_autoadd_rhythm_action_dto(
       RhythmActionDto? self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -3496,17 +2718,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_rhythm_action_dto(self, serializer);
-    }
-  }
-
-  @protected
-  void sse_encode_opt_box_autoadd_room_dto(
-      RoomDto? self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    sse_encode_bool(self != null, serializer);
-    if (self != null) {
-      sse_encode_box_autoadd_room_dto(self, serializer);
     }
   }
 
@@ -3556,15 +2767,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       RoomSourceDto self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.index, serializer);
-  }
-
-  @protected
-  void sse_encode_room_state_dto(RoomStateDto self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_bool(self.rhythmEnabled, serializer);
-    sse_encode_bool(self.lightsOn, serializer);
-    sse_encode_f_64(self.timeOffsetMinutes, serializer);
-    sse_encode_f_64(self.brightnessOffset, serializer);
   }
 
   @protected

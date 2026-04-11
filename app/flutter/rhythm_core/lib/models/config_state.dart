@@ -1,4 +1,5 @@
 import '../src/rust/api/dto/curve.dart' show CurveConfigDto;
+import 'curve_defaults.dart' show curveConfigFromJson, defaultCurveConfig;
 
 /// Solar context with sunrise/sunset times for the current day.
 class SolarContext {
@@ -87,27 +88,26 @@ class RawConfig {
   });
 
   factory RawConfig.fromJson(Map<String, dynamic> json) {
-    // Use Rust defaults for fallback values
-    final d = CurveConfigDto.default_();
+    final d = curveConfigFromJson(json);
     return RawConfig(
-      minColorTemp: (json['min_color_temp'] as num?)?.toInt() ?? d.minColorTemp,
-      maxColorTemp: (json['max_color_temp'] as num?)?.toInt() ?? d.maxColorTemp,
-      minBrightness: (json['min_brightness'] as num?)?.toInt() ?? d.minBrightness,
-      maxBrightness: (json['max_brightness'] as num?)?.toInt() ?? d.maxBrightness,
-      widthLeftBri: (json['width_left_bri'] as num?)?.toDouble() ?? d.widthLeftBri,
-      widthRightBri: (json['width_right_bri'] as num?)?.toDouble() ?? d.widthRightBri,
-      widthLeftCct: (json['width_left_cct'] as num?)?.toDouble() ?? d.widthLeftCct,
-      widthRightCct: (json['width_right_cct'] as num?)?.toDouble() ?? d.widthRightCct,
-      shapeP: (json['shape_p'] as num?)?.toDouble() ?? d.shapeP,
-      maxDimSteps: (json['max_dim_steps'] as num?)?.toInt() ?? d.maxDimSteps,
-      fadeMs: (json['fade_ms'] as num?)?.toInt() ?? d.fadeMs,
-      motionTimeoutSecs: (json['motion_timeout_secs'] as num?)?.toInt() ?? d.motionTimeoutSecs,
+      minColorTemp: d.minColorTemp,
+      maxColorTemp: d.maxColorTemp,
+      minBrightness: d.minBrightness,
+      maxBrightness: d.maxBrightness,
+      widthLeftBri: d.widthLeftBri,
+      widthRightBri: d.widthRightBri,
+      widthLeftCct: d.widthLeftCct,
+      widthRightCct: d.widthRightCct,
+      shapeP: d.shapeP,
+      maxDimSteps: d.maxDimSteps,
+      fadeMs: d.fadeMs,
+      motionTimeoutSecs: d.motionTimeoutSecs,
     );
   }
 
-  /// Create default config using values from Rust's CurveConfigDto.default_().
+  /// Create default config using shared app/server defaults.
   factory RawConfig.defaults() {
-    final d = CurveConfigDto.default_();
+    final d = defaultCurveConfig;
     return RawConfig(
       minColorTemp: d.minColorTemp,
       maxColorTemp: d.maxColorTemp,

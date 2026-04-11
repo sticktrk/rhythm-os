@@ -4,18 +4,18 @@ import 'package:rhythm_core/rhythm_core.dart';
 /// Helper to create a test RawConfig without requiring FFI initialization.
 /// Uses hardcoded values that match the expected Rust defaults.
 RawConfig _createTestConfig({
-  int minColorTemp = 2000,
-  int maxColorTemp = 6500,
-  int minBrightness = 10,
+  int minColorTemp = 1800,
+  int maxColorTemp = 5500,
+  int minBrightness = 2,
   int maxBrightness = 100,
-  double widthLeftBri = 1.0,
-  double widthRightBri = 1.0,
-  double widthLeftCct = 1.0,
-  double widthRightCct = 1.0,
-  double shapeP = 4.0,
-  int maxDimSteps = 10,
+  double widthLeftBri = 0.95,
+  double widthRightBri = 0.85,
+  double widthLeftCct = 0.95,
+  double widthRightCct = 1.15,
+  double shapeP = 6.0,
+  int maxDimSteps = 6,
   int fadeMs = 500,
-  int motionTimeoutSecs = 600,
+  int motionTimeoutSecs = 1200,
 }) {
   return RawConfig(
     minColorTemp: minColorTemp,
@@ -35,8 +35,27 @@ RawConfig _createTestConfig({
 
 void main() {
   group('RawConfig', () {
-    // Note: Tests for RawConfig.defaults() require FFI initialization.
-    // For pure unit tests, we use _createTestConfig() instead.
+    group('defaults', () {
+      test('matches shared Dart/server defaults', () {
+        final config = RawConfig.defaults();
+
+        expect(config.minColorTemp, defaultCurveConfig.minColorTemp);
+        expect(config.maxColorTemp, defaultCurveConfig.maxColorTemp);
+        expect(config.minBrightness, defaultCurveConfig.minBrightness);
+        expect(config.maxBrightness, defaultCurveConfig.maxBrightness);
+        expect(config.widthLeftBri, defaultCurveConfig.widthLeftBri);
+        expect(config.widthRightBri, defaultCurveConfig.widthRightBri);
+        expect(config.widthLeftCct, defaultCurveConfig.widthLeftCct);
+        expect(config.widthRightCct, defaultCurveConfig.widthRightCct);
+        expect(config.shapeP, defaultCurveConfig.shapeP);
+        expect(config.maxDimSteps, defaultCurveConfig.maxDimSteps);
+        expect(config.fadeMs, defaultCurveConfig.fadeMs);
+        expect(
+          config.motionTimeoutSecs,
+          defaultCurveConfig.motionTimeoutSecs,
+        );
+      });
+    });
 
     group('constructor', () {
       test('creates config with valid values', () {
@@ -94,21 +113,69 @@ void main() {
       });
     });
 
-    // Note: fromJson tests require FFI initialization because
-    // RawConfig.fromJson internally calls CurveConfigDto.default_()
-    // to get fallback values. These tests are covered in ffi/ tests.
-    group('fromJson (requires FFI)', () {
+    group('fromJson', () {
       test('parses complete JSON correctly', () {
-        // This test requires FFI - skip for unit tests
-      }, skip: 'Requires FFI initialization');
+        final config = RawConfig.fromJson({
+          'min_color_temp': 2200,
+          'max_color_temp': 6000,
+          'min_brightness': 5,
+          'max_brightness': 95,
+          'width_left_bri': 0.8,
+          'width_right_bri': 1.2,
+          'width_left_cct': 0.9,
+          'width_right_cct': 1.1,
+          'shape_p': 5.0,
+          'max_dim_steps': 8,
+          'fade_ms': 750,
+          'motion_timeout_secs': 300,
+        });
+
+        expect(config.minColorTemp, 2200);
+        expect(config.maxColorTemp, 6000);
+        expect(config.minBrightness, 5);
+        expect(config.maxBrightness, 95);
+        expect(config.widthLeftBri, 0.8);
+        expect(config.widthRightBri, 1.2);
+        expect(config.widthLeftCct, 0.9);
+        expect(config.widthRightCct, 1.1);
+        expect(config.shapeP, 5.0);
+        expect(config.maxDimSteps, 8);
+        expect(config.fadeMs, 750);
+        expect(config.motionTimeoutSecs, 300);
+      });
 
       test('handles integer values as doubles', () {
-        // This test requires FFI - skip for unit tests
-      }, skip: 'Requires FFI initialization');
+        final config = RawConfig.fromJson({
+          'width_left_bri': 1,
+          'width_right_bri': 2,
+          'width_left_cct': 1,
+          'width_right_cct': 2,
+          'shape_p': 6,
+        });
 
-      test('handles double values as integers', () {
-        // This test requires FFI - skip for unit tests
-      }, skip: 'Requires FFI initialization');
+        expect(config.widthLeftBri, 1.0);
+        expect(config.widthRightBri, 2.0);
+        expect(config.widthLeftCct, 1.0);
+        expect(config.widthRightCct, 2.0);
+        expect(config.shapeP, 6.0);
+      });
+
+      test('fills missing fields from shared defaults', () {
+        final config = RawConfig.fromJson({
+          'min_brightness': 10,
+          'shape_p': 4.5,
+        });
+
+        expect(config.minBrightness, 10);
+        expect(config.shapeP, 4.5);
+        expect(config.minColorTemp, defaultCurveConfig.minColorTemp);
+        expect(config.maxColorTemp, defaultCurveConfig.maxColorTemp);
+        expect(config.fadeMs, defaultCurveConfig.fadeMs);
+        expect(
+          config.motionTimeoutSecs,
+          defaultCurveConfig.motionTimeoutSecs,
+        );
+      });
     });
 
     group('toJson', () {
@@ -142,10 +209,20 @@ void main() {
         expect(json['max_dim_steps'], equals(15));
       });
 
-      // round-trip test requires fromJson which needs FFI
       test('round-trip serialization preserves values', () {
-        // This test requires FFI - skip for unit tests
-      }, skip: 'Requires FFI initialization (fromJson)');
+        final original = _createTestConfig(
+          minColorTemp: 2200,
+          maxBrightness: 90,
+          widthLeftCct: 1.4,
+        );
+
+        final restored = RawConfig.fromJson(original.toJson());
+
+        expect(restored.minColorTemp, original.minColorTemp);
+        expect(restored.maxBrightness, original.maxBrightness);
+        expect(restored.widthLeftCct, original.widthLeftCct);
+        expect(restored.motionTimeoutSecs, original.motionTimeoutSecs);
+      });
     });
 
     group('copyWith', () {

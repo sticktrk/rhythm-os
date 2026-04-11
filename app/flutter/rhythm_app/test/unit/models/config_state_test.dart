@@ -3,18 +3,18 @@ import 'package:rhythm_core/rhythm_core.dart';
 
 /// Helper to create a test RawConfig without requiring FFI initialization.
 RawConfig _createTestRawConfig({
-  int minColorTemp = 2000,
-  int maxColorTemp = 6500,
-  int minBrightness = 10,
+  int minColorTemp = 1800,
+  int maxColorTemp = 5500,
+  int minBrightness = 2,
   int maxBrightness = 100,
-  double widthLeftBri = 1.0,
-  double widthRightBri = 1.0,
-  double widthLeftCct = 1.0,
-  double widthRightCct = 1.0,
-  double shapeP = 4.0,
-  int maxDimSteps = 10,
+  double widthLeftBri = 0.95,
+  double widthRightBri = 0.85,
+  double widthLeftCct = 0.95,
+  double widthRightCct = 1.15,
+  double shapeP = 6.0,
+  int maxDimSteps = 6,
   int fadeMs = 500,
-  int motionTimeoutSecs = 600,
+  int motionTimeoutSecs = 1200,
 }) {
   return RawConfig(
     minColorTemp: minColorTemp,
@@ -139,8 +139,23 @@ void main() {
   });
 
   group('ConfigState', () {
-    // Note: Tests for ConfigState.defaults() require FFI initialization.
-    // For pure unit tests, we use _createTestConfigState() instead.
+    group('defaults', () {
+      test('creates default config and solar context', () {
+        final state = ConfigState.defaults();
+
+        expect(state.config.minColorTemp, defaultCurveConfig.minColorTemp);
+        expect(state.config.maxColorTemp, defaultCurveConfig.maxColorTemp);
+        expect(state.config.fadeMs, defaultCurveConfig.fadeMs);
+        expect(
+          state.config.motionTimeoutSecs,
+          defaultCurveConfig.motionTimeoutSecs,
+        );
+        expect(state.solar, SolarContext.defaults());
+        expect(state.latitude, isNull);
+        expect(state.longitude, isNull);
+        expect(state.timezone, isNull);
+      });
+    });
 
     group('constructor', () {
       test('creates state with valid config and solar', () {
@@ -160,16 +175,49 @@ void main() {
       });
     });
 
-    // Note: ConfigState.fromJson internally calls RawConfig.fromJson which
-    // requires FFI initialization. These tests are covered in ffi/ tests.
-    group('fromJson (requires FFI)', () {
+    group('fromJson', () {
       test('parses nested config and solar correctly', () {
-        // This test requires FFI - skip for unit tests
-      }, skip: 'Requires FFI initialization (RawConfig.fromJson)');
+        final state = ConfigState.fromJson({
+          'config': {
+            'min_color_temp': 2200,
+            'max_color_temp': 6000,
+            'shape_p': 5.0,
+          },
+          'solar': {
+            'sunrise': 5.75,
+            'sunset': 20.25,
+            'solar_noon': 13.0,
+            'solar_midnight': 1.0,
+            'day_length': 14.5,
+          },
+          'latitude': 35.0,
+          'longitude': -78.5,
+          'timezone': 'America/New_York',
+        });
+
+        expect(state.config.minColorTemp, 2200);
+        expect(state.config.maxColorTemp, 6000);
+        expect(state.config.shapeP, 5.0);
+        expect(state.solar.sunrise, 5.75);
+        expect(state.solar.solarNoon, 13.0);
+        expect(state.latitude, 35.0);
+        expect(state.longitude, -78.5);
+        expect(state.timezone, 'America/New_York');
+      });
 
       test('handles missing optional location fields', () {
-        // This test requires FFI - skip for unit tests
-      }, skip: 'Requires FFI initialization (RawConfig.fromJson)');
+        final state = ConfigState.fromJson({
+          'min_brightness': 10,
+          'shape_p': 4.5,
+        });
+
+        expect(state.config.minBrightness, 10);
+        expect(state.config.shapeP, 4.5);
+        expect(state.solar, SolarContext.defaults());
+        expect(state.latitude, isNull);
+        expect(state.longitude, isNull);
+        expect(state.timezone, isNull);
+      });
     });
 
     group('withConfig', () {

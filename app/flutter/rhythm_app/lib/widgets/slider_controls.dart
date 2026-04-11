@@ -99,7 +99,7 @@ class _SliderControlsState extends State<SliderControls> {
               }
             },
             onReset: () {
-              final d = CurveConfigDto.default_();
+              final d = defaultCurveConfig;
               widget.onConfigChanged(widget.config.copyWith(
                 widthLeftBri: d.widthLeftBri,
                 widthLeftCct: d.widthLeftCct,
@@ -138,7 +138,7 @@ class _SliderControlsState extends State<SliderControls> {
               }
             },
             onReset: () {
-              final d = CurveConfigDto.default_();
+              final d = defaultCurveConfig;
               widget.onConfigChanged(widget.config.copyWith(
                 widthRightBri: d.widthRightBri,
                 widthRightCct: d.widthRightCct,

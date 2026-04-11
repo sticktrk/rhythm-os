@@ -5,6 +5,7 @@ use super::curve::CurveConfigDto;
 /// Action type for rhythm runner.
 ///
 /// Maps to ButtonAction in rhythm-core.
+#[flutter_rust_bridge::frb(unignore)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RhythmActionDto {
     /// Toggle lights on/off with rhythm mode
@@ -30,6 +31,7 @@ pub enum RhythmActionDto {
 /// Source/provider for a room.
 ///
 /// Identifies where a room was imported from.
+#[flutter_rust_bridge::frb(unignore)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoomSourceDto {
     /// Unknown source (backwards compatibility)
@@ -43,6 +45,7 @@ pub enum RoomSourceDto {
 }
 
 /// A room managed by the runner.
+#[flutter_rust_bridge::frb(unignore)]
 #[derive(Debug, Clone)]
 pub struct RoomDto {
     /// Unique identifier for this room.
@@ -101,6 +104,7 @@ impl RoomDto {
 }
 
 /// Complete runner state - holds all rooms.
+#[flutter_rust_bridge::frb(unignore)]
 #[derive(Debug, Clone, Default)]
 pub struct RunnerStateDto {
     /// All managed rooms.
@@ -108,6 +112,7 @@ pub struct RunnerStateDto {
 }
 
 /// Command type for light control.
+#[flutter_rust_bridge::frb(unignore)]
 #[derive(Debug, Clone, Copy)]
 pub enum LightCommandType {
     TurnOn,
@@ -115,6 +120,7 @@ pub enum LightCommandType {
 }
 
 /// A command to send to a light device.
+#[flutter_rust_bridge::frb(unignore)]
 #[derive(Debug, Clone)]
 pub struct LightCommandDto {
     /// The device ID to control.
@@ -130,6 +136,7 @@ pub struct LightCommandDto {
 }
 
 /// Result of handling an action.
+#[flutter_rust_bridge::frb(unignore)]
 #[derive(Debug, Clone)]
 pub struct RunnerActionResultDto {
     /// Updated runner state.

@@ -1,10 +1,11 @@
 import 'package:flutter/foundation.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_core/runner/room_state_store.dart' as room_state;
 
 /// Mock ConfigModel for testing widgets that depend on it.
 class MockConfigModel extends ChangeNotifier {
   RawConfig _rawConfig = RawConfig.defaults();
-  CurveConfigDto _config = CurveConfigDto.default_();
+  CurveConfigDto _config = defaultCurveConfig;
   SolarContext _solar = SolarContext.defaults();
   double _selectedHour = 12.0;
   String _activeHalf = 'morning';
@@ -100,7 +101,7 @@ class MockConfigModel extends ChangeNotifier {
   /// Reset all state to defaults and clear call count.
   void reset() {
     _rawConfig = RawConfig.defaults();
-    _config = CurveConfigDto.default_();
+    _config = defaultCurveConfig;
     _solar = SolarContext.defaults();
     _selectedHour = 12.0;
     _activeHalf = 'morning';
@@ -118,12 +119,12 @@ class MockConfigModel extends ChangeNotifier {
 
 /// Mock RoomProvider for testing.
 class MockRoomProvider extends ChangeNotifier {
-  RunnerStateDto _state = createRunnerState();
+  RunnerStateDto _state = room_state.emptyRunnerState();
   int _currentIndex = 0;
   bool _initialized = false;
 
   List<RoomDto> get rooms => _state.rooms;
-  List<RoomDto> get enabledRooms => runnerGetEnabledRooms(state: _state);
+  List<RoomDto> get enabledRooms => room_state.enabledRooms(state: _state);
   RoomDto? get currentRoom => rooms.isNotEmpty && _currentIndex < rooms.length
       ? rooms[_currentIndex]
       : null;
@@ -144,13 +145,13 @@ class MockRoomProvider extends ChangeNotifier {
 
   void addRoom(RoomDto room) {
     addRoomCallCount++;
-    _state = runnerAddRoom(state: _state, room: room);
+    _state = room_state.addRoom(state: _state, room: room);
     notifyListeners();
   }
 
   void removeRoom(String roomId) {
     removeRoomCallCount++;
-    _state = runnerRemoveRoom(state: _state, roomId: roomId);
+    _state = room_state.removeRoom(state: _state, roomId: roomId);
     if (_currentIndex >= _state.rooms.length && _state.rooms.isNotEmpty) {
       _currentIndex = _state.rooms.length - 1;
     }
@@ -165,13 +166,13 @@ class MockRoomProvider extends ChangeNotifier {
   }
 
   void clearAllRooms() {
-    _state = createRunnerState();
+    _state = room_state.emptyRunnerState();
     _currentIndex = 0;
     notifyListeners();
   }
 
   void reset() {
-    _state = createRunnerState();
+    _state = room_state.emptyRunnerState();
     _currentIndex = 0;
     _initialized = false;
     addRoomCallCount = 0;

@@ -8,7 +8,6 @@ pub mod dto;
 pub mod helpers;
 pub mod hue;
 pub mod hue_registry;
-pub mod runner;
 
 #[cfg(test)]
 mod tests;
@@ -28,15 +27,6 @@ pub use curve::{
     calculate_lighting, calculate_step_sequences, generate_curve_data,
     generate_curve_data_high_res, generate_curve_data_with_sun_times, get_sun_position,
     get_sun_times, get_twilight_times, is_morning,
-};
-
-// Runner functions
-pub use runner::{
-    calculate_action_result, create_runner_state, runner_add_room, runner_get_enabled_rooms,
-    runner_get_room, runner_get_room_ids, runner_get_rooms_by_source, runner_handle_action,
-    runner_remove_room, runner_set_room_brightness_offset, runner_set_room_curve_config,
-    runner_set_room_devices, runner_set_room_disabled, runner_set_room_lights_on,
-    runner_set_room_rhythm_enabled, runner_set_room_time_offset,
 };
 
 // Helper functions

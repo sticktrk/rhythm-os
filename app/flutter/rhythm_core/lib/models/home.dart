@@ -1,6 +1,8 @@
 import 'package:hive/hive.dart';
 import '../src/rust/api/dto/curve.dart' show CurveConfigDto;
 import 'config_state.dart' show RawConfig;
+import 'curve_config_extensions.dart';
+import 'curve_defaults.dart' show curveConfigFromJson;
 
 part 'home.g.dart';
 
@@ -354,37 +356,10 @@ class Home {
 
 /// Helper to convert CurveConfigDto to JSON.
 Map<String, dynamic> _curveConfigToJson(CurveConfigDto config) {
-  return {
-    'min_color_temp': config.minColorTemp,
-    'max_color_temp': config.maxColorTemp,
-    'min_brightness': config.minBrightness,
-    'max_brightness': config.maxBrightness,
-    'width_left_bri': config.widthLeftBri,
-    'width_right_bri': config.widthRightBri,
-    'width_left_cct': config.widthLeftCct,
-    'width_right_cct': config.widthRightCct,
-    'shape_p': config.shapeP,
-    'max_dim_steps': config.maxDimSteps,
-    'fade_ms': config.fadeMs,
-    'motion_timeout_secs': config.motionTimeoutSecs,
-  };
+  return config.toJson();
 }
 
 /// Helper to convert JSON to CurveConfigDto.
 CurveConfigDto _curveConfigFromJson(Map<String, dynamic> json) {
-  final d = CurveConfigDto.default_();
-  return CurveConfigDto(
-    minColorTemp: (json['min_color_temp'] as num?)?.toInt() ?? d.minColorTemp,
-    maxColorTemp: (json['max_color_temp'] as num?)?.toInt() ?? d.maxColorTemp,
-    minBrightness: (json['min_brightness'] as num?)?.toInt() ?? d.minBrightness,
-    maxBrightness: (json['max_brightness'] as num?)?.toInt() ?? d.maxBrightness,
-    widthLeftBri: (json['width_left_bri'] as num?)?.toDouble() ?? d.widthLeftBri,
-    widthRightBri: (json['width_right_bri'] as num?)?.toDouble() ?? d.widthRightBri,
-    widthLeftCct: (json['width_left_cct'] as num?)?.toDouble() ?? d.widthLeftCct,
-    widthRightCct: (json['width_right_cct'] as num?)?.toDouble() ?? d.widthRightCct,
-    shapeP: (json['shape_p'] as num?)?.toDouble() ?? d.shapeP,
-    maxDimSteps: (json['max_dim_steps'] as num?)?.toInt() ?? d.maxDimSteps,
-    fadeMs: (json['fade_ms'] as num?)?.toInt() ?? d.fadeMs,
-    motionTimeoutSecs: (json['motion_timeout_secs'] as num?)?.toInt() ?? d.motionTimeoutSecs,
-  );
+  return curveConfigFromJson(json);
 }

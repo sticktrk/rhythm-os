@@ -1,9 +1,9 @@
 /// Rhythm Runner - Standalone adaptive lighting controller.
 ///
 /// The Rhythm Runner is a thin orchestration layer that:
-/// - Periodically calls Rust tick() for lighting updates
-/// - Handles button actions by calling Rust handle_action()
-/// - Persists state via SharedPreferences (Rust owns the state logic)
+/// - Handles button actions with Dart-side room state
+/// - Delegates curve/step math to the local Rust curve engine
+/// - Persists state via SharedPreferences
 /// - Executes light commands via providers
 /// - Receives input events from registered event sources
 library;
@@ -16,8 +16,8 @@ import '../events/event_source.dart';
 import '../src/rust/api/curve.dart' show getSunTimes;
 import '../src/rust/api/dto/curve.dart' show CurveConfigDto;
 import '../src/rust/api/dto/runner.dart';
-import '../src/rust/api/runner.dart';
 import 'provider_manager.dart';
+import 'room_state_store.dart' as room_state;
 import 'runner_state_json.dart' as json_util;
 
 /// Configuration for the Rhythm Runner.
@@ -67,12 +67,13 @@ enum RhythmRunnerStatus {
   paused,
 }
 
-/// Rhythm Runner - Thin orchestration layer over Rust state management.
+/// Rhythm Runner - Thin orchestration layer over local room state.
 ///
-/// All state logic lives in Rust. Dart is responsible for:
+/// Dart is responsible for:
 /// - Timer management
 /// - Persistence (SharedPreferences)
 /// - Executing commands via providers
+/// - Delegating curve calculations to the local Rust curve engine
 ///
 /// Usage:
 /// ```dart
@@ -92,8 +93,8 @@ class RhythmRunner {
   Timer? _periodicTimer;
   RhythmRunnerStatus _status = RhythmRunnerStatus.stopped;
 
-  /// Current runner state (owned by Rust, stored here for FFI calls).
-  RunnerStateDto _state = createRunnerState();
+  /// Current runner state.
+  RunnerStateDto _state = room_state.emptyRunnerState();
 
   /// Registered event sources.
   final Map<String, EventSource> _eventSources = {};
@@ -126,10 +127,11 @@ class RhythmRunner {
   RunnerStateDto get state => _state;
 
   /// Get all room IDs.
-  List<String> get roomIds => runnerGetRoomIds(state: _state);
+  List<String> get roomIds => room_state.roomIds(state: _state);
 
   /// Get a room by ID.
-  RoomDto? getRoom(String roomId) => runnerGetRoom(state: _state, roomId: roomId);
+  RoomDto? getRoom(String roomId) =>
+      room_state.roomById(state: _state, roomId: roomId);
 
   /// Load persisted state from SharedPreferences.
   Future<void> load() async {
@@ -153,19 +155,23 @@ class RhythmRunner {
 
   /// Add a room to the runner.
   Future<void> addRoom(RoomDto room) async {
-    _state = runnerAddRoom(state: _state, room: room);
+    _state = room_state.addRoom(state: _state, room: room);
     await save();
   }
 
   /// Remove a room from the runner.
   Future<void> removeRoom(String roomId) async {
-    _state = runnerRemoveRoom(state: _state, roomId: roomId);
+    _state = room_state.removeRoom(state: _state, roomId: roomId);
     await save();
   }
 
   /// Set devices for a room.
   Future<void> setRoomDevices(String roomId, List<String> deviceIds) async {
-    _state = runnerSetRoomDevices(state: _state, roomId: roomId, deviceIds: deviceIds);
+    _state = room_state.setRoomDevices(
+      state: _state,
+      roomId: roomId,
+      deviceIds: deviceIds,
+    );
     await save();
   }
 
@@ -317,8 +323,7 @@ class RhythmRunner {
       timezone: config.timezone,
     );
 
-    // Process action in Rust
-    final result = runnerHandleAction(
+    final result = room_state.calculateRoomActionResult(
       state: _state,
       config: config.curveConfig,
       solarNoonHour: sunTimes.solarNoon,

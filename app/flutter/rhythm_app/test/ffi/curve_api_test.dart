@@ -20,15 +20,15 @@ void main() {
 
   group('CurveConfigDto (requires FFI)', () {
     test('default_() returns valid config', () {
-      // CurveConfigDto.default_() requires FFI initialization
+      // The Rust-backed default constructor requires FFI initialization.
     }, skip: 'Requires FFI initialization');
 
     test('copyWith preserves unchanged fields', () {
-      // CurveConfigDto.default_() requires FFI initialization
+      // Constructing configs from Rust defaults requires FFI initialization.
     }, skip: 'Requires FFI initialization');
 
     test('copyWith can update all fields', () {
-      // CurveConfigDto.default_() requires FFI initialization
+      // Constructing configs from Rust defaults requires FFI initialization.
     }, skip: 'Requires FFI initialization');
   });
 

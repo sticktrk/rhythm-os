@@ -521,9 +521,9 @@ CurveConfigDto sdkCurveConfigToDto(sdk.RhythmCurveConfig c) => CurveConfigDto(
       widthRightCct: c.widthRightCct,
       shapeP: c.shapeP,
       maxDimSteps: c.maxDimSteps,
-      fadeMs: c.fadeMs ?? CurveConfigDto.default_().fadeMs,
+      fadeMs: c.fadeMs ?? defaultCurveConfig.fadeMs,
       motionTimeoutSecs:
-          c.motionTimeoutSecs ?? CurveConfigDto.default_().motionTimeoutSecs,
+          c.motionTimeoutSecs ?? defaultCurveConfig.motionTimeoutSecs,
     );
 
 /// Local-only API implementation with SettingsService (Hive) persistence.

@@ -1,6 +1,5 @@
 //! DTO types for Flutter API.
 
-pub mod action;
 pub mod color;
 pub mod curve;
 pub mod hue;
@@ -9,7 +8,6 @@ pub mod runner;
 pub mod solar;
 
 // Re-export all public types
-pub use action::*;
 pub use color::*;
 pub use curve::*;
 pub use hue::*;

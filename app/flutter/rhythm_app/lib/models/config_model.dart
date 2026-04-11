@@ -13,7 +13,7 @@ class ConfigModel extends ChangeNotifier {
   SolarContext _solar = SolarContext.defaults();
 
   /// Config DTO for calculations (mirrors rawConfig)
-  CurveConfigDto _config = CurveConfigDto.default_();
+  CurveConfigDto _config = defaultCurveConfig;
 
   // Undo/redo history
   final List<CurveConfigDto> _undoStack = [];
@@ -144,7 +144,7 @@ class ConfigModel extends ChangeNotifier {
   /// Reset to factory defaults (pushes undo first so it's reversible).
   void resetToDefaults() {
     pushUndoSnapshot();
-    _config = CurveConfigDto.default_();
+    _config = defaultCurveConfig;
     _syncRawConfigFromDto(_config);
     notifyListeners();
   }

@@ -15,9 +15,7 @@ export 'src/rust/frb_generated.dart';
 export 'src/rust/api/curve.dart';
 export 'src/rust/api/helpers.dart';
 export 'src/rust/api/hue.dart';
-export 'src/rust/api/runner.dart';
 // DTOs
-export 'src/rust/api/dto/action.dart';
 export 'src/rust/api/dto/color.dart';
 export 'src/rust/api/dto/curve.dart';
 export 'src/rust/api/dto/hue.dart';
@@ -28,6 +26,7 @@ export 'src/rust/api/dto/solar.dart';
 export 'models/app_settings.dart';
 export 'models/config_state.dart';
 export 'models/curve_config_extensions.dart';
+export 'models/curve_defaults.dart';
 export 'models/home.dart';
 export 'models/hub.dart';
 
@@ -48,6 +47,7 @@ export 'providers/hub_discovery.dart';
 
 // Runner
 export 'runner/provider_manager.dart';
+export 'runner/room_state_store.dart';
 export 'runner/rhythm_runner.dart';
 
 // Event Sources

@@ -1095,9 +1095,9 @@ class ServerSyncProvider extends ChangeNotifier {
       widthRightCct: srvWrCct,
       shapeP: srvShapeP,
       maxDimSteps: srvMaxDim,
-      fadeMs: srvFadeMs ?? CurveConfigDto.default_().fadeMs,
+      fadeMs: srvFadeMs ?? defaultCurveConfig.fadeMs,
       motionTimeoutSecs:
-          srvMotionTimeout ?? CurveConfigDto.default_().motionTimeoutSecs,
+          srvMotionTimeout ?? defaultCurveConfig.motionTimeoutSecs,
     );
 
     final appConfig = _homeProvider.currentHome?.curveConfig;

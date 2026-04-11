@@ -1,13 +1,14 @@
 /// Room management provider for Rhythm Lighting.
 ///
 /// Manages rooms across multiple sources (Hue, Home Assistant, ESP32)
-/// with Rust-based state management via FFI.
+/// with Dart-side room state and local Rust curve math.
 library;
 
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_core/runner/room_state_store.dart' as room_state;
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmMode, RoomModeState;
 import '../services/analytics_service.dart';
 import '../services/settings_service.dart';
@@ -26,14 +27,14 @@ RunnerStateDto replaceRoomsPreservingUserState(
   required RoomSourceDto source,
   required List<RoomDto> freshRooms,
 }) {
-  final existing = runnerGetRoomsBySource(state: state, source: source);
+  final existing = room_state.roomsBySource(state: state, source: source);
   final existingById = <String, RoomDto>{
     for (final r in existing) r.id: r,
   };
 
   // Remove existing rooms from this source
   for (final room in existing) {
-    state = runnerRemoveRoom(state: state, roomId: room.id);
+    state = room_state.removeRoom(state: state, roomId: room.id);
   }
 
   // Add fresh rooms, restoring preserved state from existing
@@ -54,7 +55,7 @@ RunnerStateDto replaceRoomsPreservingUserState(
             curveConfig: prev.curveConfig,
           )
         : room;
-    state = runnerAddRoom(state: state, room: toAdd);
+    state = room_state.addRoom(state: state, room: toAdd);
   }
 
   return state;
@@ -104,7 +105,7 @@ class MotionTimerInfo {
 /// - Tracks current room index for swipeable UI
 /// - Provides enabled/disabled room filtering
 class RoomProvider extends ChangeNotifier {
-  RunnerStateDto _state = createRunnerState();
+  RunnerStateDto _state = room_state.emptyRunnerState();
   int _currentIndex = 0;
   bool _initialized = false;
   int _resetGeneration = 0;
@@ -274,7 +275,7 @@ class RoomProvider extends ChangeNotifier {
 
   // Getters
   List<RoomDto> get rooms => _state.rooms;
-  List<RoomDto> get enabledRooms => runnerGetEnabledRooms(state: _state);
+  List<RoomDto> get enabledRooms => room_state.enabledRooms(state: _state);
   RoomDto? get currentRoom => rooms.isNotEmpty && _currentIndex < rooms.length
       ? rooms[_currentIndex]
       : null;
@@ -338,14 +339,14 @@ class RoomProvider extends ChangeNotifier {
 
   /// Add a single room.
   Future<void> addRoom(RoomDto room) async {
-    _state = runnerAddRoom(state: _state, room: room);
+    _state = room_state.addRoom(state: _state, room: room);
     await _save();
     notifyListeners();
   }
 
   /// Remove a room by ID.
   Future<void> removeRoom(String roomId) async {
-    _state = runnerRemoveRoom(state: _state, roomId: roomId);
+    _state = room_state.removeRoom(state: _state, roomId: roomId);
 
     // Adjust current index if needed
     if (_currentIndex >= _state.rooms.length && _state.rooms.isNotEmpty) {
@@ -358,14 +359,14 @@ class RoomProvider extends ChangeNotifier {
 
   /// Get rooms from a specific source.
   List<RoomDto> getRoomsBySource(RoomSourceDto source) {
-    return runnerGetRoomsBySource(state: _state, source: source);
+    return room_state.roomsBySource(state: _state, source: source);
   }
 
   /// Clear all rooms from a specific source.
   Future<void> clearRoomsBySource(RoomSourceDto source) async {
-    final roomsToRemove = runnerGetRoomsBySource(state: _state, source: source);
+    final roomsToRemove = room_state.roomsBySource(state: _state, source: source);
     for (final room in roomsToRemove) {
-      _state = runnerRemoveRoom(state: _state, roomId: room.id);
+      _state = room_state.removeRoom(state: _state, roomId: room.id);
     }
     if (_currentIndex >= _state.rooms.length && _state.rooms.isNotEmpty) {
       _currentIndex = _state.rooms.length - 1;
@@ -415,7 +416,7 @@ class RoomProvider extends ChangeNotifier {
   Future<void> toggleDisabled(String roomId) async {
     final room = rooms.firstWhere((r) => r.id == roomId,
         orElse: () => throw Exception('Room not found'));
-    _state = runnerSetRoomDisabled(
+    _state = room_state.setRoomDisabled(
         state: _state, roomId: roomId, disabled: !room.disabled);
     await _save();
     notifyListeners();
@@ -426,7 +427,7 @@ class RoomProvider extends ChangeNotifier {
   Future<void> setRoomDisabled(String roomId, bool disabled) async {
     final room = rooms.firstWhere((r) => r.id == roomId,
         orElse: () => throw Exception('Room not found'));
-    _state = runnerSetRoomDisabled(
+    _state = room_state.setRoomDisabled(
         state: _state, roomId: roomId, disabled: disabled);
     await _save();
     notifyListeners();
@@ -438,21 +439,21 @@ class RoomProvider extends ChangeNotifier {
   /// Pass `null` to use the global configuration.
   Future<void> setRoomCurveConfig(String roomId, CurveConfigDto? config) async {
     _state =
-        runnerSetRoomCurveConfig(state: _state, roomId: roomId, config: config);
+        room_state.setRoomCurveConfig(state: _state, roomId: roomId, config: config);
     await _save();
     notifyListeners();
   }
 
   /// Update room devices.
   Future<void> setRoomDevices(String roomId, List<String> deviceIds) async {
-    _state = runnerSetRoomDevices(
+    _state = room_state.setRoomDevices(
         state: _state, roomId: roomId, deviceIds: deviceIds);
     await _save();
     notifyListeners();
   }
 
   // ============================================================================
-  // Room Control (Rust brain wrappers)
+  // Room Control
   // ============================================================================
 
   /// Apply all server-authoritative room state in a single atomic update.
@@ -483,17 +484,17 @@ class RoomProvider extends ChangeNotifier {
     }
 
     if (room.rhythmEnabled != rhythmEnabled) {
-      _state = runnerSetRoomRhythmEnabled(
+      _state = room_state.setRoomRhythmEnabled(
           state: _state, roomId: roomId, rhythmEnabled: rhythmEnabled);
       changed = true;
     }
     if (room.timeOffsetMinutes != timeOffset) {
-      _state = runnerSetRoomTimeOffset(
+      _state = room_state.setRoomTimeOffset(
           state: _state, roomId: roomId, timeOffsetMinutes: timeOffset);
       changed = true;
     }
     if (room.brightnessOffset != brightnessOffset) {
-      _state = runnerSetRoomBrightnessOffset(
+      _state = room_state.setRoomBrightnessOffset(
           state: _state, roomId: roomId, brightnessOffset: brightnessOffset);
       changed = true;
     }
@@ -517,7 +518,7 @@ class RoomProvider extends ChangeNotifier {
       final lockedUntil = _lightsOnLockedUntil[roomId];
       if (lockedUntil == null || DateTime.now().isAfter(lockedUntil)) {
         if (room.lightsOn != lightsOn) {
-          _state = runnerSetRoomLightsOn(
+          _state = room_state.setRoomLightsOn(
               state: _state, roomId: roomId, lightsOn: lightsOn);
           changed = true;
         }
@@ -547,7 +548,7 @@ class RoomProvider extends ChangeNotifier {
 
   /// Set rhythm enabled/disabled for a room.
   Future<void> setRoomRhythmEnabled(String roomId, bool enabled) async {
-    _state = runnerSetRoomRhythmEnabled(
+    _state = room_state.setRoomRhythmEnabled(
         state: _state, roomId: roomId, rhythmEnabled: enabled);
     await _save();
     notifyListeners();
@@ -565,7 +566,7 @@ class RoomProvider extends ChangeNotifier {
     }
     _roomStates[roomId] =
         lightsOn ? RoomModeState.active : RoomModeState.hardOff;
-    _state = runnerSetRoomLightsOn(
+    _state = room_state.setRoomLightsOn(
         state: _state, roomId: roomId, lightsOn: lightsOn);
     await _save();
     notifyListeners();
@@ -583,7 +584,7 @@ class RoomProvider extends ChangeNotifier {
         DateTime.now().add(const Duration(seconds: 3));
     _roomStates[roomId] =
         lightsOn ? RoomModeState.active : RoomModeState.hardOff;
-    _state = runnerSetRoomLightsOn(
+    _state = room_state.setRoomLightsOn(
         state: _state, roomId: roomId, lightsOn: lightsOn);
     await _save();
     notifyListeners();
@@ -591,7 +592,7 @@ class RoomProvider extends ChangeNotifier {
 
   /// Set time offset for a room (from dragging the blue dot).
   Future<void> setRoomTimeOffset(String roomId, double offsetMinutes) async {
-    _state = runnerSetRoomTimeOffset(
+    _state = room_state.setRoomTimeOffset(
         state: _state, roomId: roomId, timeOffsetMinutes: offsetMinutes);
     await _save();
     notifyListeners();
@@ -609,7 +610,7 @@ class RoomProvider extends ChangeNotifier {
     required int dayOfYear,
     required double currentHour,
   }) {
-    final result = runnerHandleAction(
+    final result = room_state.calculateRoomActionResult(
       state: _state,
       config: config,
       solarNoonHour: solarNoonHour,
@@ -650,7 +651,7 @@ class RoomProvider extends ChangeNotifier {
     final room = currentRoom;
     if (room == null) return null;
 
-    final result = runnerHandleAction(
+    final result = room_state.calculateRoomActionResult(
       state: _state,
       config: config,
       solarNoonHour: solarNoonHour,
@@ -676,7 +677,7 @@ class RoomProvider extends ChangeNotifier {
 
   /// Get a room by ID.
   RoomDto? getRoom(String roomId) {
-    return runnerGetRoom(state: _state, roomId: roomId);
+    return room_state.roomById(state: _state, roomId: roomId);
   }
 
   /// Check if there are any rooms.
@@ -715,7 +716,7 @@ class RoomProvider extends ChangeNotifier {
 
   /// Clear all rooms and associated transient state.
   Future<void> clearAllRooms() async {
-    _state = createRunnerState();
+    _state = room_state.emptyRunnerState();
     _currentIndex = 0;
     _motionTimers.clear();
     _roomsWithSensors.clear();

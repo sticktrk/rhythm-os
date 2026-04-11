@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueNom,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 470141064;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1692632949;
 
 // Section: executor
 
@@ -221,44 +221,6 @@ fn wire__crate__api__hue_registry__behavior_tracker_remove_impl(
         },
     )
 }
-fn wire__crate__api__runner__calculate_action_result_impl(
-    config: impl CstDecode<crate::api::dto::curve::CurveConfigDto>,
-    solar_noon_hour: impl CstDecode<f64>,
-    latitude: impl CstDecode<f64>,
-    day_of_year: impl CstDecode<i32>,
-    current_hour: impl CstDecode<f64>,
-    action: impl CstDecode<crate::api::dto::runner::RhythmActionDto>,
-    room_state: impl CstDecode<crate::api::dto::action::RoomStateDto>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "calculate_action_result",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_config = config.cst_decode();
-            let api_solar_noon_hour = solar_noon_hour.cst_decode();
-            let api_latitude = latitude.cst_decode();
-            let api_day_of_year = day_of_year.cst_decode();
-            let api_current_hour = current_hour.cst_decode();
-            let api_action = action.cst_decode();
-            let api_room_state = room_state.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok = Result::<_, ()>::Ok(crate::api::runner::calculate_action_result(
-                    api_config,
-                    api_solar_noon_hour,
-                    api_latitude,
-                    api_day_of_year,
-                    api_current_hour,
-                    api_action,
-                    api_room_state,
-                ))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
 fn wire__crate__api__curve__calculate_lighting_impl(
     config: impl CstDecode<crate::api::dto::curve::CurveConfigDto>,
     solar_noon_hour: impl CstDecode<f64>,
@@ -385,22 +347,6 @@ fn wire__crate__api__hue_registry__create_room_impl(
             transform_result_dco::<_, _, ()>((move || {
                 let output_ok =
                     Result::<_, ()>::Ok(crate::api::hue_registry::create_room(api_id, api_name))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__runner__create_runner_state_impl(
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "create_runner_state",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok = Result::<_, ()>::Ok(crate::api::runner::create_runner_state())?;
                 Ok(output_ok)
             })())
         },
@@ -966,378 +912,6 @@ fn wire__crate__api__dto__runner__room_dto_with_source_impl(
         },
     )
 }
-fn wire__crate__api__dto__action__room_state_dto_default_impl(
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "room_state_dto_default",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok =
-                    Result::<_, ()>::Ok(crate::api::dto::action::RoomStateDto::default())?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__runner__runner_add_room_impl(
-    state: impl CstDecode<crate::api::dto::runner::RunnerStateDto>,
-    room: impl CstDecode<crate::api::dto::runner::RoomDto>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "runner_add_room",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_state = state.cst_decode();
-            let api_room = room.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok =
-                    Result::<_, ()>::Ok(crate::api::runner::runner_add_room(api_state, api_room))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__runner__runner_get_enabled_rooms_impl(
-    state: impl CstDecode<crate::api::dto::runner::RunnerStateDto>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "runner_get_enabled_rooms",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_state = state.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok =
-                    Result::<_, ()>::Ok(crate::api::runner::runner_get_enabled_rooms(api_state))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__runner__runner_get_room_impl(
-    state: impl CstDecode<crate::api::dto::runner::RunnerStateDto>,
-    room_id: impl CstDecode<String>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "runner_get_room",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_state = state.cst_decode();
-            let api_room_id = room_id.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok = Result::<_, ()>::Ok(crate::api::runner::runner_get_room(
-                    api_state,
-                    api_room_id,
-                ))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__runner__runner_get_room_ids_impl(
-    state: impl CstDecode<crate::api::dto::runner::RunnerStateDto>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "runner_get_room_ids",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_state = state.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok =
-                    Result::<_, ()>::Ok(crate::api::runner::runner_get_room_ids(api_state))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__runner__runner_get_rooms_by_source_impl(
-    state: impl CstDecode<crate::api::dto::runner::RunnerStateDto>,
-    source: impl CstDecode<crate::api::dto::runner::RoomSourceDto>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "runner_get_rooms_by_source",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_state = state.cst_decode();
-            let api_source = source.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok = Result::<_, ()>::Ok(
-                    crate::api::runner::runner_get_rooms_by_source(api_state, api_source),
-                )?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__runner__runner_handle_action_impl(
-    state: impl CstDecode<crate::api::dto::runner::RunnerStateDto>,
-    config: impl CstDecode<crate::api::dto::curve::CurveConfigDto>,
-    solar_noon_hour: impl CstDecode<f64>,
-    latitude: impl CstDecode<f64>,
-    day_of_year: impl CstDecode<i32>,
-    current_hour: impl CstDecode<f64>,
-    room_id: impl CstDecode<String>,
-    action: impl CstDecode<crate::api::dto::runner::RhythmActionDto>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "runner_handle_action",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_state = state.cst_decode();
-            let api_config = config.cst_decode();
-            let api_solar_noon_hour = solar_noon_hour.cst_decode();
-            let api_latitude = latitude.cst_decode();
-            let api_day_of_year = day_of_year.cst_decode();
-            let api_current_hour = current_hour.cst_decode();
-            let api_room_id = room_id.cst_decode();
-            let api_action = action.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok = Result::<_, ()>::Ok(crate::api::runner::runner_handle_action(
-                    api_state,
-                    api_config,
-                    api_solar_noon_hour,
-                    api_latitude,
-                    api_day_of_year,
-                    api_current_hour,
-                    api_room_id,
-                    api_action,
-                ))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__runner__runner_remove_room_impl(
-    state: impl CstDecode<crate::api::dto::runner::RunnerStateDto>,
-    room_id: impl CstDecode<String>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "runner_remove_room",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_state = state.cst_decode();
-            let api_room_id = room_id.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok = Result::<_, ()>::Ok(crate::api::runner::runner_remove_room(
-                    api_state,
-                    api_room_id,
-                ))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__runner__runner_set_room_brightness_offset_impl(
-    state: impl CstDecode<crate::api::dto::runner::RunnerStateDto>,
-    room_id: impl CstDecode<String>,
-    brightness_offset: impl CstDecode<f64>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "runner_set_room_brightness_offset",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_state = state.cst_decode();
-            let api_room_id = room_id.cst_decode();
-            let api_brightness_offset = brightness_offset.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok =
-                    Result::<_, ()>::Ok(crate::api::runner::runner_set_room_brightness_offset(
-                        api_state,
-                        api_room_id,
-                        api_brightness_offset,
-                    ))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__runner__runner_set_room_curve_config_impl(
-    state: impl CstDecode<crate::api::dto::runner::RunnerStateDto>,
-    room_id: impl CstDecode<String>,
-    config: impl CstDecode<Option<crate::api::dto::curve::CurveConfigDto>>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "runner_set_room_curve_config",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_state = state.cst_decode();
-            let api_room_id = room_id.cst_decode();
-            let api_config = config.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok =
-                    Result::<_, ()>::Ok(crate::api::runner::runner_set_room_curve_config(
-                        api_state,
-                        api_room_id,
-                        api_config,
-                    ))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__runner__runner_set_room_devices_impl(
-    state: impl CstDecode<crate::api::dto::runner::RunnerStateDto>,
-    room_id: impl CstDecode<String>,
-    device_ids: impl CstDecode<Vec<String>>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "runner_set_room_devices",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_state = state.cst_decode();
-            let api_room_id = room_id.cst_decode();
-            let api_device_ids = device_ids.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok = Result::<_, ()>::Ok(crate::api::runner::runner_set_room_devices(
-                    api_state,
-                    api_room_id,
-                    api_device_ids,
-                ))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__runner__runner_set_room_disabled_impl(
-    state: impl CstDecode<crate::api::dto::runner::RunnerStateDto>,
-    room_id: impl CstDecode<String>,
-    disabled: impl CstDecode<bool>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "runner_set_room_disabled",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_state = state.cst_decode();
-            let api_room_id = room_id.cst_decode();
-            let api_disabled = disabled.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok = Result::<_, ()>::Ok(crate::api::runner::runner_set_room_disabled(
-                    api_state,
-                    api_room_id,
-                    api_disabled,
-                ))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__runner__runner_set_room_lights_on_impl(
-    state: impl CstDecode<crate::api::dto::runner::RunnerStateDto>,
-    room_id: impl CstDecode<String>,
-    lights_on: impl CstDecode<bool>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "runner_set_room_lights_on",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_state = state.cst_decode();
-            let api_room_id = room_id.cst_decode();
-            let api_lights_on = lights_on.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok =
-                    Result::<_, ()>::Ok(crate::api::runner::runner_set_room_lights_on(
-                        api_state,
-                        api_room_id,
-                        api_lights_on,
-                    ))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__runner__runner_set_room_rhythm_enabled_impl(
-    state: impl CstDecode<crate::api::dto::runner::RunnerStateDto>,
-    room_id: impl CstDecode<String>,
-    rhythm_enabled: impl CstDecode<bool>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "runner_set_room_rhythm_enabled",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_state = state.cst_decode();
-            let api_room_id = room_id.cst_decode();
-            let api_rhythm_enabled = rhythm_enabled.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok =
-                    Result::<_, ()>::Ok(crate::api::runner::runner_set_room_rhythm_enabled(
-                        api_state,
-                        api_room_id,
-                        api_rhythm_enabled,
-                    ))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__runner__runner_set_room_time_offset_impl(
-    state: impl CstDecode<crate::api::dto::runner::RunnerStateDto>,
-    room_id: impl CstDecode<String>,
-    time_offset_minutes: impl CstDecode<f64>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "runner_set_room_time_offset",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_state = state.cst_decode();
-            let api_room_id = room_id.cst_decode();
-            let api_time_offset_minutes = time_offset_minutes.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok =
-                    Result::<_, ()>::Ok(crate::api::runner::runner_set_room_time_offset(
-                        api_state,
-                        api_room_id,
-                        api_time_offset_minutes,
-                    ))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
 fn wire__crate__api__dto__runner__runner_state_dto_default_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
@@ -1439,25 +1013,6 @@ impl SseDecode for String {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut inner = <Vec<u8>>::sse_decode(deserializer);
         return String::from_utf8(inner).unwrap();
-    }
-}
-
-impl SseDecode for crate::api::dto::action::ActionResultDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_lighting =
-            <Option<crate::api::dto::curve::LightingValuesDto>>::sse_decode(deserializer);
-        let mut var_newState = <crate::api::dto::action::RoomStateDto>::sse_decode(deserializer);
-        let mut var_shouldTurnOff = <bool>::sse_decode(deserializer);
-        let mut var_shouldTurnOn = <bool>::sse_decode(deserializer);
-        let mut var_stateChanged = <bool>::sse_decode(deserializer);
-        return crate::api::dto::action::ActionResultDto {
-            lighting: var_lighting,
-            new_state: var_newState,
-            should_turn_off: var_shouldTurnOff,
-            should_turn_on: var_shouldTurnOn,
-            state_changed: var_stateChanged,
-        };
     }
 }
 
@@ -1841,19 +1396,6 @@ impl SseDecode for Option<i32> {
     }
 }
 
-impl SseDecode for Option<crate::api::dto::curve::LightingValuesDto> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        if (<bool>::sse_decode(deserializer)) {
-            return Some(<crate::api::dto::curve::LightingValuesDto>::sse_decode(
-                deserializer,
-            ));
-        } else {
-            return None;
-        }
-    }
-}
-
 impl SseDecode for Option<crate::api::dto::runner::RhythmActionDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1861,17 +1403,6 @@ impl SseDecode for Option<crate::api::dto::runner::RhythmActionDto> {
             return Some(<crate::api::dto::runner::RhythmActionDto>::sse_decode(
                 deserializer,
             ));
-        } else {
-            return None;
-        }
-    }
-}
-
-impl SseDecode for Option<crate::api::dto::runner::RoomDto> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        if (<bool>::sse_decode(deserializer)) {
-            return Some(<crate::api::dto::runner::RoomDto>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -1963,22 +1494,6 @@ impl SseDecode for crate::api::dto::runner::RoomSourceDto {
             2 => crate::api::dto::runner::RoomSourceDto::HomeAssistant,
             3 => crate::api::dto::runner::RoomSourceDto::Esp32,
             _ => unreachable!("Invalid variant for RoomSourceDto: {}", inner),
-        };
-    }
-}
-
-impl SseDecode for crate::api::dto::action::RoomStateDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_rhythmEnabled = <bool>::sse_decode(deserializer);
-        let mut var_lightsOn = <bool>::sse_decode(deserializer);
-        let mut var_timeOffsetMinutes = <f64>::sse_decode(deserializer);
-        let mut var_brightnessOffset = <f64>::sse_decode(deserializer);
-        return crate::api::dto::action::RoomStateDto {
-            rhythm_enabled: var_rhythmEnabled,
-            lights_on: var_lightsOn,
-            time_offset_minutes: var_timeOffsetMinutes,
-            brightness_offset: var_brightnessOffset,
         };
     }
 }
@@ -2151,30 +1666,6 @@ fn pde_ffi_dispatcher_sync_impl(
 
 // Section: rust2dart
 
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::dto::action::ActionResultDto {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.lighting.into_into_dart().into_dart(),
-            self.new_state.into_into_dart().into_dart(),
-            self.should_turn_off.into_into_dart().into_dart(),
-            self.should_turn_on.into_into_dart().into_dart(),
-            self.state_changed.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for crate::api::dto::action::ActionResultDto
-{
-}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::dto::action::ActionResultDto>
-    for crate::api::dto::action::ActionResultDto
-{
-    fn into_into_dart(self) -> crate::api::dto::action::ActionResultDto {
-        self
-    }
-}
 // Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::dto::hue_registry::BehaviorMappingDto {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
@@ -2557,29 +2048,6 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::dto::runner::RoomSourceDto>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::dto::action::RoomStateDto {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.rhythm_enabled.into_into_dart().into_dart(),
-            self.lights_on.into_into_dart().into_dart(),
-            self.time_offset_minutes.into_into_dart().into_dart(),
-            self.brightness_offset.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for crate::api::dto::action::RoomStateDto
-{
-}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::dto::action::RoomStateDto>
-    for crate::api::dto::action::RoomStateDto
-{
-    fn into_into_dart(self) -> crate::api::dto::action::RoomStateDto {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::dto::runner::RunnerActionResultDto {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -2778,17 +2246,6 @@ impl SseEncode for String {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <Vec<u8>>::sse_encode(self.into_bytes(), serializer);
-    }
-}
-
-impl SseEncode for crate::api::dto::action::ActionResultDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <Option<crate::api::dto::curve::LightingValuesDto>>::sse_encode(self.lighting, serializer);
-        <crate::api::dto::action::RoomStateDto>::sse_encode(self.new_state, serializer);
-        <bool>::sse_encode(self.should_turn_off, serializer);
-        <bool>::sse_encode(self.should_turn_on, serializer);
-        <bool>::sse_encode(self.state_changed, serializer);
     }
 }
 
@@ -3088,32 +2545,12 @@ impl SseEncode for Option<i32> {
     }
 }
 
-impl SseEncode for Option<crate::api::dto::curve::LightingValuesDto> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <bool>::sse_encode(self.is_some(), serializer);
-        if let Some(value) = self {
-            <crate::api::dto::curve::LightingValuesDto>::sse_encode(value, serializer);
-        }
-    }
-}
-
 impl SseEncode for Option<crate::api::dto::runner::RhythmActionDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::dto::runner::RhythmActionDto>::sse_encode(value, serializer);
-        }
-    }
-}
-
-impl SseEncode for Option<crate::api::dto::runner::RoomDto> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <bool>::sse_encode(self.is_some(), serializer);
-        if let Some(value) = self {
-            <crate::api::dto::runner::RoomDto>::sse_encode(value, serializer);
         }
     }
 }
@@ -3191,16 +2628,6 @@ impl SseEncode for crate::api::dto::runner::RoomSourceDto {
             },
             serializer,
         );
-    }
-}
-
-impl SseEncode for crate::api::dto::action::RoomStateDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <bool>::sse_encode(self.rhythm_enabled, serializer);
-        <bool>::sse_encode(self.lights_on, serializer);
-        <f64>::sse_encode(self.time_offset_minutes, serializer);
-        <f64>::sse_encode(self.brightness_offset, serializer);
     }
 }
 
@@ -3326,18 +2753,6 @@ mod io {
             String::from_utf8(vec).unwrap()
         }
     }
-    impl CstDecode<crate::api::dto::action::ActionResultDto> for wire_cst_action_result_dto {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::dto::action::ActionResultDto {
-            crate::api::dto::action::ActionResultDto {
-                lighting: self.lighting.cst_decode(),
-                new_state: self.new_state.cst_decode(),
-                should_turn_off: self.should_turn_off.cst_decode(),
-                should_turn_on: self.should_turn_on.cst_decode(),
-                state_changed: self.state_changed.cst_decode(),
-            }
-        }
-    }
     impl CstDecode<crate::api::dto::hue_registry::BehaviorMappingDto>
         for wire_cst_behavior_mapping_dto
     {
@@ -3396,39 +2811,11 @@ mod io {
             unsafe { *flutter_rust_bridge::for_generated::box_from_leak_ptr(self) }
         }
     }
-    impl CstDecode<crate::api::dto::curve::LightingValuesDto> for *mut wire_cst_lighting_values_dto {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::dto::curve::LightingValuesDto {
-            let wrap = unsafe { flutter_rust_bridge::for_generated::box_from_leak_ptr(self) };
-            CstDecode::<crate::api::dto::curve::LightingValuesDto>::cst_decode(*wrap).into()
-        }
-    }
     impl CstDecode<crate::api::dto::runner::RhythmActionDto> for *mut i32 {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> crate::api::dto::runner::RhythmActionDto {
             let wrap = unsafe { flutter_rust_bridge::for_generated::box_from_leak_ptr(self) };
             CstDecode::<crate::api::dto::runner::RhythmActionDto>::cst_decode(*wrap).into()
-        }
-    }
-    impl CstDecode<crate::api::dto::runner::RoomDto> for *mut wire_cst_room_dto {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::dto::runner::RoomDto {
-            let wrap = unsafe { flutter_rust_bridge::for_generated::box_from_leak_ptr(self) };
-            CstDecode::<crate::api::dto::runner::RoomDto>::cst_decode(*wrap).into()
-        }
-    }
-    impl CstDecode<crate::api::dto::action::RoomStateDto> for *mut wire_cst_room_state_dto {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::dto::action::RoomStateDto {
-            let wrap = unsafe { flutter_rust_bridge::for_generated::box_from_leak_ptr(self) };
-            CstDecode::<crate::api::dto::action::RoomStateDto>::cst_decode(*wrap).into()
-        }
-    }
-    impl CstDecode<crate::api::dto::runner::RunnerStateDto> for *mut wire_cst_runner_state_dto {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::dto::runner::RunnerStateDto {
-            let wrap = unsafe { flutter_rust_bridge::for_generated::box_from_leak_ptr(self) };
-            CstDecode::<crate::api::dto::runner::RunnerStateDto>::cst_decode(*wrap).into()
         }
     }
     impl CstDecode<crate::api::dto::solar::TwilightPhaseDto> for *mut wire_cst_twilight_phase_dto {
@@ -3646,17 +3033,6 @@ mod io {
             }
         }
     }
-    impl CstDecode<crate::api::dto::action::RoomStateDto> for wire_cst_room_state_dto {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::dto::action::RoomStateDto {
-            crate::api::dto::action::RoomStateDto {
-                rhythm_enabled: self.rhythm_enabled.cst_decode(),
-                lights_on: self.lights_on.cst_decode(),
-                time_offset_minutes: self.time_offset_minutes.cst_decode(),
-                brightness_offset: self.brightness_offset.cst_decode(),
-            }
-        }
-    }
     impl CstDecode<crate::api::dto::runner::RunnerActionResultDto>
         for wire_cst_runner_action_result_dto
     {
@@ -3749,22 +3125,6 @@ mod io {
                 x: self.x.cst_decode(),
                 y: self.y.cst_decode(),
             }
-        }
-    }
-    impl NewWithNullPtr for wire_cst_action_result_dto {
-        fn new_with_null_ptr() -> Self {
-            Self {
-                lighting: core::ptr::null_mut(),
-                new_state: Default::default(),
-                should_turn_off: Default::default(),
-                should_turn_on: Default::default(),
-                state_changed: Default::default(),
-            }
-        }
-    }
-    impl Default for wire_cst_action_result_dto {
-        fn default() -> Self {
-            Self::new_with_null_ptr()
         }
     }
     impl NewWithNullPtr for wire_cst_behavior_mapping_dto {
@@ -3952,21 +3312,6 @@ mod io {
         }
     }
     impl Default for wire_cst_room_dto {
-        fn default() -> Self {
-            Self::new_with_null_ptr()
-        }
-    }
-    impl NewWithNullPtr for wire_cst_room_state_dto {
-        fn new_with_null_ptr() -> Self {
-            Self {
-                rhythm_enabled: Default::default(),
-                lights_on: Default::default(),
-                time_offset_minutes: Default::default(),
-                brightness_offset: Default::default(),
-            }
-        }
-    }
-    impl Default for wire_cst_room_state_dto {
         fn default() -> Self {
             Self::new_with_null_ptr()
         }
@@ -4162,27 +3507,6 @@ mod io {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__runner__calculate_action_result(
-        config: *mut wire_cst_curve_config_dto,
-        solar_noon_hour: f64,
-        latitude: f64,
-        day_of_year: i32,
-        current_hour: f64,
-        action: i32,
-        room_state: *mut wire_cst_room_state_dto,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__calculate_action_result_impl(
-            config,
-            solar_noon_hour,
-            latitude,
-            day_of_year,
-            current_hour,
-            action,
-            room_state,
-        )
-    }
-
-    #[unsafe(no_mangle)]
     pub extern "C" fn frbgen_rhythm_core_wire__crate__api__curve__calculate_lighting(
         config: *mut wire_cst_curve_config_dto,
         solar_noon_hour: f64,
@@ -4239,12 +3563,6 @@ mod io {
         name: *mut wire_cst_list_prim_u_8_strict,
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
         wire__crate__api__hue_registry__create_room_impl(id, name)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__runner__create_runner_state(
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__create_runner_state_impl()
     }
 
     #[unsafe(no_mangle)]
@@ -4467,156 +3785,6 @@ mod io {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__dto__action__room_state_dto_default(
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__dto__action__room_state_dto_default_impl()
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__runner__runner_add_room(
-        state: *mut wire_cst_runner_state_dto,
-        room: *mut wire_cst_room_dto,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_add_room_impl(state, room)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__runner__runner_get_enabled_rooms(
-        state: *mut wire_cst_runner_state_dto,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_get_enabled_rooms_impl(state)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__runner__runner_get_room(
-        state: *mut wire_cst_runner_state_dto,
-        room_id: *mut wire_cst_list_prim_u_8_strict,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_get_room_impl(state, room_id)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__runner__runner_get_room_ids(
-        state: *mut wire_cst_runner_state_dto,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_get_room_ids_impl(state)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__runner__runner_get_rooms_by_source(
-        state: *mut wire_cst_runner_state_dto,
-        source: i32,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_get_rooms_by_source_impl(state, source)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__runner__runner_handle_action(
-        state: *mut wire_cst_runner_state_dto,
-        config: *mut wire_cst_curve_config_dto,
-        solar_noon_hour: f64,
-        latitude: f64,
-        day_of_year: i32,
-        current_hour: f64,
-        room_id: *mut wire_cst_list_prim_u_8_strict,
-        action: i32,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_handle_action_impl(
-            state,
-            config,
-            solar_noon_hour,
-            latitude,
-            day_of_year,
-            current_hour,
-            room_id,
-            action,
-        )
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__runner__runner_remove_room(
-        state: *mut wire_cst_runner_state_dto,
-        room_id: *mut wire_cst_list_prim_u_8_strict,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_remove_room_impl(state, room_id)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__runner__runner_set_room_brightness_offset(
-        state: *mut wire_cst_runner_state_dto,
-        room_id: *mut wire_cst_list_prim_u_8_strict,
-        brightness_offset: f64,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_set_room_brightness_offset_impl(
-            state,
-            room_id,
-            brightness_offset,
-        )
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__runner__runner_set_room_curve_config(
-        state: *mut wire_cst_runner_state_dto,
-        room_id: *mut wire_cst_list_prim_u_8_strict,
-        config: *mut wire_cst_curve_config_dto,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_set_room_curve_config_impl(state, room_id, config)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__runner__runner_set_room_devices(
-        state: *mut wire_cst_runner_state_dto,
-        room_id: *mut wire_cst_list_prim_u_8_strict,
-        device_ids: *mut wire_cst_list_String,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_set_room_devices_impl(state, room_id, device_ids)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__runner__runner_set_room_disabled(
-        state: *mut wire_cst_runner_state_dto,
-        room_id: *mut wire_cst_list_prim_u_8_strict,
-        disabled: bool,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_set_room_disabled_impl(state, room_id, disabled)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__runner__runner_set_room_lights_on(
-        state: *mut wire_cst_runner_state_dto,
-        room_id: *mut wire_cst_list_prim_u_8_strict,
-        lights_on: bool,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_set_room_lights_on_impl(state, room_id, lights_on)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__runner__runner_set_room_rhythm_enabled(
-        state: *mut wire_cst_runner_state_dto,
-        room_id: *mut wire_cst_list_prim_u_8_strict,
-        rhythm_enabled: bool,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_set_room_rhythm_enabled_impl(
-            state,
-            room_id,
-            rhythm_enabled,
-        )
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__runner__runner_set_room_time_offset(
-        state: *mut wire_cst_runner_state_dto,
-        room_id: *mut wire_cst_list_prim_u_8_strict,
-        time_offset_minutes: f64,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_set_room_time_offset_impl(
-            state,
-            room_id,
-            time_offset_minutes,
-        )
-    }
-
-    #[unsafe(no_mangle)]
     pub extern "C" fn frbgen_rhythm_core_wire__crate__api__dto__runner__runner_state_dto_default(
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
         wire__crate__api__dto__runner__runner_state_dto_default_impl()
@@ -4656,39 +3824,10 @@ mod io {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_cst_new_box_autoadd_lighting_values_dto(
-    ) -> *mut wire_cst_lighting_values_dto {
-        flutter_rust_bridge::for_generated::new_leak_box_ptr(
-            wire_cst_lighting_values_dto::new_with_null_ptr(),
-        )
-    }
-
-    #[unsafe(no_mangle)]
     pub extern "C" fn frbgen_rhythm_core_cst_new_box_autoadd_rhythm_action_dto(
         value: i32,
     ) -> *mut i32 {
         flutter_rust_bridge::for_generated::new_leak_box_ptr(value)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_cst_new_box_autoadd_room_dto() -> *mut wire_cst_room_dto {
-        flutter_rust_bridge::for_generated::new_leak_box_ptr(wire_cst_room_dto::new_with_null_ptr())
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_cst_new_box_autoadd_room_state_dto(
-    ) -> *mut wire_cst_room_state_dto {
-        flutter_rust_bridge::for_generated::new_leak_box_ptr(
-            wire_cst_room_state_dto::new_with_null_ptr(),
-        )
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_cst_new_box_autoadd_runner_state_dto(
-    ) -> *mut wire_cst_runner_state_dto {
-        flutter_rust_bridge::for_generated::new_leak_box_ptr(
-            wire_cst_runner_state_dto::new_with_null_ptr(),
-        )
     }
 
     #[unsafe(no_mangle)]
@@ -4802,15 +3941,6 @@ mod io {
         flutter_rust_bridge::for_generated::new_leak_box_ptr(wrap)
     }
 
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct wire_cst_action_result_dto {
-        lighting: *mut wire_cst_lighting_values_dto,
-        new_state: wire_cst_room_state_dto,
-        should_turn_off: bool,
-        should_turn_on: bool,
-        state_changed: bool,
-    }
     #[repr(C)]
     #[derive(Clone, Copy)]
     pub struct wire_cst_behavior_mapping_dto {
@@ -4966,14 +4096,6 @@ mod io {
     }
     #[repr(C)]
     #[derive(Clone, Copy)]
-    pub struct wire_cst_room_state_dto {
-        rhythm_enabled: bool,
-        lights_on: bool,
-        time_offset_minutes: f64,
-        brightness_offset: f64,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
     pub struct wire_cst_runner_action_result_dto {
         state: wire_cst_runner_state_dto,
         commands: *mut wire_cst_list_light_command_dto,
@@ -5068,29 +4190,6 @@ mod web {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> String {
             self
-        }
-    }
-    impl CstDecode<crate::api::dto::action::ActionResultDto>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::dto::action::ActionResultDto {
-            let self_ = self
-                .dyn_into::<flutter_rust_bridge::for_generated::js_sys::Array>()
-                .unwrap();
-            assert_eq!(
-                self_.length(),
-                5,
-                "Expected 5 elements, got {}",
-                self_.length()
-            );
-            crate::api::dto::action::ActionResultDto {
-                lighting: self_.get(0).cst_decode(),
-                new_state: self_.get(1).cst_decode(),
-                should_turn_off: self_.get(2).cst_decode(),
-                should_turn_on: self_.get(3).cst_decode(),
-                state_changed: self_.get(4).cst_decode(),
-            }
         }
     }
     impl CstDecode<crate::api::dto::hue_registry::BehaviorMappingDto>
@@ -5448,28 +4547,6 @@ mod web {
             }
         }
     }
-    impl CstDecode<crate::api::dto::action::RoomStateDto>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::dto::action::RoomStateDto {
-            let self_ = self
-                .dyn_into::<flutter_rust_bridge::for_generated::js_sys::Array>()
-                .unwrap();
-            assert_eq!(
-                self_.length(),
-                4,
-                "Expected 4 elements, got {}",
-                self_.length()
-            );
-            crate::api::dto::action::RoomStateDto {
-                rhythm_enabled: self_.get(0).cst_decode(),
-                lights_on: self_.get(1).cst_decode(),
-                time_offset_minutes: self_.get(2).cst_decode(),
-                brightness_offset: self_.get(3).cst_decode(),
-            }
-        }
-    }
     impl CstDecode<crate::api::dto::runner::RunnerActionResultDto>
         for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
     {
@@ -5810,27 +4887,6 @@ mod web {
     }
 
     #[wasm_bindgen]
-    pub fn wire__crate__api__runner__calculate_action_result(
-        config: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-        solar_noon_hour: f64,
-        latitude: f64,
-        day_of_year: i32,
-        current_hour: f64,
-        action: i32,
-        room_state: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__calculate_action_result_impl(
-            config,
-            solar_noon_hour,
-            latitude,
-            day_of_year,
-            current_hour,
-            action,
-            room_state,
-        )
-    }
-
-    #[wasm_bindgen]
     pub fn wire__crate__api__curve__calculate_lighting(
         config: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
         solar_noon_hour: f64,
@@ -5887,12 +4943,6 @@ mod web {
         name: String,
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
         wire__crate__api__hue_registry__create_room_impl(id, name)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__runner__create_runner_state(
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__create_runner_state_impl()
     }
 
     #[wasm_bindgen]
@@ -6112,156 +5162,6 @@ mod web {
         source: i32,
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
         wire__crate__api__dto__runner__room_dto_with_source_impl(id, name, source)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__dto__action__room_state_dto_default(
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__dto__action__room_state_dto_default_impl()
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__runner__runner_add_room(
-        state: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-        room: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_add_room_impl(state, room)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__runner__runner_get_enabled_rooms(
-        state: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_get_enabled_rooms_impl(state)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__runner__runner_get_room(
-        state: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-        room_id: String,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_get_room_impl(state, room_id)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__runner__runner_get_room_ids(
-        state: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_get_room_ids_impl(state)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__runner__runner_get_rooms_by_source(
-        state: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-        source: i32,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_get_rooms_by_source_impl(state, source)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__runner__runner_handle_action(
-        state: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-        config: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-        solar_noon_hour: f64,
-        latitude: f64,
-        day_of_year: i32,
-        current_hour: f64,
-        room_id: String,
-        action: i32,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_handle_action_impl(
-            state,
-            config,
-            solar_noon_hour,
-            latitude,
-            day_of_year,
-            current_hour,
-            room_id,
-            action,
-        )
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__runner__runner_remove_room(
-        state: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-        room_id: String,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_remove_room_impl(state, room_id)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__runner__runner_set_room_brightness_offset(
-        state: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-        room_id: String,
-        brightness_offset: f64,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_set_room_brightness_offset_impl(
-            state,
-            room_id,
-            brightness_offset,
-        )
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__runner__runner_set_room_curve_config(
-        state: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-        room_id: String,
-        config: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_set_room_curve_config_impl(state, room_id, config)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__runner__runner_set_room_devices(
-        state: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-        room_id: String,
-        device_ids: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_set_room_devices_impl(state, room_id, device_ids)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__runner__runner_set_room_disabled(
-        state: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-        room_id: String,
-        disabled: bool,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_set_room_disabled_impl(state, room_id, disabled)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__runner__runner_set_room_lights_on(
-        state: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-        room_id: String,
-        lights_on: bool,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_set_room_lights_on_impl(state, room_id, lights_on)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__runner__runner_set_room_rhythm_enabled(
-        state: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-        room_id: String,
-        rhythm_enabled: bool,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_set_room_rhythm_enabled_impl(
-            state,
-            room_id,
-            rhythm_enabled,
-        )
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__runner__runner_set_room_time_offset(
-        state: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-        room_id: String,
-        time_offset_minutes: f64,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__runner__runner_set_room_time_offset_impl(
-            state,
-            room_id,
-            time_offset_minutes,
-        )
     }
 
     #[wasm_bindgen]

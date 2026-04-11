@@ -1,7 +1,7 @@
 /// Dart-side JSON serialization for RunnerStateDto.
 ///
-/// Replaces the hand-rolled Rust JSON serializer/parser that was in
-/// runner.rs. Uses dart:convert for reliability and maintainability.
+/// Replaces the hand-rolled serializer/parser from the legacy Rust runner
+/// module. Uses dart:convert for reliability and maintainability.
 /// JSON keys use snake_case for backwards compatibility with existing
 /// persisted data.
 library;
@@ -10,6 +10,7 @@ import 'dart:convert';
 
 import '../src/rust/api/dto/curve.dart';
 import '../src/rust/api/dto/runner.dart';
+import '../models/curve_defaults.dart' show curveConfigFromJson;
 
 /// Serialize RunnerStateDto to a JSON string.
 String runnerStateToJson(RunnerStateDto state) {
@@ -110,26 +111,5 @@ Map<String, dynamic> _curveConfigToMap(CurveConfigDto config) {
 }
 
 CurveConfigDto _curveConfigFromMap(Map<String, dynamic> map) {
-  // Use CurveConfigDto.default_() for missing fields to match Rust behavior.
-  final d = CurveConfigDto.default_();
-  return CurveConfigDto(
-    minColorTemp: (map['min_color_temp'] as num?)?.toInt() ?? d.minColorTemp,
-    maxColorTemp: (map['max_color_temp'] as num?)?.toInt() ?? d.maxColorTemp,
-    minBrightness:
-        (map['min_brightness'] as num?)?.toInt() ?? d.minBrightness,
-    maxBrightness:
-        (map['max_brightness'] as num?)?.toInt() ?? d.maxBrightness,
-    widthLeftBri:
-        (map['width_left_bri'] as num?)?.toDouble() ?? d.widthLeftBri,
-    widthRightBri:
-        (map['width_right_bri'] as num?)?.toDouble() ?? d.widthRightBri,
-    widthLeftCct:
-        (map['width_left_cct'] as num?)?.toDouble() ?? d.widthLeftCct,
-    widthRightCct:
-        (map['width_right_cct'] as num?)?.toDouble() ?? d.widthRightCct,
-    shapeP: (map['shape_p'] as num?)?.toDouble() ?? d.shapeP,
-    maxDimSteps: (map['max_dim_steps'] as num?)?.toInt() ?? d.maxDimSteps,
-    fadeMs: (map['fade_ms'] as num?)?.toInt() ?? d.fadeMs,
-    motionTimeoutSecs: (map['motion_timeout_secs'] as num?)?.toInt() ?? d.motionTimeoutSecs,
-  );
+  return curveConfigFromJson(map);
 }

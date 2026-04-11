@@ -694,9 +694,9 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       widthRightCct: curve.widthRightCct,
       shapeP: curve.shapeP,
       maxDimSteps: config.maxDimSteps,
-      fadeMs: config.fadeMs ?? CurveConfigDto.default_().fadeMs,
-      motionTimeoutSecs: config.motionTimeoutSecs ??
-          CurveConfigDto.default_().motionTimeoutSecs,
+      fadeMs: config.fadeMs ?? defaultCurveConfig.fadeMs,
+      motionTimeoutSecs:
+          config.motionTimeoutSecs ?? defaultCurveConfig.motionTimeoutSecs,
     );
   }
 

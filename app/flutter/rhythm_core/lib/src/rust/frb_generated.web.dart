@@ -7,7 +7,6 @@
 // ignore_for_file: argument_type_not_assignable
 
 import 'api/curve.dart';
-import 'api/dto/action.dart';
 import 'api/dto/color.dart';
 import 'api/dto/curve.dart';
 import 'api/dto/hue.dart';
@@ -17,7 +16,6 @@ import 'api/dto/solar.dart';
 import 'api/helpers.dart';
 import 'api/hue.dart';
 import 'api/hue_registry.dart';
-import 'api/runner.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'frb_generated.dart';
@@ -33,9 +31,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String dco_decode_String(dynamic raw);
-
-  @protected
-  ActionResultDto dco_decode_action_result_dto(dynamic raw);
 
   @protected
   BehaviorMappingDto dco_decode_behavior_mapping_dto(dynamic raw);
@@ -64,19 +59,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_box_autoadd_i_32(dynamic raw);
 
   @protected
-  LightingValuesDto dco_decode_box_autoadd_lighting_values_dto(dynamic raw);
-
-  @protected
   RhythmActionDto dco_decode_box_autoadd_rhythm_action_dto(dynamic raw);
-
-  @protected
-  RoomDto dco_decode_box_autoadd_room_dto(dynamic raw);
-
-  @protected
-  RoomStateDto dco_decode_box_autoadd_room_state_dto(dynamic raw);
-
-  @protected
-  RunnerStateDto dco_decode_box_autoadd_runner_state_dto(dynamic raw);
 
   @protected
   TwilightPhaseDto dco_decode_box_autoadd_twilight_phase_dto(dynamic raw);
@@ -158,14 +141,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? dco_decode_opt_box_autoadd_i_32(dynamic raw);
 
   @protected
-  LightingValuesDto? dco_decode_opt_box_autoadd_lighting_values_dto(
-      dynamic raw);
-
-  @protected
   RhythmActionDto? dco_decode_opt_box_autoadd_rhythm_action_dto(dynamic raw);
-
-  @protected
-  RoomDto? dco_decode_opt_box_autoadd_room_dto(dynamic raw);
 
   @protected
   TwilightPhaseDto? dco_decode_opt_box_autoadd_twilight_phase_dto(dynamic raw);
@@ -181,9 +157,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RoomSourceDto dco_decode_room_source_dto(dynamic raw);
-
-  @protected
-  RoomStateDto dco_decode_room_state_dto(dynamic raw);
 
   @protected
   RunnerActionResultDto dco_decode_runner_action_result_dto(dynamic raw);
@@ -222,9 +195,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String sse_decode_String(SseDeserializer deserializer);
 
   @protected
-  ActionResultDto sse_decode_action_result_dto(SseDeserializer deserializer);
-
-  @protected
   BehaviorMappingDto sse_decode_behavior_mapping_dto(
       SseDeserializer deserializer);
 
@@ -254,22 +224,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_box_autoadd_i_32(SseDeserializer deserializer);
 
   @protected
-  LightingValuesDto sse_decode_box_autoadd_lighting_values_dto(
-      SseDeserializer deserializer);
-
-  @protected
   RhythmActionDto sse_decode_box_autoadd_rhythm_action_dto(
-      SseDeserializer deserializer);
-
-  @protected
-  RoomDto sse_decode_box_autoadd_room_dto(SseDeserializer deserializer);
-
-  @protected
-  RoomStateDto sse_decode_box_autoadd_room_state_dto(
-      SseDeserializer deserializer);
-
-  @protected
-  RunnerStateDto sse_decode_box_autoadd_runner_state_dto(
       SseDeserializer deserializer);
 
   @protected
@@ -361,15 +316,8 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? sse_decode_opt_box_autoadd_i_32(SseDeserializer deserializer);
 
   @protected
-  LightingValuesDto? sse_decode_opt_box_autoadd_lighting_values_dto(
-      SseDeserializer deserializer);
-
-  @protected
   RhythmActionDto? sse_decode_opt_box_autoadd_rhythm_action_dto(
       SseDeserializer deserializer);
-
-  @protected
-  RoomDto? sse_decode_opt_box_autoadd_room_dto(SseDeserializer deserializer);
 
   @protected
   TwilightPhaseDto? sse_decode_opt_box_autoadd_twilight_phase_dto(
@@ -386,9 +334,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RoomSourceDto sse_decode_room_source_dto(SseDeserializer deserializer);
-
-  @protected
-  RoomStateDto sse_decode_room_state_dto(SseDeserializer deserializer);
 
   @protected
   RunnerActionResultDto sse_decode_runner_action_result_dto(
@@ -428,18 +373,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String cst_encode_String(String raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return raw;
-  }
-
-  @protected
-  JSAny cst_encode_action_result_dto(ActionResultDto raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return [
-      cst_encode_opt_box_autoadd_lighting_values_dto(raw.lighting),
-      cst_encode_room_state_dto(raw.newState),
-      cst_encode_bool(raw.shouldTurnOff),
-      cst_encode_bool(raw.shouldTurnOn),
-      cst_encode_bool(raw.stateChanged)
-    ].jsify()!;
   }
 
   @protected
@@ -491,33 +424,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
-  JSAny cst_encode_box_autoadd_lighting_values_dto(LightingValuesDto raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return cst_encode_lighting_values_dto(raw);
-  }
-
-  @protected
   int cst_encode_box_autoadd_rhythm_action_dto(RhythmActionDto raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return cst_encode_rhythm_action_dto(raw);
-  }
-
-  @protected
-  JSAny cst_encode_box_autoadd_room_dto(RoomDto raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return cst_encode_room_dto(raw);
-  }
-
-  @protected
-  JSAny cst_encode_box_autoadd_room_state_dto(RoomStateDto raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return cst_encode_room_state_dto(raw);
-  }
-
-  @protected
-  JSAny cst_encode_box_autoadd_runner_state_dto(RunnerStateDto raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return cst_encode_runner_state_dto(raw);
   }
 
   @protected
@@ -701,22 +610,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
-  JSAny? cst_encode_opt_box_autoadd_lighting_values_dto(
-      LightingValuesDto? raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw == null ? null : cst_encode_box_autoadd_lighting_values_dto(raw);
-  }
-
-  @protected
   int? cst_encode_opt_box_autoadd_rhythm_action_dto(RhythmActionDto? raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return raw == null ? null : cst_encode_box_autoadd_rhythm_action_dto(raw);
-  }
-
-  @protected
-  JSAny? cst_encode_opt_box_autoadd_room_dto(RoomDto? raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw == null ? null : cst_encode_box_autoadd_room_dto(raw);
   }
 
   @protected
@@ -749,17 +645,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       cst_encode_f_64(raw.timeOffsetMinutes),
       cst_encode_f_64(raw.brightnessOffset),
       cst_encode_opt_box_autoadd_curve_config_dto(raw.curveConfig)
-    ].jsify()!;
-  }
-
-  @protected
-  JSAny cst_encode_room_state_dto(RoomStateDto raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return [
-      cst_encode_bool(raw.rhythmEnabled),
-      cst_encode_bool(raw.lightsOn),
-      cst_encode_f_64(raw.timeOffsetMinutes),
-      cst_encode_f_64(raw.brightnessOffset)
     ].jsify()!;
   }
 
@@ -881,10 +766,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_String(String self, SseSerializer serializer);
 
   @protected
-  void sse_encode_action_result_dto(
-      ActionResultDto self, SseSerializer serializer);
-
-  @protected
   void sse_encode_behavior_mapping_dto(
       BehaviorMappingDto self, SseSerializer serializer);
 
@@ -914,23 +795,8 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_box_autoadd_i_32(int self, SseSerializer serializer);
 
   @protected
-  void sse_encode_box_autoadd_lighting_values_dto(
-      LightingValuesDto self, SseSerializer serializer);
-
-  @protected
   void sse_encode_box_autoadd_rhythm_action_dto(
       RhythmActionDto self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_box_autoadd_room_dto(RoomDto self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_box_autoadd_room_state_dto(
-      RoomStateDto self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_box_autoadd_runner_state_dto(
-      RunnerStateDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_twilight_phase_dto(
@@ -1027,16 +893,8 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_box_autoadd_i_32(int? self, SseSerializer serializer);
 
   @protected
-  void sse_encode_opt_box_autoadd_lighting_values_dto(
-      LightingValuesDto? self, SseSerializer serializer);
-
-  @protected
   void sse_encode_opt_box_autoadd_rhythm_action_dto(
       RhythmActionDto? self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_opt_box_autoadd_room_dto(
-      RoomDto? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_twilight_phase_dto(
@@ -1054,9 +912,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_room_source_dto(RoomSourceDto self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_room_state_dto(RoomStateDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_runner_action_result_dto(
@@ -1154,24 +1009,6 @@ class RustLibWire implements BaseWire {
               tracker, behavior_id);
 
   JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__calculate_action_result(
-              JSAny config,
-              double solar_noon_hour,
-              double latitude,
-              int day_of_year,
-              double current_hour,
-              int action,
-              JSAny room_state) =>
-          wasmModule.wire__crate__api__runner__calculate_action_result(
-              config,
-              solar_noon_hour,
-              latitude,
-              day_of_year,
-              current_hour,
-              action,
-              room_state);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__curve__calculate_lighting(
               JSAny config,
               double solar_noon_hour,
@@ -1205,10 +1042,6 @@ class RustLibWire implements BaseWire {
   JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__hue_registry__create_room(String id, String name) =>
           wasmModule.wire__crate__api__hue_registry__create_room(id, name);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__create_runner_state() =>
-          wasmModule.wire__crate__api__runner__create_runner_state();
 
   JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__hue_registry__create_switch_device(
@@ -1354,101 +1187,6 @@ class RustLibWire implements BaseWire {
               id, name, source);
 
   JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__dto__action__room_state_dto_default() =>
-          wasmModule.wire__crate__api__dto__action__room_state_dto_default();
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_add_room(JSAny state, JSAny room) =>
-          wasmModule.wire__crate__api__runner__runner_add_room(state, room);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_get_enabled_rooms(JSAny state) =>
-          wasmModule.wire__crate__api__runner__runner_get_enabled_rooms(state);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_get_room(JSAny state, String room_id) =>
-          wasmModule.wire__crate__api__runner__runner_get_room(state, room_id);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_get_room_ids(JSAny state) =>
-          wasmModule.wire__crate__api__runner__runner_get_room_ids(state);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_get_rooms_by_source(
-              JSAny state, int source) =>
-          wasmModule.wire__crate__api__runner__runner_get_rooms_by_source(
-              state, source);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_handle_action(
-              JSAny state,
-              JSAny config,
-              double solar_noon_hour,
-              double latitude,
-              int day_of_year,
-              double current_hour,
-              String room_id,
-              int action) =>
-          wasmModule.wire__crate__api__runner__runner_handle_action(
-              state,
-              config,
-              solar_noon_hour,
-              latitude,
-              day_of_year,
-              current_hour,
-              room_id,
-              action);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_remove_room(
-              JSAny state, String room_id) =>
-          wasmModule.wire__crate__api__runner__runner_remove_room(
-              state, room_id);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_set_room_brightness_offset(
-              JSAny state, String room_id, double brightness_offset) =>
-          wasmModule
-              .wire__crate__api__runner__runner_set_room_brightness_offset(
-                  state, room_id, brightness_offset);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_set_room_curve_config(
-              JSAny state, String room_id, JSAny? config) =>
-          wasmModule.wire__crate__api__runner__runner_set_room_curve_config(
-              state, room_id, config);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_set_room_devices(
-              JSAny state, String room_id, JSAny device_ids) =>
-          wasmModule.wire__crate__api__runner__runner_set_room_devices(
-              state, room_id, device_ids);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_set_room_disabled(
-              JSAny state, String room_id, bool disabled) =>
-          wasmModule.wire__crate__api__runner__runner_set_room_disabled(
-              state, room_id, disabled);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_set_room_lights_on(
-              JSAny state, String room_id, bool lights_on) =>
-          wasmModule.wire__crate__api__runner__runner_set_room_lights_on(
-              state, room_id, lights_on);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_set_room_rhythm_enabled(
-              JSAny state, String room_id, bool rhythm_enabled) =>
-          wasmModule.wire__crate__api__runner__runner_set_room_rhythm_enabled(
-              state, room_id, rhythm_enabled);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_set_room_time_offset(
-              JSAny state, String room_id, double time_offset_minutes) =>
-          wasmModule.wire__crate__api__runner__runner_set_room_time_offset(
-              state, room_id, time_offset_minutes);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__dto__runner__runner_state_dto_default() =>
           wasmModule.wire__crate__api__dto__runner__runner_state_dto_default();
 }
@@ -1491,16 +1229,6 @@ extension type RustLibWasmModule._(JSObject _) implements JSObject {
           JSAny tracker, String behavior_id);
 
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__calculate_action_result(
-          JSAny config,
-          double solar_noon_hour,
-          double latitude,
-          int day_of_year,
-          double current_hour,
-          int action,
-          JSAny room_state);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__curve__calculate_lighting(
           JSAny config,
           double solar_noon_hour,
@@ -1526,9 +1254,6 @@ extension type RustLibWasmModule._(JSObject _) implements JSObject {
 
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__hue_registry__create_room(String id, String name);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__create_runner_state();
 
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__hue_registry__create_switch_device(String id,
@@ -1623,67 +1348,6 @@ extension type RustLibWasmModule._(JSObject _) implements JSObject {
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__dto__runner__room_dto_with_source(
           String id, String name, int source);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__dto__action__room_state_dto_default();
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_add_room(JSAny state, JSAny room);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_get_enabled_rooms(JSAny state);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_get_room(JSAny state, String room_id);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_get_room_ids(JSAny state);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_get_rooms_by_source(
-          JSAny state, int source);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_handle_action(
-          JSAny state,
-          JSAny config,
-          double solar_noon_hour,
-          double latitude,
-          int day_of_year,
-          double current_hour,
-          String room_id,
-          int action);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_remove_room(JSAny state, String room_id);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_set_room_brightness_offset(
-          JSAny state, String room_id, double brightness_offset);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_set_room_curve_config(
-          JSAny state, String room_id, JSAny? config);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_set_room_devices(
-          JSAny state, String room_id, JSAny device_ids);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_set_room_disabled(
-          JSAny state, String room_id, bool disabled);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_set_room_lights_on(
-          JSAny state, String room_id, bool lights_on);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_set_room_rhythm_enabled(
-          JSAny state, String room_id, bool rhythm_enabled);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__runner__runner_set_room_time_offset(
-          JSAny state, String room_id, double time_offset_minutes);
 
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__dto__runner__runner_state_dto_default();
