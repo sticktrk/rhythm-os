@@ -6,12 +6,13 @@ import '../../providers/settings_provider.dart';
 import '../../providers/home_provider.dart';
 import '../../services/analytics_service.dart';
 import '../../services/auth_service.dart';
+import '../../widgets/settings_row.dart';
 import 'sections/account_section.dart';
-import 'sections/hubs_section.dart';
 // import 'sections/sleep_section.dart'; // TODO: Re-enable when sleep schedule is implemented
 import 'sections/preferences_section.dart';
-import 'sections/about_section.dart'; // Also exports DeleteAccountSection
-import 'sections/energy_section.dart';
+import 'sections/transitions_section.dart';
+import 'sections/rhythm_server_section.dart';
+import 'sections/rhythm_app_section.dart';
 
 /// Full-screen settings modal with slide-up animation.
 ///
@@ -80,10 +81,25 @@ class SettingsScreen extends StatelessWidget {
                         return Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            const HubsSection(),
                             const PreferencesSection(),
-                            const EnergySection(),
-                            const AboutSection(),
+                            const TransitionsSection(),
+                            const SettingsSectionHeader(title: 'Settings'),
+                            SettingsGroup(
+                              children: [
+                                SettingsRow(
+                                  icon: Icons.developer_board,
+                                  iconColor: const Color(0xFF00BCD4),
+                                  label: 'Rhythm Server',
+                                  onTap: () => RhythmServerDetailScreen.show(context),
+                                ),
+                                SettingsRow(
+                                  icon: Icons.apps_rounded,
+                                  iconColor: CelestialColors.accentBlue,
+                                  label: 'Rhythm App',
+                                  onTap: () => RhythmAppDetailScreen.show(context),
+                                ),
+                              ],
+                            ),
                             const SizedBox(height: 40),
                           ],
                         );
@@ -100,15 +116,28 @@ class SettingsScreen extends StatelessWidget {
                             children: [
                               // Show Account CTA at top for anonymous users
                               if (isAnonymous) AccountSection(user: user),
-                              const HubsSection(),
                               // SleepSection(), // TODO: Re-enable when sleep schedule is implemented
                               const PreferencesSection(),
-                              const EnergySection(),
-                              const AboutSection(),
+                              const TransitionsSection(),
+                              const SettingsSectionHeader(title: 'Settings'),
+                              SettingsGroup(
+                                children: [
+                                  SettingsRow(
+                                    icon: Icons.developer_board,
+                                    iconColor: const Color(0xFF00BCD4),
+                                    label: 'Rhythm Server',
+                                    onTap: () => RhythmServerDetailScreen.show(context),
+                                  ),
+                                  SettingsRow(
+                                    icon: Icons.apps_rounded,
+                                    iconColor: CelestialColors.accentBlue,
+                                    label: 'Rhythm App',
+                                    onTap: () => RhythmAppDetailScreen.show(context),
+                                  ),
+                                ],
+                              ),
                               // Show Account at bottom for signed-in users
                               if (!isAnonymous) AccountSection(user: user),
-                              // Delete Account always at the very bottom
-                              const DeleteAccountSection(),
                               const SizedBox(height: 40),
                             ],
                           );

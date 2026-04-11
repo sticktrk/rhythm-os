@@ -16,6 +16,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 
+import '../models/config_model.dart';
 import '../providers/home_provider.dart';
 import 'location_settings_screen.dart';
 
@@ -42,6 +43,13 @@ class _SolarData {
 
   bool get isPolarDay => sunTimes.dayLength >= 24.0;
   bool get isPolarNight => sunTimes.dayLength <= 0.0;
+}
+
+class _SolarEvent {
+  final String label;
+  final double hour;
+  final Color color;
+  const _SolarEvent(this.label, this.hour, this.color);
 }
 
 // =============================================================================
@@ -101,6 +109,7 @@ class SunPositionScreen extends StatefulWidget {
 class _SunPositionScreenState extends State<SunPositionScreen>
     with TickerProviderStateMixin {
   _SolarData? _data;
+  CurveDataDto? _curveData;
   bool _noLocation = false;
 
   late final AnimationController _pulseCtl;
@@ -176,17 +185,36 @@ class _SunPositionScreenState extends State<SunPositionScreen>
     }
     final tz = _tz(loc.longitude);
     final now = DateTime.now();
+    final sunTimes = getSunTimes(
+      latitude: loc.latitude, longitude: loc.longitude,
+      year: now.year, month: now.month, day: now.day, timezone: tz,
+    );
+
+    // Generate curve data for arc coloring
+    CurveDataDto? curve;
+    try {
+      final config = context.read<ConfigModel>().config;
+      final dayOfYear = now.difference(DateTime(now.year, 1, 1)).inDays + 1;
+      curve = generateCurveDataHighRes(
+        config: config,
+        solarNoonHour: sunTimes.solarNoon,
+        latitude: loc.latitude,
+        dayOfYear: dayOfYear,
+        samplesPerHour: 4,
+      );
+    } catch (_) {
+      curve = null;
+    }
+
     setState(() {
       _noLocation = false;
+      _curveData = curve;
       _data = _SolarData(
         latitude: loc.latitude,
         longitude: loc.longitude,
         timezone: tz,
         cityName: loc.cityName,
-        sunTimes: getSunTimes(
-          latitude: loc.latitude, longitude: loc.longitude,
-          year: now.year, month: now.month, day: now.day, timezone: tz,
-        ),
+        sunTimes: sunTimes,
         twilightTimes: getTwilightTimes(
           latitude: loc.latitude, longitude: loc.longitude,
           year: now.year, month: now.month, day: now.day, timezone: tz,
@@ -359,14 +387,26 @@ class _SunPositionScreenState extends State<SunPositionScreen>
     final prev = _prevScrubHour ?? _hour;
     final h = _posToHour(pos, arcCenter, solarNoon);
 
-    // Haptic on crossing sunrise/sunset (ignore large jumps from wrapping)
-    final sr = d.sunTimes.sunrise;
-    final ss = d.sunTimes.sunset;
+    // Haptic on crossing solar events (ignore large jumps from wrapping)
     final hDiff = (h - prev).abs();
     if (hDiff < 2.0) {
-      if ((prev < sr && h >= sr) || (prev > sr && h <= sr) ||
-          (prev < ss && h >= ss) || (prev > ss && h <= ss)) {
+      bool crossed(double event) =>
+          (prev < event && h >= event) || (prev > event && h <= event);
+
+      final tw = d.twilightTimes;
+      if (crossed(d.sunTimes.sunrise) || crossed(d.sunTimes.sunset)) {
         HapticFeedback.mediumImpact();
+      } else if (crossed(d.sunTimes.solarNoon)) {
+        HapticFeedback.mediumImpact();
+      } else if ((tw.dawn.civil != null && crossed(tw.dawn.civil!)) ||
+                 (tw.dusk.civil != null && crossed(tw.dusk.civil!))) {
+        HapticFeedback.lightImpact();
+      } else if ((tw.dawn.nautical != null && crossed(tw.dawn.nautical!)) ||
+                 (tw.dusk.nautical != null && crossed(tw.dusk.nautical!))) {
+        HapticFeedback.lightImpact();
+      } else if ((tw.dawn.astronomical != null && crossed(tw.dawn.astronomical!)) ||
+                 (tw.dusk.astronomical != null && crossed(tw.dusk.astronomical!))) {
+        HapticFeedback.selectionClick();
       }
     }
 
@@ -449,6 +489,7 @@ class _SunPositionScreenState extends State<SunPositionScreen>
                     thresholdT: thr,
                     nearSunrise: nearSR,
                     use24: MediaQuery.alwaysUse24HourFormatOf(context),
+                    curveData: _curveData,
                   ),
                   size: Size.infinite,
                 ),
@@ -512,6 +553,13 @@ class _SunPositionScreenState extends State<SunPositionScreen>
                     child: _nextEventWidget(d, hour),
                   ),
 
+                // Current time — floats inside the arc
+                Positioned(
+                  left: 0, right: 0,
+                  top: horizonY - arcRadius * 0.5,
+                  child: IgnorePointer(child: _currentTimeWidget(hour)),
+                ),
+
                 // Sunrise / Sunset + day info — bottom
                 if (!d.isPolarDay && !d.isPolarNight)
                   Positioned(
@@ -568,7 +616,7 @@ class _SunPositionScreenState extends State<SunPositionScreen>
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 24),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(20),
         color: Colors.black.withValues(alpha: 0.35),
@@ -586,15 +634,15 @@ class _SunPositionScreenState extends State<SunPositionScreen>
                     const Text('SUNRISE',
                       style: TextStyle(
                         color: sunriseColor,
-                        fontSize: 13,
+                        fontSize: 11,
                         fontWeight: FontWeight.w600,
                         letterSpacing: 3.0,
                       )),
-                    const SizedBox(height: 6),
+                    const SizedBox(height: 4),
                     Text(_fmtShort(d.sunTimes.sunrise),
                       style: const TextStyle(
                         color: sunriseColor,
-                        fontSize: 38,
+                        fontSize: 28,
                         fontWeight: FontWeight.w300,
                         letterSpacing: 1.0,
                         fontFeatures: [FontFeature.tabularFigures()],
@@ -606,7 +654,7 @@ class _SunPositionScreenState extends State<SunPositionScreen>
               // Center divider
               Container(
                 width: 1,
-                height: 52,
+                height: 36,
                 color: Colors.white.withValues(alpha: 0.12),
               ),
 
@@ -618,15 +666,15 @@ class _SunPositionScreenState extends State<SunPositionScreen>
                     const Text('SUNSET',
                       style: TextStyle(
                         color: sunsetColor,
-                        fontSize: 13,
+                        fontSize: 11,
                         fontWeight: FontWeight.w600,
                         letterSpacing: 3.0,
                       )),
-                    const SizedBox(height: 6),
+                    const SizedBox(height: 4),
                     Text(_fmtShort(d.sunTimes.sunset),
                       style: const TextStyle(
                         color: sunsetColor,
-                        fontSize: 38,
+                        fontSize: 28,
                         fontWeight: FontWeight.w300,
                         letterSpacing: 1.0,
                         fontFeatures: [FontFeature.tabularFigures()],
@@ -637,10 +685,10 @@ class _SunPositionScreenState extends State<SunPositionScreen>
             ],
           ),
 
-          const SizedBox(height: 14),
+          const SizedBox(height: 8),
           Container(height: 1, color: Colors.white.withValues(alpha: 0.08)),
-          const SizedBox(height: 12),
-          // Solar noon
+          const SizedBox(height: 8),
+          // Solar noon + day info
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
@@ -651,54 +699,65 @@ class _SunPositionScreenState extends State<SunPositionScreen>
                   fontWeight: FontWeight.w600,
                   letterSpacing: 2.5,
                 )),
-              const SizedBox(width: 10),
+              const SizedBox(width: 8),
               Text(_fmtShort(d.sunTimes.solarNoon),
                 style: TextStyle(
                   color: Colors.white.withValues(alpha: 0.7),
-                  fontSize: 15,
+                  fontSize: 13,
                   fontWeight: FontWeight.w300,
                   letterSpacing: 0.5,
                   fontFeatures: const [FontFeature.tabularFigures()],
                 )),
+              const SizedBox(width: 16),
+              Text('${d.sunTimes.dayLength.floor()}h ${((d.sunTimes.dayLength - d.sunTimes.dayLength.floor()) * 60).round()}m of light',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.5),
+                  fontSize: 10, fontWeight: FontWeight.w400, letterSpacing: 1.0,
+                )),
             ],
           ),
-          const SizedBox(height: 10),
-          _dayInfo(d),
         ],
       ),
     );
   }
 
   Widget _nextEventWidget(_SolarData d, double hour) {
-    final String label;
-    final double eventHour;
-    final double remaining;
-    final bool isSunrise;
+    const dawn = Color(0xFFF0A830);
+    const dusk = Color(0xFF7898D0);
+    final tw = d.twilightTimes;
 
-    if (hour < d.sunTimes.sunrise) {
-      label = 'SUNRISE';
-      eventHour = d.sunTimes.sunrise;
-      remaining = d.sunTimes.sunrise - hour;
-      isSunrise = true;
-    } else if (hour < d.sunTimes.sunset) {
-      label = 'SUNSET';
-      eventHour = d.sunTimes.sunset;
-      remaining = d.sunTimes.sunset - hour;
-      isSunrise = false;
+    final events = <_SolarEvent>[
+      if (tw.dawn.astronomical != null)
+        _SolarEvent('ASTRO DAWN', tw.dawn.astronomical!, dawn),
+      if (tw.dawn.nautical != null)
+        _SolarEvent('NAUTICAL DAWN', tw.dawn.nautical!, dawn),
+      if (tw.dawn.civil != null)
+        _SolarEvent('CIVIL DAWN', tw.dawn.civil!, dawn),
+      _SolarEvent('SUNRISE', d.sunTimes.sunrise, dawn),
+      _SolarEvent('SUNSET', d.sunTimes.sunset, dusk),
+      if (tw.dusk.civil != null)
+        _SolarEvent('CIVIL DUSK', tw.dusk.civil!, dusk),
+      if (tw.dusk.nautical != null)
+        _SolarEvent('NAUTICAL DUSK', tw.dusk.nautical!, dusk),
+      if (tw.dusk.astronomical != null)
+        _SolarEvent('ASTRO DUSK', tw.dusk.astronomical!, dusk),
+    ]..sort((a, b) => a.hour.compareTo(b.hour));
+
+    // Find next event after current hour
+    final idx = events.indexWhere((e) => e.hour > hour);
+    final _SolarEvent next;
+    final double remaining;
+    if (idx >= 0) {
+      next = events[idx];
+      remaining = next.hour - hour;
     } else {
-      label = 'SUNRISE';
-      eventHour = d.sunTimes.sunrise;
-      remaining = (24.0 - hour) + d.sunTimes.sunrise;
-      isSunrise = true;
+      next = events.first;
+      remaining = (24.0 - hour) + next.hour;
     }
 
     final h = remaining.floor();
     final m = ((remaining - h) * 60).round();
     final countdown = h > 0 ? '${h}h ${m}m' : '${m}m';
-
-    final color = isSunrise
-        ? const Color(0xFFF0A830)
-        : const Color(0xFF7898D0);
 
     return Center(
       child: Container(
@@ -710,17 +769,17 @@ class _SunPositionScreenState extends State<SunPositionScreen>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(label,
+            Text(next.label,
               style: TextStyle(
-                color: color,
+                color: next.color,
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
                 letterSpacing: 3.0,
               )),
             const SizedBox(height: 6),
-            Text(_fmtShort(eventHour),
+            Text(_fmtShort(next.hour),
               style: TextStyle(
-                color: color,
+                color: next.color,
                 fontSize: 42,
                 fontWeight: FontWeight.w200,
                 letterSpacing: 2.0,
@@ -737,6 +796,25 @@ class _SunPositionScreenState extends State<SunPositionScreen>
           ],
         ),
       ),
+    );
+  }
+
+  Widget _currentTimeWidget(double hour) {
+    return Center(
+      child: Text(_fmtShort(hour),
+        style: TextStyle(
+          color: Colors.white.withValues(alpha: _isLive ? 0.85 : 0.65),
+          fontSize: 48,
+          fontWeight: FontWeight.w200,
+          letterSpacing: 4.0,
+          fontFeatures: const [FontFeature.tabularFigures()],
+          shadows: [
+            Shadow(
+              color: Colors.black.withValues(alpha: 0.6),
+              blurRadius: 24,
+            ),
+          ],
+        )),
     );
   }
 
@@ -851,6 +929,7 @@ class _CelestialPainter extends CustomPainter {
   final double thresholdT;
   final bool nearSunrise;
   final bool use24;
+  final CurveDataDto? curveData;
 
   static List<_Star>? _stars;
   static List<_Shimmer>? _shimmer;
@@ -865,6 +944,7 @@ class _CelestialPainter extends CustomPainter {
     required this.thresholdT,
     required this.nearSunrise,
     required this.use24,
+    this.curveData,
   });
 
   @override
@@ -969,28 +1049,77 @@ class _CelestialPainter extends CustomPainter {
   void _drawArc(Canvas canvas) {
     final rect = Rect.fromCircle(center: center, radius: radius);
 
-    // Upper semicircle — warm, clearly visible path
-    canvas.drawArc(rect, -math.pi, math.pi, false, Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.0
-      ..shader = LinearGradient(
-        begin: Alignment.centerLeft, end: Alignment.centerRight,
-        colors: [
-          const Color(0xFFF0A830).withValues(alpha: 0.20),
-          const Color(0xFFF0A830).withValues(alpha: 0.55),
-          const Color(0xFFF0A830).withValues(alpha: 0.20),
-        ],
-      ).createShader(rect));
+    // Upper semicircle — colored by curve data
+    if (curveData != null && curveData!.hours.isNotEmpty) {
+      const segments = 48;
+      final segPaint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 4.0
+        ..strokeCap = StrokeCap.butt;
+      const segSweep = math.pi / segments;
+      for (int i = 0; i < segments; i++) {
+        final startAngle = -math.pi + i * segSweep;
+        final midHour = _angleToHour(startAngle + segSweep / 2);
+        final (color, opacity) = _curveColorAt(midHour);
+        segPaint.color = color.withValues(alpha: opacity);
+        canvas.drawArc(rect, startAngle, segSweep + 0.02, false, segPaint);
+      }
+    } else {
+      canvas.drawArc(rect, -math.pi, math.pi, false, Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 4.0
+        ..shader = LinearGradient(
+          begin: Alignment.centerLeft, end: Alignment.centerRight,
+          colors: [
+            const Color(0xFFF0A830).withValues(alpha: 0.20),
+            const Color(0xFFF0A830).withValues(alpha: 0.55),
+            const Color(0xFFF0A830).withValues(alpha: 0.20),
+          ],
+        ).createShader(rect));
+    }
 
-    // Lower semicircle — dashed, visible
-    final dashes = (radius * math.pi / 8.0).round();
-    final paint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.20)
+    // Lower arc — dashed from horizon down to outermost twilight, empty through midnight
+    final dashPaint = Paint()
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.2
+      ..strokeWidth = 3.0
       ..strokeCap = StrokeCap.round;
-    for (int i = 0; i < dashes; i++) {
-      canvas.drawArc(rect, (i / dashes) * math.pi, math.pi / dashes * 0.4, false, paint);
+    if (!data.isPolarDay && !data.isPolarNight) {
+      // Dusk side: right horizon (0) → astronomical dusk
+      final aduskAngle = _hourToAngle(
+        data.twilightTimes.dusk.astronomical ?? data.sunTimes.sunset);
+      if (aduskAngle > 0.01) {
+        final n = (radius * aduskAngle / 8.0).round().clamp(1, 100);
+        final dashSweep = aduskAngle / n;
+        for (int i = 0; i < n; i++) {
+          final dashStart = (i / n) * aduskAngle;
+          final midHour = _angleToHour(dashStart + dashSweep * 0.2);
+          final (color, opacity) = _curveColorAt(midHour);
+          dashPaint.color = color.withValues(alpha: opacity * 0.5);
+          canvas.drawArc(rect, dashStart, dashSweep * 0.4, false, dashPaint);
+        }
+      }
+      // Dawn side: astronomical dawn → left horizon (π)
+      var adawnAngle = _hourToAngle(
+        data.twilightTimes.dawn.astronomical ?? data.sunTimes.sunrise);
+      if (adawnAngle < 0) adawnAngle += 2 * math.pi;
+      final dawnSweep = math.pi - adawnAngle;
+      if (dawnSweep > 0.01) {
+        final n = (radius * dawnSweep / 8.0).round().clamp(1, 100);
+        final dashSeg = dawnSweep / n;
+        for (int i = 0; i < n; i++) {
+          final dashStart = adawnAngle + (i / n) * dawnSweep;
+          final midHour = _angleToHour(dashStart + dashSeg * 0.2);
+          final (color, opacity) = _curveColorAt(midHour);
+          dashPaint.color = color.withValues(alpha: opacity * 0.5);
+          canvas.drawArc(rect, dashStart, dashSeg * 0.4, false, dashPaint);
+        }
+      }
+    } else {
+      final n = (radius * math.pi / 8.0).round();
+      for (int i = 0; i < n; i++) {
+        dashPaint.color = Colors.white.withValues(alpha: 0.20);
+        canvas.drawArc(rect, (i / n) * math.pi, math.pi / n * 0.4, false, dashPaint);
+      }
     }
 
     // Hour labels around the circle
@@ -1029,19 +1158,24 @@ class _CelestialPainter extends CustomPainter {
   // --------------------------------------------------------------------------
 
   void _drawEventMarkers(Canvas canvas) {
-    const dawn = Color(0xFFF0A830);
-    const dusk = Color(0xFF7898D0);
+    const fallbackDawn = Color(0xFFF0A830);
+    const fallbackDusk = Color(0xFF7898D0);
     final tw = data.twilightTimes;
 
+    Color tickColor(double h, Color fallback) {
+      final (color, _) = _curveColorAt(h);
+      return curveData != null ? color : fallback;
+    }
+
     // Astronomical (outermost / subtlest)
-    if (tw.dawn.astronomical != null) _twilightTick(canvas, tw.dawn.astronomical!, dawn, 0.25, 8, 1.2);
-    if (tw.dusk.astronomical != null) _twilightTick(canvas, tw.dusk.astronomical!, dusk, 0.25, 8, 1.2);
+    if (tw.dawn.astronomical != null) _twilightTick(canvas, tw.dawn.astronomical!, tickColor(tw.dawn.astronomical!, fallbackDawn), 0.25, 8, 1.2);
+    if (tw.dusk.astronomical != null) _twilightTick(canvas, tw.dusk.astronomical!, tickColor(tw.dusk.astronomical!, fallbackDusk), 0.25, 8, 1.2);
     // Nautical
-    if (tw.dawn.nautical != null) _twilightTick(canvas, tw.dawn.nautical!, dawn, 0.45, 10, 1.5);
-    if (tw.dusk.nautical != null) _twilightTick(canvas, tw.dusk.nautical!, dusk, 0.45, 10, 1.5);
+    if (tw.dawn.nautical != null) _twilightTick(canvas, tw.dawn.nautical!, tickColor(tw.dawn.nautical!, fallbackDawn), 0.45, 10, 1.5);
+    if (tw.dusk.nautical != null) _twilightTick(canvas, tw.dusk.nautical!, tickColor(tw.dusk.nautical!, fallbackDusk), 0.45, 10, 1.5);
     // Civil (closest to horizon / most visible)
-    if (tw.dawn.civil != null) _twilightTick(canvas, tw.dawn.civil!, dawn, 0.70, 12, 2.0);
-    if (tw.dusk.civil != null) _twilightTick(canvas, tw.dusk.civil!, dusk, 0.70, 12, 2.0);
+    if (tw.dawn.civil != null) _twilightTick(canvas, tw.dawn.civil!, tickColor(tw.dawn.civil!, fallbackDawn), 0.70, 12, 2.0);
+    if (tw.dusk.civil != null) _twilightTick(canvas, tw.dusk.civil!, tickColor(tw.dusk.civil!, fallbackDusk), 0.70, 12, 2.0);
 
     // Solar noon — zenith marker
     _drawSolarNoonMarker(canvas);
@@ -1225,9 +1359,65 @@ class _CelestialPainter extends CustomPainter {
     return -math.pi / 2 + (delta / 12.0) * math.pi;
   }
 
+  double _angleToHour(double angle) {
+    final delta = (angle + math.pi / 2) * 12.0 / math.pi;
+    var h = data.sunTimes.solarNoon + delta;
+    return ((h % 24) + 24) % 24;
+  }
+
+  double _interpolateValue(List<double> hours, List<int> values, double targetHour) {
+    if (hours.isEmpty) return 50.0;
+    if (hours.length == 1) return values[0].toDouble();
+    var lowerIdx = 0;
+    var upperIdx = hours.length - 1;
+    for (int i = 0; i < hours.length - 1; i++) {
+      if (hours[i] <= targetHour && hours[i + 1] >= targetHour) {
+        lowerIdx = i;
+        upperIdx = i + 1;
+        break;
+      }
+    }
+    if (targetHour < hours.first) {
+      lowerIdx = hours.length - 1;
+      upperIdx = 0;
+    } else if (targetHour > hours.last) {
+      lowerIdx = hours.length - 1;
+      upperIdx = 0;
+    }
+    final lowerHour = hours[lowerIdx];
+    final upperHour = hours[upperIdx];
+    final lowerValue = values[lowerIdx];
+    final upperValue = values[upperIdx];
+    if (lowerHour == upperHour) return lowerValue.toDouble();
+    double t;
+    if (upperIdx == 0 && lowerIdx == hours.length - 1) {
+      final totalSpan = (24 - lowerHour) + upperHour;
+      final position = targetHour >= lowerHour
+          ? targetHour - lowerHour
+          : (24 - lowerHour) + targetHour;
+      t = position / totalSpan;
+    } else {
+      t = (targetHour - lowerHour) / (upperHour - lowerHour);
+    }
+    return lowerValue + (upperValue - lowerValue) * t;
+  }
+
+  (Color, double) _curveColorAt(double hour) {
+    final cd = curveData;
+    if (cd == null || cd.hours.isEmpty) {
+      return (const Color(0xFFF0A830), 0.55);
+    }
+    final kelvin = _interpolateValue(cd.hours, cd.kelvin, hour);
+    final brightness = _interpolateValue(cd.hours, cd.brightness, hour);
+    final color = ColorUtils.curveColorForCCT(kelvin.toInt());
+    final opacity = 0.20 + (brightness / 100) * 0.55;
+    return (color, opacity);
+  }
+
   @override
   bool shouldRepaint(_CelestialPainter old) =>
-      pulse != old.pulse || hour != old.hour || thresholdT != old.thresholdT;
+      pulse != old.pulse || hour != old.hour || thresholdT != old.thresholdT ||
+      curveData != old.curveData;
 }
 
 // =============================================================================

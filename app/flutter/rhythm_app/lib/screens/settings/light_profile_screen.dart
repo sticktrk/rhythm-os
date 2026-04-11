@@ -63,7 +63,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   late String _selectedProfileId;
   final Map<String, sdk.RhythmCurveConfig> _profileConfigs = {};
   List<sdk.RhythmModeConfig> _modeConfigs = const [];
-  List<sdk.RhythmModeTransitionConfig> _modeTransitions = const [];
   sdk.RhythmMode? _serverActiveMode;
 
   // Light transition duration (from selected profile config).
@@ -251,7 +250,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     if (!mounted) return;
 
     _modeConfigs = [...?mode?.configs];
-    _modeTransitions = [...?mode?.transitions];
     _serverActiveMode = mode?.active;
     settingsProfiles.sort((a, b) {
       final ia = _profileOrder.indexOf(a.id);
@@ -2635,7 +2633,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       idleModeSaved = await api.modeSet(
         active: _serverActiveMode,
         configs: updatedModeConfigs,
-        transitions: _modeTransitions,
       );
       if (!mounted) return;
       if (!idleModeSaved) {

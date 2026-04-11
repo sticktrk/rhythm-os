@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
@@ -157,14 +156,34 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     }
   }
 
-  /// Set the active global mode on the server.
+  /// Flip the global mode from the All Rooms toggle.
+  ///
+  /// For the day/sleep toggle we run the default saved transitions so the
+  /// backend applies the canonical transition object rather than a direct mode
+  /// switch.
   Future<void> _setActiveMode(RhythmMode mode) async {
     HapticFeedback.mediumImpact();
+    final roomProvider = context.read<RoomProvider>();
+    if (roomProvider.anyRoomTransitioning) return;
     final serverSync = context.read<ServerSyncProvider>();
-    await serverSync.dispatchSetActiveMode(mode);
-    if (mounted) {
+    final currentMode = serverSync.activeMode;
+    if (currentMode == mode) return;
+
+    final transitionId = currentMode == null
+        ? null
+        : switch (mode) {
+            RhythmMode.sleep => 'day_to_sleep',
+            RhythmMode.day => 'sleep_to_day',
+          };
+    if (transitionId == null) {
+      await serverSync.dispatchSetActiveMode(mode);
       await _loadData();
+      return;
     }
+
+    final success = await serverSync.dispatchRunTransition(transitionId);
+    if (!success) return;
+    await _loadData();
   }
 
   @override
@@ -275,6 +294,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                 curveData: _curveData,
                 pageController: _roomPageController,
                 activeMode: serverSync.activeMode,
+                pendingMode: roomProvider.anyRoomTransitioning
+                    ? serverSync.activeMode
+                    : null,
                 onModeSelected: _setActiveMode,
                 onPageChanged: (page) {
                   setState(() => _currentRoomPage = page);

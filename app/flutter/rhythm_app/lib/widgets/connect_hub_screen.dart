@@ -234,6 +234,10 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
             break;
         }
       }, onError: (e) {
+        if (_isIgnorableBonsoirResolveError(e)) {
+          debugPrint('mDNS: ignoring transient Bonsoir resolve error: $e');
+          return;
+        }
         debugPrint('mDNS: discovery stream error: $e');
       });
 
@@ -244,6 +248,12 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     } catch (e) {
       debugPrint('mDNS scan error: $e');
     }
+  }
+
+  bool _isIgnorableBonsoirResolveError(Object error) {
+    return error is PlatformException &&
+        error.code == 'discoveryError' &&
+        error.message == 'discoveryServiceResolveFailed';
   }
 
   Future<void> _handleResolvedService(
@@ -604,27 +614,38 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
 
   Widget _buildScanAgainButton() {
     return Padding(
-      padding: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.only(top: 16),
       child: GestureDetector(
         onTap: _scanForDevices,
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.refresh,
-              color: _teal.withValues(alpha: 0.7),
-              size: 15,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+          decoration: BoxDecoration(
+            color: _teal.withValues(alpha: 0.15),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: _teal.withValues(alpha: 0.3),
+              width: 1,
             ),
-            const SizedBox(width: 6),
-            Text(
-              'Scan again',
-              style: TextStyle(
-                color: _teal.withValues(alpha: 0.7),
-                fontSize: 13,
-                fontWeight: FontWeight.w500,
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.refresh,
+                color: _teal,
+                size: 18,
               ),
-            ),
-          ],
+              const SizedBox(width: 8),
+              Text(
+                'Scan Again',
+                style: TextStyle(
+                  color: _teal,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

@@ -27,6 +27,7 @@ class AllRoomsScreen extends StatefulWidget {
   final PageController pageController;
   final ValueChanged<int> onPageChanged;
   final RhythmMode? activeMode;
+  final RhythmMode? pendingMode;
   final ValueChanged<RhythmMode>? onModeSelected;
 
   const AllRoomsScreen({
@@ -37,6 +38,7 @@ class AllRoomsScreen extends StatefulWidget {
     required this.pageController,
     required this.onPageChanged,
     this.activeMode,
+    this.pendingMode,
     this.onModeSelected,
   });
 
@@ -575,6 +577,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
           if (widget.activeMode != null)
             _CurveProfileToggle(
               activeMode: widget.activeMode!,
+              pendingMode: widget.pendingMode,
               onModeSelected: widget.onModeSelected,
             ),
         ],
@@ -1098,10 +1101,12 @@ const _moonGlow = Color(0xFF7C8EBF);
 /// Animated segmented toggle for switching between day and sleep modes.
 class _CurveProfileToggle extends StatelessWidget {
   final RhythmMode activeMode;
+  final RhythmMode? pendingMode;
   final ValueChanged<RhythmMode>? onModeSelected;
 
   const _CurveProfileToggle({
     required this.activeMode,
+    this.pendingMode,
     this.onModeSelected,
   });
 
@@ -1114,28 +1119,36 @@ class _CurveProfileToggle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      height: 34,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(17),
-        color: CelestialColors.backgroundCard.withValues(alpha: 0.85),
-        border: Border.all(
-          color: CelestialColors.orbitRing.withValues(alpha: 0.25),
-          width: 1,
-        ),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (final mode in RhythmMode.values)
-            _buildSegment(
-              label: _modeVisuals[mode]!.$1,
-              icon: _modeVisuals[mode]!.$2,
-              isActive: mode == activeMode,
-              activeColor: _modeVisuals[mode]!.$3,
-              onTap: () => onModeSelected?.call(mode),
+    return IgnorePointer(
+      ignoring: pendingMode != null,
+      child: AnimatedOpacity(
+        duration: _duration,
+        opacity: pendingMode == null ? 1.0 : 0.82,
+        child: Container(
+          height: 34,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(17),
+            color: CelestialColors.backgroundCard.withValues(alpha: 0.85),
+            border: Border.all(
+              color: CelestialColors.orbitRing.withValues(alpha: 0.25),
+              width: 1,
             ),
-        ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final mode in RhythmMode.values)
+                _buildSegment(
+                  label: _modeVisuals[mode]!.$1,
+                  icon: _modeVisuals[mode]!.$2,
+                  isActive: mode == activeMode,
+                  isPending: mode == pendingMode,
+                  activeColor: _modeVisuals[mode]!.$3,
+                  onTap: () => onModeSelected?.call(mode),
+                ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -1144,13 +1157,16 @@ class _CurveProfileToggle extends StatelessWidget {
     required String label,
     required IconData icon,
     required bool isActive,
+    required bool isPending,
     required Color activeColor,
     required VoidCallback onTap,
   }) {
+    final isHighlighted = isActive || isPending;
+
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: () {
-        if (!isActive) {
+        if (!isActive && !isPending && pendingMode == null) {
           HapticFeedback.lightImpact();
           onTap();
         }
@@ -1162,11 +1178,11 @@ class _CurveProfileToggle extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(14),
-          color: isActive
+          color: isHighlighted
               ? activeColor.withValues(alpha: 0.15)
               : Colors.transparent,
           border: Border.all(
-            color: isActive
+            color: isHighlighted
                 ? activeColor.withValues(alpha: 0.25)
                 : Colors.transparent,
             width: 0.5,
@@ -1177,24 +1193,35 @@ class _CurveProfileToggle extends StatelessWidget {
           children: [
             AnimatedSwitcher(
               duration: _duration,
-              child: Icon(
-                icon,
-                key: ValueKey(isActive),
-                size: 14,
-                color: isActive
-                    ? activeColor
-                    : CelestialColors.textSecondary.withValues(alpha: 0.4),
-              ),
+              child: isPending
+                  ? SizedBox(
+                      key: const ValueKey('pending'),
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.8,
+                        valueColor: AlwaysStoppedAnimation<Color>(activeColor),
+                      ),
+                    )
+                  : Icon(
+                      icon,
+                      key: ValueKey(isActive),
+                      size: 14,
+                      color: isHighlighted
+                          ? activeColor
+                          : CelestialColors.textSecondary
+                              .withValues(alpha: 0.4),
+                    ),
             ),
             const SizedBox(width: 5),
             AnimatedDefaultTextStyle(
               duration: _duration,
               style: TextStyle(
-                color: isActive
+                color: isHighlighted
                     ? activeColor
                     : CelestialColors.textSecondary.withValues(alpha: 0.4),
                 fontSize: 13,
-                fontWeight: isActive ? FontWeight.w600 : FontWeight.w400,
+                fontWeight: isHighlighted ? FontWeight.w600 : FontWeight.w400,
                 letterSpacing: 0.2,
               ),
               child: Text(label),

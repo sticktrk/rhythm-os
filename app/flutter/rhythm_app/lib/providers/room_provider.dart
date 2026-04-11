@@ -151,6 +151,9 @@ class RoomProvider extends ChangeNotifier {
   /// Per-room live mode from SSE (`day` / `sleep`).
   final Map<String, RhythmMode> _roomModes = {};
 
+  /// Per-room global mode-transition flag from the server.
+  final Map<String, bool> _roomTransitioning = {};
+
   /// Per-room brightness from server (effective brightness after offsets).
   final Map<String, int> _roomBrightness = {};
 
@@ -185,6 +188,14 @@ class RoomProvider extends ChangeNotifier {
 
   /// Latest live mode for a room from SSE, when available.
   RhythmMode? getRoomMode(String roomId) => _roomModes[roomId];
+
+  /// Whether the server reports an active mode-transition fade for a room.
+  bool isRoomTransitioning(String roomId) =>
+      _roomTransitioning[roomId] ?? false;
+
+  /// Whether any current room is inside a server-side mode transition.
+  bool get anyRoomTransitioning =>
+      rooms.any((room) => _roomTransitioning[room.id] ?? false);
 
   /// Set room state locally with a 3s optimistic lock.
   void setRoomStateLocal(String roomId, RoomModeState state) {
@@ -454,6 +465,7 @@ class RoomProvider extends ChangeNotifier {
     required double timeOffset,
     required double brightnessOffset,
     required RoomModeState state,
+    bool transitioning = false,
     RhythmMode? mode,
     bool? lightsOn,
     int? brightness,
@@ -490,6 +502,10 @@ class RoomProvider extends ChangeNotifier {
         roomStateLocked == null || DateTime.now().isAfter(roomStateLocked);
     if (roomStateUnlocked && _roomStates[roomId] != state) {
       _roomStates[roomId] = state;
+      changed = true;
+    }
+    if (_roomTransitioning[roomId] != transitioning) {
+      _roomTransitioning[roomId] = transitioning;
       changed = true;
     }
     if (mode != null && _roomModes[roomId] != mode) {
@@ -683,6 +699,7 @@ class RoomProvider extends ChangeNotifier {
     _roomStateLockedUntil.clear();
     _roomStates.clear();
     _roomModes.clear();
+    _roomTransitioning.clear();
     _roomBrightness.clear();
     _roomKelvin.clear();
     _roomColor.clear();
@@ -706,6 +723,7 @@ class RoomProvider extends ChangeNotifier {
     _roomStateLockedUntil.clear();
     _roomStates.clear();
     _roomModes.clear();
+    _roomTransitioning.clear();
     _roomBrightness.clear();
     _roomKelvin.clear();
     _roomColor.clear();

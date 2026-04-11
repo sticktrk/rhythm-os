@@ -98,6 +98,15 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Active global mode from the server (`day` / `sleep`).
   RhythmMode? _activeMode;
 
+  /// Saved mode transitions from the server.
+  List<RhythmModeTransitionConfig> _modeTransitions = const [];
+
+  /// Mode configs from the server (profile routing per mode).
+  List<RhythmModeConfig> _modeConfigs = const [];
+
+  /// Profile configs from the server hello.
+  List<RhythmCurveConfig> _profiles = const [];
+
   /// Active resolved profile ID from `/api/state.active_profile`.
   String? _activeProfileId;
 
@@ -145,6 +154,15 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Active global mode.
   RhythmMode? get activeMode => _activeMode;
+
+  /// Saved mode transitions.
+  List<RhythmModeTransitionConfig> get modeTransitions => _modeTransitions;
+
+  /// Mode configs (profile routing per mode).
+  List<RhythmModeConfig> get modeConfigs => _modeConfigs;
+
+  /// Profile configs from the server.
+  List<RhythmCurveConfig> get profiles => _profiles;
 
   /// Active resolved profile ID for display/edit sync.
   String? get activeProfileId => _activeProfileId;
@@ -401,7 +419,7 @@ class ServerSyncProvider extends ChangeNotifier {
     debugPrint('ServerSync: Server location: ${hello.location}');
     for (final r in hello.rooms) {
       debugPrint(
-          'ServerSync: Server room "${r.name}" rhythm=${r.rhythmEnabled} offset=${r.timeOffset} state=${r.state.wireValue}');
+          'ServerSync: Server room "${r.name}" rhythm=${r.rhythmEnabled} offset=${r.timeOffset} state=${r.state.wireValue} transitioning=${r.transitioning}');
     }
     _firmwareVersion = hello.version;
     _serverPlatformType = hello.platformType;
@@ -416,6 +434,9 @@ class ServerSyncProvider extends ChangeNotifier {
     }
     _powerSave = hello.settings?.powerSave ?? false;
     _activeMode = hello.mode?.active;
+    _modeTransitions = [...hello.transitions];
+    _modeConfigs = [...?hello.mode?.configs];
+    _profiles = [...hello.profiles];
     _activeProfileId = hello.activeProfile['id'] as String? ??
         hello.mode?.activeConfig?.activeProfileId;
     _rhythmIntervalSecs = activeProfileConfig?.rhythmIntervalSecs ?? 60;
@@ -567,6 +588,7 @@ class ServerSyncProvider extends ChangeNotifier {
             timeOffset: sr.timeOffset,
             brightnessOffset: sr.brightnessOffset,
             state: sr.state,
+            transitioning: sr.transitioning,
             lightsOn: sr.lightsOn,
             brightness: sr.brightness,
             kelvin: sr.kelvin,
@@ -605,6 +627,7 @@ class ServerSyncProvider extends ChangeNotifier {
         timeOffset: state.timeOffset,
         brightnessOffset: state.brightnessOffset,
         state: state.state,
+        transitioning: state.transitioning,
         mode: state.mode,
         lightsOn: state.lightsOn,
         brightness: state.brightness,
@@ -678,8 +701,7 @@ class ServerSyncProvider extends ChangeNotifier {
       final now = DateTime.now();
       if (_lastHubReconnectTime != null &&
           now.difference(_lastHubReconnectTime!).inSeconds < 5) {
-        debugPrint(
-            'ServerSync: Hub connected — skipping re-hello (cooldown)');
+        debugPrint('ServerSync: Hub connected — skipping re-hello (cooldown)');
         return;
       }
       _lastHubReconnectTime = now;
@@ -891,6 +913,37 @@ class ServerSyncProvider extends ChangeNotifier {
     notifyListeners();
     await _connection.api.setActiveMode(mode);
     await fullRefresh();
+  }
+
+  /// Update a single mode transition on the server.
+  Future<bool> dispatchUpdateTransition(
+      RhythmModeTransitionConfig updated) async {
+    if (!_connection.connected) return false;
+    final newList = _modeTransitions.map((t) {
+      if (t.id == updated.id ||
+          (t.id.isEmpty &&
+              updated.id.isEmpty &&
+              t.fromMode == updated.fromMode &&
+              t.toMode == updated.toMode)) {
+        return updated;
+      }
+      return t;
+    }).toList();
+    _modeTransitions = newList;
+    notifyListeners();
+    final success = await _connection.api.setTransitions(newList);
+    if (success) await fullRefresh();
+    return success;
+  }
+
+  /// Run a saved transition by ID.
+  Future<bool> dispatchRunTransition(String transitionId) async {
+    if (!_connection.connected) return false;
+    final success = await _connection.api.triggerTransition(transitionId);
+    if (success) {
+      await fullRefresh();
+    }
+    return success;
   }
 
   /// Activate sleep mode on the server.

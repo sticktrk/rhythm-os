@@ -47,8 +47,16 @@
 			</array>
 		</dict>
 	</array>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_http._tcp</string>
+		<string>_hue._tcp</string>
+		<string>_home-assistant._tcp</string>
+	</array>
 	<key>NSLocationUsageDescription</key>
 	<string>Rhythm needs your location to calculate sunrise and sunset times for adaptive lighting.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Rhythm needs local network access to discover and communicate with RhythmServer, Hue, and HomeAssistant devices.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Rhythm needs your location to calculate sunrise and sunset times for adaptive lighting.</string>
 	<key>NSMainNibFile</key>
