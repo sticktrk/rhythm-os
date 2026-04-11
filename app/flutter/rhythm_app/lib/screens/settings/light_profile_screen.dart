@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' as sdk;
@@ -944,6 +945,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
           ],
           const SizedBox(height: 24),
           _buildIdleSection(),
+          const SizedBox(height: 24),
+          _buildRoomDefaultsSection(),
           if (_curveConfigDirty) ...[
             const SizedBox(height: 24),
             _buildSaveButton(),
@@ -2559,6 +2562,139 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   // ---------------------------------------------------------------------------
+  // Room Defaults
+  // ---------------------------------------------------------------------------
+
+  Map<String, String> _roomDefaultsForCurrentMode() {
+    final config = _modeConfigForMode(_selectedMode);
+    if (config == null) return {};
+    return {
+      for (final rd in config.roomDefaults) rd.roomId: rd.state,
+    };
+  }
+
+  Future<void> _onRoomDefaultChanged(String roomId, String? newState) async {
+    final defaults = Map<String, String>.from(_roomDefaultsForCurrentMode());
+    if (newState == null) {
+      defaults.remove(roomId);
+    } else {
+      defaults[roomId] = newState;
+    }
+
+    final updatedRoomDefaults = defaults.entries
+        .map((e) => sdk.RoomDefault(roomId: e.key, state: e.value))
+        .toList();
+
+    final hasConfig = _modeConfigs.any((c) => c.mode == _selectedMode);
+    List<sdk.RhythmModeConfig> updatedConfigs;
+    if (hasConfig) {
+      updatedConfigs = _modeConfigs.map((config) {
+        if (config.mode == _selectedMode) {
+          return config.copyWith(roomDefaults: updatedRoomDefaults);
+        }
+        return config;
+      }).toList();
+    } else {
+      updatedConfigs = [
+        ..._modeConfigs,
+        sdk.RhythmModeConfig(
+          mode: _selectedMode,
+          activeProfileId: '',
+          roomDefaults: updatedRoomDefaults,
+        ),
+      ];
+    }
+
+    setState(() => _modeConfigs = updatedConfigs);
+
+    final api = context.read<ServerSyncProvider>().api;
+    await api.modeSet(configs: updatedConfigs);
+  }
+
+  Widget _buildRoomDefaultsSection() {
+    final rooms = context.read<RoomProvider>().rooms;
+    if (rooms.isEmpty) return const SizedBox.shrink();
+
+    final defaults = _roomDefaultsForCurrentMode();
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 18, 18, 14),
+      decoration: BoxDecoration(
+        color: _Palette.card,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: _Palette.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header
+          Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _Palette.blue.withValues(alpha: 0.12),
+                ),
+                child: Icon(
+                  Icons.meeting_room_rounded,
+                  color: _Palette.blue.withValues(alpha: 0.7),
+                  size: 18,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Room Defaults',
+                      style: TextStyle(
+                        color: _Palette.textPrimary,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: -0.1,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Override room states when ${_isSleepProfile ? 'sleep' : 'day'} activates',
+                      style: TextStyle(
+                        color: _Palette.textSecondary.withValues(alpha: 0.5),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          // 2-wide room grid
+          GridView.count(
+            crossAxisCount: 2,
+            crossAxisSpacing: 10,
+            mainAxisSpacing: 10,
+            childAspectRatio: 1.55,
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            children: [
+              for (final room in rooms)
+                _RoomDefaultCard(
+                  roomName: room.name,
+                  state: defaults[room.id],
+                  onStateChanged: (newState) =>
+                      _onRoomDefaultChanged(room.id, newState),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
   // Save
   // ---------------------------------------------------------------------------
 
@@ -3037,6 +3173,246 @@ class _TimeGradientPainter extends CustomPainter {
 }
 
 // -----------------------------------------------------------------------------
+// Room default card
+// -----------------------------------------------------------------------------
+
+enum _RoomDefaultMode { none, off, idle, active }
+
+class _RoomDefaultCard extends StatelessWidget {
+  final String roomName;
+  final String? state; // null = no override, "active", "idle", "hard_off"
+  final ValueChanged<String?> onStateChanged;
+
+  const _RoomDefaultCard({
+    required this.roomName,
+    required this.state,
+    required this.onStateChanged,
+  });
+
+  _RoomDefaultMode get _mode => switch (state) {
+        'active' => _RoomDefaultMode.active,
+        'idle' => _RoomDefaultMode.idle,
+        'hard_off' => _RoomDefaultMode.off,
+        _ => _RoomDefaultMode.none,
+      };
+
+  String? _stateFromMode(_RoomDefaultMode mode) => switch (mode) {
+        _RoomDefaultMode.active => 'active',
+        _RoomDefaultMode.idle => 'idle',
+        _RoomDefaultMode.off => 'hard_off',
+        _RoomDefaultMode.none => null,
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final mode = _mode;
+    final hasOverride = mode != _RoomDefaultMode.none;
+
+    final bgColor = switch (mode) {
+      _RoomDefaultMode.active => const Color(0xFF1E1A12),
+      _RoomDefaultMode.idle =>
+        Color.lerp(_Palette.card, const Color(0xFF2E2518), 0.4)!,
+      _RoomDefaultMode.off || _RoomDefaultMode.none => _Palette.card,
+    };
+
+    final stateLabel = switch (mode) {
+      _RoomDefaultMode.active => 'Active',
+      _RoomDefaultMode.idle => 'Standby',
+      _RoomDefaultMode.off => 'Off',
+      _RoomDefaultMode.none => 'No override',
+    };
+
+    final stateLabelColor = switch (mode) {
+      _RoomDefaultMode.active => const Color(0xFFD4A020),
+      _RoomDefaultMode.idle => _Palette.idle,
+      _RoomDefaultMode.off => _Palette.textSecondary,
+      _RoomDefaultMode.none =>
+        _Palette.textSecondary.withValues(alpha: 0.4),
+    };
+
+    return GestureDetector(
+      onLongPress: hasOverride
+          ? () {
+              HapticFeedback.lightImpact();
+              onStateChanged(null);
+            }
+          : null,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInOut,
+        decoration: BoxDecoration(
+          color: bgColor,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: hasOverride
+                ? _Palette.border
+                : _Palette.border.withValues(alpha: 0.4),
+          ),
+        ),
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: AnimatedOpacity(
+                opacity: hasOverride ? 1.0 : 0.45,
+                duration: const Duration(milliseconds: 300),
+                child: Text(
+                  roomName,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: _Palette.textPrimary,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+            Text(
+              stateLabel,
+              style: TextStyle(
+                color: stateLabelColor,
+                fontSize: 11,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const SizedBox(height: 6),
+            _DefaultStateToggle(
+              mode: mode,
+              onModeChanged: (newMode) {
+                HapticFeedback.lightImpact();
+                onStateChanged(_stateFromMode(newMode));
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3-state toggle matching the CelestialToggle from room_card.dart
+// ---------------------------------------------------------------------------
+
+class _DefaultStateToggle extends StatelessWidget {
+  final _RoomDefaultMode mode;
+  final ValueChanged<_RoomDefaultMode> onModeChanged;
+
+  const _DefaultStateToggle({
+    required this.mode,
+    required this.onModeChanged,
+  });
+
+  void _onTap() {
+    switch (mode) {
+      case _RoomDefaultMode.none:
+        onModeChanged(_RoomDefaultMode.active);
+      case _RoomDefaultMode.active:
+        onModeChanged(_RoomDefaultMode.idle);
+      case _RoomDefaultMode.idle:
+        onModeChanged(_RoomDefaultMode.active);
+      case _RoomDefaultMode.off:
+        onModeChanged(_RoomDefaultMode.active);
+    }
+  }
+
+  void _onLongPress() {
+    if (mode != _RoomDefaultMode.off) {
+      onModeChanged(_RoomDefaultMode.off);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasOverride = mode != _RoomDefaultMode.none;
+
+    final alignment = switch (mode) {
+      _RoomDefaultMode.off => Alignment.centerLeft,
+      _RoomDefaultMode.idle => Alignment.center,
+      _RoomDefaultMode.active => Alignment.centerRight,
+      _RoomDefaultMode.none => Alignment.center,
+    };
+
+    final trackGradient = switch (mode) {
+      _RoomDefaultMode.off => const LinearGradient(
+          colors: [Color(0xFF2A2F38), Color(0xFF30363D)],
+        ),
+      _RoomDefaultMode.idle => const LinearGradient(
+          colors: [Color(0xFF221C14), Color(0xFF2E2518)],
+        ),
+      _RoomDefaultMode.active => const LinearGradient(
+          colors: [Color(0xFF8B6B20), Color(0xFFD4A020)],
+        ),
+      _RoomDefaultMode.none => const LinearGradient(
+          colors: [Color(0xFF1E2228), Color(0xFF1E2228)],
+        ),
+    };
+
+    final thumbColor = switch (mode) {
+      _RoomDefaultMode.off => _Palette.textSecondary,
+      _RoomDefaultMode.idle => const Color(0xFFCDBFAA),
+      _RoomDefaultMode.active => Colors.white,
+      _RoomDefaultMode.none =>
+        _Palette.textSecondary.withValues(alpha: 0.3),
+    };
+
+    final thumbShadow = switch (mode) {
+      _RoomDefaultMode.active => [
+          BoxShadow(
+            color: _Palette.amber.withValues(alpha: 0.4),
+            blurRadius: 8,
+            spreadRadius: 1,
+          ),
+        ],
+      _RoomDefaultMode.idle => [
+          BoxShadow(
+            color: const Color(0xFFD4A574).withValues(alpha: 0.2),
+            blurRadius: 6,
+          ),
+        ],
+      _RoomDefaultMode.off || _RoomDefaultMode.none => <BoxShadow>[],
+    };
+
+    return GestureDetector(
+      onTap: _onTap,
+      onLongPress: _onLongPress,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedOpacity(
+        opacity: hasOverride ? 1.0 : 0.4,
+        duration: const Duration(milliseconds: 300),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeInOut,
+          width: 64,
+          height: 28,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            gradient: trackGradient,
+          ),
+          padding: const EdgeInsets.all(3),
+          child: AnimatedAlign(
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeInOut,
+            alignment: alignment,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 300),
+              width: 22,
+              height: 22,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: thumbColor,
+                boxShadow: thumbShadow,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // Palette
 // -----------------------------------------------------------------------------
 
