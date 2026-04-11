@@ -52,7 +52,7 @@ void main() {
     });
 
     testWidgets('RoomProvider can add rooms', (WidgetTester tester) async {
-      await roomProvider.addRoom(RoomDto.raw(
+      await roomProvider.addRoom(RoomDto(
         id: 'room_1',
         name: 'Living Room',
         source: RoomSourceDto.hue,
@@ -92,7 +92,7 @@ void main() {
 
     testWidgets('setCurrentIndex navigates to room',
         (WidgetTester tester) async {
-      await roomProvider.addRoom(RoomDto.raw(
+      await roomProvider.addRoom(RoomDto(
         id: 'room_1',
         name: 'Living Room',
         source: RoomSourceDto.hue,
@@ -104,7 +104,7 @@ void main() {
         brightnessOffset: 0,
         curveConfig: null,
       ));
-      await roomProvider.addRoom(RoomDto.raw(
+      await roomProvider.addRoom(RoomDto(
         id: 'room_2',
         name: 'Bedroom',
         source: RoomSourceDto.hue,
@@ -155,7 +155,7 @@ void main() {
 
     testWidgets('nextRoom and previousRoom navigate correctly',
         (WidgetTester tester) async {
-      await roomProvider.addRoom(RoomDto.raw(
+      await roomProvider.addRoom(RoomDto(
         id: 'room_1',
         name: 'Room 1',
         source: RoomSourceDto.hue,
@@ -167,7 +167,7 @@ void main() {
         brightnessOffset: 0,
         curveConfig: null,
       ));
-      await roomProvider.addRoom(RoomDto.raw(
+      await roomProvider.addRoom(RoomDto(
         id: 'room_2',
         name: 'Room 2',
         source: RoomSourceDto.hue,

@@ -11,7 +11,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 /// Map a Hue V2 button event to a rhythm action.
 ///
 /// This function takes raw button event data from the Hue V2 API SSE stream
-/// and maps it to a `RhythmActionDto` that can be passed to `runner_handle_action()`.
+/// and maps it to a `RhythmActionDto` that the Dart room-state layer can handle.
 ///
 /// # Hue Dimmer Switch (RWL02x) Button Layout
 ///

@@ -193,7 +193,7 @@ class TestRoomFactory {
     bool disabled = false,
   }) {
     _idCounter++;
-    return RoomDto.raw(
+    return RoomDto(
       id: id ?? 'room_$_idCounter',
       name: name,
       source: source,

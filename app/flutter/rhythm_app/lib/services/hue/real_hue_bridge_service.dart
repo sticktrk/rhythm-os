@@ -187,7 +187,7 @@ class RealHueBridgeService implements HueBridgeService {
         _roomToGroupedLight[id] = groupedLightId;
       }
 
-      rooms.add(RoomDto.raw(
+      rooms.add(RoomDto(
         id: id, // Use raw UUID as room ID
         name: name,
         source: RoomSourceDto.hue,
@@ -206,7 +206,7 @@ class RealHueBridgeService implements HueBridgeService {
     final updatedRooms = rooms.map((room) {
       final isOn = lightStates[room.id] ?? false;
       if (isOn != room.lightsOn) {
-        return RoomDto.raw(
+        return RoomDto(
           id: room.id,
           name: room.name,
           source: room.source,
@@ -695,14 +695,36 @@ class RealHueBridgeService implements HueBridgeService {
       // First try: match by ID (Hue room UUID == Rhythm room ID)
       var rhythmRoom = _rooms.firstWhere(
         (r) => r.id == hueRoom.id,
-        orElse: () => RoomDto(id: '', name: ''),
+        orElse: () => RoomDto(
+          id: '',
+          name: '',
+          source: RoomSourceDto.unknown,
+          deviceIds: const [],
+          rhythmEnabled: false,
+          disabled: false,
+          lightsOn: false,
+          timeOffsetMinutes: 0,
+          brightnessOffset: 0,
+          curveConfig: null,
+        ),
       );
 
       // Second try: match by name (case-insensitive)
       if (rhythmRoom.id.isEmpty) {
         rhythmRoom = _rooms.firstWhere(
           (r) => r.name.toLowerCase() == hueRoom.name.toLowerCase(),
-          orElse: () => RoomDto(id: '', name: ''),
+          orElse: () => RoomDto(
+            id: '',
+            name: '',
+            source: RoomSourceDto.unknown,
+            deviceIds: const [],
+            rhythmEnabled: false,
+            disabled: false,
+            lightsOn: false,
+            timeOffsetMinutes: 0,
+            brightnessOffset: 0,
+            curveConfig: null,
+          ),
         );
       }
 

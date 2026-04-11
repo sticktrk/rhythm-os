@@ -15,8 +15,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../events/event_source.dart';
 import '../src/rust/api/curve.dart' show getSunTimes;
 import '../src/rust/api/dto/curve.dart' show CurveConfigDto;
-import '../src/rust/api/dto/runner.dart';
+import '../src/rust/api/dto/runner.dart' show RhythmActionDto;
 import 'provider_manager.dart';
+import 'runner_models.dart';
 import 'room_state_store.dart' as room_state;
 import 'runner_state_json.dart' as json_util;
 

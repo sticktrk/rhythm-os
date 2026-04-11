@@ -1,7 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_core/runner/room_state_store.dart' as room_state;
+import 'package:rhythm_core/runner/runner_models.dart';
 import 'package:rhythm_core/src/rust/api/dto/curve.dart';
-import 'package:rhythm_core/src/rust/api/dto/runner.dart';
+import 'package:rhythm_core/src/rust/api/dto/runner.dart' show RhythmActionDto;
 
 const _testConfig = CurveConfigDto(
   minColorTemp: 2200,
@@ -28,7 +29,7 @@ RoomDto _room({
   double timeOffsetMinutes = 0,
   double brightnessOffset = 0,
 }) {
-  return RoomDto.raw(
+  return RoomDto(
     id: id,
     name: name,
     source: source,

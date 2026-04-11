@@ -191,8 +191,18 @@ class AppStateRefresh {
 
       final rooms = hello.rooms
           .where((r) => r.id.isNotEmpty && r.name.isNotEmpty)
-          .map((r) => RoomDto.withSource(
-              id: r.id, name: r.name, source: RoomSourceDto.homeAssistant))
+          .map((r) => RoomDto(
+                id: r.id,
+                name: r.name,
+                source: RoomSourceDto.homeAssistant,
+                deviceIds: const [],
+                rhythmEnabled: false,
+                disabled: false,
+                lightsOn: false,
+                timeOffsetMinutes: 0,
+                brightnessOffset: 0,
+                curveConfig: null,
+              ))
           .toList();
 
       if (rooms.isNotEmpty) {

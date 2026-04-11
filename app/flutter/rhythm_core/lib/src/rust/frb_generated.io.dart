@@ -54,9 +54,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       dynamic raw);
 
   @protected
-  int dco_decode_box_autoadd_i_32(dynamic raw);
-
-  @protected
   RhythmActionDto dco_decode_box_autoadd_rhythm_action_dto(dynamic raw);
 
   @protected
@@ -90,12 +87,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_i_32(dynamic raw);
 
   @protected
-  LightCommandDto dco_decode_light_command_dto(dynamic raw);
-
-  @protected
-  LightCommandType dco_decode_light_command_type(dynamic raw);
-
-  @protected
   LightingValuesDto dco_decode_lighting_values_dto(dynamic raw);
 
   @protected
@@ -103,9 +94,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<BehaviorMappingDto> dco_decode_list_behavior_mapping_dto(dynamic raw);
-
-  @protected
-  List<LightCommandDto> dco_decode_list_light_command_dto(dynamic raw);
 
   @protected
   Float64List dco_decode_list_prim_f_64_strict(dynamic raw);
@@ -117,16 +105,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
-  List<RoomDto> dco_decode_list_room_dto(dynamic raw);
-
-  @protected
   List<StepPointDto> dco_decode_list_step_point_dto(dynamic raw);
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
-
-  @protected
-  CurveConfigDto? dco_decode_opt_box_autoadd_curve_config_dto(dynamic raw);
 
   @protected
   double? dco_decode_opt_box_autoadd_f_64(dynamic raw);
@@ -134,9 +116,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   HueButtonEventTypeDto? dco_decode_opt_box_autoadd_hue_button_event_type_dto(
       dynamic raw);
-
-  @protected
-  int? dco_decode_opt_box_autoadd_i_32(dynamic raw);
 
   @protected
   RhythmActionDto? dco_decode_opt_box_autoadd_rhythm_action_dto(dynamic raw);
@@ -149,18 +128,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RhythmActionDto dco_decode_rhythm_action_dto(dynamic raw);
-
-  @protected
-  RoomDto dco_decode_room_dto(dynamic raw);
-
-  @protected
-  RoomSourceDto dco_decode_room_source_dto(dynamic raw);
-
-  @protected
-  RunnerActionResultDto dco_decode_runner_action_result_dto(dynamic raw);
-
-  @protected
-  RunnerStateDto dco_decode_runner_state_dto(dynamic raw);
 
   @protected
   SolarInfoDto dco_decode_solar_info_dto(dynamic raw);
@@ -219,9 +186,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       SseDeserializer deserializer);
 
   @protected
-  int sse_decode_box_autoadd_i_32(SseDeserializer deserializer);
-
-  @protected
   RhythmActionDto sse_decode_box_autoadd_rhythm_action_dto(
       SseDeserializer deserializer);
 
@@ -260,12 +224,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
-  LightCommandDto sse_decode_light_command_dto(SseDeserializer deserializer);
-
-  @protected
-  LightCommandType sse_decode_light_command_type(SseDeserializer deserializer);
-
-  @protected
   LightingValuesDto sse_decode_lighting_values_dto(
       SseDeserializer deserializer);
 
@@ -274,10 +232,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<BehaviorMappingDto> sse_decode_list_behavior_mapping_dto(
-      SseDeserializer deserializer);
-
-  @protected
-  List<LightCommandDto> sse_decode_list_light_command_dto(
       SseDeserializer deserializer);
 
   @protected
@@ -290,9 +244,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
-  List<RoomDto> sse_decode_list_room_dto(SseDeserializer deserializer);
-
-  @protected
   List<StepPointDto> sse_decode_list_step_point_dto(
       SseDeserializer deserializer);
 
@@ -300,18 +251,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
-  CurveConfigDto? sse_decode_opt_box_autoadd_curve_config_dto(
-      SseDeserializer deserializer);
-
-  @protected
   double? sse_decode_opt_box_autoadd_f_64(SseDeserializer deserializer);
 
   @protected
   HueButtonEventTypeDto? sse_decode_opt_box_autoadd_hue_button_event_type_dto(
       SseDeserializer deserializer);
-
-  @protected
-  int? sse_decode_opt_box_autoadd_i_32(SseDeserializer deserializer);
 
   @protected
   RhythmActionDto? sse_decode_opt_box_autoadd_rhythm_action_dto(
@@ -326,19 +270,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RhythmActionDto sse_decode_rhythm_action_dto(SseDeserializer deserializer);
-
-  @protected
-  RoomDto sse_decode_room_dto(SseDeserializer deserializer);
-
-  @protected
-  RoomSourceDto sse_decode_room_source_dto(SseDeserializer deserializer);
-
-  @protected
-  RunnerActionResultDto sse_decode_runner_action_result_dto(
-      SseDeserializer deserializer);
-
-  @protected
-  RunnerStateDto sse_decode_runner_state_dto(SseDeserializer deserializer);
 
   @protected
   SolarInfoDto sse_decode_solar_info_dto(SseDeserializer deserializer);
@@ -407,12 +338,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
-  ffi.Pointer<ffi.Int32> cst_encode_box_autoadd_i_32(int raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return wire.cst_new_box_autoadd_i_32(cst_encode_i_32(raw));
-  }
-
-  @protected
   ffi.Pointer<ffi.Int32> cst_encode_box_autoadd_rhythm_action_dto(
       RhythmActionDto raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
@@ -451,17 +376,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
-  ffi.Pointer<wire_cst_list_light_command_dto>
-      cst_encode_list_light_command_dto(List<LightCommandDto> raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    final ans = wire.cst_new_list_light_command_dto(raw.length);
-    for (var i = 0; i < raw.length; ++i) {
-      cst_api_fill_to_wire_light_command_dto(raw[i], ans.ref.ptr[i]);
-    }
-    return ans;
-  }
-
-  @protected
   ffi.Pointer<wire_cst_list_prim_f_64_strict> cst_encode_list_prim_f_64_strict(
       Float64List raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
@@ -489,17 +403,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
-  ffi.Pointer<wire_cst_list_room_dto> cst_encode_list_room_dto(
-      List<RoomDto> raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    final ans = wire.cst_new_list_room_dto(raw.length);
-    for (var i = 0; i < raw.length; ++i) {
-      cst_api_fill_to_wire_room_dto(raw[i], ans.ref.ptr[i]);
-    }
-    return ans;
-  }
-
-  @protected
   ffi.Pointer<wire_cst_list_step_point_dto> cst_encode_list_step_point_dto(
       List<StepPointDto> raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
@@ -518,15 +421,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
-  ffi.Pointer<wire_cst_curve_config_dto>
-      cst_encode_opt_box_autoadd_curve_config_dto(CurveConfigDto? raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw == null
-        ? ffi.nullptr
-        : cst_encode_box_autoadd_curve_config_dto(raw);
-  }
-
-  @protected
   ffi.Pointer<ffi.Double> cst_encode_opt_box_autoadd_f_64(double? raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return raw == null ? ffi.nullptr : cst_encode_box_autoadd_f_64(raw);
@@ -539,12 +433,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     return raw == null
         ? ffi.nullptr
         : cst_encode_box_autoadd_hue_button_event_type_dto(raw);
-  }
-
-  @protected
-  ffi.Pointer<ffi.Int32> cst_encode_opt_box_autoadd_i_32(int? raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw == null ? ffi.nullptr : cst_encode_box_autoadd_i_32(raw);
   }
 
   @protected
@@ -662,16 +550,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
-  void cst_api_fill_to_wire_light_command_dto(
-      LightCommandDto apiObj, wire_cst_light_command_dto wireObj) {
-    wireObj.device_id = cst_encode_String(apiObj.deviceId);
-    wireObj.room_id = cst_encode_String(apiObj.roomId);
-    wireObj.command_type = cst_encode_light_command_type(apiObj.commandType);
-    wireObj.brightness = cst_encode_opt_box_autoadd_i_32(apiObj.brightness);
-    wireObj.kelvin = cst_encode_opt_box_autoadd_i_32(apiObj.kelvin);
-  }
-
-  @protected
   void cst_api_fill_to_wire_lighting_values_dto(
       LightingValuesDto apiObj, wire_cst_lighting_values_dto wireObj) {
     wireObj.kelvin = cst_encode_i_32(apiObj.kelvin);
@@ -688,36 +566,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     wireObj.r = cst_encode_i_32(apiObj.r);
     wireObj.g = cst_encode_i_32(apiObj.g);
     wireObj.b = cst_encode_i_32(apiObj.b);
-  }
-
-  @protected
-  void cst_api_fill_to_wire_room_dto(
-      RoomDto apiObj, wire_cst_room_dto wireObj) {
-    wireObj.id = cst_encode_String(apiObj.id);
-    wireObj.name = cst_encode_String(apiObj.name);
-    wireObj.source = cst_encode_room_source_dto(apiObj.source);
-    wireObj.device_ids = cst_encode_list_String(apiObj.deviceIds);
-    wireObj.rhythm_enabled = cst_encode_bool(apiObj.rhythmEnabled);
-    wireObj.disabled = cst_encode_bool(apiObj.disabled);
-    wireObj.lights_on = cst_encode_bool(apiObj.lightsOn);
-    wireObj.time_offset_minutes = cst_encode_f_64(apiObj.timeOffsetMinutes);
-    wireObj.brightness_offset = cst_encode_f_64(apiObj.brightnessOffset);
-    wireObj.curve_config =
-        cst_encode_opt_box_autoadd_curve_config_dto(apiObj.curveConfig);
-  }
-
-  @protected
-  void cst_api_fill_to_wire_runner_action_result_dto(
-      RunnerActionResultDto apiObj, wire_cst_runner_action_result_dto wireObj) {
-    cst_api_fill_to_wire_runner_state_dto(apiObj.state, wireObj.state);
-    wireObj.commands = cst_encode_list_light_command_dto(apiObj.commands);
-    wireObj.state_changed = cst_encode_bool(apiObj.stateChanged);
-  }
-
-  @protected
-  void cst_api_fill_to_wire_runner_state_dto(
-      RunnerStateDto apiObj, wire_cst_runner_state_dto wireObj) {
-    wireObj.rooms = cst_encode_list_room_dto(apiObj.rooms);
   }
 
   @protected
@@ -792,13 +640,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int cst_encode_i_32(int raw);
 
   @protected
-  int cst_encode_light_command_type(LightCommandType raw);
-
-  @protected
   int cst_encode_rhythm_action_dto(RhythmActionDto raw);
-
-  @protected
-  int cst_encode_room_source_dto(RoomSourceDto raw);
 
   @protected
   int cst_encode_u_8(int raw);
@@ -834,9 +676,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_hue_button_event_type_dto(
       HueButtonEventTypeDto self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_box_autoadd_i_32(int self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_rhythm_action_dto(
@@ -878,14 +717,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
-  void sse_encode_light_command_dto(
-      LightCommandDto self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_light_command_type(
-      LightCommandType self, SseSerializer serializer);
-
-  @protected
   void sse_encode_lighting_values_dto(
       LightingValuesDto self, SseSerializer serializer);
 
@@ -895,10 +726,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_behavior_mapping_dto(
       List<BehaviorMappingDto> self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_list_light_command_dto(
-      List<LightCommandDto> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_prim_f_64_strict(
@@ -913,9 +740,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       Uint8List self, SseSerializer serializer);
 
   @protected
-  void sse_encode_list_room_dto(List<RoomDto> self, SseSerializer serializer);
-
-  @protected
   void sse_encode_list_step_point_dto(
       List<StepPointDto> self, SseSerializer serializer);
 
@@ -923,18 +747,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_String(String? self, SseSerializer serializer);
 
   @protected
-  void sse_encode_opt_box_autoadd_curve_config_dto(
-      CurveConfigDto? self, SseSerializer serializer);
-
-  @protected
   void sse_encode_opt_box_autoadd_f_64(double? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_hue_button_event_type_dto(
       HueButtonEventTypeDto? self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_opt_box_autoadd_i_32(int? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_rhythm_action_dto(
@@ -950,20 +767,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_rhythm_action_dto(
       RhythmActionDto self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_room_dto(RoomDto self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_room_source_dto(RoomSourceDto self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_runner_action_result_dto(
-      RunnerActionResultDto self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_runner_state_dto(
-      RunnerStateDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_solar_info_dto(SolarInfoDto self, SseSerializer serializer);
@@ -1870,68 +1673,6 @@ class RustLibWire implements BaseWire {
             ffi.Pointer<wire_cst_list_prim_u_8_strict>,
           )>();
 
-  WireSyncRust2DartDco wire__crate__api__dto__runner__room_dto_new(
-    ffi.Pointer<wire_cst_list_prim_u_8_strict> id,
-    ffi.Pointer<wire_cst_list_prim_u_8_strict> name,
-  ) {
-    return _wire__crate__api__dto__runner__room_dto_new(id, name);
-  }
-
-  late final _wire__crate__api__dto__runner__room_dto_newPtr = _lookup<
-      ffi.NativeFunction<
-          WireSyncRust2DartDco Function(
-            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-          )>>('frbgen_rhythm_core_wire__crate__api__dto__runner__room_dto_new');
-  late final _wire__crate__api__dto__runner__room_dto_new =
-      _wire__crate__api__dto__runner__room_dto_newPtr.asFunction<
-          WireSyncRust2DartDco Function(
-            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-          )>();
-
-  WireSyncRust2DartDco wire__crate__api__dto__runner__room_dto_with_source(
-    ffi.Pointer<wire_cst_list_prim_u_8_strict> id,
-    ffi.Pointer<wire_cst_list_prim_u_8_strict> name,
-    int source,
-  ) {
-    return _wire__crate__api__dto__runner__room_dto_with_source(
-      id,
-      name,
-      source,
-    );
-  }
-
-  late final _wire__crate__api__dto__runner__room_dto_with_sourcePtr = _lookup<
-      ffi.NativeFunction<
-          WireSyncRust2DartDco Function(
-            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-            ffi.Int32,
-          )>>(
-    'frbgen_rhythm_core_wire__crate__api__dto__runner__room_dto_with_source',
-  );
-  late final _wire__crate__api__dto__runner__room_dto_with_source =
-      _wire__crate__api__dto__runner__room_dto_with_sourcePtr.asFunction<
-          WireSyncRust2DartDco Function(
-            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-            int,
-          )>();
-
-  WireSyncRust2DartDco
-      wire__crate__api__dto__runner__runner_state_dto_default() {
-    return _wire__crate__api__dto__runner__runner_state_dto_default();
-  }
-
-  late final _wire__crate__api__dto__runner__runner_state_dto_defaultPtr =
-      _lookup<ffi.NativeFunction<WireSyncRust2DartDco Function()>>(
-    'frbgen_rhythm_core_wire__crate__api__dto__runner__runner_state_dto_default',
-  );
-  late final _wire__crate__api__dto__runner__runner_state_dto_default =
-      _wire__crate__api__dto__runner__runner_state_dto_defaultPtr
-          .asFunction<WireSyncRust2DartDco Function()>();
-
   ffi.Pointer<wire_cst_curve_config_dto>
       cst_new_box_autoadd_curve_config_dto() {
     return _cst_new_box_autoadd_curve_config_dto();
@@ -1983,17 +1724,6 @@ class RustLibWire implements BaseWire {
       _cst_new_box_autoadd_hue_button_event_type_dtoPtr
           .asFunction<ffi.Pointer<ffi.Int32> Function(int)>();
 
-  ffi.Pointer<ffi.Int32> cst_new_box_autoadd_i_32(int value) {
-    return _cst_new_box_autoadd_i_32(value);
-  }
-
-  late final _cst_new_box_autoadd_i_32Ptr =
-      _lookup<ffi.NativeFunction<ffi.Pointer<ffi.Int32> Function(ffi.Int32)>>(
-    'frbgen_rhythm_core_cst_new_box_autoadd_i_32',
-  );
-  late final _cst_new_box_autoadd_i_32 = _cst_new_box_autoadd_i_32Ptr
-      .asFunction<ffi.Pointer<ffi.Int32> Function(int)>();
-
   ffi.Pointer<ffi.Int32> cst_new_box_autoadd_rhythm_action_dto(int value) {
     return _cst_new_box_autoadd_rhythm_action_dto(value);
   }
@@ -2044,20 +1774,6 @@ class RustLibWire implements BaseWire {
       _cst_new_list_behavior_mapping_dtoPtr.asFunction<
           ffi.Pointer<wire_cst_list_behavior_mapping_dto> Function(int)>();
 
-  ffi.Pointer<wire_cst_list_light_command_dto> cst_new_list_light_command_dto(
-    int len,
-  ) {
-    return _cst_new_list_light_command_dto(len);
-  }
-
-  late final _cst_new_list_light_command_dtoPtr = _lookup<
-      ffi.NativeFunction<
-          ffi.Pointer<wire_cst_list_light_command_dto> Function(
-              ffi.Int32)>>('frbgen_rhythm_core_cst_new_list_light_command_dto');
-  late final _cst_new_list_light_command_dto =
-      _cst_new_list_light_command_dtoPtr.asFunction<
-          ffi.Pointer<wire_cst_list_light_command_dto> Function(int)>();
-
   ffi.Pointer<wire_cst_list_prim_f_64_strict> cst_new_list_prim_f_64_strict(
     int len,
   ) {
@@ -2096,17 +1812,6 @@ class RustLibWire implements BaseWire {
               ffi.Int32)>>('frbgen_rhythm_core_cst_new_list_prim_u_8_strict');
   late final _cst_new_list_prim_u_8_strict = _cst_new_list_prim_u_8_strictPtr
       .asFunction<ffi.Pointer<wire_cst_list_prim_u_8_strict> Function(int)>();
-
-  ffi.Pointer<wire_cst_list_room_dto> cst_new_list_room_dto(int len) {
-    return _cst_new_list_room_dto(len);
-  }
-
-  late final _cst_new_list_room_dtoPtr = _lookup<
-      ffi.NativeFunction<
-          ffi.Pointer<wire_cst_list_room_dto> Function(
-              ffi.Int32)>>('frbgen_rhythm_core_cst_new_list_room_dto');
-  late final _cst_new_list_room_dto = _cst_new_list_room_dtoPtr
-      .asFunction<ffi.Pointer<wire_cst_list_room_dto> Function(int)>();
 
   ffi.Pointer<wire_cst_list_step_point_dto> cst_new_list_step_point_dto(
     int len,
@@ -2217,26 +1922,6 @@ final class wire_cst_twilight_phase_dto extends ffi.Struct {
   external ffi.Pointer<ffi.Double> astronomical;
 }
 
-final class wire_cst_light_command_dto extends ffi.Struct {
-  external ffi.Pointer<wire_cst_list_prim_u_8_strict> device_id;
-
-  external ffi.Pointer<wire_cst_list_prim_u_8_strict> room_id;
-
-  @ffi.Int32()
-  external int command_type;
-
-  external ffi.Pointer<ffi.Int32> brightness;
-
-  external ffi.Pointer<ffi.Int32> kelvin;
-}
-
-final class wire_cst_list_light_command_dto extends ffi.Struct {
-  external ffi.Pointer<wire_cst_light_command_dto> ptr;
-
-  @ffi.Int32()
-  external int len;
-}
-
 final class wire_cst_list_prim_f_64_strict extends ffi.Struct {
   external ffi.Pointer<ffi.Double> ptr;
 
@@ -2246,41 +1931,6 @@ final class wire_cst_list_prim_f_64_strict extends ffi.Struct {
 
 final class wire_cst_list_prim_i_32_strict extends ffi.Struct {
   external ffi.Pointer<ffi.Int32> ptr;
-
-  @ffi.Int32()
-  external int len;
-}
-
-final class wire_cst_room_dto extends ffi.Struct {
-  external ffi.Pointer<wire_cst_list_prim_u_8_strict> id;
-
-  external ffi.Pointer<wire_cst_list_prim_u_8_strict> name;
-
-  @ffi.Int32()
-  external int source;
-
-  external ffi.Pointer<wire_cst_list_String> device_ids;
-
-  @ffi.Bool()
-  external bool rhythm_enabled;
-
-  @ffi.Bool()
-  external bool disabled;
-
-  @ffi.Bool()
-  external bool lights_on;
-
-  @ffi.Double()
-  external double time_offset_minutes;
-
-  @ffi.Double()
-  external double brightness_offset;
-
-  external ffi.Pointer<wire_cst_curve_config_dto> curve_config;
-}
-
-final class wire_cst_list_room_dto extends ffi.Struct {
-  external ffi.Pointer<wire_cst_room_dto> ptr;
 
   @ffi.Int32()
   external int len;
@@ -2406,19 +2056,6 @@ final class wire_cst_lighting_values_dto extends ffi.Struct {
 
   @ffi.Double()
   external double sun_position;
-}
-
-final class wire_cst_runner_state_dto extends ffi.Struct {
-  external ffi.Pointer<wire_cst_list_room_dto> rooms;
-}
-
-final class wire_cst_runner_action_result_dto extends ffi.Struct {
-  external wire_cst_runner_state_dto state;
-
-  external ffi.Pointer<wire_cst_list_light_command_dto> commands;
-
-  @ffi.Bool()
-  external bool state_changed;
 }
 
 final class wire_cst_step_sequences_dto extends ffi.Struct {

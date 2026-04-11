@@ -77,7 +77,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 1692632949;
+  int get rustContentHash => -1385676109;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -221,16 +221,6 @@ abstract class RustLibApi extends BaseApi {
 
   HueButtonEventTypeDto? crateApiHueParseHueButtonEventType(
       {required String apiValue});
-
-  RoomDto crateApiDtoRunnerRoomDtoNew(
-      {required String id, required String name});
-
-  RoomDto crateApiDtoRunnerRoomDtoWithSource(
-      {required String id,
-      required String name,
-      required RoomSourceDto source});
-
-  RunnerStateDto crateApiDtoRunnerRunnerStateDtoDefault();
 }
 
 class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
@@ -1210,82 +1200,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         argNames: ["apiValue"],
       );
 
-  @override
-  RoomDto crateApiDtoRunnerRoomDtoNew(
-      {required String id, required String name}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_String(id);
-        var arg1 = cst_encode_String(name);
-        return wire.wire__crate__api__dto__runner__room_dto_new(arg0, arg1);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_room_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiDtoRunnerRoomDtoNewConstMeta,
-      argValues: [id, name],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiDtoRunnerRoomDtoNewConstMeta =>
-      const TaskConstMeta(
-        debugName: "room_dto_new",
-        argNames: ["id", "name"],
-      );
-
-  @override
-  RoomDto crateApiDtoRunnerRoomDtoWithSource(
-      {required String id,
-      required String name,
-      required RoomSourceDto source}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_String(id);
-        var arg1 = cst_encode_String(name);
-        var arg2 = cst_encode_room_source_dto(source);
-        return wire.wire__crate__api__dto__runner__room_dto_with_source(
-            arg0, arg1, arg2);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_room_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiDtoRunnerRoomDtoWithSourceConstMeta,
-      argValues: [id, name, source],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiDtoRunnerRoomDtoWithSourceConstMeta =>
-      const TaskConstMeta(
-        debugName: "room_dto_with_source",
-        argNames: ["id", "name", "source"],
-      );
-
-  @override
-  RunnerStateDto crateApiDtoRunnerRunnerStateDtoDefault() {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        return wire.wire__crate__api__dto__runner__runner_state_dto_default();
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_runner_state_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiDtoRunnerRunnerStateDtoDefaultConstMeta,
-      argValues: [],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiDtoRunnerRunnerStateDtoDefaultConstMeta =>
-      const TaskConstMeta(
-        debugName: "runner_state_dto_default",
-        argNames: [],
-      );
-
   @protected
   String dco_decode_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
@@ -1346,12 +1260,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_hue_button_event_type_dto(raw);
-  }
-
-  @protected
-  int dco_decode_box_autoadd_i_32(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw as int;
   }
 
   @protected
@@ -1473,27 +1381,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  LightCommandDto dco_decode_light_command_dto(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
-    return LightCommandDto(
-      deviceId: dco_decode_String(arr[0]),
-      roomId: dco_decode_String(arr[1]),
-      commandType: dco_decode_light_command_type(arr[2]),
-      brightness: dco_decode_opt_box_autoadd_i_32(arr[3]),
-      kelvin: dco_decode_opt_box_autoadd_i_32(arr[4]),
-    );
-  }
-
-  @protected
-  LightCommandType dco_decode_light_command_type(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return LightCommandType.values[raw as int];
-  }
-
-  @protected
   LightingValuesDto dco_decode_lighting_values_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -1523,12 +1410,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  List<LightCommandDto> dco_decode_list_light_command_dto(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return (raw as List<dynamic>).map(dco_decode_light_command_dto).toList();
-  }
-
-  @protected
   Float64List dco_decode_list_prim_f_64_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Float64List;
@@ -1547,12 +1428,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  List<RoomDto> dco_decode_list_room_dto(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return (raw as List<dynamic>).map(dco_decode_room_dto).toList();
-  }
-
-  @protected
   List<StepPointDto> dco_decode_list_step_point_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_step_point_dto).toList();
@@ -1562,12 +1437,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   String? dco_decode_opt_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_String(raw);
-  }
-
-  @protected
-  CurveConfigDto? dco_decode_opt_box_autoadd_curve_config_dto(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw == null ? null : dco_decode_box_autoadd_curve_config_dto(raw);
   }
 
   @protected
@@ -1583,12 +1452,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     return raw == null
         ? null
         : dco_decode_box_autoadd_hue_button_event_type_dto(raw);
-  }
-
-  @protected
-  int? dco_decode_opt_box_autoadd_i_32(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw == null ? null : dco_decode_box_autoadd_i_32(raw);
   }
 
   @protected
@@ -1620,56 +1483,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   RhythmActionDto dco_decode_rhythm_action_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return RhythmActionDto.values[raw as int];
-  }
-
-  @protected
-  RoomDto dco_decode_room_dto(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 10)
-      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
-    return RoomDto.raw(
-      id: dco_decode_String(arr[0]),
-      name: dco_decode_String(arr[1]),
-      source: dco_decode_room_source_dto(arr[2]),
-      deviceIds: dco_decode_list_String(arr[3]),
-      rhythmEnabled: dco_decode_bool(arr[4]),
-      disabled: dco_decode_bool(arr[5]),
-      lightsOn: dco_decode_bool(arr[6]),
-      timeOffsetMinutes: dco_decode_f_64(arr[7]),
-      brightnessOffset: dco_decode_f_64(arr[8]),
-      curveConfig: dco_decode_opt_box_autoadd_curve_config_dto(arr[9]),
-    );
-  }
-
-  @protected
-  RoomSourceDto dco_decode_room_source_dto(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return RoomSourceDto.values[raw as int];
-  }
-
-  @protected
-  RunnerActionResultDto dco_decode_runner_action_result_dto(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
-    return RunnerActionResultDto(
-      state: dco_decode_runner_state_dto(arr[0]),
-      commands: dco_decode_list_light_command_dto(arr[1]),
-      stateChanged: dco_decode_bool(arr[2]),
-    );
-  }
-
-  @protected
-  RunnerStateDto dco_decode_runner_state_dto(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 1)
-      throw Exception('unexpected arr length: expect 1 but see ${arr.length}');
-    return RunnerStateDto(
-      rooms: dco_decode_list_room_dto(arr[0]),
-    );
   }
 
   @protected
@@ -1840,12 +1653,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  int sse_decode_box_autoadd_i_32(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return (sse_decode_i_32(deserializer));
-  }
-
-  @protected
   RhythmActionDto sse_decode_box_autoadd_rhythm_action_dto(
       SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -1971,29 +1778,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  LightCommandDto sse_decode_light_command_dto(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_deviceId = sse_decode_String(deserializer);
-    var var_roomId = sse_decode_String(deserializer);
-    var var_commandType = sse_decode_light_command_type(deserializer);
-    var var_brightness = sse_decode_opt_box_autoadd_i_32(deserializer);
-    var var_kelvin = sse_decode_opt_box_autoadd_i_32(deserializer);
-    return LightCommandDto(
-        deviceId: var_deviceId,
-        roomId: var_roomId,
-        commandType: var_commandType,
-        brightness: var_brightness,
-        kelvin: var_kelvin);
-  }
-
-  @protected
-  LightCommandType sse_decode_light_command_type(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var inner = sse_decode_i_32(deserializer);
-    return LightCommandType.values[inner];
-  }
-
-  @protected
   LightingValuesDto sse_decode_lighting_values_dto(
       SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -2040,19 +1824,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  List<LightCommandDto> sse_decode_list_light_command_dto(
-      SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    var len_ = sse_decode_i_32(deserializer);
-    var ans_ = <LightCommandDto>[];
-    for (var idx_ = 0; idx_ < len_; ++idx_) {
-      ans_.add(sse_decode_light_command_dto(deserializer));
-    }
-    return ans_;
-  }
-
-  @protected
   Float64List sse_decode_list_prim_f_64_strict(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
@@ -2071,18 +1842,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
     return deserializer.buffer.getUint8List(len_);
-  }
-
-  @protected
-  List<RoomDto> sse_decode_list_room_dto(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    var len_ = sse_decode_i_32(deserializer);
-    var ans_ = <RoomDto>[];
-    for (var idx_ = 0; idx_ < len_; ++idx_) {
-      ans_.add(sse_decode_room_dto(deserializer));
-    }
-    return ans_;
   }
 
   @protected
@@ -2110,18 +1869,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  CurveConfigDto? sse_decode_opt_box_autoadd_curve_config_dto(
-      SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    if (sse_decode_bool(deserializer)) {
-      return (sse_decode_box_autoadd_curve_config_dto(deserializer));
-    } else {
-      return null;
-    }
-  }
-
-  @protected
   double? sse_decode_opt_box_autoadd_f_64(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -2139,17 +1886,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_hue_button_event_type_dto(deserializer));
-    } else {
-      return null;
-    }
-  }
-
-  @protected
-  int? sse_decode_opt_box_autoadd_i_32(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    if (sse_decode_bool(deserializer)) {
-      return (sse_decode_box_autoadd_i_32(deserializer));
     } else {
       return null;
     }
@@ -2193,60 +1929,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_i_32(deserializer);
     return RhythmActionDto.values[inner];
-  }
-
-  @protected
-  RoomDto sse_decode_room_dto(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_id = sse_decode_String(deserializer);
-    var var_name = sse_decode_String(deserializer);
-    var var_source = sse_decode_room_source_dto(deserializer);
-    var var_deviceIds = sse_decode_list_String(deserializer);
-    var var_rhythmEnabled = sse_decode_bool(deserializer);
-    var var_disabled = sse_decode_bool(deserializer);
-    var var_lightsOn = sse_decode_bool(deserializer);
-    var var_timeOffsetMinutes = sse_decode_f_64(deserializer);
-    var var_brightnessOffset = sse_decode_f_64(deserializer);
-    var var_curveConfig =
-        sse_decode_opt_box_autoadd_curve_config_dto(deserializer);
-    return RoomDto.raw(
-        id: var_id,
-        name: var_name,
-        source: var_source,
-        deviceIds: var_deviceIds,
-        rhythmEnabled: var_rhythmEnabled,
-        disabled: var_disabled,
-        lightsOn: var_lightsOn,
-        timeOffsetMinutes: var_timeOffsetMinutes,
-        brightnessOffset: var_brightnessOffset,
-        curveConfig: var_curveConfig);
-  }
-
-  @protected
-  RoomSourceDto sse_decode_room_source_dto(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var inner = sse_decode_i_32(deserializer);
-    return RoomSourceDto.values[inner];
-  }
-
-  @protected
-  RunnerActionResultDto sse_decode_runner_action_result_dto(
-      SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_state = sse_decode_runner_state_dto(deserializer);
-    var var_commands = sse_decode_list_light_command_dto(deserializer);
-    var var_stateChanged = sse_decode_bool(deserializer);
-    return RunnerActionResultDto(
-        state: var_state,
-        commands: var_commands,
-        stateChanged: var_stateChanged);
-  }
-
-  @protected
-  RunnerStateDto sse_decode_runner_state_dto(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_rooms = sse_decode_list_room_dto(deserializer);
-    return RunnerStateDto(rooms: var_rooms);
   }
 
   @protected
@@ -2371,19 +2053,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  int cst_encode_light_command_type(LightCommandType raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return cst_encode_i_32(raw.index);
-  }
-
-  @protected
   int cst_encode_rhythm_action_dto(RhythmActionDto raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return cst_encode_i_32(raw.index);
-  }
-
-  @protected
-  int cst_encode_room_source_dto(RoomSourceDto raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return cst_encode_i_32(raw.index);
   }
@@ -2453,12 +2123,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       HueButtonEventTypeDto self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_hue_button_event_type_dto(self, serializer);
-  }
-
-  @protected
-  void sse_encode_box_autoadd_i_32(int self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_i_32(self, serializer);
   }
 
   @protected
@@ -2556,24 +2220,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_light_command_dto(
-      LightCommandDto self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_String(self.deviceId, serializer);
-    sse_encode_String(self.roomId, serializer);
-    sse_encode_light_command_type(self.commandType, serializer);
-    sse_encode_opt_box_autoadd_i_32(self.brightness, serializer);
-    sse_encode_opt_box_autoadd_i_32(self.kelvin, serializer);
-  }
-
-  @protected
-  void sse_encode_light_command_type(
-      LightCommandType self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_i_32(self.index, serializer);
-  }
-
-  @protected
   void sse_encode_lighting_values_dto(
       LightingValuesDto self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -2606,16 +2252,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_list_light_command_dto(
-      List<LightCommandDto> self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_i_32(self.length, serializer);
-    for (final item in self) {
-      sse_encode_light_command_dto(item, serializer);
-    }
-  }
-
-  @protected
   void sse_encode_list_prim_f_64_strict(
       Float64List self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -2640,15 +2276,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_list_room_dto(List<RoomDto> self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_i_32(self.length, serializer);
-    for (final item in self) {
-      sse_encode_room_dto(item, serializer);
-    }
-  }
-
-  @protected
   void sse_encode_list_step_point_dto(
       List<StepPointDto> self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -2665,17 +2292,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_String(self, serializer);
-    }
-  }
-
-  @protected
-  void sse_encode_opt_box_autoadd_curve_config_dto(
-      CurveConfigDto? self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    sse_encode_bool(self != null, serializer);
-    if (self != null) {
-      sse_encode_box_autoadd_curve_config_dto(self, serializer);
     }
   }
 
@@ -2697,16 +2313,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_hue_button_event_type_dto(self, serializer);
-    }
-  }
-
-  @protected
-  void sse_encode_opt_box_autoadd_i_32(int? self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    sse_encode_bool(self != null, serializer);
-    if (self != null) {
-      sse_encode_box_autoadd_i_32(self, serializer);
     }
   }
 
@@ -2745,44 +2351,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       RhythmActionDto self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.index, serializer);
-  }
-
-  @protected
-  void sse_encode_room_dto(RoomDto self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_String(self.id, serializer);
-    sse_encode_String(self.name, serializer);
-    sse_encode_room_source_dto(self.source, serializer);
-    sse_encode_list_String(self.deviceIds, serializer);
-    sse_encode_bool(self.rhythmEnabled, serializer);
-    sse_encode_bool(self.disabled, serializer);
-    sse_encode_bool(self.lightsOn, serializer);
-    sse_encode_f_64(self.timeOffsetMinutes, serializer);
-    sse_encode_f_64(self.brightnessOffset, serializer);
-    sse_encode_opt_box_autoadd_curve_config_dto(self.curveConfig, serializer);
-  }
-
-  @protected
-  void sse_encode_room_source_dto(
-      RoomSourceDto self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_i_32(self.index, serializer);
-  }
-
-  @protected
-  void sse_encode_runner_action_result_dto(
-      RunnerActionResultDto self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_runner_state_dto(self.state, serializer);
-    sse_encode_list_light_command_dto(self.commands, serializer);
-    sse_encode_bool(self.stateChanged, serializer);
-  }
-
-  @protected
-  void sse_encode_runner_state_dto(
-      RunnerStateDto self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_list_room_dto(self.rooms, serializer);
   }
 
   @protected

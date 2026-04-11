@@ -558,7 +558,7 @@ class ServerSyncProvider extends ChangeNotifier {
       final source = entry.key;
       final rooms = <RoomDto>[];
       for (final sr in entry.value) {
-        rooms.add(RoomDto.raw(
+        rooms.add(RoomDto(
           id: sr.id,
           name: sr.name,
           source: source,

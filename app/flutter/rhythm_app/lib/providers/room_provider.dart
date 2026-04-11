@@ -41,7 +41,7 @@ RunnerStateDto replaceRoomsPreservingUserState(
   for (final room in freshRooms) {
     final prev = existingById[room.id];
     final toAdd = prev != null
-        ? RoomDto.raw(
+        ? RoomDto(
             id: room.id,
             name: room.name,
             source: room.source,

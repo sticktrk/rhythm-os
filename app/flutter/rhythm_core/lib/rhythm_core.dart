@@ -19,7 +19,7 @@ export 'src/rust/api/hue.dart';
 export 'src/rust/api/dto/color.dart';
 export 'src/rust/api/dto/curve.dart';
 export 'src/rust/api/dto/hue.dart';
-export 'src/rust/api/dto/runner.dart';
+export 'src/rust/api/dto/runner.dart' show RhythmActionDto;
 export 'src/rust/api/dto/solar.dart';
 
 // Models
@@ -46,6 +46,7 @@ export 'providers/hue_provider.dart';
 export 'providers/hub_discovery.dart';
 
 // Runner
+export 'runner/runner_models.dart';
 export 'runner/provider_manager.dart';
 export 'runner/room_state_store.dart';
 export 'runner/rhythm_runner.dart';

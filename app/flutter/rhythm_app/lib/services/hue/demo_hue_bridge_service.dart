@@ -34,7 +34,7 @@ class DemoHueBridgeService implements HueBridgeService {
 
   /// Mock rooms simulating a typical Hue setup.
   static const _mockRooms = [
-    RoomDto.raw(
+    RoomDto(
       id: 'hue_demo_1',
       name: 'Living Room',
       source: RoomSourceDto.hue,
@@ -46,7 +46,7 @@ class DemoHueBridgeService implements HueBridgeService {
       brightnessOffset: 0.0,
       curveConfig: null,
     ),
-    RoomDto.raw(
+    RoomDto(
       id: 'hue_demo_2',
       name: 'Bedroom',
       source: RoomSourceDto.hue,
@@ -58,7 +58,7 @@ class DemoHueBridgeService implements HueBridgeService {
       brightnessOffset: 0.0,
       curveConfig: null,
     ),
-    RoomDto.raw(
+    RoomDto(
       id: 'hue_demo_3',
       name: 'Kitchen',
       source: RoomSourceDto.hue,
@@ -70,7 +70,7 @@ class DemoHueBridgeService implements HueBridgeService {
       brightnessOffset: 0.0,
       curveConfig: null,
     ),
-    RoomDto.raw(
+    RoomDto(
       id: 'hue_demo_4',
       name: 'Office',
       source: RoomSourceDto.hue,

@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueNom,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1692632949;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1385676109;
 
 // Section: executor
 
@@ -867,68 +867,6 @@ fn wire__crate__api__hue__parse_hue_button_event_type_impl(
         },
     )
 }
-fn wire__crate__api__dto__runner__room_dto_new_impl(
-    id: impl CstDecode<String>,
-    name: impl CstDecode<String>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "room_dto_new",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_id = id.cst_decode();
-            let api_name = name.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok =
-                    Result::<_, ()>::Ok(crate::api::dto::runner::RoomDto::new(api_id, api_name))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__dto__runner__room_dto_with_source_impl(
-    id: impl CstDecode<String>,
-    name: impl CstDecode<String>,
-    source: impl CstDecode<crate::api::dto::runner::RoomSourceDto>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "room_dto_with_source",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_id = id.cst_decode();
-            let api_name = name.cst_decode();
-            let api_source = source.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok = Result::<_, ()>::Ok(
-                    crate::api::dto::runner::RoomDto::with_source(api_id, api_name, api_source),
-                )?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__dto__runner__runner_state_dto_default_impl(
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "runner_state_dto_default",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok =
-                    Result::<_, ()>::Ok(crate::api::dto::runner::RunnerStateDto::default())?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
 
 // Section: dart2rust
 
@@ -963,16 +901,6 @@ impl CstDecode<i32> for i32 {
         self
     }
 }
-impl CstDecode<crate::api::dto::runner::LightCommandType> for i32 {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    fn cst_decode(self) -> crate::api::dto::runner::LightCommandType {
-        match self {
-            0 => crate::api::dto::runner::LightCommandType::TurnOn,
-            1 => crate::api::dto::runner::LightCommandType::TurnOff,
-            _ => unreachable!("Invalid variant for LightCommandType: {}", self),
-        }
-    }
-}
 impl CstDecode<crate::api::dto::runner::RhythmActionDto> for i32 {
     // Codec=Cst (C-struct based), see doc to use other codecs
     fn cst_decode(self) -> crate::api::dto::runner::RhythmActionDto {
@@ -987,18 +915,6 @@ impl CstDecode<crate::api::dto::runner::RhythmActionDto> for i32 {
             7 => crate::api::dto::runner::RhythmActionDto::DimUp,
             8 => crate::api::dto::runner::RhythmActionDto::DimDown,
             _ => unreachable!("Invalid variant for RhythmActionDto: {}", self),
-        }
-    }
-}
-impl CstDecode<crate::api::dto::runner::RoomSourceDto> for i32 {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    fn cst_decode(self) -> crate::api::dto::runner::RoomSourceDto {
-        match self {
-            0 => crate::api::dto::runner::RoomSourceDto::Unknown,
-            1 => crate::api::dto::runner::RoomSourceDto::Hue,
-            2 => crate::api::dto::runner::RoomSourceDto::HomeAssistant,
-            3 => crate::api::dto::runner::RoomSourceDto::Esp32,
-            _ => unreachable!("Invalid variant for RoomSourceDto: {}", self),
         }
     }
 }
@@ -1182,37 +1098,6 @@ impl SseDecode for i32 {
     }
 }
 
-impl SseDecode for crate::api::dto::runner::LightCommandDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_deviceId = <String>::sse_decode(deserializer);
-        let mut var_roomId = <String>::sse_decode(deserializer);
-        let mut var_commandType =
-            <crate::api::dto::runner::LightCommandType>::sse_decode(deserializer);
-        let mut var_brightness = <Option<i32>>::sse_decode(deserializer);
-        let mut var_kelvin = <Option<i32>>::sse_decode(deserializer);
-        return crate::api::dto::runner::LightCommandDto {
-            device_id: var_deviceId,
-            room_id: var_roomId,
-            command_type: var_commandType,
-            brightness: var_brightness,
-            kelvin: var_kelvin,
-        };
-    }
-}
-
-impl SseDecode for crate::api::dto::runner::LightCommandType {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut inner = <i32>::sse_decode(deserializer);
-        return match inner {
-            0 => crate::api::dto::runner::LightCommandType::TurnOn,
-            1 => crate::api::dto::runner::LightCommandType::TurnOff,
-            _ => unreachable!("Invalid variant for LightCommandType: {}", inner),
-        };
-    }
-}
-
 impl SseDecode for crate::api::dto::curve::LightingValuesDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1261,20 +1146,6 @@ impl SseDecode for Vec<crate::api::dto::hue_registry::BehaviorMappingDto> {
     }
 }
 
-impl SseDecode for Vec<crate::api::dto::runner::LightCommandDto> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut len_ = <i32>::sse_decode(deserializer);
-        let mut ans_ = vec![];
-        for idx_ in 0..len_ {
-            ans_.push(<crate::api::dto::runner::LightCommandDto>::sse_decode(
-                deserializer,
-            ));
-        }
-        return ans_;
-    }
-}
-
 impl SseDecode for Vec<f64> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1311,18 +1182,6 @@ impl SseDecode for Vec<u8> {
     }
 }
 
-impl SseDecode for Vec<crate::api::dto::runner::RoomDto> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut len_ = <i32>::sse_decode(deserializer);
-        let mut ans_ = vec![];
-        for idx_ in 0..len_ {
-            ans_.push(<crate::api::dto::runner::RoomDto>::sse_decode(deserializer));
-        }
-        return ans_;
-    }
-}
-
 impl SseDecode for Vec<crate::api::dto::curve::StepPointDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1348,19 +1207,6 @@ impl SseDecode for Option<String> {
     }
 }
 
-impl SseDecode for Option<crate::api::dto::curve::CurveConfigDto> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        if (<bool>::sse_decode(deserializer)) {
-            return Some(<crate::api::dto::curve::CurveConfigDto>::sse_decode(
-                deserializer,
-            ));
-        } else {
-            return None;
-        }
-    }
-}
-
 impl SseDecode for Option<f64> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1379,17 +1225,6 @@ impl SseDecode for Option<crate::api::dto::hue::HueButtonEventTypeDto> {
             return Some(<crate::api::dto::hue::HueButtonEventTypeDto>::sse_decode(
                 deserializer,
             ));
-        } else {
-            return None;
-        }
-    }
-}
-
-impl SseDecode for Option<i32> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        if (<bool>::sse_decode(deserializer)) {
-            return Some(<i32>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -1452,72 +1287,6 @@ impl SseDecode for crate::api::dto::runner::RhythmActionDto {
             8 => crate::api::dto::runner::RhythmActionDto::DimDown,
             _ => unreachable!("Invalid variant for RhythmActionDto: {}", inner),
         };
-    }
-}
-
-impl SseDecode for crate::api::dto::runner::RoomDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_id = <String>::sse_decode(deserializer);
-        let mut var_name = <String>::sse_decode(deserializer);
-        let mut var_source = <crate::api::dto::runner::RoomSourceDto>::sse_decode(deserializer);
-        let mut var_deviceIds = <Vec<String>>::sse_decode(deserializer);
-        let mut var_rhythmEnabled = <bool>::sse_decode(deserializer);
-        let mut var_disabled = <bool>::sse_decode(deserializer);
-        let mut var_lightsOn = <bool>::sse_decode(deserializer);
-        let mut var_timeOffsetMinutes = <f64>::sse_decode(deserializer);
-        let mut var_brightnessOffset = <f64>::sse_decode(deserializer);
-        let mut var_curveConfig =
-            <Option<crate::api::dto::curve::CurveConfigDto>>::sse_decode(deserializer);
-        return crate::api::dto::runner::RoomDto {
-            id: var_id,
-            name: var_name,
-            source: var_source,
-            device_ids: var_deviceIds,
-            rhythm_enabled: var_rhythmEnabled,
-            disabled: var_disabled,
-            lights_on: var_lightsOn,
-            time_offset_minutes: var_timeOffsetMinutes,
-            brightness_offset: var_brightnessOffset,
-            curve_config: var_curveConfig,
-        };
-    }
-}
-
-impl SseDecode for crate::api::dto::runner::RoomSourceDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut inner = <i32>::sse_decode(deserializer);
-        return match inner {
-            0 => crate::api::dto::runner::RoomSourceDto::Unknown,
-            1 => crate::api::dto::runner::RoomSourceDto::Hue,
-            2 => crate::api::dto::runner::RoomSourceDto::HomeAssistant,
-            3 => crate::api::dto::runner::RoomSourceDto::Esp32,
-            _ => unreachable!("Invalid variant for RoomSourceDto: {}", inner),
-        };
-    }
-}
-
-impl SseDecode for crate::api::dto::runner::RunnerActionResultDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_state = <crate::api::dto::runner::RunnerStateDto>::sse_decode(deserializer);
-        let mut var_commands =
-            <Vec<crate::api::dto::runner::LightCommandDto>>::sse_decode(deserializer);
-        let mut var_stateChanged = <bool>::sse_decode(deserializer);
-        return crate::api::dto::runner::RunnerActionResultDto {
-            state: var_state,
-            commands: var_commands,
-            state_changed: var_stateChanged,
-        };
-    }
-}
-
-impl SseDecode for crate::api::dto::runner::RunnerStateDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_rooms = <Vec<crate::api::dto::runner::RoomDto>>::sse_decode(deserializer);
-        return crate::api::dto::runner::RunnerStateDto { rooms: var_rooms };
     }
 }
 
@@ -1875,51 +1644,6 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::dto::hue_registry::HueSwitchD
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::dto::runner::LightCommandDto {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.device_id.into_into_dart().into_dart(),
-            self.room_id.into_into_dart().into_dart(),
-            self.command_type.into_into_dart().into_dart(),
-            self.brightness.into_into_dart().into_dart(),
-            self.kelvin.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for crate::api::dto::runner::LightCommandDto
-{
-}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::dto::runner::LightCommandDto>
-    for crate::api::dto::runner::LightCommandDto
-{
-    fn into_into_dart(self) -> crate::api::dto::runner::LightCommandDto {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::dto::runner::LightCommandType {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        match self {
-            Self::TurnOn => 0.into_dart(),
-            Self::TurnOff => 1.into_dart(),
-            _ => unreachable!(),
-        }
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for crate::api::dto::runner::LightCommandType
-{
-}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::dto::runner::LightCommandType>
-    for crate::api::dto::runner::LightCommandType
-{
-    fn into_into_dart(self) -> crate::api::dto::runner::LightCommandType {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::dto::curve::LightingValuesDto {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -1992,97 +1716,6 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::dto::runner::RhythmActionDto>
     for crate::api::dto::runner::RhythmActionDto
 {
     fn into_into_dart(self) -> crate::api::dto::runner::RhythmActionDto {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::dto::runner::RoomDto {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.id.into_into_dart().into_dart(),
-            self.name.into_into_dart().into_dart(),
-            self.source.into_into_dart().into_dart(),
-            self.device_ids.into_into_dart().into_dart(),
-            self.rhythm_enabled.into_into_dart().into_dart(),
-            self.disabled.into_into_dart().into_dart(),
-            self.lights_on.into_into_dart().into_dart(),
-            self.time_offset_minutes.into_into_dart().into_dart(),
-            self.brightness_offset.into_into_dart().into_dart(),
-            self.curve_config.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for crate::api::dto::runner::RoomDto
-{
-}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::dto::runner::RoomDto>
-    for crate::api::dto::runner::RoomDto
-{
-    fn into_into_dart(self) -> crate::api::dto::runner::RoomDto {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::dto::runner::RoomSourceDto {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        match self {
-            Self::Unknown => 0.into_dart(),
-            Self::Hue => 1.into_dart(),
-            Self::HomeAssistant => 2.into_dart(),
-            Self::Esp32 => 3.into_dart(),
-            _ => unreachable!(),
-        }
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for crate::api::dto::runner::RoomSourceDto
-{
-}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::dto::runner::RoomSourceDto>
-    for crate::api::dto::runner::RoomSourceDto
-{
-    fn into_into_dart(self) -> crate::api::dto::runner::RoomSourceDto {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::dto::runner::RunnerActionResultDto {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.state.into_into_dart().into_dart(),
-            self.commands.into_into_dart().into_dart(),
-            self.state_changed.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for crate::api::dto::runner::RunnerActionResultDto
-{
-}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::dto::runner::RunnerActionResultDto>
-    for crate::api::dto::runner::RunnerActionResultDto
-{
-    fn into_into_dart(self) -> crate::api::dto::runner::RunnerActionResultDto {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::dto::runner::RunnerStateDto {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [self.rooms.into_into_dart().into_dart()].into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for crate::api::dto::runner::RunnerStateDto
-{
-}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::dto::runner::RunnerStateDto>
-    for crate::api::dto::runner::RunnerStateDto
-{
-    fn into_into_dart(self) -> crate::api::dto::runner::RunnerStateDto {
         self
     }
 }
@@ -2375,33 +2008,6 @@ impl SseEncode for i32 {
     }
 }
 
-impl SseEncode for crate::api::dto::runner::LightCommandDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <String>::sse_encode(self.device_id, serializer);
-        <String>::sse_encode(self.room_id, serializer);
-        <crate::api::dto::runner::LightCommandType>::sse_encode(self.command_type, serializer);
-        <Option<i32>>::sse_encode(self.brightness, serializer);
-        <Option<i32>>::sse_encode(self.kelvin, serializer);
-    }
-}
-
-impl SseEncode for crate::api::dto::runner::LightCommandType {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(
-            match self {
-                crate::api::dto::runner::LightCommandType::TurnOn => 0,
-                crate::api::dto::runner::LightCommandType::TurnOff => 1,
-                _ => {
-                    unimplemented!("");
-                }
-            },
-            serializer,
-        );
-    }
-}
-
 impl SseEncode for crate::api::dto::curve::LightingValuesDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -2431,16 +2037,6 @@ impl SseEncode for Vec<crate::api::dto::hue_registry::BehaviorMappingDto> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::dto::hue_registry::BehaviorMappingDto>::sse_encode(item, serializer);
-        }
-    }
-}
-
-impl SseEncode for Vec<crate::api::dto::runner::LightCommandDto> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(self.len() as _, serializer);
-        for item in self {
-            <crate::api::dto::runner::LightCommandDto>::sse_encode(item, serializer);
         }
     }
 }
@@ -2475,16 +2071,6 @@ impl SseEncode for Vec<u8> {
     }
 }
 
-impl SseEncode for Vec<crate::api::dto::runner::RoomDto> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(self.len() as _, serializer);
-        for item in self {
-            <crate::api::dto::runner::RoomDto>::sse_encode(item, serializer);
-        }
-    }
-}
-
 impl SseEncode for Vec<crate::api::dto::curve::StepPointDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -2505,16 +2091,6 @@ impl SseEncode for Option<String> {
     }
 }
 
-impl SseEncode for Option<crate::api::dto::curve::CurveConfigDto> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <bool>::sse_encode(self.is_some(), serializer);
-        if let Some(value) = self {
-            <crate::api::dto::curve::CurveConfigDto>::sse_encode(value, serializer);
-        }
-    }
-}
-
 impl SseEncode for Option<f64> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -2531,16 +2107,6 @@ impl SseEncode for Option<crate::api::dto::hue::HueButtonEventTypeDto> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::dto::hue::HueButtonEventTypeDto>::sse_encode(value, serializer);
-        }
-    }
-}
-
-impl SseEncode for Option<i32> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <bool>::sse_encode(self.is_some(), serializer);
-        if let Some(value) = self {
-            <i32>::sse_encode(value, serializer);
         }
     }
 }
@@ -2594,56 +2160,6 @@ impl SseEncode for crate::api::dto::runner::RhythmActionDto {
             },
             serializer,
         );
-    }
-}
-
-impl SseEncode for crate::api::dto::runner::RoomDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <String>::sse_encode(self.id, serializer);
-        <String>::sse_encode(self.name, serializer);
-        <crate::api::dto::runner::RoomSourceDto>::sse_encode(self.source, serializer);
-        <Vec<String>>::sse_encode(self.device_ids, serializer);
-        <bool>::sse_encode(self.rhythm_enabled, serializer);
-        <bool>::sse_encode(self.disabled, serializer);
-        <bool>::sse_encode(self.lights_on, serializer);
-        <f64>::sse_encode(self.time_offset_minutes, serializer);
-        <f64>::sse_encode(self.brightness_offset, serializer);
-        <Option<crate::api::dto::curve::CurveConfigDto>>::sse_encode(self.curve_config, serializer);
-    }
-}
-
-impl SseEncode for crate::api::dto::runner::RoomSourceDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(
-            match self {
-                crate::api::dto::runner::RoomSourceDto::Unknown => 0,
-                crate::api::dto::runner::RoomSourceDto::Hue => 1,
-                crate::api::dto::runner::RoomSourceDto::HomeAssistant => 2,
-                crate::api::dto::runner::RoomSourceDto::Esp32 => 3,
-                _ => {
-                    unimplemented!("");
-                }
-            },
-            serializer,
-        );
-    }
-}
-
-impl SseEncode for crate::api::dto::runner::RunnerActionResultDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <crate::api::dto::runner::RunnerStateDto>::sse_encode(self.state, serializer);
-        <Vec<crate::api::dto::runner::LightCommandDto>>::sse_encode(self.commands, serializer);
-        <bool>::sse_encode(self.state_changed, serializer);
-    }
-}
-
-impl SseEncode for crate::api::dto::runner::RunnerStateDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <Vec<crate::api::dto::runner::RoomDto>>::sse_encode(self.rooms, serializer);
     }
 }
 
@@ -2805,12 +2321,6 @@ mod io {
             CstDecode::<crate::api::dto::hue::HueButtonEventTypeDto>::cst_decode(*wrap).into()
         }
     }
-    impl CstDecode<i32> for *mut i32 {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> i32 {
-            unsafe { *flutter_rust_bridge::for_generated::box_from_leak_ptr(self) }
-        }
-    }
     impl CstDecode<crate::api::dto::runner::RhythmActionDto> for *mut i32 {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> crate::api::dto::runner::RhythmActionDto {
@@ -2899,18 +2409,6 @@ mod io {
             }
         }
     }
-    impl CstDecode<crate::api::dto::runner::LightCommandDto> for wire_cst_light_command_dto {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::dto::runner::LightCommandDto {
-            crate::api::dto::runner::LightCommandDto {
-                device_id: self.device_id.cst_decode(),
-                room_id: self.room_id.cst_decode(),
-                command_type: self.command_type.cst_decode(),
-                brightness: self.brightness.cst_decode(),
-                kelvin: self.kelvin.cst_decode(),
-            }
-        }
-    }
     impl CstDecode<crate::api::dto::curve::LightingValuesDto> for wire_cst_lighting_values_dto {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> crate::api::dto::curve::LightingValuesDto {
@@ -2947,18 +2445,6 @@ mod io {
             vec.into_iter().map(CstDecode::cst_decode).collect()
         }
     }
-    impl CstDecode<Vec<crate::api::dto::runner::LightCommandDto>>
-        for *mut wire_cst_list_light_command_dto
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> Vec<crate::api::dto::runner::LightCommandDto> {
-            let vec = unsafe {
-                let wrap = flutter_rust_bridge::for_generated::box_from_leak_ptr(self);
-                flutter_rust_bridge::for_generated::vec_from_leak_ptr(wrap.ptr, wrap.len)
-            };
-            vec.into_iter().map(CstDecode::cst_decode).collect()
-        }
-    }
     impl CstDecode<Vec<f64>> for *mut wire_cst_list_prim_f_64_strict {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> Vec<f64> {
@@ -2986,16 +2472,6 @@ mod io {
             }
         }
     }
-    impl CstDecode<Vec<crate::api::dto::runner::RoomDto>> for *mut wire_cst_list_room_dto {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> Vec<crate::api::dto::runner::RoomDto> {
-            let vec = unsafe {
-                let wrap = flutter_rust_bridge::for_generated::box_from_leak_ptr(self);
-                flutter_rust_bridge::for_generated::vec_from_leak_ptr(wrap.ptr, wrap.len)
-            };
-            vec.into_iter().map(CstDecode::cst_decode).collect()
-        }
-    }
     impl CstDecode<Vec<crate::api::dto::curve::StepPointDto>> for *mut wire_cst_list_step_point_dto {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> Vec<crate::api::dto::curve::StepPointDto> {
@@ -3013,43 +2489,6 @@ mod io {
                 r: self.r.cst_decode(),
                 g: self.g.cst_decode(),
                 b: self.b.cst_decode(),
-            }
-        }
-    }
-    impl CstDecode<crate::api::dto::runner::RoomDto> for wire_cst_room_dto {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::dto::runner::RoomDto {
-            crate::api::dto::runner::RoomDto {
-                id: self.id.cst_decode(),
-                name: self.name.cst_decode(),
-                source: self.source.cst_decode(),
-                device_ids: self.device_ids.cst_decode(),
-                rhythm_enabled: self.rhythm_enabled.cst_decode(),
-                disabled: self.disabled.cst_decode(),
-                lights_on: self.lights_on.cst_decode(),
-                time_offset_minutes: self.time_offset_minutes.cst_decode(),
-                brightness_offset: self.brightness_offset.cst_decode(),
-                curve_config: self.curve_config.cst_decode(),
-            }
-        }
-    }
-    impl CstDecode<crate::api::dto::runner::RunnerActionResultDto>
-        for wire_cst_runner_action_result_dto
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::dto::runner::RunnerActionResultDto {
-            crate::api::dto::runner::RunnerActionResultDto {
-                state: self.state.cst_decode(),
-                commands: self.commands.cst_decode(),
-                state_changed: self.state_changed.cst_decode(),
-            }
-        }
-    }
-    impl CstDecode<crate::api::dto::runner::RunnerStateDto> for wire_cst_runner_state_dto {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::dto::runner::RunnerStateDto {
-            crate::api::dto::runner::RunnerStateDto {
-                rooms: self.rooms.cst_decode(),
             }
         }
     }
@@ -3247,22 +2686,6 @@ mod io {
             Self::new_with_null_ptr()
         }
     }
-    impl NewWithNullPtr for wire_cst_light_command_dto {
-        fn new_with_null_ptr() -> Self {
-            Self {
-                device_id: core::ptr::null_mut(),
-                room_id: core::ptr::null_mut(),
-                command_type: Default::default(),
-                brightness: core::ptr::null_mut(),
-                kelvin: core::ptr::null_mut(),
-            }
-        }
-    }
-    impl Default for wire_cst_light_command_dto {
-        fn default() -> Self {
-            Self::new_with_null_ptr()
-        }
-    }
     impl NewWithNullPtr for wire_cst_lighting_values_dto {
         fn new_with_null_ptr() -> Self {
             Self {
@@ -3291,53 +2714,6 @@ mod io {
         }
     }
     impl Default for wire_cst_rgb_dto {
-        fn default() -> Self {
-            Self::new_with_null_ptr()
-        }
-    }
-    impl NewWithNullPtr for wire_cst_room_dto {
-        fn new_with_null_ptr() -> Self {
-            Self {
-                id: core::ptr::null_mut(),
-                name: core::ptr::null_mut(),
-                source: Default::default(),
-                device_ids: core::ptr::null_mut(),
-                rhythm_enabled: Default::default(),
-                disabled: Default::default(),
-                lights_on: Default::default(),
-                time_offset_minutes: Default::default(),
-                brightness_offset: Default::default(),
-                curve_config: core::ptr::null_mut(),
-            }
-        }
-    }
-    impl Default for wire_cst_room_dto {
-        fn default() -> Self {
-            Self::new_with_null_ptr()
-        }
-    }
-    impl NewWithNullPtr for wire_cst_runner_action_result_dto {
-        fn new_with_null_ptr() -> Self {
-            Self {
-                state: Default::default(),
-                commands: core::ptr::null_mut(),
-                state_changed: Default::default(),
-            }
-        }
-    }
-    impl Default for wire_cst_runner_action_result_dto {
-        fn default() -> Self {
-            Self::new_with_null_ptr()
-        }
-    }
-    impl NewWithNullPtr for wire_cst_runner_state_dto {
-        fn new_with_null_ptr() -> Self {
-            Self {
-                rooms: core::ptr::null_mut(),
-            }
-        }
-    }
-    impl Default for wire_cst_runner_state_dto {
         fn default() -> Self {
             Self::new_with_null_ptr()
         }
@@ -3768,29 +3144,6 @@ mod io {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__dto__runner__room_dto_new(
-        id: *mut wire_cst_list_prim_u_8_strict,
-        name: *mut wire_cst_list_prim_u_8_strict,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__dto__runner__room_dto_new_impl(id, name)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__dto__runner__room_dto_with_source(
-        id: *mut wire_cst_list_prim_u_8_strict,
-        name: *mut wire_cst_list_prim_u_8_strict,
-        source: i32,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__dto__runner__room_dto_with_source_impl(id, name, source)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__dto__runner__runner_state_dto_default(
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__dto__runner__runner_state_dto_default_impl()
-    }
-
-    #[unsafe(no_mangle)]
     pub extern "C" fn frbgen_rhythm_core_cst_new_box_autoadd_curve_config_dto(
     ) -> *mut wire_cst_curve_config_dto {
         flutter_rust_bridge::for_generated::new_leak_box_ptr(
@@ -3815,11 +3168,6 @@ mod io {
     pub extern "C" fn frbgen_rhythm_core_cst_new_box_autoadd_hue_button_event_type_dto(
         value: i32,
     ) -> *mut i32 {
-        flutter_rust_bridge::for_generated::new_leak_box_ptr(value)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_cst_new_box_autoadd_i_32(value: i32) -> *mut i32 {
         flutter_rust_bridge::for_generated::new_leak_box_ptr(value)
     }
 
@@ -3867,20 +3215,6 @@ mod io {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_cst_new_list_light_command_dto(
-        len: i32,
-    ) -> *mut wire_cst_list_light_command_dto {
-        let wrap = wire_cst_list_light_command_dto {
-            ptr: flutter_rust_bridge::for_generated::new_leak_vec_ptr(
-                <wire_cst_light_command_dto>::new_with_null_ptr(),
-                len,
-            ),
-            len,
-        };
-        flutter_rust_bridge::for_generated::new_leak_box_ptr(wrap)
-    }
-
-    #[unsafe(no_mangle)]
     pub extern "C" fn frbgen_rhythm_core_cst_new_list_prim_f_64_strict(
         len: i32,
     ) -> *mut wire_cst_list_prim_f_64_strict {
@@ -3911,20 +3245,6 @@ mod io {
             len,
         };
         flutter_rust_bridge::for_generated::new_leak_box_ptr(ans)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_cst_new_list_room_dto(
-        len: i32,
-    ) -> *mut wire_cst_list_room_dto {
-        let wrap = wire_cst_list_room_dto {
-            ptr: flutter_rust_bridge::for_generated::new_leak_vec_ptr(
-                <wire_cst_room_dto>::new_with_null_ptr(),
-                len,
-            ),
-            len,
-        };
-        flutter_rust_bridge::for_generated::new_leak_box_ptr(wrap)
     }
 
     #[unsafe(no_mangle)]
@@ -4007,15 +3327,6 @@ mod io {
     }
     #[repr(C)]
     #[derive(Clone, Copy)]
-    pub struct wire_cst_light_command_dto {
-        device_id: *mut wire_cst_list_prim_u_8_strict,
-        room_id: *mut wire_cst_list_prim_u_8_strict,
-        command_type: i32,
-        brightness: *mut i32,
-        kelvin: *mut i32,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
     pub struct wire_cst_lighting_values_dto {
         kelvin: i32,
         mireds: i32,
@@ -4039,12 +3350,6 @@ mod io {
     }
     #[repr(C)]
     #[derive(Clone, Copy)]
-    pub struct wire_cst_list_light_command_dto {
-        ptr: *mut wire_cst_light_command_dto,
-        len: i32,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
     pub struct wire_cst_list_prim_f_64_strict {
         ptr: *mut f64,
         len: i32,
@@ -4063,12 +3368,6 @@ mod io {
     }
     #[repr(C)]
     #[derive(Clone, Copy)]
-    pub struct wire_cst_list_room_dto {
-        ptr: *mut wire_cst_room_dto,
-        len: i32,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
     pub struct wire_cst_list_step_point_dto {
         ptr: *mut wire_cst_step_point_dto,
         len: i32,
@@ -4079,32 +3378,6 @@ mod io {
         r: i32,
         g: i32,
         b: i32,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct wire_cst_room_dto {
-        id: *mut wire_cst_list_prim_u_8_strict,
-        name: *mut wire_cst_list_prim_u_8_strict,
-        source: i32,
-        device_ids: *mut wire_cst_list_String,
-        rhythm_enabled: bool,
-        disabled: bool,
-        lights_on: bool,
-        time_offset_minutes: f64,
-        brightness_offset: f64,
-        curve_config: *mut wire_cst_curve_config_dto,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct wire_cst_runner_action_result_dto {
-        state: wire_cst_runner_state_dto,
-        commands: *mut wire_cst_list_light_command_dto,
-        state_changed: bool,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct wire_cst_runner_state_dto {
-        rooms: *mut wire_cst_list_room_dto,
     }
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -4368,29 +3641,6 @@ mod web {
             }
         }
     }
-    impl CstDecode<crate::api::dto::runner::LightCommandDto>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::dto::runner::LightCommandDto {
-            let self_ = self
-                .dyn_into::<flutter_rust_bridge::for_generated::js_sys::Array>()
-                .unwrap();
-            assert_eq!(
-                self_.length(),
-                5,
-                "Expected 5 elements, got {}",
-                self_.length()
-            );
-            crate::api::dto::runner::LightCommandDto {
-                device_id: self_.get(0).cst_decode(),
-                room_id: self_.get(1).cst_decode(),
-                command_type: self_.get(2).cst_decode(),
-                brightness: self_.get(3).cst_decode(),
-                kelvin: self_.get(4).cst_decode(),
-            }
-        }
-    }
     impl CstDecode<crate::api::dto::curve::LightingValuesDto>
         for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
     {
@@ -4438,18 +3688,6 @@ mod web {
                 .collect()
         }
     }
-    impl CstDecode<Vec<crate::api::dto::runner::LightCommandDto>>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> Vec<crate::api::dto::runner::LightCommandDto> {
-            self.dyn_into::<flutter_rust_bridge::for_generated::js_sys::Array>()
-                .unwrap()
-                .iter()
-                .map(CstDecode::cst_decode)
-                .collect()
-        }
-    }
     impl CstDecode<Vec<f64>> for Box<[f64]> {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> Vec<f64> {
@@ -4466,18 +3704,6 @@ mod web {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> Vec<u8> {
             self.into_vec()
-        }
-    }
-    impl CstDecode<Vec<crate::api::dto::runner::RoomDto>>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> Vec<crate::api::dto::runner::RoomDto> {
-            self.dyn_into::<flutter_rust_bridge::for_generated::js_sys::Array>()
-                .unwrap()
-                .iter()
-                .map(CstDecode::cst_decode)
-                .collect()
         }
     }
     impl CstDecode<Vec<crate::api::dto::curve::StepPointDto>>
@@ -4516,74 +3742,6 @@ mod web {
                 r: self_.get(0).cst_decode(),
                 g: self_.get(1).cst_decode(),
                 b: self_.get(2).cst_decode(),
-            }
-        }
-    }
-    impl CstDecode<crate::api::dto::runner::RoomDto>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::dto::runner::RoomDto {
-            let self_ = self
-                .dyn_into::<flutter_rust_bridge::for_generated::js_sys::Array>()
-                .unwrap();
-            assert_eq!(
-                self_.length(),
-                10,
-                "Expected 10 elements, got {}",
-                self_.length()
-            );
-            crate::api::dto::runner::RoomDto {
-                id: self_.get(0).cst_decode(),
-                name: self_.get(1).cst_decode(),
-                source: self_.get(2).cst_decode(),
-                device_ids: self_.get(3).cst_decode(),
-                rhythm_enabled: self_.get(4).cst_decode(),
-                disabled: self_.get(5).cst_decode(),
-                lights_on: self_.get(6).cst_decode(),
-                time_offset_minutes: self_.get(7).cst_decode(),
-                brightness_offset: self_.get(8).cst_decode(),
-                curve_config: self_.get(9).cst_decode(),
-            }
-        }
-    }
-    impl CstDecode<crate::api::dto::runner::RunnerActionResultDto>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::dto::runner::RunnerActionResultDto {
-            let self_ = self
-                .dyn_into::<flutter_rust_bridge::for_generated::js_sys::Array>()
-                .unwrap();
-            assert_eq!(
-                self_.length(),
-                3,
-                "Expected 3 elements, got {}",
-                self_.length()
-            );
-            crate::api::dto::runner::RunnerActionResultDto {
-                state: self_.get(0).cst_decode(),
-                commands: self_.get(1).cst_decode(),
-                state_changed: self_.get(2).cst_decode(),
-            }
-        }
-    }
-    impl CstDecode<crate::api::dto::runner::RunnerStateDto>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::dto::runner::RunnerStateDto {
-            let self_ = self
-                .dyn_into::<flutter_rust_bridge::for_generated::js_sys::Array>()
-                .unwrap();
-            assert_eq!(
-                self_.length(),
-                1,
-                "Expected 1 elements, got {}",
-                self_.length()
-            );
-            crate::api::dto::runner::RunnerStateDto {
-                rooms: self_.get(0).cst_decode(),
             }
         }
     }
@@ -4770,14 +3928,6 @@ mod web {
             self.unchecked_into_f64() as _
         }
     }
-    impl CstDecode<crate::api::dto::runner::LightCommandType>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::dto::runner::LightCommandType {
-            (self.unchecked_into_f64() as i32).cst_decode()
-        }
-    }
     impl CstDecode<Vec<f64>> for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> Vec<f64> {
@@ -4807,14 +3957,6 @@ mod web {
     {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> crate::api::dto::runner::RhythmActionDto {
-            (self.unchecked_into_f64() as i32).cst_decode()
-        }
-    }
-    impl CstDecode<crate::api::dto::runner::RoomSourceDto>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::dto::runner::RoomSourceDto {
             (self.unchecked_into_f64() as i32).cst_decode()
         }
     }
@@ -5145,29 +4287,6 @@ mod web {
         api_value: String,
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
         wire__crate__api__hue__parse_hue_button_event_type_impl(api_value)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__dto__runner__room_dto_new(
-        id: String,
-        name: String,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__dto__runner__room_dto_new_impl(id, name)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__dto__runner__room_dto_with_source(
-        id: String,
-        name: String,
-        source: i32,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__dto__runner__room_dto_with_source_impl(id, name, source)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__dto__runner__runner_state_dto_default(
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__dto__runner__runner_state_dto_default_impl()
     }
 }
 #[cfg(target_family = "wasm")]

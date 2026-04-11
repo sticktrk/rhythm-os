@@ -56,9 +56,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       dynamic raw);
 
   @protected
-  int dco_decode_box_autoadd_i_32(dynamic raw);
-
-  @protected
   RhythmActionDto dco_decode_box_autoadd_rhythm_action_dto(dynamic raw);
 
   @protected
@@ -92,12 +89,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_i_32(dynamic raw);
 
   @protected
-  LightCommandDto dco_decode_light_command_dto(dynamic raw);
-
-  @protected
-  LightCommandType dco_decode_light_command_type(dynamic raw);
-
-  @protected
   LightingValuesDto dco_decode_lighting_values_dto(dynamic raw);
 
   @protected
@@ -105,9 +96,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<BehaviorMappingDto> dco_decode_list_behavior_mapping_dto(dynamic raw);
-
-  @protected
-  List<LightCommandDto> dco_decode_list_light_command_dto(dynamic raw);
 
   @protected
   Float64List dco_decode_list_prim_f_64_strict(dynamic raw);
@@ -119,16 +107,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
-  List<RoomDto> dco_decode_list_room_dto(dynamic raw);
-
-  @protected
   List<StepPointDto> dco_decode_list_step_point_dto(dynamic raw);
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
-
-  @protected
-  CurveConfigDto? dco_decode_opt_box_autoadd_curve_config_dto(dynamic raw);
 
   @protected
   double? dco_decode_opt_box_autoadd_f_64(dynamic raw);
@@ -136,9 +118,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   HueButtonEventTypeDto? dco_decode_opt_box_autoadd_hue_button_event_type_dto(
       dynamic raw);
-
-  @protected
-  int? dco_decode_opt_box_autoadd_i_32(dynamic raw);
 
   @protected
   RhythmActionDto? dco_decode_opt_box_autoadd_rhythm_action_dto(dynamic raw);
@@ -151,18 +130,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RhythmActionDto dco_decode_rhythm_action_dto(dynamic raw);
-
-  @protected
-  RoomDto dco_decode_room_dto(dynamic raw);
-
-  @protected
-  RoomSourceDto dco_decode_room_source_dto(dynamic raw);
-
-  @protected
-  RunnerActionResultDto dco_decode_runner_action_result_dto(dynamic raw);
-
-  @protected
-  RunnerStateDto dco_decode_runner_state_dto(dynamic raw);
 
   @protected
   SolarInfoDto dco_decode_solar_info_dto(dynamic raw);
@@ -221,9 +188,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       SseDeserializer deserializer);
 
   @protected
-  int sse_decode_box_autoadd_i_32(SseDeserializer deserializer);
-
-  @protected
   RhythmActionDto sse_decode_box_autoadd_rhythm_action_dto(
       SseDeserializer deserializer);
 
@@ -262,12 +226,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
-  LightCommandDto sse_decode_light_command_dto(SseDeserializer deserializer);
-
-  @protected
-  LightCommandType sse_decode_light_command_type(SseDeserializer deserializer);
-
-  @protected
   LightingValuesDto sse_decode_lighting_values_dto(
       SseDeserializer deserializer);
 
@@ -276,10 +234,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<BehaviorMappingDto> sse_decode_list_behavior_mapping_dto(
-      SseDeserializer deserializer);
-
-  @protected
-  List<LightCommandDto> sse_decode_list_light_command_dto(
       SseDeserializer deserializer);
 
   @protected
@@ -292,9 +246,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
-  List<RoomDto> sse_decode_list_room_dto(SseDeserializer deserializer);
-
-  @protected
   List<StepPointDto> sse_decode_list_step_point_dto(
       SseDeserializer deserializer);
 
@@ -302,18 +253,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
-  CurveConfigDto? sse_decode_opt_box_autoadd_curve_config_dto(
-      SseDeserializer deserializer);
-
-  @protected
   double? sse_decode_opt_box_autoadd_f_64(SseDeserializer deserializer);
 
   @protected
   HueButtonEventTypeDto? sse_decode_opt_box_autoadd_hue_button_event_type_dto(
       SseDeserializer deserializer);
-
-  @protected
-  int? sse_decode_opt_box_autoadd_i_32(SseDeserializer deserializer);
 
   @protected
   RhythmActionDto? sse_decode_opt_box_autoadd_rhythm_action_dto(
@@ -328,19 +272,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RhythmActionDto sse_decode_rhythm_action_dto(SseDeserializer deserializer);
-
-  @protected
-  RoomDto sse_decode_room_dto(SseDeserializer deserializer);
-
-  @protected
-  RoomSourceDto sse_decode_room_source_dto(SseDeserializer deserializer);
-
-  @protected
-  RunnerActionResultDto sse_decode_runner_action_result_dto(
-      SseDeserializer deserializer);
-
-  @protected
-  RunnerStateDto sse_decode_runner_state_dto(SseDeserializer deserializer);
 
   @protected
   SolarInfoDto sse_decode_solar_info_dto(SseDeserializer deserializer);
@@ -415,12 +346,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       HueButtonEventTypeDto raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return cst_encode_hue_button_event_type_dto(raw);
-  }
-
-  @protected
-  int cst_encode_box_autoadd_i_32(int raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return cst_encode_i_32(raw);
   }
 
   @protected
@@ -503,18 +428,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
-  JSAny cst_encode_light_command_dto(LightCommandDto raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return [
-      cst_encode_String(raw.deviceId),
-      cst_encode_String(raw.roomId),
-      cst_encode_light_command_type(raw.commandType),
-      cst_encode_opt_box_autoadd_i_32(raw.brightness),
-      cst_encode_opt_box_autoadd_i_32(raw.kelvin)
-    ].jsify()!;
-  }
-
-  @protected
   JSAny cst_encode_lighting_values_dto(LightingValuesDto raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return [
@@ -541,12 +454,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
-  JSAny cst_encode_list_light_command_dto(List<LightCommandDto> raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw.map(cst_encode_light_command_dto).toList().jsify()!;
-  }
-
-  @protected
   JSAny cst_encode_list_prim_f_64_strict(Float64List raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return raw.jsify()!;
@@ -565,12 +472,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
-  JSAny cst_encode_list_room_dto(List<RoomDto> raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw.map(cst_encode_room_dto).toList().jsify()!;
-  }
-
-  @protected
   JSAny cst_encode_list_step_point_dto(List<StepPointDto> raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return raw.map(cst_encode_step_point_dto).toList().jsify()!;
@@ -580,12 +481,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? cst_encode_opt_String(String? raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return raw == null ? null : cst_encode_String(raw);
-  }
-
-  @protected
-  JSAny? cst_encode_opt_box_autoadd_curve_config_dto(CurveConfigDto? raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw == null ? null : cst_encode_box_autoadd_curve_config_dto(raw);
   }
 
   @protected
@@ -601,12 +496,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     return raw == null
         ? null
         : cst_encode_box_autoadd_hue_button_event_type_dto(raw);
-  }
-
-  @protected
-  int? cst_encode_opt_box_autoadd_i_32(int? raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw == null ? null : cst_encode_box_autoadd_i_32(raw);
   }
 
   @protected
@@ -629,39 +518,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       cst_encode_i_32(raw.g),
       cst_encode_i_32(raw.b)
     ].jsify()!;
-  }
-
-  @protected
-  JSAny cst_encode_room_dto(RoomDto raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return [
-      cst_encode_String(raw.id),
-      cst_encode_String(raw.name),
-      cst_encode_room_source_dto(raw.source),
-      cst_encode_list_String(raw.deviceIds),
-      cst_encode_bool(raw.rhythmEnabled),
-      cst_encode_bool(raw.disabled),
-      cst_encode_bool(raw.lightsOn),
-      cst_encode_f_64(raw.timeOffsetMinutes),
-      cst_encode_f_64(raw.brightnessOffset),
-      cst_encode_opt_box_autoadd_curve_config_dto(raw.curveConfig)
-    ].jsify()!;
-  }
-
-  @protected
-  JSAny cst_encode_runner_action_result_dto(RunnerActionResultDto raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return [
-      cst_encode_runner_state_dto(raw.state),
-      cst_encode_list_light_command_dto(raw.commands),
-      cst_encode_bool(raw.stateChanged)
-    ].jsify()!;
-  }
-
-  @protected
-  JSAny cst_encode_runner_state_dto(RunnerStateDto raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return [cst_encode_list_room_dto(raw.rooms)].jsify()!;
   }
 
   @protected
@@ -748,13 +604,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int cst_encode_i_32(int raw);
 
   @protected
-  int cst_encode_light_command_type(LightCommandType raw);
-
-  @protected
   int cst_encode_rhythm_action_dto(RhythmActionDto raw);
-
-  @protected
-  int cst_encode_room_source_dto(RoomSourceDto raw);
 
   @protected
   int cst_encode_u_8(int raw);
@@ -790,9 +640,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_hue_button_event_type_dto(
       HueButtonEventTypeDto self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_box_autoadd_i_32(int self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_rhythm_action_dto(
@@ -834,14 +681,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
-  void sse_encode_light_command_dto(
-      LightCommandDto self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_light_command_type(
-      LightCommandType self, SseSerializer serializer);
-
-  @protected
   void sse_encode_lighting_values_dto(
       LightingValuesDto self, SseSerializer serializer);
 
@@ -851,10 +690,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_behavior_mapping_dto(
       List<BehaviorMappingDto> self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_list_light_command_dto(
-      List<LightCommandDto> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_prim_f_64_strict(
@@ -869,9 +704,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       Uint8List self, SseSerializer serializer);
 
   @protected
-  void sse_encode_list_room_dto(List<RoomDto> self, SseSerializer serializer);
-
-  @protected
   void sse_encode_list_step_point_dto(
       List<StepPointDto> self, SseSerializer serializer);
 
@@ -879,18 +711,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_String(String? self, SseSerializer serializer);
 
   @protected
-  void sse_encode_opt_box_autoadd_curve_config_dto(
-      CurveConfigDto? self, SseSerializer serializer);
-
-  @protected
   void sse_encode_opt_box_autoadd_f_64(double? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_hue_button_event_type_dto(
       HueButtonEventTypeDto? self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_opt_box_autoadd_i_32(int? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_rhythm_action_dto(
@@ -906,20 +731,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_rhythm_action_dto(
       RhythmActionDto self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_room_dto(RoomDto self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_room_source_dto(RoomSourceDto self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_runner_action_result_dto(
-      RunnerActionResultDto self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_runner_state_dto(
-      RunnerStateDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_solar_info_dto(SolarInfoDto self, SseSerializer serializer);
@@ -1175,20 +986,6 @@ class RustLibWire implements BaseWire {
       wire__crate__api__hue__parse_hue_button_event_type(String api_value) =>
           wasmModule
               .wire__crate__api__hue__parse_hue_button_event_type(api_value);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__dto__runner__room_dto_new(String id, String name) =>
-          wasmModule.wire__crate__api__dto__runner__room_dto_new(id, name);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__dto__runner__room_dto_with_source(
-              String id, String name, int source) =>
-          wasmModule.wire__crate__api__dto__runner__room_dto_with_source(
-              id, name, source);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__dto__runner__runner_state_dto_default() =>
-          wasmModule.wire__crate__api__dto__runner__runner_state_dto_default();
 }
 
 @JS('wasm_bindgen')
@@ -1341,14 +1138,4 @@ extension type RustLibWasmModule._(JSObject _) implements JSObject {
 
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__hue__parse_hue_button_event_type(String api_value);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__dto__runner__room_dto_new(String id, String name);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__dto__runner__room_dto_with_source(
-          String id, String name, int source);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__dto__runner__runner_state_dto_default();
 }

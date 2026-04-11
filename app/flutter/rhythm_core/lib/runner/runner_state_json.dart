@@ -9,8 +9,8 @@ library;
 import 'dart:convert';
 
 import '../src/rust/api/dto/curve.dart';
-import '../src/rust/api/dto/runner.dart';
 import '../models/curve_defaults.dart' show curveConfigFromJson;
+import 'runner_models.dart';
 
 /// Serialize RunnerStateDto to a JSON string.
 String runnerStateToJson(RunnerStateDto state) {
@@ -58,7 +58,7 @@ Map<String, dynamic> _roomToMap(RoomDto room) {
 }
 
 RoomDto _roomFromMap(Map<String, dynamic> map) {
-  return RoomDto.raw(
+  return RoomDto(
     id: map['id'] as String,
     name: (map['name'] as String?) ?? (map['id'] as String),
     source: _sourceFromString(map['source'] as String? ?? 'unknown'),

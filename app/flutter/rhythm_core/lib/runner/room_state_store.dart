@@ -7,7 +7,8 @@ library;
 
 import '../src/rust/api/curve.dart' as curve_api;
 import '../src/rust/api/dto/curve.dart' show CurveConfigDto, LightingValuesDto;
-import '../src/rust/api/dto/runner.dart';
+import '../src/rust/api/dto/runner.dart' show RhythmActionDto;
+import 'runner_models.dart';
 
 const _noChange = Object();
 
@@ -399,7 +400,7 @@ RoomDto _copyRoom(
   double? brightnessOffset,
   Object? curveConfig = _noChange,
 }) {
-  return RoomDto.raw(
+  return RoomDto(
     id: id ?? room.id,
     name: name ?? room.name,
     source: source ?? room.source,
