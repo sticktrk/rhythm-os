@@ -2,7 +2,7 @@ import 'rhythm_api.dart';
 
 // Import the generated Rust bindings
 import '../src/rust/api/curve.dart' as rust_api;
-import '../src/rust/api/dto/curve.dart' show CurveConfigDto;
+import '../src/rust/api/dto/curve.dart' show CurveConfigDto, CurveDataDto;
 import '../src/rust/api/dto/solar.dart' show TwilightPhaseDto;
 import '../src/rust/frb_generated.dart';
 
@@ -42,8 +42,8 @@ class NativeBrain {
 
   /// Generate curve data for visualization with full solar information.
   ///
-  /// This replaces the REST call to /api/curve for preview purposes.
-  /// Synchronous - runs on main thread (no web workers needed).
+  /// This mirrors the server preview contract using the default graph
+  /// resolution of 4 samples per hour.
   CurveData getCurveData({
     required CurveConfigDto config,
     required double latitude,
@@ -52,8 +52,30 @@ class NativeBrain {
     required int month,
     required int day,
     required String timezone,
+  }) =>
+      getCurveDataHighRes(
+        config: config,
+        latitude: latitude,
+        longitude: longitude,
+        year: year,
+        month: month,
+        day: day,
+        timezone: timezone,
+        samplesPerHour: 4,
+      );
+
+  /// Generate high-resolution curve data for smooth graph rendering.
+  CurveData getCurveDataHighRes({
+    required CurveConfigDto config,
+    required double latitude,
+    required double longitude,
+    required int year,
+    required int month,
+    required int day,
+    required String timezone,
+    int samplesPerHour = 4,
   }) {
-    final result = rust_api.generateCurveDataWithSunTimes(
+    final result = rust_api.generateCurveDataHighResWithSunTimes(
       config: config,
       latitude: latitude,
       longitude: longitude,
@@ -61,57 +83,10 @@ class NativeBrain {
       month: month,
       day: day,
       timezone: timezone,
-    );
-
-    return CurveData(
-      hours: result.hours.toList(),
-      brightness: result.brightness.toList(),
-      kelvin: result.kelvin.toList(),
-      solar: SolarInfo(
-        solarNoon: result.solar.solarNoon,
-        solarMidnight: result.solar.solarMidnight,
-        sunrise: result.solar.sunrise,
-        sunset: result.solar.sunset,
-        dayLength: result.solar.dayLength,
-        dawn: _mapTwilightPhase(result.solar.dawn),
-        dusk: _mapTwilightPhase(result.solar.dusk),
-      ),
-    );
-  }
-
-  /// Generate high-resolution curve data for smooth graph rendering.
-  ///
-  /// Note: This uses the old API without full sun times calculation.
-  /// For accurate sunrise/sunset, use getCurveData() instead.
-  CurveData getCurveDataHighRes({
-    required CurveConfigDto config,
-    required double solarNoonHour,
-    required double latitude,
-    required int dayOfYear,
-    int samplesPerHour = 4,
-  }) {
-    final result = rust_api.generateCurveDataHighRes(
-      config: config,
-      solarNoonHour: solarNoonHour,
-      latitude: latitude,
-      dayOfYear: dayOfYear,
       samplesPerHour: samplesPerHour,
     );
 
-    return CurveData(
-      hours: result.hours.toList(),
-      brightness: result.brightness.toList(),
-      kelvin: result.kelvin.toList(),
-      solar: SolarInfo(
-        solarNoon: result.solar.solarNoon,
-        solarMidnight: result.solar.solarMidnight,
-        sunrise: result.solar.sunrise,
-        sunset: result.solar.sunset,
-        dayLength: result.solar.dayLength,
-        dawn: _mapTwilightPhase(result.solar.dawn),
-        dusk: _mapTwilightPhase(result.solar.dusk),
-      ),
-    );
+    return _mapCurveData(result);
   }
 
   TwilightPhase? _mapTwilightPhase(TwilightPhaseDto? phase) {
@@ -126,16 +101,22 @@ class NativeBrain {
   /// Calculate lighting values for a specific time.
   LightingValues calculateLighting({
     required CurveConfigDto config,
-    required double solarNoonHour,
     required double latitude,
-    required int dayOfYear,
+    required double longitude,
+    required int year,
+    required int month,
+    required int day,
+    required String timezone,
     required double currentHour,
   }) {
-    final result = rust_api.calculateLighting(
+    final result = rust_api.calculateLightingWithSunTimes(
       config: config,
-      solarNoonHour: solarNoonHour,
       latitude: latitude,
-      dayOfYear: dayOfYear,
+      longitude: longitude,
+      year: year,
+      month: month,
+      day: day,
+      timezone: timezone,
       currentHour: currentHour,
     );
 
@@ -152,17 +133,23 @@ class NativeBrain {
   /// Calculate step sequences for visualization.
   StepSequences getStepSequences({
     required CurveConfigDto config,
-    required double solarNoonHour,
     required double latitude,
-    required int dayOfYear,
+    required double longitude,
+    required int year,
+    required int month,
+    required int day,
+    required String timezone,
     required double hour,
     required int maxSteps,
   }) {
-    final result = rust_api.calculateStepSequences(
+    final result = rust_api.calculateStepSequencesWithSunTimes(
       config: config,
-      solarNoonHour: solarNoonHour,
       latitude: latitude,
-      dayOfYear: dayOfYear,
+      longitude: longitude,
+      year: year,
+      month: month,
+      day: day,
+      timezone: timezone,
       startHour: hour,
       maxSteps: maxSteps,
     );
@@ -184,6 +171,23 @@ class NativeBrain {
                 rgb: s.rgb.toList(),
               ))
           .toList(),
+    );
+  }
+
+  CurveData _mapCurveData(CurveDataDto result) {
+    return CurveData(
+      hours: result.hours.toList(),
+      brightness: result.brightness.toList(),
+      kelvin: result.kelvin.toList(),
+      solar: SolarInfo(
+        solarNoon: result.solar.solarNoon,
+        solarMidnight: result.solar.solarMidnight,
+        sunrise: result.solar.sunrise,
+        sunset: result.solar.sunset,
+        dayLength: result.solar.dayLength,
+        dawn: _mapTwilightPhase(result.solar.dawn),
+        dusk: _mapTwilightPhase(result.solar.dusk),
+      ),
     );
   }
 
@@ -213,6 +217,7 @@ class NativeBrain {
 /// Lighting values with RGB.
 class LightingValues {
   final int kelvin;
+
   /// Color temperature in mireds (micro reciprocal degrees).
   /// Calculated as 1,000,000 / kelvin. Used by Hue bulbs (ct parameter).
   final int mireds;

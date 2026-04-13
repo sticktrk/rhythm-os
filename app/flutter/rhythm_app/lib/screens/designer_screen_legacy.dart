@@ -92,13 +92,13 @@ class _DesignerScreenLegacyState extends State<DesignerScreenLegacy> {
       final curveData = await api.getCurveData();
 
       if (mounted) {
-
         // Load curve config from Home (Supabase) first, fall back to API
         final homeCurveConfig = homeProvider.currentHome?.curveConfig;
         if (homeCurveConfig != null) {
           // Use curve config from Supabase
           configModel.updateConfig(homeCurveConfig);
-          debugPrint('DesignerScreen: Loaded curve config from Home (Supabase)');
+          debugPrint(
+              'DesignerScreen: Loaded curve config from Home (Supabase)');
         } else {
           // Fall back to API config state
           final configState = await api.getConfigState();
@@ -133,9 +133,6 @@ class _DesignerScreenLegacyState extends State<DesignerScreenLegacy> {
     try {
       final api = context.read<RhythmApi>();
 
-      // Preserve solar info from existing data (sunrise/sunset don't change with config)
-      final existingSolar = _curveData?.solar;
-
       // Try high-res curves first for smoother rendering (sync call)
       CurveData? curveData;
       if (api is HybridApiClient) {
@@ -143,16 +140,6 @@ class _DesignerScreenLegacyState extends State<DesignerScreenLegacy> {
           config: config,
           samplesPerHour: 4,
         );
-
-        // High-res doesn't calculate sun times, so preserve existing solar info
-        if (curveData != null && existingSolar != null) {
-          curveData = CurveData(
-            hours: curveData.hours,
-            brightness: curveData.brightness,
-            kelvin: curveData.kelvin,
-            solar: existingSolar,
-          );
-        }
       }
 
       // Fall back to standard resolution if high-res not available
@@ -183,7 +170,8 @@ class _DesignerScreenLegacyState extends State<DesignerScreenLegacy> {
     try {
       // Save to Supabase via HomeProvider
       if (homeProvider.currentHome != null) {
-        final success = await homeProvider.updateCurrentHomeCurveConfig(configModel.config);
+        final success =
+            await homeProvider.updateCurrentHomeCurveConfig(configModel.config);
         if (!success) {
           throw Exception('Failed to update curve config in Supabase');
         }
@@ -375,5 +363,4 @@ class _DesignerScreenLegacyState extends State<DesignerScreenLegacy> {
       },
     );
   }
-
 }

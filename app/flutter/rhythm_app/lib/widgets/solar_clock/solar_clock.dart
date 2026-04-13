@@ -7,6 +7,7 @@ import 'solar_clock_geometry.dart';
 class SolarClock extends StatelessWidget {
   final SolarClockData data;
   final bool use24;
+  final SolarClockOrientation orientation;
   final SolarCurveSamples? curveData;
   final double arcStrokeWidth;
   final bool showUpperArc;
@@ -24,6 +25,7 @@ class SolarClock extends StatelessWidget {
     super.key,
     required this.data,
     required this.use24,
+    this.orientation = SolarClockOrientation.standard24,
     this.curveData,
     this.arcStrokeWidth = 4.0,
     this.showUpperArc = true,
@@ -45,6 +47,7 @@ class SolarClock extends StatelessWidget {
         final geometry = SolarClockGeometry.fromConstraints(
           constraints,
           solarNoon: data.solarNoon,
+          orientation: orientation,
           horizonFactor: horizonFactor,
           radiusWidthFactor: radiusWidthFactor,
           radiusHeightFactor: radiusHeightFactor,

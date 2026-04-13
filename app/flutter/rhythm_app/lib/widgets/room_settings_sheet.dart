@@ -873,15 +873,12 @@ class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb>
                   );
                 },
                 child: Center(
-                  child: Text(
-                    widget.roomName.isNotEmpty
-                        ? widget.roomName[0].toUpperCase()
-                        : '?',
-                    style: TextStyle(
-                      color: cctColor,
-                      fontSize: 28,
-                      fontWeight: FontWeight.w700,
-                    ),
+                  child: Icon(
+                    _active
+                        ? Icons.pause_rounded
+                        : Icons.play_arrow_rounded,
+                    color: cctColor,
+                    size: 32,
                   ),
                 ),
               ),

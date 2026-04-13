@@ -77,7 +77,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -1385676109;
+  int get rustContentHash => -250165170;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -114,18 +114,24 @@ abstract class RustLibApi extends BaseApi {
   BehaviorRemoveResultDto crateApiHueRegistryBehaviorTrackerRemove(
       {required HueBehaviorTrackerDto tracker, required String behaviorId});
 
-  LightingValuesDto crateApiCurveCalculateLighting(
+  LightingValuesDto crateApiCurveCalculateLightingWithSunTimes(
       {required CurveConfigDto config,
-      required double solarNoonHour,
       required double latitude,
-      required int dayOfYear,
+      required double longitude,
+      required int year,
+      required int month,
+      required int day,
+      required String timezone,
       required double currentHour});
 
-  StepSequencesDto crateApiCurveCalculateStepSequences(
+  StepSequencesDto crateApiCurveCalculateStepSequencesWithSunTimes(
       {required CurveConfigDto config,
-      required double solarNoonHour,
       required double latitude,
-      required int dayOfYear,
+      required double longitude,
+      required int year,
+      required int month,
+      required int day,
+      required String timezone,
       required double startHour,
       required int maxSteps});
 
@@ -151,17 +157,14 @@ abstract class RustLibApi extends BaseApi {
   int crateApiHelpersEndpointForManufacturer(
       {required String manufacturer, required String model});
 
-  CurveDataDto crateApiCurveGenerateCurveData(
+  CurveDataDto crateApiCurveGenerateCurveDataHighResWithSunTimes(
       {required CurveConfigDto config,
-      required double solarNoonHour,
       required double latitude,
-      required int dayOfYear});
-
-  CurveDataDto crateApiCurveGenerateCurveDataHighRes(
-      {required CurveConfigDto config,
-      required double solarNoonHour,
-      required double latitude,
-      required int dayOfYear,
+      required double longitude,
+      required int year,
+      required int month,
+      required int day,
+      required String timezone,
       required int samplesPerHour});
 
   CurveDataDto crateApiCurveGenerateCurveDataWithSunTimes(
@@ -443,73 +446,101 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  LightingValuesDto crateApiCurveCalculateLighting(
+  LightingValuesDto crateApiCurveCalculateLightingWithSunTimes(
       {required CurveConfigDto config,
-      required double solarNoonHour,
       required double latitude,
-      required int dayOfYear,
+      required double longitude,
+      required int year,
+      required int month,
+      required int day,
+      required String timezone,
       required double currentHour}) {
     return handler.executeSync(SyncTask(
       callFfi: () {
         var arg0 = cst_encode_box_autoadd_curve_config_dto(config);
-        var arg1 = cst_encode_f_64(solarNoonHour);
-        var arg2 = cst_encode_f_64(latitude);
-        var arg3 = cst_encode_i_32(dayOfYear);
-        var arg4 = cst_encode_f_64(currentHour);
-        return wire.wire__crate__api__curve__calculate_lighting(
-            arg0, arg1, arg2, arg3, arg4);
+        var arg1 = cst_encode_f_64(latitude);
+        var arg2 = cst_encode_f_64(longitude);
+        var arg3 = cst_encode_i_32(year);
+        var arg4 = cst_encode_i_32(month);
+        var arg5 = cst_encode_i_32(day);
+        var arg6 = cst_encode_String(timezone);
+        var arg7 = cst_encode_f_64(currentHour);
+        return wire.wire__crate__api__curve__calculate_lighting_with_sun_times(
+            arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7);
       },
       codec: DcoCodec(
         decodeSuccessData: dco_decode_lighting_values_dto,
         decodeErrorData: null,
       ),
-      constMeta: kCrateApiCurveCalculateLightingConstMeta,
-      argValues: [config, solarNoonHour, latitude, dayOfYear, currentHour],
+      constMeta: kCrateApiCurveCalculateLightingWithSunTimesConstMeta,
+      argValues: [
+        config,
+        latitude,
+        longitude,
+        year,
+        month,
+        day,
+        timezone,
+        currentHour
+      ],
       apiImpl: this,
     ));
   }
 
-  TaskConstMeta get kCrateApiCurveCalculateLightingConstMeta =>
+  TaskConstMeta get kCrateApiCurveCalculateLightingWithSunTimesConstMeta =>
       const TaskConstMeta(
-        debugName: "calculate_lighting",
+        debugName: "calculate_lighting_with_sun_times",
         argNames: [
           "config",
-          "solarNoonHour",
           "latitude",
-          "dayOfYear",
+          "longitude",
+          "year",
+          "month",
+          "day",
+          "timezone",
           "currentHour"
         ],
       );
 
   @override
-  StepSequencesDto crateApiCurveCalculateStepSequences(
+  StepSequencesDto crateApiCurveCalculateStepSequencesWithSunTimes(
       {required CurveConfigDto config,
-      required double solarNoonHour,
       required double latitude,
-      required int dayOfYear,
+      required double longitude,
+      required int year,
+      required int month,
+      required int day,
+      required String timezone,
       required double startHour,
       required int maxSteps}) {
     return handler.executeSync(SyncTask(
       callFfi: () {
         var arg0 = cst_encode_box_autoadd_curve_config_dto(config);
-        var arg1 = cst_encode_f_64(solarNoonHour);
-        var arg2 = cst_encode_f_64(latitude);
-        var arg3 = cst_encode_i_32(dayOfYear);
-        var arg4 = cst_encode_f_64(startHour);
-        var arg5 = cst_encode_i_32(maxSteps);
-        return wire.wire__crate__api__curve__calculate_step_sequences(
-            arg0, arg1, arg2, arg3, arg4, arg5);
+        var arg1 = cst_encode_f_64(latitude);
+        var arg2 = cst_encode_f_64(longitude);
+        var arg3 = cst_encode_i_32(year);
+        var arg4 = cst_encode_i_32(month);
+        var arg5 = cst_encode_i_32(day);
+        var arg6 = cst_encode_String(timezone);
+        var arg7 = cst_encode_f_64(startHour);
+        var arg8 = cst_encode_i_32(maxSteps);
+        return wire
+            .wire__crate__api__curve__calculate_step_sequences_with_sun_times(
+                arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
       },
       codec: DcoCodec(
         decodeSuccessData: dco_decode_step_sequences_dto,
         decodeErrorData: null,
       ),
-      constMeta: kCrateApiCurveCalculateStepSequencesConstMeta,
+      constMeta: kCrateApiCurveCalculateStepSequencesWithSunTimesConstMeta,
       argValues: [
         config,
-        solarNoonHour,
         latitude,
-        dayOfYear,
+        longitude,
+        year,
+        month,
+        day,
+        timezone,
         startHour,
         maxSteps
       ],
@@ -517,14 +548,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     ));
   }
 
-  TaskConstMeta get kCrateApiCurveCalculateStepSequencesConstMeta =>
+  TaskConstMeta get kCrateApiCurveCalculateStepSequencesWithSunTimesConstMeta =>
       const TaskConstMeta(
-        debugName: "calculate_step_sequences",
+        debugName: "calculate_step_sequences_with_sun_times",
         argNames: [
           "config",
-          "solarNoonHour",
           "latitude",
-          "dayOfYear",
+          "longitude",
+          "year",
+          "month",
+          "day",
+          "timezone",
           "startHour",
           "maxSteps"
         ],
@@ -688,74 +722,63 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  CurveDataDto crateApiCurveGenerateCurveData(
+  CurveDataDto crateApiCurveGenerateCurveDataHighResWithSunTimes(
       {required CurveConfigDto config,
-      required double solarNoonHour,
       required double latitude,
-      required int dayOfYear}) {
-    return handler.executeSync(SyncTask(
-      callFfi: () {
-        var arg0 = cst_encode_box_autoadd_curve_config_dto(config);
-        var arg1 = cst_encode_f_64(solarNoonHour);
-        var arg2 = cst_encode_f_64(latitude);
-        var arg3 = cst_encode_i_32(dayOfYear);
-        return wire.wire__crate__api__curve__generate_curve_data(
-            arg0, arg1, arg2, arg3);
-      },
-      codec: DcoCodec(
-        decodeSuccessData: dco_decode_curve_data_dto,
-        decodeErrorData: null,
-      ),
-      constMeta: kCrateApiCurveGenerateCurveDataConstMeta,
-      argValues: [config, solarNoonHour, latitude, dayOfYear],
-      apiImpl: this,
-    ));
-  }
-
-  TaskConstMeta get kCrateApiCurveGenerateCurveDataConstMeta =>
-      const TaskConstMeta(
-        debugName: "generate_curve_data",
-        argNames: ["config", "solarNoonHour", "latitude", "dayOfYear"],
-      );
-
-  @override
-  CurveDataDto crateApiCurveGenerateCurveDataHighRes(
-      {required CurveConfigDto config,
-      required double solarNoonHour,
-      required double latitude,
-      required int dayOfYear,
+      required double longitude,
+      required int year,
+      required int month,
+      required int day,
+      required String timezone,
       required int samplesPerHour}) {
     return handler.executeSync(SyncTask(
       callFfi: () {
         var arg0 = cst_encode_box_autoadd_curve_config_dto(config);
-        var arg1 = cst_encode_f_64(solarNoonHour);
-        var arg2 = cst_encode_f_64(latitude);
-        var arg3 = cst_encode_i_32(dayOfYear);
-        var arg4 = cst_encode_i_32(samplesPerHour);
-        return wire.wire__crate__api__curve__generate_curve_data_high_res(
-            arg0, arg1, arg2, arg3, arg4);
+        var arg1 = cst_encode_f_64(latitude);
+        var arg2 = cst_encode_f_64(longitude);
+        var arg3 = cst_encode_i_32(year);
+        var arg4 = cst_encode_i_32(month);
+        var arg5 = cst_encode_i_32(day);
+        var arg6 = cst_encode_String(timezone);
+        var arg7 = cst_encode_i_32(samplesPerHour);
+        return wire
+            .wire__crate__api__curve__generate_curve_data_high_res_with_sun_times(
+                arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7);
       },
       codec: DcoCodec(
         decodeSuccessData: dco_decode_curve_data_dto,
         decodeErrorData: null,
       ),
-      constMeta: kCrateApiCurveGenerateCurveDataHighResConstMeta,
-      argValues: [config, solarNoonHour, latitude, dayOfYear, samplesPerHour],
+      constMeta: kCrateApiCurveGenerateCurveDataHighResWithSunTimesConstMeta,
+      argValues: [
+        config,
+        latitude,
+        longitude,
+        year,
+        month,
+        day,
+        timezone,
+        samplesPerHour
+      ],
       apiImpl: this,
     ));
   }
 
-  TaskConstMeta get kCrateApiCurveGenerateCurveDataHighResConstMeta =>
-      const TaskConstMeta(
-        debugName: "generate_curve_data_high_res",
-        argNames: [
-          "config",
-          "solarNoonHour",
-          "latitude",
-          "dayOfYear",
-          "samplesPerHour"
-        ],
-      );
+  TaskConstMeta
+      get kCrateApiCurveGenerateCurveDataHighResWithSunTimesConstMeta =>
+          const TaskConstMeta(
+            debugName: "generate_curve_data_high_res_with_sun_times",
+            argNames: [
+              "config",
+              "latitude",
+              "longitude",
+              "year",
+              "month",
+              "day",
+              "timezone",
+              "samplesPerHour"
+            ],
+          );
 
   @override
   CurveDataDto crateApiCurveGenerateCurveDataWithSunTimes(

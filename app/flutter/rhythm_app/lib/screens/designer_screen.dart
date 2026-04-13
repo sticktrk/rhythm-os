@@ -112,24 +112,12 @@ class _DesignerScreenState extends State<DesignerScreen> {
   void _updateCurveData(CurveConfigDto config) {
     final api = context.read<RhythmApi>();
 
-    // Preserve solar info (sunrise/sunset don't change with config)
-    final existingSolar = _curveData?.solar;
-
     CurveData? curveData;
     if (api is HybridApiClient) {
       curveData = api.getCurveDataHighRes(
         config: config,
         samplesPerHour: 10,
       );
-      // High-res doesn't compute sun times, so preserve existing
-      if (curveData != null && existingSolar != null) {
-        curveData = CurveData(
-          hours: curveData.hours,
-          brightness: curveData.brightness,
-          kelvin: curveData.kelvin,
-          solar: existingSolar,
-        );
-      }
     }
 
     if (curveData != null && mounted) {

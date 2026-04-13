@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueNom,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1385676109;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -250165170;
 
 // Section: executor
 
@@ -221,68 +221,89 @@ fn wire__crate__api__hue_registry__behavior_tracker_remove_impl(
         },
     )
 }
-fn wire__crate__api__curve__calculate_lighting_impl(
+fn wire__crate__api__curve__calculate_lighting_with_sun_times_impl(
     config: impl CstDecode<crate::api::dto::curve::CurveConfigDto>,
-    solar_noon_hour: impl CstDecode<f64>,
     latitude: impl CstDecode<f64>,
-    day_of_year: impl CstDecode<i32>,
+    longitude: impl CstDecode<f64>,
+    year: impl CstDecode<i32>,
+    month: impl CstDecode<i32>,
+    day: impl CstDecode<i32>,
+    timezone: impl CstDecode<String>,
     current_hour: impl CstDecode<f64>,
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "calculate_lighting",
+            debug_name: "calculate_lighting_with_sun_times",
             port: None,
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
         },
         move || {
             let api_config = config.cst_decode();
-            let api_solar_noon_hour = solar_noon_hour.cst_decode();
             let api_latitude = latitude.cst_decode();
-            let api_day_of_year = day_of_year.cst_decode();
+            let api_longitude = longitude.cst_decode();
+            let api_year = year.cst_decode();
+            let api_month = month.cst_decode();
+            let api_day = day.cst_decode();
+            let api_timezone = timezone.cst_decode();
             let api_current_hour = current_hour.cst_decode();
             transform_result_dco::<_, _, ()>((move || {
-                let output_ok = Result::<_, ()>::Ok(crate::api::curve::calculate_lighting(
-                    api_config,
-                    api_solar_noon_hour,
-                    api_latitude,
-                    api_day_of_year,
-                    api_current_hour,
-                ))?;
+                let output_ok =
+                    Result::<_, ()>::Ok(crate::api::curve::calculate_lighting_with_sun_times(
+                        api_config,
+                        api_latitude,
+                        api_longitude,
+                        api_year,
+                        api_month,
+                        api_day,
+                        api_timezone,
+                        api_current_hour,
+                    ))?;
                 Ok(output_ok)
             })())
         },
     )
 }
-fn wire__crate__api__curve__calculate_step_sequences_impl(
+fn wire__crate__api__curve__calculate_step_sequences_with_sun_times_impl(
     config: impl CstDecode<crate::api::dto::curve::CurveConfigDto>,
-    solar_noon_hour: impl CstDecode<f64>,
     latitude: impl CstDecode<f64>,
-    day_of_year: impl CstDecode<i32>,
+    longitude: impl CstDecode<f64>,
+    year: impl CstDecode<i32>,
+    month: impl CstDecode<i32>,
+    day: impl CstDecode<i32>,
+    timezone: impl CstDecode<String>,
     start_hour: impl CstDecode<f64>,
     max_steps: impl CstDecode<i32>,
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "calculate_step_sequences",
+            debug_name: "calculate_step_sequences_with_sun_times",
             port: None,
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
         },
         move || {
             let api_config = config.cst_decode();
-            let api_solar_noon_hour = solar_noon_hour.cst_decode();
             let api_latitude = latitude.cst_decode();
-            let api_day_of_year = day_of_year.cst_decode();
+            let api_longitude = longitude.cst_decode();
+            let api_year = year.cst_decode();
+            let api_month = month.cst_decode();
+            let api_day = day.cst_decode();
+            let api_timezone = timezone.cst_decode();
             let api_start_hour = start_hour.cst_decode();
             let api_max_steps = max_steps.cst_decode();
             transform_result_dco::<_, _, ()>((move || {
-                let output_ok = Result::<_, ()>::Ok(crate::api::curve::calculate_step_sequences(
-                    api_config,
-                    api_solar_noon_hour,
-                    api_latitude,
-                    api_day_of_year,
-                    api_start_hour,
-                    api_max_steps,
-                ))?;
+                let output_ok = Result::<_, ()>::Ok(
+                    crate::api::curve::calculate_step_sequences_with_sun_times(
+                        api_config,
+                        api_latitude,
+                        api_longitude,
+                        api_year,
+                        api_month,
+                        api_day,
+                        api_timezone,
+                        api_start_hour,
+                        api_max_steps,
+                    ),
+                )?;
                 Ok(output_ok)
             })())
         },
@@ -424,63 +445,44 @@ fn wire__crate__api__helpers__endpoint_for_manufacturer_impl(
         },
     )
 }
-fn wire__crate__api__curve__generate_curve_data_impl(
+fn wire__crate__api__curve__generate_curve_data_high_res_with_sun_times_impl(
     config: impl CstDecode<crate::api::dto::curve::CurveConfigDto>,
-    solar_noon_hour: impl CstDecode<f64>,
     latitude: impl CstDecode<f64>,
-    day_of_year: impl CstDecode<i32>,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "generate_curve_data",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let api_config = config.cst_decode();
-            let api_solar_noon_hour = solar_noon_hour.cst_decode();
-            let api_latitude = latitude.cst_decode();
-            let api_day_of_year = day_of_year.cst_decode();
-            transform_result_dco::<_, _, ()>((move || {
-                let output_ok = Result::<_, ()>::Ok(crate::api::curve::generate_curve_data(
-                    api_config,
-                    api_solar_noon_hour,
-                    api_latitude,
-                    api_day_of_year,
-                ))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
-fn wire__crate__api__curve__generate_curve_data_high_res_impl(
-    config: impl CstDecode<crate::api::dto::curve::CurveConfigDto>,
-    solar_noon_hour: impl CstDecode<f64>,
-    latitude: impl CstDecode<f64>,
-    day_of_year: impl CstDecode<i32>,
+    longitude: impl CstDecode<f64>,
+    year: impl CstDecode<i32>,
+    month: impl CstDecode<i32>,
+    day: impl CstDecode<i32>,
+    timezone: impl CstDecode<String>,
     samples_per_hour: impl CstDecode<i32>,
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "generate_curve_data_high_res",
+            debug_name: "generate_curve_data_high_res_with_sun_times",
             port: None,
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
         },
         move || {
             let api_config = config.cst_decode();
-            let api_solar_noon_hour = solar_noon_hour.cst_decode();
             let api_latitude = latitude.cst_decode();
-            let api_day_of_year = day_of_year.cst_decode();
+            let api_longitude = longitude.cst_decode();
+            let api_year = year.cst_decode();
+            let api_month = month.cst_decode();
+            let api_day = day.cst_decode();
+            let api_timezone = timezone.cst_decode();
             let api_samples_per_hour = samples_per_hour.cst_decode();
             transform_result_dco::<_, _, ()>((move || {
-                let output_ok =
-                    Result::<_, ()>::Ok(crate::api::curve::generate_curve_data_high_res(
+                let output_ok = Result::<_, ()>::Ok(
+                    crate::api::curve::generate_curve_data_high_res_with_sun_times(
                         api_config,
-                        api_solar_noon_hour,
                         api_latitude,
-                        api_day_of_year,
+                        api_longitude,
+                        api_year,
+                        api_month,
+                        api_day,
+                        api_timezone,
                         api_samples_per_hour,
-                    ))?;
+                    ),
+                )?;
                 Ok(output_ok)
             })())
         },
@@ -2883,38 +2885,42 @@ mod io {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__curve__calculate_lighting(
+    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__curve__calculate_lighting_with_sun_times(
         config: *mut wire_cst_curve_config_dto,
-        solar_noon_hour: f64,
         latitude: f64,
-        day_of_year: i32,
+        longitude: f64,
+        year: i32,
+        month: i32,
+        day: i32,
+        timezone: *mut wire_cst_list_prim_u_8_strict,
         current_hour: f64,
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__curve__calculate_lighting_impl(
+        wire__crate__api__curve__calculate_lighting_with_sun_times_impl(
             config,
-            solar_noon_hour,
             latitude,
-            day_of_year,
+            longitude,
+            year,
+            month,
+            day,
+            timezone,
             current_hour,
         )
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__curve__calculate_step_sequences(
+    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__curve__calculate_step_sequences_with_sun_times(
         config: *mut wire_cst_curve_config_dto,
-        solar_noon_hour: f64,
         latitude: f64,
-        day_of_year: i32,
+        longitude: f64,
+        year: i32,
+        month: i32,
+        day: i32,
+        timezone: *mut wire_cst_list_prim_u_8_strict,
         start_hour: f64,
         max_steps: i32,
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__curve__calculate_step_sequences_impl(
-            config,
-            solar_noon_hour,
-            latitude,
-            day_of_year,
-            start_hour,
-            max_steps,
+        wire__crate__api__curve__calculate_step_sequences_with_sun_times_impl(
+            config, latitude, longitude, year, month, day, timezone, start_hour, max_steps,
         )
     }
 
@@ -2973,33 +2979,24 @@ mod io {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__curve__generate_curve_data(
+    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__curve__generate_curve_data_high_res_with_sun_times(
         config: *mut wire_cst_curve_config_dto,
-        solar_noon_hour: f64,
         latitude: f64,
-        day_of_year: i32,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__curve__generate_curve_data_impl(
-            config,
-            solar_noon_hour,
-            latitude,
-            day_of_year,
-        )
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_rhythm_core_wire__crate__api__curve__generate_curve_data_high_res(
-        config: *mut wire_cst_curve_config_dto,
-        solar_noon_hour: f64,
-        latitude: f64,
-        day_of_year: i32,
+        longitude: f64,
+        year: i32,
+        month: i32,
+        day: i32,
+        timezone: *mut wire_cst_list_prim_u_8_strict,
         samples_per_hour: i32,
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__curve__generate_curve_data_high_res_impl(
+        wire__crate__api__curve__generate_curve_data_high_res_with_sun_times_impl(
             config,
-            solar_noon_hour,
             latitude,
-            day_of_year,
+            longitude,
+            year,
+            month,
+            day,
+            timezone,
             samples_per_hour,
         )
     }
@@ -4029,38 +4026,42 @@ mod web {
     }
 
     #[wasm_bindgen]
-    pub fn wire__crate__api__curve__calculate_lighting(
+    pub fn wire__crate__api__curve__calculate_lighting_with_sun_times(
         config: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-        solar_noon_hour: f64,
         latitude: f64,
-        day_of_year: i32,
+        longitude: f64,
+        year: i32,
+        month: i32,
+        day: i32,
+        timezone: String,
         current_hour: f64,
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__curve__calculate_lighting_impl(
+        wire__crate__api__curve__calculate_lighting_with_sun_times_impl(
             config,
-            solar_noon_hour,
             latitude,
-            day_of_year,
+            longitude,
+            year,
+            month,
+            day,
+            timezone,
             current_hour,
         )
     }
 
     #[wasm_bindgen]
-    pub fn wire__crate__api__curve__calculate_step_sequences(
+    pub fn wire__crate__api__curve__calculate_step_sequences_with_sun_times(
         config: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-        solar_noon_hour: f64,
         latitude: f64,
-        day_of_year: i32,
+        longitude: f64,
+        year: i32,
+        month: i32,
+        day: i32,
+        timezone: String,
         start_hour: f64,
         max_steps: i32,
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__curve__calculate_step_sequences_impl(
-            config,
-            solar_noon_hour,
-            latitude,
-            day_of_year,
-            start_hour,
-            max_steps,
+        wire__crate__api__curve__calculate_step_sequences_with_sun_times_impl(
+            config, latitude, longitude, year, month, day, timezone, start_hour, max_steps,
         )
     }
 
@@ -4119,33 +4120,24 @@ mod web {
     }
 
     #[wasm_bindgen]
-    pub fn wire__crate__api__curve__generate_curve_data(
+    pub fn wire__crate__api__curve__generate_curve_data_high_res_with_sun_times(
         config: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-        solar_noon_hour: f64,
         latitude: f64,
-        day_of_year: i32,
-    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__curve__generate_curve_data_impl(
-            config,
-            solar_noon_hour,
-            latitude,
-            day_of_year,
-        )
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__curve__generate_curve_data_high_res(
-        config: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-        solar_noon_hour: f64,
-        latitude: f64,
-        day_of_year: i32,
+        longitude: f64,
+        year: i32,
+        month: i32,
+        day: i32,
+        timezone: String,
         samples_per_hour: i32,
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
-        wire__crate__api__curve__generate_curve_data_high_res_impl(
+        wire__crate__api__curve__generate_curve_data_high_res_with_sun_times_impl(
             config,
-            solar_noon_hour,
             latitude,
-            day_of_year,
+            longitude,
+            year,
+            month,
+            day,
+            timezone,
             samples_per_hour,
         )
     }

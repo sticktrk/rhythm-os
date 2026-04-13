@@ -13,7 +13,6 @@ import 'dart:async';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../events/event_source.dart';
-import '../src/rust/api/curve.dart' show getSunTimes;
 import '../src/rust/api/dto/curve.dart' show CurveConfigDto;
 import '../src/rust/api/dto/runner.dart' show RhythmActionDto;
 import 'provider_manager.dart';
@@ -111,7 +110,8 @@ class RhythmRunner {
   RunnerErrorCallback? onError;
 
   /// Callback for event source state changes.
-  void Function(String sourceId, EventSourceState state)? onEventSourceStateChanged;
+  void Function(String sourceId, EventSourceState state)?
+      onEventSourceStateChanged;
 
   RhythmRunner({
     required this.config,
@@ -313,23 +313,17 @@ class RhythmRunner {
 
   /// Handle a button/remote action for a room.
   Future<void> handleAction(String roomId, RhythmActionDto action) async {
-    // Get current solar info
     final now = DateTime.now();
-    final sunTimes = getSunTimes(
+
+    final result = room_state.calculateRoomActionResult(
+      state: _state,
+      config: config.curveConfig,
       latitude: config.latitude,
       longitude: config.longitude,
       year: now.year,
       month: now.month,
       day: now.day,
       timezone: config.timezone,
-    );
-
-    final result = room_state.calculateRoomActionResult(
-      state: _state,
-      config: config.curveConfig,
-      solarNoonHour: sunTimes.solarNoon,
-      latitude: config.latitude,
-      dayOfYear: _dayOfYear(now),
       currentHour: _currentHour(now),
       roomId: roomId,
       action: action,
@@ -377,11 +371,6 @@ class RhythmRunner {
   /// Get the current time as decimal hours (0-24).
   double _currentHour(DateTime now) {
     return now.hour + now.minute / 60.0 + now.second / 3600.0;
-  }
-
-  /// Get the day of year (1-365/366).
-  int _dayOfYear(DateTime date) {
-    return date.difference(DateTime(date.year, 1, 1)).inDays + 1;
   }
 
   /// Dispose the runner and release resources.

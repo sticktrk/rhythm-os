@@ -180,12 +180,14 @@ class _SunPositionScreenState extends State<SunPositionScreen>
     CurveDataDto? curve;
     try {
       final config = context.read<ConfigModel>().config;
-      final dayOfYear = now.difference(DateTime(now.year, 1, 1)).inDays + 1;
-      curve = generateCurveDataHighRes(
+      curve = generateCurveDataHighResWithSunTimes(
         config: config,
-        solarNoonHour: sunTimes.solarNoon,
         latitude: loc.latitude,
-        dayOfYear: dayOfYear,
+        longitude: loc.longitude,
+        year: now.year,
+        month: now.month,
+        day: now.day,
+        timezone: tz,
         samplesPerHour: 4,
       );
     } catch (_) {

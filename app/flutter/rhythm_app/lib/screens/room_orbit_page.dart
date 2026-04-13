@@ -121,9 +121,11 @@ class _RoomOrbitPageState extends State<RoomOrbitPage> {
   void _regenerateCurveData() {
     final api = context.read<RhythmApi>();
     if (api is HybridApiClient) {
+      final now = DateTime.now();
       final data = api.getCurveDataHighRes(
         config: _effectiveConfig,
         samplesPerHour: 4,
+        date: now,
       );
       if (data != null && mounted) {
         setState(() {
@@ -192,9 +194,12 @@ class _RoomOrbitPageState extends State<RoomOrbitPage> {
       roomId: widget.room.id,
       action: RhythmActionDto.reset,
       config: _effectiveConfig,
-      solarNoonHour: api.solarNoonHour,
       latitude: api.latitude,
-      dayOfYear: api.dayOfYear,
+      longitude: api.longitude,
+      year: now.year,
+      month: now.month,
+      day: now.day,
+      timezone: api.timezone,
       currentHour: currentHour,
     );
 
@@ -243,9 +248,12 @@ class _RoomOrbitPageState extends State<RoomOrbitPage> {
         roomId: widget.room.id,
         action: RhythmActionDto.onPress,
         config: _effectiveConfig,
-        solarNoonHour: api.solarNoonHour,
         latitude: api.latitude,
-        dayOfYear: api.dayOfYear,
+        longitude: api.longitude,
+        year: now.year,
+        month: now.month,
+        day: now.day,
+        timezone: api.timezone,
         currentHour: currentHour,
       );
 
@@ -257,7 +265,8 @@ class _RoomOrbitPageState extends State<RoomOrbitPage> {
           _configureHueService();
           for (final cmd in result.commands) {
             if (cmd.commandType == LightCommandType.turnOn) {
-              final mireds = cmd.kelvin != null ? (1000000 ~/ cmd.kelvin!) : null;
+              final mireds =
+                  cmd.kelvin != null ? (1000000 ~/ cmd.kelvin!) : null;
               await HueServiceLocator.instance.setRoomState(
                 cmd.roomId,
                 on: true,
@@ -265,7 +274,8 @@ class _RoomOrbitPageState extends State<RoomOrbitPage> {
                 mireds: mireds,
               );
             } else {
-              await HueServiceLocator.instance.setRoomState(cmd.roomId, on: false);
+              await HueServiceLocator.instance
+                  .setRoomState(cmd.roomId, on: false);
             }
           }
           HapticFeedback.mediumImpact();
@@ -324,12 +334,14 @@ class _RoomOrbitPageState extends State<RoomOrbitPage> {
       final values = api.calculateLighting(
         config: _effectiveConfig,
         currentHour: hour,
+        date: DateTime.now(),
       );
       if (values == null) return;
 
       final brightness = _manualBrightness ?? values.brightness;
 
-      debugPrint('[Orbit] Setting room ${widget.room.name} to $brightness%, ${(1000000 / values.mireds).round()}K');
+      debugPrint(
+          '[Orbit] Setting room ${widget.room.name} to $brightness%, ${(1000000 / values.mireds).round()}K');
       _configureHueService();
       await HueServiceLocator.instance.setRoomState(
         widget.room.id,
@@ -394,7 +406,8 @@ class _RoomOrbitPageState extends State<RoomOrbitPage> {
         final api = context.read<RhythmApi>();
         final selectedHour = _displayedHour(room);
         final isLightOn = room.lightsOn;
-        final isFollowingNow = room.rhythmEnabled && room.timeOffsetMinutes == 0.0;
+        final isFollowingNow =
+            room.rhythmEnabled && room.timeOffsetMinutes == 0.0;
 
         int curveBrightness;
         int kelvin;
@@ -403,6 +416,7 @@ class _RoomOrbitPageState extends State<RoomOrbitPage> {
           final values = api.calculateLighting(
             config: _effectiveConfig,
             currentHour: selectedHour,
+            date: DateTime.now(),
           );
           if (values != null) {
             curveBrightness = values.brightness;

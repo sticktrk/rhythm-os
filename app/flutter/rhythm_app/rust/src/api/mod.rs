@@ -24,9 +24,9 @@ pub use dto::*;
 
 // Curve functions
 pub use curve::{
-    calculate_lighting, calculate_step_sequences, generate_curve_data,
-    generate_curve_data_high_res, generate_curve_data_with_sun_times, get_sun_position,
-    get_sun_times, get_twilight_times, is_morning,
+    calculate_lighting_with_sun_times, calculate_step_sequences_with_sun_times,
+    generate_curve_data_high_res_with_sun_times, generate_curve_data_with_sun_times,
+    get_sun_position, get_sun_times, get_twilight_times, is_morning,
 };
 
 // Helper functions

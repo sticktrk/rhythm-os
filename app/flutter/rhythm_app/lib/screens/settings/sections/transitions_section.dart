@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:rhythm_core/utils/color_utils.dart';
+import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
+import '../../../providers/home_provider.dart';
 import '../../../providers/server_sync_provider.dart';
 import '../../../widgets/settings_row.dart';
 import '../default_transition_editor_screen.dart';
@@ -12,13 +13,17 @@ class TransitionsSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<ServerSyncProvider>(
-      builder: (context, serverSync, _) {
+    return Consumer2<ServerSyncProvider, HomeProvider>(
+      builder: (context, serverSync, homeProvider, _) {
         final profileColors = _resolveProfileColors(
           serverSync.modeConfigs,
           serverSync.profiles,
         );
-        final summary = _summaryValue(serverSync.modeTransitions);
+        final summary = _summaryValue(
+          context,
+          transitions: serverSync.modeTransitions,
+          home: homeProvider.currentHome,
+        );
 
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -29,7 +34,7 @@ class TransitionsSection extends StatelessWidget {
                 SettingsRow(
                   icon: Icons.wb_twilight_rounded,
                   iconColor: const Color(0xFFFFB74D),
-                  label: 'Default Transition',
+                  label: 'Daily Rhythm',
                   value: summary.isEmpty ? null : summary,
                   onTap: () => DefaultTransitionEditorScreen.show(
                     context,
@@ -45,7 +50,11 @@ class TransitionsSection extends StatelessWidget {
   }
 }
 
-String _summaryValue(List<RhythmModeTransitionConfig> transitions) {
+String _summaryValue(
+  BuildContext context, {
+  required List<RhythmModeTransitionConfig> transitions,
+  required Home? home,
+}) {
   RhythmModeTransitionConfig? dayTransition;
   RhythmModeTransitionConfig? sleepTransition;
 
@@ -59,18 +68,111 @@ String _summaryValue(List<RhythmModeTransitionConfig> transitions) {
     }
   }
 
+  final solarContext = _resolveSolarContext(home);
   final labels = [
-    _triggerLabel(dayTransition?.trigger),
-    _triggerLabel(sleepTransition?.trigger),
+    _triggerSummaryLabel(
+      context,
+      mode: RhythmMode.day,
+      trigger: dayTransition?.trigger,
+      sunTimes: solarContext?.sunTimes,
+      twilightTimes: solarContext?.twilightTimes,
+    ),
+    _triggerSummaryLabel(
+      context,
+      mode: RhythmMode.sleep,
+      trigger: sleepTransition?.trigger,
+      sunTimes: solarContext?.sunTimes,
+      twilightTimes: solarContext?.twilightTimes,
+    ),
   ].whereType<String>().where((label) => label.isNotEmpty).toList();
   return labels.join(' / ');
 }
 
-String? _triggerLabel(RhythmTransitionTrigger? trigger) {
+({SunTimesDto sunTimes, TwilightTimesDto twilightTimes})? _resolveSolarContext(
+  Home? home,
+) {
+  final loc = home?.location;
+  if (loc == null) return null;
+
+  try {
+    final now = DateTime.now();
+    final timezone =
+        home?.timezone ?? SolarUtils.timezoneFromLongitude(loc.longitude);
+    return (
+      sunTimes: getSunTimes(
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+        year: now.year,
+        month: now.month,
+        day: now.day,
+        timezone: timezone,
+      ),
+      twilightTimes: getTwilightTimes(
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+        year: now.year,
+        month: now.month,
+        day: now.day,
+        timezone: timezone,
+      ),
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
+String? _triggerSummaryLabel(
+  BuildContext context, {
+  required RhythmMode mode,
+  required RhythmTransitionTrigger? trigger,
+  required SunTimesDto? sunTimes,
+  required TwilightTimesDto? twilightTimes,
+}) {
   if (trigger == null) return null;
   if (trigger.isScheduled) return trigger.time;
   if (trigger.kind == 'manual') return '';
 
+  final event = trigger.event;
+  if (trigger.kind == 'solar' && event != null) {
+    final hour = _eventTimeHours(
+      mode: mode,
+      event: event,
+      sunTimes: sunTimes,
+      twilightTimes: twilightTimes,
+    );
+    if (hour != null) {
+      return SolarUtils.formatHour(
+        hour,
+        use24: MediaQuery.alwaysUse24HourFormatOf(context),
+      );
+    }
+  }
+
+  return _triggerLabel(trigger);
+}
+
+double? _eventTimeHours({
+  required RhythmMode mode,
+  required String event,
+  required SunTimesDto? sunTimes,
+  required TwilightTimesDto? twilightTimes,
+}) {
+  final isDawn = mode == RhythmMode.day;
+  return switch (event) {
+    'sunrise' => sunTimes?.sunrise,
+    'sunset' => sunTimes?.sunset,
+    'civil_twilight' =>
+      isDawn ? twilightTimes?.dawn.civil : twilightTimes?.dusk.civil,
+    'nautical_twilight' =>
+      isDawn ? twilightTimes?.dawn.nautical : twilightTimes?.dusk.nautical,
+    'astronomical_twilight' => isDawn
+        ? twilightTimes?.dawn.astronomical
+        : twilightTimes?.dusk.astronomical,
+    _ => null,
+  };
+}
+
+String? _triggerLabel(RhythmTransitionTrigger trigger) {
   return switch (trigger.event) {
     'sunrise' => 'Sunrise',
     'civil_twilight' => 'Civil',

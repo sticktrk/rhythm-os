@@ -364,7 +364,8 @@ class RoomProvider extends ChangeNotifier {
 
   /// Clear all rooms from a specific source.
   Future<void> clearRoomsBySource(RoomSourceDto source) async {
-    final roomsToRemove = room_state.roomsBySource(state: _state, source: source);
+    final roomsToRemove =
+        room_state.roomsBySource(state: _state, source: source);
     for (final room in roomsToRemove) {
       _state = room_state.removeRoom(state: _state, roomId: room.id);
     }
@@ -438,8 +439,8 @@ class RoomProvider extends ChangeNotifier {
   ///
   /// Pass `null` to use the global configuration.
   Future<void> setRoomCurveConfig(String roomId, CurveConfigDto? config) async {
-    _state =
-        room_state.setRoomCurveConfig(state: _state, roomId: roomId, config: config);
+    _state = room_state.setRoomCurveConfig(
+        state: _state, roomId: roomId, config: config);
     await _save();
     notifyListeners();
   }
@@ -605,17 +606,23 @@ class RoomProvider extends ChangeNotifier {
     required String roomId,
     required RhythmActionDto action,
     required CurveConfigDto config,
-    required double solarNoonHour,
     required double latitude,
-    required int dayOfYear,
+    required double longitude,
+    required int year,
+    required int month,
+    required int day,
+    required String timezone,
     required double currentHour,
   }) {
     final result = room_state.calculateRoomActionResult(
       state: _state,
       config: config,
-      solarNoonHour: solarNoonHour,
       latitude: latitude,
-      dayOfYear: dayOfYear,
+      longitude: longitude,
+      year: year,
+      month: month,
+      day: day,
+      timezone: timezone,
       currentHour: currentHour,
       roomId: roomId,
       action: action,
@@ -642,9 +649,12 @@ class RoomProvider extends ChangeNotifier {
   /// Returns the light commands to execute.
   Future<RunnerActionResultDto?> handleAction({
     required CurveConfigDto config,
-    required double solarNoonHour,
     required double latitude,
-    required int dayOfYear,
+    required double longitude,
+    required int year,
+    required int month,
+    required int day,
+    required String timezone,
     required double currentHour,
     required RhythmActionDto action,
   }) async {
@@ -654,9 +664,12 @@ class RoomProvider extends ChangeNotifier {
     final result = room_state.calculateRoomActionResult(
       state: _state,
       config: config,
-      solarNoonHour: solarNoonHour,
       latitude: latitude,
-      dayOfYear: dayOfYear,
+      longitude: longitude,
+      year: year,
+      month: month,
+      day: day,
+      timezone: timezone,
       currentHour: currentHour,
       roomId: room.id,
       action: action,

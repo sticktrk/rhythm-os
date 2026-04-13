@@ -20,7 +20,8 @@ RunnerStateDto addRoom({
   required RunnerStateDto state,
   required RoomDto room,
 }) {
-  final rooms = List<RoomDto>.of(state.rooms)..removeWhere((r) => r.id == room.id);
+  final rooms = List<RoomDto>.of(state.rooms)
+    ..removeWhere((r) => r.id == room.id);
   rooms.add(room);
   return RunnerStateDto(rooms: rooms);
 }
@@ -30,7 +31,8 @@ RunnerStateDto removeRoom({
   required RunnerStateDto state,
   required String roomId,
 }) {
-  final rooms = List<RoomDto>.of(state.rooms)..removeWhere((r) => r.id == roomId);
+  final rooms = List<RoomDto>.of(state.rooms)
+    ..removeWhere((r) => r.id == roomId);
   return RunnerStateDto(rooms: rooms);
 }
 
@@ -160,9 +162,12 @@ RunnerStateDto setRoomCurveConfig({
 RunnerActionResultDto calculateRoomActionResult({
   required RunnerStateDto state,
   required CurveConfigDto config,
-  required double solarNoonHour,
   required double latitude,
-  required int dayOfYear,
+  required double longitude,
+  required int year,
+  required int month,
+  required int day,
+  required String timezone,
   required double currentHour,
   required String roomId,
   required RhythmActionDto action,
@@ -179,9 +184,12 @@ RunnerActionResultDto calculateRoomActionResult({
   final outcome = _applyAction(
     room: room,
     config: config,
-    solarNoonHour: solarNoonHour,
     latitude: latitude,
-    dayOfYear: dayOfYear,
+    longitude: longitude,
+    year: year,
+    month: month,
+    day: day,
+    timezone: timezone,
     currentHour: currentHour,
     action: action,
   );
@@ -213,9 +221,12 @@ RunnerStateDto _updateRoom(
 _ActionOutcome _applyAction({
   required RoomDto room,
   required CurveConfigDto config,
-  required double solarNoonHour,
   required double latitude,
-  required int dayOfYear,
+  required double longitude,
+  required int year,
+  required int month,
+  required int day,
+  required String timezone,
   required double currentHour,
   required RhythmActionDto action,
 }) {
@@ -231,9 +242,12 @@ _ActionOutcome _applyAction({
 
       final lighting = _lightingAt(
         config: config,
-        solarNoonHour: solarNoonHour,
         latitude: latitude,
-        dayOfYear: dayOfYear,
+        longitude: longitude,
+        year: year,
+        month: month,
+        day: day,
+        timezone: timezone,
         hour: currentHour,
       );
       return _ActionOutcome(
@@ -244,7 +258,9 @@ _ActionOutcome _applyAction({
           timeOffsetMinutes: 0,
           brightnessOffset: 0,
         ),
-        commands: [_turnOnCommand(room.id, lighting.brightness, lighting.kelvin)],
+        commands: [
+          _turnOnCommand(room.id, lighting.brightness, lighting.kelvin)
+        ],
         stateChanged: true,
       );
 
@@ -258,9 +274,12 @@ _ActionOutcome _applyAction({
     case RhythmActionDto.reset:
       final lighting = _lightingAt(
         config: config,
-        solarNoonHour: solarNoonHour,
         latitude: latitude,
-        dayOfYear: dayOfYear,
+        longitude: longitude,
+        year: year,
+        month: month,
+        day: day,
+        timezone: timezone,
         hour: currentHour,
       );
       return _ActionOutcome(
@@ -271,7 +290,9 @@ _ActionOutcome _applyAction({
           timeOffsetMinutes: 0,
           brightnessOffset: 0,
         ),
-        commands: [_turnOnCommand(room.id, lighting.brightness, lighting.kelvin)],
+        commands: [
+          _turnOnCommand(room.id, lighting.brightness, lighting.kelvin)
+        ],
         stateChanged: true,
       );
 
@@ -291,12 +312,16 @@ _ActionOutcome _applyAction({
 
     case RhythmActionDto.stepUp:
     case RhythmActionDto.stepDown:
-      final effectiveHour = _wrapHour(currentHour + room.timeOffsetMinutes / 60.0);
-      final sequences = curve_api.calculateStepSequences(
+      final effectiveHour =
+          _wrapHour(currentHour + room.timeOffsetMinutes / 60.0);
+      final sequences = curve_api.calculateStepSequencesWithSunTimes(
         config: config,
-        solarNoonHour: solarNoonHour,
         latitude: latitude,
-        dayOfYear: dayOfYear,
+        longitude: longitude,
+        year: year,
+        month: month,
+        day: day,
+        timezone: timezone,
         startHour: effectiveHour,
         maxSteps: 1,
       );
@@ -309,9 +334,12 @@ _ActionOutcome _applyAction({
       final newEffectiveHour = _wrapHour(currentHour + newOffset / 60.0);
       final lighting = _lightingAt(
         config: config,
-        solarNoonHour: solarNoonHour,
         latitude: latitude,
-        dayOfYear: dayOfYear,
+        longitude: longitude,
+        year: year,
+        month: month,
+        day: day,
+        timezone: timezone,
         hour: newEffectiveHour,
       );
       return _ActionOutcome(
@@ -320,7 +348,9 @@ _ActionOutcome _applyAction({
           lightsOn: true,
           timeOffsetMinutes: newOffset,
         ),
-        commands: [_turnOnCommand(room.id, lighting.brightness, lighting.kelvin)],
+        commands: [
+          _turnOnCommand(room.id, lighting.brightness, lighting.kelvin)
+        ],
         stateChanged: true,
       );
 
@@ -329,23 +359,30 @@ _ActionOutcome _applyAction({
       final delta = action == RhythmActionDto.dimUp ? 10.0 : -10.0;
       final nextBrightnessOffset =
           (room.brightnessOffset + delta).clamp(-100.0, 100.0);
-      final effectiveHour = _wrapHour(currentHour + room.timeOffsetMinutes / 60.0);
+      final effectiveHour =
+          _wrapHour(currentHour + room.timeOffsetMinutes / 60.0);
       final lighting = _lightingAt(
         config: config,
-        solarNoonHour: solarNoonHour,
         latitude: latitude,
-        dayOfYear: dayOfYear,
+        longitude: longitude,
+        year: year,
+        month: month,
+        day: day,
+        timezone: timezone,
         hour: effectiveHour,
       );
-      final adjustedBrightness =
-          (lighting.brightness + nextBrightnessOffset).clamp(1.0, 100.0).toInt();
+      final adjustedBrightness = (lighting.brightness + nextBrightnessOffset)
+          .clamp(1.0, 100.0)
+          .toInt();
       return _ActionOutcome(
         room: _copyRoom(
           room,
           lightsOn: true,
           brightnessOffset: nextBrightnessOffset,
         ),
-        commands: [_turnOnCommand(room.id, adjustedBrightness, lighting.kelvin)],
+        commands: [
+          _turnOnCommand(room.id, adjustedBrightness, lighting.kelvin)
+        ],
         stateChanged: true,
       );
   }
@@ -353,16 +390,22 @@ _ActionOutcome _applyAction({
 
 LightingValuesDto _lightingAt({
   required CurveConfigDto config,
-  required double solarNoonHour,
   required double latitude,
-  required int dayOfYear,
+  required double longitude,
+  required int year,
+  required int month,
+  required int day,
+  required String timezone,
   required double hour,
 }) {
-  return curve_api.calculateLighting(
+  return curve_api.calculateLightingWithSunTimes(
     config: config,
-    solarNoonHour: solarNoonHour,
     latitude: latitude,
-    dayOfYear: dayOfYear,
+    longitude: longitude,
+    year: year,
+    month: month,
+    day: day,
+    timezone: timezone,
     currentHour: _wrapHour(hour),
   );
 }

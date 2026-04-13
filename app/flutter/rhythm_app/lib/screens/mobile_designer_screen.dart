@@ -98,7 +98,6 @@ class _MobileDesignerScreenState extends State<MobileDesignerScreen> {
   Future<void> _updateCurveData(CurveConfigDto config) async {
     try {
       final api = context.read<RhythmApi>();
-      final existingSolar = _curveData?.solar;
 
       CurveData? curveData;
       if (api is HybridApiClient) {
@@ -106,15 +105,6 @@ class _MobileDesignerScreenState extends State<MobileDesignerScreen> {
           config: config,
           samplesPerHour: 4,
         );
-
-        if (curveData != null && existingSolar != null) {
-          curveData = CurveData(
-            hours: curveData.hours,
-            brightness: curveData.brightness,
-            kelvin: curveData.kelvin,
-            solar: existingSolar,
-          );
-        }
       }
 
       curveData ??= await api.getCurveData(overrides: config);

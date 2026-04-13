@@ -820,25 +820,47 @@ class RustLibWire implements BaseWire {
               tracker, behavior_id);
 
   JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__curve__calculate_lighting(
+      wire__crate__api__curve__calculate_lighting_with_sun_times(
               JSAny config,
-              double solar_noon_hour,
               double latitude,
-              int day_of_year,
+              double longitude,
+              int year,
+              int month,
+              int day,
+              String timezone,
               double current_hour) =>
-          wasmModule.wire__crate__api__curve__calculate_lighting(
-              config, solar_noon_hour, latitude, day_of_year, current_hour);
+          wasmModule.wire__crate__api__curve__calculate_lighting_with_sun_times(
+              config,
+              latitude,
+              longitude,
+              year,
+              month,
+              day,
+              timezone,
+              current_hour);
 
   JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__curve__calculate_step_sequences(
+      wire__crate__api__curve__calculate_step_sequences_with_sun_times(
               JSAny config,
-              double solar_noon_hour,
               double latitude,
-              int day_of_year,
+              double longitude,
+              int year,
+              int month,
+              int day,
+              String timezone,
               double start_hour,
               int max_steps) =>
-          wasmModule.wire__crate__api__curve__calculate_step_sequences(config,
-              solar_noon_hour, latitude, day_of_year, start_hour, max_steps);
+          wasmModule
+              .wire__crate__api__curve__calculate_step_sequences_with_sun_times(
+                  config,
+                  latitude,
+                  longitude,
+                  year,
+                  month,
+                  day,
+                  timezone,
+                  start_hour,
+                  max_steps);
 
   JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__hue_registry__create_behavior_tracker() =>
@@ -875,20 +897,25 @@ class RustLibWire implements BaseWire {
               manufacturer, model);
 
   JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__curve__generate_curve_data(JSAny config,
-              double solar_noon_hour, double latitude, int day_of_year) =>
-          wasmModule.wire__crate__api__curve__generate_curve_data(
-              config, solar_noon_hour, latitude, day_of_year);
-
-  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__curve__generate_curve_data_high_res(
+      wire__crate__api__curve__generate_curve_data_high_res_with_sun_times(
               JSAny config,
-              double solar_noon_hour,
               double latitude,
-              int day_of_year,
+              double longitude,
+              int year,
+              int month,
+              int day,
+              String timezone,
               int samples_per_hour) =>
-          wasmModule.wire__crate__api__curve__generate_curve_data_high_res(
-              config, solar_noon_hour, latitude, day_of_year, samples_per_hour);
+          wasmModule
+              .wire__crate__api__curve__generate_curve_data_high_res_with_sun_times(
+                  config,
+                  latitude,
+                  longitude,
+                  year,
+                  month,
+                  day,
+                  timezone,
+                  samples_per_hour);
 
   JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__curve__generate_curve_data_with_sun_times(
@@ -1026,19 +1053,25 @@ extension type RustLibWasmModule._(JSObject _) implements JSObject {
           JSAny tracker, String behavior_id);
 
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__curve__calculate_lighting(
+      wire__crate__api__curve__calculate_lighting_with_sun_times(
           JSAny config,
-          double solar_noon_hour,
           double latitude,
-          int day_of_year,
+          double longitude,
+          int year,
+          int month,
+          int day,
+          String timezone,
           double current_hour);
 
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__curve__calculate_step_sequences(
+      wire__crate__api__curve__calculate_step_sequences_with_sun_times(
           JSAny config,
-          double solar_noon_hour,
           double latitude,
-          int day_of_year,
+          double longitude,
+          int year,
+          int month,
+          int day,
+          String timezone,
           double start_hour,
           int max_steps);
 
@@ -1064,15 +1097,14 @@ extension type RustLibWasmModule._(JSObject _) implements JSObject {
           String manufacturer, String model);
 
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__curve__generate_curve_data(JSAny config,
-          double solar_noon_hour, double latitude, int day_of_year);
-
-  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
-      wire__crate__api__curve__generate_curve_data_high_res(
+      wire__crate__api__curve__generate_curve_data_high_res_with_sun_times(
           JSAny config,
-          double solar_noon_hour,
           double latitude,
-          int day_of_year,
+          double longitude,
+          int year,
+          int month,
+          int day,
+          String timezone,
           int samples_per_hour);
 
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */

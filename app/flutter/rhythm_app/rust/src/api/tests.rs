@@ -4,11 +4,11 @@
 mod tests {
     use crate::api::{
         area_ids_match,
-        calculate_lighting,
-        calculate_step_sequences,
+        calculate_lighting_with_sun_times,
+        calculate_step_sequences_with_sun_times,
         endpoint_for_manufacturer,
         // Curve functions
-        generate_curve_data,
+        generate_curve_data_high_res_with_sun_times,
         generate_curve_data_with_sun_times,
         // Helper functions
         get_group_prefix,
@@ -30,17 +30,31 @@ mod tests {
     };
 
     #[test]
-    fn test_generate_curve_data() {
+    fn test_generate_curve_data_high_res_with_sun_times() {
         let config = CurveConfigDto::default();
-        let result = generate_curve_data(config, 12.0, 35.0, 172);
+        let result = generate_curve_data_high_res_with_sun_times(
+            config,
+            35.7796,
+            -78.6382,
+            2024,
+            6,
+            21,
+            "America/New_York".to_string(),
+            4,
+        );
 
-        assert_eq!(result.hours.len(), 24);
-        assert_eq!(result.brightness.len(), 24);
-        assert_eq!(result.kelvin.len(), 24);
+        assert_eq!(result.hours.len(), 96);
+        assert_eq!(result.brightness.len(), 96);
+        assert_eq!(result.kelvin.len(), 96);
 
         // At noon (index 12), brightness should be high
-        assert!(result.brightness[12] > 90);
-        assert!(result.kelvin[12] >= CurveConfigDto::default().max_color_temp - 100);
+        let noon_index = result
+            .hours
+            .iter()
+            .position(|hour| (*hour - 12.0).abs() < 0.001)
+            .expect("expected noon sample");
+        assert!(result.brightness[noon_index] > 90);
+        assert!(result.kelvin[noon_index] >= CurveConfigDto::default().max_color_temp - 100);
 
         // At midnight (index 0), brightness should be low and color warm
         assert!(result.brightness[0] < 10);
@@ -49,9 +63,18 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_lighting() {
+    fn test_calculate_lighting_with_sun_times() {
         let config = CurveConfigDto::default();
-        let result = calculate_lighting(config, 12.0, 35.0, 172, 12.0);
+        let result = calculate_lighting_with_sun_times(
+            config,
+            35.7796,
+            -78.6382,
+            2024,
+            6,
+            21,
+            "America/New_York".to_string(),
+            12.0,
+        );
 
         assert!(result.brightness > 90);
         assert!(result.kelvin >= CurveConfigDto::default().max_color_temp - 100);
@@ -59,13 +82,23 @@ mod tests {
     }
 
     #[test]
-    fn test_step_sequences() {
+    fn test_step_sequences_with_sun_times() {
         let config = CurveConfigDto::default();
         // Use 9:00 AM - mid-morning between sunrise (~6:00) and noon (12:00)
         // At this time, both step_up (toward noon) and step_down (toward sunrise) are possible
         // Note: At noon, step_up would be empty (already at max brightness)
         //       At sunrise, step_down would be empty (already at min brightness)
-        let result = calculate_step_sequences(config, 12.0, 35.0, 172, 9.0, 10);
+        let result = calculate_step_sequences_with_sun_times(
+            config,
+            35.7796,
+            -78.6382,
+            2024,
+            6,
+            21,
+            "America/New_York".to_string(),
+            9.0,
+            10,
+        );
 
         // Should have generated some steps in both directions
         assert!(

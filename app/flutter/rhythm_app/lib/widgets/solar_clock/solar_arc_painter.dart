@@ -36,12 +36,17 @@ class SolarArcPainter extends CustomPainter {
     if (showUpperArc) _drawUpperArc(canvas);
     if (showLowerArc) _drawLowerArc(canvas);
     if (showHourLabels) _drawHourLabels(canvas);
-    if (showEventMarkers && !data.isPolarDay && !data.isPolarNight) {
+    if (showEventMarkers) {
       _drawEventMarkers(canvas);
     }
   }
 
   void _drawUpperArc(Canvas canvas) {
+    if (geometry.orientation == SolarClockOrientation.standard24) {
+      _drawStandardDayArc(canvas);
+      return;
+    }
+
     final rect = geometry.arcRect;
     final samples = curveData;
 
@@ -55,10 +60,7 @@ class SolarArcPainter extends CustomPainter {
 
       for (int i = 0; i < segments; i++) {
         final startAngle = -math.pi + i * segSweep;
-        final midHour = SolarUtils.angleToHour(
-          startAngle + segSweep / 2,
-          data.solarNoon,
-        );
+        final midHour = geometry.hourForAngle(startAngle + segSweep / 2);
         final (color, opacity) = _curveStyleAt(midHour);
         paint.color = color.withValues(alpha: opacity);
         canvas.drawArc(rect, startAngle, segSweep + 0.02, false, paint);
@@ -87,6 +89,11 @@ class SolarArcPainter extends CustomPainter {
   }
 
   void _drawLowerArc(Canvas canvas) {
+    if (geometry.orientation == SolarClockOrientation.standard24) {
+      _drawStandardNightArc(canvas);
+      return;
+    }
+
     final rect = geometry.arcRect;
     final dashPaint = Paint()
       ..style = PaintingStyle.stroke
@@ -108,24 +115,21 @@ class SolarArcPainter extends CustomPainter {
     final astronomicalDawn =
         data.twilightTimes.dawn.astronomical ?? data.sunrise;
 
-    final duskAngle = SolarUtils.hourToAngle(astronomicalDusk, data.solarNoon);
+    final duskAngle = geometry.angleForHour(astronomicalDusk);
     if (duskAngle > 0.01) {
       final segments =
           (geometry.radius * duskAngle / 8.0).round().clamp(1, 100);
       final dashSweep = duskAngle / segments;
       for (int i = 0; i < segments; i++) {
         final dashStart = (i / segments) * duskAngle;
-        final midHour = SolarUtils.angleToHour(
-          dashStart + dashSweep * 0.2,
-          data.solarNoon,
-        );
+        final midHour = geometry.hourForAngle(dashStart + dashSweep * 0.2);
         final (color, opacity) = _curveStyleAt(midHour);
         dashPaint.color = color.withValues(alpha: opacity * 0.5);
         canvas.drawArc(rect, dashStart, dashSweep * 0.4, false, dashPaint);
       }
     }
 
-    var dawnAngle = SolarUtils.hourToAngle(astronomicalDawn, data.solarNoon);
+    var dawnAngle = geometry.angleForHour(astronomicalDawn);
     if (dawnAngle < 0) dawnAngle += 2 * math.pi;
     final dawnSweep = math.pi - dawnAngle;
     if (dawnSweep > 0.01) {
@@ -134,10 +138,7 @@ class SolarArcPainter extends CustomPainter {
       final dashSweep = dawnSweep / segments;
       for (int i = 0; i < segments; i++) {
         final dashStart = dawnAngle + (i / segments) * dawnSweep;
-        final midHour = SolarUtils.angleToHour(
-          dashStart + dashSweep * 0.2,
-          data.solarNoon,
-        );
+        final midHour = geometry.hourForAngle(dashStart + dashSweep * 0.2);
         final (color, opacity) = _curveStyleAt(midHour);
         dashPaint.color = color.withValues(alpha: opacity * 0.5);
         canvas.drawArc(rect, dashStart, dashSweep * 0.4, false, dashPaint);
@@ -151,10 +152,7 @@ class SolarArcPainter extends CustomPainter {
 
     for (int i = 0; i < segments; i++) {
       final dashStart = (i / segments) * math.pi;
-      final midHour = SolarUtils.angleToHour(
-        dashStart + dashSweep * 0.2,
-        data.solarNoon,
-      );
+      final midHour = geometry.hourForAngle(dashStart + dashSweep * 0.2);
       final (color, opacity) = _curveStyleAt(midHour);
       dashPaint.color = curveData == null || curveData!.isEmpty
           ? Colors.white.withValues(alpha: 0.20)
@@ -163,11 +161,105 @@ class SolarArcPainter extends CustomPainter {
     }
   }
 
+  void _drawStandardDayArc(Canvas canvas) {
+    if (data.isPolarNight) return;
+
+    _drawHourRange(
+      canvas,
+      startHour: data.isPolarDay ? 0.0 : data.sunrise,
+      endHour: data.isPolarDay ? 24.0 : data.sunset,
+      fullCircle: data.isPolarDay,
+      dashed: false,
+      strokeWidth: arcStrokeWidth,
+    );
+  }
+
+  void _drawStandardNightArc(Canvas canvas) {
+    if (data.isPolarDay) return;
+
+    final astronomicalDusk =
+        data.twilightTimes.dusk.astronomical ?? data.sunset;
+    final astronomicalDawn =
+        data.twilightTimes.dawn.astronomical ?? data.sunrise;
+
+    _drawHourRange(
+      canvas,
+      startHour: data.isPolarNight
+          ? 0.0
+          : showFullLowerArc
+              ? data.sunset
+              : astronomicalDusk,
+      endHour: data.isPolarNight
+          ? 24.0
+          : showFullLowerArc
+              ? data.sunrise
+              : astronomicalDawn,
+      fullCircle: data.isPolarNight,
+      dashed: true,
+      strokeWidth: 3.0,
+      opacityMultiplier: 0.5,
+      noCurveColor: Colors.white.withValues(alpha: 0.20),
+    );
+  }
+
+  void _drawHourRange(
+    Canvas canvas, {
+    required double startHour,
+    required double endHour,
+    required bool dashed,
+    required double strokeWidth,
+    bool fullCircle = false,
+    double opacityMultiplier = 1.0,
+    Color? noCurveColor,
+  }) {
+    final hourSpan = fullCircle ? 24.0 : _clockwiseHourSpan(startHour, endHour);
+    if (hourSpan <= 0.01) return;
+
+    final rect = geometry.arcRect;
+    final segments = dashed
+        ? (geometry.radius * (hourSpan / 24.0) * 2 * math.pi / 8.0)
+            .round()
+            .clamp(1, 140)
+        : (48 * (hourSpan / 24.0)).round().clamp(1, 96);
+    final hourStep = hourSpan / segments;
+    final sweep = (2 * math.pi * hourStep) / 24.0;
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth
+      ..strokeCap = dashed ? StrokeCap.round : StrokeCap.butt;
+
+    for (int i = 0; i < segments; i++) {
+      final segmentStartHour = fullCircle
+          ? i * hourStep
+          : SolarUtils.normalizeHour(startHour + i * hourStep);
+      final midHour = fullCircle
+          ? (i + 0.5) * hourStep
+          : SolarUtils.normalizeHour(startHour + (i + 0.5) * hourStep);
+      final (color, opacity) = _curveStyleAt(midHour);
+      paint.color = curveData == null || curveData!.isEmpty
+          ? noCurveColor ?? color.withValues(alpha: opacity * opacityMultiplier)
+          : color.withValues(alpha: opacity * opacityMultiplier);
+      canvas.drawArc(
+        rect,
+        geometry.angleForHour(segmentStartHour),
+        dashed ? sweep * 0.4 : sweep + 0.02,
+        false,
+        paint,
+      );
+    }
+  }
+
+  double _clockwiseHourSpan(double startHour, double endHour) {
+    final span = SolarUtils.normalizeHour(endHour - startHour);
+    if (span == 0.0 && startHour != endHour) return 24.0;
+    return span;
+  }
+
   void _drawHourLabels(Canvas canvas) {
     const labels = [0, 3, 6, 9, 12, 15, 18, 21];
 
     for (final hour in labels) {
-      final angle = SolarUtils.hourToAngle(hour.toDouble(), data.solarNoon);
+      final angle = geometry.angleForHour(hour.toDouble());
       final cosValue = math.cos(angle);
       final sinValue = math.sin(angle);
       final isUpperArc = sinValue < 0;
@@ -217,65 +309,67 @@ class SolarArcPainter extends CustomPainter {
       );
     }
 
-    if (tw.dawn.astronomical != null) {
-      _drawTwilightTick(
-        canvas,
-        tw.dawn.astronomical!,
-        tickColor(tw.dawn.astronomical!, fallbackDawn),
-        0.25,
-        8,
-        1.2,
-      );
-    }
-    if (tw.dusk.astronomical != null) {
-      _drawTwilightTick(
-        canvas,
-        tw.dusk.astronomical!,
-        tickColor(tw.dusk.astronomical!, fallbackDusk),
-        0.25,
-        8,
-        1.2,
-      );
-    }
-    if (tw.dawn.nautical != null) {
-      _drawTwilightTick(
-        canvas,
-        tw.dawn.nautical!,
-        tickColor(tw.dawn.nautical!, fallbackDawn),
-        0.45,
-        10,
-        1.5,
-      );
-    }
-    if (tw.dusk.nautical != null) {
-      _drawTwilightTick(
-        canvas,
-        tw.dusk.nautical!,
-        tickColor(tw.dusk.nautical!, fallbackDusk),
-        0.45,
-        10,
-        1.5,
-      );
-    }
-    if (tw.dawn.civil != null) {
-      _drawTwilightTick(
-        canvas,
-        tw.dawn.civil!,
-        tickColor(tw.dawn.civil!, fallbackDawn),
-        0.70,
-        12,
-        2.0,
-      );
-    }
-    if (tw.dusk.civil != null) {
-      _drawTwilightTick(
-        canvas,
-        tw.dusk.civil!,
-        tickColor(tw.dusk.civil!, fallbackDusk),
-        0.70,
-        12,
-        2.0,
-      );
+    if (!data.isPolarDay && !data.isPolarNight) {
+      if (tw.dawn.astronomical != null) {
+        _drawTwilightTick(
+          canvas,
+          tw.dawn.astronomical!,
+          tickColor(tw.dawn.astronomical!, fallbackDawn),
+          0.25,
+          8,
+          1.2,
+        );
+      }
+      if (tw.dusk.astronomical != null) {
+        _drawTwilightTick(
+          canvas,
+          tw.dusk.astronomical!,
+          tickColor(tw.dusk.astronomical!, fallbackDusk),
+          0.25,
+          8,
+          1.2,
+        );
+      }
+      if (tw.dawn.nautical != null) {
+        _drawTwilightTick(
+          canvas,
+          tw.dawn.nautical!,
+          tickColor(tw.dawn.nautical!, fallbackDawn),
+          0.45,
+          10,
+          1.5,
+        );
+      }
+      if (tw.dusk.nautical != null) {
+        _drawTwilightTick(
+          canvas,
+          tw.dusk.nautical!,
+          tickColor(tw.dusk.nautical!, fallbackDusk),
+          0.45,
+          10,
+          1.5,
+        );
+      }
+      if (tw.dawn.civil != null) {
+        _drawTwilightTick(
+          canvas,
+          tw.dawn.civil!,
+          tickColor(tw.dawn.civil!, fallbackDawn),
+          0.70,
+          12,
+          2.0,
+        );
+      }
+      if (tw.dusk.civil != null) {
+        _drawTwilightTick(
+          canvas,
+          tw.dusk.civil!,
+          tickColor(tw.dusk.civil!, fallbackDusk),
+          0.70,
+          12,
+          2.0,
+        );
+      }
     }
 
     _drawSolarNoonMarker(canvas);
@@ -289,7 +383,7 @@ class SolarArcPainter extends CustomPainter {
     double extent,
     double stroke,
   ) {
-    final angle = SolarUtils.hourToAngle(hour, data.solarNoon);
+    final angle = geometry.angleForHour(hour);
     final cosValue = math.cos(angle);
     final sinValue = math.sin(angle);
     final inner = Offset(
@@ -321,10 +415,11 @@ class SolarArcPainter extends CustomPainter {
   }
 
   void _drawSolarNoonMarker(Canvas canvas) {
-    final angle = SolarUtils.hourToAngle(data.solarNoon, data.solarNoon);
+    final angle = geometry.angleForHour(data.solarNoon);
     final cosValue = math.cos(angle);
     final sinValue = math.sin(angle);
-    const extent = 10.0;
+    final extent =
+        geometry.orientation == SolarClockOrientation.standard24 ? 12.0 : 10.0;
     final inner = Offset(
       geometry.center.dx + (geometry.radius - extent) * cosValue,
       geometry.center.dy + (geometry.radius - extent) * sinValue,

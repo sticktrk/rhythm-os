@@ -9,122 +9,9 @@ import 'dto/curve.dart';
 import 'dto/solar.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-/// Generate curve data for visualization.
-///
-/// This is the main function for generating the lighting curve graph.
-/// It samples the curve at each hour from 0-23 and returns brightness
-/// and color temperature values.
-///
-/// # Arguments
-///
-/// * `config` - Curve configuration parameters
-/// * `solar_noon_hour` - Hour of solar noon (0-24, local time)
-/// * `latitude` - Latitude in degrees (for elevation calculations)
-/// * `day_of_year` - Day of year (1-365) for seasonal adjustments
-///
-/// # Returns
-///
-/// CurveDataDto with hourly brightness and kelvin values.
-CurveDataDto generateCurveData(
-        {required CurveConfigDto config,
-        required double solarNoonHour,
-        required double latitude,
-        required int dayOfYear}) =>
-    RustLib.instance.api.crateApiCurveGenerateCurveData(
-        config: config,
-        solarNoonHour: solarNoonHour,
-        latitude: latitude,
-        dayOfYear: dayOfYear);
-
-/// Generate high-resolution curve data for smooth graph rendering.
-///
-/// Samples the curve at smaller intervals for a smoother graph.
-///
-/// # Arguments
-///
-/// * `config` - Curve configuration parameters
-/// * `solar_noon_hour` - Hour of solar noon (0-24, local time)
-/// * `latitude` - Latitude in degrees
-/// * `day_of_year` - Day of year (1-365)
-/// * `samples_per_hour` - Number of samples per hour (default: 4)
-///
-/// # Returns
-///
-/// CurveDataDto with high-resolution brightness and kelvin values.
-CurveDataDto generateCurveDataHighRes(
-        {required CurveConfigDto config,
-        required double solarNoonHour,
-        required double latitude,
-        required int dayOfYear,
-        required int samplesPerHour}) =>
-    RustLib.instance.api.crateApiCurveGenerateCurveDataHighRes(
-        config: config,
-        solarNoonHour: solarNoonHour,
-        latitude: latitude,
-        dayOfYear: dayOfYear,
-        samplesPerHour: samplesPerHour);
-
-/// Calculate lighting values for a specific hour.
-///
-/// # Arguments
-///
-/// * `config` - Curve configuration parameters
-/// * `solar_noon_hour` - Hour of solar noon (0-24, local time)
-/// * `latitude` - Latitude in degrees
-/// * `day_of_year` - Day of year (1-365)
-/// * `current_hour` - Current time in hours (0-24)
-///
-/// # Returns
-///
-/// LightingValuesDto with brightness, kelvin, RGB, and xy values.
-LightingValuesDto calculateLighting(
-        {required CurveConfigDto config,
-        required double solarNoonHour,
-        required double latitude,
-        required int dayOfYear,
-        required double currentHour}) =>
-    RustLib.instance.api.crateApiCurveCalculateLighting(
-        config: config,
-        solarNoonHour: solarNoonHour,
-        latitude: latitude,
-        dayOfYear: dayOfYear,
-        currentHour: currentHour);
-
-/// Calculate step sequences for visualization.
-///
-/// This generates the step markers shown on the curve graph,
-/// illustrating where each dim/brighten step would land.
-/// Each point represents where pressing the step button would take you.
-///
-/// The step size is calculated as: (max_brightness - min_brightness) / max_steps
-/// This matches the HTML/Python reference implementations.
-///
-/// # Arguments
-///
-/// * `config` - Curve configuration parameters
-/// * `solar_noon_hour` - Hour of solar noon (0-24, local time)
-/// * `latitude` - Latitude in degrees
-/// * `day_of_year` - Day of year (1-365)
-/// * `start_hour` - Starting hour for step sequence
-/// * `max_steps` - Number of steps from min to max brightness (determines step size)
-///
-/// # Returns
-///
-/// StepSequencesDto with step_up and step_down sequences.
-StepSequencesDto calculateStepSequences(
-        {required CurveConfigDto config,
-        required double solarNoonHour,
-        required double latitude,
-        required int dayOfYear,
-        required double startHour,
-        required int maxSteps}) =>
-    RustLib.instance.api.crateApiCurveCalculateStepSequences(
-        config: config,
-        solarNoonHour: solarNoonHour,
-        latitude: latitude,
-        dayOfYear: dayOfYear,
-        startHour: startHour,
-        maxSteps: maxSteps);
+// These functions are ignored because they are not marked as `pub`: `build_curve_data_dto`, `build_lighting_values_dto`, `resolve_curve_context`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ResolvedCurveContext`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`
 
 /// Get sun position at a specific hour.
 ///
@@ -196,8 +83,9 @@ SunTimesDto getSunTimes(
 
 /// Generate curve data with full solar information including sunrise/sunset.
 ///
-/// This is an enhanced version of `generate_curve_data` that also calculates
-/// sunrise and sunset times.
+/// This is the authoritative preview path for hourly sampling: it resolves
+/// the same solar context the server preview endpoints use and samples once
+/// per hour.
 ///
 /// # Arguments
 ///
@@ -228,6 +116,71 @@ CurveDataDto generateCurveDataWithSunTimes(
         month: month,
         day: day,
         timezone: timezone);
+
+/// Generate high-resolution curve data using full solar context.
+///
+/// This matches the server preview semantics while allowing the caller to
+/// choose the sampling density for live graph updates.
+CurveDataDto generateCurveDataHighResWithSunTimes(
+        {required CurveConfigDto config,
+        required double latitude,
+        required double longitude,
+        required int year,
+        required int month,
+        required int day,
+        required String timezone,
+        required int samplesPerHour}) =>
+    RustLib.instance.api.crateApiCurveGenerateCurveDataHighResWithSunTimes(
+        config: config,
+        latitude: latitude,
+        longitude: longitude,
+        year: year,
+        month: month,
+        day: day,
+        timezone: timezone,
+        samplesPerHour: samplesPerHour);
+
+/// Calculate lighting values for a specific hour using full solar context.
+LightingValuesDto calculateLightingWithSunTimes(
+        {required CurveConfigDto config,
+        required double latitude,
+        required double longitude,
+        required int year,
+        required int month,
+        required int day,
+        required String timezone,
+        required double currentHour}) =>
+    RustLib.instance.api.crateApiCurveCalculateLightingWithSunTimes(
+        config: config,
+        latitude: latitude,
+        longitude: longitude,
+        year: year,
+        month: month,
+        day: day,
+        timezone: timezone,
+        currentHour: currentHour);
+
+/// Calculate step sequences using full solar context.
+StepSequencesDto calculateStepSequencesWithSunTimes(
+        {required CurveConfigDto config,
+        required double latitude,
+        required double longitude,
+        required int year,
+        required int month,
+        required int day,
+        required String timezone,
+        required double startHour,
+        required int maxSteps}) =>
+    RustLib.instance.api.crateApiCurveCalculateStepSequencesWithSunTimes(
+        config: config,
+        latitude: latitude,
+        longitude: longitude,
+        year: year,
+        month: month,
+        day: day,
+        timezone: timezone,
+        startHour: startHour,
+        maxSteps: maxSteps);
 
 /// Calculate twilight times for a location and date.
 ///

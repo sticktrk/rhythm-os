@@ -144,9 +144,12 @@ void main() {
       final result = room_state.calculateRoomActionResult(
         state: state,
         config: _testConfig,
-        solarNoonHour: 12,
         latitude: 35,
-        dayOfYear: 172,
+        longitude: -78.9,
+        year: 2024,
+        month: 6,
+        day: 21,
+        timezone: 'America/New_York',
         currentHour: 9,
         roomId: 'living_room',
         action: RhythmActionDto.onPress,
@@ -156,7 +159,9 @@ void main() {
       expect(result.commands, hasLength(1));
       expect(result.commands.single.commandType, LightCommandType.turnOff);
       expect(
-        room_state.roomById(state: result.state, roomId: 'living_room')!.lightsOn,
+        room_state
+            .roomById(state: result.state, roomId: 'living_room')!
+            .lightsOn,
         isFalse,
       );
     });
@@ -170,9 +175,12 @@ void main() {
       final result = room_state.calculateRoomActionResult(
         state: state,
         config: _testConfig,
-        solarNoonHour: 12,
         latitude: 35,
-        dayOfYear: 172,
+        longitude: -78.9,
+        year: 2024,
+        month: 6,
+        day: 21,
+        timezone: 'America/New_York',
         currentHour: 9,
         roomId: 'living_room',
         action: RhythmActionDto.offPress,
@@ -192,9 +200,12 @@ void main() {
       final enabled = room_state.calculateRoomActionResult(
         state: state,
         config: _testConfig,
-        solarNoonHour: 12,
         latitude: 35,
-        dayOfYear: 172,
+        longitude: -78.9,
+        year: 2024,
+        month: 6,
+        day: 21,
+        timezone: 'America/New_York',
         currentHour: 9,
         roomId: 'living_room',
         action: RhythmActionDto.rhythmOn,
@@ -203,7 +214,8 @@ void main() {
       expect(enabled.stateChanged, isTrue);
       expect(enabled.commands, isEmpty);
       expect(
-        room_state.roomById(state: enabled.state, roomId: 'living_room')!
+        room_state
+            .roomById(state: enabled.state, roomId: 'living_room')!
             .rhythmEnabled,
         isTrue,
       );
@@ -211,9 +223,12 @@ void main() {
       final disabled = room_state.calculateRoomActionResult(
         state: enabled.state,
         config: _testConfig,
-        solarNoonHour: 12,
         latitude: 35,
-        dayOfYear: 172,
+        longitude: -78.9,
+        year: 2024,
+        month: 6,
+        day: 21,
+        timezone: 'America/New_York',
         currentHour: 9,
         roomId: 'living_room',
         action: RhythmActionDto.rhythmOff,
@@ -222,7 +237,8 @@ void main() {
       expect(disabled.stateChanged, isTrue);
       expect(disabled.commands, isEmpty);
       expect(
-        room_state.roomById(state: disabled.state, roomId: 'living_room')!
+        room_state
+            .roomById(state: disabled.state, roomId: 'living_room')!
             .rhythmEnabled,
         isFalse,
       );

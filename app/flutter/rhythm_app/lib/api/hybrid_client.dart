@@ -14,12 +14,13 @@ class HybridApiClient implements RhythmApi {
   final RhythmApi _remote;
   final NativeBrain? _brain;
 
-  // Cached solar/location data from server
+  // Cached preview/location data for local curve math.
   double _solarNoonHour = 12.0;
   double _latitude = 35.0;
   double _longitude = -78.9; // Default: Raleigh, NC
   String _timezone = 'America/New_York';
   int _dayOfYear = 172;
+  DateTime _previewDate = DateTime.now();
 
   HybridApiClient._({
     required RhythmApi remote,
@@ -112,6 +113,9 @@ class HybridApiClient implements RhythmApi {
   /// Get the current cached day of year.
   int get dayOfYear => _dayOfYear;
 
+  /// Get the current cached preview date.
+  DateTime get previewDate => _previewDate;
+
   @override
   Future<ConfigState> getConfigState() => _remote.getConfigState();
 
@@ -143,43 +147,21 @@ class HybridApiClient implements RhythmApi {
         final targetDay = month != null
             ? 15
             : now.day; // Use middle of month if month specified
-        final targetDate = DateTime(now.year, targetMonth, targetDay);
+        final targetDate =
+            _dateOnly(DateTime(now.year, targetMonth, targetDay));
 
         // Sync call - no await needed (runs on main thread)
         final curveData = _brain.getCurveData(
           config: config,
           latitude: _latitude,
           longitude: _longitude,
-          year: now.year,
+          year: targetDate.year,
           month: targetMonth,
           day: targetDay,
           timezone: _timezone,
         );
 
-        _solarNoonHour = curveData.solar.solarNoon;
-        _dayOfYear = _dayOfYearForDate(targetDate);
-
-        CurveData? highRes;
-        try {
-          highRes = _brain.getCurveDataHighRes(
-            config: config,
-            solarNoonHour: _solarNoonHour,
-            latitude: _latitude,
-            dayOfYear: _dayOfYear,
-            samplesPerHour: 4,
-          );
-        } catch (_) {
-          highRes = null;
-        }
-
-        if (highRes != null) {
-          return CurveData(
-            hours: highRes.hours,
-            brightness: highRes.brightness,
-            kelvin: highRes.kelvin,
-            solar: curveData.solar,
-          );
-        }
+        _cachePreviewCurve(curveData, targetDate);
 
         return curveData;
       } catch (e) {
@@ -196,24 +178,48 @@ class HybridApiClient implements RhythmApi {
     return date.difference(DateTime(date.year, 1, 1)).inDays + 1;
   }
 
+  DateTime _dateOnly(DateTime date) =>
+      DateTime(date.year, date.month, date.day);
+
+  DateTime _curveDateFor(DateTime? date) => _dateOnly(date ?? _previewDate);
+
+  void _cachePreviewCurve(CurveData curveData, DateTime date) {
+    _previewDate = _dateOnly(date);
+    _solarNoonHour = curveData.solar.solarNoon;
+    _dayOfYear = _dayOfYearForDate(_previewDate);
+  }
+
   /// Get high-resolution curve data for smooth graph rendering.
   ///
   /// Only available when local brain is active.
   CurveData? getCurveDataHighRes({
     required CurveConfigDto config,
     int samplesPerHour = 4,
+    DateTime? date,
   }) {
     if (_brain == null) return null;
 
     try {
+      final targetDate = _curveDateFor(date);
+
       // Sync call - runs on main thread
-      return _brain.getCurveDataHighRes(
+      final curveData = _brain.getCurveDataHighRes(
         config: config,
-        solarNoonHour: _solarNoonHour,
         latitude: _latitude,
-        dayOfYear: _dayOfYear,
+        longitude: _longitude,
+        year: targetDate.year,
+        month: targetDate.month,
+        day: targetDate.day,
+        timezone: _timezone,
         samplesPerHour: samplesPerHour,
       );
+
+      if (date == null) {
+        _solarNoonHour = curveData.solar.solarNoon;
+        _dayOfYear = _dayOfYearForDate(targetDate);
+      }
+
+      return curveData;
     } catch (e) {
       return null;
     }
@@ -230,12 +236,16 @@ class HybridApiClient implements RhythmApi {
       try {
         final config = overrides ??
             ConfigState.rawConfigToDto((await _remote.getConfigState()).config);
+        final targetDate = _curveDateFor(null);
         // Sync call - runs on main thread
         return _brain.getStepSequences(
           config: config,
-          solarNoonHour: _solarNoonHour,
           latitude: _latitude,
-          dayOfYear: _dayOfYear,
+          longitude: _longitude,
+          year: targetDate.year,
+          month: targetDate.month,
+          day: targetDate.day,
+          timezone: _timezone,
           hour: hour,
           maxSteps: maxSteps,
         );
@@ -273,8 +283,7 @@ class HybridApiClient implements RhythmApi {
       await _remote.getTime();
       // Calculate day of year from current time
       // The server should ideally provide this
-      final now = DateTime.now();
-      _dayOfYear = now.difference(DateTime(now.year, 1, 1)).inDays + 1;
+      _dayOfYear = _dayOfYearForDate(_previewDate);
 
       // Solar noon and latitude would need to come from server
       // or be configured in the app settings
@@ -323,16 +332,22 @@ class HybridApiClient implements RhythmApi {
   LightingValues? calculateLighting({
     required CurveConfigDto config,
     required double currentHour,
+    DateTime? date,
   }) {
     if (_brain == null) return null;
 
     try {
+      final targetDate = _curveDateFor(date);
+
       // Sync call - runs on main thread
       return _brain.calculateLighting(
         config: config,
-        solarNoonHour: _solarNoonHour,
         latitude: _latitude,
-        dayOfYear: _dayOfYear,
+        longitude: _longitude,
+        year: targetDate.year,
+        month: targetDate.month,
+        day: targetDate.day,
+        timezone: _timezone,
         currentHour: currentHour,
       );
     } catch (e) {

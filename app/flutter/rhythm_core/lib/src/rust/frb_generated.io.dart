@@ -1031,80 +1031,112 @@ class RustLibWire implements BaseWire {
             ffi.Pointer<wire_cst_list_prim_u_8_strict>,
           )>();
 
-  WireSyncRust2DartDco wire__crate__api__curve__calculate_lighting(
+  WireSyncRust2DartDco
+      wire__crate__api__curve__calculate_lighting_with_sun_times(
     ffi.Pointer<wire_cst_curve_config_dto> config,
-    double solar_noon_hour,
     double latitude,
-    int day_of_year,
+    double longitude,
+    int year,
+    int month,
+    int day,
+    ffi.Pointer<wire_cst_list_prim_u_8_strict> timezone,
     double current_hour,
   ) {
-    return _wire__crate__api__curve__calculate_lighting(
+    return _wire__crate__api__curve__calculate_lighting_with_sun_times(
       config,
-      solar_noon_hour,
       latitude,
-      day_of_year,
+      longitude,
+      year,
+      month,
+      day,
+      timezone,
       current_hour,
     );
   }
 
-  late final _wire__crate__api__curve__calculate_lightingPtr = _lookup<
-      ffi.NativeFunction<
-          WireSyncRust2DartDco Function(
-            ffi.Pointer<wire_cst_curve_config_dto>,
-            ffi.Double,
-            ffi.Double,
-            ffi.Int32,
-            ffi.Double,
-          )>>('frbgen_rhythm_core_wire__crate__api__curve__calculate_lighting');
-  late final _wire__crate__api__curve__calculate_lighting =
-      _wire__crate__api__curve__calculate_lightingPtr.asFunction<
-          WireSyncRust2DartDco Function(
-            ffi.Pointer<wire_cst_curve_config_dto>,
-            double,
-            double,
-            int,
-            double,
-          )>();
-
-  WireSyncRust2DartDco wire__crate__api__curve__calculate_step_sequences(
-    ffi.Pointer<wire_cst_curve_config_dto> config,
-    double solar_noon_hour,
-    double latitude,
-    int day_of_year,
-    double start_hour,
-    int max_steps,
-  ) {
-    return _wire__crate__api__curve__calculate_step_sequences(
-      config,
-      solar_noon_hour,
-      latitude,
-      day_of_year,
-      start_hour,
-      max_steps,
-    );
-  }
-
-  late final _wire__crate__api__curve__calculate_step_sequencesPtr = _lookup<
+  late final _wire__crate__api__curve__calculate_lighting_with_sun_timesPtr =
+      _lookup<
           ffi.NativeFunction<
               WireSyncRust2DartDco Function(
                 ffi.Pointer<wire_cst_curve_config_dto>,
                 ffi.Double,
                 ffi.Double,
                 ffi.Int32,
-                ffi.Double,
                 ffi.Int32,
+                ffi.Int32,
+                ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+                ffi.Double,
               )>>(
-      'frbgen_rhythm_core_wire__crate__api__curve__calculate_step_sequences');
-  late final _wire__crate__api__curve__calculate_step_sequences =
-      _wire__crate__api__curve__calculate_step_sequencesPtr.asFunction<
+    'frbgen_rhythm_core_wire__crate__api__curve__calculate_lighting_with_sun_times',
+  );
+  late final _wire__crate__api__curve__calculate_lighting_with_sun_times =
+      _wire__crate__api__curve__calculate_lighting_with_sun_timesPtr.asFunction<
           WireSyncRust2DartDco Function(
             ffi.Pointer<wire_cst_curve_config_dto>,
             double,
             double,
             int,
-            double,
             int,
+            int,
+            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+            double,
           )>();
+
+  WireSyncRust2DartDco
+      wire__crate__api__curve__calculate_step_sequences_with_sun_times(
+    ffi.Pointer<wire_cst_curve_config_dto> config,
+    double latitude,
+    double longitude,
+    int year,
+    int month,
+    int day,
+    ffi.Pointer<wire_cst_list_prim_u_8_strict> timezone,
+    double start_hour,
+    int max_steps,
+  ) {
+    return _wire__crate__api__curve__calculate_step_sequences_with_sun_times(
+      config,
+      latitude,
+      longitude,
+      year,
+      month,
+      day,
+      timezone,
+      start_hour,
+      max_steps,
+    );
+  }
+
+  late final _wire__crate__api__curve__calculate_step_sequences_with_sun_timesPtr =
+      _lookup<
+          ffi.NativeFunction<
+              WireSyncRust2DartDco Function(
+                ffi.Pointer<wire_cst_curve_config_dto>,
+                ffi.Double,
+                ffi.Double,
+                ffi.Int32,
+                ffi.Int32,
+                ffi.Int32,
+                ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+                ffi.Double,
+                ffi.Int32,
+              )>>(
+    'frbgen_rhythm_core_wire__crate__api__curve__calculate_step_sequences_with_sun_times',
+  );
+  late final _wire__crate__api__curve__calculate_step_sequences_with_sun_times =
+      _wire__crate__api__curve__calculate_step_sequences_with_sun_timesPtr
+          .asFunction<
+              WireSyncRust2DartDco Function(
+                ffi.Pointer<wire_cst_curve_config_dto>,
+                double,
+                double,
+                int,
+                int,
+                int,
+                ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+                double,
+                int,
+              )>();
 
   WireSyncRust2DartDco
       wire__crate__api__hue_registry__create_behavior_tracker() {
@@ -1242,55 +1274,30 @@ class RustLibWire implements BaseWire {
             ffi.Pointer<wire_cst_list_prim_u_8_strict>,
           )>();
 
-  WireSyncRust2DartDco wire__crate__api__curve__generate_curve_data(
+  WireSyncRust2DartDco
+      wire__crate__api__curve__generate_curve_data_high_res_with_sun_times(
     ffi.Pointer<wire_cst_curve_config_dto> config,
-    double solar_noon_hour,
     double latitude,
-    int day_of_year,
-  ) {
-    return _wire__crate__api__curve__generate_curve_data(
-      config,
-      solar_noon_hour,
-      latitude,
-      day_of_year,
-    );
-  }
-
-  late final _wire__crate__api__curve__generate_curve_dataPtr = _lookup<
-          ffi.NativeFunction<
-              WireSyncRust2DartDco Function(
-                ffi.Pointer<wire_cst_curve_config_dto>,
-                ffi.Double,
-                ffi.Double,
-                ffi.Int32,
-              )>>(
-      'frbgen_rhythm_core_wire__crate__api__curve__generate_curve_data');
-  late final _wire__crate__api__curve__generate_curve_data =
-      _wire__crate__api__curve__generate_curve_dataPtr.asFunction<
-          WireSyncRust2DartDco Function(
-            ffi.Pointer<wire_cst_curve_config_dto>,
-            double,
-            double,
-            int,
-          )>();
-
-  WireSyncRust2DartDco wire__crate__api__curve__generate_curve_data_high_res(
-    ffi.Pointer<wire_cst_curve_config_dto> config,
-    double solar_noon_hour,
-    double latitude,
-    int day_of_year,
+    double longitude,
+    int year,
+    int month,
+    int day,
+    ffi.Pointer<wire_cst_list_prim_u_8_strict> timezone,
     int samples_per_hour,
   ) {
-    return _wire__crate__api__curve__generate_curve_data_high_res(
+    return _wire__crate__api__curve__generate_curve_data_high_res_with_sun_times(
       config,
-      solar_noon_hour,
       latitude,
-      day_of_year,
+      longitude,
+      year,
+      month,
+      day,
+      timezone,
       samples_per_hour,
     );
   }
 
-  late final _wire__crate__api__curve__generate_curve_data_high_resPtr =
+  late final _wire__crate__api__curve__generate_curve_data_high_res_with_sun_timesPtr =
       _lookup<
           ffi.NativeFunction<
               WireSyncRust2DartDco Function(
@@ -1299,18 +1306,25 @@ class RustLibWire implements BaseWire {
                 ffi.Double,
                 ffi.Int32,
                 ffi.Int32,
+                ffi.Int32,
+                ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+                ffi.Int32,
               )>>(
-    'frbgen_rhythm_core_wire__crate__api__curve__generate_curve_data_high_res',
+    'frbgen_rhythm_core_wire__crate__api__curve__generate_curve_data_high_res_with_sun_times',
   );
-  late final _wire__crate__api__curve__generate_curve_data_high_res =
-      _wire__crate__api__curve__generate_curve_data_high_resPtr.asFunction<
-          WireSyncRust2DartDco Function(
-            ffi.Pointer<wire_cst_curve_config_dto>,
-            double,
-            double,
-            int,
-            int,
-          )>();
+  late final _wire__crate__api__curve__generate_curve_data_high_res_with_sun_times =
+      _wire__crate__api__curve__generate_curve_data_high_res_with_sun_timesPtr
+          .asFunction<
+              WireSyncRust2DartDco Function(
+                ffi.Pointer<wire_cst_curve_config_dto>,
+                double,
+                double,
+                int,
+                int,
+                int,
+                ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+                int,
+              )>();
 
   WireSyncRust2DartDco
       wire__crate__api__curve__generate_curve_data_with_sun_times(

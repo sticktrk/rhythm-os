@@ -2,8 +2,12 @@
 
 use rhythm_core::{
     calculate_sun_times, calculate_twilight_times, kelvin_to_mireds, lookup_timezone,
-    solar_time_from_location, CurveContext, LightProfile, LightProfileModule, SolarTime,
-    StepAction, Timezone,
+    solar_time_from_location, CurveContext, LightProfile, LightProfileModule, SolarTime, SunTimes,
+    Timezone, TwilightTimes,
+};
+use rhythm_profile::{
+    generate_curve_data as render_curve_data, generate_step_sequences as render_step_sequences,
+    CurveData as RenderedCurveData, LightingValues as RenderedLightingValues,
 };
 
 use super::dto::{
@@ -11,144 +15,84 @@ use super::dto::{
     StepSequencesDto, SunTimesDto, TwilightPhaseDto, TwilightTimesDto, XyDto,
 };
 
-/// Generate curve data for visualization.
-///
-/// This is the main function for generating the lighting curve graph.
-/// It samples the curve at each hour from 0-23 and returns brightness
-/// and color temperature values.
-///
-/// # Arguments
-///
-/// * `config` - Curve configuration parameters
-/// * `solar_noon_hour` - Hour of solar noon (0-24, local time)
-/// * `latitude` - Latitude in degrees (for elevation calculations)
-/// * `day_of_year` - Day of year (1-365) for seasonal adjustments
-///
-/// # Returns
-///
-/// CurveDataDto with hourly brightness and kelvin values.
-pub fn generate_curve_data(
-    config: CurveConfigDto,
-    solar_noon_hour: f64,
+#[derive(Clone, Copy)]
+struct ResolvedCurveContext {
+    solar: SolarTime,
+    sun_times: SunTimes,
+    twilight: TwilightTimes,
+}
+
+fn resolve_curve_context(
     latitude: f64,
-    day_of_year: i32,
-) -> CurveDataDto {
-    let profile = LightProfile::new(config.into());
-    let solar = SolarTime::new(solar_noon_hour as f32, latitude as f32, day_of_year as u32);
+    longitude: f64,
+    year: i32,
+    month: i32,
+    day: i32,
+    timezone: &str,
+) -> ResolvedCurveContext {
+    let tz = lookup_timezone(timezone).unwrap_or_else(|| Timezone::new(timezone));
 
-    let mut hours = Vec::with_capacity(24);
-    let mut brightness = Vec::with_capacity(24);
-    let mut kelvin = Vec::with_capacity(24);
+    let sun_times = calculate_sun_times(
+        latitude as f32,
+        longitude as f32,
+        year,
+        month as u32,
+        day as u32,
+        &tz,
+    );
+    let twilight = calculate_twilight_times(
+        latitude as f32,
+        longitude as f32,
+        year,
+        month as u32,
+        day as u32,
+        &tz,
+    );
+    let solar = solar_time_from_location(
+        latitude as f32,
+        longitude as f32,
+        year,
+        month as u32,
+        day as u32,
+        &tz,
+    );
 
-    for h in 0..24 {
-        let hour = h as f32;
-        hours.push(hour as f64);
-        let ctx = CurveContext::new(hour, solar, None);
-        let values = profile.calculate(&ctx);
-        brightness.push(values.brightness as i32);
-        kelvin.push(values.kelvin as i32);
+    ResolvedCurveContext {
+        solar,
+        sun_times,
+        twilight,
     }
+}
 
+fn build_curve_data_dto(
+    curve_data: RenderedCurveData,
+    resolved: &ResolvedCurveContext,
+) -> CurveDataDto {
     CurveDataDto {
-        hours,
-        brightness,
-        kelvin,
+        hours: curve_data.hours.into_iter().map(f64::from).collect(),
+        brightness: curve_data.brightness.into_iter().map(i32::from).collect(),
+        kelvin: curve_data.kelvin.into_iter().map(i32::from).collect(),
         solar: SolarInfoDto {
-            sunrise: None,
-            sunset: None,
-            solar_noon: solar_noon_hour,
-            solar_midnight: solar.solar_midnight_hour() as f64,
-            day_length: None,
-            dawn: None,
-            dusk: None,
+            sunrise: Some(resolved.sun_times.sunrise as f64),
+            sunset: Some(resolved.sun_times.sunset as f64),
+            solar_noon: resolved.solar.solar_noon_hour as f64,
+            solar_midnight: resolved.solar.solar_midnight_hour() as f64,
+            day_length: Some(resolved.sun_times.day_length as f64),
+            dawn: Some(TwilightPhaseDto {
+                civil: resolved.twilight.dawn.civil.map(f64::from),
+                nautical: resolved.twilight.dawn.nautical.map(f64::from),
+                astronomical: resolved.twilight.dawn.astronomical.map(f64::from),
+            }),
+            dusk: Some(TwilightPhaseDto {
+                civil: resolved.twilight.dusk.civil.map(f64::from),
+                nautical: resolved.twilight.dusk.nautical.map(f64::from),
+                astronomical: resolved.twilight.dusk.astronomical.map(f64::from),
+            }),
         },
     }
 }
 
-/// Generate high-resolution curve data for smooth graph rendering.
-///
-/// Samples the curve at smaller intervals for a smoother graph.
-///
-/// # Arguments
-///
-/// * `config` - Curve configuration parameters
-/// * `solar_noon_hour` - Hour of solar noon (0-24, local time)
-/// * `latitude` - Latitude in degrees
-/// * `day_of_year` - Day of year (1-365)
-/// * `samples_per_hour` - Number of samples per hour (default: 4)
-///
-/// # Returns
-///
-/// CurveDataDto with high-resolution brightness and kelvin values.
-pub fn generate_curve_data_high_res(
-    config: CurveConfigDto,
-    solar_noon_hour: f64,
-    latitude: f64,
-    day_of_year: i32,
-    samples_per_hour: i32,
-) -> CurveDataDto {
-    let profile = LightProfile::new(config.into());
-    let solar = SolarTime::new(solar_noon_hour as f32, latitude as f32, day_of_year as u32);
-
-    let samples = samples_per_hour.max(1) as usize;
-    let total_samples = 24 * samples;
-    let step = 1.0 / samples as f32;
-
-    let mut hours = Vec::with_capacity(total_samples);
-    let mut brightness = Vec::with_capacity(total_samples);
-    let mut kelvin = Vec::with_capacity(total_samples);
-
-    for i in 0..total_samples {
-        let hour = i as f32 * step;
-        hours.push(hour as f64);
-        let ctx = CurveContext::new(hour, solar, None);
-        let values = profile.calculate(&ctx);
-        brightness.push(values.brightness as i32);
-        kelvin.push(values.kelvin as i32);
-    }
-
-    CurveDataDto {
-        hours,
-        brightness,
-        kelvin,
-        solar: SolarInfoDto {
-            sunrise: None,
-            sunset: None,
-            solar_noon: solar_noon_hour,
-            solar_midnight: solar.solar_midnight_hour() as f64,
-            day_length: None,
-            dawn: None,
-            dusk: None,
-        },
-    }
-}
-
-/// Calculate lighting values for a specific hour.
-///
-/// # Arguments
-///
-/// * `config` - Curve configuration parameters
-/// * `solar_noon_hour` - Hour of solar noon (0-24, local time)
-/// * `latitude` - Latitude in degrees
-/// * `day_of_year` - Day of year (1-365)
-/// * `current_hour` - Current time in hours (0-24)
-///
-/// # Returns
-///
-/// LightingValuesDto with brightness, kelvin, RGB, and xy values.
-pub fn calculate_lighting(
-    config: CurveConfigDto,
-    solar_noon_hour: f64,
-    latitude: f64,
-    day_of_year: i32,
-    current_hour: f64,
-) -> LightingValuesDto {
-    let profile = LightProfile::new(config.into());
-    let solar = SolarTime::new(solar_noon_hour as f32, latitude as f32, day_of_year as u32);
-    let ctx = CurveContext::new(current_hour as f32, solar, None);
-
-    let values = profile.calculate(&ctx);
-
+fn build_lighting_values_dto(values: RenderedLightingValues) -> LightingValuesDto {
     LightingValuesDto {
         kelvin: values.kelvin as i32,
         mireds: kelvin_to_mireds(values.kelvin) as i32,
@@ -165,110 +109,6 @@ pub fn calculate_lighting(
         solar_time: values.solar_time as f64,
         sun_position: values.sun_position as f64,
     }
-}
-
-/// Calculate step sequences for visualization.
-///
-/// This generates the step markers shown on the curve graph,
-/// illustrating where each dim/brighten step would land.
-/// Each point represents where pressing the step button would take you.
-///
-/// The step size is calculated as: (max_brightness - min_brightness) / max_steps
-/// This matches the HTML/Python reference implementations.
-///
-/// # Arguments
-///
-/// * `config` - Curve configuration parameters
-/// * `solar_noon_hour` - Hour of solar noon (0-24, local time)
-/// * `latitude` - Latitude in degrees
-/// * `day_of_year` - Day of year (1-365)
-/// * `start_hour` - Starting hour for step sequence
-/// * `max_steps` - Number of steps from min to max brightness (determines step size)
-///
-/// # Returns
-///
-/// StepSequencesDto with step_up and step_down sequences.
-pub fn calculate_step_sequences(
-    config: CurveConfigDto,
-    solar_noon_hour: f64,
-    latitude: f64,
-    day_of_year: i32,
-    start_hour: f64,
-    max_steps: i32,
-) -> StepSequencesDto {
-    // Override max_dim_steps with the passed value so step size matches UI
-    let mut profile_config = rhythm_core::LightProfileConfig::from(config);
-    let max_steps = max_steps.clamp(1, 500) as u8;
-    profile_config.max_dim_steps = max_steps;
-
-    let solar = SolarTime::new(solar_noon_hour as f32, latitude as f32, day_of_year as u32);
-    let profile = LightProfile::new(profile_config);
-
-    let max_iterations = max_steps as usize;
-
-    // Calculate step up sequence (brighten toward boundary)
-    let mut step_up = Vec::with_capacity(max_iterations);
-    let mut current_hour = start_hour as f32;
-
-    for _ in 0..max_iterations {
-        let ctx = CurveContext::new(current_hour, solar, None);
-        let result = profile.calculate_step(&ctx, StepAction::Brighten);
-
-        // Stop if we're at the boundary (no more steps possible)
-        if result.at_boundary {
-            break;
-        }
-
-        // Calculate target hour and values
-        let target_hour = current_hour + result.time_offset_minutes / 60.0;
-        let values = &result.values;
-
-        step_up.push(StepPointDto {
-            hour: target_hour as f64,
-            brightness: values.brightness as i32,
-            kelvin: values.kelvin as i32,
-            rgb: vec![
-                values.rgb.r as i32,
-                values.rgb.g as i32,
-                values.rgb.b as i32,
-            ],
-        });
-
-        current_hour = target_hour;
-    }
-
-    // Calculate step down sequence (dim toward boundary)
-    let mut step_down = Vec::with_capacity(max_iterations);
-    current_hour = start_hour as f32;
-
-    for _ in 0..max_iterations {
-        let ctx = CurveContext::new(current_hour, solar, None);
-        let result = profile.calculate_step(&ctx, StepAction::Dim);
-
-        // Stop if we're at the boundary (no more steps possible)
-        if result.at_boundary {
-            break;
-        }
-
-        // Calculate target hour and values
-        let target_hour = current_hour + result.time_offset_minutes / 60.0;
-        let values = &result.values;
-
-        step_down.push(StepPointDto {
-            hour: target_hour as f64,
-            brightness: values.brightness as i32,
-            kelvin: values.kelvin as i32,
-            rgb: vec![
-                values.rgb.r as i32,
-                values.rgb.g as i32,
-                values.rgb.b as i32,
-            ],
-        });
-
-        current_hour = target_hour;
-    }
-
-    StepSequencesDto { step_up, step_down }
 }
 
 /// Get sun position at a specific hour.
@@ -364,8 +204,9 @@ pub fn get_sun_times(
 
 /// Generate curve data with full solar information including sunrise/sunset.
 ///
-/// This is an enhanced version of `generate_curve_data` that also calculates
-/// sunrise and sunset times.
+/// This is the authoritative preview path for hourly sampling: it resolves
+/// the same solar context the server preview endpoints use and samples once
+/// per hour.
 ///
 /// # Arguments
 ///
@@ -389,74 +230,110 @@ pub fn generate_curve_data_with_sun_times(
     day: i32,
     timezone: String,
 ) -> CurveDataDto {
-    let tz = lookup_timezone(&timezone).unwrap_or_else(|| Timezone::new(&timezone));
-
-    // Calculate sun times
-    let sun_times = calculate_sun_times(
-        latitude as f32,
-        longitude as f32,
-        year,
-        month as u32,
-        day as u32,
-        &tz,
-    );
-
-    // Calculate twilight times
-    let twilight = calculate_twilight_times(
-        latitude as f32,
-        longitude as f32,
-        year,
-        month as u32,
-        day as u32,
-        &tz,
-    );
-
-    // Create solar time from location
-    let solar = solar_time_from_location(
-        latitude as f32,
-        longitude as f32,
-        year,
-        month as u32,
-        day as u32,
-        &tz,
-    );
-
+    let resolved = resolve_curve_context(latitude, longitude, year, month, day, &timezone);
     let profile = LightProfile::new(config.into());
+    let curve_data = render_curve_data(&profile, resolved.solar, Some(resolved.sun_times), 1);
 
-    let mut hours = Vec::with_capacity(24);
-    let mut brightness = Vec::with_capacity(24);
-    let mut kelvin = Vec::with_capacity(24);
+    build_curve_data_dto(curve_data, &resolved)
+}
 
-    for h in 0..24 {
-        let hour = h as f32;
-        hours.push(hour as f64);
-        let ctx = CurveContext::new(hour, solar, Some(sun_times));
-        let values = profile.calculate(&ctx);
-        brightness.push(values.brightness as i32);
-        kelvin.push(values.kelvin as i32);
-    }
+/// Generate high-resolution curve data using full solar context.
+///
+/// This matches the server preview semantics while allowing the caller to
+/// choose the sampling density for live graph updates.
+pub fn generate_curve_data_high_res_with_sun_times(
+    config: CurveConfigDto,
+    latitude: f64,
+    longitude: f64,
+    year: i32,
+    month: i32,
+    day: i32,
+    timezone: String,
+    samples_per_hour: i32,
+) -> CurveDataDto {
+    let resolved = resolve_curve_context(latitude, longitude, year, month, day, &timezone);
+    let profile = LightProfile::new(config.into());
+    let curve_data = render_curve_data(
+        &profile,
+        resolved.solar,
+        Some(resolved.sun_times),
+        samples_per_hour.max(1) as u32,
+    );
 
-    CurveDataDto {
-        hours,
-        brightness,
-        kelvin,
-        solar: SolarInfoDto {
-            sunrise: Some(sun_times.sunrise as f64),
-            sunset: Some(sun_times.sunset as f64),
-            solar_noon: solar.solar_noon_hour as f64,
-            solar_midnight: solar.solar_midnight_hour() as f64,
-            day_length: Some(sun_times.day_length as f64),
-            dawn: Some(TwilightPhaseDto {
-                civil: twilight.dawn.civil.map(|v| v as f64),
-                nautical: twilight.dawn.nautical.map(|v| v as f64),
-                astronomical: twilight.dawn.astronomical.map(|v| v as f64),
-            }),
-            dusk: Some(TwilightPhaseDto {
-                civil: twilight.dusk.civil.map(|v| v as f64),
-                nautical: twilight.dusk.nautical.map(|v| v as f64),
-                astronomical: twilight.dusk.astronomical.map(|v| v as f64),
-            }),
-        },
+    build_curve_data_dto(curve_data, &resolved)
+}
+
+/// Calculate lighting values for a specific hour using full solar context.
+pub fn calculate_lighting_with_sun_times(
+    config: CurveConfigDto,
+    latitude: f64,
+    longitude: f64,
+    year: i32,
+    month: i32,
+    day: i32,
+    timezone: String,
+    current_hour: f64,
+) -> LightingValuesDto {
+    let resolved = resolve_curve_context(latitude, longitude, year, month, day, &timezone);
+    let profile = LightProfile::new(config.into());
+    let ctx = CurveContext::new(
+        current_hour as f32,
+        resolved.solar,
+        Some(resolved.sun_times),
+    );
+    let values = profile.calculate(&ctx);
+
+    build_lighting_values_dto(values)
+}
+
+/// Calculate step sequences using full solar context.
+pub fn calculate_step_sequences_with_sun_times(
+    config: CurveConfigDto,
+    latitude: f64,
+    longitude: f64,
+    year: i32,
+    month: i32,
+    day: i32,
+    timezone: String,
+    start_hour: f64,
+    max_steps: i32,
+) -> StepSequencesDto {
+    let resolved = resolve_curve_context(latitude, longitude, year, month, day, &timezone);
+
+    let mut profile_config = rhythm_core::LightProfileConfig::from(config);
+    let max_steps = max_steps.clamp(1, 500) as u8;
+    profile_config.max_dim_steps = max_steps;
+
+    let profile = LightProfile::new(profile_config);
+    let sequences = render_step_sequences(
+        &profile,
+        resolved.solar,
+        Some(resolved.sun_times),
+        start_hour as f32,
+        max_steps,
+    );
+
+    StepSequencesDto {
+        step_up: sequences
+            .step_up
+            .into_iter()
+            .map(|step| StepPointDto {
+                hour: step.hour as f64,
+                brightness: step.brightness as i32,
+                kelvin: step.kelvin as i32,
+                rgb: vec![step.rgb.r as i32, step.rgb.g as i32, step.rgb.b as i32],
+            })
+            .collect(),
+        step_down: sequences
+            .step_down
+            .into_iter()
+            .map(|step| StepPointDto {
+                hour: step.hour as f64,
+                brightness: step.brightness as i32,
+                kelvin: step.kelvin as i32,
+                rgb: vec![step.rgb.r as i32, step.rgb.g as i32, step.rgb.b as i32],
+            })
+            .collect(),
     }
 }
 

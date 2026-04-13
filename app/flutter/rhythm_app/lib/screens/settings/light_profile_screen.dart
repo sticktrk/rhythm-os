@@ -2688,6 +2688,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
             children: [
               for (final room in rooms)
                 _RoomDefaultCard(
+                  roomId: room.id,
                   roomName: room.name,
                   state: defaults[room.id],
                   onStateChanged: (newState) =>
@@ -3185,11 +3186,13 @@ class _TimeGradientPainter extends CustomPainter {
 enum _RoomDefaultMode { none, off, idle, active }
 
 class _RoomDefaultCard extends StatelessWidget {
+  final String roomId;
   final String roomName;
   final String? state; // null = no override, "active", "idle", "hard_off"
   final ValueChanged<String?> onStateChanged;
 
   const _RoomDefaultCard({
+    required this.roomId,
     required this.roomName,
     required this.state,
     required this.onStateChanged,
@@ -3232,70 +3235,299 @@ class _RoomDefaultCard extends StatelessWidget {
       _RoomDefaultMode.active => const Color(0xFFD4A020),
       _RoomDefaultMode.idle => _Palette.idle,
       _RoomDefaultMode.off => _Palette.textSecondary,
-      _RoomDefaultMode.none =>
-        _Palette.textSecondary.withValues(alpha: 0.4),
+      _RoomDefaultMode.none => _Palette.textSecondary.withValues(alpha: 0.4),
     };
 
-    return GestureDetector(
-      onLongPress: hasOverride
-          ? () {
-              HapticFeedback.lightImpact();
-              onStateChanged(null);
-            }
-          : null,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeInOut,
-        decoration: BoxDecoration(
-          color: bgColor,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-            color: hasOverride
-                ? _Palette.border
-                : _Palette.border.withValues(alpha: 0.4),
-          ),
-        ),
-        padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: AnimatedOpacity(
-                opacity: hasOverride ? 1.0 : 0.45,
-                duration: const Duration(milliseconds: 300),
-                child: Text(
-                  roomName,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: _Palette.textPrimary,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
+    final indicatorColor = switch (mode) {
+      _RoomDefaultMode.active => const Color(0xFFD4A020),
+      _RoomDefaultMode.idle => const Color(0xFFCDBFAA),
+      _RoomDefaultMode.off => _Palette.textSecondary.withValues(alpha: 0.8),
+      _RoomDefaultMode.none => _Palette.textSecondary.withValues(alpha: 0.75),
+    };
+
+    return Selector<RoomProvider,
+        ({MotionTimerInfo? motionTimer, bool hasSensor})>(
+      selector: (_, provider) => (
+        motionTimer: provider.getMotionTimer(roomId),
+        hasSensor: provider.hasMotionSensor(roomId),
+      ),
+      builder: (context, motionState, child) {
+        final motionTimer = motionState.motionTimer;
+        final hasSensor = motionState.hasSensor;
+
+        return GestureDetector(
+          onLongPress: hasOverride
+              ? () {
+                  HapticFeedback.lightImpact();
+                  onStateChanged(null);
+                }
+              : null,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeInOut,
+            decoration: BoxDecoration(
+              color: bgColor,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: hasOverride
+                    ? _Palette.border
+                    : _Palette.border.withValues(alpha: 0.4),
+              ),
+            ),
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (motionTimer != null)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 8, top: 1),
+                          child: _RoomDefaultMotionIndicator(
+                            info: motionTimer,
+                            color: indicatorColor,
+                            onExpired: () => context
+                                .read<RoomProvider>()
+                                .clearMotionTimer(roomId),
+                          ),
+                        )
+                      else if (hasSensor)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 8, top: 2),
+                          child: Icon(
+                            Icons.sensors_rounded,
+                            size: 18,
+                            color: indicatorColor.withValues(alpha: 0.45),
+                          ),
+                        ),
+                      Expanded(
+                        child: AnimatedOpacity(
+                          opacity: hasOverride ? 1.0 : 0.45,
+                          duration: const Duration(milliseconds: 300),
+                          child: Text(
+                            roomName,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: _Palette.textPrimary,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-              ),
+                Text(
+                  stateLabel,
+                  style: TextStyle(
+                    color: stateLabelColor,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                _DefaultStateToggle(
+                  mode: mode,
+                  onModeChanged: (newMode) {
+                    HapticFeedback.lightImpact();
+                    onStateChanged(_stateFromMode(newMode));
+                  },
+                ),
+              ],
             ),
-            Text(
-              stateLabel,
-              style: TextStyle(
-                color: stateLabelColor,
-                fontSize: 11,
-                fontWeight: FontWeight.w500,
-              ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _RoomDefaultMotionIndicator extends StatefulWidget {
+  final MotionTimerInfo info;
+  final Color color;
+  final VoidCallback? onExpired;
+
+  const _RoomDefaultMotionIndicator({
+    required this.info,
+    required this.color,
+    this.onExpired,
+  });
+
+  @override
+  State<_RoomDefaultMotionIndicator> createState() =>
+      _RoomDefaultMotionIndicatorState();
+}
+
+class _RoomDefaultMotionIndicatorState
+    extends State<_RoomDefaultMotionIndicator>
+    with SingleTickerProviderStateMixin {
+  Timer? _countdownTimer;
+  int _interpolatedRemaining = 0;
+  late final AnimationController _pulseController;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1500),
+    );
+    _syncFromInfo();
+  }
+
+  @override
+  void didUpdateWidget(_RoomDefaultMotionIndicator oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.info != widget.info) {
+      _syncFromInfo();
+    }
+  }
+
+  void _syncFromInfo() {
+    if (widget.info.motionActive) {
+      _countdownTimer?.cancel();
+      _countdownTimer = null;
+      if (!_pulseController.isAnimating) {
+        _pulseController.repeat(reverse: true);
+      }
+      return;
+    }
+
+    _pulseController.stop();
+    _pulseController.value = 0;
+
+    if (widget.info.remainingSecs != null) {
+      _interpolatedRemaining = widget.info.remainingSecs!;
+      _startCountdown();
+      return;
+    }
+
+    _countdownTimer?.cancel();
+    _countdownTimer = null;
+  }
+
+  void _startCountdown() {
+    _countdownTimer?.cancel();
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      final elapsed =
+          DateTime.now().difference(widget.info.receivedAt).inSeconds;
+      final remaining = (widget.info.remainingSecs ?? 0) - elapsed;
+      if (remaining <= 0) {
+        _countdownTimer?.cancel();
+        _countdownTimer = null;
+        widget.onExpired?.call();
+        return;
+      }
+      setState(() {
+        _interpolatedRemaining = remaining.clamp(0, widget.info.timeoutSecs);
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _countdownTimer?.cancel();
+    _pulseController.dispose();
+    super.dispose();
+  }
+
+  String _formatTime(int secs) {
+    if (secs >= 60) return '${(secs / 60).ceil()}m';
+    return '${secs}s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.info.motionActive) {
+      return AnimatedBuilder(
+        animation: _pulseController,
+        builder: (context, child) {
+          final scale = 1.0 + _pulseController.value * 0.1;
+          return Transform.scale(scale: scale, child: child);
+        },
+        child: Icon(
+          Icons.directions_walk_rounded,
+          size: 20,
+          color: widget.color,
+        ),
+      );
+    }
+
+    final progress = widget.info.timeoutSecs > 0
+        ? _interpolatedRemaining / widget.info.timeoutSecs
+        : 0.0;
+
+    return SizedBox(
+      width: 28,
+      height: 28,
+      child: CustomPaint(
+        painter: _RoomDefaultMiniCountdownPainter(
+          progress: progress,
+          color: widget.color,
+        ),
+        child: Center(
+          child: Text(
+            _formatTime(_interpolatedRemaining),
+            style: TextStyle(
+              color: widget.color,
+              fontSize: 9,
+              fontWeight: FontWeight.w700,
+              height: 1,
             ),
-            const SizedBox(height: 6),
-            _DefaultStateToggle(
-              mode: mode,
-              onModeChanged: (newMode) {
-                HapticFeedback.lightImpact();
-                onStateChanged(_stateFromMode(newMode));
-              },
-            ),
-          ],
+          ),
         ),
       ),
     );
   }
+}
+
+class _RoomDefaultMiniCountdownPainter extends CustomPainter {
+  final double progress;
+  final Color color;
+
+  _RoomDefaultMiniCountdownPainter({
+    required this.progress,
+    required this.color,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width / 2 - 1.5;
+    const strokeWidth = 2.5;
+
+    canvas.drawCircle(
+      center,
+      radius,
+      Paint()
+        ..color = color.withValues(alpha: 0.15)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = strokeWidth,
+    );
+
+    if (progress > 0) {
+      canvas.drawArc(
+        Rect.fromCircle(center: center, radius: radius),
+        -math.pi / 2,
+        2 * math.pi * progress,
+        false,
+        Paint()
+          ..color = color.withValues(alpha: 0.7)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = strokeWidth
+          ..strokeCap = StrokeCap.round,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _RoomDefaultMiniCountdownPainter oldDelegate) =>
+      progress != oldDelegate.progress || color != oldDelegate.color;
 }
 
 // ---------------------------------------------------------------------------
@@ -3360,8 +3592,7 @@ class _DefaultStateToggle extends StatelessWidget {
       _RoomDefaultMode.off => _Palette.textSecondary,
       _RoomDefaultMode.idle => const Color(0xFFCDBFAA),
       _RoomDefaultMode.active => Colors.white,
-      _RoomDefaultMode.none =>
-        _Palette.textSecondary.withValues(alpha: 0.3),
+      _RoomDefaultMode.none => _Palette.textSecondary.withValues(alpha: 0.3),
     };
 
     final thumbShadow = switch (mode) {
