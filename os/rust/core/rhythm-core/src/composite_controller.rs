@@ -239,7 +239,7 @@ impl LightController for CompositeController {
         }
     }
 
-    async fn turn_off(&self, room_id: &str) -> LightControlResult<()> {
+    async fn turn_off(&self, room_id: &str, transition_ms: Option<u32>) -> LightControlResult<()> {
         let targets = self.controllers_for_room(room_id);
         if targets.is_empty() {
             return Err(LightControlError::RoomNotFound(format!(
@@ -251,15 +251,18 @@ impl LightController for CompositeController {
         // Single target: await directly (same reasoning as turn_on)
         if targets.len() == 1 {
             let (key, controller, hub_room_id) = &targets[0];
-            return controller.turn_off(hub_room_id).await.map_err(|e| {
-                warn!(target: "composite", "hub {} failed: {}", key, e);
-                e
-            });
+            return controller
+                .turn_off(hub_room_id, transition_ms)
+                .await
+                .map_err(|e| {
+                    warn!(target: "composite", "hub {} failed: {}", key, e);
+                    e
+                });
         }
 
         // Multi-target: fan out to OS threads
         let any_ok = dispatch_parallel(&targets, |controller, hub_room_id| {
-            sync_block_on(controller.turn_off(hub_room_id))
+            sync_block_on(controller.turn_off(hub_room_id, transition_ms))
         });
 
         if any_ok {
@@ -341,8 +344,8 @@ impl LightController for Arc<CompositeController> {
     async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
         (**self).turn_on(room_id, command).await
     }
-    async fn turn_off(&self, room_id: &str) -> LightControlResult<()> {
-        (**self).turn_off(room_id).await
+    async fn turn_off(&self, room_id: &str, transition_ms: Option<u32>) -> LightControlResult<()> {
+        (**self).turn_off(room_id, transition_ms).await
     }
     async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
         (**self).get_rooms().await
@@ -369,7 +372,7 @@ mod tests {
         name: String,
         should_fail: AtomicBool,
         turn_on_calls: Mutex<Vec<(String, LightingCommand)>>,
-        turn_off_calls: Mutex<Vec<String>>,
+        turn_off_calls: Mutex<Vec<(String, Option<u32>)>>,
         lights_on: AtomicBool,
         rooms: Mutex<Vec<Room>>,
     }
@@ -422,14 +425,18 @@ mod tests {
             Ok(())
         }
 
-        async fn turn_off(&self, room_id: &str) -> LightControlResult<()> {
+        async fn turn_off(
+            &self,
+            room_id: &str,
+            transition_ms: Option<u32>,
+        ) -> LightControlResult<()> {
             if self.should_fail.load(Ordering::Relaxed) {
                 return Err(LightControlError::CommandFailed("mock failure".into()));
             }
             self.turn_off_calls
                 .lock()
                 .unwrap()
-                .push(room_id.to_string());
+                .push((room_id.to_string(), transition_ms));
             Ok(())
         }
 
@@ -523,7 +530,7 @@ mod tests {
             vec![("hub_a".to_string(), "room1".to_string())],
         )]));
 
-        composite.turn_off("room1").await.unwrap();
+        composite.turn_off("room1", None).await.unwrap();
         assert_eq!(mock.turn_off_count(), 1);
     }
 

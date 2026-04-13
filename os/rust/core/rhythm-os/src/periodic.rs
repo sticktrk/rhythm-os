@@ -328,7 +328,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             let now = Instant::now();
             let transitions_before = s.room_mode_transitions.len();
             s.room_mode_transitions
-                .retain(|_, transition| transition.ends_at > now);
+                .retain(|_, transition| transition.periodic_resume_at > now);
             let expired_transitions = transitions_before - s.room_mode_transitions.len();
             let all_rooms: Vec<rhythm_core::RoomSnapshot> = s
                 .hub_runtime()
@@ -348,7 +348,10 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                     if room.hard_off {
                         hard_off_rooms += 1;
                     }
-                    if s.room_mode_transitions.contains_key(&room.id) {
+                    if s.room_mode_transitions
+                        .get(&room.id)
+                        .is_some_and(|transition| transition.periodic_resume_at > now)
+                    {
                         transition_skipped += 1;
                         return false;
                     }
@@ -1415,6 +1418,9 @@ mod tests {
                 _: &str,
                 _: rhythm_core::LightingCommand,
             ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn lights_off_room(&self, _: &str, _: Option<u32>) -> anyhow::Result<()> {
                 Ok(())
             }
             fn set_power_save(&self, _: bool) -> Vec<String> {

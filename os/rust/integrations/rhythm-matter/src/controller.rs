@@ -197,7 +197,7 @@ impl<T: MatterTransport + 'static> LightController for MatterLightController<T> 
         Ok(())
     }
 
-    async fn turn_off(&self, room_id: &str) -> LightControlResult<()> {
+    async fn turn_off(&self, room_id: &str, _transition_ms: Option<u32>) -> LightControlResult<()> {
         let room_label =
             rhythm_os::controller_helpers::format_room_label(&self.hub_data.registry, room_id);
         let device_ids = {
@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn turn_off_sends_off_to_all_devices() {
         let (controller, spy, _) = make_controller();
-        block_on(controller.turn_off("kitchen")).unwrap();
+        block_on(controller.turn_off("kitchen", None)).unwrap();
 
         let calls = spy.commands();
         assert_eq!(calls.len(), 2); // One off command per device

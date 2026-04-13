@@ -125,10 +125,13 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
         Ok(())
     }
 
-    async fn turn_off(&self, room_id: &str) -> LightControlResult<()> {
+    async fn turn_off(&self, room_id: &str, transition_ms: Option<u32>) -> LightControlResult<()> {
         let room_label = rhythm_os::controller_helpers::format_room_label(&self.registry, room_id);
         let grouped_light_id =
             rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
+        let fade_ms = transition_ms
+            .map(|ms| u16::try_from(ms).unwrap_or(u16::MAX))
+            .filter(|ms| *ms > 0);
 
         self.client
             .set_grouped_light(
@@ -138,7 +141,7 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
                 None,
                 None,
                 None,
-                None,
+                fade_ms,
             )
             .map_err(|e| {
                 log::warn!(target: "cmd", "Hue turn_off failed: room={} err={}", room_label, e);
@@ -149,7 +152,12 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
             })?;
 
         let _ = grouped_light_id;
-        debug!(target: "cmd", "Hue turn_off: room={}", room_label);
+        debug!(
+            target: "cmd",
+            "Hue turn_off: room={} transition_ms={:?}",
+            room_label,
+            transition_ms
+        );
 
         Ok(())
     }
@@ -256,7 +264,7 @@ mod tests {
     #[test]
     fn turn_off_sends_off() {
         let (controller, _) = make_spy_controller();
-        block_on(controller.turn_off("room1")).unwrap();
+        block_on(controller.turn_off("room1", None)).unwrap();
 
         let calls = controller.client.set_grouped_light_calls();
         assert_eq!(calls.len(), 1);
@@ -274,6 +282,22 @@ mod tests {
                 assert_eq!(*brightness, None);
                 assert_eq!(*kelvin, None);
                 assert_eq!(*fade_ms, None);
+            }
+            other => panic!("Expected SetGroupedLight, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn turn_off_with_transition_sends_fade() {
+        let (controller, _) = make_spy_controller();
+        block_on(controller.turn_off("room1", Some(1_250))).unwrap();
+
+        let calls = controller.client.set_grouped_light_calls();
+        assert_eq!(calls.len(), 1);
+        match &calls[0] {
+            HueTransportCall::SetGroupedLight { on, fade_ms, .. } => {
+                assert!(!*on);
+                assert_eq!(*fade_ms, Some(1_250));
             }
             other => panic!("Expected SetGroupedLight, got {:?}", other),
         }

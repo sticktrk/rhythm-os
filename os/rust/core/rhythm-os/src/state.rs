@@ -70,7 +70,14 @@ pub struct MotionSnapshot {
 /// between two global modes.
 #[derive(Clone)]
 pub struct RoomModeTransition {
+    /// When the transition fade itself is expected to complete.
     pub ends_at: Instant,
+    /// When the periodic loop may resume touching this room.
+    ///
+    /// This can intentionally extend past `ends_at` so the first scheduler
+    /// pass after a mode transition does not immediately refresh the room and
+    /// re-hit the hub with a redundant command/status probe.
+    pub periodic_resume_at: Instant,
 }
 
 /// Platform-specific tuning for stack sizes and resource limits.
@@ -834,6 +841,9 @@ mod tests {
                 _: &str,
                 _: rhythm_core::LightingCommand,
             ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn lights_off_room(&self, _: &str, _: Option<u32>) -> anyhow::Result<()> {
                 Ok(())
             }
             fn set_power_save(&self, _: bool) -> Vec<String> {

@@ -23,6 +23,7 @@ pub enum SpyCall {
     },
     TurnOff {
         room_id: String,
+        transition_ms: Option<u32>,
     },
     AnyLightsOn {
         room_id: String,
@@ -86,7 +87,23 @@ impl SpyLightController {
             .unwrap()
             .iter()
             .filter_map(|c| match c {
-                SpyCall::TurnOff { room_id } => Some(room_id.clone()),
+                SpyCall::TurnOff { room_id, .. } => Some(room_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Get only `TurnOff` calls as `(room_id, transition_ms)` pairs.
+    pub fn turn_off_with_transition_calls(&self) -> Vec<(String, Option<u32>)> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| match c {
+                SpyCall::TurnOff {
+                    room_id,
+                    transition_ms,
+                } => Some((room_id.clone(), *transition_ms)),
                 _ => None,
             })
             .collect()
@@ -150,9 +167,10 @@ impl LightController for SpyLightController {
         Ok(())
     }
 
-    async fn turn_off(&self, room_id: &str) -> LightControlResult<()> {
+    async fn turn_off(&self, room_id: &str, transition_ms: Option<u32>) -> LightControlResult<()> {
         self.calls.lock().unwrap().push(SpyCall::TurnOff {
             room_id: room_id.to_string(),
+            transition_ms,
         });
         Ok(())
     }
@@ -184,8 +202,8 @@ impl LightController for Arc<SpyLightController> {
     async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
         (**self).turn_on(room_id, command).await
     }
-    async fn turn_off(&self, room_id: &str) -> LightControlResult<()> {
-        (**self).turn_off(room_id).await
+    async fn turn_off(&self, room_id: &str, transition_ms: Option<u32>) -> LightControlResult<()> {
+        (**self).turn_off(room_id, transition_ms).await
     }
     async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
         (**self).get_rooms().await
@@ -221,7 +239,7 @@ mod tests {
     #[tokio::test]
     async fn records_turn_off() {
         let spy = SpyLightController::new();
-        spy.turn_off("bedroom").await.unwrap();
+        spy.turn_off("bedroom", None).await.unwrap();
 
         let calls = spy.turn_off_calls();
         assert_eq!(calls, vec!["bedroom"]);

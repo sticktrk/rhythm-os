@@ -305,9 +305,13 @@ impl<C: LightController> RhythmEngine<C> {
         Ok(())
     }
 
-    async fn send_non_periodic_turn_off(&mut self, room_id: &str) -> LightControlResult<()> {
+    async fn send_non_periodic_turn_off(
+        &mut self,
+        room_id: &str,
+        transition_ms: Option<u32>,
+    ) -> LightControlResult<()> {
         self.clear_periodic_dedupe(room_id);
-        self.controller.turn_off(room_id).await
+        self.controller.turn_off(room_id, transition_ms).await
     }
 
     async fn send_periodic_turn_on(
@@ -805,7 +809,7 @@ impl<C: LightController> RhythmEngine<C> {
             if let Some(room) = self.rooms.get_mut(room_id) {
                 room.hard_off = false;
             }
-            self.send_non_periodic_turn_off(room_id).await
+            self.send_non_periodic_turn_off(room_id, None).await
         } else {
             // Dim to soft-off brightness with idle profile color instead of turning off
             let (offset, profile_settings) = {
@@ -826,11 +830,16 @@ impl<C: LightController> RhythmEngine<C> {
     ///
     /// Always calls `controller.turn_off()` regardless of power_save setting.
     /// Also clears the `soft_off` flag on the room if it was set.
-    pub async fn lights_off(&mut self, room_id: &str) -> LightControlResult<()> {
+    pub async fn lights_off(
+        &mut self,
+        room_id: &str,
+        transition_ms: Option<u32>,
+    ) -> LightControlResult<()> {
         let room = self.rooms.get_or_create(room_id, room_id);
         room.soft_off = false;
         room.hard_off = true;
-        self.send_non_periodic_turn_off(room_id).await
+        self.send_non_periodic_turn_off(room_id, transition_ms)
+            .await
     }
 
     // =========================================================================
@@ -1960,6 +1969,21 @@ mod tests {
         assert!(cmd.kelvin > 0);
         assert!(cmd.xy.x > 0.0);
         assert!(cmd.xy.y > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_lights_off_passes_transition_to_controller() {
+        let (mut engine, spy) = spy_engine();
+
+        engine.lights_off("room1", Some(1_200)).await.unwrap();
+
+        assert_eq!(
+            spy.turn_off_with_transition_calls(),
+            vec![("room1".to_string(), Some(1_200))]
+        );
+        let room = engine.rooms().get("room1").unwrap();
+        assert!(room.hard_off);
+        assert!(!room.soft_off);
     }
 
     #[tokio::test]

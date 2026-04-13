@@ -666,7 +666,7 @@ pub fn run_event_loop(
                 motion_state = MotionTimerState::new();
             }
 
-            // Clear motion timers requested by fix-my-lights or other commands
+            // Clear motion timers requested by commands that force a room off.
             if !s.pending_motion_clear.is_empty() {
                 let room_ids = std::mem::take(&mut s.pending_motion_clear);
                 drop(s); // release lock before logging
@@ -676,7 +676,7 @@ pub fn run_event_loop(
                     motion_state.warning_active.remove(room_id);
                 }
                 if !room_ids.is_empty() {
-                    info!(target: "evt", "Motion: cleared timers for {} rooms (fix-my-lights)", room_ids.len());
+                    info!(target: "evt", "Motion: cleared timers for {} rooms", room_ids.len());
                     motion_dirty = true;
                 }
             }
@@ -1172,6 +1172,9 @@ mod tests {
             _: &str,
             _: rhythm_core::LightingCommand,
         ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn lights_off_room(&self, _: &str, _: Option<u32>) -> anyhow::Result<()> {
             Ok(())
         }
         fn set_power_save(&self, _: bool) -> Vec<String> {

@@ -77,7 +77,8 @@ pub trait LightController: Send + Sync {
     /// # Arguments
     ///
     /// * `room_id` - The ID of the room to control
-    async fn turn_off(&self, room_id: &str) -> LightControlResult<()>;
+    /// * `transition_ms` - Optional fade duration before the room turns off
+    async fn turn_off(&self, room_id: &str, transition_ms: Option<u32>) -> LightControlResult<()>;
 
     /// Get all available rooms from the backend.
     ///
@@ -123,7 +124,11 @@ impl LightController for NoOpController {
         Ok(())
     }
 
-    async fn turn_off(&self, _room_id: &str) -> LightControlResult<()> {
+    async fn turn_off(
+        &self,
+        _room_id: &str,
+        _transition_ms: Option<u32>,
+    ) -> LightControlResult<()> {
         Ok(())
     }
 
@@ -157,7 +162,7 @@ mod tests {
 
         let cmd = LightingCommand::new(80, 4000);
         assert!(controller.turn_on("test", cmd).await.is_ok());
-        assert!(controller.turn_off("test").await.is_ok());
+        assert!(controller.turn_off("test", None).await.is_ok());
 
         let rooms = controller.get_rooms().await.unwrap();
         assert!(rooms.is_empty());

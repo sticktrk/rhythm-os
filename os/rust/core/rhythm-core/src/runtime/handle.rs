@@ -81,6 +81,9 @@ pub trait RuntimeHandle: Send + Sync {
     /// Apply an explicit rendered lighting command to a room.
     fn apply_room_command(&self, room_id: &str, command: LightingCommand) -> Result<()>;
 
+    /// Turn a room fully off, optionally fading out first.
+    fn lights_off_room(&self, room_id: &str, transition_ms: Option<u32>) -> Result<()>;
+
     /// Set power save mode on the engine. Returns room IDs that were soft_off
     /// (caller must turn them truly off when switching power_save ON).
     fn set_power_save(&self, enabled: bool) -> Vec<String>;
@@ -360,6 +363,15 @@ where
             .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
         crate::runtime::executor::block_on(engine.apply_room_command(room_id, command))
             .map_err(|e| anyhow::anyhow!("apply_room_command failed: {}", e))
+    }
+
+    fn lights_off_room(&self, room_id: &str, transition_ms: Option<u32>) -> Result<()> {
+        let mut engine = self
+            .engine()
+            .write()
+            .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
+        crate::runtime::executor::block_on(engine.lights_off(room_id, transition_ms))
+            .map_err(|e| anyhow::anyhow!("lights_off failed: {}", e))
     }
 
     fn set_power_save(&self, enabled: bool) -> Vec<String> {

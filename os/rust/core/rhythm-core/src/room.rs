@@ -15,6 +15,7 @@ use crate::light_profile::{
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 const REMOVED_LEGACY_IDLE_PROFILE_ID: &str = "idle";
+pub const DEFAULT_MODE_TRANSITION_DURATION_MS: u32 = 30_000;
 
 fn is_removed_legacy_idle_profile_id(id: &str) -> bool {
     id == REMOVED_LEGACY_IDLE_PROFILE_ID
@@ -528,7 +529,9 @@ fn default_preserve_hard_off() -> bool {
 }
 
 fn default_mode_transition_duration_ms() -> TimerSetting {
-    TimerSetting::Fixed { value: 5_000 }
+    TimerSetting::Fixed {
+        value: DEFAULT_MODE_TRANSITION_DURATION_MS,
+    }
 }
 
 #[cfg(feature = "serde")]
@@ -759,14 +762,22 @@ where
 
 pub fn default_mode_transition_configs() -> Vec<ModeTransitionConfig> {
     normalize_mode_transition_configs(vec![
-        ModeTransitionConfig::new(RhythmMode::Sleep, RhythmMode::Day, 5_000)
-            .with_id("sleep_to_day")
-            .with_label("Sleep to Day")
-            .with_trigger(ModeTransitionTrigger::AstronomicalTwilight),
-        ModeTransitionConfig::new(RhythmMode::Day, RhythmMode::Sleep, 5_000)
-            .with_id("day_to_sleep")
-            .with_label("Day to Sleep")
-            .with_trigger(ModeTransitionTrigger::NauticalTwilight),
+        ModeTransitionConfig::new(
+            RhythmMode::Sleep,
+            RhythmMode::Day,
+            DEFAULT_MODE_TRANSITION_DURATION_MS,
+        )
+        .with_id("sleep_to_day")
+        .with_label("Sleep to Day")
+        .with_trigger(ModeTransitionTrigger::AstronomicalTwilight),
+        ModeTransitionConfig::new(
+            RhythmMode::Day,
+            RhythmMode::Sleep,
+            DEFAULT_MODE_TRANSITION_DURATION_MS,
+        )
+        .with_id("day_to_sleep")
+        .with_label("Day to Sleep")
+        .with_trigger(ModeTransitionTrigger::NauticalTwilight),
     ])
 }
 
@@ -1234,12 +1245,15 @@ mod tests {
     }
 
     #[test]
-    fn test_default_mode_transitions_use_short_testing_fade() {
+    fn test_default_mode_transitions_use_default_duration() {
         let configs = default_mode_transition_configs();
         assert_eq!(configs.len(), 2);
-        assert!(configs
-            .iter()
-            .all(|config| { config.duration_ms == TimerSetting::Fixed { value: 5_000 } }));
+        assert!(configs.iter().all(|config| {
+            config.duration_ms
+                == TimerSetting::Fixed {
+                    value: DEFAULT_MODE_TRANSITION_DURATION_MS,
+                }
+        }));
         assert_eq!(configs[0].id, "sleep_to_day");
         assert_eq!(configs[1].id, "day_to_sleep");
         assert_eq!(configs[0].label, "Sleep to Day");
@@ -1492,7 +1506,12 @@ mod tests {
             }"#;
 
             let config: ModeTransitionConfig = serde_json::from_str(json).unwrap();
-            assert_eq!(config.duration_ms, TimerSetting::Fixed { value: 5_000 });
+            assert_eq!(
+                config.duration_ms,
+                TimerSetting::Fixed {
+                    value: DEFAULT_MODE_TRANSITION_DURATION_MS,
+                }
+            );
             assert!(config.preserve_hard_off);
         }
 
@@ -1513,18 +1532,22 @@ mod tests {
             let json = serde_json::to_value(ModeTransitionConfig::new(
                 RhythmMode::Sleep,
                 RhythmMode::Day,
-                5_000,
+                DEFAULT_MODE_TRANSITION_DURATION_MS,
             ))
             .unwrap();
 
-            assert_eq!(json["duration_ms"], 5_000);
+            assert_eq!(json["duration_ms"], DEFAULT_MODE_TRANSITION_DURATION_MS);
         }
 
         #[test]
         fn test_mode_transition_serialize_auto_duration_as_object() {
             let json = serde_json::to_value(
-                ModeTransitionConfig::new(RhythmMode::Sleep, RhythmMode::Day, 5_000)
-                    .with_duration(TimerSetting::Auto),
+                ModeTransitionConfig::new(
+                    RhythmMode::Sleep,
+                    RhythmMode::Day,
+                    DEFAULT_MODE_TRANSITION_DURATION_MS,
+                )
+                .with_duration(TimerSetting::Auto),
             )
             .unwrap();
 

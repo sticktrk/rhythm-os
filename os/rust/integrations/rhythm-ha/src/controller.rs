@@ -116,11 +116,18 @@ impl<H: HaTransport + 'static> LightController for HaLightController<H> {
         Ok(())
     }
 
-    async fn turn_off(&self, room_id: &str) -> LightControlResult<()> {
+    async fn turn_off(&self, room_id: &str, transition_ms: Option<u32>) -> LightControlResult<()> {
         let room_label = rhythm_os::controller_helpers::format_room_label(&self.registry, room_id);
+        let area_id = rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
         let data = serde_json::json!({
-            "area_id": room_id,
+            "area_id": area_id,
         });
+        let mut data = data;
+
+        if let Some(transition_ms) = transition_ms.filter(|ms| *ms > 0) {
+            let transition_secs = (transition_ms as f32 / 1000.0).max(0.1);
+            data["transition"] = serde_json::json!(transition_secs);
+        }
 
         self.client
             .call_service("light", "turn_off", &data)
@@ -132,7 +139,12 @@ impl<H: HaTransport + 'static> LightController for HaLightController<H> {
                 ))
             })?;
 
-        debug!(target: "cmd", "HA turn_off: room={}", room_label);
+        debug!(
+            target: "cmd",
+            "HA turn_off: room={} transition_ms={:?}",
+            room_label,
+            transition_ms
+        );
 
         Ok(())
     }
@@ -266,13 +278,23 @@ mod tests {
     #[test]
     fn turn_off_sends_area_id() {
         let (controller, _) = make_controller();
-        block_on(controller.turn_off("living_room")).unwrap();
+        block_on(controller.turn_off("living_room", None)).unwrap();
 
         let calls = controller.client.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].domain, "light");
         assert_eq!(calls[0].service, "turn_off");
         assert_eq!(calls[0].data["area_id"], "living_room");
+    }
+
+    #[test]
+    fn turn_off_includes_transition_when_fade_set() {
+        let (controller, _) = make_controller();
+        block_on(controller.turn_off("living_room", Some(1_500))).unwrap();
+
+        let calls = controller.client.calls();
+        let transition = calls[0].data["transition"].as_f64().unwrap();
+        assert!((transition - 1.5).abs() < 0.01);
     }
 
     #[test]

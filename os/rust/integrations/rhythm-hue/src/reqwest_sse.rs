@@ -101,19 +101,16 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
             }
         };
 
-        let mut connected = false;
-        let mut last_byte_event = Instant::now();
-        let mut last_alive_log = Instant::now();
         let mut chunks_since_alive: u32 = 0;
         let mut line_buf = Vec::with_capacity(4096);
         let mut stream = response.bytes_stream();
 
         info!(target: "sse", "SSE connected (conn #{})", connect_count);
         let _ = tx.try_send(HueSseEvent::Connected);
-        connected = true;
         backoff = Duration::from_secs(1);
-        last_byte_event = Instant::now();
-        last_alive_log = Instant::now();
+        let now = Instant::now();
+        let mut last_byte_event = now;
+        let mut last_alive_log = now;
 
         loop {
             if shutdown.load(Ordering::Relaxed) {
@@ -170,9 +167,7 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
         }
 
         if !shutdown.load(Ordering::Relaxed) {
-            if connected {
-                let _ = tx.try_send(HueSseEvent::Disconnected("Connection lost".to_string()));
-            }
+            let _ = tx.try_send(HueSseEvent::Disconnected("Connection lost".to_string()));
             info!(target: "sse", "Reconnecting SSE in {:?}...", backoff);
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(max_backoff);

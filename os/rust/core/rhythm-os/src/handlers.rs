@@ -1358,6 +1358,9 @@ mod tests {
             ) -> anyhow::Result<()> {
                 Ok(())
             }
+            fn lights_off_room(&self, _: &str, _: Option<u32>) -> anyhow::Result<()> {
+                Ok(())
+            }
             fn set_power_save(&self, _: bool) -> Vec<String> {
                 vec![]
             }

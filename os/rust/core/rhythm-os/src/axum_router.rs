@@ -648,6 +648,11 @@ mod tests {
             Ok(())
         }
 
+        fn lights_off_room(&self, _: &str, _: Option<u32>) -> anyhow::Result<()> {
+            self.record("lights_off_room");
+            Ok(())
+        }
+
         fn set_power_save(&self, _: bool) -> Vec<String> {
             Vec::new()
         }

@@ -111,10 +111,10 @@ impl HueTransport for ReqwestHueTransport {
                 let mirek = ((1_000_000.0_f32 / k as f32).round() as u32).clamp(153, 500);
                 body["color_temperature"] = serde_json::json!({ "mirek": mirek });
             }
+        }
 
-            if let Some(ms) = fade_ms {
-                body["dynamics"] = serde_json::json!({ "duration": ms });
-            }
+        if let Some(ms) = fade_ms {
+            body["dynamics"] = serde_json::json!({ "duration": ms });
         }
 
         let resp = self

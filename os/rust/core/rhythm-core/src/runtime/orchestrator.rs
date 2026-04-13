@@ -239,7 +239,7 @@ where
             }
             ButtonAction::LightsOff => {
                 info!("lights_off for {}", event.room_id);
-                engine.lights_off(&event.room_id).await?;
+                engine.lights_off(&event.room_id, None).await?;
                 Ok(false)
             }
             ButtonAction::SleepOn => {
