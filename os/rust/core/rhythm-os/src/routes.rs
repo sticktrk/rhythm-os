@@ -30,6 +30,22 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["GET"],
     },
     SharedRoute {
+        path: "/api/configuration",
+        methods: &["GET", "PUT"],
+    },
+    SharedRoute {
+        path: "/api/configuration/factory-default",
+        methods: &["GET"],
+    },
+    SharedRoute {
+        path: "/api/configuration/reset",
+        methods: &["POST"],
+    },
+    SharedRoute {
+        path: "/api/backup",
+        methods: &["GET"],
+    },
+    SharedRoute {
         path: "/api/rooms/state",
         methods: &["GET"],
     },

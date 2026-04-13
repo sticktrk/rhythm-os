@@ -118,10 +118,7 @@ impl StoredLightProfiles {
         profiles: &mut std::collections::BTreeMap<String, LightProfileConfig>,
         runtime_config: &mut RuntimeConfig,
     ) {
-        profiles.clear();
-        for profile in rhythm_core::default_builtin_profiles() {
-            profiles.insert(profile.id.clone(), profile);
-        }
+        *profiles = crate::factory_default_config::factory_default_light_profile_config_map();
         for profile in &self.profiles {
             if profile.id == "idle" {
                 continue;
@@ -678,6 +675,7 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::factory_default_config::factory_default_light_profile_config_map;
     use crate::hub::HubCredentials;
     use std::sync::{Arc, Mutex};
 
@@ -801,6 +799,29 @@ mod tests {
         assert!(profiles.contains_key(rhythm_core::DAY_IDLE_PROFILE_ID));
         assert!(profiles.contains_key(rhythm_core::SLEEP_IDLE_PROFILE_ID));
         assert!(!profiles.contains_key("idle"));
+    }
+
+    #[test]
+    fn stored_light_profiles_empty_payload_restores_bundled_profiles() {
+        let stored = StoredLightProfiles {
+            solar_noon_hour: 11.75,
+            profiles: vec![],
+        };
+
+        let mut profiles = std::collections::BTreeMap::new();
+        profiles.insert(
+            "junk".into(),
+            rhythm_core::LightProfileConfig {
+                id: "junk".into(),
+                name: "Junk".into(),
+                ..rhythm_core::default_rhythm_profile()
+            },
+        );
+        let mut runtime_config = rhythm_core::RuntimeConfig::default();
+        stored.apply_to_state(&mut profiles, &mut runtime_config);
+
+        assert_eq!(profiles, factory_default_light_profile_config_map());
+        assert!((runtime_config.solar_noon_hour - 11.75).abs() < 0.01);
     }
 
     #[test]

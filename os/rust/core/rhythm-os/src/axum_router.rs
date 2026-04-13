@@ -48,6 +48,16 @@ fn shared_routes() -> Router<SharedState> {
     Router::new()
         .route("/health", get(health))
         .route("/api/state", get(get_state))
+        .route(
+            "/api/configuration",
+            get(get_configuration).put(put_configuration),
+        )
+        .route(
+            "/api/configuration/factory-default",
+            get(get_factory_default_configuration),
+        )
+        .route("/api/configuration/reset", post(post_configuration_reset))
+        .route("/api/backup", get(get_backup))
         .route("/api/rooms/state", get(get_rooms_state))
         .route("/api/events", get(sse_events))
         .route("/api/rooms", put(put_rooms).delete(delete_room))
@@ -126,6 +136,36 @@ async fn health() -> ApiResponse {
 
 async fn get_state(State(state): State<SharedState>) -> ApiResponse {
     handlers::handle_get_state(&state)
+}
+
+async fn get_configuration(State(state): State<SharedState>) -> ApiResponse {
+    handlers::handle_get_configuration(&state)
+}
+
+async fn put_configuration(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_put_configuration(&state, &body)).await
+}
+
+async fn get_factory_default_configuration() -> ApiResponse {
+    handlers::handle_get_factory_default_configuration()
+}
+
+async fn post_configuration_reset(State(state): State<SharedState>) -> ApiResponse {
+    run_blocking(move || handlers::handle_post_configuration_reset(&state)).await
+}
+
+async fn get_backup(
+    State(state): State<SharedState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResponse {
+    let include_secrets = params
+        .get("include_secrets")
+        .and_then(|value| value.parse::<bool>().ok())
+        .unwrap_or(false);
+    run_blocking(move || handlers::handle_get_backup(&state, include_secrets)).await
 }
 
 async fn get_rooms_state(State(state): State<SharedState>) -> ApiResponse {

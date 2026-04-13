@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use rhythm_core::{
-    default_builtin_profiles, default_mode_configs, default_mode_transition_configs,
     normalize_mode_transition_configs, ButtonAction, LightProfileConfig, ModeChangeCause,
     ModeConfig, ModeTransitionConfig, RhythmMode, RuntimeConfig, RuntimeHandle,
 };
@@ -15,6 +14,11 @@ use rhythm_profile::profile_config::DEFAULT_FADE_MS;
 
 use crate::canonical::identity::HubKey;
 use crate::canonical::registry::CanonicalRegistry;
+use crate::factory_default_config::{
+    factory_default_active_mode, factory_default_light_profile_config_map,
+    factory_default_mode_config_map, factory_default_mode_transition_configs,
+    factory_default_power_save,
+};
 use crate::hub::{ActiveHub, HubCredentials, HubEvent};
 use crate::storage::Storage;
 use crate::topology::RoomTopologyStore;
@@ -361,8 +365,8 @@ impl Default for AppState {
         let mut state = Self {
             light_profile_configs: default_light_profile_configs(),
             mode_configs: default_mode_config_map(),
-            mode_transition_configs: default_mode_transition_configs(),
-            active_mode: RhythmMode::Day,
+            mode_transition_configs: factory_default_mode_transition_configs(),
+            active_mode: factory_default_active_mode(),
             last_active_mode_cause: ModeChangeCause::Manual,
             last_active_mode_transition_id: None,
             last_active_mode_change_utc_ms: Some(now_utc_ms),
@@ -387,7 +391,7 @@ impl Default for AppState {
                 .as_millis() as u64,
             default_motion_timeout_secs: default_motion_timeout,
             default_fade_ms: default_fade,
-            power_save: false,
+            power_save: factory_default_power_save(),
             storage: None,
             work_tx: None,
             periodic_work_tx: None,
@@ -421,18 +425,11 @@ impl Default for AppState {
 }
 
 fn default_light_profile_configs() -> BTreeMap<String, LightProfileConfig> {
-    let mut configs = BTreeMap::new();
-    for profile in default_builtin_profiles() {
-        configs.insert(profile.id.clone(), profile);
-    }
-    configs
+    factory_default_light_profile_config_map()
 }
 
 fn default_mode_config_map() -> BTreeMap<RhythmMode, ModeConfig> {
-    default_mode_configs()
-        .into_iter()
-        .map(|config| (config.mode, config))
-        .collect()
+    factory_default_mode_config_map()
 }
 
 impl AppState {
@@ -519,6 +516,18 @@ impl AppState {
         if is_active {
             self.sync_active_mode_runtime_overrides();
         }
+    }
+
+    /// Replace the stored profile set, preserving built-ins as fallbacks.
+    pub fn replace_light_profile_configs<I>(&mut self, configs: I)
+    where
+        I: IntoIterator<Item = LightProfileConfig>,
+    {
+        self.light_profile_configs = default_light_profile_configs();
+        for config in configs {
+            self.set_light_profile_config(config);
+        }
+        self.sync_active_mode_runtime_overrides();
     }
 
     /// Restore the built-in profile set.
@@ -712,6 +721,10 @@ pub fn rooms_from_engine(runtime: &dyn RuntimeHandle) -> rhythm_core::room::Room
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::factory_default_config::{
+        factory_default_active_mode, factory_default_light_profile_config,
+        factory_default_mode_transition_configs, factory_default_power_save,
+    };
     use rhythm_core::config::DEFAULT_MOTION_TIMEOUT_SECS;
     use rhythm_core::runtime::RoomSnapshot;
 
@@ -942,6 +955,51 @@ mod tests {
         assert_eq!(
             state.mode_configs()[0].active_profile_id.as_deref(),
             Some(rhythm_core::RHYTHM_PROFILE_ID)
+        );
+    }
+
+    #[test]
+    fn app_state_default_uses_bundled_defaults() {
+        let state = AppState::default();
+
+        assert_eq!(state.active_mode, factory_default_active_mode());
+        assert_eq!(state.power_save, factory_default_power_save());
+        assert_eq!(
+            state.mode_transition_configs(),
+            factory_default_mode_transition_configs()
+        );
+        assert_eq!(
+            state
+                .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
+                .cloned(),
+            factory_default_light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
+        );
+        assert_eq!(
+            state
+                .light_profile_config(rhythm_core::SLEEP_PROFILE_ID)
+                .cloned(),
+            factory_default_light_profile_config(rhythm_core::SLEEP_PROFILE_ID)
+        );
+    }
+
+    #[test]
+    fn reset_light_profile_configs_restores_bundled_profile_values() {
+        let mut state = AppState::default();
+        let mut rhythm = state
+            .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
+            .cloned()
+            .unwrap();
+        rhythm.name = "Custom Day".into();
+        rhythm.min_brightness = 17;
+        state.set_light_profile_config(rhythm);
+
+        state.reset_light_profile_configs();
+
+        assert_eq!(
+            state
+                .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
+                .cloned(),
+            factory_default_light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
         );
     }
 }

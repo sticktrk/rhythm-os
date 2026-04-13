@@ -80,6 +80,49 @@ pub fn handle_get_state(state: &SharedState) -> ApiResponse {
     }
 }
 
+pub fn handle_get_configuration(state: &SharedState) -> ApiResponse {
+    match commands::build_configuration_bundle(state) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_put_configuration(state: &SharedState, body: &Value) -> ApiResponse {
+    let payload: crate::bundle::ConfigurationImportPayload =
+        match serde_json::from_value(body.clone()) {
+            Ok(payload) => payload,
+            Err(e) => {
+                return ApiResponse::bad_request(&format!("Invalid configuration bundle: {}", e));
+            }
+        };
+
+    match commands::do_configuration_import(state, payload) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::bad_request(&e.to_string()),
+    }
+}
+
+pub fn handle_get_factory_default_configuration() -> ApiResponse {
+    match commands::build_factory_default_configuration_bundle() {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_post_configuration_reset(state: &SharedState) -> ApiResponse {
+    match commands::do_configuration_reset(state) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::bad_request(&e.to_string()),
+    }
+}
+
+pub fn handle_get_backup(state: &SharedState, include_secrets: bool) -> ApiResponse {
+    match commands::build_backup_bundle(state, include_secrets) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
 pub fn handle_get_rooms_state(state: &SharedState) -> ApiResponse {
     match commands::build_rooms_state(state) {
         Ok(json) => ApiResponse::json_ok(json),
@@ -264,13 +307,8 @@ fn default_profile_config_for(
     let s = state.lock().map_err(|_| "lock".to_string())?;
     let active_profile_id = s.active_mode_profile_id();
     let id = requested_id.unwrap_or(active_profile_id.as_str());
-    match id {
-        rhythm_core::RHYTHM_PROFILE_ID => Ok(rhythm_core::default_rhythm_profile()),
-        rhythm_core::SLEEP_PROFILE_ID => Ok(rhythm_core::default_sleep_profile()),
-        rhythm_core::DAY_IDLE_PROFILE_ID => Ok(rhythm_core::default_day_idle_profile()),
-        rhythm_core::SLEEP_IDLE_PROFILE_ID => Ok(rhythm_core::default_sleep_idle_profile()),
-        _ => Err(format!("Unknown light profile: {}", id)),
-    }
+    crate::factory_default_config::factory_default_light_profile_config(id)
+        .ok_or_else(|| format!("Unknown light profile: {}", id))
 }
 
 pub fn handle_get_config(state: &SharedState, profile_id: Option<&str>) -> ApiResponse {
@@ -1135,6 +1173,9 @@ mod tests {
     use super::*;
     use crate::canonical::identity::{DiscoveredIdentity, HardwareId, HubKey};
     use crate::canonical::registry::ResolveResult;
+    use crate::factory_default_config::{
+        factory_default_configuration_bundle, factory_default_light_profile_config,
+    };
     use crate::hub::{ActiveHub, HubType};
     use crate::pairing::{PairingStatus, UnpairingRequest, UnpairingResult};
     use crate::registry::HubDeviceRegistry;
@@ -1538,10 +1579,106 @@ mod tests {
     #[test]
     fn reset_config_returns_200_with_defaults() {
         let state = handler_state_with_runtime();
+        let _ = handle_put_config(
+            &state,
+            Some(rhythm_core::RHYTHM_PROFILE_ID),
+            &json!({
+                "id": "rhythm",
+                "name": "Modified Day",
+                "curve": { "type": "super-gaussian" },
+                "min_brightness": 17,
+                "max_brightness": 83,
+                "min_color_temp": 2200,
+                "max_color_temp": 5000,
+                "max_dim_steps": 4,
+                "fade_ms": { "mode": "fixed", "value": 999 }
+            }),
+        );
         let r = handle_reset_config(&state, None);
         assert_eq!(r.status, 200);
-        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
-        assert!(parsed.get("max_brightness").is_some());
+        let parsed: rhythm_core::LightProfileConfig = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(
+            parsed,
+            factory_default_light_profile_config(rhythm_core::RHYTHM_PROFILE_ID).unwrap()
+        );
+    }
+
+    #[test]
+    fn get_factory_default_configuration_returns_factory_default_bundle() {
+        let r = handle_get_factory_default_configuration();
+        assert_eq!(r.status, 200);
+        let parsed: crate::bundle::ConfigurationBundle = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(
+            parsed.name.as_deref(),
+            Some(
+                factory_default_configuration_bundle()
+                    .name
+                    .as_deref()
+                    .unwrap_or("")
+            )
+        );
+        assert_eq!(
+            parsed.configuration.profiles,
+            factory_default_configuration_bundle()
+                .configuration
+                .profiles
+        );
+    }
+
+    #[test]
+    fn post_configuration_reset_restores_factory_default_bundle() {
+        let state = handler_state_with_runtime();
+        let _ = handle_put_configuration(
+            &state,
+            &json!({
+                "configuration": {
+                    "power_save": true,
+                    "active_mode": "day",
+                    "profiles": [{
+                        "id": "focus",
+                        "name": "Focus",
+                        "curve": { "type": "super-gaussian" },
+                        "min_brightness": 10,
+                        "max_brightness": 40,
+                        "min_color_temp": 1800,
+                        "max_color_temp": 4000,
+                        "max_dim_steps": 4
+                    }],
+                    "mode_configs": [{
+                        "mode": "day",
+                        "active_profile_id": "focus"
+                    }],
+                    "mode_transitions": [],
+                    "rooms": []
+                }
+            }),
+        );
+
+        let r = handle_post_configuration_reset(&state);
+        assert_eq!(r.status, 200);
+        let parsed: crate::bundle::ConfigurationBundle = serde_json::from_str(&r.body).unwrap();
+        let factory_default = factory_default_configuration_bundle();
+        let mut parsed_profiles = parsed.configuration.profiles.clone();
+        parsed_profiles.sort_by(|left, right| left.id.cmp(&right.id));
+        let mut expected_profiles = factory_default.configuration.profiles.clone();
+        expected_profiles.sort_by(|left, right| left.id.cmp(&right.id));
+        assert_eq!(
+            parsed.configuration.power_save,
+            factory_default.configuration.power_save
+        );
+        assert_eq!(
+            parsed.configuration.active_mode,
+            factory_default.configuration.active_mode
+        );
+        assert_eq!(
+            parsed.configuration.mode_configs,
+            factory_default.configuration.mode_configs
+        );
+        assert_eq!(
+            parsed.configuration.mode_transitions,
+            factory_default.configuration.mode_transitions
+        );
+        assert_eq!(parsed_profiles, expected_profiles);
     }
 
     #[test]

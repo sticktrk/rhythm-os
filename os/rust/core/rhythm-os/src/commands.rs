@@ -25,7 +25,16 @@ use crate::api_types::{
     ModeLastChangeDto, ModeSettingsDto, ModeTransitionsDto, ProfilesDto, RoomFullState,
     RoomPollState, RoomRhythmState, RoomsPollResponse, SettingsDto, StateSnapshot, TypedDeviceDto,
 };
+use crate::bundle::{
+    BackupBundle, BackupHubCredentials, BackupHubRegistry, BackupInstallation, BackupRuntimeState,
+    ConfigurationBundle, ConfigurationImportPayload, ConfigurationRoom, PortableConfiguration,
+    BUNDLE_SCHEMA_VERSION,
+};
 use crate::canonical::identity::HubKey;
+use crate::factory_default_config::{
+    factory_default_active_profile_config_for_mode, factory_default_configuration_bundle,
+    factory_default_idle_profile_config_for_mode, factory_default_light_profile_config_map,
+};
 use crate::state::{rooms_from_engine, AppState, SharedState};
 use crate::storage::StoredLocation;
 
@@ -539,7 +548,7 @@ fn resolve_profile_id(s: &AppState, requested_id: Option<&str>) -> Result<String
 fn active_profile_config(s: &AppState) -> LightProfileConfig {
     s.active_mode_profile_config()
         .cloned()
-        .unwrap_or_else(rhythm_core::default_rhythm_profile)
+        .unwrap_or_else(|| factory_default_active_profile_config_for_mode(s.active_mode))
 }
 
 fn absorb_light_profile_time_offset(
@@ -1578,6 +1587,189 @@ pub fn build_profiles(state: &SharedState) -> Result<String> {
     serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize profiles: {}", e))
 }
 
+fn room_manager_for_export(state: &SharedState) -> rhythm_core::RoomManager {
+    let runtime = state.lock().ok().and_then(|s| s.hub_runtime());
+    if let Some(runtime) = runtime {
+        return rooms_from_engine(runtime.as_ref());
+    }
+
+    let Ok(s) = state.lock() else {
+        return rhythm_core::RoomManager::default();
+    };
+
+    s.storage
+        .as_ref()
+        .and_then(|storage| storage.load_rooms().ok())
+        .unwrap_or_default()
+}
+
+fn portable_configuration_from_parts(
+    s: &AppState,
+    room_manager: &rhythm_core::RoomManager,
+) -> PortableConfiguration {
+    let mut rooms: Vec<_> = room_manager.iter().map(ConfigurationRoom::from).collect();
+    rooms.sort_by(|left, right| left.id.cmp(&right.id).then(left.name.cmp(&right.name)));
+
+    PortableConfiguration {
+        power_save: s.power_save,
+        active_mode: s.active_mode,
+        profiles: s.light_profile_configs.values().cloned().collect(),
+        mode_configs: s.mode_configs(),
+        mode_transitions: s.mode_transition_configs(),
+        rooms,
+    }
+}
+
+fn stored_location_from_state(s: &AppState) -> Option<StoredLocation> {
+    let has_location = s.latitude.is_some()
+        || s.longitude.is_some()
+        || s.timezone_name.is_some()
+        || s.utc_offset_hours.abs() > f32::EPSILON;
+    has_location.then(|| StoredLocation {
+        latitude: s.latitude,
+        longitude: s.longitude,
+        utc_offset_hours: s.utc_offset_hours,
+        timezone_name: s.timezone_name.clone(),
+    })
+}
+
+fn backup_hub_credentials_from_state(
+    creds: &crate::hub::HubCredentials,
+    include_secrets: bool,
+) -> BackupHubCredentials {
+    BackupHubCredentials {
+        hub_type: creds.hub_type.clone(),
+        address: creds.address.clone(),
+        data: include_secrets.then(|| creds.data.clone()),
+    }
+}
+
+pub fn build_configuration_bundle_dto(state: &SharedState) -> Result<ConfigurationBundle> {
+    let room_manager = room_manager_for_export(state);
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+
+    Ok(ConfigurationBundle {
+        schema_version: BUNDLE_SCHEMA_VERSION,
+        kind: crate::bundle::BundleKind::ConfigurationBundle,
+        name: None,
+        description: None,
+        configuration: portable_configuration_from_parts(&s, &room_manager),
+    })
+}
+
+pub fn build_configuration_bundle(state: &SharedState) -> Result<String> {
+    let bundle = build_configuration_bundle_dto(state)?;
+    serialize_configuration_bundle(&bundle)
+}
+
+fn serialize_configuration_bundle(bundle: &ConfigurationBundle) -> Result<String> {
+    serde_json::to_string_pretty(bundle)
+        .map_err(|e| anyhow::anyhow!("serialize configuration bundle: {}", e))
+}
+
+pub fn build_factory_default_configuration_bundle_dto() -> ConfigurationBundle {
+    factory_default_configuration_bundle()
+}
+
+pub fn build_factory_default_configuration_bundle() -> Result<String> {
+    serialize_configuration_bundle(&build_factory_default_configuration_bundle_dto())
+}
+
+pub fn do_configuration_reset(state: &SharedState) -> Result<String> {
+    do_configuration_import(
+        state,
+        ConfigurationImportPayload::Bundle(factory_default_configuration_bundle()),
+    )
+}
+
+pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Result<BackupBundle> {
+    let room_manager = room_manager_for_export(state);
+    let (
+        configuration,
+        location,
+        topology,
+        canonical_registry,
+        runtime_state,
+        hub_credentials,
+        hub_registries,
+    ) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let configuration = portable_configuration_from_parts(&s, &room_manager);
+        let mut hub_credentials: Vec<_> = s
+            .hub_credentials
+            .values()
+            .map(|creds| backup_hub_credentials_from_state(creds, include_secrets))
+            .collect();
+        hub_credentials.sort_by(|left, right| {
+            left.address.cmp(&right.address).then(
+                left.hub_type
+                    .as_ref()
+                    .map(|t| t.as_str())
+                    .cmp(&right.hub_type.as_ref().map(|t| t.as_str())),
+            )
+        });
+        let hub_registries: Vec<_> = s
+            .hubs
+            .iter()
+            .filter_map(|(hub_key, hub)| {
+                hub.registry
+                    .as_ref()
+                    .map(|registry| (hub_key.clone(), registry.clone()))
+            })
+            .collect();
+
+        (
+            configuration,
+            stored_location_from_state(&s),
+            s.topology.clone(),
+            s.canonical_registry.clone(),
+            BackupRuntimeState {
+                active_mode: s.active_mode,
+                last_change_cause: s.last_active_mode_cause,
+                last_change_transition_id: s.last_active_mode_transition_id.clone(),
+                last_change_epoch_ms: s.last_active_mode_change_utc_ms,
+            },
+            hub_credentials,
+            hub_registries,
+        )
+    };
+
+    let mut hub_registry_snapshots: Vec<_> = hub_registries
+        .into_iter()
+        .filter_map(|(hub_key, registry)| {
+            registry.lock().ok().map(|registry| BackupHubRegistry {
+                hub_key,
+                snapshot: registry.snapshot_json(),
+            })
+        })
+        .collect();
+    hub_registry_snapshots
+        .sort_by(|left, right| left.hub_key.to_string().cmp(&right.hub_key.to_string()));
+
+    Ok(BackupBundle {
+        schema_version: BUNDLE_SCHEMA_VERSION,
+        kind: crate::bundle::BundleKind::BackupBundle,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        secrets_included: include_secrets,
+        configuration,
+        installation: BackupInstallation {
+            location,
+            rooms: room_manager,
+            topology,
+            canonical_registry,
+            hub_credentials,
+            hub_registries: hub_registry_snapshots,
+        },
+        runtime_state,
+    })
+}
+
+pub fn build_backup_bundle(state: &SharedState, include_secrets: bool) -> Result<String> {
+    let bundle = build_backup_bundle_dto(state, include_secrets)?;
+    serde_json::to_string_pretty(&bundle)
+        .map_err(|e| anyhow::anyhow!("serialize backup bundle: {}", e))
+}
+
 fn current_local_datetime(utc_offset: f32) -> chrono::NaiveDateTime {
     let now = chrono::Utc::now().naive_utc();
     let offset_secs = (utc_offset * 3600.0) as i64;
@@ -1998,13 +2190,7 @@ fn resolved_profile_config_for_room_state_from_parts(
                 .get(active_profile_id.as_str())
                 .cloned()
         })
-        .unwrap_or_else(|| {
-            if target_mode == RhythmMode::Sleep {
-                rhythm_core::default_sleep_profile()
-            } else {
-                rhythm_core::default_rhythm_profile()
-            }
-        });
+        .unwrap_or_else(|| factory_default_active_profile_config_for_mode(target_mode));
     settings.apply_to_config(&mut active_config);
 
     if room_state == RoomModeState::Active {
@@ -2020,11 +2206,7 @@ fn resolved_profile_config_for_room_state_from_parts(
         .and_then(|target_id| light_profile_configs.get(target_id).cloned())
         .unwrap_or_else(|| {
             if matches!(room_state, RoomModeState::Idle | RoomModeState::HardOff) {
-                if target_mode == RhythmMode::Sleep {
-                    rhythm_core::default_sleep_idle_profile()
-                } else {
-                    rhythm_core::default_day_idle_profile()
-                }
+                factory_default_idle_profile_config_for_mode(target_mode)
             } else {
                 active_config.clone()
             }
@@ -2596,6 +2778,201 @@ pub fn do_transitions_set(
 ) -> Result<String> {
     do_settings_set_internal(state, None, None, None, mode_transitions, None, false)?;
     build_transitions(state)
+}
+
+fn validate_imported_configuration(configuration: &PortableConfiguration) -> Result<()> {
+    validate_mode_configs(&configuration.mode_configs)?;
+
+    let valid_profile_ids: HashSet<_> = factory_default_light_profile_config_map()
+        .into_iter()
+        .map(|(id, _)| id)
+        .chain(
+            configuration
+                .profiles
+                .iter()
+                .map(|config| config.id.clone()),
+        )
+        .collect();
+
+    for room in &configuration.rooms {
+        room_flags_for_target_state(room.state)?;
+
+        if let Some(profile_id) = room.room_profile.profile_id.as_deref() {
+            if rhythm_core::is_builtin_state_profile_id(profile_id) {
+                return Err(anyhow::anyhow!(
+                    "Room '{}' cannot select built-in state profile '{}'",
+                    room.id,
+                    profile_id
+                ));
+            }
+            if !valid_profile_ids.contains(profile_id) {
+                return Err(anyhow::anyhow!(
+                    "Room '{}' references unknown light profile '{}'",
+                    room.id,
+                    profile_id
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn imported_room_profile_patch(room: &ConfigurationRoom) -> RoomProfileSettingsPatch {
+    RoomProfileSettingsPatch {
+        clear_all: false,
+        profile_id: Some(room.room_profile.profile_id.clone()),
+        fade_ms: Some(room.room_profile.fade_ms.clone()),
+        motion_timeout_secs: Some(room.room_profile.motion_timeout_secs.clone()),
+    }
+}
+
+fn configuration_room_target_id(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    imported: &ConfigurationRoom,
+) -> Option<String> {
+    let resolved_id = resolve_room_id(state, &imported.id);
+    if runtime.engine_room_snapshot(&resolved_id).is_some() {
+        return Some(resolved_id);
+    }
+
+    runtime
+        .engine_all_room_snapshots()
+        .into_iter()
+        .find(|snapshot| {
+            snapshot.name == imported.name
+                || snapshot.name.eq_ignore_ascii_case(imported.name.as_str())
+        })
+        .map(|snapshot| snapshot.id)
+}
+
+pub fn do_configuration_import(
+    state: &SharedState,
+    payload: ConfigurationImportPayload,
+) -> Result<String> {
+    let bundle = payload.into_bundle();
+    if bundle.schema_version != BUNDLE_SCHEMA_VERSION {
+        return Err(anyhow::anyhow!(
+            "Unsupported configuration schema version: {}",
+            bundle.schema_version
+        ));
+    }
+
+    let configuration = bundle.configuration;
+    validate_imported_configuration(&configuration)?;
+
+    let imported_profiles = configuration.profiles;
+    let imported_power_save = configuration.power_save;
+    let imported_active_mode = configuration.active_mode;
+    let imported_mode_configs = configuration.mode_configs;
+    let imported_mode_transitions = configuration.mode_transitions;
+    let imported_rooms = configuration.rooms;
+
+    let (profiles_to_apply, runtimes) = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.replace_light_profile_configs(imported_profiles);
+        persist_light_profiles_locked(&s);
+        (
+            s.light_profile_configs
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
+            s.hubs
+                .values()
+                .filter_map(|hub| hub.runtime.clone())
+                .collect::<Vec<_>>(),
+        )
+    };
+
+    for runtime in &runtimes {
+        for profile in &profiles_to_apply {
+            if let Err(e) = runtime.set_light_profile_config(profile.clone()) {
+                warn!(
+                    target: "cmd",
+                    "configuration_import: failed to update runtime profile '{}': {}",
+                    profile.id,
+                    e
+                );
+            }
+        }
+    }
+
+    do_settings_set_internal(
+        state,
+        Some(imported_power_save),
+        Some(imported_active_mode),
+        Some(imported_mode_configs),
+        Some(imported_mode_transitions),
+        Some(ModeChangeContext::new(ModeChangeCause::Manual, None)),
+        true,
+    )?;
+
+    let runtime = state.lock().ok().and_then(|s| s.hub_runtime());
+    let mut applied_rooms = 0usize;
+    let mut skipped_rooms = 0usize;
+
+    if let Some(runtime) = runtime {
+        for imported_room in &imported_rooms {
+            let Some(room_id) = configuration_room_target_id(state, &runtime, imported_room) else {
+                skipped_rooms += 1;
+                info!(
+                    target: "cmd",
+                    "configuration_import: skipped room '{}' ({}) because no local match was found",
+                    imported_room.name,
+                    imported_room.id
+                );
+                continue;
+            };
+
+            let patch = imported_room_profile_patch(imported_room);
+            if let Err(e) = do_room_preferences_set(
+                state,
+                &room_id,
+                Some(imported_room.rhythm_enabled),
+                Some(imported_room.disabled),
+                Some(imported_room.state),
+                Some(&patch),
+                false,
+            ) {
+                skipped_rooms += 1;
+                warn!(
+                    target: "cmd",
+                    "configuration_import: failed to apply room '{}' to '{}': {}",
+                    imported_room.id,
+                    room_id,
+                    e
+                );
+                continue;
+            }
+            applied_rooms += 1;
+        }
+
+        if !imported_rooms.is_empty() {
+            persist_rooms(state);
+        }
+    } else {
+        skipped_rooms = imported_rooms.len();
+    }
+
+    info!(
+        target: "cmd",
+        "configuration_import: profiles={} modes={} transitions={} rooms_applied={} rooms_skipped={}",
+        profiles_to_apply.len(),
+        state.lock().ok().map(|s| s.mode_configs().len()).unwrap_or(0),
+        state
+            .lock()
+            .ok()
+            .map(|s| s.mode_transition_configs().len())
+            .unwrap_or(0),
+        applied_rooms,
+        skipped_rooms
+    );
+
+    #[cfg(feature = "desktop")]
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
+
+    build_configuration_bundle(state)
 }
 
 pub fn do_set_active_mode(state: &SharedState, mode: RhythmMode) -> Result<()> {
@@ -5214,6 +5591,16 @@ pub fn build_curve_solar(state: &SharedState, date: Option<&str>) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bundle::{
+        BundleKind, ConfigurationBundle, ConfigurationImportPayload, ConfigurationRoom,
+        PortableConfiguration,
+    };
+    use crate::factory_default_config::{
+        factory_default_active_mode, factory_default_configuration_bundle,
+        factory_default_light_profile_config, factory_default_mode_transition_configs,
+        factory_default_power_save,
+    };
+    use crate::hub::HubCredentials;
     use crate::hub::{ActiveHub, HubType};
     use crate::state::{AppState, MotionSnapshot};
     use chrono::{Datelike, Timelike};
@@ -5489,6 +5876,17 @@ mod tests {
         drop(app);
 
         (state, runtime)
+    }
+
+    fn make_focus_profile() -> LightProfileConfig {
+        let mut focus =
+            factory_default_light_profile_config(rhythm_core::RHYTHM_PROFILE_ID).unwrap();
+        focus.id = "focus".into();
+        focus.name = "Focus".into();
+        focus.min_brightness = 9;
+        focus.max_brightness = 44;
+        focus.fade_ms = TimerSetting::Fixed { value: 777 };
+        focus
     }
 
     #[test]
@@ -6108,6 +6506,293 @@ mod tests {
         let (state, _rt) = setup_state(vec![]);
         let dto = build_profiles_dto(&state).unwrap();
         assert!(!dto.profiles.is_empty());
+    }
+
+    #[test]
+    fn build_configuration_bundle_dto_exports_fresh_state_defaults() {
+        let (state, _rt) = setup_state(vec![]);
+
+        let bundle = build_configuration_bundle_dto(&state).unwrap();
+        let s = state.lock().unwrap();
+
+        assert_eq!(bundle.schema_version, BUNDLE_SCHEMA_VERSION);
+        assert_eq!(bundle.kind, BundleKind::ConfigurationBundle);
+        assert_eq!(
+            bundle.configuration.power_save,
+            factory_default_power_save()
+        );
+        assert_eq!(
+            bundle.configuration.active_mode,
+            factory_default_active_mode()
+        );
+        assert_eq!(
+            bundle.configuration.profiles,
+            s.light_profile_configs
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(bundle.configuration.mode_configs, s.mode_configs());
+        assert_eq!(
+            bundle.configuration.mode_transitions,
+            factory_default_mode_transition_configs()
+        );
+        assert!(bundle.configuration.rooms.is_empty());
+    }
+
+    #[test]
+    fn build_factory_default_configuration_bundle_matches_factory_default_source() {
+        let bundle = build_factory_default_configuration_bundle_dto();
+        let expected = factory_default_configuration_bundle();
+        assert_eq!(bundle.schema_version, expected.schema_version);
+        assert_eq!(bundle.kind, expected.kind);
+        assert_eq!(bundle.name, expected.name);
+        assert_eq!(bundle.description, expected.description);
+        assert_eq!(
+            bundle.configuration.power_save,
+            expected.configuration.power_save
+        );
+        assert_eq!(
+            bundle.configuration.active_mode,
+            expected.configuration.active_mode
+        );
+        assert_eq!(
+            bundle.configuration.profiles,
+            expected.configuration.profiles
+        );
+        assert_eq!(
+            bundle.configuration.mode_configs,
+            expected.configuration.mode_configs
+        );
+        assert_eq!(
+            bundle.configuration.mode_transitions,
+            expected.configuration.mode_transitions
+        );
+        assert_eq!(bundle.configuration.rooms.len(), 0);
+    }
+
+    #[test]
+    fn configuration_import_applies_profiles_settings_and_room_preferences_by_name() {
+        let mut snapshot = make_snapshot("local-office", false, false);
+        snapshot.name = "Office".into();
+        let (state, runtime) = setup_state(vec![snapshot]);
+        let focus = make_focus_profile();
+        let transition =
+            rhythm_core::ModeTransitionConfig::new(RhythmMode::Day, RhythmMode::Sleep, 4_321)
+                .with_id("custom_day_to_sleep")
+                .with_label("Custom Day to Sleep")
+                .with_trigger(ModeTransitionTrigger::Sunset);
+
+        let payload = ConfigurationImportPayload::Bundle(ConfigurationBundle {
+            schema_version: BUNDLE_SCHEMA_VERSION,
+            kind: BundleKind::ConfigurationBundle,
+            name: Some("Shared Setup".into()),
+            description: Some("Portable config".into()),
+            configuration: PortableConfiguration {
+                power_save: true,
+                active_mode: RhythmMode::Day,
+                profiles: vec![focus.clone()],
+                mode_configs: vec![
+                    ModeConfig {
+                        mode: RhythmMode::Day,
+                        active_profile_id: Some("focus".into()),
+                        idle_profile_id: None,
+                        wake_profile_id: None,
+                        warning_profile_id: None,
+                        room_defaults: vec![],
+                    },
+                    ModeConfig::default_for_mode(RhythmMode::Sleep),
+                ],
+                mode_transitions: vec![transition.clone()],
+                rooms: vec![ConfigurationRoom {
+                    id: "shared-office".into(),
+                    name: "Office".into(),
+                    rhythm_enabled: true,
+                    disabled: true,
+                    state: RoomModeState::Idle,
+                    room_profile: rhythm_core::RoomProfileSettings {
+                        profile_id: Some("focus".into()),
+                        fade_ms: Some(TimerSetting::Fixed { value: 3_210 }),
+                        motion_timeout_secs: Some(TimerSetting::Fixed { value: 654 }),
+                    },
+                }],
+            },
+        });
+
+        let json = do_configuration_import(&state, payload).unwrap();
+        let exported: ConfigurationBundle = serde_json::from_str(&json).unwrap();
+        let s = state.lock().unwrap();
+
+        assert!(s.power_save);
+        assert_eq!(s.active_mode, RhythmMode::Day);
+        assert_eq!(
+            s.mode_configs()
+                .iter()
+                .find(|config| config.mode == RhythmMode::Day)
+                .and_then(|config| config.active_profile_id.as_deref()),
+            Some("focus")
+        );
+        assert_eq!(s.mode_transition_configs(), vec![transition.clone()]);
+        assert_eq!(s.light_profile_config("focus"), Some(&focus));
+        drop(s);
+
+        let applied = runtime.engine_room_snapshot("local-office").unwrap();
+        assert!(applied.rhythm_enabled);
+        assert!(applied.disabled);
+        assert!(applied.soft_off);
+        assert!(!applied.hard_off);
+        assert_eq!(
+            applied.profile_settings.profile_id.as_deref(),
+            Some("focus")
+        );
+        assert_eq!(
+            applied.profile_settings.fade_ms,
+            Some(TimerSetting::Fixed { value: 3_210 })
+        );
+        assert_eq!(
+            applied.profile_settings.motion_timeout_secs,
+            Some(TimerSetting::Fixed { value: 654 })
+        );
+        assert!(
+            runtime
+                .config_updates()
+                .iter()
+                .any(|config| config.id == "focus"),
+            "runtime should receive imported custom profile config"
+        );
+
+        assert_eq!(exported.kind, BundleKind::ConfigurationBundle);
+        assert!(exported.configuration.power_save);
+        assert_eq!(exported.configuration.active_mode, RhythmMode::Day);
+        assert_eq!(exported.configuration.rooms.len(), 1);
+        assert_eq!(exported.configuration.rooms[0].id, "local-office");
+        assert_eq!(exported.configuration.rooms[0].name, "Office");
+        assert_eq!(exported.configuration.rooms[0].state, RoomModeState::Idle);
+        assert_eq!(
+            exported.configuration.rooms[0]
+                .room_profile
+                .profile_id
+                .as_deref(),
+            Some("focus")
+        );
+    }
+
+    #[test]
+    fn configuration_import_rejects_unknown_room_profile_reference() {
+        let (state, _rt) = setup_state(vec![]);
+
+        let err = do_configuration_import(
+            &state,
+            ConfigurationImportPayload::Configuration(PortableConfiguration {
+                power_save: false,
+                active_mode: RhythmMode::Day,
+                profiles: vec![],
+                mode_configs: vec![],
+                mode_transitions: vec![],
+                rooms: vec![ConfigurationRoom {
+                    id: "office".into(),
+                    name: "Office".into(),
+                    rhythm_enabled: true,
+                    disabled: false,
+                    state: RoomModeState::Active,
+                    room_profile: rhythm_core::RoomProfileSettings {
+                        profile_id: Some("missing_profile".into()),
+                        fade_ms: None,
+                        motion_timeout_secs: None,
+                    },
+                }],
+            }),
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("unknown light profile 'missing_profile'"));
+    }
+
+    #[test]
+    fn build_backup_bundle_dto_redacts_or_includes_hub_secrets() {
+        let (state, _rt) = setup_state(vec![]);
+        let creds = HubCredentials::new(
+            "hue",
+            "192.168.1.2",
+            serde_json::json!({ "username": "secret-user" }),
+        );
+        let hub_key = creds.hub_key().unwrap();
+        state.lock().unwrap().hub_credentials.insert(hub_key, creds);
+
+        let redacted = build_backup_bundle_dto(&state, false).unwrap();
+        assert!(!redacted.secrets_included);
+        assert_eq!(redacted.kind, BundleKind::BackupBundle);
+        assert_eq!(
+            redacted.configuration.active_mode,
+            factory_default_active_mode()
+        );
+        assert_eq!(redacted.installation.hub_credentials.len(), 1);
+        assert_eq!(
+            redacted.installation.hub_credentials[0].address,
+            "192.168.1.2"
+        );
+        assert_eq!(redacted.installation.hub_credentials[0].data, None);
+
+        let included = build_backup_bundle_dto(&state, true).unwrap();
+        assert!(included.secrets_included);
+        assert_eq!(included.installation.hub_credentials.len(), 1);
+        assert_eq!(
+            included.installation.hub_credentials[0].data,
+            Some(serde_json::json!({ "username": "secret-user" }))
+        );
+    }
+
+    #[test]
+    fn configuration_reset_restores_factory_default_configuration() {
+        let (state, _rt) = setup_state(vec![]);
+        let focus = make_focus_profile();
+        do_configuration_import(
+            &state,
+            ConfigurationImportPayload::Configuration(PortableConfiguration {
+                power_save: true,
+                active_mode: RhythmMode::Day,
+                profiles: vec![focus],
+                mode_configs: vec![ModeConfig {
+                    mode: RhythmMode::Day,
+                    active_profile_id: Some("focus".into()),
+                    idle_profile_id: None,
+                    wake_profile_id: None,
+                    warning_profile_id: None,
+                    room_defaults: vec![],
+                }],
+                mode_transitions: vec![],
+                rooms: vec![],
+            }),
+        )
+        .unwrap();
+
+        let json = do_configuration_reset(&state).unwrap();
+        let reset_bundle: ConfigurationBundle = serde_json::from_str(&json).unwrap();
+        let expected = factory_default_configuration_bundle();
+        let mut reset_profiles = reset_bundle.configuration.profiles.clone();
+        reset_profiles.sort_by(|left, right| left.id.cmp(&right.id));
+        let mut expected_profiles = expected.configuration.profiles.clone();
+        expected_profiles.sort_by(|left, right| left.id.cmp(&right.id));
+
+        assert_eq!(
+            reset_bundle.configuration.power_save,
+            expected.configuration.power_save
+        );
+        assert_eq!(
+            reset_bundle.configuration.active_mode,
+            expected.configuration.active_mode
+        );
+        assert_eq!(reset_profiles, expected_profiles);
+        assert_eq!(
+            reset_bundle.configuration.mode_configs,
+            expected.configuration.mode_configs
+        );
+        assert_eq!(
+            reset_bundle.configuration.mode_transitions,
+            expected.configuration.mode_transitions
+        );
     }
 
     #[test]

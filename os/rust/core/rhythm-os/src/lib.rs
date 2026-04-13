@@ -8,12 +8,14 @@
 //! transports, and HTTP servers are provided by the consuming binary crate.
 
 pub mod api_types;
+pub mod bundle;
 pub mod button_resolve;
 pub mod canonical;
 pub mod commands;
 pub mod controller_helpers;
 pub mod discovery;
 pub mod event_loop;
+pub mod factory_default_config;
 pub mod handlers;
 pub mod hub;
 pub mod hue_buttons;
