@@ -9,7 +9,7 @@ TMP_DIR="${BUILD_DIR}/genimage.tmp"
 rm -rf "${BOOT_DIR}" "${TMP_DIR}"
 mkdir -p "${BOOT_DIR}" "${TMP_DIR}"
 
-cp -f "${BINARIES_DIR}"/rpi-firmware/* "${BOOT_DIR}/"
+cp -a "${BINARIES_DIR}/rpi-firmware/." "${BOOT_DIR}/"
 cp -f "${BINARIES_DIR}/zImage" "${BOOT_DIR}/kernel.img"
 cp -f "${BOARD_DIR}/config.txt" "${BOOT_DIR}/config.txt"
 cp -f "${BOARD_DIR}/cmdline.txt" "${BOOT_DIR}/cmdline.txt"
