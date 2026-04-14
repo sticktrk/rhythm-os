@@ -38,9 +38,9 @@ class RhythmServerDetailScreen extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         const SizedBox(height: 8),
+                        // ── RhythmServer ──
                         SettingsGroup(
                           children: [
-                            // ── RhythmServer ──
                             Builder(
                               builder: (context) {
                                 final esp32Hub = homeProvider
@@ -117,7 +117,12 @@ class RhythmServerDetailScreen extends StatelessWidget {
                                 );
                               },
                             ),
-                            // ── Device Review ──
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        // ── Device Review ──
+                        SettingsGroup(
+                          children: [
                             SettingsRow(
                               icon: Icons.devices_other,
                               iconColor: const Color(0xFFFF9800),
@@ -159,7 +164,12 @@ class RhythmServerDetailScreen extends StatelessWidget {
                                     builder: (_) => const TriageScreen()),
                               ),
                             ),
-                            // ── Power Usage ──
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        // ── Power Usage ──
+                        SettingsGroup(
+                          children: [
                             SettingsRow(
                               icon: Icons.bolt_rounded,
                               iconColor: const Color(0xFF4ADE80),

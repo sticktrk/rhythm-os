@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnectionState;
 import '../providers/home_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../screens/hubs/rhythmserver_settings_screen.dart';
@@ -51,9 +52,13 @@ class _HubConnectionBannerState extends State<HubConnectionBanner>
       (p) => p.serverHubInfos,
     );
 
-    final configured = hubs
-        .where((h) => h['type'] != null && h['type'] != 'none')
-        .toList();
+    final configured =
+        hubs.where((h) => h['type'] != null && h['type'] != 'none').toList();
+    final retrying = context.select<ServerSyncProvider, bool>(
+      (p) =>
+          p.connectionState == RhythmConnectionState.connecting ||
+          p.connectionState == RhythmConnectionState.reconnecting,
+    );
 
     // Only accept non-empty snapshots — the provider clears hub infos
     // transiently during reconnect cycles (see _onConnectionStateChanged).
@@ -78,7 +83,7 @@ class _HubConnectionBannerState extends State<HubConnectionBanner>
           curve: Curves.easeOutCubic,
           alignment: Alignment.topCenter,
           child: visible
-              ? _buildBanner(_stableHubs, disconnected)
+              ? _buildBanner(disconnected, retrying)
               : const SizedBox(width: double.infinity, height: 0),
         ),
       ),
@@ -86,95 +91,105 @@ class _HubConnectionBannerState extends State<HubConnectionBanner>
   }
 
   Widget _buildBanner(
-    List<Map<String, dynamic>> allHubs,
     List<Map<String, dynamic>> disconnected,
+    bool retrying,
   ) {
     final count = disconnected.length;
     final names = disconnected.map((h) => _hubLabel(h['type'] as String));
-    final headline = count == 1
-        ? '${names.first} unreachable'
-        : '$count hubs unreachable';
+    final headline =
+        count == 1 ? '${names.first} unreachable' : '$count hubs unreachable';
 
-    return GestureDetector(
-      onTap: _openServerSettings,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-        child: Container(
-          decoration: BoxDecoration(
-            color: const Color(0xFF1A1708),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: const Color(0xFFE8A54B).withValues(alpha: 0.25),
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: const Color(0xFFE8A54B).withValues(alpha: 0.06),
-                blurRadius: 12,
-                spreadRadius: 0,
-              ),
-            ],
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: Container(
+        decoration: BoxDecoration(
+          color: const Color(0xFF1A1708),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: const Color(0xFFE8A54B).withValues(alpha: 0.25),
           ),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(14, 10, 6, 10),
-            child: Row(
-              children: [
-                // Pulsing amber dot
-                AnimatedBuilder(
-                  animation: _pulse,
-                  builder: (context, _) {
-                    return Container(
-                      width: 8,
-                      height: 8,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: const Color(0xFFE8A54B)
-                            .withValues(alpha: _pulse.value),
-                        boxShadow: [
-                          BoxShadow(
-                            color: const Color(0xFFE8A54B)
-                                .withValues(alpha: 0.4 * _pulse.value),
-                            blurRadius: 6,
-                            spreadRadius: 1,
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
-                const SizedBox(width: 10),
-                // Headline + hub pills
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFFE8A54B).withValues(alpha: 0.06),
+              blurRadius: 12,
+              spreadRadius: 0,
+            ),
+          ],
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 10, 10, 10),
+          child: Row(
+            children: [
+              Expanded(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _openServerSettings,
+                  child: Row(
                     children: [
-                      Text(
-                        headline,
-                        style: const TextStyle(
-                          color: Color(0xFFE8A54B),
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: 0.1,
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Wrap(
-                        spacing: 6,
-                        runSpacing: 4,
-                        children: [
-                          for (final hub in disconnected)
-                            _HubChip(
-                              type: hub['type'] as String,
-                              pulse: _pulse,
+                      // Pulsing amber dot
+                      AnimatedBuilder(
+                        animation: _pulse,
+                        builder: (context, _) {
+                          return Container(
+                            width: 8,
+                            height: 8,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: const Color(0xFFE8A54B)
+                                  .withValues(alpha: _pulse.value),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: const Color(0xFFE8A54B)
+                                      .withValues(alpha: 0.4 * _pulse.value),
+                                  blurRadius: 6,
+                                  spreadRadius: 1,
+                                ),
+                              ],
                             ),
-                        ],
+                          );
+                        },
+                      ),
+                      const SizedBox(width: 10),
+                      // Headline + hub pills
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              headline,
+                              style: const TextStyle(
+                                color: Color(0xFFE8A54B),
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 0.1,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Wrap(
+                              spacing: 6,
+                              runSpacing: 4,
+                              children: [
+                                for (final hub in disconnected)
+                                  _HubChip(
+                                    type: hub['type'] as String,
+                                    pulse: _pulse,
+                                  ),
+                              ],
+                            ),
+                          ],
+                        ),
                       ),
                     ],
                   ),
                 ),
-                const SizedBox(width: 8),
-              ],
-            ),
+              ),
+              const SizedBox(width: 10),
+              _RetryButton(
+                retrying: retrying,
+                onPressed: retrying ? null : _retryHubs,
+              ),
+            ],
           ),
         ),
       ),
@@ -190,12 +205,81 @@ class _HubConnectionBannerState extends State<HubConnectionBanner>
     }
   }
 
+  Future<void> _retryHubs() async {
+    HapticFeedback.selectionClick();
+    await context.read<ServerSyncProvider>().fullRefresh();
+  }
+
   static String _hubLabel(String type) => switch (type) {
         'hue' => 'Hue',
         'homeassistant' || 'home_assistant' => 'Home Assistant',
         'matter' => 'Matter',
         _ => type,
       };
+}
+
+class _RetryButton extends StatelessWidget {
+  final bool retrying;
+  final Future<void> Function()? onPressed;
+
+  const _RetryButton({
+    required this.retrying,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = const Color(0xFFE8A54B);
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: onPressed,
+        borderRadius: BorderRadius.circular(10),
+        child: Ink(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: accent.withValues(alpha: retrying ? 0.08 : 0.12),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: accent.withValues(alpha: retrying ? 0.18 : 0.24),
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (retrying)
+                SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    valueColor: AlwaysStoppedAnimation<Color>(
+                      accent.withValues(alpha: 0.9),
+                    ),
+                  ),
+                )
+              else
+                Icon(
+                  Icons.refresh_rounded,
+                  size: 15,
+                  color: accent.withValues(alpha: 0.9),
+                ),
+              const SizedBox(width: 6),
+              Text(
+                retrying ? 'Retrying' : 'Retry',
+                style: TextStyle(
+                  color: accent.withValues(alpha: 0.92),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.1,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 /// Compact chip showing a disconnected hub.

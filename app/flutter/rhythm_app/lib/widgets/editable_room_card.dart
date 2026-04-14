@@ -127,57 +127,58 @@ class _EditableRoomCardState extends State<EditableRoomCard>
         child: Stack(
           children: [
             IgnorePointer(child: _buildCard()),
-            // Drag handle — top-right corner, eagerly claims gesture
-            Positioned(
-              right: 6,
-              top: 0,
-              bottom: 0,
-              child: RawGestureDetector(
-                gestures: <Type, GestureRecognizerFactory>{
-                  _EagerPanRecognizer:
-                      GestureRecognizerFactoryWithHandlers<_EagerPanRecognizer>(
-                    () => _EagerPanRecognizer(),
-                    (recognizer) {
-                      recognizer.onStart = (details) {
-                        HapticFeedback.mediumImpact();
-                        final pointer = _dragPointerId;
-                        if (pointer != null) {
-                          widget.onDragStart?.call(
-                            widget.roomId,
-                            pointer,
-                            details.globalPosition,
-                          );
-                        }
-                      };
-                    },
-                  ),
-                },
-                child: Listener(
-                  onPointerDown: (event) {
-                    _dragPointerId = event.pointer;
-                  },
-                  onPointerCancel: (_) {
-                    _dragPointerId = null;
-                  },
-                  onPointerUp: (_) {
-                    _dragPointerId = null;
-                  },
-                  child: Center(
-                    child: Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: CelestialColors.backgroundCard.withValues(
-                          alpha: 0.6,
-                        ),
-                        borderRadius: BorderRadius.circular(8),
+            // Drag handle — centered on the card, eagerly claims gesture.
+            Positioned.fill(
+              child: Align(
+                alignment: Alignment.center,
+                child: Transform.translate(
+                  offset: const Offset(0, -10),
+                  child: RawGestureDetector(
+                    gestures: <Type, GestureRecognizerFactory>{
+                      _EagerPanRecognizer: GestureRecognizerFactoryWithHandlers<
+                          _EagerPanRecognizer>(
+                        () => _EagerPanRecognizer(),
+                        (recognizer) {
+                          recognizer.onStart = (details) {
+                            HapticFeedback.mediumImpact();
+                            final pointer = _dragPointerId;
+                            if (pointer != null) {
+                              widget.onDragStart?.call(
+                                widget.roomId,
+                                pointer,
+                                details.globalPosition,
+                              );
+                            }
+                          };
+                        },
                       ),
-                      child: Icon(
-                        Icons.drag_indicator_rounded,
-                        color: CelestialColors.textSecondary.withValues(
-                          alpha: 0.7,
+                    },
+                    child: Listener(
+                      onPointerDown: (event) {
+                        _dragPointerId = event.pointer;
+                      },
+                      onPointerCancel: (_) {
+                        _dragPointerId = null;
+                      },
+                      onPointerUp: (_) {
+                        _dragPointerId = null;
+                      },
+                      child: Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: CelestialColors.backgroundCard.withValues(
+                            alpha: 0.6,
+                          ),
+                          borderRadius: BorderRadius.circular(8),
                         ),
-                        size: 20,
+                        child: Icon(
+                          Icons.drag_indicator_rounded,
+                          color: CelestialColors.textSecondary.withValues(
+                            alpha: 0.7,
+                          ),
+                          size: 20,
+                        ),
                       ),
                     ),
                   ),

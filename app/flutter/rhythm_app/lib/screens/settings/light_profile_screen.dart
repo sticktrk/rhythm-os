@@ -91,6 +91,15 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   // Interval auto mode (null = server decides).
   bool _intervalAuto = false;
 
+  // Expand/collapse state for range cards.
+  bool _brightnessExpanded = false;
+  bool _colorTempExpanded = false;
+  bool _idleExpanded = false;
+  bool _roomDefaultsExpanded = false;
+
+  /// Notifier bumped on every setState so child screens can rebuild.
+  final _rebuildNotifier = ValueNotifier<int>(0);
+
   // Sleep profile state: fixed direct color plus a single brightness level.
   double _sleepHue = 10;
   double _sleepBrightness = 20;
@@ -142,9 +151,17 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   @override
+  @override
+  void setState(VoidCallback fn) {
+    super.setState(fn);
+    _rebuildNotifier.value++;
+  }
+
+  @override
   void dispose() {
     _roomDefaultsDebounce?.cancel();
     _glowController.dispose();
+    _rebuildNotifier.dispose();
     super.dispose();
   }
 
@@ -435,6 +452,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     } else {
       _applyIdleFallback();
     }
+    _idleExpanded = _idleCustomBri || _idleCustomColor;
   }
 
   void _applyIdleFallback() {
@@ -936,15 +954,11 @@ class _LightProfileScreenState extends State<LightProfileScreen>
             _buildBrightnessRangeCard(),
             const SizedBox(height: 14),
             _buildColorTempRangeCard(),
-            const SizedBox(height: 24),
-            _buildTimeSimulator(),
+            const SizedBox(height: 14),
+            _buildAdvancedColorEditorItem(),
           ],
           const SizedBox(height: 24),
           _buildMotionTimeoutCard(),
-          if (!_isSleepProfile) ...[
-            const SizedBox(height: 14),
-            _buildIntervalCard(),
-          ],
           const SizedBox(height: 24),
           _buildIdleSection(),
           const SizedBox(height: 24),
@@ -1041,211 +1055,299 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     final isDefault = !_idleCustomBri && !_idleCustomColor;
     final briColor = _idleCustomBri ? _Palette.amber : _Palette.idle;
     final colorColor = _idleCustomColor ? _idleSelectedColor : _Palette.idle;
+    final expanded = _idleExpanded;
 
-    return Container(
-      padding: const EdgeInsets.fromLTRB(18, 18, 18, 18),
-      decoration: BoxDecoration(
-        color: _Palette.card,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: _Palette.border),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Header.
-          Row(
-            children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: _Palette.idle.withValues(alpha: 0.12),
-                ),
-                child: Icon(
-                  Icons.brightness_low_rounded,
-                  color: _Palette.idle.withValues(alpha: 0.7),
-                  size: 18,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'When Standby',
-                      style: TextStyle(
-                        color: _Palette.textPrimary,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                        letterSpacing: -0.1,
+    return AnimatedContainer(
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOutCubic,
+        padding: const EdgeInsets.fromLTRB(18, 18, 18, 18),
+        decoration: BoxDecoration(
+          color: _Palette.card,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(
+            color: expanded
+                ? _Palette.idle.withValues(alpha: 0.25)
+                : _Palette.border,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header — tappable to expand/collapse.
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => setState(() => _idleExpanded = !_idleExpanded),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        width: 36,
+                        height: 36,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: _Palette.idle.withValues(alpha: 0.12),
+                        ),
+                        child: Icon(
+                          Icons.brightness_low_rounded,
+                          color: _Palette.idle.withValues(alpha: 0.7),
+                          size: 18,
+                        ),
                       ),
-                    ),
-                    if (isDefault) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        _selectedCustomIdleProfileId == null
-                            ? 'Uses default standby fallback (inherit active at 1%)'
-                            : 'Uses 1% inherited standby',
-                        style: TextStyle(
-                          color: _Palette.textSecondary.withValues(alpha: 0.5),
-                          fontSize: 12,
+                      const SizedBox(width: 12),
+                      const Expanded(
+                        child: Text(
+                          'When Standby',
+                          style: TextStyle(
+                            color: _Palette.textPrimary,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: -0.1,
+                          ),
+                        ),
+                      ),
+                      if (!expanded && isDefault)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: _Palette.idle.withValues(alpha: 0.06),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            'Auto',
+                            style: TextStyle(
+                              color: _Palette.idle.withValues(alpha: 0.5),
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      if (!expanded && _idleCustomBri) ...[
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: _Palette.amber.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(
+                                color: _Palette.amber.withValues(alpha: 0.2)),
+                          ),
+                          child: Text(
+                            '${_idleBrightness.round()}%',
+                            style: TextStyle(
+                              color: _Palette.amber.withValues(alpha: 0.8),
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              fontFeatures: const [
+                                FontFeature.tabularFigures()
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                      if (!expanded && _idleCustomColor) ...[
+                        if (_idleCustomBri) const SizedBox(width: 6),
+                        Container(
+                          width: 26,
+                          height: 26,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: _idleSelectedColor,
+                            border: Border.all(
+                              color:
+                                  _idleSelectedColor.withValues(alpha: 0.4),
+                              width: 2,
+                            ),
+                          ),
+                        ),
+                      ],
+                      const SizedBox(width: 6),
+                      AnimatedRotation(
+                        turns: expanded ? 0.5 : 0,
+                        duration: const Duration(milliseconds: 250),
+                        curve: Curves.easeOutCubic,
+                        child: Icon(
+                          Icons.keyboard_arrow_down_rounded,
+                          color:
+                              _Palette.textSecondary.withValues(alpha: 0.3),
+                          size: 20,
                         ),
                       ),
                     ],
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 18),
-          // Custom Brightness toggle + slider.
-          Row(
-            children: [
-              Icon(
-                Icons.brightness_medium_rounded,
-                color: briColor.withValues(alpha: _idleCustomBri ? 0.8 : 0.35),
-                size: 16,
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  'Custom Brightness',
-                  style: TextStyle(
-                    color: _idleCustomBri
-                        ? _Palette.textPrimary
-                        : _Palette.textSecondary.withValues(alpha: 0.5),
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
                   ),
-                ),
+                ],
               ),
-              if (_idleCustomBri)
-                Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: Text(
-                    '${_idleBrightness.round()}%',
-                    style: TextStyle(
-                      color: briColor.withValues(alpha: 0.7),
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      fontFeatures: const [FontFeature.tabularFigures()],
-                    ),
-                  ),
-                ),
-              SizedBox(
-                height: 28,
-                child: Switch.adaptive(
-                  value: _idleCustomBri,
-                  onChanged: (v) {
-                    setState(() {
-                      _idleCustomBri = v;
-                      if (v && _idleBrightness < 1) {
-                        _idleBrightness = 1;
-                      }
-                      _curveConfigDirty = true;
-                    });
-                  },
-                  activeTrackColor: briColor,
-                  activeThumbColor: _Palette.textPrimary,
-                ),
-              ),
-            ],
-          ),
-          AnimatedSize(
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeOutCubic,
-            alignment: Alignment.topCenter,
-            child: _idleCustomBri
-                ? Padding(
-                    padding: const EdgeInsets.only(top: 8, left: 26),
-                    child: SliderTheme(
-                      data: SliderThemeData(
-                        activeTrackColor: briColor,
-                        inactiveTrackColor: briColor.withValues(alpha: 0.12),
-                        thumbColor: briColor,
-                        overlayColor: briColor.withValues(alpha: 0.12),
-                        trackHeight: 4,
-                        thumbShape:
-                            const RoundSliderThumbShape(enabledThumbRadius: 7),
-                        overlayShape:
-                            const RoundSliderOverlayShape(overlayRadius: 16),
-                      ),
-                      child: Slider(
-                        value: _idleBrightness.clamp(1, 100),
-                        min: 1,
-                        max: 100,
-                        divisions: 99,
-                        onChanged: (v) {
-                          setState(() {
-                            _idleBrightness = v;
-                            _curveConfigDirty = true;
-                          });
-                        },
-                      ),
-                    ),
-                  )
-                : const SizedBox.shrink(),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            child: Divider(
-              height: 1,
-              color: _Palette.border.withValues(alpha: 0.5),
             ),
-          ),
-          // Custom Color toggle + picker.
-          Row(
-            children: [
-              Icon(
-                Icons.palette_outlined,
-                color:
-                    colorColor.withValues(alpha: _idleCustomColor ? 0.8 : 0.35),
-                size: 16,
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  'Custom Color',
-                  style: TextStyle(
-                    color: _idleCustomColor
-                        ? _Palette.textPrimary
-                        : _Palette.textSecondary.withValues(alpha: 0.5),
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ),
-              SizedBox(
-                height: 28,
-                child: Switch.adaptive(
-                  value: _idleCustomColor,
-                  onChanged: (v) {
-                    setState(() {
-                      _idleCustomColor = v;
-                      _curveConfigDirty = true;
-                    });
-                  },
-                  activeTrackColor: colorColor,
-                  activeThumbColor: _Palette.textPrimary,
-                ),
-              ),
-            ],
-          ),
-          AnimatedSize(
-            duration: const Duration(milliseconds: 350),
-            curve: Curves.easeOutCubic,
-            alignment: Alignment.topCenter,
-            child: _idleCustomColor
-                ? Padding(
-                    padding: const EdgeInsets.only(top: 16),
-                    child: _buildIdleColorPicker(),
-                  )
-                : const SizedBox.shrink(),
-          ),
-        ],
-      ),
+            AnimatedSize(
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeOutCubic,
+              alignment: Alignment.topCenter,
+              child: expanded
+                  ? Column(
+                      children: [
+                        const SizedBox(height: 18),
+                        // Custom Brightness toggle + slider.
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.brightness_medium_rounded,
+                              color: briColor.withValues(
+                                  alpha: _idleCustomBri ? 0.8 : 0.35),
+                              size: 16,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                'Custom Brightness',
+                                style: TextStyle(
+                                  color: _idleCustomBri
+                                      ? _Palette.textPrimary
+                                      : _Palette.textSecondary
+                                          .withValues(alpha: 0.5),
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                            if (_idleCustomBri)
+                              Padding(
+                                padding: const EdgeInsets.only(right: 8),
+                                child: Text(
+                                  '${_idleBrightness.round()}%',
+                                  style: TextStyle(
+                                    color: briColor.withValues(alpha: 0.7),
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w700,
+                                    fontFeatures: const [
+                                      FontFeature.tabularFigures()
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            SizedBox(
+                              height: 28,
+                              child: Switch.adaptive(
+                                value: _idleCustomBri,
+                                onChanged: (v) {
+                                  setState(() {
+                                    _idleCustomBri = v;
+                                    if (v && _idleBrightness < 1) {
+                                      _idleBrightness = 1;
+                                    }
+                                    _curveConfigDirty = true;
+                                  });
+                                },
+                                activeTrackColor: briColor,
+                                activeThumbColor: _Palette.textPrimary,
+                              ),
+                            ),
+                          ],
+                        ),
+                        AnimatedSize(
+                          duration: const Duration(milliseconds: 300),
+                          curve: Curves.easeOutCubic,
+                          alignment: Alignment.topCenter,
+                          child: _idleCustomBri
+                              ? Padding(
+                                  padding:
+                                      const EdgeInsets.only(top: 8, left: 26),
+                                  child: SliderTheme(
+                                    data: SliderThemeData(
+                                      activeTrackColor: briColor,
+                                      inactiveTrackColor:
+                                          briColor.withValues(alpha: 0.12),
+                                      thumbColor: briColor,
+                                      overlayColor:
+                                          briColor.withValues(alpha: 0.12),
+                                      trackHeight: 4,
+                                      thumbShape:
+                                          const RoundSliderThumbShape(
+                                              enabledThumbRadius: 7),
+                                      overlayShape:
+                                          const RoundSliderOverlayShape(
+                                              overlayRadius: 16),
+                                    ),
+                                    child: Slider(
+                                      value: _idleBrightness.clamp(1, 100),
+                                      min: 1,
+                                      max: 100,
+                                      divisions: 99,
+                                      onChanged: (v) {
+                                        setState(() {
+                                          _idleBrightness = v;
+                                          _curveConfigDirty = true;
+                                        });
+                                      },
+                                    ),
+                                  ),
+                                )
+                              : const SizedBox.shrink(),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          child: Divider(
+                            height: 1,
+                            color: _Palette.border.withValues(alpha: 0.5),
+                          ),
+                        ),
+                        // Custom Color toggle + picker.
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.palette_outlined,
+                              color: colorColor.withValues(
+                                  alpha: _idleCustomColor ? 0.8 : 0.35),
+                              size: 16,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                'Custom Color',
+                                style: TextStyle(
+                                  color: _idleCustomColor
+                                      ? _Palette.textPrimary
+                                      : _Palette.textSecondary
+                                          .withValues(alpha: 0.5),
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                            SizedBox(
+                              height: 28,
+                              child: Switch.adaptive(
+                                value: _idleCustomColor,
+                                onChanged: (v) {
+                                  setState(() {
+                                    _idleCustomColor = v;
+                                    _curveConfigDirty = true;
+                                  });
+                                },
+                                activeTrackColor: colorColor,
+                                activeThumbColor: _Palette.textPrimary,
+                              ),
+                            ),
+                          ],
+                        ),
+                        AnimatedSize(
+                          duration: const Duration(milliseconds: 350),
+                          curve: Curves.easeOutCubic,
+                          alignment: Alignment.topCenter,
+                          child: _idleCustomColor
+                              ? Padding(
+                                  padding: const EdgeInsets.only(top: 16),
+                                  child: _buildIdleColorPicker(),
+                                )
+                              : const SizedBox.shrink(),
+                        ),
+                      ],
+                    )
+                  : const SizedBox.shrink(),
+            ),
+          ],
+        ),
     );
   }
 
@@ -1559,111 +1661,150 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     const color = _Palette.amber;
     final minPct = _minBrightness.round();
     final maxPct = _maxBrightness.round();
+    final expanded = _brightnessExpanded;
 
-    return Container(
-      padding: const EdgeInsets.fromLTRB(18, 18, 18, 10),
-      decoration: BoxDecoration(
-        color: _Palette.card,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: _Palette.border),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: color.withValues(alpha: 0.12),
+    return GestureDetector(
+      onTap: () => setState(() => _brightnessExpanded = !_brightnessExpanded),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOutCubic,
+        padding: EdgeInsets.fromLTRB(18, 18, 18, expanded ? 10 : 18),
+        decoration: BoxDecoration(
+          color: _Palette.card,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(
+            color: expanded
+                ? color.withValues(alpha: 0.25)
+                : _Palette.border,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: color.withValues(alpha: 0.12),
+                  ),
+                  child: const Icon(Icons.wb_sunny_rounded,
+                      color: color, size: 18),
                 ),
-                child:
-                    const Icon(Icons.wb_sunny_rounded, color: color, size: 18),
-              ),
-              const SizedBox(width: 12),
-              const Expanded(
-                child: Text(
-                  'Brightness',
-                  style: TextStyle(
-                    color: _Palette.textPrimary,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: -0.1,
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Text(
+                    'Brightness',
+                    style: TextStyle(
+                      color: _Palette.textPrimary,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: -0.1,
+                    ),
                   ),
                 ),
-              ),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
-                  color: color.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: color.withValues(alpha: 0.15)),
-                ),
-                child: Text(
-                  '$minPct%',
-                  style: TextStyle(
-                    color: color.withValues(alpha: 0.5),
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    fontFeatures: const [FontFeature.tabularFigures()],
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(8),
+                    border:
+                        Border.all(color: color.withValues(alpha: 0.15)),
+                  ),
+                  child: Text(
+                    '$minPct%',
+                    style: TextStyle(
+                      color: color.withValues(alpha: 0.5),
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
                   ),
                 ),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 5),
-                child: Text(
-                  '–',
-                  style: TextStyle(
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 5),
+                  child: Text(
+                    '–',
+                    style: TextStyle(
+                      color:
+                          _Palette.textSecondary.withValues(alpha: 0.3),
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(8),
+                    border:
+                        Border.all(color: color.withValues(alpha: 0.25)),
+                  ),
+                  child: Text(
+                    '$maxPct%',
+                    style: const TextStyle(
+                      color: color,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                AnimatedRotation(
+                  turns: expanded ? 0.5 : 0,
+                  duration: const Duration(milliseconds: 250),
+                  curve: Curves.easeOutCubic,
+                  child: Icon(
+                    Icons.keyboard_arrow_down_rounded,
                     color: _Palette.textSecondary.withValues(alpha: 0.3),
-                    fontSize: 13,
+                    size: 20,
                   ),
                 ),
-              ),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
-                  color: color.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: color.withValues(alpha: 0.25)),
-                ),
-                child: Text(
-                  '$maxPct%',
-                  style: const TextStyle(
-                    color: color,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700,
-                    fontFeatures: [FontFeature.tabularFigures()],
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          _buildInlineSlider(
-            label: 'Min',
-            value: _minBrightness,
-            min: 1,
-            max: 50,
-            divisions: 49,
-            format: (v) => '${v.round()}%',
-            color: color.withValues(alpha: 0.5),
-            onChanged: (v) => _onCurveChanged(() => _minBrightness = v),
-          ),
-          _buildInlineSlider(
-            label: 'Max',
-            value: _maxBrightness,
-            min: 20,
-            max: 100,
-            divisions: 80,
-            format: (v) => '${v.round()}%',
-            color: color,
-            onChanged: (v) => _onCurveChanged(() => _maxBrightness = v),
-          ),
-        ],
+              ],
+            ),
+            AnimatedSize(
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeOutCubic,
+              alignment: Alignment.topCenter,
+              child: expanded
+                  ? Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Column(
+                        children: [
+                          _buildInlineSlider(
+                            label: 'Min',
+                            value: _minBrightness,
+                            min: 1,
+                            max: 50,
+                            divisions: 49,
+                            format: (v) => '${v.round()}%',
+                            color: color.withValues(alpha: 0.5),
+                            onChanged: (v) => _onCurveChanged(
+                                () => _minBrightness = v),
+                          ),
+                          _buildInlineSlider(
+                            label: 'Max',
+                            value: _maxBrightness,
+                            min: 20,
+                            max: 100,
+                            divisions: 80,
+                            format: (v) => '${v.round()}%',
+                            color: color,
+                            onChanged: (v) => _onCurveChanged(
+                                () => _maxBrightness = v),
+                          ),
+                        ],
+                      ),
+                    )
+                  : const SizedBox.shrink(),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1675,131 +1816,170 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   Widget _buildColorTempRangeCard() {
     final warmColor = ColorUtils.curveColorForCCT(_minColorTemp.round());
     final coolColor = ColorUtils.curveColorForCCT(_maxColorTemp.round());
+    final expanded = _colorTempExpanded;
 
-    return Container(
-      padding: const EdgeInsets.fromLTRB(18, 18, 18, 10),
-      decoration: BoxDecoration(
-        color: _Palette.card,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: _Palette.border),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  gradient: LinearGradient(
-                    colors: [
-                      warmColor.withValues(alpha: 0.18),
-                      coolColor.withValues(alpha: 0.18),
-                    ],
-                  ),
-                ),
-                child:
-                    Icon(Icons.thermostat_rounded, color: warmColor, size: 18),
-              ),
-              const SizedBox(width: 12),
-              const Expanded(
-                child: Text(
-                  'Color Temperature',
-                  style: TextStyle(
-                    color: _Palette.textPrimary,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: -0.1,
-                  ),
-                ),
-              ),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
-                  color: warmColor.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: warmColor.withValues(alpha: 0.2)),
-                ),
-                child: Text(
-                  '${_minColorTemp.round()}K',
-                  style: TextStyle(
-                    color: warmColor,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    fontFeatures: const [FontFeature.tabularFigures()],
-                  ),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 5),
-                child: Text(
-                  '–',
-                  style: TextStyle(
-                    color: _Palette.textSecondary.withValues(alpha: 0.3),
-                    fontSize: 13,
-                  ),
-                ),
-              ),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
-                  color: coolColor.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: coolColor.withValues(alpha: 0.2)),
-                ),
-                child: Text(
-                  '${_maxColorTemp.round()}K',
-                  style: TextStyle(
-                    color: coolColor,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    fontFeatures: const [FontFeature.tabularFigures()],
-                  ),
-                ),
-              ),
-            ],
+    return GestureDetector(
+      onTap: () => setState(() => _colorTempExpanded = !_colorTempExpanded),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOutCubic,
+        padding: EdgeInsets.fromLTRB(18, 18, 18, expanded ? 10 : 18),
+        decoration: BoxDecoration(
+          color: _Palette.card,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(
+            color: expanded
+                ? warmColor.withValues(alpha: 0.2)
+                : _Palette.border,
           ),
-          const SizedBox(height: 14),
-          // Kelvin gradient strip showing the selected range
-          Container(
-            height: 6,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(3),
-              gradient: LinearGradient(
-                colors: List.generate(8, (i) {
-                  final k =
-                      _minColorTemp + (i / 7) * (_maxColorTemp - _minColorTemp);
-                  return ColorUtils.curveColorForCCT(k.round());
-                }),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: LinearGradient(
+                      colors: [
+                        warmColor.withValues(alpha: 0.18),
+                        coolColor.withValues(alpha: 0.18),
+                      ],
+                    ),
+                  ),
+                  child: Icon(Icons.thermostat_rounded,
+                      color: warmColor, size: 18),
+                ),
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Text(
+                    'Color Temperature',
+                    style: TextStyle(
+                      color: _Palette.textPrimary,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: -0.1,
+                    ),
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: warmColor.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                        color: warmColor.withValues(alpha: 0.2)),
+                  ),
+                  child: Text(
+                    '${_minColorTemp.round()}K',
+                    style: TextStyle(
+                      color: warmColor,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 5),
+                  child: Text(
+                    '–',
+                    style: TextStyle(
+                      color:
+                          _Palette.textSecondary.withValues(alpha: 0.3),
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: coolColor.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                        color: coolColor.withValues(alpha: 0.2)),
+                  ),
+                  child: Text(
+                    '${_maxColorTemp.round()}K',
+                    style: TextStyle(
+                      color: coolColor,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                AnimatedRotation(
+                  turns: expanded ? 0.5 : 0,
+                  duration: const Duration(milliseconds: 250),
+                  curve: Curves.easeOutCubic,
+                  child: Icon(
+                    Icons.keyboard_arrow_down_rounded,
+                    color: _Palette.textSecondary.withValues(alpha: 0.3),
+                    size: 20,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            // Kelvin gradient strip — always visible as a preview
+            Container(
+              height: 6,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(3),
+                gradient: LinearGradient(
+                  colors: List.generate(8, (i) {
+                    final k = _minColorTemp +
+                        (i / 7) * (_maxColorTemp - _minColorTemp);
+                    return ColorUtils.curveColorForCCT(k.round());
+                  }),
+                ),
               ),
             ),
-          ),
-          const SizedBox(height: 4),
-          _buildInlineSlider(
-            label: 'Min',
-            value: _minColorTemp,
-            min: 1500,
-            max: 4000,
-            divisions: 25,
-            format: (v) => '${v.round()}K',
-            color: warmColor,
-            onChanged: (v) => _onCurveChanged(() => _minColorTemp = v),
-          ),
-          _buildInlineSlider(
-            label: 'Max',
-            value: _maxColorTemp,
-            min: 2000,
-            max: 6500,
-            divisions: 45,
-            format: (v) => '${v.round()}K',
-            color: coolColor,
-            onChanged: (v) => _onCurveChanged(() => _maxColorTemp = v),
-          ),
-        ],
+            AnimatedSize(
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeOutCubic,
+              alignment: Alignment.topCenter,
+              child: expanded
+                  ? Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Column(
+                        children: [
+                          _buildInlineSlider(
+                            label: 'Min',
+                            value: _minColorTemp,
+                            min: 1500,
+                            max: 4000,
+                            divisions: 25,
+                            format: (v) => '${v.round()}K',
+                            color: warmColor,
+                            onChanged: (v) => _onCurveChanged(
+                                () => _minColorTemp = v),
+                          ),
+                          _buildInlineSlider(
+                            label: 'Max',
+                            value: _maxColorTemp,
+                            min: 2000,
+                            max: 6500,
+                            divisions: 45,
+                            format: (v) => '${v.round()}K',
+                            color: coolColor,
+                            onChanged: (v) => _onCurveChanged(
+                                () => _maxColorTemp = v),
+                          ),
+                        ],
+                      ),
+                    )
+                  : const SizedBox.shrink(),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1808,150 +1988,139 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   // Background Light Interval card
   // ---------------------------------------------------------------------------
 
-  Widget _buildIntervalCard() {
+  Widget _buildIntervalRow() {
     const color = _Palette.blue;
-    return Container(
-      padding: const EdgeInsets.fromLTRB(18, 18, 18, 12),
-      decoration: BoxDecoration(
-        color: _Palette.card,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: _Palette.border),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 36,
-                height: 36,
+    return Column(
+      children: [
+        Row(
+          children: [
+            Container(
+              width: 30,
+              height: 30,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: color.withValues(alpha: 0.1),
+              ),
+              child:
+                  Icon(Icons.update_rounded, color: color, size: 15),
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text(
+                'Background Interval',
+                style: TextStyle(
+                  color: _Palette.textSecondary,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+            GestureDetector(
+              onTap: () {
+                setState(() {
+                  _intervalAuto = !_intervalAuto;
+                  _curveConfigDirty = true;
+                });
+              },
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: color.withValues(alpha: 0.12),
-                ),
-                child: const Icon(Icons.update_rounded, color: color, size: 18),
-              ),
-              const SizedBox(width: 12),
-              const Expanded(
-                child: Text(
-                  'Background Light Interval',
-                  style: TextStyle(
-                    color: _Palette.textPrimary,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: -0.1,
-                  ),
-                ),
-              ),
-              GestureDetector(
-                onTap: () {
-                  setState(() {
-                    _intervalAuto = !_intervalAuto;
-                    _curveConfigDirty = true;
-                  });
-                },
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
+                  color: _intervalAuto
+                      ? color.withValues(alpha: 0.12)
+                      : color.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(
                     color: _intervalAuto
-                        ? color.withValues(alpha: 0.12)
-                        : color.withValues(alpha: 0.06),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                      color: _intervalAuto
-                          ? color.withValues(alpha: 0.25)
-                          : color.withValues(alpha: 0.12),
-                    ),
+                        ? color.withValues(alpha: 0.25)
+                        : color.withValues(alpha: 0.12),
                   ),
-                  child: Text(
-                    _intervalAuto ? 'Auto' : _formatInterval(_intervalSecs),
-                    style: TextStyle(
-                      color:
-                          _intervalAuto ? color : color.withValues(alpha: 0.7),
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 0.3,
-                    ),
+                ),
+                child: Text(
+                  _intervalAuto ? 'Auto' : _formatInterval(_intervalSecs),
+                  style: TextStyle(
+                    color: _intervalAuto
+                        ? color
+                        : color.withValues(alpha: 0.7),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
                   ),
+                ),
+              ),
+            ),
+            if (_intervalAuto) ...[
+              const SizedBox(width: 8),
+              Text(
+                _formatInterval(_intervalSecs),
+                style: TextStyle(
+                  color: _Palette.textSecondary.withValues(alpha: 0.5),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  fontFeatures: const [FontFeature.tabularFigures()],
                 ),
               ),
             ],
-          ),
-          const SizedBox(height: 12),
-          Padding(
-            padding: const EdgeInsets.only(left: 48),
-            child: Text(
-              _intervalAuto
-                  ? 'Server will compute from curve rate-of-change'
-                  : 'How often this profile updates the runtime loop',
-              style: TextStyle(
-                color: _Palette.textSecondary.withValues(alpha: 0.45),
-                fontSize: 12,
-                height: 1.3,
-              ),
-            ),
-          ),
-          AnimatedSize(
-            duration: const Duration(milliseconds: 250),
-            curve: Curves.easeOutCubic,
-            alignment: Alignment.topCenter,
-            child: _intervalAuto
-                ? const SizedBox.shrink()
-                : Padding(
-                    padding: const EdgeInsets.only(top: 10),
-                    child: Column(
-                      children: [
-                        SliderTheme(
-                          data: SliderThemeData(
-                            activeTrackColor: color,
-                            inactiveTrackColor: color.withValues(alpha: 0.12),
-                            thumbColor: color,
-                            overlayColor: color.withValues(alpha: 0.12),
-                            trackHeight: 4,
-                            thumbShape: const RoundSliderThumbShape(
-                                enabledThumbRadius: 8),
-                            overlayShape: const RoundSliderOverlayShape(
-                                overlayRadius: 18),
-                          ),
-                          child: Slider(
-                            value: _intervalSecs.clamp(30, 300),
-                            min: 30,
-                            max: 300,
-                            divisions: 27,
-                            onChanged: _onIntervalChanged,
-                          ),
+          ],
+        ),
+        AnimatedSize(
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOutCubic,
+          alignment: Alignment.topCenter,
+          child: _intervalAuto
+              ? const SizedBox.shrink()
+              : Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Column(
+                    children: [
+                      SliderTheme(
+                        data: SliderThemeData(
+                          activeTrackColor: color,
+                          inactiveTrackColor: color.withValues(alpha: 0.12),
+                          thumbColor: color,
+                          overlayColor: color.withValues(alpha: 0.12),
+                          trackHeight: 4,
+                          thumbShape: const RoundSliderThumbShape(
+                              enabledThumbRadius: 8),
+                          overlayShape: const RoundSliderOverlayShape(
+                              overlayRadius: 18),
                         ),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 6),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Text(
-                                _formatInterval(30),
-                                style: TextStyle(
-                                  color: _Palette.textSecondary
-                                      .withValues(alpha: 0.4),
-                                  fontSize: 11,
-                                ),
-                              ),
-                              Text(
-                                _formatInterval(300),
-                                style: TextStyle(
-                                  color: _Palette.textSecondary
-                                      .withValues(alpha: 0.4),
-                                  fontSize: 11,
-                                ),
-                              ),
-                            ],
-                          ),
+                        child: Slider(
+                          value: _intervalSecs.clamp(30, 300),
+                          min: 30,
+                          max: 300,
+                          divisions: 27,
+                          onChanged: _onIntervalChanged,
                         ),
-                      ],
-                    ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              _formatInterval(30),
+                              style: TextStyle(
+                                color: _Palette.textSecondary
+                                    .withValues(alpha: 0.4),
+                                fontSize: 11,
+                              ),
+                            ),
+                            Text(
+                              _formatInterval(300),
+                              style: TextStyle(
+                                color: _Palette.textSecondary
+                                    .withValues(alpha: 0.4),
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
-          ),
-        ],
-      ),
+                ),
+        ),
+      ],
     );
   }
 
@@ -2084,6 +2253,83 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                 ],
               ),
             ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Advanced Color Editor — nav item + screen
+  // ---------------------------------------------------------------------------
+
+  Widget _buildAdvancedColorEditorItem() {
+    const color = _Palette.amber;
+    return GestureDetector(
+      onTap: _openAdvancedColorEditor,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(18, 16, 14, 16),
+        decoration: BoxDecoration(
+          color: _Palette.card,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: _Palette.border),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: color.withValues(alpha: 0.12),
+              ),
+              child: const Icon(Icons.tune_rounded, color: color, size: 18),
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text(
+                'Advanced Color Editor',
+                style: TextStyle(
+                  color: _Palette.textPrimary,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: -0.1,
+                ),
+              ),
+            ),
+            Icon(
+              Icons.chevron_right_rounded,
+              color: _Palette.textSecondary.withValues(alpha: 0.4),
+              size: 22,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _openAdvancedColorEditor() {
+    Navigator.of(context).push(
+      PageRouteBuilder(
+        opaque: false,
+        barrierColor: Colors.black54,
+        pageBuilder: (context, animation, secondaryAnimation) {
+          return _AdvancedColorEditorScreen(parent: this);
+        },
+        transitionsBuilder: (context, animation, secondaryAnimation, child) {
+          final curve = CurvedAnimation(
+            parent: animation,
+            curve: Curves.easeOutCubic,
+            reverseCurve: Curves.easeInCubic,
+          );
+          return SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(1, 0),
+              end: Offset.zero,
+            ).animate(curve),
+            child: child,
+          );
+        },
+        transitionDuration: const Duration(milliseconds: 350),
+        reverseTransitionDuration: const Duration(milliseconds: 300),
+      ),
     );
   }
 
@@ -2449,6 +2695,15 @@ class _LightProfileScreenState extends State<LightProfileScreen>
               ),
             ],
           ),
+          // Background Light Interval
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 10),
+            child: Divider(
+              height: 1,
+              color: _Palette.border.withValues(alpha: 0.5),
+            ),
+          ),
+          _buildIntervalRow(),
         ],
       ),
     );
@@ -2622,79 +2877,136 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     if (rooms.isEmpty) return const SizedBox.shrink();
 
     final defaults = _roomDefaultsForCurrentMode();
+    final expanded = _roomDefaultsExpanded;
+    final hasOverrides = defaults.isNotEmpty;
+    const color = _Palette.blue;
 
-    return Container(
-      padding: const EdgeInsets.fromLTRB(18, 18, 18, 14),
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
+      padding: EdgeInsets.fromLTRB(18, 18, 18, expanded ? 14 : 18),
       decoration: BoxDecoration(
         color: _Palette.card,
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: _Palette.border),
+        border: Border.all(
+          color: expanded
+              ? color.withValues(alpha: 0.25)
+              : _Palette.border,
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Header
-          Row(
-            children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: _Palette.blue.withValues(alpha: 0.12),
+          // Header — tappable to expand/collapse.
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () =>
+                setState(() => _roomDefaultsExpanded = !_roomDefaultsExpanded),
+            child: Row(
+              children: [
+                Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: color.withValues(alpha: 0.12),
+                  ),
+                  child: Icon(
+                    Icons.meeting_room_rounded,
+                    color: color.withValues(alpha: 0.7),
+                    size: 18,
+                  ),
                 ),
-                child: Icon(
-                  Icons.meeting_room_rounded,
-                  color: _Palette.blue.withValues(alpha: 0.7),
-                  size: 18,
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Text(
+                    'Room Defaults',
+                    style: TextStyle(
+                      color: _Palette.textPrimary,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: -0.1,
+                    ),
+                  ),
                 ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Room Defaults',
+                if (!expanded && hasOverrides)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(6),
+                      border:
+                          Border.all(color: color.withValues(alpha: 0.2)),
+                    ),
+                    child: Text(
+                      '${defaults.length} set',
                       style: TextStyle(
-                        color: _Palette.textPrimary,
-                        fontSize: 15,
+                        color: color.withValues(alpha: 0.8),
+                        fontSize: 11,
                         fontWeight: FontWeight.w600,
-                        letterSpacing: -0.1,
+                        fontFeatures: const [FontFeature.tabularFigures()],
                       ),
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'Override room states when ${_isSleepProfile ? 'sleep' : 'day'} activates',
+                  ),
+                if (!expanded && !hasOverrides)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: 0.06),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      'None',
                       style: TextStyle(
-                        color: _Palette.textSecondary.withValues(alpha: 0.5),
-                        fontSize: 12,
+                        color: color.withValues(alpha: 0.4),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
-                  ],
+                  ),
+                const SizedBox(width: 6),
+                AnimatedRotation(
+                  turns: expanded ? 0.5 : 0,
+                  duration: const Duration(milliseconds: 250),
+                  curve: Curves.easeOutCubic,
+                  child: Icon(
+                    Icons.keyboard_arrow_down_rounded,
+                    color: _Palette.textSecondary.withValues(alpha: 0.3),
+                    size: 20,
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-          const SizedBox(height: 16),
-          // 2-wide room grid
-          GridView.count(
-            crossAxisCount: 2,
-            crossAxisSpacing: 10,
-            mainAxisSpacing: 10,
-            childAspectRatio: 1.55,
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            children: [
-              for (final room in rooms)
-                _RoomDefaultCard(
-                  roomId: room.id,
-                  roomName: room.name,
-                  state: defaults[room.id],
-                  onStateChanged: (newState) =>
-                      _onRoomDefaultChanged(room.id, newState),
-                ),
-            ],
+          AnimatedSize(
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.topCenter,
+            child: expanded
+                ? Padding(
+                    padding: const EdgeInsets.only(top: 16),
+                    child: GridView.count(
+                      crossAxisCount: 2,
+                      crossAxisSpacing: 10,
+                      mainAxisSpacing: 10,
+                      childAspectRatio: 1.55,
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      children: [
+                        for (final room in rooms)
+                          _RoomDefaultCard(
+                            roomId: room.id,
+                            roomName: room.name,
+                            state: defaults[room.id],
+                            onStateChanged: (newState) =>
+                                _onRoomDefaultChanged(room.id, newState),
+                          ),
+                      ],
+                    ),
+                  )
+                : const SizedBox.shrink(),
           ),
         ],
       ),
@@ -3652,6 +3964,99 @@ class _DefaultStateToggle extends StatelessWidget {
 
 // Palette
 // -----------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Advanced Color Editor — full-screen overlay
+// ---------------------------------------------------------------------------
+
+class _AdvancedColorEditorScreen extends StatefulWidget {
+  final _LightProfileScreenState parent;
+
+  const _AdvancedColorEditorScreen({required this.parent});
+
+  @override
+  State<_AdvancedColorEditorScreen> createState() =>
+      _AdvancedColorEditorScreenState();
+}
+
+class _AdvancedColorEditorScreenState
+    extends State<_AdvancedColorEditorScreen> {
+  _LightProfileScreenState get _parent => widget.parent;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: _Palette.bg,
+      body: SafeArea(
+        child: Column(
+          children: [
+            _buildHeader(),
+            Expanded(
+              child: ValueListenableBuilder<int>(
+                valueListenable: _parent._rebuildNotifier,
+                builder: (context, _, __) {
+                  return SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(20, 8, 20, 40),
+                    child: Column(
+                      children: [
+                        _parent._buildHeroIcon(),
+                        const SizedBox(height: 24),
+                        _parent._buildTimeSimulator(),
+                        if (_parent._curveConfigDirty) ...[
+                          const SizedBox(height: 24),
+                          _parent._buildSaveButton(),
+                        ],
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Row(
+        children: [
+          GestureDetector(
+            onTap: () => Navigator.of(context).pop(),
+            child: Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: _Palette.amber.withValues(alpha: 0.12),
+                border: Border.all(
+                  color: _Palette.amber.withValues(alpha: 0.25),
+                ),
+              ),
+              child: const Icon(
+                  Icons.arrow_back_rounded, color: _Palette.amber, size: 20),
+            ),
+          ),
+          const Expanded(
+            child: Text(
+              'Advanced Color Editor',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: _Palette.textPrimary,
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.3,
+              ),
+            ),
+          ),
+          const SizedBox(width: 40),
+        ],
+      ),
+    );
+  }
+}
 
 class _Palette {
   static const bg = Color(0xFF0B0E13);

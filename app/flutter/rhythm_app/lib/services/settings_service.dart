@@ -16,6 +16,8 @@ import '../data/local_data_source.dart';
 /// (via HomeProvider) and sync to cloud. This service only handles
 /// device-local settings.
 class SettingsService {
+  static const String roomPageLayoutScopePrefix = 'room_page_layout::';
+
   static SettingsService? _instance;
   static SettingsService get instance => _instance ??= SettingsService._();
 
@@ -279,8 +281,78 @@ class SettingsService {
   // ============================================================
 
   /// Get room page layout as ordered lists of room IDs per page.
-  List<List<String>>? getRoomPageLayout() {
-    final json = _settings.roomPageAssignmentsJson;
+  List<List<String>>? getRoomPageLayout({String? scopeKey}) {
+    final json = _roomPageLayoutJson(scopeKey: scopeKey);
+    return _decodeRoomPageLayout(json);
+  }
+
+  /// Get the legacy unscoped room page layout.
+  List<List<String>>? getLegacyRoomPageLayout() {
+    return _decodeRoomPageLayout(_settings.roomPageAssignmentsJson);
+  }
+
+  /// Save room page layout.
+  Future<void> saveRoomPageLayout(List<List<String>> pages,
+      {String? scopeKey}) async {
+    final json = jsonEncode(pages);
+    if (scopeKey == null) {
+      _settings = _settings.copyWith(roomPageAssignmentsJson: json);
+      await _save();
+      return;
+    }
+
+    await _localDataSource!.saveSettingsValue(
+      _roomPageLayoutStorageKey(scopeKey),
+      json,
+    );
+  }
+
+  /// Clear room page layout.
+  Future<void> clearRoomPageAssignments({String? scopeKey}) async {
+    if (scopeKey == null) {
+      _settings = _settings.clearField(clearRoomPageAssignmentsJson: true);
+      await _save();
+      return;
+    }
+
+    await _localDataSource!.deleteSettingsValue(
+      _roomPageLayoutStorageKey(scopeKey),
+    );
+  }
+
+  /// Copy the legacy global room page layout into a scoped slot.
+  ///
+  /// This is a one-time bridge from the previous single-layout storage model.
+  Future<void> migrateLegacyRoomPageLayoutToScope(String scopeKey) async {
+    final legacyJson = _settings.roomPageAssignmentsJson;
+    if (legacyJson == null) return;
+
+    final scopedKey = _roomPageLayoutStorageKey(scopeKey);
+    final existing = _localDataSource!.getSettingsValue(scopedKey);
+    if (existing is String && existing.isNotEmpty) {
+      return;
+    }
+
+    await _localDataSource!.saveSettingsValue(scopedKey, legacyJson);
+    _settings = _settings.clearField(clearRoomPageAssignmentsJson: true);
+    await _save();
+  }
+
+  String _roomPageLayoutStorageKey(String scopeKey) {
+    return '$roomPageLayoutScopePrefix$scopeKey';
+  }
+
+  String? _roomPageLayoutJson({String? scopeKey}) {
+    if (scopeKey == null) {
+      return _settings.roomPageAssignmentsJson;
+    }
+    final value = _localDataSource!.getSettingsValue(
+      _roomPageLayoutStorageKey(scopeKey),
+    );
+    return value as String?;
+  }
+
+  List<List<String>>? _decodeRoomPageLayout(String? json) {
     if (json == null) return null;
     try {
       final decoded = jsonDecode(json) as List<dynamic>;
@@ -290,18 +362,6 @@ class SettingsService {
     } catch (e) {
       return null;
     }
-  }
-
-  /// Save room page layout.
-  Future<void> saveRoomPageLayout(List<List<String>> pages) async {
-    _settings = _settings.copyWith(roomPageAssignmentsJson: jsonEncode(pages));
-    await _save();
-  }
-
-  /// Clear room page layout.
-  Future<void> clearRoomPageAssignments() async {
-    _settings = _settings.clearField(clearRoomPageAssignmentsJson: true);
-    await _save();
   }
 
   // ============================================================

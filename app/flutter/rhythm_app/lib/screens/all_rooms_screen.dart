@@ -98,16 +98,21 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
         pageProvider.getRoomsForPage(currentPage, widget.rooms);
     final dragStartIndex = currentRooms.indexWhere((room) => room.id == roomId);
 
-    // Find the card's render box to compute the offset from touch to card origin
+    // Anchor the drag preview to the card center horizontally so the card
+    // stays centered under the finger instead of feeling right-grabbed from
+    // the handle edge.
     final key = _cardKeys[roomId];
     final box = key?.currentContext?.findRenderObject() as RenderBox?;
     if (box != null) {
       final cardTopLeft = box.localToGlobal(Offset.zero);
-      _dragStartOffset = globalPosition - cardTopLeft;
       _dragCardSize = box.size;
+      _dragStartOffset = Offset(
+        _dragCardSize.width / 2,
+        globalPosition.dy - cardTopLeft.dy,
+      );
     } else {
-      _dragStartOffset = const Offset(0, 40);
       _dragCardSize = Size(MediaQuery.of(context).size.width - 32, 112);
+      _dragStartOffset = Offset(_dragCardSize.width / 2, 40);
     }
 
     setState(() {

@@ -149,9 +149,8 @@ class _RoomCardState extends State<RoomCard> {
         if (room == null) return const SizedBox.shrink();
 
         // Check if this room's hub is reachable.
-        final hubConnected = context
-            .select<ServerSyncProvider, bool>(
-                (p) => p.isRoomHubConnected(room.source));
+        final hubConnected = context.select<ServerSyncProvider, bool>(
+            (p) => p.isRoomHubConnected(room.source));
 
         // External reset bumps the generation counter — drop local overrides
         if (resetGen != _lastResetGen) {
@@ -246,170 +245,174 @@ class _RoomCardState extends State<RoomCard> {
             opacity: hubConnected ? 1.0 : 0.35,
             duration: const Duration(milliseconds: 400),
             child: GestureDetector(
-          onTap: () => RoomSettingsSheet.show(context, room),
-          // Only register double-tap when off-curve to avoid tap delay on normal cards
-          onDoubleTap: offCurve ? _resetRoom : null,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 400),
-            curve: Curves.easeInOut,
-            clipBehavior: Clip.antiAlias,
-            decoration: BoxDecoration(
-              color: bgColor,
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Stack(
-              children: [
-                // Subtle radial glow for idle mode — like moonlight
-                if (mode == RoomMode.idle)
-                  Positioned.fill(
-                    child: IgnorePointer(
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(20),
-                          gradient: RadialGradient(
-                            center: const Alignment(0.65, -0.4),
-                            radius: 0.9,
-                            colors: [
-                              cctColor.withValues(alpha: 0.12),
-                              Colors.transparent,
+              onTap: () => RoomSettingsSheet.show(context, room),
+              // Only register double-tap when off-curve to avoid tap delay on normal cards
+              onDoubleTap: offCurve ? _resetRoom : null,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 400),
+                curve: Curves.easeInOut,
+                clipBehavior: Clip.antiAlias,
+                decoration: BoxDecoration(
+                  color: bgColor,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Stack(
+                  children: [
+                    // Subtle radial glow for idle mode — like moonlight
+                    if (mode == RoomMode.idle)
+                      Positioned.fill(
+                        child: IgnorePointer(
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(20),
+                              gradient: RadialGradient(
+                                center: const Alignment(0.65, -0.4),
+                                radius: 0.9,
+                                colors: [
+                                  cctColor.withValues(alpha: 0.12),
+                                  Colors.transparent,
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    // Main content
+                    Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Top row: [motion+name]  [pill]  [toggle]
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(12, 14, 8, 0),
+                          child: Row(
+                            children: [
+                              // Left: motion + name
+                              Expanded(
+                                child: Row(
+                                  children: [
+                                    if (motionTimer != null)
+                                      Padding(
+                                        padding:
+                                            const EdgeInsets.only(right: 8),
+                                        child: _MotionIndicator(
+                                          info: motionTimer,
+                                          color: iconColor,
+                                          onExpired: () => context
+                                              .read<RoomProvider>()
+                                              .clearMotionTimer(widget.roomId),
+                                        ),
+                                      )
+                                    else if (hasSensor)
+                                      Padding(
+                                        padding:
+                                            const EdgeInsets.only(right: 8),
+                                        child: Icon(
+                                          Icons.sensors_rounded,
+                                          size: 18,
+                                          color:
+                                              iconColor.withValues(alpha: 0.45),
+                                        ),
+                                      ),
+                                    Flexible(
+                                      child: Text(
+                                        room.name,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: textColor,
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (idleLikeState)
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 8),
+                                  child: _IdlePill(
+                                    color: iconColor,
+                                    bgColor: cctColor.withValues(alpha: 0.08),
+                                  ),
+                                ),
+                              // Right: celestial toggle
+                              _CelestialToggle(
+                                mode: mode,
+                                onModeChanged: _onModeChanged,
+                                powerSave: widget.powerSave,
+                                offCurve: offCurve,
+                              ),
                             ],
                           ),
                         ),
-                      ),
-                    ),
-                  ),
-                // Main content
-                Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Top row: [motion+name]  [pill]  [toggle]
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 14, 8, 0),
-                      child: Row(
-                        children: [
-                          // Left: motion + name
-                          Expanded(
-                            child: Row(
-                              children: [
-                                if (motionTimer != null)
-                                  Padding(
-                                    padding: const EdgeInsets.only(right: 8),
-                                    child: _MotionIndicator(
-                                      info: motionTimer,
-                                      color: iconColor,
-                                      onExpired: () => context
-                                          .read<RoomProvider>()
-                                          .clearMotionTimer(widget.roomId),
-                                    ),
-                                  )
-                                else if (hasSensor)
-                                  Padding(
-                                    padding: const EdgeInsets.only(right: 8),
-                                    child: Icon(
-                                      Icons.sensors_rounded,
-                                      size: 18,
-                                      color: iconColor.withValues(alpha: 0.45),
-                                    ),
-                                  ),
-                                Flexible(
-                                  child: Text(
-                                    room.name,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      color: textColor,
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          if (idleLikeState)
-                            Padding(
-                              padding: const EdgeInsets.only(right: 8),
-                              child: _IdlePill(
-                                color: iconColor,
-                                bgColor: cctColor.withValues(alpha: 0.08),
+                        // Brightness slider
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
+                          child: SliderTheme(
+                            data: SliderThemeData(
+                              trackHeight: 6,
+                              thumbShape: const RoundSliderThumbShape(
+                                enabledThumbRadius: 8,
                               ),
+                              overlayShape: const RoundSliderOverlayShape(
+                                overlayRadius: 16,
+                              ),
+                              // Active colors (ON mode)
+                              activeTrackColor:
+                                  Colors.black.withValues(alpha: 0.08),
+                              inactiveTrackColor:
+                                  Colors.black.withValues(alpha: 0.06),
+                              thumbColor: Colors.white,
+                              overlayColor:
+                                  Colors.black.withValues(alpha: 0.06),
+                              // Disabled colors (idle or off)
+                              disabledActiveTrackColor: mode == RoomMode.idle
+                                  ? cctColor.withValues(alpha: 0.12)
+                                  : CelestialColors.orbitRing
+                                      .withValues(alpha: 0.3),
+                              disabledInactiveTrackColor: mode == RoomMode.idle
+                                  ? cctColor.withValues(alpha: 0.06)
+                                  : CelestialColors.orbitRing
+                                      .withValues(alpha: 0.2),
+                              disabledThumbColor: mode == RoomMode.idle
+                                  ? cctColor.withValues(alpha: 0.3)
+                                  : CelestialColors.textSecondary
+                                      .withValues(alpha: 0.5),
+                              trackShape: const RoundedRectSliderTrackShape(),
                             ),
-                          // Right: celestial toggle
-                          _CelestialToggle(
-                            mode: mode,
-                            onModeChanged: _onModeChanged,
-                            powerSave: widget.powerSave,
-                            offCurve: offCurve,
+                            child: Slider(
+                              value: displayBrightness.toDouble().clamp(1, 100),
+                              min: 1,
+                              max: 100,
+                              onChanged: sliderActive
+                                  ? (v) {
+                                      setState(() {
+                                        _sliderBrightness = v.round();
+                                      });
+                                    }
+                                  : null,
+                              onChangeEnd: sliderActive
+                                  ? (_) => _onBrightnessSliderEnd()
+                                  : null,
+                            ),
                           ),
-                        ],
-                      ),
-                    ),
-                    // Brightness slider
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
-                      child: SliderTheme(
-                        data: SliderThemeData(
-                          trackHeight: 6,
-                          thumbShape: const RoundSliderThumbShape(
-                            enabledThumbRadius: 8,
-                          ),
-                          overlayShape: const RoundSliderOverlayShape(
-                            overlayRadius: 16,
-                          ),
-                          // Active colors (ON mode)
-                          activeTrackColor:
-                              Colors.black.withValues(alpha: 0.08),
-                          inactiveTrackColor:
-                              Colors.black.withValues(alpha: 0.06),
-                          thumbColor: Colors.white,
-                          overlayColor: Colors.black.withValues(alpha: 0.06),
-                          // Disabled colors (idle or off)
-                          disabledActiveTrackColor: mode == RoomMode.idle
-                              ? cctColor.withValues(alpha: 0.12)
-                              : CelestialColors.orbitRing
-                                  .withValues(alpha: 0.3),
-                          disabledInactiveTrackColor: mode == RoomMode.idle
-                              ? cctColor.withValues(alpha: 0.06)
-                              : CelestialColors.orbitRing
-                                  .withValues(alpha: 0.2),
-                          disabledThumbColor: mode == RoomMode.idle
-                              ? cctColor.withValues(alpha: 0.3)
-                              : CelestialColors.textSecondary
-                                  .withValues(alpha: 0.5),
-                          trackShape: const RoundedRectSliderTrackShape(),
                         ),
-                        child: Slider(
-                          value: displayBrightness.toDouble().clamp(1, 100),
-                          min: 1,
-                          max: 100,
-                          onChanged: sliderActive
-                              ? (v) {
-                                  setState(() {
-                                    _sliderBrightness = v.round();
-                                  });
-                                }
-                              : null,
-                          onChangeEnd: sliderActive
-                              ? (_) => _onBrightnessSliderEnd()
-                              : null,
+                      ],
+                    ),
+                    // Rhythm-active breathing border
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: _RhythmBorderGlow(
+                          active: rhythmGlowActive,
+                          color: glowColor,
                         ),
                       ),
                     ),
                   ],
                 ),
-                // Rhythm-active breathing border
-                Positioned.fill(
-                  child: IgnorePointer(
-                    child: _RhythmBorderGlow(
-                      active: rhythmGlowActive,
-                      color: glowColor,
-                    ),
-                  ),
-                ),
-              ],
+              ),
             ),
-          ),
-        ),
           ),
         );
       },
@@ -552,7 +555,7 @@ class _CelestialToggle extends StatelessWidget {
   }
 }
 
-/// Standby indicator pill — dim-light icon + "Standby" label.
+/// Standby indicator pill.
 class _IdlePill extends StatelessWidget {
   final Color color;
   final Color bgColor;
@@ -567,24 +570,13 @@ class _IdlePill extends StatelessWidget {
         color: bgColor,
         borderRadius: BorderRadius.circular(20),
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            Icons.brightness_low_rounded,
-            color: color,
-            size: 16,
-          ),
-          const SizedBox(width: 4),
-          Text(
-            'Standby',
-            style: TextStyle(
-              color: color,
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
+      child: Text(
+        'Standby',
+        style: TextStyle(
+          color: color,
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+        ),
       ),
     );
   }

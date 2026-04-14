@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import '../services/settings_service.dart';
@@ -8,20 +10,121 @@ import '../services/settings_service.dart';
 /// Each page stores an ordered list of room IDs. During normal operation every
 /// current room is materialized into exactly one page so drag/drop works against
 /// the same ordering the user sees. Page layouts persist via [SettingsService].
+abstract interface class RoomPageLayoutStore {
+  List<List<String>>? loadLayout({String? scopeKey});
+  List<List<String>>? loadLegacyLayout();
+  Future<void> saveLayout(List<List<String>> pages, {String? scopeKey});
+  Future<void> clearLayout({String? scopeKey});
+  Future<void> migrateLegacyLayoutToScope(String scopeKey);
+}
+
+class SettingsRoomPageLayoutStore implements RoomPageLayoutStore {
+  final SettingsService _settingsService;
+
+  SettingsRoomPageLayoutStore(this._settingsService);
+
+  @override
+  List<List<String>>? loadLayout({String? scopeKey}) {
+    return _settingsService.getRoomPageLayout(scopeKey: scopeKey);
+  }
+
+  @override
+  List<List<String>>? loadLegacyLayout() {
+    return _settingsService.getLegacyRoomPageLayout();
+  }
+
+  @override
+  Future<void> saveLayout(List<List<String>> pages, {String? scopeKey}) {
+    return _settingsService.saveRoomPageLayout(pages, scopeKey: scopeKey);
+  }
+
+  @override
+  Future<void> clearLayout({String? scopeKey}) {
+    return _settingsService.clearRoomPageAssignments(scopeKey: scopeKey);
+  }
+
+  @override
+  Future<void> migrateLegacyLayoutToScope(String scopeKey) {
+    return _settingsService.migrateLegacyRoomPageLayoutToScope(scopeKey);
+  }
+}
+
 class RoomPageProvider extends ChangeNotifier {
+  final RoomPageLayoutStore _layoutStore;
+
   /// Ordered room IDs per page. Index = page number.
   List<List<String>> _pages = [];
   bool _editMode = false;
   bool _initialized = false;
+  String? _scopeKey;
+  bool _claimedLegacyLayout = false;
+  bool _pausePersistenceUntilRoomSetChanges = false;
+  String? _roomSignatureAtScopeChange;
+
+  RoomPageProvider({RoomPageLayoutStore? layoutStore})
+      : _layoutStore = layoutStore ??
+            SettingsRoomPageLayoutStore(SettingsService.instance);
 
   /// Whether edit mode (wiggle + drag) is active.
   bool get editMode => _editMode;
 
+  /// Active layout scope key.
+  String? get scopeKey => _scopeKey;
+
   /// Load saved page layout from persistent storage.
-  void initialize() {
+  void initialize({String? scopeKey}) {
     if (_initialized) return;
-    _pages = SettingsService.instance.getRoomPageLayout() ?? [];
     _initialized = true;
+    setLayoutScope(scopeKey, notify: false);
+  }
+
+  /// Build a room-layout scope key from the currently active home and hubs.
+  ///
+  /// This is intentionally derived from the local hub topology for now. When
+  /// cloud-backed hub/account IDs solidify, this method is the single place to
+  /// swap over to that canonical identity.
+  static String? layoutScopeFor({
+    required Home? home,
+    required List<Hub> hubs,
+  }) {
+    final enabledHubs = hubs.where((hub) => hub.enabled).toList();
+    final homePrefix = home == null ? '' : 'home:${home.id}:';
+
+    final serverHub =
+        enabledHubs.where((hub) => hub.type == HubType.server).firstOrNull;
+    if (serverHub != null) {
+      return '${homePrefix}server:${_hubFingerprint(serverHub)}';
+    }
+
+    if (enabledHubs.isNotEmpty) {
+      final fingerprints = enabledHubs.map(_hubFingerprint).toList()..sort();
+      return '${homePrefix}hubs:${fingerprints.join('|')}';
+    }
+
+    return home == null ? null : '${homePrefix}default';
+  }
+
+  /// Reload the persisted layout for a new room source scope.
+  void setLayoutScope(String? scopeKey, {bool notify = true}) {
+    final normalizedScopeKey =
+        scopeKey != null && scopeKey.isEmpty ? null : scopeKey;
+
+    if (_initialized && normalizedScopeKey == _scopeKey) {
+      return;
+    }
+
+    _initialized = true;
+    _scopeKey = normalizedScopeKey;
+    _pages = _loadPagesForScope(normalizedScopeKey);
+    if (!_editMode) {
+      _compactPages();
+    }
+    _pausePersistenceUntilRoomSetChanges = normalizedScopeKey != null;
+    _roomSignatureAtScopeChange = null;
+
+    if (notify) {
+      notifyListeners();
+    }
   }
 
   /// Get the page index for a room (defaults to 0 if not in any page).
@@ -127,6 +230,7 @@ class RoomPageProvider extends ChangeNotifier {
   /// Ensures every current room appears exactly once across all pages,
   /// preserving stored order where possible and appending new rooms to page 0.
   void reconcileRooms(List<RoomDto> currentRooms) {
+    final allowPersistence = _allowPersistenceForRooms(currentRooms);
     final currentSet = currentRooms.map((room) => room.id).toSet();
     final normalizedPages = <List<String>>[];
     final seen = <String>{};
@@ -174,7 +278,9 @@ class RoomPageProvider extends ChangeNotifier {
       if (!_editMode) {
         _compactPages();
       }
-      _save();
+      if (allowPersistence) {
+        _save();
+      }
       notifyListeners();
     }
   }
@@ -187,12 +293,64 @@ class RoomPageProvider extends ChangeNotifier {
   Future<void> _save() async {
     try {
       if (_pages.isEmpty || _pages.every((p) => p.isEmpty)) {
-        await SettingsService.instance.clearRoomPageAssignments();
+        await _layoutStore.clearLayout(scopeKey: _scopeKey);
       } else {
-        await SettingsService.instance.saveRoomPageLayout(_pages);
+        await _layoutStore.saveLayout(_pages, scopeKey: _scopeKey);
       }
     } catch (e) {
       debugPrint('RoomPageProvider: Failed to save: $e');
     }
+  }
+
+  List<List<String>> _loadPagesForScope(String? scopeKey) {
+    final scoped = _layoutStore.loadLayout(scopeKey: scopeKey);
+    if (scoped != null) {
+      return scoped;
+    }
+
+    if (scopeKey == null || _claimedLegacyLayout) {
+      return [];
+    }
+
+    final legacy = _layoutStore.loadLegacyLayout();
+    if (legacy == null) {
+      return [];
+    }
+
+    _claimedLegacyLayout = true;
+    unawaited(_layoutStore.migrateLegacyLayoutToScope(scopeKey));
+    return legacy;
+  }
+
+  bool _allowPersistenceForRooms(List<RoomDto> rooms) {
+    if (!_pausePersistenceUntilRoomSetChanges) {
+      return true;
+    }
+
+    final signature = _roomSignature(rooms);
+    if (_roomSignatureAtScopeChange == null) {
+      _roomSignatureAtScopeChange = signature;
+      return false;
+    }
+
+    if (_roomSignatureAtScopeChange == signature) {
+      return false;
+    }
+
+    _pausePersistenceUntilRoomSetChanges = false;
+    _roomSignatureAtScopeChange = null;
+    return true;
+  }
+
+  static String _roomSignature(List<RoomDto> rooms) {
+    final ids = rooms.map((room) => room.id).toList()..sort();
+    return ids.join('|');
+  }
+
+  static String _hubFingerprint(Hub hub) {
+    final endpoint = hub.endpoint;
+    final ssl = endpoint.useSsl ? 'ssl' : 'plain';
+    final host = Uri.encodeComponent(endpoint.host);
+    return '${hub.type.name}:$host:${endpoint.port}:$ssl';
   }
 }

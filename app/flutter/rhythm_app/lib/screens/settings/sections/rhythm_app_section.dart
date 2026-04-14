@@ -52,9 +52,25 @@ class RhythmAppDetailScreen extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         const SizedBox(height: 8),
-                        SettingsGroup(
-                          children: [
-                            if (caps.hasLocationSetup)
+                        if (AuthService().currentUser != null &&
+                            !AuthService().currentUser!.isAnonymous) ...[
+                          SettingsGroup(
+                            children: [
+                              SettingsRow(
+                                icon: Icons.person_outline,
+                                iconColor: CelestialColors.accentBlue,
+                                label: 'Profile',
+                                value: AuthService().currentUser?.email ??
+                                    'Signed in',
+                                showChevron: false,
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                        ],
+                        if (caps.hasLocationSetup) ...[
+                          SettingsGroup(
+                            children: [
                               SettingsRow(
                                 icon: Icons.location_on_outlined,
                                 iconColor: const Color(0xFF4CAF50),
@@ -62,12 +78,23 @@ class RhythmAppDetailScreen extends StatelessWidget {
                                 onTap: () =>
                                     _showLocationSettings(context, settings),
                               ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                        ],
+                        SettingsGroup(
+                          children: [
                             SettingsRow(
                               icon: Icons.chat_bubble_outline_rounded,
                               iconColor: const Color(0xFFFFC857),
                               label: 'Help & Feedback',
                               onTap: () => FeedbackDialog.show(context),
                             ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        SettingsGroup(
+                          children: [
                             SettingsRow(
                               icon: Icons.info_outline,
                               iconColor: const Color(0xFF607D8B),
@@ -76,6 +103,11 @@ class RhythmAppDetailScreen extends StatelessWidget {
                               showChevron: false,
                               onTap: null,
                             ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        SettingsGroup(
+                          children: [
                             SettingsRow(
                               icon: Icons.delete_forever_rounded,
                               iconColor: Colors.red,

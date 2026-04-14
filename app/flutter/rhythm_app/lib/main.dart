@@ -170,7 +170,19 @@ class RhythmApp extends StatelessWidget {
         // Room management (syncs rooms from Hue, HA, ESP32)
         ChangeNotifierProvider(create: (_) => RoomProvider()..initialize()),
         // Room page assignments (multi-screen room organization)
-        ChangeNotifierProvider(create: (_) => RoomPageProvider()..initialize()),
+        ChangeNotifierProxyProvider<HomeProvider, RoomPageProvider>(
+          create: (_) => RoomPageProvider(),
+          update: (_, homeProvider, roomPageProvider) {
+            roomPageProvider ??= RoomPageProvider();
+            roomPageProvider.setLayoutScope(
+              RoomPageProvider.layoutScopeFor(
+                home: homeProvider.currentHome,
+                hubs: homeProvider.currentHomeHubs,
+              ),
+            );
+            return roomPageProvider;
+          },
+        ),
         // Server connection (transport layer — SDK)
         Provider(
             create: (_) => RhythmConnection(), dispose: (_, c) => c.dispose()),

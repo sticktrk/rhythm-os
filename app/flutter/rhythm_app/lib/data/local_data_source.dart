@@ -44,7 +44,8 @@ class LocalDataSource {
     _settingsBox = await Hive.openBox<dynamic>(_settingsBoxName);
 
     _initialized = true;
-    debugPrint('LocalDataSource: Initialized with ${_homesBox!.length} homes, ${_hubsBox!.length} hubs');
+    debugPrint(
+        'LocalDataSource: Initialized with ${_homesBox!.length} homes, ${_hubsBox!.length} hubs');
   }
 
   void _registerAdapters() {
@@ -103,7 +104,8 @@ class LocalDataSource {
     _ensureInitialized();
     await _homesBox!.delete(id);
     // Also delete all hubs belonging to this home
-    final hubsToDelete = _hubsBox!.values.where((h) => h.homeId == id).map((h) => h.id).toList();
+    final hubsToDelete =
+        _hubsBox!.values.where((h) => h.homeId == id).map((h) => h.id).toList();
     for (final hubId in hubsToDelete) {
       await _hubsBox!.delete(hubId);
     }
@@ -187,6 +189,24 @@ class LocalDataSource {
     await _settingsBox!.put(_settingsKey, settings);
   }
 
+  /// Get an arbitrary value from the settings box.
+  dynamic getSettingsValue(String key) {
+    _ensureInitialized();
+    return _settingsBox!.get(key);
+  }
+
+  /// Save an arbitrary value into the settings box.
+  Future<void> saveSettingsValue(String key, dynamic value) async {
+    _ensureInitialized();
+    await _settingsBox!.put(key, value);
+  }
+
+  /// Delete an arbitrary value from the settings box.
+  Future<void> deleteSettingsValue(String key) async {
+    _ensureInitialized();
+    await _settingsBox!.delete(key);
+  }
+
   /// Check if migration from SharedPreferences has been completed.
   bool isMigrationComplete() {
     _ensureInitialized();
@@ -211,7 +231,8 @@ class LocalDataSource {
 
   void _ensureInitialized() {
     if (!_initialized) {
-      throw StateError('LocalDataSource not initialized. Call initialize() first.');
+      throw StateError(
+          'LocalDataSource not initialized. Call initialize() first.');
     }
   }
 

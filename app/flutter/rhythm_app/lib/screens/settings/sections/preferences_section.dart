@@ -17,14 +17,14 @@ class PreferencesSection extends StatelessWidget {
             SettingsRow(
               icon: Icons.wb_sunny_rounded,
               iconColor: const Color(0xFFF9A825),
-              label: 'Day',
+              label: 'Day Profile',
               onTap: () =>
                   LightProfileScreen.show(context, initialProfile: 'rhythm'),
             ),
             SettingsRow(
               icon: Icons.bedtime_rounded,
               iconColor: const Color(0xFF7C4DFF),
-              label: 'Sleep',
+              label: 'Sleep Profile',
               onTap: () =>
                   LightProfileScreen.show(context, initialProfile: 'sleep'),
             ),

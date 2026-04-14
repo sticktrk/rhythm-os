@@ -28,17 +28,7 @@ class AccountSection extends StatelessWidget {
       children: [
         const SettingsSectionHeader(title: 'Account'),
         if (isSignedIn)
-          SettingsGroup(
-            children: [
-              SettingsRow(
-                icon: Icons.person_outline,
-                iconColor: CelestialColors.accentBlue,
-                label: 'Profile',
-                value: user?.email ?? 'Signed in',
-                showChevron: false,
-              ),
-            ],
-          )
+          const SizedBox.shrink()
         else if (isAnonymous)
           _buildUpgradeAccountCard(context)
         else
