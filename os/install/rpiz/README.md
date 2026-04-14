@@ -29,12 +29,10 @@ dist/bin/rpiz/rhythm-cli
 
 ## Build the SD-card image
 
-1. Clone Buildroot somewhere outside this repo.
-2. Point the helper script at that checkout.
+If `./buildroot` does not exist, the helper script now clones Buildroot there automatically.
 
 ```bash
-git clone https://git.buildroot.net/buildroot ~/src/buildroot
-./scripts/build-rpiz-image.sh --release --buildroot-dir ~/src/buildroot
+./scripts/build-rpiz-image.sh --release
 ```
 
 The image lands at:
@@ -48,8 +46,7 @@ out/rpiz/images/sdcard.img
 If your host is macOS, or you just want the Linux image build isolated, use Docker:
 
 ```bash
-git clone https://git.buildroot.net/buildroot ./buildroot
-./scripts/build-rpiz-image.sh --release --buildroot-dir ./buildroot --docker
+./scripts/build-rpiz-image.sh --release --docker
 ```
 
 That flow still builds `dist/bin/rpiz/rhythm-server` on the host, then runs the Buildroot image step in a Debian-based Docker container defined by `install/rpiz/docker/Dockerfile`.
@@ -60,7 +57,6 @@ To embed Wi-Fi credentials for a Pi Zero W / Zero 2 W image:
 ```bash
 ./scripts/build-rpiz-image.sh \
   --release \
-  --buildroot-dir ~/src/buildroot \
   --docker \
   --wifi-ssid "YourSSID" \
   --wifi-psk "YourPassword" \
@@ -68,6 +64,8 @@ To embed Wi-Fi credentials for a Pi Zero W / Zero 2 W image:
 ```
 
 The default country is `US`. Credentials are written into `/etc/wpa_supplicant.conf` during the image build and are not committed back into the repo.
+
+If you want to use a non-default Buildroot checkout, pass `--buildroot-dir /path/to/buildroot`. The script only auto-clones the default `./buildroot` path.
 
 ## Flash the SD card
 

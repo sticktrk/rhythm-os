@@ -204,9 +204,14 @@ setup_cross_env() {
     esac
 }
 
+should_use_cross() {
+    [ "$1" = "rpiz" ] && [ "$(uname -s)" = "Linux" ] && command -v cross &>/dev/null
+}
+
 build_for_target() {
     local target="$1"
     local rust_target
+    local builder="cargo"
     rust_target=$(get_rust_target "$target")
 
     if [ -z "$rust_target" ]; then
@@ -216,10 +221,15 @@ build_for_target() {
 
     echo "Building for $target ($rust_target)..."
 
-    # Prefer direct cargo+linker cross-compilation. `cross` on macOS can
-    # select an incompatible Linux host toolchain for ARMv6 targets.
-    check_musl_cross "$target"
-    setup_cross_env "$target"
+    # Prefer direct cargo+linker cross-compilation on macOS, where `cross`
+    # can select an incompatible Linux host toolchain for ARMv6 targets.
+    # On Linux, prefer `cross` for rpiz when available.
+    if should_use_cross "$target"; then
+        builder="cross"
+    else
+        check_musl_cross "$target"
+        setup_cross_env "$target"
+    fi
 
     # Ensure target is installed
     if ! rustup target list --installed | grep -q "$rust_target"; then
@@ -227,7 +237,7 @@ build_for_target() {
         rustup target add "$rust_target"
     fi
 
-    cargo build $CARGO_FLAGS -p rhythm-server --target "$rust_target"
+    "$builder" build $CARGO_FLAGS -p rhythm-server --target "$rust_target"
 
     # Copy to dist
     local output_dir="$PROJECT_ROOT/dist/bin/$target"

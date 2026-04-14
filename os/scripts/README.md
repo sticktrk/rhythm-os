@@ -95,16 +95,16 @@ Build the `rhythm-server` binary and package it into `dist/bin/...`.
 Build a Raspberry Pi Zero SD-card image using the Buildroot external tree in `install/rpiz/buildroot`.
 
 ```bash
-./scripts/build-rpiz-image.sh --release --buildroot-dir ~/src/buildroot
-./scripts/build-rpiz-image.sh --skip-server-build --buildroot-dir ~/src/buildroot
-./scripts/build-rpiz-image.sh --release --buildroot-dir ./buildroot --docker
-./scripts/build-rpiz-image.sh --release --buildroot-dir ~/src/buildroot --wifi-ssid "MyNet" --wifi-psk "secretpass"
+./scripts/build-rpiz-image.sh --release
+./scripts/build-rpiz-image.sh --skip-server-build
+./scripts/build-rpiz-image.sh --release --docker
+./scripts/build-rpiz-image.sh --release --wifi-ssid "MyNet" --wifi-psk "secretpass"
 ```
 
 **Options:**
 | Flag | Description |
 |------|-------------|
-| `--buildroot-dir <path>` | Path to a Buildroot checkout |
+| `--buildroot-dir <path>` | Path to a Buildroot checkout. Default is `./buildroot`, and that path is auto-cloned if missing |
 | `--output-dir <path>` | Buildroot output directory (default: `out/rpiz`) |
 | `--release` | Build the server binary in release mode before packaging |
 | `--debug` | Build the server binary in debug mode before packaging |

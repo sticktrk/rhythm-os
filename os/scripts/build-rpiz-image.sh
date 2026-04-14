@@ -7,7 +7,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-BUILDROOT_DIR=""
+DEFAULT_BUILDROOT_DIR="$PROJECT_ROOT/buildroot"
+BUILDROOT_DIR="$DEFAULT_BUILDROOT_DIR"
 OUTPUT_DIR="$PROJECT_ROOT/out/rpiz"
 DEFAULT_OUTPUT_DIR="$PROJECT_ROOT/out/rpiz"
 DEFAULT_DOCKER_OUTPUT_DIR="$PROJECT_ROOT/out/rpiz-docker"
@@ -19,6 +20,7 @@ WIFI_PSK="${RHYTHM_WIFI_PSK:-}"
 WIFI_COUNTRY="${RHYTHM_WIFI_COUNTRY:-US}"
 DOCKER_BUILD=false
 DOCKER_IMAGE="rhythm-rpiz-builder:local"
+BUILDROOT_GIT_URL="${RHYTHM_BUILDROOT_GIT_URL:-https://git.buildroot.net/buildroot}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -64,10 +66,10 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 --buildroot-dir <path> [OPTIONS]"
+            echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --buildroot-dir <path>  Path to a Buildroot checkout"
+            echo "  --buildroot-dir <path>  Path to a Buildroot checkout (default: $BUILDROOT_DIR)"
             echo "  --output-dir <path>     Buildroot output directory (default: $OUTPUT_DIR)"
             echo "  --release               Build dist/bin/rpiz/rhythm-server in release mode (default)"
             echo "  --debug                 Build dist/bin/rpiz/rhythm-server in debug mode first"
@@ -86,11 +88,6 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-
-if [ -z "$BUILDROOT_DIR" ]; then
-    echo "Error: --buildroot-dir is required"
-    exit 1
-fi
 
 if { [ -n "$WIFI_SSID" ] && [ -z "$WIFI_PSK" ]; } || { [ -z "$WIFI_SSID" ] && [ -n "$WIFI_PSK" ]; }; then
     echo "Error: --wifi-ssid and --wifi-psk must be provided together"
@@ -113,6 +110,37 @@ run_server_build() {
     "$SCRIPT_DIR/build-server.sh" "${server_flags[@]}"
 }
 
+ensure_buildroot_checkout() {
+    local buildroot_dir_abs default_buildroot_dir_abs
+
+    if [ -f "$BUILDROOT_DIR/Makefile" ]; then
+        return 0
+    fi
+
+    buildroot_dir_abs="$(cd "$(dirname "$BUILDROOT_DIR")" && pwd)/$(basename "$BUILDROOT_DIR")"
+    default_buildroot_dir_abs="$DEFAULT_BUILDROOT_DIR"
+
+    if [ -e "$BUILDROOT_DIR" ]; then
+        echo "Error: $BUILDROOT_DIR exists but does not look like a Buildroot checkout"
+        exit 1
+    fi
+
+    if [ "$buildroot_dir_abs" != "$default_buildroot_dir_abs" ]; then
+        echo "Error: $BUILDROOT_DIR does not look like a Buildroot checkout"
+        echo "The script only auto-clones the default path: $DEFAULT_BUILDROOT_DIR"
+        exit 1
+    fi
+
+    if ! command -v git >/dev/null 2>&1; then
+        echo "Error: git is required to clone Buildroot into $BUILDROOT_DIR"
+        exit 1
+    fi
+
+    echo "Buildroot checkout not found at $BUILDROOT_DIR"
+    echo "Cloning from $BUILDROOT_GIT_URL ..."
+    git clone "$BUILDROOT_GIT_URL" "$BUILDROOT_DIR"
+}
+
 run_in_docker() {
     local project_root_abs buildroot_dir_abs output_dir_abs docker_args inner_args
 
@@ -121,10 +149,7 @@ run_in_docker() {
         exit 1
     fi
 
-    if [ ! -f "$BUILDROOT_DIR/Makefile" ]; then
-        echo "Error: $BUILDROOT_DIR does not look like a Buildroot checkout"
-        exit 1
-    fi
+    ensure_buildroot_checkout
 
     if [ "$SKIP_SERVER_BUILD" = false ]; then
         run_server_build
@@ -206,10 +231,7 @@ if [ "$(uname -s)" != "Linux" ]; then
     exit 1
 fi
 
-if [ ! -f "$BUILDROOT_DIR/Makefile" ]; then
-    echo "Error: $BUILDROOT_DIR does not look like a Buildroot checkout"
-    exit 1
-fi
+ensure_buildroot_checkout
 
 if [ "$SKIP_SERVER_BUILD" = false ]; then
     run_server_build
