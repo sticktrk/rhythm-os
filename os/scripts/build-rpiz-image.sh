@@ -1,0 +1,241 @@
+#!/bin/bash
+# Build a Raspberry Pi Zero SD-card image around the prebuilt rhythm-server binary.
+#
+# Usage: ./scripts/build-rpiz-image.sh --buildroot-dir <path> [--release|--debug] [--output-dir <path>] [--skip-server-build]
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+BUILDROOT_DIR=""
+OUTPUT_DIR="$PROJECT_ROOT/out/rpiz"
+DEFAULT_OUTPUT_DIR="$PROJECT_ROOT/out/rpiz"
+DEFAULT_DOCKER_OUTPUT_DIR="$PROJECT_ROOT/out/rpiz-docker"
+OUTPUT_DIR_EXPLICIT=false
+BUILD_MODE="release"
+SKIP_SERVER_BUILD=false
+WIFI_SSID="${RHYTHM_WIFI_SSID:-}"
+WIFI_PSK="${RHYTHM_WIFI_PSK:-}"
+WIFI_COUNTRY="${RHYTHM_WIFI_COUNTRY:-US}"
+DOCKER_BUILD=false
+DOCKER_IMAGE="rhythm-rpiz-builder:local"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --buildroot-dir)
+            BUILDROOT_DIR="$2"
+            shift 2
+            ;;
+        --output-dir)
+            OUTPUT_DIR="$2"
+            OUTPUT_DIR_EXPLICIT=true
+            shift 2
+            ;;
+        --release)
+            BUILD_MODE="release"
+            shift
+            ;;
+        --debug)
+            BUILD_MODE="debug"
+            shift
+            ;;
+        --skip-server-build)
+            SKIP_SERVER_BUILD=true
+            shift
+            ;;
+        --wifi-ssid)
+            WIFI_SSID="$2"
+            shift 2
+            ;;
+        --wifi-psk)
+            WIFI_PSK="$2"
+            shift 2
+            ;;
+        --wifi-country)
+            WIFI_COUNTRY="$2"
+            shift 2
+            ;;
+        --docker)
+            DOCKER_BUILD=true
+            shift
+            ;;
+        --docker-image)
+            DOCKER_IMAGE="$2"
+            shift 2
+            ;;
+        -h|--help)
+            echo "Usage: $0 --buildroot-dir <path> [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  --buildroot-dir <path>  Path to a Buildroot checkout"
+            echo "  --output-dir <path>     Buildroot output directory (default: $OUTPUT_DIR)"
+            echo "  --release               Build dist/bin/rpiz/rhythm-server in release mode (default)"
+            echo "  --debug                 Build dist/bin/rpiz/rhythm-server in debug mode first"
+            echo "  --skip-server-build     Reuse existing dist/bin/rpiz/rhythm-server"
+            echo "  --wifi-ssid <ssid>      Embed Wi-Fi SSID for Pi Zero W / Zero 2 W"
+            echo "  --wifi-psk <psk>        Embed WPA/WPA2 passphrase"
+            echo "  --wifi-country <code>   Wi-Fi regulatory country (default: $WIFI_COUNTRY)"
+            echo "  --docker                Run the Buildroot image step inside Docker"
+            echo "  --docker-image <name>   Docker image tag to build/use (default: $DOCKER_IMAGE)"
+            echo "  -h, --help              Show this help"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+if [ -z "$BUILDROOT_DIR" ]; then
+    echo "Error: --buildroot-dir is required"
+    exit 1
+fi
+
+if { [ -n "$WIFI_SSID" ] && [ -z "$WIFI_PSK" ]; } || { [ -z "$WIFI_SSID" ] && [ -n "$WIFI_PSK" ]; }; then
+    echo "Error: --wifi-ssid and --wifi-psk must be provided together"
+    exit 1
+fi
+
+if [ -n "$WIFI_COUNTRY" ] && ! printf '%s' "$WIFI_COUNTRY" | grep -Eq '^[A-Za-z][A-Za-z]$'; then
+    echo "Error: --wifi-country must be a 2-letter country code"
+    exit 1
+fi
+
+run_server_build() {
+    local server_flags
+    server_flags=("--target" "rpiz")
+    if [ "$BUILD_MODE" = "release" ]; then
+        server_flags=("--release" "${server_flags[@]}")
+    else
+        server_flags=("--debug" "${server_flags[@]}")
+    fi
+    "$SCRIPT_DIR/build-server.sh" "${server_flags[@]}"
+}
+
+run_in_docker() {
+    local project_root_abs buildroot_dir_abs output_dir_abs docker_args inner_args
+
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "Error: docker is required for --docker"
+        exit 1
+    fi
+
+    if [ ! -f "$BUILDROOT_DIR/Makefile" ]; then
+        echo "Error: $BUILDROOT_DIR does not look like a Buildroot checkout"
+        exit 1
+    fi
+
+    if [ "$SKIP_SERVER_BUILD" = false ]; then
+        run_server_build
+    fi
+
+    if [ "$OUTPUT_DIR_EXPLICIT" = false ]; then
+        OUTPUT_DIR="$DEFAULT_DOCKER_OUTPUT_DIR"
+    fi
+
+    project_root_abs="$(cd "$PROJECT_ROOT" && pwd)"
+    buildroot_dir_abs="$(cd "$BUILDROOT_DIR" && pwd)"
+    mkdir -p "$OUTPUT_DIR"
+    output_dir_abs="$(cd "$OUTPUT_DIR" && pwd)"
+
+    if [ -f "$OUTPUT_DIR/build/buildroot-config/conf" ] && file "$OUTPUT_DIR/build/buildroot-config/conf" 2>/dev/null | grep -q 'Mach-O'; then
+        echo "Error: $OUTPUT_DIR contains macOS Buildroot host artifacts."
+        echo "Use a fresh Docker output dir or remove the old one first."
+        echo "Recommended:"
+        echo "  rm -rf \"$OUTPUT_DIR\""
+        echo "  ./scripts/build-rpiz-image.sh --release --buildroot-dir \"$BUILDROOT_DIR\" --docker"
+        exit 1
+    fi
+
+    docker build \
+        -t "$DOCKER_IMAGE" \
+        -f "$PROJECT_ROOT/install/rpiz/docker/Dockerfile" \
+        "$PROJECT_ROOT/install/rpiz/docker"
+
+    docker_args=(
+        run --rm -t
+        -e HOME=/tmp/rhythm-home
+        -e LANG=C.UTF-8
+        -e LC_ALL=C.UTF-8
+        --security-opt seccomp=unconfined
+        -v "$project_root_abs:/workspace"
+        -v "$buildroot_dir_abs:/buildroot"
+        -v "$output_dir_abs:/output"
+        -w /workspace
+    )
+
+    if command -v id >/dev/null 2>&1; then
+        docker_args+=(--user "$(id -u):$(id -g)")
+    fi
+
+    if [ -n "$WIFI_SSID" ]; then
+        docker_args+=(
+            -e "RHYTHM_WIFI_SSID=$WIFI_SSID"
+            -e "RHYTHM_WIFI_PSK=$WIFI_PSK"
+            -e "RHYTHM_WIFI_COUNTRY=$WIFI_COUNTRY"
+        )
+    fi
+
+    inner_args=("--buildroot-dir" "/buildroot" "--output-dir" "/output" "--skip-server-build")
+    if [ "$BUILD_MODE" = "release" ]; then
+        inner_args=("--release" "${inner_args[@]}")
+    else
+        inner_args=("--debug" "${inner_args[@]}")
+    fi
+
+    docker "${docker_args[@]}" "$DOCKER_IMAGE" bash -lc \
+        "./scripts/build-rpiz-image.sh ${inner_args[*]}"
+}
+
+if [ "$DOCKER_BUILD" = true ]; then
+    run_in_docker
+    exit 0
+fi
+
+if [ "$(uname -s)" != "Linux" ]; then
+    echo "Error: Buildroot image generation must run on Linux."
+    echo "This script packages the rpiz binary into a Buildroot SD image, and"
+    echo "Buildroot's host tooling does not support macOS as a build host."
+    echo ""
+    echo "Build the binary on macOS if you want:"
+    echo "  ./scripts/build-server.sh --release --target rpiz"
+    echo ""
+    echo "Then run the image build from a Linux machine, Linux VM, or Docker:"
+    echo "  ./scripts/build-rpiz-image.sh --release --buildroot-dir /path/to/buildroot --docker"
+    exit 1
+fi
+
+if [ ! -f "$BUILDROOT_DIR/Makefile" ]; then
+    echo "Error: $BUILDROOT_DIR does not look like a Buildroot checkout"
+    exit 1
+fi
+
+if [ "$SKIP_SERVER_BUILD" = false ]; then
+    run_server_build
+fi
+
+SERVER_BINARY="$PROJECT_ROOT/dist/bin/rpiz/rhythm-server"
+if [ ! -x "$SERVER_BINARY" ]; then
+    echo "Error: Missing $SERVER_BINARY"
+    echo "Build it first with: ./scripts/build-server.sh --release --target rpiz"
+    exit 1
+fi
+
+if [ -n "$WIFI_SSID" ]; then
+    WIFI_COUNTRY="$(printf '%s' "$WIFI_COUNTRY" | tr '[:lower:]' '[:upper:]')"
+    echo "Embedding Wi-Fi config for SSID '$WIFI_SSID' (country $WIFI_COUNTRY)"
+    export RHYTHM_WIFI_SSID="$WIFI_SSID"
+    export RHYTHM_WIFI_PSK="$WIFI_PSK"
+    export RHYTHM_WIFI_COUNTRY="$WIFI_COUNTRY"
+fi
+
+EXTERNAL_DIR="$PROJECT_ROOT/install/rpiz/buildroot"
+
+make -C "$BUILDROOT_DIR" BR2_EXTERNAL="$EXTERNAL_DIR" O="$OUTPUT_DIR" rhythm_rpiz_defconfig
+make -C "$BUILDROOT_DIR" BR2_EXTERNAL="$EXTERNAL_DIR" O="$OUTPUT_DIR"
+
+echo ""
+echo "RPi Zero image build complete"
+echo "  Image: $OUTPUT_DIR/images/sdcard.img"
+echo "  Rootfs: $OUTPUT_DIR/images/rootfs.ext2"

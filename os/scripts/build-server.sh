@@ -69,9 +69,10 @@ while [[ $# -gt 0 ]]; do
             echo "  macos-x86_64        macOS Intel (x86_64-apple-darwin)"
             echo "  linux-amd64         Linux x86_64 (x86_64-unknown-linux-musl)"
             echo "  linux-aarch64       Linux ARM64 (aarch64-unknown-linux-musl)"
+            echo "  rpiz                Raspberry Pi Zero / Zero W (arm-unknown-linux-musleabihf)"
             echo "  all-macos           Both macOS targets"
-            echo "  all-linux           Both Linux musl targets"
-            echo "  all                 All 4 targets"
+            echo "  all-linux           All Linux musl targets, including rpiz"
+            echo "  all                 All supported targets"
             echo ""
             echo "Output: dist/bin/{os}-{arch}/rhythm-server"
             echo ""
@@ -126,6 +127,7 @@ get_rust_target() {
         macos-x86_64)   echo "x86_64-apple-darwin" ;;
         linux-amd64)    echo "x86_64-unknown-linux-musl" ;;
         linux-aarch64)  echo "aarch64-unknown-linux-musl" ;;
+        rpiz)           echo "arm-unknown-linux-musleabihf" ;;
         *)              echo "" ;;
     esac
 }
@@ -141,6 +143,7 @@ get_native_output_dir() {
     case "$(uname -m)" in
         x86_64)         arch="x86_64" ; [ "$os" = "linux" ] && arch="amd64" ;;
         aarch64|arm64)  arch="arm64" ; [ "$os" = "linux" ] && arch="aarch64" ;;
+        armv6l|arm1176*) arch="armv6l" ; [ "$os" = "linux" ] && arch="rpiz" ;;
         *)              arch="$(uname -m)" ;;
     esac
     echo "${os}-${arch}"
@@ -149,7 +152,7 @@ get_native_output_dir() {
 # Check cross-compilation prerequisites for Linux musl from macOS
 check_musl_cross() {
     local target="$1"
-    if [ "$(uname -s)" != "Darwin" ]; then
+    if [ "$(uname -s)" != "Darwin" ] && [ "$target" != "rpiz" ]; then
         return 0
     fi
 
@@ -168,13 +171,20 @@ check_musl_cross() {
                 exit 1
             fi
             ;;
+        rpiz)
+            if ! command -v arm-linux-musleabihf-gcc &>/dev/null; then
+                echo "Error: arm-linux-musleabihf-gcc not found."
+                echo "Install a musl ARMv6 hard-float cross compiler or use: cargo install cross"
+                exit 1
+            fi
+            ;;
     esac
 }
 
 # Set linker environment for cross-compilation
 setup_cross_env() {
     local target="$1"
-    if [ "$(uname -s)" != "Darwin" ]; then
+    if [ "$(uname -s)" != "Darwin" ] && [ "$target" != "rpiz" ]; then
         return 0
     fi
 
@@ -186,6 +196,10 @@ setup_cross_env() {
         linux-aarch64)
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="aarch64-linux-musl-gcc"
             export CC_aarch64_unknown_linux_musl="aarch64-linux-musl-gcc"
+            ;;
+        rpiz)
+            export CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_LINKER="arm-linux-musleabihf-gcc"
+            export CC_arm_unknown_linux_musleabihf="arm-linux-musleabihf-gcc"
             ;;
     esac
 }
@@ -202,7 +216,8 @@ build_for_target() {
 
     echo "Building for $target ($rust_target)..."
 
-    # Check prerequisites for cross-compilation
+    # Prefer direct cargo+linker cross-compilation. `cross` on macOS can
+    # select an incompatible Linux host toolchain for ARMv6 targets.
     check_musl_cross "$target"
     setup_cross_env "$target"
 
@@ -262,7 +277,7 @@ if [ "$CLEAN" = true ]; then
 fi
 
 MACOS_TARGETS="macos-arm64 macos-x86_64"
-LINUX_TARGETS="linux-amd64 linux-aarch64"
+LINUX_TARGETS="linux-amd64 linux-aarch64 rpiz"
 
 case "$TARGET" in
     native)
@@ -283,12 +298,12 @@ case "$TARGET" in
             build_for_target "$t"
         done
         ;;
-    macos-arm64|macos-x86_64|linux-amd64|linux-aarch64)
+    macos-arm64|macos-x86_64|linux-amd64|linux-aarch64|rpiz)
         build_for_target "$TARGET"
         ;;
     *)
         echo "Unknown target: $TARGET"
-        echo "Valid targets: native, macos-arm64, macos-x86_64, linux-amd64, linux-aarch64, all-macos, all-linux, all"
+        echo "Valid targets: native, macos-arm64, macos-x86_64, linux-amd64, linux-aarch64, rpiz, all-macos, all-linux, all"
         exit 1
         ;;
 esac

@@ -49,6 +49,10 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let platform_type =
+        std::env::var("RHYTHM_PLATFORM_TYPE").unwrap_or_else(|_| "desktop".to_string());
+    let platform_context =
+        std::env::var("RHYTHM_PLATFORM_CONTEXT").unwrap_or_else(|_| "server".to_string());
 
     // Init logging — always suppress noisy mdns-sd AAAA errors
     let base_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| args.log_level.clone());
@@ -76,8 +80,8 @@ fn main() -> Result<()> {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.event_tx = Some(event_tx);
         s.firmware_version = Box::leak(VERSION.to_string().into_boxed_str());
-        s.platform_type = "desktop";
-        s.platform_context = "server";
+        s.platform_type = Box::leak(platform_type.into_boxed_str());
+        s.platform_context = Box::leak(platform_context.into_boxed_str());
         s.listen_port = Some(args.port);
         s.data_dir = data_dir.clone();
         s.storage = Some(Box::new(file_storage));

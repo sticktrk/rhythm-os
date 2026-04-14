@@ -1,0 +1,61 @@
+#!/bin/sh
+
+WPA_CONF=/etc/wpa_supplicant.conf
+WPA_PIDFILE=/var/run/wpa_supplicant.wlan0.pid
+DHCP_PIDFILE=/var/run/udhcpc.wlan0.pid
+
+has_wifi_config() {
+    [ -s "$WPA_CONF" ] && grep -q '^network={[[:space:]]*$' "$WPA_CONF"
+}
+
+pid_is_running() {
+    [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null
+}
+
+start() {
+    has_wifi_config || return 0
+
+    modprobe cfg80211 2>/dev/null || true
+    modprobe brcmutil 2>/dev/null || true
+    modprobe brcmfmac 2>/dev/null || true
+    sleep 2
+
+    [ -d /sys/class/net/wlan0 ] || return 0
+
+    ifconfig wlan0 up 2>/dev/null || true
+
+    if ! pid_is_running "$WPA_PIDFILE"; then
+        /usr/sbin/wpa_supplicant -B -i wlan0 -c "$WPA_CONF" -P "$WPA_PIDFILE"
+    fi
+
+    if ! pid_is_running "$DHCP_PIDFILE"; then
+        udhcpc -b -i wlan0 -p "$DHCP_PIDFILE" >/dev/null 2>&1 || true
+    fi
+}
+
+stop() {
+    if pid_is_running "$DHCP_PIDFILE"; then
+        kill "$(cat "$DHCP_PIDFILE")" 2>/dev/null || true
+    fi
+    rm -f "$DHCP_PIDFILE"
+
+    if pid_is_running "$WPA_PIDFILE"; then
+        kill "$(cat "$WPA_PIDFILE")" 2>/dev/null || true
+    fi
+    rm -f "$WPA_PIDFILE"
+
+    ifconfig wlan0 down 2>/dev/null || true
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop
+        start
+        ;;
+esac

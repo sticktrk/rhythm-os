@@ -1,0 +1,6 @@
+::sysinit:/etc/init.d/rcS
+::respawn:/usr/bin/rhythm-launch
+::restart:/sbin/init
+::ctrlaltdel:/sbin/reboot
+::shutdown:/sbin/swapoff -a
+::shutdown:/bin/umount -a -r

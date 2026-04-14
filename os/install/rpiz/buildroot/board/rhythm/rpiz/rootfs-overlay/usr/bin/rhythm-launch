@@ -1,0 +1,14 @@
+#!/bin/sh
+
+set -eu
+
+LOGFILE=/var/log/rhythm-server.log
+DATA_DIR=/data
+
+mkdir -p "$(dirname "$LOGFILE")" "$DATA_DIR"
+
+export RHYTHM_PLATFORM_TYPE=embedded
+export RHYTHM_PLATFORM_CONTEXT=rpiz
+
+# Stay in the foreground so BusyBox init can respawn the server if it exits.
+exec /usr/bin/rhythm-server --data-dir "$DATA_DIR" --log-level info >>"$LOGFILE" 2>&1

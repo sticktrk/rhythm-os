@@ -96,6 +96,7 @@ addon/rhythm_state.json
 
 # Build output directories
 dist/
+/buildroot/
 addon/bin/
 install/addon/bin/
 

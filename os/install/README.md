@@ -14,6 +14,7 @@ Pre-built binaries are available on the [Releases](https://github.com/sticktrk/r
 | macOS (Intel) | `rhythm-server-macos-x86_64.tar.gz` |
 | Linux (x86_64) | `rhythm-server-linux-amd64.tar.gz` |
 | Linux (ARM64) | `rhythm-server-linux-aarch64.tar.gz` |
+| Raspberry Pi Zero / Zero W | `rhythm-server-rpiz.tar.gz` |
 
 Each archive contains `rhythm-server` and `rhythm-cli`.
 
@@ -21,6 +22,7 @@ Each archive contains `rhythm-server` and `rhythm-cli`.
 
 ```bash
 ./scripts/build-server.sh --release
+./scripts/build-server.sh --release --target rpiz
 ```
 
 ### Install as a system service
@@ -49,6 +51,10 @@ The install script sets up auto-start and auto-restart:
 ```
 
 The server runs on port `54448` by default and advertises via mDNS.
+
+## Raspberry Pi Zero appliance
+
+For a non-Raspberry-Pi-OS setup, use the `rpiz` target plus the Buildroot image scaffolding in [install/rpiz/README.md](rpiz/README.md). The image path is USB-first: it boots the prebuilt `rhythm-server` binary on a minimal Linux rootfs and brings up `usb0` at `192.168.7.2` so you can smoke-test the API over USB before worrying about Wi-Fi or LAN.
 
 ### Management
 

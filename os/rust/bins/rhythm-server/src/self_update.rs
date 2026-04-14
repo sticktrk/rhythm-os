@@ -38,6 +38,8 @@ fn platform_asset_name() -> Option<&'static str> {
         Some("rhythm-server-linux-amd64")
     } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         Some("rhythm-server-linux-aarch64")
+    } else if cfg!(all(target_os = "linux", target_arch = "arm")) {
+        Some("rhythm-server-rpiz")
     } else {
         None
     }

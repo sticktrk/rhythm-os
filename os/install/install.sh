@@ -93,6 +93,7 @@ auto_detect_binary() {
     case "$(uname -m)" in
         x86_64)         arch="x86_64" ; [ "$os_name" = "linux" ] && arch="amd64" ;;
         aarch64|arm64)  arch="arm64" ; [ "$os_name" = "linux" ] && arch="aarch64" ;;
+        armv6l|arm1176*) arch="armv6l" ; [ "$os_name" = "linux" ] && arch="rpiz" ;;
         *)              arch="$(uname -m)" ;;
     esac
 
@@ -108,6 +109,7 @@ auto_detect_binary() {
     case "$(uname -m)" in
         x86_64)         legacy_arch="amd64" ;;
         aarch64|arm64)  legacy_arch="aarch64" ;;
+        armv6l|arm1176*) legacy_arch="rpiz" ;;
         *)              legacy_arch="$(uname -m)" ;;
     esac
     candidate="$PROJECT_ROOT/dist/bin/${legacy_arch}/rhythm-server"

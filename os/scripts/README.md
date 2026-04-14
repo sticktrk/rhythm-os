@@ -9,7 +9,9 @@ This directory contains all build and deployment scripts for Rhythm OS.
 ./scripts/run-dev.sh                    # Build and run addon locally
 
 # Build individual components
+./scripts/build-server.sh               # Build the server
 ./scripts/build-rust.sh                 # Build Rust addon
+./scripts/build-rpiz-image.sh           # Build Pi Zero SD image
 
 # Deploy
 ./scripts/deploy-addon.sh               # Push addon to Docker Hub
@@ -65,6 +67,56 @@ Build the Rust addon binary.
 | `--target <arch>` | Target: `native`, `amd64`, `aarch64`, `armv7`, `all` |
 
 **Output:** `dist/bin/{arch}/rhythm-addon`
+
+### build-server.sh
+
+Build the `rhythm-server` binary and package it into `dist/bin/...`.
+
+```bash
+./scripts/build-server.sh                              # Debug build, native target
+./scripts/build-server.sh --release                    # Release build, native target
+./scripts/build-server.sh --release --target rpiz      # Raspberry Pi Zero / Zero W
+./scripts/build-server.sh --release --target all-linux # All Linux targets
+```
+
+**Options:**
+| Flag | Description |
+|------|-------------|
+| `--release` | Build in release mode (optimized) |
+| `--debug` | Build in debug mode |
+| `--target <target>` | Target: `native`, `macos-arm64`, `macos-x86_64`, `linux-amd64`, `linux-aarch64`, `rpiz`, `all-macos`, `all-linux`, `all` |
+| `--clean` | Clean before building |
+| `--run` | Run the native server after building |
+
+**Output:** `dist/bin/{target}/{rhythm-server,rhythm-cli}`
+
+### build-rpiz-image.sh
+
+Build a Raspberry Pi Zero SD-card image using the Buildroot external tree in `install/rpiz/buildroot`.
+
+```bash
+./scripts/build-rpiz-image.sh --release --buildroot-dir ~/src/buildroot
+./scripts/build-rpiz-image.sh --skip-server-build --buildroot-dir ~/src/buildroot
+./scripts/build-rpiz-image.sh --release --buildroot-dir ./buildroot --docker
+./scripts/build-rpiz-image.sh --release --buildroot-dir ~/src/buildroot --wifi-ssid "MyNet" --wifi-psk "secretpass"
+```
+
+**Options:**
+| Flag | Description |
+|------|-------------|
+| `--buildroot-dir <path>` | Path to a Buildroot checkout |
+| `--output-dir <path>` | Buildroot output directory (default: `out/rpiz`) |
+| `--release` | Build the server binary in release mode before packaging |
+| `--debug` | Build the server binary in debug mode before packaging |
+| `--skip-server-build` | Reuse an existing `dist/bin/rpiz/rhythm-server` |
+| `--wifi-ssid <ssid>` | Embed Wi-Fi SSID for Pi Zero W / Zero 2 W |
+| `--wifi-psk <psk>` | Embed WPA/WPA2 passphrase |
+| `--wifi-country <code>` | Two-letter country code, default `US` |
+| `--docker` | Run the Buildroot image step inside Docker |
+| `--docker-image <name>` | Docker image tag to build/use |
+
+**Output:** `out/rpiz/images/sdcard.img`
+With `--docker` and no explicit `--output-dir`, the default becomes `out/rpiz-docker/images/sdcard.img`.
 
 ---
 
