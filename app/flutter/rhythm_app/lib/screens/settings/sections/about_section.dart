@@ -41,7 +41,10 @@ class AboutSection extends StatelessWidget {
                   icon: Icons.chat_bubble_outline_rounded,
                   iconColor: const Color(0xFFFFC857),
                   label: 'Help & Feedback',
-                  onTap: () => FeedbackDialog.show(context),
+                  onTap: () {
+                    AnalyticsService().logFeedbackOpened();
+                    FeedbackDialog.show(context);
+                  },
                 ),
                 SettingsRow(
                   icon: Icons.info_outline,
@@ -175,6 +178,7 @@ class DeleteAccountSection extends StatelessWidget {
       }
 
       // 8. Reset analytics identity
+      AnalyticsService().logAccountDeleted();
       AnalyticsService().logSignOut();
       AnalyticsService().resetUser();
 

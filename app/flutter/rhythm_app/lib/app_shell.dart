@@ -150,6 +150,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     try {
       final serverSync = context.read<ServerSyncProvider>();
       await serverSync.dispatchFixMyLights();
+      AnalyticsService().logFixMyLights(source: 'app_shell');
       if (mounted) HapticFeedback.heavyImpact();
     } finally {
       if (mounted) setState(() => _isFixing = false);
@@ -178,12 +179,20 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     if (transitionId == null) {
       await serverSync.dispatchSetActiveMode(mode);
       await _loadData();
+      AnalyticsService().logGlobalModeChanged(
+        mode.name,
+        source: 'all_rooms_toggle',
+      );
       return;
     }
 
     final success = await serverSync.dispatchRunTransition(transitionId);
     if (!success) return;
     await _loadData();
+    AnalyticsService().logGlobalModeChanged(
+      mode.name,
+      source: 'all_rooms_toggle',
+    );
   }
 
   @override

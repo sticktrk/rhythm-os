@@ -20,6 +20,7 @@ class RhythmAppDetailScreen extends StatelessWidget {
   const RhythmAppDetailScreen({super.key});
 
   static Future<void> show(BuildContext context) {
+    AnalyticsService().logScreenView('rhythm_app_detail');
     return Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => const RhythmAppDetailScreen()),
     );
@@ -49,84 +50,87 @@ class RhythmAppDetailScreen extends StatelessWidget {
                     builder: (context, settings, child) {
                       final caps = context.read<PlatformCapabilities>();
                       return Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        const SizedBox(height: 8),
-                        if (AuthService().currentUser != null &&
-                            !AuthService().currentUser!.isAnonymous) ...[
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          const SizedBox(height: 8),
+                          if (AuthService().currentUser != null &&
+                              !AuthService().currentUser!.isAnonymous) ...[
+                            SettingsGroup(
+                              children: [
+                                SettingsRow(
+                                  icon: Icons.person_outline,
+                                  iconColor: CelestialColors.accentBlue,
+                                  label: 'Profile',
+                                  value: AuthService().currentUser?.email ??
+                                      'Signed in',
+                                  showChevron: false,
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                          ],
+                          if (caps.hasLocationSetup) ...[
+                            SettingsGroup(
+                              children: [
+                                SettingsRow(
+                                  icon: Icons.location_on_outlined,
+                                  iconColor: const Color(0xFF4CAF50),
+                                  label: 'Location',
+                                  onTap: () =>
+                                      _showLocationSettings(context, settings),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                          ],
                           SettingsGroup(
                             children: [
                               SettingsRow(
-                                icon: Icons.person_outline,
-                                iconColor: CelestialColors.accentBlue,
-                                label: 'Profile',
-                                value: AuthService().currentUser?.email ??
-                                    'Signed in',
+                                icon: Icons.chat_bubble_outline_rounded,
+                                iconColor: const Color(0xFFFFC857),
+                                label: 'Help & Feedback',
+                                onTap: () {
+                                  AnalyticsService().logFeedbackOpened();
+                                  FeedbackDialog.show(context);
+                                },
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                          SettingsGroup(
+                            children: [
+                              SettingsRow(
+                                icon: Icons.info_outline,
+                                iconColor: const Color(0xFF607D8B),
+                                label: 'Version',
+                                value: settings.appVersion,
                                 showChevron: false,
+                                onTap: null,
                               ),
                             ],
                           ),
                           const SizedBox(height: 12),
-                        ],
-                        if (caps.hasLocationSetup) ...[
                           SettingsGroup(
                             children: [
                               SettingsRow(
-                                icon: Icons.location_on_outlined,
-                                iconColor: const Color(0xFF4CAF50),
-                                label: 'Location',
-                                onTap: () =>
-                                    _showLocationSettings(context, settings),
+                                icon: Icons.delete_forever_rounded,
+                                iconColor: Colors.red,
+                                label: 'Delete Account',
+                                showChevron: false,
+                                onTap: () => _deleteAccount(context),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 12),
+                          const SizedBox(height: 40),
                         ],
-                        SettingsGroup(
-                          children: [
-                            SettingsRow(
-                              icon: Icons.chat_bubble_outline_rounded,
-                              iconColor: const Color(0xFFFFC857),
-                              label: 'Help & Feedback',
-                              onTap: () => FeedbackDialog.show(context),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 12),
-                        SettingsGroup(
-                          children: [
-                            SettingsRow(
-                              icon: Icons.info_outline,
-                              iconColor: const Color(0xFF607D8B),
-                              label: 'Version',
-                              value: settings.appVersion,
-                              showChevron: false,
-                              onTap: null,
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 12),
-                        SettingsGroup(
-                          children: [
-                            SettingsRow(
-                              icon: Icons.delete_forever_rounded,
-                              iconColor: Colors.red,
-                              label: 'Delete Account',
-                              showChevron: false,
-                              onTap: () => _deleteAccount(context),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 40),
-                      ],
-                    );
-                  },
+                      );
+                    },
+                  ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
-      ),
       ),
     );
   }
@@ -229,8 +233,7 @@ class RhythmAppDetailScreen extends StatelessWidget {
             }
             debugPrint('Delete Account: Homes deleted via PostgREST fallback');
           } catch (e2) {
-            debugPrint(
-                'Delete Account: PostgREST fallback also failed: $e2');
+            debugPrint('Delete Account: PostgREST fallback also failed: $e2');
           }
           await authService.signOut();
         }
@@ -271,6 +274,7 @@ class RhythmAppDetailScreen extends StatelessWidget {
         debugPrint('Delete Account: Home provider error: $e');
       }
 
+      AnalyticsService().logAccountDeleted();
       AnalyticsService().logSignOut();
       AnalyticsService().resetUser();
 

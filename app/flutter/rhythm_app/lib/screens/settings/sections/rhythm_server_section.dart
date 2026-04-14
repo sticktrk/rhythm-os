@@ -6,6 +6,7 @@ import '../../../widgets/settings_row.dart';
 import '../../../widgets/solar_orbit.dart';
 import '../../../providers/home_provider.dart';
 import '../../../providers/server_sync_provider.dart';
+import '../../../services/analytics_service.dart';
 import '../../hubs/rhythmserver_settings_screen.dart';
 import '../../triage_screen.dart';
 import '../../power_usage_screen.dart';
@@ -16,6 +17,7 @@ class RhythmServerDetailScreen extends StatelessWidget {
   const RhythmServerDetailScreen({super.key});
 
   static Future<void> show(BuildContext context) {
+    AnalyticsService().logScreenView('rhythm_server_detail');
     return Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => const RhythmServerDetailScreen()),
     );
@@ -45,8 +47,7 @@ class RhythmServerDetailScreen extends StatelessWidget {
                               builder: (context) {
                                 final esp32Hub = homeProvider
                                     .getFirstHubOfType(HubType.server);
-                                final serverState =
-                                    serverSync.connectionState;
+                                final serverState = serverSync.connectionState;
                                 final isOnline = serverState ==
                                     RhythmConnectionState.connected;
                                 final isConnecting = serverState ==
@@ -107,13 +108,11 @@ class RhythmServerDetailScreen extends StatelessWidget {
                                   ),
                                   showChevron: false,
                                   onTap: esp32Hub != null
-                                      ? () =>
-                                          RhythmServerSettingsScreen.show(
-                                              context,
-                                              hub: esp32Hub)
+                                      ? () => RhythmServerSettingsScreen.show(
+                                          context,
+                                          hub: esp32Hub)
                                       : () => ConnectHubScreen.show(context,
-                                          mode:
-                                              ConnectHubMode.rhythmServer),
+                                          mode: ConnectHubMode.rhythmServer),
                                 );
                               },
                             ),
@@ -136,8 +135,7 @@ class RhythmServerDetailScreen extends StatelessWidget {
                                           horizontal: 7, vertical: 2),
                                       decoration: BoxDecoration(
                                         color: const Color(0xFFFF9800),
-                                        borderRadius:
-                                            BorderRadius.circular(10),
+                                        borderRadius: BorderRadius.circular(10),
                                       ),
                                       child: Text(
                                         '${serverSync.triagePendingCount}',

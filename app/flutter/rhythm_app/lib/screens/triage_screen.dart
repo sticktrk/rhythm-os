@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/server_sync_provider.dart';
+import '../services/analytics_service.dart';
 import '../widgets/solar_orbit.dart'; // For CelestialColors
 
 enum _TriageFilter { all, devices, rooms }
@@ -26,11 +27,13 @@ class _TriageScreenState extends State<TriageScreen> {
   @override
   void initState() {
     super.initState();
+    AnalyticsService().logScreenView('device_review');
     _loadEntries();
   }
 
-  int get _deviceCount =>
-      _entries.where((e) => (e['kind'] ?? 'device_merge') == 'device_merge').length;
+  int get _deviceCount => _entries
+      .where((e) => (e['kind'] ?? 'device_merge') == 'device_merge')
+      .length;
 
   int get _roomCount =>
       _entries.where((e) => e['kind'] == 'room_binding').length;
@@ -45,7 +48,8 @@ class _TriageScreenState extends State<TriageScreen> {
   }
 
   Future<void> _loadEntries({bool sync = false}) async {
-    debugPrint('TriageScreen: _loadEntries called (busy=$_busy, loading=$_loading, sync=$sync)');
+    debugPrint(
+        'TriageScreen: _loadEntries called (busy=$_busy, loading=$_loading, sync=$sync)');
     try {
       final syncProvider = context.read<ServerSyncProvider>();
       final http = syncProvider.api;
@@ -58,7 +62,8 @@ class _TriageScreenState extends State<TriageScreen> {
       final entries = await http.getTriageEntries();
       debugPrint('TriageScreen: got ${entries?.length ?? 'null'} entries');
       if (entries != null && entries.isNotEmpty) {
-        debugPrint('TriageScreen: first entry keys=${entries.first.keys.toList()}, id=${entries.first['id']} (${entries.first['id'].runtimeType})');
+        debugPrint(
+            'TriageScreen: first entry keys=${entries.first.keys.toList()}, id=${entries.first['id']} (${entries.first['id'].runtimeType})');
       }
       if (mounted) {
         setState(() {
@@ -66,6 +71,18 @@ class _TriageScreenState extends State<TriageScreen> {
           _entries = entries ?? [];
           _loading = false;
         });
+      }
+      if (entries != null) {
+        final deviceCount = entries
+            .where((e) => (e['kind'] ?? 'device_merge') == 'device_merge')
+            .length;
+        final roomCount =
+            entries.where((e) => e['kind'] == 'room_binding').length;
+        AnalyticsService().logTriageViewed(
+          entryCount: entries.length,
+          deviceCount: deviceCount,
+          roomCount: roomCount,
+        );
       }
     } catch (e, st) {
       debugPrint('TriageScreen: _loadEntries failed: $e\n$st');
@@ -80,7 +97,8 @@ class _TriageScreenState extends State<TriageScreen> {
 
   @override
   Widget build(BuildContext context) {
-    debugPrint('TriageScreen: build (loading=$_loading, busy=$_busy, connErr=$_connectionError, entries=${_entries.length})');
+    debugPrint(
+        'TriageScreen: build (loading=$_loading, busy=$_busy, connErr=$_connectionError, entries=${_entries.length})');
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,
       appBar: AppBar(
@@ -145,7 +163,8 @@ class _TriageScreenState extends State<TriageScreen> {
               decoration: BoxDecoration(
                 color: CelestialColors.sunWarm.withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: CelestialColors.sunWarm.withValues(alpha: 0.3)),
+                border: Border.all(
+                    color: CelestialColors.sunWarm.withValues(alpha: 0.3)),
               ),
               child: const Text(
                 'Retry',
@@ -198,7 +217,10 @@ class _TriageScreenState extends State<TriageScreen> {
       final active = _filter == value;
       return Expanded(
         child: GestureDetector(
-          onTap: () => setState(() => _filter = value),
+          onTap: () {
+            AnalyticsService().logTriageFilterChanged(value.name);
+            setState(() => _filter = value);
+          },
           child: Container(
             padding: const EdgeInsets.symmetric(vertical: 8),
             decoration: BoxDecoration(
@@ -246,7 +268,8 @@ class _TriageScreenState extends State<TriageScreen> {
   Widget _buildEntryList() {
     final filtered = _filteredEntries;
     final hasBothKinds = _deviceCount > 0 && _roomCount > 0;
-    final headerCount = hasBothKinds ? 2 : 1; // filter bar + summary, or just summary
+    final headerCount =
+        hasBothKinds ? 2 : 1; // filter bar + summary, or just summary
 
     final noun = switch (_filter) {
       _TriageFilter.all => 'item',
@@ -311,19 +334,27 @@ class _TriageScreenState extends State<TriageScreen> {
     Map<String, dynamic> entry,
     String canonicalId,
   ) async {
-    debugPrint('TriageScreen: _resolveMerge called (busy=$_busy, entryId=${entry['id']}, canonicalId=$canonicalId)');
+    debugPrint(
+        'TriageScreen: _resolveMerge called (busy=$_busy, entryId=${entry['id']}, canonicalId=$canonicalId)');
     if (_busy) return;
     setState(() => _busy = true);
     try {
       final entryId = entry['id']?.toString() ?? '';
       final http = context.read<ServerSyncProvider>().api;
       await http.resolveTriageMerge(entryId, canonicalId);
+      AnalyticsService().logTriageResolution(
+        kind: 'device_merge',
+        action: 'merge',
+        hasTarget: true,
+      );
       if (mounted) await _loadEntries();
     } catch (e) {
       debugPrint('TriageScreen: merge failed: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Merge failed: $e'), backgroundColor: Colors.red.shade800),
+          SnackBar(
+              content: Text('Merge failed: $e'),
+              backgroundColor: Colors.red.shade800),
         );
       }
     } finally {
@@ -332,19 +363,26 @@ class _TriageScreenState extends State<TriageScreen> {
   }
 
   Future<void> _resolveNew(Map<String, dynamic> entry) async {
-    debugPrint('TriageScreen: _resolveNew called (busy=$_busy, entryId=${entry['id']})');
+    debugPrint(
+        'TriageScreen: _resolveNew called (busy=$_busy, entryId=${entry['id']})');
     if (_busy) return;
     setState(() => _busy = true);
     try {
       final entryId = entry['id']?.toString() ?? '';
       final http = context.read<ServerSyncProvider>().api;
       await http.resolveTriageNew(entryId);
+      AnalyticsService().logTriageResolution(
+        kind: entry['kind'] as String? ?? 'device_merge',
+        action: 'keep_separate',
+      );
       if (mounted) await _loadEntries();
     } catch (e) {
       debugPrint('TriageScreen: keep-separate failed: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Keep separate failed: $e'), backgroundColor: Colors.red.shade800),
+          SnackBar(
+              content: Text('Keep separate failed: $e'),
+              backgroundColor: Colors.red.shade800),
         );
       }
     } finally {
@@ -352,20 +390,29 @@ class _TriageScreenState extends State<TriageScreen> {
     }
   }
 
-  Future<void> _resolveBind(Map<String, dynamic> entry, {String? targetRoomId}) async {
-    debugPrint('TriageScreen: _resolveBind called (busy=$_busy, entryId=${entry['id']}, targetRoomId=$targetRoomId)');
+  Future<void> _resolveBind(Map<String, dynamic> entry,
+      {String? targetRoomId}) async {
+    debugPrint(
+        'TriageScreen: _resolveBind called (busy=$_busy, entryId=${entry['id']}, targetRoomId=$targetRoomId)');
     if (_busy) return;
     setState(() => _busy = true);
     try {
       final entryId = entry['id']?.toString() ?? '';
       final http = context.read<ServerSyncProvider>().api;
       await http.resolveTriageBind(entryId, targetRoomId: targetRoomId);
+      AnalyticsService().logTriageResolution(
+        kind: 'room_binding',
+        action: 'merge',
+        hasTarget: targetRoomId != null,
+      );
       if (mounted) await _loadEntries();
     } catch (e) {
       debugPrint('TriageScreen: bind failed: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Room merge failed: $e'), backgroundColor: Colors.red.shade800),
+          SnackBar(
+              content: Text('Room merge failed: $e'),
+              backgroundColor: Colors.red.shade800),
         );
       }
     } finally {
@@ -374,19 +421,26 @@ class _TriageScreenState extends State<TriageScreen> {
   }
 
   Future<void> _resolveDismiss(Map<String, dynamic> entry) async {
-    debugPrint('TriageScreen: _resolveDismiss called (busy=$_busy, entryId=${entry['id']})');
+    debugPrint(
+        'TriageScreen: _resolveDismiss called (busy=$_busy, entryId=${entry['id']})');
     if (_busy) return;
     setState(() => _busy = true);
     try {
       final entryId = entry['id']?.toString() ?? '';
       final http = context.read<ServerSyncProvider>().api;
       await http.resolveTriageDismiss(entryId);
+      AnalyticsService().logTriageResolution(
+        kind: entry['kind'] as String? ?? 'device_merge',
+        action: 'dismiss',
+      );
       if (mounted) await _loadEntries();
     } catch (e) {
       debugPrint('TriageScreen: dismiss failed: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Dismiss failed: $e'), backgroundColor: Colors.red.shade800),
+          SnackBar(
+              content: Text('Dismiss failed: $e'),
+              backgroundColor: Colors.red.shade800),
         );
       }
     } finally {
@@ -418,15 +472,13 @@ class _TriageCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     debugPrint('_TriageCard: build (id=${entry['id']}, busy=$busy)');
-    final discovered =
-        (entry['discovered'] as Map<String, dynamic>?) ?? {};
+    final discovered = (entry['discovered'] as Map<String, dynamic>?) ?? {};
     final name = discovered['name'] as String? ?? 'Unknown Device';
     final deviceType = discovered['device_type'] as String? ?? 'light';
     final manufacturer = discovered['manufacturer'] as String?;
     final model = discovered['model'] as String?;
     final roomName = discovered['room_name'] as String? ?? '';
-    final candidates =
-        (entry['candidate_matches'] as List<dynamic>?) ?? [];
+    final candidates = (entry['candidate_matches'] as List<dynamic>?) ?? [];
 
     final typeLabel = switch (deviceType) {
       'light' => 'Light',
@@ -435,9 +487,8 @@ class _TriageCard extends StatelessWidget {
       _ => deviceType,
     };
 
-    final productInfo = [manufacturer, model]
-        .whereType<String>()
-        .join(' \u00B7 ');
+    final productInfo =
+        [manufacturer, model].whereType<String>().join(' \u00B7 ');
 
     return Container(
       decoration: BoxDecoration(
@@ -483,7 +534,8 @@ class _TriageCard extends StatelessWidget {
                     Text(
                       '$typeLabel${productInfo.isNotEmpty ? ' \u00B7 $productInfo' : ''}',
                       style: TextStyle(
-                        color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+                        color: CelestialColors.textSecondary
+                            .withValues(alpha: 0.7),
                         fontSize: 12,
                       ),
                     ),
@@ -517,8 +569,7 @@ class _TriageCard extends StatelessWidget {
                 ),
               ),
             ),
-            for (final candidate in candidates)
-              _buildCandidateRow(candidate),
+            for (final candidate in candidates) _buildCandidateRow(candidate),
           ],
           const SizedBox(height: 16),
           // Actions
@@ -533,7 +584,8 @@ class _TriageCard extends StatelessWidget {
                       label: 'Keep Separate',
                       color: const Color(0xFF64B5F6),
                       onTap: () {
-                        debugPrint('_TriageCard: Keep Separate tapped (id=${entry['id']})');
+                        debugPrint(
+                            '_TriageCard: Keep Separate tapped (id=${entry['id']})');
                         onKeepSeparate();
                       },
                     ),
@@ -543,7 +595,8 @@ class _TriageCard extends StatelessWidget {
                     label: 'Dismiss',
                     color: CelestialColors.textSecondary,
                     onTap: () {
-                      debugPrint('_TriageCard: Dismiss tapped (id=${entry['id']})');
+                      debugPrint(
+                          '_TriageCard: Dismiss tapped (id=${entry['id']})');
                       onDismiss();
                     },
                   ),
@@ -596,7 +649,8 @@ class _TriageCard extends StatelessWidget {
                     Text(
                       reasons,
                       style: TextStyle(
-                        color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+                        color: CelestialColors.textSecondary
+                            .withValues(alpha: 0.6),
                         fontSize: 11,
                       ),
                     ),
@@ -620,16 +674,21 @@ class _TriageCard extends StatelessWidget {
             ),
             const SizedBox(width: 8),
             GestureDetector(
-              onTap: busy ? null : () {
-                debugPrint('_TriageCard: Merge tapped (id=${entry['id']}, cid=$cid)');
-                onMerge(cid);
-              },
+              onTap: busy
+                  ? null
+                  : () {
+                      debugPrint(
+                          '_TriageCard: Merge tapped (id=${entry['id']}, cid=$cid)');
+                      onMerge(cid);
+                    },
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                 decoration: BoxDecoration(
                   color: CelestialColors.sunWarm.withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: CelestialColors.sunWarm.withValues(alpha: 0.3)),
+                  border: Border.all(
+                      color: CelestialColors.sunWarm.withValues(alpha: 0.3)),
                 ),
                 child: const Text(
                   'Merge',
@@ -700,9 +759,8 @@ class _RoomBindingCard extends StatelessWidget {
       'hue' => 'Hue',
       _ => hubType,
     };
-    final hubInfo = [hubLabel, hubAddr]
-        .where((s) => s.isNotEmpty)
-        .join(' \u00B7 ');
+    final hubInfo =
+        [hubLabel, hubAddr].where((s) => s.isNotEmpty).join(' \u00B7 ');
 
     final hasMultipleCandidates = candidates.length > 1;
 
@@ -751,7 +809,8 @@ class _RoomBindingCard extends StatelessWidget {
                       Text(
                         hubInfo,
                         style: TextStyle(
-                          color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+                          color: CelestialColors.textSecondary
+                              .withValues(alpha: 0.7),
                           fontSize: 12,
                         ),
                       ),
@@ -812,11 +871,12 @@ class _RoomBindingCard extends StatelessWidget {
                       child: _ActionButton(
                         label: 'Merge Rooms',
                         color: CelestialColors.sunWarm,
-                        onTap: () => onBind(targetRoomId: targetId.isNotEmpty ? targetId : null),
+                        onTap: () => onBind(
+                            targetRoomId:
+                                targetId.isNotEmpty ? targetId : null),
                       ),
                     ),
-                  if (!hasMultipleCandidates)
-                    const SizedBox(width: 8),
+                  if (!hasMultipleCandidates) const SizedBox(width: 8),
                   Expanded(
                     child: _ActionButton(
                       label: 'Keep Separate',
@@ -867,11 +927,13 @@ class _RoomBindingCard extends StatelessWidget {
             GestureDetector(
               onTap: busy ? null : () => onBind(targetRoomId: roomId),
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                 decoration: BoxDecoration(
                   color: CelestialColors.sunWarm.withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: CelestialColors.sunWarm.withValues(alpha: 0.3)),
+                  border: Border.all(
+                      color: CelestialColors.sunWarm.withValues(alpha: 0.3)),
                 ),
                 child: const Text(
                   'Merge',

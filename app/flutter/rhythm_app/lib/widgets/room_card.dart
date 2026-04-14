@@ -7,6 +7,7 @@ import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RoomModeState;
 import '../providers/server_sync_provider.dart';
 import '../providers/room_provider.dart';
+import '../services/analytics_service.dart';
 import 'room_settings_sheet.dart';
 import 'solar_orbit.dart'; // For CelestialColors
 
@@ -41,6 +42,17 @@ class _RoomCardState extends State<RoomCard> {
   int? _sliderBrightness;
   int _lastResetGen = 0;
 
+  String _analyticsModeForState(RoomModeState state) {
+    final mode = switch (state) {
+      RoomModeState.hardOff => RoomMode.off,
+      RoomModeState.idle ||
+      RoomModeState.warning =>
+        widget.powerSave ? RoomMode.off : RoomMode.idle,
+      RoomModeState.wake || RoomModeState.active => RoomMode.on,
+    };
+    return mode.name;
+  }
+
   /// Handle three-state mode transitions.
   ///
   /// Tap: ON ↔ IDLE (the common path)
@@ -50,6 +62,8 @@ class _RoomCardState extends State<RoomCard> {
     final roomProvider = context.read<RoomProvider>();
     final room = roomProvider.getRoom(widget.roomId);
     if (room == null) return;
+    final previousMode =
+        _analyticsModeForState(roomProvider.getRoomState(widget.roomId));
 
     final serverSync = context.read<ServerSyncProvider>();
 
@@ -93,12 +107,21 @@ class _RoomCardState extends State<RoomCard> {
     setState(() {
       _sliderBrightness = null;
     });
+    AnalyticsService().logRoomModeChanged(
+      roomId: widget.roomId,
+      previousMode: previousMode,
+      nextMode: newMode.name,
+    );
   }
 
   void _onBrightnessSliderEnd() {
     if (_sliderBrightness == null) return;
     final serverSync = context.read<ServerSyncProvider>();
     serverSync.dispatchBrightness(widget.roomId, _sliderBrightness!);
+    AnalyticsService().logRoomBrightnessAdjusted(
+      roomId: widget.roomId,
+      brightness: _sliderBrightness!,
+    );
   }
 
   /// Reset this room to its adaptive curve position (per-room fix-my-lights).
@@ -106,6 +129,7 @@ class _RoomCardState extends State<RoomCard> {
     HapticFeedback.mediumImpact();
     final serverSync = context.read<ServerSyncProvider>();
     serverSync.dispatchResetRoom(widget.roomId);
+    AnalyticsService().logRoomResetToCurve(roomId: widget.roomId);
     setState(() {
       _sliderBrightness = null;
     });

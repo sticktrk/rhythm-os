@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import '../providers/home_provider.dart';
 import '../providers/server_sync_provider.dart';
+import '../services/analytics_service.dart';
 
 /// Location settings screen with clear permission guidance.
 /// GPS-only approach with excellent UX for handling permission states.
@@ -14,6 +15,7 @@ class LocationSettingsScreen extends StatefulWidget {
   const LocationSettingsScreen({super.key});
 
   static Future<bool?> show(BuildContext context) {
+    AnalyticsService().logScreenView('location_settings');
     return Navigator.of(context).push<bool>(
       PageRouteBuilder(
         opaque: false,
@@ -251,6 +253,7 @@ class _LocationSettingsScreenState extends State<LocationSettingsScreen>
         _statusMessage = 'Location updated';
         _isLoading = false;
       });
+      AnalyticsService().logLocationUpdated(hasPlaceName: placeName != null);
     } catch (e) {
       if (!mounted) return;
       setState(() {

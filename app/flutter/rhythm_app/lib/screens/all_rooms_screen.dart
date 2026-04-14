@@ -8,6 +8,7 @@ import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmMode;
 import '../providers/room_page_provider.dart';
 import '../providers/server_sync_provider.dart';
+import '../services/analytics_service.dart';
 import '../widgets/editable_room_card.dart';
 import '../widgets/room_card.dart';
 import '../widgets/hub_connection_banner.dart';
@@ -82,6 +83,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
   Future<void> _onRefresh() async {
     final serverSync = context.read<ServerSyncProvider>();
     await serverSync.fullRefresh();
+    AnalyticsService().logRoomsRefreshed(source: 'all_rooms_pull_to_refresh');
   }
 
   // -- Drag handle callbacks --------------------------------------------------
@@ -211,10 +213,25 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     _edgeScrollTargetPage = null;
 
     final fromPage = pageProvider.getPage(draggedId);
+    final existingRooms =
+        pageProvider.getRoomsForPage(currentPage, widget.rooms);
+    final existingIndex =
+        existingRooms.indexWhere((room) => room.id == draggedId);
+    final didChange = fromPage != currentPage || existingIndex != dropIndex;
     if (fromPage != currentPage) {
       pageProvider.moveRoom(draggedId, currentPage, insertIndex: dropIndex);
     } else {
       pageProvider.reorderInPage(draggedId, currentPage, dropIndex);
+    }
+    if (didChange) {
+      AnalyticsService().logRoomLayoutChanged(
+        action: fromPage == currentPage ? 'reorder' : 'move_page',
+        fromPage: fromPage,
+        toPage: currentPage,
+        toIndex: dropIndex,
+        roomCount: widget.rooms.length,
+        pageCount: math.max(1, pageProvider.pageCount - 1),
+      );
     }
 
     HapticFeedback.selectionClick();
@@ -433,6 +450,10 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
                 onEnterEditMode: () {
                   final pageProvider = context.read<RoomPageProvider>();
                   pageProvider.reconcileRooms(widget.rooms);
+                  AnalyticsService().logRoomLayoutEditStarted(
+                    roomCount: widget.rooms.length,
+                    pageCount: pageProvider.pageCount,
+                  );
                   pageProvider.enterEditMode();
                 },
               ),
@@ -541,7 +562,12 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
             GestureDetector(
               onTap: () {
                 HapticFeedback.lightImpact();
-                context.read<RoomPageProvider>().exitEditMode();
+                final pageProvider = context.read<RoomPageProvider>();
+                pageProvider.exitEditMode();
+                AnalyticsService().logRoomLayoutEditCompleted(
+                  roomCount: widget.rooms.length,
+                  pageCount: pageProvider.pageCount,
+                );
               },
               child: Container(
                 padding:

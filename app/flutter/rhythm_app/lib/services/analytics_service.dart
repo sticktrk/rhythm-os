@@ -126,7 +126,8 @@ class AnalyticsService {
   }
 
   /// Track sleep schedule step.
-  Future<void> logOnboardingSleepSchedule(String wakeTime, String sleepTime) async {
+  Future<void> logOnboardingSleepSchedule(
+      String wakeTime, String sleepTime) async {
     await logEvent('onboarding_sleep_schedule', {
       'wake_time': wakeTime,
       'sleep_time': sleepTime,
@@ -190,6 +191,97 @@ class AnalyticsService {
     await logEvent('config_saved');
   }
 
+  /// Track a global day/sleep mode change.
+  Future<void> logGlobalModeChanged(
+    String mode, {
+    required String source,
+  }) async {
+    await logEvent('global_mode_changed', {
+      'mode': mode,
+      'source': source,
+    });
+  }
+
+  /// Track a per-room mode change from the room card UI.
+  Future<void> logRoomModeChanged({
+    required String roomId,
+    required String previousMode,
+    required String nextMode,
+  }) async {
+    await logEvent('room_mode_changed', {
+      'room_id': roomId,
+      'previous_mode': previousMode,
+      'next_mode': nextMode,
+    });
+  }
+
+  /// Track a room brightness adjustment from the room card UI.
+  Future<void> logRoomBrightnessAdjusted({
+    required String roomId,
+    required int brightness,
+  }) async {
+    await logEvent('room_brightness_adjusted', {
+      'room_id': roomId,
+      'brightness': brightness,
+    });
+  }
+
+  /// Track resetting an individual room back to its adaptive curve.
+  Future<void> logRoomResetToCurve({required String roomId}) async {
+    await logEvent('room_reset_to_curve', {'room_id': roomId});
+  }
+
+  /// Track the global "Fix My Lights" action.
+  Future<void> logFixMyLights({required String source}) async {
+    await logEvent('fix_my_lights', {'source': source});
+  }
+
+  /// Track refreshing the rooms experience.
+  Future<void> logRoomsRefreshed({required String source}) async {
+    await logEvent('rooms_refreshed', {'source': source});
+  }
+
+  /// Track entering room layout edit mode.
+  Future<void> logRoomLayoutEditStarted({
+    required int roomCount,
+    required int pageCount,
+  }) async {
+    await logEvent('room_layout_edit_started', {
+      'room_count': roomCount,
+      'page_count': pageCount,
+    });
+  }
+
+  /// Track leaving room layout edit mode.
+  Future<void> logRoomLayoutEditCompleted({
+    required int roomCount,
+    required int pageCount,
+  }) async {
+    await logEvent('room_layout_edit_completed', {
+      'room_count': roomCount,
+      'page_count': pageCount,
+    });
+  }
+
+  /// Track a room reorder or cross-page move.
+  Future<void> logRoomLayoutChanged({
+    required String action,
+    required int fromPage,
+    required int toPage,
+    required int toIndex,
+    required int roomCount,
+    required int pageCount,
+  }) async {
+    await logEvent('room_layout_changed', {
+      'action': action,
+      'from_page': fromPage,
+      'to_page': toPage,
+      'to_index': toIndex,
+      'room_count': roomCount,
+      'page_count': pageCount,
+    });
+  }
+
   // ===========================================================================
   // Curve Editing Events (Lower Priority)
   // ===========================================================================
@@ -208,7 +300,8 @@ class AnalyticsService {
   }
 
   /// Track mirror toggle in slider controls.
-  Future<void> logMirrorToggle({required bool enabled, required String side}) async {
+  Future<void> logMirrorToggle(
+      {required bool enabled, required String side}) async {
     await logEvent('mirror_toggle', {
       'enabled': enabled ? 1 : 0,
       'side': side,
@@ -306,6 +399,164 @@ class AnalyticsService {
   /// Track sign out.
   Future<void> logSignOut() async {
     await logEvent('sign_out');
+  }
+
+  /// Track account deletion.
+  Future<void> logAccountDeleted() async {
+    await logEvent('account_deleted');
+  }
+
+  /// Track opening the in-app feedback surface.
+  Future<void> logFeedbackOpened() async {
+    await logEvent('feedback_opened');
+  }
+
+  // ===========================================================================
+  // Light Profile Events
+  // ===========================================================================
+
+  /// Track opening the light profile editor.
+  Future<void> logLightProfileOpened(String profile) async {
+    await logEvent('light_profile_opened', {'profile': profile});
+  }
+
+  /// Track successfully saving the light profile editor.
+  Future<void> logLightProfileSaved(String profile) async {
+    await logEvent('light_profile_saved', {'profile': profile});
+  }
+
+  /// Track a failed save attempt in the light profile editor.
+  Future<void> logLightProfileSaveFailed(
+    String profile, {
+    required String stage,
+  }) async {
+    await logEvent('light_profile_save_failed', {
+      'profile': profile,
+      'stage': stage,
+    });
+  }
+
+  /// Track resetting a profile back to defaults.
+  Future<void> logLightProfileReset(String profile) async {
+    await logEvent('light_profile_reset', {'profile': profile});
+  }
+
+  /// Track preview/apply actions in the time simulator.
+  Future<void> logLightProfilePreviewAction({
+    required String profile,
+    required String action,
+    double? offsetMinutes,
+  }) async {
+    await logEvent('light_profile_preview_action', {
+      'profile': profile,
+      'action': action,
+      if (offsetMinutes != null) 'offset_minutes': offsetMinutes,
+    });
+  }
+
+  /// Track opening the advanced color editor.
+  Future<void> logLightProfileAdvancedColorEditorOpened(String profile) async {
+    await logEvent('light_profile_advanced_color_editor_opened', {
+      'profile': profile,
+    });
+  }
+
+  /// Track changes to per-room profile defaults.
+  Future<void> logLightProfileRoomDefaultChanged({
+    required String profile,
+    required bool cleared,
+  }) async {
+    await logEvent('light_profile_room_default_changed', {
+      'profile': profile,
+      'cleared': cleared ? 1 : 0,
+    });
+  }
+
+  // ===========================================================================
+  // Hub Recovery Events
+  // ===========================================================================
+
+  /// Track actions taken from the hub recovery banner.
+  Future<void> logHubRecoveryAction({
+    required String action,
+    required int disconnectedCount,
+  }) async {
+    await logEvent('hub_recovery_action', {
+      'action': action,
+      'disconnected_count': disconnectedCount,
+    });
+  }
+
+  // ===========================================================================
+  // Device Review Events
+  // ===========================================================================
+
+  /// Track loading the device review queue.
+  Future<void> logTriageViewed({
+    required int entryCount,
+    required int deviceCount,
+    required int roomCount,
+  }) async {
+    await logEvent('device_review_loaded', {
+      'entry_count': entryCount,
+      'device_count': deviceCount,
+      'room_count': roomCount,
+    });
+  }
+
+  /// Track switching device review filters.
+  Future<void> logTriageFilterChanged(String filter) async {
+    await logEvent('device_review_filter_changed', {'filter': filter});
+  }
+
+  /// Track a device review resolution action.
+  Future<void> logTriageResolution({
+    required String kind,
+    required String action,
+    bool? hasTarget,
+  }) async {
+    await logEvent('device_review_resolution', {
+      'kind': kind,
+      'action': action,
+      if (hasTarget != null) 'has_target': hasTarget ? 1 : 0,
+    });
+  }
+
+  // ===========================================================================
+  // Power Usage Events
+  // ===========================================================================
+
+  /// Track viewing the power usage screen with calculated data.
+  Future<void> logPowerUsageViewed({
+    required int roomCount,
+    required int lightCount,
+  }) async {
+    await logEvent('power_usage_viewed', {
+      'room_count': roomCount,
+      'light_count': lightCount,
+    });
+  }
+
+  /// Track power-save toggles from the power usage screen.
+  Future<void> logPowerSaveToggled({
+    required bool enabled,
+    required String source,
+  }) async {
+    await logEvent('power_save_toggled', {
+      'enabled': enabled ? 1 : 0,
+      'source': source,
+    });
+  }
+
+  // ===========================================================================
+  // Location Events
+  // ===========================================================================
+
+  /// Track successful manual location updates.
+  Future<void> logLocationUpdated({required bool hasPlaceName}) async {
+    await logEvent('location_updated', {
+      'has_place_name': hasPlaceName ? 1 : 0,
+    });
   }
 
   // ===========================================================================

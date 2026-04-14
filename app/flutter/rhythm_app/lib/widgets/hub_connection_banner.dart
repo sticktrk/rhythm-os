@@ -5,6 +5,7 @@ import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnectionState;
 import '../providers/home_provider.dart';
 import '../providers/server_sync_provider.dart';
+import '../services/analytics_service.dart';
 import '../screens/hubs/rhythmserver_settings_screen.dart';
 
 /// Compact banner shown when the server is connected but one or more
@@ -123,7 +124,7 @@ class _HubConnectionBannerState extends State<HubConnectionBanner>
               Expanded(
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
-                  onTap: _openServerSettings,
+                  onTap: () => _openServerSettings(count),
                   child: Row(
                     children: [
                       // Pulsing amber dot
@@ -187,7 +188,7 @@ class _HubConnectionBannerState extends State<HubConnectionBanner>
               const SizedBox(width: 10),
               _RetryButton(
                 retrying: retrying,
-                onPressed: retrying ? null : _retryHubs,
+                onPressed: retrying ? null : () => _retryHubs(count),
               ),
             ],
           ),
@@ -196,18 +197,26 @@ class _HubConnectionBannerState extends State<HubConnectionBanner>
     );
   }
 
-  void _openServerSettings() {
+  void _openServerSettings(int disconnectedCount) {
     HapticFeedback.lightImpact();
     final homeProvider = context.read<HomeProvider>();
     final serverHub = homeProvider.getFirstHubOfType(HubType.server);
     if (serverHub != null) {
       RhythmServerSettingsScreen.show(context, hub: serverHub);
+      AnalyticsService().logHubRecoveryAction(
+        action: 'open_settings',
+        disconnectedCount: disconnectedCount,
+      );
     }
   }
 
-  Future<void> _retryHubs() async {
+  Future<void> _retryHubs(int disconnectedCount) async {
     HapticFeedback.selectionClick();
     await context.read<ServerSyncProvider>().fullRefresh();
+    AnalyticsService().logHubRecoveryAction(
+      action: 'retry',
+      disconnectedCount: disconnectedCount,
+    );
   }
 
   static String _hubLabel(String type) => switch (type) {

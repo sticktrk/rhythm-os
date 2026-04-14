@@ -7,6 +7,7 @@ import '../../../onboarding/providers/onboarding_provider.dart';
 import '../../../onboarding/providers/auth_provider.dart' as onboarding;
 import '../../../onboarding/widgets/onboarding_orbit.dart';
 import '../../../services/app_state_refresh.dart';
+import '../../../services/analytics_service.dart';
 
 /// Full-screen sign-in modal.
 class SignInModal {
@@ -14,6 +15,7 @@ class SignInModal {
   static void show(BuildContext context) {
     // Guard: don't show modal when auxiliary sign-in is disabled
     if (!FeatureFlags.auxSignIn) return;
+    AnalyticsService().logScreenView('sign_in');
 
     Navigator.of(context).push(
       PageRouteBuilder(
@@ -34,7 +36,8 @@ class SignInModal {
                       children: [
                         // Modal header with close button
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 12),
                           child: Row(
                             children: [
                               // Close button
@@ -45,9 +48,11 @@ class SignInModal {
                                   height: 40,
                                   decoration: BoxDecoration(
                                     shape: BoxShape.circle,
-                                    color: CelestialColors.accentBlue.withValues(alpha: 0.15),
+                                    color: CelestialColors.accentBlue
+                                        .withValues(alpha: 0.15),
                                     border: Border.all(
-                                      color: CelestialColors.accentBlue.withValues(alpha: 0.3),
+                                      color: CelestialColors.accentBlue
+                                          .withValues(alpha: 0.3),
                                       width: 1,
                                     ),
                                   ),
@@ -83,7 +88,8 @@ class SignInModal {
                                 await AppStateRefresh.sync(context);
 
                                 if (context.mounted) {
-                                  Navigator.of(context).popUntil((route) => route.isFirst);
+                                  Navigator.of(context)
+                                      .popUntil((route) => route.isFirst);
                                 }
                               }
                             },

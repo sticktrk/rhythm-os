@@ -16,6 +16,7 @@ import '../providers/home_provider.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmRoom, RoomModeState;
+import '../services/analytics_service.dart';
 import '../services/settings_service.dart';
 
 // =============================================================================
@@ -74,6 +75,7 @@ class PowerUsageScreen extends StatefulWidget {
   const PowerUsageScreen({super.key});
 
   static Future<void> show(BuildContext context) {
+    AnalyticsService().logScreenView('power_usage');
     return Navigator.of(context).push(
       PageRouteBuilder(
         opaque: false,
@@ -135,6 +137,7 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
   }
 
   Future<void> _loadData() async {
+    final shouldTrackView = _data == null;
     setState(() {
       _loading = true;
       _error = null;
@@ -220,6 +223,12 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
           _data = data;
           _loading = false;
         });
+      }
+      if (shouldTrackView) {
+        AnalyticsService().logPowerUsageViewed(
+          roomCount: data.rooms.length,
+          lightCount: data.totalLights,
+        );
       }
     } catch (e) {
       if (mounted) {
@@ -326,6 +335,10 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
   void _onPowerSaveChanged(bool value) {
     setState(() => _powerSave = value);
     context.read<ServerSyncProvider>().api.settingsSet(powerSave: value);
+    AnalyticsService().logPowerSaveToggled(
+      enabled: value,
+      source: 'power_usage',
+    );
   }
 
   @override
