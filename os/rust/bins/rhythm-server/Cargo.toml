@@ -27,7 +27,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 
-tower = { workspace = true }
+tower = { workspace = true, features = ["util"] }
 
 # Server-specific
 clap = { workspace = true }
@@ -36,6 +36,9 @@ anyhow = { workspace = true }
 
 # HTTP client (for self-update)
 reqwest = { workspace = true }
+flate2 = "1.0"
+sha2 = "0.10"
+tar = "0.4"
 
 # Logging
 log = "0.4"
@@ -46,4 +49,3 @@ libc = "0.2"
 
 # mDNS (for discover endpoint)
 mdns-sd = { workspace = true }
-

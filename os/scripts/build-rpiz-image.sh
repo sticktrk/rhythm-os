@@ -255,6 +255,10 @@ fi
 EXTERNAL_DIR="$PROJECT_ROOT/install/rpiz/buildroot"
 
 make -C "$BUILDROOT_DIR" BR2_EXTERNAL="$EXTERNAL_DIR" O="$OUTPUT_DIR" rhythm_rpiz_defconfig
+# The prebuilt server comes from dist/bin/rpiz via a local-site package. Force
+# that package to refresh each run so Buildroot does not reuse a stale unpacked
+# copy when the host-side binary changes between image builds.
+make -C "$BUILDROOT_DIR" BR2_EXTERNAL="$EXTERNAL_DIR" O="$OUTPUT_DIR" rhythm-prebuilt-dirclean
 make -C "$BUILDROOT_DIR" BR2_EXTERNAL="$EXTERNAL_DIR" O="$OUTPUT_DIR"
 
 echo ""

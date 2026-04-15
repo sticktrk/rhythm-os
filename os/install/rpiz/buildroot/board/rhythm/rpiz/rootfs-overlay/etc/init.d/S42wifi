@@ -3,6 +3,16 @@
 WPA_CONF=/etc/wpa_supplicant.conf
 WPA_PIDFILE=/var/run/wpa_supplicant.wlan0.pid
 DHCP_PIDFILE=/var/run/udhcpc.wlan0.pid
+LOGFILE=/var/log/wifi.log
+
+log() {
+    local msg="wifi: $*"
+    mkdir -p "$(dirname "$LOGFILE")"
+    printf '%s\n' "$msg" >> "$LOGFILE"
+    if [ -w /dev/console ]; then
+        printf '%s\n' "$msg" > /dev/console
+    fi
+}
 
 has_wifi_config() {
     [ -s "$WPA_CONF" ] && grep -q '^network={[[:space:]]*$' "$WPA_CONF"
@@ -12,24 +22,72 @@ pid_is_running() {
     [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null
 }
 
+status_field() {
+    /usr/sbin/wpa_cli -i wlan0 status 2>/dev/null | sed -n "s/^$1=//p" | head -n 1
+}
+
 start() {
-    has_wifi_config || return 0
+    if ! has_wifi_config; then
+        log "no embedded credentials; skipping wlan0 bring-up"
+        return 0
+    fi
+
+    log "starting wlan0"
 
     modprobe cfg80211 2>/dev/null || true
     modprobe brcmutil 2>/dev/null || true
     modprobe brcmfmac 2>/dev/null || true
     sleep 2
 
-    [ -d /sys/class/net/wlan0 ] || return 0
+    if [ ! -d /sys/class/net/wlan0 ]; then
+        log "wlan0 did not appear after brcmfmac load"
+        return 0
+    fi
 
     ifconfig wlan0 up 2>/dev/null || true
 
     if ! pid_is_running "$WPA_PIDFILE"; then
-        /usr/sbin/wpa_supplicant -B -i wlan0 -c "$WPA_CONF" -P "$WPA_PIDFILE"
+        if /usr/sbin/wpa_supplicant -B -i wlan0 -c "$WPA_CONF" -P "$WPA_PIDFILE"; then
+            log "wpa_supplicant started"
+        else
+            log "wpa_supplicant failed to start"
+            return 0
+        fi
     fi
 
     if ! pid_is_running "$DHCP_PIDFILE"; then
-        udhcpc -b -i wlan0 -p "$DHCP_PIDFILE" >/dev/null 2>&1 || true
+        if udhcpc -b -i wlan0 -p "$DHCP_PIDFILE" >/dev/null 2>&1; then
+            log "udhcpc started"
+        else
+            log "udhcpc failed to start"
+        fi
+    fi
+
+    attempt=1
+    while [ "$attempt" -le 8 ]; do
+        state="$(status_field wpa_state)"
+        ssid="$(status_field ssid)"
+        ip_addr="$(status_field ip_address)"
+
+        if [ -n "$ip_addr" ]; then
+            if [ -n "$ssid" ]; then
+                log "connected to '$ssid' with IP $ip_addr"
+            else
+                log "connected with IP $ip_addr"
+            fi
+            return 0
+        fi
+
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+
+    state="$(status_field wpa_state)"
+    ssid="$(status_field ssid)"
+    if [ -n "$ssid" ]; then
+        log "no IP yet; state=${state:-unknown} ssid='$ssid'"
+    else
+        log "no IP yet; state=${state:-unknown}"
     fi
 }
 

@@ -1,5 +1,6 @@
 //! Axum HTTP server — uses shared routes from rhythm-os plus server-specific endpoints.
 
+use axum::http::StatusCode;
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -14,11 +15,39 @@ use tower_http::trace::TraceLayer;
 
 /// Create the Axum router with all API routes.
 pub fn create_router(state: SharedState) -> Router {
+    let ota_status = crate::self_update::OtaStatusHandle::new(env!("CARGO_PKG_VERSION"));
+
     rhythm_os::axum_router::api_routes()
         // Server-specific endpoints
         .route("/api/discover", get(discover))
-        .route("/api/ota/check", get(check_update))
-        .route("/api/ota/update", post(do_update))
+        .route(
+            "/api/ota/capabilities",
+            get({
+                let ota_status = ota_status.clone();
+                move || ota_capabilities(ota_status.clone())
+            }),
+        )
+        .route(
+            "/api/ota/status",
+            get({
+                let ota_status = ota_status.clone();
+                move || ota_status_snapshot(ota_status.clone())
+            }),
+        )
+        .route(
+            "/api/ota/check",
+            get({
+                let ota_status = ota_status.clone();
+                move || check_update(ota_status.clone())
+            }),
+        )
+        .route(
+            "/api/ota/update",
+            post({
+                let ota_status = ota_status.clone();
+                move || do_update(ota_status.clone())
+            }),
+        )
         .with_state(state)
         // CORS + trace at outer level so they cover fallback/404 responses too
         .layer(CorsLayer::permissive())
@@ -33,18 +62,39 @@ fn json_ok(body: String) -> Response {
     ApiResponse::json_ok(body).into_response()
 }
 
+fn json_status(status: StatusCode, body: serde_json::Value) -> Response {
+    (
+        status,
+        [("content-type", "application/json")],
+        body.to_string(),
+    )
+        .into_response()
+}
+
 fn err_500(e: impl std::fmt::Display) -> Response {
     ApiResponse::server_error(e).into_response()
+}
+
+fn err_409(message: impl Into<String>) -> Response {
+    json_status(
+        StatusCode::CONFLICT,
+        serde_json::json!({
+            "status": "error",
+            "message": message.into(),
+        }),
+    )
 }
 
 // ---------------------------------------------------------------------------
 // Server-specific handlers
 // ---------------------------------------------------------------------------
 
-async fn check_update() -> Response {
+async fn check_update(ota_status: crate::self_update::OtaStatusHandle) -> Response {
     let version = env!("CARGO_PKG_VERSION");
+    ota_status.mark_checking();
     match tokio::task::spawn_blocking(move || crate::self_update::check_blocking(version)).await {
         Ok(Ok(info)) => {
+            ota_status.record_check_result(&info);
             let json = serde_json::json!({
                 "current_version": info.current_version,
                 "latest_version": info.latest_version,
@@ -52,7 +102,27 @@ async fn check_update() -> Response {
             });
             json_ok(json.to_string())
         }
-        Ok(Err(e)) => err_500(e),
+        Ok(Err(e)) => {
+            ota_status.mark_error(e.clone());
+            err_500(e)
+        }
+        Err(e) => {
+            ota_status.mark_error(e.to_string());
+            err_500(e)
+        }
+    }
+}
+
+async fn ota_capabilities(ota_status: crate::self_update::OtaStatusHandle) -> Response {
+    match serde_json::to_value(ota_status.capabilities()) {
+        Ok(value) => json_status(StatusCode::OK, value),
+        Err(e) => err_500(e),
+    }
+}
+
+async fn ota_status_snapshot(ota_status: crate::self_update::OtaStatusHandle) -> Response {
+    match serde_json::to_value(ota_status.snapshot()) {
+        Ok(value) => json_status(StatusCode::OK, value),
         Err(e) => err_500(e),
     }
 }
@@ -140,8 +210,18 @@ fn scan_mdns() -> Vec<serde_json::Value> {
     devices
 }
 
-async fn do_update() -> Response {
+async fn do_update(ota_status: crate::self_update::OtaStatusHandle) -> Response {
+    let snapshot = ota_status.snapshot();
+    if matches!(
+        snapshot.state,
+        crate::self_update::OtaUpdateState::Updating
+            | crate::self_update::OtaUpdateState::Restarting
+    ) {
+        return err_409("Update already in progress");
+    }
+
     let version = env!("CARGO_PKG_VERSION");
+    ota_status.mark_checking();
 
     // Check for update
     let info = match tokio::task::spawn_blocking(move || {
@@ -150,9 +230,16 @@ async fn do_update() -> Response {
     .await
     {
         Ok(Ok(info)) => info,
-        Ok(Err(e)) => return err_500(e),
-        Err(e) => return err_500(e),
+        Ok(Err(e)) => {
+            ota_status.mark_error(e.clone());
+            return err_500(e);
+        }
+        Err(e) => {
+            ota_status.mark_error(e.to_string());
+            return err_500(e);
+        }
     };
+    ota_status.record_check_result(&info);
 
     if !info.update_available {
         return json_ok(r#"{"status":"ok","message":"Already up to date"}"#.to_string());
@@ -162,21 +249,42 @@ async fn do_update() -> Response {
         Some(url) => url,
         None => return err_500("No download URL for this platform"),
     };
+    let asset_name = match info.asset_name.clone() {
+        Some(name) => name,
+        None => return err_500("No release asset for this platform"),
+    };
+
+    if let Err(e) = ota_status.begin_update(&info.latest_version) {
+        return err_409(e);
+    }
 
     let latest = info.latest_version.clone();
     let previous = info.current_version.clone();
+    let checksum_url = info.checksum_url.clone();
+    let expected_sha256 = info.expected_sha256.clone();
 
     // Download and install
-    if let Err(e) =
-        match tokio::task::spawn_blocking(move || crate::self_update::apply_blocking(&download_url))
-            .await
-        {
-            Ok(result) => result,
-            Err(e) => Err(e.to_string()),
-        }
+    let apply_result = match tokio::task::spawn_blocking(move || {
+        crate::self_update::apply_blocking(
+            &download_url,
+            &asset_name,
+            expected_sha256.as_deref(),
+            checksum_url.as_deref(),
+        )
+    })
+    .await
     {
-        return err_500(e);
-    }
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => {
+            ota_status.mark_error(e.clone());
+            return err_500(e);
+        }
+        Err(e) => {
+            ota_status.mark_error(e.to_string());
+            return err_500(e);
+        }
+    };
+    ota_status.mark_restarting(&previous, &latest, apply_result.checksum_verified);
 
     // Exit non-zero after responding so the service manager restarts us
     tokio::spawn(async {
@@ -186,7 +294,13 @@ async fn do_update() -> Response {
     });
 
     json_ok(format!(
-        r#"{{"status":"ok","message":"Updated to v{}, restarting...","previous_version":"{}","new_version":"{}"}}"#,
-        latest, previous, latest
+        r#"{{"status":"ok","message":"Updated to v{}, restarting...","previous_version":"{}","new_version":"{}","checksum_verified":{}}}"#,
+        latest,
+        previous,
+        latest,
+        apply_result
+            .checksum_verified
+            .map(serde_json::Value::Bool)
+            .unwrap_or(serde_json::Value::Null)
     ))
 }

@@ -18,7 +18,7 @@
           "width_right_cct": 1.15,
           "shape_p": 6.0
         },
-        "min_brightness": 2,
+        "min_brightness": 20,
         "max_brightness": 100,
         "min_color_temp": 1800,
         "max_color_temp": 5500,

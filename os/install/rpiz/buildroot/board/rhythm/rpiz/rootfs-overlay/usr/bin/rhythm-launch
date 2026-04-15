@@ -7,6 +7,11 @@ DATA_DIR=/data
 
 mkdir -p "$(dirname "$LOGFILE")" "$DATA_DIR"
 
+printf 'rhythm-launch: system time %s\n' "$(date -Iseconds 2>/dev/null || date)" >>"$LOGFILE"
+if [ -w /dev/console ]; then
+    printf 'rhythm-launch: system time %s\n' "$(date -Iseconds 2>/dev/null || date)" > /dev/console
+fi
+
 export RHYTHM_PLATFORM_TYPE=embedded
 export RHYTHM_PLATFORM_CONTEXT=rpiz
 
