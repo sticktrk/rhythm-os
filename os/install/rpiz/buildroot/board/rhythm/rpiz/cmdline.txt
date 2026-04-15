@@ -1,1 +1,1 @@
-console=tty1 root=/dev/mmcblk0p2 rootwait modules-load=dwc2,g_ether
+console=tty1 root=/dev/mmcblk0p2 rootwait rw modules-load=dwc2,g_ether
