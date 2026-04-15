@@ -59,19 +59,29 @@ copy_real_if_present() {
     fi
 }
 
-# Buildroot's Raspberry Pi Wi-Fi package only provided the NVRAM text files.
-# Use linux-firmware for the actual 43430 blobs, then normalize the filenames
-# to the ones the Pi Zero W kernel requests at runtime.
-copy_real_if_present \
+copy_real_if_missing() {
+    src="$1"
+    dst="$2"
+
+    if [ -e "$src" ] && [ ! -e "$dst" ]; then
+        cp -L -f "$src" "$dst"
+    fi
+}
+
+# Prefer the Raspberry Pi-specific brcmfmac blobs if they were already staged
+# by brcmfmac_sdio-firmware-rpi. Only fall back to the Cypress/linux-firmware
+# names when the generic 43430 blob names are absent, then normalize the final
+# filenames to the ones the Pi Zero W kernel requests at runtime.
+copy_real_if_missing \
     "${CYPRESS_FIRMWARE_DIR}/cyfmac43430-sdio.bin" \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.bin"
-copy_real_if_present \
+copy_real_if_missing \
     "${CYPRESS_FIRMWARE_DIR}/cyfmac43430-sdio.clm_blob" \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.clm_blob"
-copy_real_if_present \
+copy_real_if_missing \
     "${FIRMWARE_DIR}/brcmfmac43430a0-sdio.bin" \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.bin"
-copy_real_if_present \
+copy_real_if_missing \
     "${FIRMWARE_DIR}/brcmfmac43430a0-sdio.bin" \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.raspberrypi,model-zero-w.bin"
 
