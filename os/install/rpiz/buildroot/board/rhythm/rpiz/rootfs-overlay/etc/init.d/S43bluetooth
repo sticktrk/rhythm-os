@@ -1,0 +1,48 @@
+#!/bin/sh
+
+LOGFILE=/var/log/bluetooth.log
+
+log() {
+    local msg="bluetooth: $*"
+    mkdir -p "$(dirname "$LOGFILE")"
+    printf '%s\n' "$msg" >> "$LOGFILE"
+    if [ -w /dev/console ]; then
+        printf '%s\n' "$msg" > /dev/console
+    fi
+}
+
+log_kernel_excerpt() {
+    local lines
+
+    lines="$(dmesg 2>/dev/null | grep -E 'Bluetooth:|hci0:|BCM43430|btuart|hci_uart' | tail -n 20 || true)"
+    if [ -n "$lines" ]; then
+        printf '%s\n' "$lines" | while IFS= read -r line; do
+            log "kernel: $line"
+        done
+    fi
+}
+
+start() {
+    log "loading bluetooth modules"
+    modprobe bluetooth 2>/dev/null || true
+    modprobe hci_uart 2>/dev/null || true
+    sleep 2
+    log_kernel_excerpt
+}
+
+stop() {
+    :
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop
+        start
+        ;;
+esac

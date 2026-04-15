@@ -33,20 +33,24 @@ fn matter_data_path(state: &SharedState) -> Result<String> {
 
 /// Get the shared transport from the hub's MatterHubData.
 fn get_transport(state: &SharedState) -> Result<Arc<MatcTransport>> {
-    let hub_key = HubKey::new(HubType::new("matter"), "local");
-    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    let hub = s
-        .hubs
-        .get(&hub_key)
-        .ok_or_else(|| anyhow::anyhow!("Matter hub not connected"))?;
-    let hub_data = hub
-        .data::<Arc<MatterHubData>>()
-        .ok_or_else(|| anyhow::anyhow!("Matter hub data missing"))?;
+    let hub_data = get_hub_data(state)?;
     hub_data
         .transport
         .get()
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("Matter transport not initialized"))
+}
+
+/// Get the shared Matter hub data from the connected local hub.
+fn get_hub_data(state: &SharedState) -> Result<Arc<MatterHubData>> {
+    let hub_key = HubKey::new(HubType::new("matter"), "local");
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    s.hubs
+        .get(&hub_key)
+        .ok_or_else(|| anyhow::anyhow!("Matter hub not connected"))?
+        .data::<Arc<MatterHubData>>()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Matter hub data missing"))
 }
 
 /// Connect to the local Matter fabric and store the hub in state.
@@ -82,16 +86,7 @@ pub fn connect_and_start(state: SharedState, _key: &HubKey) -> Result<Receiver<H
 /// DeviceManager (which would conflict on port 5555).
 pub fn create_controller(state: &SharedState, _key: &HubKey) -> Result<Arc<dyn LightController>> {
     let transport = get_transport(state)?;
-
-    let hub_data = {
-        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        let key = HubKey::new(HubType::new("matter"), "local");
-        s.hubs
-            .get(&key)
-            .and_then(|h| h.data::<Arc<MatterHubData>>())
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Matter hub not connected"))?
-    };
+    let hub_data = get_hub_data(state)?;
 
     Ok(Arc::new(MatterLightController::new(transport, hub_data)))
 }
@@ -331,142 +326,13 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
         state: &SharedState,
         params: &serde_json::Value,
     ) -> Result<PairingSession> {
-        use rhythm_core::runtime::hub_registry::DeviceType;
-        use rhythm_os::canonical::identity::HardwareId;
-        use rhythm_os::pairing::{PairedDeviceInfo, PairingStatus};
+        let request = crate::commissioning::MatterPairingParams::from_value(params)?;
+        crate::commissioning::ensure_matter_hub_connected(state)?;
 
-        let setup_code = params
-            .get("setup_code")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'setup_code' in pairing params"))?;
+        let transport = get_transport(state)?;
+        let hub_data = get_hub_data(state)?;
 
-        // Ensure the Matter hub is connected before commissioning.
-        // If not already connected, store credentials and connect so the
-        // device registry and capabilities are available after pairing.
-        {
-            let hub_key = HubKey::new(HubType::new("matter"), "local");
-            let already_connected = state
-                .lock()
-                .map(|s| s.hubs.contains_key(&hub_key))
-                .unwrap_or(false);
-            if !already_connected {
-                info!(target: "pair", "Matter hub not connected, auto-bootstrapping...");
-                let credentials = serde_json::json!({ "fabric_id": "default" });
-                rhythm_os::commands::do_hub_credentials(state, "matter", "local", &credentials)?;
-            }
-        }
-
-        // Get the shared transport and derive next node ID from commissioned devices.
-        // Using the shared transport avoids creating a second DeviceManager that
-        // would conflict on port 5555.
-        let (transport, next_node_id) = {
-            let hub_key = HubKey::new(HubType::new("matter"), "local");
-            let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-            if let Some(hub) = s.hubs.get(&hub_key) {
-                if let Some(hub_data) = hub.data::<Arc<MatterHubData>>() {
-                    let tr = hub_data
-                        .transport
-                        .get()
-                        .cloned()
-                        .ok_or_else(|| anyhow::anyhow!("Matter transport not initialized"))?;
-                    let max = hub_data
-                        .commissioned
-                        .lock()
-                        .map(|c| c.iter().map(|d| d.node_id).max().unwrap_or(99))
-                        .unwrap_or(99);
-                    (tr, max + 1)
-                } else {
-                    return Err(anyhow::anyhow!("Matter hub data missing"));
-                }
-            } else {
-                return Err(anyhow::anyhow!("Matter hub not connected"));
-            }
-        };
-
-        // Commission using the shared transport's drop-and-recreate flow.
-        // This temporarily drops the existing DM to free port 5555, commissions
-        // on a dedicated thread, then reloads the DM.
-        match transport.commission_device(setup_code, next_node_id) {
-            Ok(device) => {
-                let device_id =
-                    crate::lifecycle::format_device_id(device.node_id, device.light_endpoint);
-                let device_name = format!("{} {}", device.vendor_name, device.product_name);
-
-                info!(target: "sys", "Matter: paired {} (node {}, id={})",
-                    device_name, device.node_id, device_id);
-
-                // Store device capabilities from commissioning data.
-                // No room is created here — the user assigns Matter devices
-                // to rooms via the app's topology system.
-                let hub_key = HubKey::new(HubType::new("matter"), "local");
-
-                // Store device capabilities from commissioning data
-                {
-                    let mut caps = crate::capabilities::capabilities_from_commissioned(&device);
-                    crate::capabilities::enrich_from_db(
-                        &mut caps,
-                        &device,
-                        rhythm_devices::builtin_db(),
-                    );
-                    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-                    if let Some(hub) = s.hubs.get(&hub_key) {
-                        if let Some(hub_data) = hub.data::<Arc<MatterHubData>>() {
-                            if let Ok(mut dc) = hub_data.device_caps.lock() {
-                                dc.insert(device_id.clone(), caps);
-                                info!(target: "sys",
-                                    "Matter: stored caps for {} ({} devices tracked)",
-                                    device_id, dc.len()
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Register canonical device for cross-hub dedup
-                {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-
-                    let identity = rhythm_os::canonical::identity::DiscoveredIdentity {
-                        native_id: device_id.clone(),
-                        room_id: device_id.clone(),
-                        room_name: device_name.clone(),
-                        name: device_name.clone(),
-                        device_type: DeviceType::Light,
-                        hardware_ids: vec![HardwareId::matter(&device.node_id.to_string())],
-                        manufacturer: Some(device.vendor_name.clone()),
-                        model: Some(device.product_name.clone()),
-                    };
-
-                    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-                    s.canonical_registry.resolve(&identity, &hub_key, now);
-                }
-
-                Ok(PairingSession {
-                    hub_type: "matter".to_string(),
-                    status: PairingStatus::Complete,
-                    device: Some(PairedDeviceInfo {
-                        device_id,
-                        name: device_name,
-                        device_type: DeviceType::Light,
-                        manufacturer: Some(device.vendor_name),
-                        model: Some(device.product_name),
-                    }),
-                    error: None,
-                })
-            }
-            Err(e) => {
-                log::error!(target: "pair", "Matter commissioning error: {:#}", e);
-                Ok(PairingSession {
-                    hub_type: "matter".to_string(),
-                    status: PairingStatus::Failed,
-                    device: None,
-                    error: Some(format!("{:#}", e)),
-                })
-            }
-        }
+        crate::commissioning::pair_device(state, transport, hub_data, &request)
     }
 
     fn start_unpairing(

@@ -9,7 +9,7 @@ use rhythm_os::hub::HubEvent;
 use crate::controller::MatterDeviceRegistry;
 #[cfg(feature = "desktop")]
 use crate::desktop_transport::MatcTransport;
-use crate::transport::MatterDeviceInfo;
+use crate::transport::{CommissionedDevice, MatterDeviceInfo};
 
 /// Matter-specific state stored in `ActiveHub::hub_data`.
 ///
@@ -36,6 +36,32 @@ pub struct MatterHubData {
 }
 
 impl MatterHubData {
+    /// Allocate the next local node ID for a new commission.
+    pub fn next_node_id(&self) -> u64 {
+        self.commissioned
+            .lock()
+            .map(|c| c.iter().map(|d| d.node_id).max().unwrap_or(99) + 1)
+            .unwrap_or(100)
+    }
+
+    /// Upsert a newly commissioned device into the in-memory fabric cache.
+    pub fn record_commissioned_device(&self, device: &CommissionedDevice) {
+        let info = MatterDeviceInfo {
+            node_id: device.node_id,
+            vendor_name: device.vendor_name.clone(),
+            product_name: device.product_name.clone(),
+            reachable: true,
+        };
+
+        if let Ok(mut list) = self.commissioned.lock() {
+            if let Some(existing) = list.iter_mut().find(|d| d.node_id == device.node_id) {
+                *existing = info;
+            } else {
+                list.push(info);
+            }
+        }
+    }
+
     /// Remove a device from the commissioned list and capabilities cache.
     ///
     /// Called during decommission — protocol + integration-specific cleanup.
@@ -49,5 +75,69 @@ impl MatterHubData {
         if let Ok(mut caps) = self.device_caps.lock() {
             caps.retain(|k, _| k != &prefix && !k.starts_with(&format!("{}-", prefix)));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn commissioned_device(
+        node_id: u64,
+        vendor_name: &str,
+        product_name: &str,
+    ) -> CommissionedDevice {
+        CommissionedDevice {
+            node_id,
+            vendor_name: vendor_name.to_string(),
+            product_name: product_name.to_string(),
+            vendor_id: 1,
+            product_id: 2,
+            serial_number: None,
+            light_endpoint: 1,
+            color_modes: Vec::new(),
+            min_kelvin: None,
+            max_kelvin: None,
+        }
+    }
+
+    fn hub_data() -> MatterHubData {
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        MatterHubData {
+            #[cfg(feature = "desktop")]
+            transport: std::sync::OnceLock::new(),
+            registry: Arc::new(Mutex::new(MatterDeviceRegistry::new())),
+            fabric_id: "default".to_string(),
+            commissioned: Mutex::new(Vec::new()),
+            device_caps: Mutex::new(HashMap::new()),
+            event_tx,
+        }
+    }
+
+    #[test]
+    fn next_node_id_defaults_to_100() {
+        let hub_data = hub_data();
+        assert_eq!(hub_data.next_node_id(), 100);
+    }
+
+    #[test]
+    fn record_commissioned_device_updates_cache() {
+        let hub_data = hub_data();
+
+        hub_data.record_commissioned_device(&commissioned_device(100, "Vendor", "Lamp"));
+        hub_data.record_commissioned_device(&commissioned_device(101, "Vendor", "Lamp 2"));
+
+        let commissioned = hub_data.commissioned.lock().unwrap();
+        assert_eq!(commissioned.len(), 2);
+        assert_eq!(commissioned[0].node_id, 100);
+        assert_eq!(commissioned[1].node_id, 101);
+        drop(commissioned);
+
+        hub_data.record_commissioned_device(&commissioned_device(100, "Updated", "Lamp"));
+
+        let commissioned = hub_data.commissioned.lock().unwrap();
+        assert_eq!(commissioned.len(), 2);
+        assert_eq!(commissioned[0].vendor_name, "Updated");
+        assert_eq!(hub_data.next_node_id(), 102);
     }
 }

@@ -7,6 +7,33 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+/// Matter network type for commissioning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatterCommissioningNetwork {
+    /// Matter-over-WiFi.
+    Wifi,
+}
+
+/// Rendezvous method used during commissioning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatterCommissioningRendezvous {
+    /// The device is already IP-reachable and advertises `_matterc._udp.local`.
+    OnNetwork,
+}
+
+/// Shared commissioning request built by the orchestrator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatterCommissionRequest {
+    /// Manual pairing code used for PASE.
+    pub setup_code: String,
+    /// Matter node ID to assign on our fabric.
+    pub node_id: u64,
+    /// Matter network type being commissioned.
+    pub network: MatterCommissioningNetwork,
+    /// Rendezvous method used to reach the device.
+    pub rendezvous: MatterCommissioningRendezvous,
+}
+
 /// Platform-agnostic interface to a Matter controller/commissioner.
 ///
 /// Implementors provide the actual Matter stack. On desktop this uses
@@ -17,6 +44,18 @@ pub trait MatterTransport: Send + Sync {
     /// Performs the full PASE → CASE commissioning flow and adds the device
     /// to the local Matter fabric.
     fn commission(&self, setup_code: &str) -> Result<CommissionedDevice>;
+
+    /// Commission a device using an orchestrator-built request.
+    ///
+    /// The default implementation preserves the old trait contract and only
+    /// supports on-network Wi-Fi commissioning.
+    fn commission_request(&self, request: &MatterCommissionRequest) -> Result<CommissionedDevice> {
+        match (request.network, request.rendezvous) {
+            (MatterCommissioningNetwork::Wifi, MatterCommissioningRendezvous::OnNetwork) => {
+                self.commission(&request.setup_code)
+            }
+        }
+    }
 
     /// Send a cluster command to a specific device endpoint.
     ///

@@ -23,7 +23,8 @@ use log::{debug, info};
 use matc::tlv::TlvItemValue;
 
 use crate::transport::{
-    CommissionedDevice, MatterColorMode, MatterDeviceInfo, MatterTransport, SubscribeSpec,
+    CommissionedDevice, MatterColorMode, MatterCommissionRequest, MatterCommissioningNetwork,
+    MatterCommissioningRendezvous, MatterDeviceInfo, MatterTransport, SubscribeSpec,
 };
 
 // ============================================================================
@@ -226,6 +227,14 @@ impl MatterTransport for MatcTransport {
         Err(anyhow::anyhow!(
             "Use MatcTransport::commission_device() instead"
         ))
+    }
+
+    fn commission_request(&self, request: &MatterCommissionRequest) -> Result<CommissionedDevice> {
+        match (request.network, request.rendezvous) {
+            (MatterCommissioningNetwork::Wifi, MatterCommissioningRendezvous::OnNetwork) => {
+                self.commission_device(&request.setup_code, request.node_id)
+            }
+        }
     }
 
     fn send_cluster_cmd(

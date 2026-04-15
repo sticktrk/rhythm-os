@@ -11,6 +11,7 @@
 
 pub mod capabilities;
 pub mod clusters;
+pub mod commissioning;
 pub mod controller;
 pub mod discovery;
 pub mod events;
