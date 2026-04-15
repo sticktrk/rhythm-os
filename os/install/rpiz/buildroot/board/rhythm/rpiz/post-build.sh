@@ -2,12 +2,14 @@
 
 set -eu
 
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 TARGET_DIR="$1"
 WPA_CONF="${TARGET_DIR}/etc/wpa_supplicant.conf"
 WIFI_SSID="${RHYTHM_WIFI_SSID:-}"
 WIFI_PSK="${RHYTHM_WIFI_PSK:-}"
 WIFI_COUNTRY="${RHYTHM_WIFI_COUNTRY:-US}"
 WIFI_COUNTRY="$(printf '%s' "$WIFI_COUNTRY" | tr '[:lower:]' '[:upper:]')"
+BOARD_FIRMWARE_DIR="${SCRIPT_DIR}/firmware"
 FIRMWARE_ROOT_DIR="${TARGET_DIR}/lib/firmware"
 FIRMWARE_DIR="${TARGET_DIR}/lib/firmware/brcm"
 CYPRESS_FIRMWARE_DIR="${TARGET_DIR}/lib/firmware/cypress"
@@ -84,9 +86,15 @@ copy_real_if_present \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.raspberrypi,model-zero-w.txt"
 copy_real_if_present \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.raspberrypi,3-model-b.txt" \
+    "${FIRMWARE_DIR}/brcmfmac43430-sdio.raspberrypi,model-zero-w.txt"
+# Prefer a known-good Zero W board file over the Pi 3 Model B fallback. The
+# wrong board NVRAM file can leave the SDIO chip present but unable to switch
+# into HT clock mode, which shows up as brcmf_sdio_htclk timeouts.
+copy_real_if_present \
+    "${BOARD_FIRMWARE_DIR}/brcmfmac43430-sdio.raspberrypi,model-zero-w.txt" \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.txt"
 copy_real_if_present \
-    "${FIRMWARE_DIR}/brcmfmac43430-sdio.raspberrypi,3-model-b.txt" \
+    "${BOARD_FIRMWARE_DIR}/brcmfmac43430-sdio.raspberrypi,model-zero-w.txt" \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.raspberrypi,model-zero-w.txt"
 
 # The Pi Zero W Bluetooth controller expects a Broadcom patch file at
