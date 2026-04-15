@@ -22,7 +22,17 @@ find_wifi_iface() {
         [ -e "$path" ] || continue
         iface="${path##*/}"
         [ "$iface" = "lo" ] && continue
+        case "$iface" in
+            wlan*|wl*)
+                printf '%s\n' "$iface"
+                return 0
+                ;;
+        esac
         if [ -d "$path/wireless" ]; then
+            printf '%s\n' "$iface"
+            return 0
+        fi
+        if [ -L "$path/phy80211" ]; then
             printf '%s\n' "$iface"
             return 0
         fi
@@ -70,6 +80,17 @@ log_firmware_inventory() {
     fi
 }
 
+log_net_inventory() {
+    local lines
+
+    lines="$(ifconfig -a 2>/dev/null || true)"
+    if [ -n "$lines" ]; then
+        printf '%s\n' "$lines" | while IFS= read -r line; do
+            log "ifconfig: $line"
+        done
+    fi
+}
+
 start() {
     local iface attempt state ssid ip_addr
 
@@ -86,7 +107,7 @@ start() {
 
     iface=""
     attempt=1
-    while [ "$attempt" -le 15 ]; do
+    while [ "$attempt" -le 30 ]; do
         iface="$(find_wifi_iface || true)"
         if [ -n "$iface" ]; then
             break
@@ -97,6 +118,7 @@ start() {
 
     if [ -z "$iface" ]; then
         log "no wireless interface appeared after brcmfmac load"
+        log_net_inventory
         log_firmware_inventory
         log_kernel_excerpt
         return 0

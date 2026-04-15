@@ -57,6 +57,9 @@ copy_if_present \
 copy_if_present \
     "${FIRMWARE_DIR}/brcmfmac43430a0-sdio.bin" \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.bin"
+copy_if_present \
+    "${FIRMWARE_DIR}/brcmfmac43430a0-sdio.bin" \
+    "${FIRMWARE_DIR}/brcmfmac43430-sdio.raspberrypi,model-zero-w.bin"
 
 copy_if_present \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.bin" \
@@ -67,6 +70,9 @@ copy_if_present \
 copy_if_present \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.txt" \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.raspberrypi,model-zero-w.txt"
+copy_if_present \
+    "${FIRMWARE_DIR}/brcmfmac43430-sdio.raspberrypi,3-model-b.txt" \
+    "${FIRMWARE_DIR}/brcmfmac43430-sdio.txt"
 copy_if_present \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.raspberrypi,3-model-b.txt" \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.raspberrypi,model-zero-w.txt"
