@@ -9,6 +9,7 @@ members = [
     "rust/integrations/rhythm-ha",
     "rust/integrations/rhythm-matter",
     "rust/bins/rhythm-server",
+    "rust/bins/rhythm-linux-embedded",
     "rust/bins/rhythm-addon",
 ]
 exclude = [

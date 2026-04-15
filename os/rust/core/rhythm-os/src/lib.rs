@@ -23,6 +23,7 @@ pub mod lifecycle;
 pub mod mdns;
 pub mod pairing;
 pub mod periodic;
+pub mod provisioning;
 pub mod registry;
 pub mod room_sync;
 pub mod routes;

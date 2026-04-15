@@ -1888,6 +1888,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhythm-linux-embedded"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "log",
+ "rhythm-os",
+ "rhythm-server",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rhythm-matter"
 version = "0.1.0"
 dependencies = [

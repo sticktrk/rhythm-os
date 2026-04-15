@@ -1,8 +1,8 @@
-//! Rhythm OS — macOS/Linux CLI server.
+//! Rhythm OS Linux embedded appliance runtime.
 //!
-//! Same API surface as the ESP32 firmware, running as a native process.
-//! Connects to Hue bridges, Home Assistant, and future hubs via the
-//! integration registry in `hub::INTEGRATIONS`.
+//! Reuses the native Linux/macOS server stack, but gives embedded-appliance
+//! targets like rpiz their own binary crate so board-specific provisioning,
+//! networking, and packaging concerns do not accumulate in `rhythm-server`.
 
 use std::sync::{Arc, Mutex};
 
@@ -25,16 +25,16 @@ impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
     }
 }
 
-/// Rhythm OS server for macOS/Linux.
+/// Rhythm OS Linux embedded appliance.
 #[derive(Parser, Debug)]
-#[command(name = "rhythm-server", version, about)]
+#[command(name = "rhythm-linux-embedded", version, about)]
 struct Args {
     /// HTTP server port.
     #[arg(short, long, default_value_t = 54448)]
     port: u16,
 
     /// Data directory for persistent storage.
-    #[arg(short, long, default_value = "~/.rhythm")]
+    #[arg(short, long, default_value = "/data")]
     data_dir: String,
 
     /// Log level (trace, debug, info, warn, error).
@@ -47,9 +47,9 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 fn main() -> Result<()> {
     let args = Args::parse();
     let platform_type =
-        std::env::var("RHYTHM_PLATFORM_TYPE").unwrap_or_else(|_| "desktop".to_string());
+        std::env::var("RHYTHM_PLATFORM_TYPE").unwrap_or_else(|_| "embedded".to_string());
     let platform_context =
-        std::env::var("RHYTHM_PLATFORM_CONTEXT").unwrap_or_else(|_| "server".to_string());
+        std::env::var("RHYTHM_PLATFORM_CONTEXT").unwrap_or_else(|_| "linux-embedded".to_string());
 
     // Init logging — always suppress noisy mdns-sd AAAA errors
     let base_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| args.log_level.clone());
@@ -61,16 +61,12 @@ fn main() -> Result<()> {
         )))
         .init();
 
-    info!(target: "sys", "Rhythm Server v{} starting...", VERSION);
+    info!(target: "sys", "Rhythm Linux Embedded v{} starting...", VERSION);
 
-    // Expand ~ in data dir
-    let data_dir = shellexpand(&args.data_dir);
-    std::fs::create_dir_all(&data_dir)?;
+    std::fs::create_dir_all(&args.data_dir)?;
 
-    // Create storage backend
-    let file_storage = FileStorage::new(&data_dir)?;
+    let file_storage = FileStorage::new(&args.data_dir)?;
 
-    // Build shared state
     let (event_tx, _) = tokio::sync::broadcast::channel(64);
     let state: SharedState = Arc::new(Mutex::new(AppState::default()));
     {
@@ -80,21 +76,17 @@ fn main() -> Result<()> {
         s.platform_type = Box::leak(platform_type.into_boxed_str());
         s.platform_context = Box::leak(platform_context.into_boxed_str());
         s.listen_port = Some(args.port);
-        s.data_dir = data_dir.clone();
+        s.data_dir = args.data_dir.clone();
         s.storage = Some(Box::new(file_storage));
 
-        // Load persisted state
         rhythm_os::storage::load_persisted_state(&mut s);
 
-        // Set integration-driven callbacks from the static registry
         let callbacks = rhythm_os::hub::integration_callbacks(hub::INTEGRATIONS);
         s.ensure_runtime_fn = Some(callbacks.ensure_runtime_fn);
         s.get_hub_provider_fn = Some(callbacks.get_hub_provider_fn);
         s.register_controller_fn = Some(callbacks.register_controller_fn);
         s.start_pairing_fn = Some(callbacks.start_pairing_fn);
         s.start_unpairing_fn = Some(callbacks.start_unpairing_fn);
-
-        // Credentials interceptor: delegates to integrations
         s.hub_credentials_interceptor = Some(rhythm_os::hub::combined_credentials_interceptor(
             hub::INTEGRATIONS,
         ));
@@ -148,9 +140,8 @@ fn main() -> Result<()> {
             .expect("Failed to spawn periodic-worker thread");
     }
 
-    info!(target: "sys", "Data directory: {}", data_dir);
+    info!(target: "sys", "Data directory: {}", args.data_dir);
 
-    // Spawn event loop on a dedicated std::thread (not tokio)
     {
         let event_state = state.clone();
         std::thread::Builder::new()
@@ -161,7 +152,6 @@ fn main() -> Result<()> {
             .expect("Failed to spawn event loop thread");
     }
 
-    // Spawn periodic updater on a dedicated std::thread
     {
         let periodic_state = state.clone();
         std::thread::Builder::new()
@@ -172,7 +162,6 @@ fn main() -> Result<()> {
             .expect("Failed to spawn periodic thread");
     }
 
-    // Start tokio runtime for the async HTTP server + mDNS
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
@@ -214,7 +203,6 @@ fn bootstrap_hubs(state: &SharedState) {
         return;
     }
 
-    // Refresh credentials before connecting (e.g., rotating tokens).
     for (key, hub_type_str) in &all_creds {
         if let Some(integration) = hub::find_integration(hub::INTEGRATIONS, hub_type_str) {
             integration.refresh_credentials(state, key);
@@ -285,7 +273,6 @@ fn bootstrap_hubs(state: &SharedState) {
 }
 
 async fn run_server(state: SharedState, port: u16) -> Result<()> {
-    // Start HTTP server
     let addr = format!("0.0.0.0:{}", port);
     info!(target: "sys", "Starting HTTP server on {}", addr);
 
@@ -298,26 +285,15 @@ async fn run_server(state: SharedState, port: u16) -> Result<()> {
                 addr, e
             )
         });
-    info!(target: "sys", "Rhythm Server listening on http://{}", addr);
+    info!(target: "sys", "Rhythm Linux Embedded listening on http://{}", addr);
 
-    // Register mDNS service for auto-discovery by clients
+    // Keep the existing server-style mDNS identity for now so the rpiz split
+    // does not also change discovery semantics.
     let _mdns = rhythm_os::mdns::register_mdns_service(port, "server", VERSION, "rhythm-server");
 
-    // Bootstrap configured hubs on a blocking background thread after the
-    // listener is up so clients can connect immediately during hub sync.
     spawn_hub_bootstrap(state.clone());
 
     axum::serve(listener, server).await?;
 
     Ok(())
-}
-
-/// Expand ~ to home directory.
-fn shellexpand(path: &str) -> String {
-    if path.starts_with("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{}{}", home, &path[1..]);
-        }
-    }
-    path.to_string()
 }

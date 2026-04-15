@@ -70,7 +70,7 @@ Build the Rust addon binary.
 
 ### build-server.sh
 
-Build the `rhythm-server` binary and package it into `dist/bin/...`.
+Build the native Rhythm OS binaries and package them into `dist/bin/...`.
 
 ```bash
 ./scripts/build-server.sh                              # Debug build, native target
@@ -89,6 +89,7 @@ Build the `rhythm-server` binary and package it into `dist/bin/...`.
 | `--run` | Run the native server after building |
 
 **Output:** `dist/bin/{target}/{rhythm-server,rhythm-cli}`
+For `rpiz`, the build comes from the `rhythm-linux-embedded` crate and writes both `dist/bin/rpiz/rhythm-linux-embedded` and the compatibility appliance binary `dist/bin/rpiz/rhythm-server`.
 
 ### build-rpiz-image.sh
 

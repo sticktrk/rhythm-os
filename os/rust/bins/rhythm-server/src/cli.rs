@@ -7,10 +7,10 @@
 //!   rhythm-cli status    Show service status
 //!   rhythm-cli update    Self-update from the configured OTA feed
 
-mod self_update;
 mod service_ctl;
 
 use clap::{Parser, Subcommand};
+use rhythm_server::self_update;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 

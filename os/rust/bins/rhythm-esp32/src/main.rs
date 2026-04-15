@@ -33,6 +33,7 @@ use log::{info, warn};
 
 use rhythm_os::event_loop::MotionTimerState;
 use rhythm_os::hub::HubEvent;
+use rhythm_os::provisioning::{ProvisioningConnectResult, WifiCredentials};
 use rhythm_os::state::{AppState, SharedState, WorkItem};
 
 /// Firmware version from Cargo.toml, used in mDNS, BLE, HTTP API, and OTA.
@@ -246,8 +247,8 @@ fn main() -> Result<()> {
         drop(wifi_modem); // WiFi thread will steal its own WifiModem
 
         // Channels: BLE → WiFi thread (credentials), WiFi thread → BLE (result)
-        let (cred_tx, cred_rx) = std::sync::mpsc::channel::<ble_prov::WifiCredentials>();
-        let (wifi_tx, wifi_rx) = std::sync::mpsc::channel::<ble_prov::WifiResult>();
+        let (cred_tx, cred_rx) = std::sync::mpsc::channel::<WifiCredentials>();
+        let (wifi_tx, wifi_rx) = std::sync::mpsc::channel::<ProvisioningConnectResult>();
 
         // Spawn WiFi provisioning thread
         let prov_sysloop = sysloop.clone();
@@ -278,7 +279,7 @@ fn main() -> Result<()> {
                                 .map(|info| format!("{}", info.ip))
                                 .unwrap_or_else(|_| "unknown".to_string());
 
-                            let _ = wifi_tx.send(ble_prov::WifiResult::Connected { ip });
+                            let _ = wifi_tx.send(ProvisioningConnectResult::Connected { ip });
 
                             // Drop the temporary WiFi — main thread will reconnect permanently
                             drop(wifi);
@@ -286,7 +287,7 @@ fn main() -> Result<()> {
                         }
                         Err(e) => {
                             warn!("WiFi thread: connection failed: {:?}", e);
-                            let _ = wifi_tx.send(ble_prov::WifiResult::Failed {
+                            let _ = wifi_tx.send(ProvisioningConnectResult::Failed {
                                 error: format!("{}", e),
                             });
                             // Loop to wait for retry credentials

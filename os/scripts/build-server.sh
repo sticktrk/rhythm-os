@@ -1,8 +1,8 @@
 #!/bin/bash
-# Build the rhythm-server binary
+# Build the Rhythm OS native binaries.
 #
 # Usage: ./scripts/build-server.sh [--release|--debug] [--target <target>] [--clean] [--run] [--data-dir <path>] [-- args...]
-# Output: dist/bin/{os}-{arch}/rhythm-server
+# Output: dist/bin/{target}/...
 
 set -e
 
@@ -74,7 +74,7 @@ while [[ $# -gt 0 ]]; do
             echo "  all-linux           All Linux musl targets, including rpiz"
             echo "  all                 All supported targets"
             echo ""
-            echo "Output: dist/bin/{os}-{arch}/rhythm-server"
+            echo "Output: dist/bin/{target}/..."
             echo ""
             echo "Examples:"
             echo "  $0 --run --data-dir /tmp/rhythm-dev"
@@ -212,11 +212,18 @@ build_for_target() {
     local target="$1"
     local rust_target
     local builder="cargo"
+    local package="rhythm-server"
+    local bins=(rhythm-server rhythm-cli)
     rust_target=$(get_rust_target "$target")
 
     if [ -z "$rust_target" ]; then
         echo "Unknown target: $target"
         exit 1
+    fi
+
+    if [ "$target" = "rpiz" ]; then
+        package="rhythm-linux-embedded"
+        bins=(rhythm-linux-embedded)
     fi
 
     echo "Building for $target ($rust_target)..."
@@ -237,14 +244,26 @@ build_for_target() {
         rustup target add "$rust_target"
     fi
 
-    "$builder" build $CARGO_FLAGS -p rhythm-server --target "$rust_target"
+    local cargo_bin_flags=()
+    local bin
+    for bin in "${bins[@]}"; do
+        cargo_bin_flags+=(--bin "$bin")
+    done
+
+    "$builder" build $CARGO_FLAGS -p "$package" --target "$rust_target" "${cargo_bin_flags[@]}"
 
     # Copy to dist
     local output_dir="$PROJECT_ROOT/dist/bin/$target"
     mkdir -p "$output_dir"
-    cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-server" "$output_dir/"
-    cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-cli" "$output_dir/"
-    echo "Output: dist/bin/$target/{rhythm-server,rhythm-cli}"
+    if [ "$target" = "rpiz" ]; then
+        cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-linux-embedded" "$output_dir/"
+        cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-linux-embedded" "$output_dir/rhythm-server"
+        echo "Output: dist/bin/$target/{rhythm-linux-embedded,rhythm-server}"
+    else
+        cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-server" "$output_dir/"
+        cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-cli" "$output_dir/"
+        echo "Output: dist/bin/$target/{rhythm-server,rhythm-cli}"
+    fi
 }
 
 build_native() {
@@ -282,8 +301,9 @@ build_native() {
 cd "$PROJECT_ROOT"
 
 if [ "$CLEAN" = true ]; then
-    echo "Cleaning rhythm-server..."
+    echo "Cleaning target artifacts..."
     cargo clean -p rhythm-server
+    cargo clean -p rhythm-linux-embedded
 fi
 
 MACOS_TARGETS="macos-arm64 macos-x86_64"

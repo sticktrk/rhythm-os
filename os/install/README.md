@@ -54,7 +54,7 @@ The server runs on port `54448` by default and advertises via mDNS.
 
 ## Raspberry Pi Zero appliance
 
-For a non-Raspberry-Pi-OS setup, use the `rpiz` target plus the Buildroot image scaffolding in [install/rpiz/README.md](rpiz/README.md). The image path is USB-first: it boots the prebuilt `rhythm-server` binary on a minimal Linux rootfs and brings up `usb0` at `192.168.7.2` so you can smoke-test the API over USB before worrying about Wi-Fi or LAN.
+For a non-Raspberry-Pi-OS setup, use the `rpiz` target plus the Buildroot image scaffolding in [install/rpiz/README.md](rpiz/README.md). The Rust appliance crate is now `rhythm-linux-embedded`; the image path remains USB-first and boots the packaged appliance binary on a minimal Linux rootfs while bringing up `usb0` at `192.168.7.2` so you can smoke-test the API over USB before worrying about Wi-Fi or LAN.
 
 ### Management
 

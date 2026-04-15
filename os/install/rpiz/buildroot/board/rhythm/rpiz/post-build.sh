@@ -62,8 +62,24 @@ copy_if_present \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.bin" \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.raspberrypi,model-zero-w.bin"
 copy_if_present \
+    "${FIRMWARE_DIR}/brcmfmac43430-sdio.clm_blob" \
+    "${FIRMWARE_DIR}/brcmfmac43430-sdio.raspberrypi,model-zero-w.clm_blob"
+copy_if_present \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.txt" \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.raspberrypi,model-zero-w.txt"
 copy_if_present \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.raspberrypi,3-model-b.txt" \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.raspberrypi,model-zero-w.txt"
+
+# The Pi Zero W Bluetooth controller expects a Broadcom patch file at
+# /lib/firmware/brcm/BCM43430A1.hcd. Normalize whatever variant the firmware
+# packages provided to that canonical filename.
+for src in \
+    "${FIRMWARE_DIR}"/BCM43430A1*.hcd \
+    "${FIRMWARE_DIR}"/BCM4343*.hcd \
+    "${TARGET_DIR}"/lib/firmware/synaptics/*.hcd
+do
+    [ -f "$src" ] || continue
+    copy_if_present "$src" "${FIRMWARE_DIR}/BCM43430A1.hcd"
+    [ -f "${FIRMWARE_DIR}/BCM43430A1.hcd" ] && break
+done

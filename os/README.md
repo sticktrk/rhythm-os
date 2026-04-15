@@ -33,7 +33,7 @@ Rhythm OS manages your lights through **curves** — continuous functions that d
 | Target | Crate | Notes |
 |--------|-------|-------|
 | macOS / Linux | `rhythm-server` | CLI server with HTTP API and mDNS discovery. |
-| Raspberry Pi Zero | `rhythm-server` (`rpiz` target) | Buildroot appliance image with USB gadget first-boot access. |
+| Raspberry Pi Zero | `rhythm-linux-embedded` (`rpiz` target) | Buildroot appliance image with USB gadget first-boot access. |
 | Home Assistant | `rhythm-addon` | Add-on with ingress support. Auto-configures from HA Supervisor. |
 | ESP32-C6 | `rhythm-esp32` | Standalone controller. WiFi + BLE provisioning, OTA updates. |
 

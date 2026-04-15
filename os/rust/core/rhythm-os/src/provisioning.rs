@@ -1,0 +1,384 @@
+//! Shared Wi-Fi provisioning contract for hardware bootstrap flows.
+//!
+//! The BLE transport differs substantially across targets (ESP-IDF vs. BlueZ),
+//! but the provisioning contract is the same:
+//! - advertise the same GATT UUIDs
+//! - accept `{"ssid","password"}` credentials
+//! - report `waiting` / `connecting` / `connected` / `wifi_failed`
+//! - keep retrying until the network comes up
+
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+/// BLE service UUID for Rhythm Wi-Fi provisioning.
+pub const PROVISIONING_SERVICE_UUID: u128 = 0x72797468_6d00_1000_8000_00805f9b34fb;
+/// BLE write characteristic UUID for Wi-Fi credentials.
+pub const PROVISIONING_WIFI_CMD_UUID: u128 = 0x72797468_6d01_1000_8000_00805f9b34fb;
+/// BLE status characteristic UUID for provisioning progress.
+pub const PROVISIONING_STATUS_UUID: u128 = 0x72797468_6d02_1000_8000_00805f9b34fb;
+/// BLE read characteristic UUID for device metadata.
+pub const PROVISIONING_DEVICE_INFO_UUID: u128 = 0x72797468_6d03_1000_8000_00805f9b34fb;
+
+/// Wi-Fi credentials received from a provisioning frontend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WifiCredentials {
+    pub ssid: String,
+    pub password: String,
+}
+
+/// Metadata exposed to the provisioning client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProvisioningDeviceInfo {
+    pub name: String,
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+}
+
+impl ProvisioningDeviceInfo {
+    pub fn json_bytes(&self) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(self)?)
+    }
+}
+
+/// Status payload surfaced to the provisioning client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProvisioningStatus {
+    Waiting,
+    Connecting,
+    Connected { ip: String },
+    WifiFailed { error: String },
+    Failed { error: String },
+}
+
+#[derive(Serialize)]
+struct ProvisioningStatusPayload<'a> {
+    status: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ip: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'a str>,
+}
+
+impl ProvisioningStatus {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Connecting => "connecting",
+            Self::Connected { .. } => "connected",
+            Self::WifiFailed { .. } => "wifi_failed",
+            Self::Failed { .. } => "failed",
+        }
+    }
+
+    pub fn json_bytes(&self) -> Result<Vec<u8>> {
+        let payload = match self {
+            Self::Waiting => ProvisioningStatusPayload {
+                status: self.code(),
+                ip: None,
+                error: None,
+            },
+            Self::Connecting => ProvisioningStatusPayload {
+                status: self.code(),
+                ip: None,
+                error: None,
+            },
+            Self::Connected { ip } => ProvisioningStatusPayload {
+                status: self.code(),
+                ip: Some(ip),
+                error: None,
+            },
+            Self::WifiFailed { error } | Self::Failed { error } => ProvisioningStatusPayload {
+                status: self.code(),
+                ip: None,
+                error: Some(error),
+            },
+        };
+
+        Ok(serde_json::to_vec(&payload)?)
+    }
+}
+
+/// A target-specific frontend event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProvisioningEvent {
+    Credentials(WifiCredentials),
+    Error(String),
+}
+
+/// Result of a hardware-specific network verification attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProvisioningConnectResult {
+    Connected { ip: String },
+    Failed { error: String },
+}
+
+/// Transport frontend for provisioning sessions.
+pub trait ProvisioningFrontend {
+    fn start(&mut self, info: &ProvisioningDeviceInfo) -> Result<()>;
+    fn poll_event(&mut self, timeout: Duration) -> Result<Option<ProvisioningEvent>>;
+    fn publish_status(&mut self, status: &ProvisioningStatus) -> Result<()>;
+    fn stop(&mut self) -> Result<()>;
+}
+
+/// Network verification backend for provisioning sessions.
+pub trait ProvisioningBackend {
+    fn begin_connect(&mut self, creds: WifiCredentials) -> Result<()>;
+    fn poll_result(&mut self, timeout: Duration) -> Result<Option<ProvisioningConnectResult>>;
+}
+
+/// Runtime tuning for the provisioning session loop.
+#[derive(Debug, Clone)]
+pub struct ProvisioningSessionConfig {
+    pub poll_interval: Duration,
+    pub connect_timeout: Duration,
+    pub success_grace_period: Duration,
+}
+
+impl Default for ProvisioningSessionConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval: Duration::from_millis(100),
+            connect_timeout: Duration::from_secs(30),
+            success_grace_period: Duration::from_secs(2),
+        }
+    }
+}
+
+struct PendingConnect {
+    creds: WifiCredentials,
+    deadline: Instant,
+}
+
+/// Run a full provisioning session using a target-specific frontend/backend pair.
+pub fn run_provisioning_session<F, B>(
+    frontend: &mut F,
+    backend: &mut B,
+    info: &ProvisioningDeviceInfo,
+    config: &ProvisioningSessionConfig,
+) -> Result<WifiCredentials>
+where
+    F: ProvisioningFrontend,
+    B: ProvisioningBackend,
+{
+    frontend.start(info)?;
+
+    let result = (|| -> Result<WifiCredentials> {
+        frontend.publish_status(&ProvisioningStatus::Waiting)?;
+
+        let mut pending: Option<PendingConnect> = None;
+
+        loop {
+            if let Some(event) = frontend.poll_event(config.poll_interval)? {
+                match event {
+                    ProvisioningEvent::Credentials(creds) => {
+                        if pending.is_none() {
+                            frontend.publish_status(&ProvisioningStatus::Connecting)?;
+                            backend.begin_connect(creds.clone())?;
+                            pending = Some(PendingConnect {
+                                creds,
+                                deadline: Instant::now() + config.connect_timeout,
+                            });
+                        }
+                    }
+                    ProvisioningEvent::Error(error) => {
+                        frontend.publish_status(&ProvisioningStatus::Failed { error })?;
+                    }
+                }
+            }
+
+            let mut clear_pending = false;
+            if let Some(active) = pending.as_ref() {
+                if let Some(result) = backend.poll_result(Duration::from_millis(0))? {
+                    match result {
+                        ProvisioningConnectResult::Connected { ip } => {
+                            frontend.publish_status(&ProvisioningStatus::Connected { ip })?;
+                            std::thread::sleep(config.success_grace_period);
+                            frontend.stop()?;
+                            return Ok(active.creds.clone());
+                        }
+                        ProvisioningConnectResult::Failed { error } => {
+                            frontend.publish_status(&ProvisioningStatus::WifiFailed { error })?;
+                            clear_pending = true;
+                        }
+                    }
+                } else if Instant::now() >= active.deadline {
+                    frontend.publish_status(&ProvisioningStatus::WifiFailed {
+                        error: "Connection timed out".to_string(),
+                    })?;
+                    clear_pending = true;
+                }
+            }
+
+            if clear_pending {
+                pending = None;
+            }
+        }
+    })();
+
+    if result.is_err() {
+        let _ = frontend.stop();
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use super::*;
+
+    struct FakeFrontend {
+        events: VecDeque<ProvisioningEvent>,
+        statuses: Vec<ProvisioningStatus>,
+        started: bool,
+        stopped: bool,
+    }
+
+    impl FakeFrontend {
+        fn new(events: Vec<ProvisioningEvent>) -> Self {
+            Self {
+                events: VecDeque::from(events),
+                statuses: Vec::new(),
+                started: false,
+                stopped: false,
+            }
+        }
+    }
+
+    impl ProvisioningFrontend for FakeFrontend {
+        fn start(&mut self, _info: &ProvisioningDeviceInfo) -> Result<()> {
+            self.started = true;
+            Ok(())
+        }
+
+        fn poll_event(&mut self, _timeout: Duration) -> Result<Option<ProvisioningEvent>> {
+            Ok(self.events.pop_front())
+        }
+
+        fn publish_status(&mut self, status: &ProvisioningStatus) -> Result<()> {
+            self.statuses.push(status.clone());
+            Ok(())
+        }
+
+        fn stop(&mut self) -> Result<()> {
+            self.stopped = true;
+            Ok(())
+        }
+    }
+
+    struct FakeBackend {
+        results: VecDeque<Option<ProvisioningConnectResult>>,
+        requested: Vec<WifiCredentials>,
+    }
+
+    impl FakeBackend {
+        fn new(results: Vec<Option<ProvisioningConnectResult>>) -> Self {
+            Self {
+                results: VecDeque::from(results),
+                requested: Vec::new(),
+            }
+        }
+    }
+
+    impl ProvisioningBackend for FakeBackend {
+        fn begin_connect(&mut self, creds: WifiCredentials) -> Result<()> {
+            self.requested.push(creds);
+            Ok(())
+        }
+
+        fn poll_result(&mut self, _timeout: Duration) -> Result<Option<ProvisioningConnectResult>> {
+            Ok(self.results.pop_front().flatten())
+        }
+    }
+
+    fn device_info() -> ProvisioningDeviceInfo {
+        ProvisioningDeviceInfo {
+            name: "Rhythm-ABCD".to_string(),
+            version: "1.2.3".to_string(),
+            mac: Some("AA:BB:CC:DD:EE:FF".to_string()),
+        }
+    }
+
+    #[test]
+    fn provisioning_session_reports_success() {
+        let creds = WifiCredentials {
+            ssid: "wifi".to_string(),
+            password: "secret".to_string(),
+        };
+        let mut frontend = FakeFrontend::new(vec![ProvisioningEvent::Credentials(creds.clone())]);
+        let mut backend = FakeBackend::new(vec![Some(ProvisioningConnectResult::Connected {
+            ip: "192.168.1.10".to_string(),
+        })]);
+
+        let mut config = ProvisioningSessionConfig::default();
+        config.success_grace_period = Duration::from_millis(0);
+
+        let result =
+            run_provisioning_session(&mut frontend, &mut backend, &device_info(), &config).unwrap();
+
+        assert_eq!(result, creds);
+        assert!(frontend.started);
+        assert!(frontend.stopped);
+        assert_eq!(
+            frontend.statuses,
+            vec![
+                ProvisioningStatus::Waiting,
+                ProvisioningStatus::Connecting,
+                ProvisioningStatus::Connected {
+                    ip: "192.168.1.10".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn provisioning_session_retries_after_wifi_failure() {
+        let first = WifiCredentials {
+            ssid: "bad".to_string(),
+            password: "pw1".to_string(),
+        };
+        let second = WifiCredentials {
+            ssid: "good".to_string(),
+            password: "pw2".to_string(),
+        };
+        let mut frontend = FakeFrontend::new(vec![
+            ProvisioningEvent::Credentials(first.clone()),
+            ProvisioningEvent::Credentials(second.clone()),
+        ]);
+        let mut backend = FakeBackend::new(vec![
+            Some(ProvisioningConnectResult::Failed {
+                error: "bad credentials".to_string(),
+            }),
+            Some(ProvisioningConnectResult::Connected {
+                ip: "10.0.0.5".to_string(),
+            }),
+        ]);
+
+        let mut config = ProvisioningSessionConfig::default();
+        config.success_grace_period = Duration::from_millis(0);
+
+        let result =
+            run_provisioning_session(&mut frontend, &mut backend, &device_info(), &config).unwrap();
+
+        assert_eq!(result, second);
+        assert_eq!(backend.requested, vec![first, second]);
+        assert_eq!(
+            frontend.statuses,
+            vec![
+                ProvisioningStatus::Waiting,
+                ProvisioningStatus::Connecting,
+                ProvisioningStatus::WifiFailed {
+                    error: "bad credentials".to_string(),
+                },
+                ProvisioningStatus::Connecting,
+                ProvisioningStatus::Connected {
+                    ip: "10.0.0.5".to_string(),
+                },
+            ]
+        );
+    }
+}

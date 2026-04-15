@@ -1,0 +1,22 @@
+[package]
+name = "rhythm-linux-embedded"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+description = "Linux embedded appliance runtime for Rhythm OS"
+default-run = "rhythm-linux-embedded"
+
+[[bin]]
+name = "rhythm-linux-embedded"
+
+[dependencies]
+rhythm-server = { path = "../rhythm-server" }
+rhythm-os = { path = "../../core/rhythm-os", features = ["desktop"] }
+
+tokio = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+chrono = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+log = "0.4"
