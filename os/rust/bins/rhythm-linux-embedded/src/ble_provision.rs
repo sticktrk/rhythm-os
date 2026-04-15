@@ -13,8 +13,12 @@ use log::{info, warn};
 use rhythm_os::provisioning::{
     provisioning_device_name, run_provisioning_session, ProvisioningBackend,
     ProvisioningConnectResult, ProvisioningDeviceInfo, ProvisioningEvent, ProvisioningFrontend,
-    ProvisioningSessionConfig, ProvisioningStatus, WifiCredentials, PROVISIONING_DEVICE_INFO_UUID,
-    PROVISIONING_SERVICE_UUID, PROVISIONING_STATUS_UUID, PROVISIONING_WIFI_CMD_UUID,
+    ProvisioningSessionConfig, ProvisioningStatus, WifiCredentials,
+};
+#[cfg(target_os = "linux")]
+use rhythm_os::provisioning::{
+    PROVISIONING_DEVICE_INFO_UUID, PROVISIONING_SERVICE_UUID, PROVISIONING_STATUS_UUID,
+    PROVISIONING_WIFI_CMD_UUID,
 };
 
 use crate::wifi;
@@ -362,10 +366,18 @@ mod bluez {
             info.mac = adapter.address().await.ok().map(|addr| addr.to_string());
         }
 
+        // BlueZ uses the default agent for incoming LE pairing. Keep the
+        // capability at NoInputNoOutput so iOS can stay on the same
+        // "just works" flow as ESP32, but make this provisioning agent the
+        // explicit default so bluetoothd does not fall back to some other
+        // system agent or IO capability.
         let agent = session
-            .register_agent(Agent::default())
+            .register_agent(Agent {
+                request_default: true,
+                ..Default::default()
+            })
             .await
-            .context("registering Bluetooth agent")?;
+            .context("registering Bluetooth provisioning agent")?;
 
         let service_uuid = Uuid::from_u128(PROVISIONING_SERVICE_UUID);
         let wifi_cmd_uuid = Uuid::from_u128(PROVISIONING_WIFI_CMD_UUID);
@@ -559,5 +571,24 @@ struct BluezFrontend;
 impl BluezFrontend {
     fn new() -> Result<Self> {
         Err(anyhow!("BlueZ provisioning is only supported on Linux"))
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl ProvisioningFrontend for BluezFrontend {
+    fn start(&mut self, _info: &ProvisioningDeviceInfo) -> Result<()> {
+        Err(anyhow!("BlueZ provisioning is only supported on Linux"))
+    }
+
+    fn poll_event(&mut self, _timeout: Duration) -> Result<Option<ProvisioningEvent>> {
+        Err(anyhow!("BlueZ provisioning is only supported on Linux"))
+    }
+
+    fn publish_status(&mut self, _status: &ProvisioningStatus) -> Result<()> {
+        Err(anyhow!("BlueZ provisioning is only supported on Linux"))
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        Ok(())
     }
 }
