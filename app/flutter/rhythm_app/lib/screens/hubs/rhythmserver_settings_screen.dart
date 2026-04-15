@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -75,6 +77,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   bool _isRebooting = false;
   bool _isRefreshing = false;
   bool _isConfiguringHub = false;
+  OtaState? _lastHandledOtaState;
 
   // Per-hub-type device summaries from /api/devices/canonical
   Map<String, String> _hubSummaries = {};
@@ -123,6 +126,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     _otaService.addListener(_onOtaStateChanged);
     _checkHealth();
     _fetchHubSummaries();
+    unawaited(_loadOtaSupport());
 
     AnalyticsService().logScreenView('rhythmserver_settings');
   }
@@ -138,9 +142,16 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   void _onOtaStateChanged() {
     if (!mounted) return;
 
+    if (_otaService.state == _lastHandledOtaState) {
+      setState(() {});
+      return;
+    }
+
+    _lastHandledOtaState = _otaService.state;
+
     if (_otaService.state == OtaState.complete) {
       AnalyticsService().logOtaUpdateCompleted(
-        _otaService.availableRelease?.version ?? 'unknown',
+        _otaService.currentVersion,
       );
       // Force a full reconnect so the sync provider picks up the new
       // firmware version from GET /api/state (the poll endpoint doesn't
@@ -153,6 +164,17 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     }
 
     setState(() {});
+  }
+
+  Future<void> _loadOtaSupport() async {
+    final syncProvider = context.read<ServerSyncProvider>();
+    await _otaService.initialize(
+      host: widget.hub.endpoint.host,
+      port: widget.hub.endpoint.port,
+      fallbackCurrentVersion: syncProvider.firmwareVersion,
+      fallbackPlatformType: syncProvider.serverPlatformType,
+      fallbackPlatformContext: syncProvider.serverPlatformContext,
+    );
   }
 
   Future<void> _checkHealth() async {
@@ -226,6 +248,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     await Future.wait([
       _checkHealth(),
       _fetchHubSummaries(),
+      _loadOtaSupport(),
       () async {
         // Force SSE reconnect to re-fetch /api/state (rooms, hubs, settings).
         final sync = context.read<ServerSyncProvider>();
@@ -529,7 +552,11 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
   Widget _buildVersionSection() {
     final syncProvider = context.watch<ServerSyncProvider>();
-    final currentVersion = syncProvider.firmwareVersion;
+    final currentVersion = _otaService.currentVersion != '0.0.0'
+        ? _otaService.currentVersion
+        : syncProvider.firmwareVersion;
+    final showOtaControls =
+        _otaService.isLoadingSupport || _otaService.showUpdateUi;
 
     return _buildSection(
       title: _isEmbedded ? 'FIRMWARE' : 'VERSION',
@@ -574,8 +601,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 ),
               ),
 
-              // OTA controls (ESP32 only)
-              if (_isEmbedded) ..._buildOtaStateContent(currentVersion),
+              if (showOtaControls) ..._buildOtaStateContent(currentVersion),
 
               // HA addon managed note
               if (_isHaAddon)
@@ -609,6 +635,16 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   }
 
   List<Widget> _buildOtaStateContent(String currentVersion) {
+    if (_otaService.isLoadingSupport) {
+      return [
+        _buildOtaButton(
+          label: 'Loading update support...',
+          icon: null,
+          isLoading: true,
+        ),
+      ];
+    }
+
     switch (_otaService.state) {
       case OtaState.idle:
         return [
@@ -714,8 +750,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       case OtaState.uploading:
         final pct = _otaService.progress;
         final label = _otaService.state == OtaState.downloading
-            ? 'Downloading...'
-            : 'Installing...';
+            ? 'Downloading firmware...'
+            : (_otaService.statusMessage ?? 'Installing update...');
         return [
           Divider(
             height: 1,
@@ -733,15 +769,16 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     fontSize: 14,
                   ),
                 ),
-                Text(
-                  '$pct%',
-                  style: const TextStyle(
-                    color: _teal,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    fontFamily: 'monospace',
+                if (pct != null)
+                  Text(
+                    '$pct%',
+                    style: const TextStyle(
+                      color: _teal,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      fontFamily: 'monospace',
+                    ),
                   ),
-                ),
               ],
             ),
           ),
@@ -750,7 +787,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
             child: ClipRRect(
               borderRadius: BorderRadius.circular(4),
               child: LinearProgressIndicator(
-                value: pct / 100.0,
+                value: pct != null ? pct / 100.0 : null,
                 backgroundColor: _teal.withValues(alpha: 0.1),
                 valueColor: const AlwaysStoppedAnimation(_teal),
                 minHeight: 6,
@@ -808,7 +845,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 ),
                 const SizedBox(width: 12),
                 Text(
-                  'Rebooting device...',
+                  _otaService.statusMessage ?? 'Device restarting',
                   style: TextStyle(
                     color: CelestialColors.textSecondary.withValues(alpha: 0.8),
                     fontSize: 14,
@@ -834,7 +871,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    'Updated to v${_otaService.availableRelease?.version ?? ""}',
+                    'Updated to v${_otaService.currentVersion}',
                     style: const TextStyle(
                       color: Color(0xFF22C55E),
                       fontSize: 14,
@@ -1144,8 +1181,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 boxShadow: !connected
                     ? [
                         BoxShadow(
-                          color:
-                              const Color(0xFFEF4444).withValues(alpha: 0.6),
+                          color: const Color(0xFFEF4444).withValues(alpha: 0.6),
                           blurRadius: 6,
                           spreadRadius: 1,
                         ),
@@ -1789,6 +1825,9 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
   Widget _buildProgress() {
     final isDownloading = widget.otaService.state == OtaState.downloading;
     final pct = widget.otaService.progress;
+    final message = isDownloading
+        ? 'Downloading firmware...'
+        : (widget.otaService.statusMessage ?? 'Installing on device...');
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -1832,7 +1871,7 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
         ),
         const SizedBox(height: 8),
         Text(
-          isDownloading ? 'Downloading firmware...' : 'Installing on device...',
+          message,
           style: const TextStyle(
             color: CelestialColors.textSecondary,
             fontSize: 15,
@@ -1842,22 +1881,24 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
         ClipRRect(
           borderRadius: BorderRadius.circular(4),
           child: LinearProgressIndicator(
-            value: pct / 100.0,
+            value: pct != null ? pct / 100.0 : null,
             backgroundColor: _teal.withValues(alpha: 0.1),
             valueColor: const AlwaysStoppedAnimation(_teal),
             minHeight: 8,
           ),
         ),
-        const SizedBox(height: 12),
-        Text(
-          '$pct%',
-          style: const TextStyle(
-            color: _teal,
-            fontSize: 20,
-            fontWeight: FontWeight.w600,
-            fontFamily: 'monospace',
+        if (pct != null) ...[
+          const SizedBox(height: 12),
+          Text(
+            '$pct%',
+            style: const TextStyle(
+              color: _teal,
+              fontSize: 20,
+              fontWeight: FontWeight.w600,
+              fontFamily: 'monospace',
+            ),
           ),
-        ),
+        ],
         const SizedBox(height: 40),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -1992,7 +2033,7 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
         ),
         const SizedBox(height: 32),
         const Text(
-          'Rebooting Device',
+          'Device restarting',
           style: TextStyle(
             color: CelestialColors.textPrimary,
             fontSize: 22,
@@ -2000,12 +2041,14 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
           ),
         ),
         const SizedBox(height: 8),
-        const Text(
-          'Verifying update...',
-          style: TextStyle(
+        Text(
+          widget.otaService.statusMessage ??
+              'Waiting for the device to come back online...',
+          style: const TextStyle(
             color: CelestialColors.textSecondary,
             fontSize: 15,
           ),
+          textAlign: TextAlign.center,
         ),
         const SizedBox(height: 40),
         Row(
@@ -2031,7 +2074,7 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
   }
 
   Widget _buildComplete() {
-    final version = widget.otaService.availableRelease?.version ?? '';
+    final version = widget.otaService.currentVersion;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
