@@ -235,7 +235,6 @@ mod bluez {
 
     use anyhow::{Context, Result};
     use bluer::adv::Advertisement;
-    use bluer::agent::Agent;
     use bluer::gatt::local::{
         Application, ApplicationHandle, Characteristic, CharacteristicNotify,
         CharacteristicNotifyMethod, CharacteristicRead, CharacteristicWrite,
@@ -265,7 +264,6 @@ mod bluez {
         session: Session,
         adapter: Adapter,
         previous_alias: String,
-        agent: bluer::agent::AgentHandle,
         app: ApplicationHandle,
         adv: AdvertisementHandle,
     }
@@ -346,13 +344,9 @@ mod bluez {
             .await
             .context("powering Bluetooth adapter")?;
         adapter
-            .set_pairable_timeout(0)
+            .set_pairable(false)
             .await
-            .context("disabling pairable timeout")?;
-        adapter
-            .set_pairable(true)
-            .await
-            .context("enabling pairable mode")?;
+            .context("disabling pairable mode")?;
         let previous_alias = adapter
             .alias()
             .await
@@ -365,19 +359,6 @@ mod bluez {
         if info.mac.is_none() {
             info.mac = adapter.address().await.ok().map(|addr| addr.to_string());
         }
-
-        // BlueZ uses the default agent for incoming LE pairing. Keep the
-        // capability at NoInputNoOutput so iOS can stay on the same
-        // "just works" flow as ESP32, but make this provisioning agent the
-        // explicit default so bluetoothd does not fall back to some other
-        // system agent or IO capability.
-        let agent = session
-            .register_agent(Agent {
-                request_default: true,
-                ..Default::default()
-            })
-            .await
-            .context("registering Bluetooth provisioning agent")?;
 
         let service_uuid = Uuid::from_u128(PROVISIONING_SERVICE_UUID);
         let wifi_cmd_uuid = Uuid::from_u128(PROVISIONING_WIFI_CMD_UUID);
@@ -399,7 +380,6 @@ mod bluez {
                         write: Some(CharacteristicWrite {
                             write: true,
                             write_without_response: true,
-                            encrypt_write: true,
                             method: CharacteristicWriteMethod::Fun(Box::new(move |value, req| {
                                 let event_tx = write_event_tx.clone();
                                 async move {
@@ -521,7 +501,6 @@ mod bluez {
             session,
             adapter,
             previous_alias,
-            agent,
             app: app_handle,
             adv: adv_handle,
         })
@@ -532,14 +511,12 @@ mod bluez {
             session,
             adapter,
             previous_alias,
-            agent,
             app,
             adv,
         } = handles;
 
         drop(adv);
         drop(app);
-        drop(agent);
 
         adapter
             .set_alias(previous_alias)
