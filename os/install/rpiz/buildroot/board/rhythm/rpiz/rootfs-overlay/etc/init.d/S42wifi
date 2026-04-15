@@ -114,6 +114,25 @@ log_sdio_inventory() {
     done
 }
 
+reprobe_sdio_devices() {
+    local path devname
+
+    for path in /sys/bus/sdio/devices/*; do
+        [ -e "$path" ] || continue
+        devname="${path##*/}"
+
+        if [ -w /sys/bus/sdio/drivers_probe ]; then
+            echo "$devname" > /sys/bus/sdio/drivers_probe 2>/dev/null || true
+            log "reprobe: drivers_probe $devname"
+        fi
+
+        if [ -w /sys/bus/sdio/drivers/brcmfmac/bind ]; then
+            echo "$devname" > /sys/bus/sdio/drivers/brcmfmac/bind 2>/dev/null || true
+            log "reprobe: bind brcmfmac $devname"
+        fi
+    done
+}
+
 modprobe_logged() {
     local module="$1"
     local output status
@@ -151,6 +170,20 @@ start() {
         sleep 1
         attempt=$((attempt + 1))
     done
+
+    if [ -z "$iface" ]; then
+        log "no wireless interface yet; forcing SDIO reprobe"
+        reprobe_sdio_devices
+        attempt=1
+        while [ "$attempt" -le 10 ]; do
+            iface="$(find_wifi_iface || true)"
+            if [ -n "$iface" ]; then
+                break
+            fi
+            sleep 1
+            attempt=$((attempt + 1))
+        done
+    fi
 
     if [ -z "$iface" ]; then
         log "no wireless interface appeared after brcmfmac load"
