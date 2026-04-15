@@ -22,10 +22,11 @@ use esp_idf_svc::hal::modem::BluetoothModem;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use log::{info, warn};
 use rhythm_os::provisioning::{
-    run_provisioning_session, ProvisioningBackend, ProvisioningConnectResult, ProvisioningDeviceInfo,
-    ProvisioningEvent, ProvisioningFrontend, ProvisioningSessionConfig, ProvisioningStatus,
-    WifiCredentials, PROVISIONING_DEVICE_INFO_UUID, PROVISIONING_SERVICE_UUID,
-    PROVISIONING_STATUS_UUID, PROVISIONING_WIFI_CMD_UUID,
+    provisioning_device_name, run_provisioning_session, ProvisioningBackend,
+    ProvisioningConnectResult, ProvisioningDeviceInfo, ProvisioningEvent, ProvisioningFrontend,
+    ProvisioningSessionConfig, ProvisioningStatus, WifiCredentials,
+    PROVISIONING_DEVICE_INFO_UUID, PROVISIONING_SERVICE_UUID, PROVISIONING_STATUS_UUID,
+    PROVISIONING_WIFI_CMD_UUID,
 };
 
 use crate::led::{LedStatus, Ws2812Led};
@@ -492,8 +493,9 @@ pub fn run_provisioning<'d>(
     info!("Starting BLE provisioning...");
 
     let mac = get_mac_address();
+    let suffix = format!("{:02X}{:02X}", mac[4], mac[5]);
     let identity = ProvisioningDeviceInfo {
-        name: format!("Rhythm-{:02X}{:02X}", mac[4], mac[5]),
+        name: provisioning_device_name("esp32", &suffix),
         version: crate::FIRMWARE_VERSION.to_string(),
         mac: Some(format!(
             "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",

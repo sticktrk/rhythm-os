@@ -11,10 +11,10 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use log::{info, warn};
 use rhythm_os::provisioning::{
-    run_provisioning_session, ProvisioningBackend, ProvisioningConnectResult,
-    ProvisioningDeviceInfo, ProvisioningEvent, ProvisioningFrontend, ProvisioningSessionConfig,
-    ProvisioningStatus, WifiCredentials, PROVISIONING_DEVICE_INFO_UUID, PROVISIONING_SERVICE_UUID,
-    PROVISIONING_STATUS_UUID, PROVISIONING_WIFI_CMD_UUID,
+    provisioning_device_name, run_provisioning_session, ProvisioningBackend,
+    ProvisioningConnectResult, ProvisioningDeviceInfo, ProvisioningEvent, ProvisioningFrontend,
+    ProvisioningSessionConfig, ProvisioningStatus, WifiCredentials, PROVISIONING_DEVICE_INFO_UUID,
+    PROVISIONING_SERVICE_UUID, PROVISIONING_STATUS_UUID, PROVISIONING_WIFI_CMD_UUID,
 };
 
 use crate::wifi;
@@ -130,7 +130,7 @@ fn build_identity(version: &str) -> ProvisioningDeviceInfo {
         .unwrap_or_else(|| "RPIZ".to_string());
 
     ProvisioningDeviceInfo {
-        name: format!("Rhythm-{}", suffix),
+        name: provisioning_device_name("rpiz", &suffix),
         version: version.to_string(),
         mac: None,
     }
@@ -258,11 +258,12 @@ mod bluez {
     }
 
     struct BluezHandles {
-        _session: Session,
-        _adapter: Adapter,
-        _agent: bluer::agent::AgentHandle,
-        _app: ApplicationHandle,
-        _adv: AdvertisementHandle,
+        session: Session,
+        adapter: Adapter,
+        previous_alias: String,
+        agent: bluer::agent::AgentHandle,
+        app: ApplicationHandle,
+        adv: AdvertisementHandle,
     }
 
     impl BluezFrontend {
@@ -318,7 +319,9 @@ mod bluez {
 
         fn stop(&mut self) -> Result<()> {
             info!("Stopping BLE provisioning frontend...");
-            self.handles.take();
+            if let Some(handles) = self.handles.take() {
+                self.runtime.block_on(stop_bluez(handles))?;
+            }
             Ok(())
         }
     }
@@ -346,6 +349,14 @@ mod bluez {
             .set_pairable(true)
             .await
             .context("enabling pairable mode")?;
+        let previous_alias = adapter
+            .alias()
+            .await
+            .context("reading Bluetooth adapter alias")?;
+        adapter
+            .set_alias(info.name.clone())
+            .await
+            .context("setting Bluetooth adapter alias")?;
 
         if info.mac.is_none() {
             info.mac = adapter.address().await.ok().map(|addr| addr.to_string());
@@ -495,12 +506,37 @@ mod bluez {
         );
 
         Ok(BluezHandles {
-            _session: session,
-            _adapter: adapter,
-            _agent: agent,
-            _app: app_handle,
-            _adv: adv_handle,
+            session,
+            adapter,
+            previous_alias,
+            agent,
+            app: app_handle,
+            adv: adv_handle,
         })
+    }
+
+    async fn stop_bluez(handles: BluezHandles) -> Result<()> {
+        let BluezHandles {
+            session,
+            adapter,
+            previous_alias,
+            agent,
+            app,
+            adv,
+        } = handles;
+
+        drop(adv);
+        drop(app);
+        drop(agent);
+
+        adapter
+            .set_alias(previous_alias)
+            .await
+            .context("restoring Bluetooth adapter alias")?;
+
+        drop(adapter);
+        drop(session);
+        Ok(())
     }
 
     fn parse_credentials(bytes: &[u8]) -> Result<super::WifiCredentials> {

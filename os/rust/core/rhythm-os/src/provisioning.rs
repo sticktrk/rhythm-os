@@ -43,6 +43,35 @@ impl ProvisioningDeviceInfo {
     }
 }
 
+/// Build a stable provisioning device name for a hardware target.
+///
+/// Format: `rhythm-(rpiz|esp32)-<id>`
+pub fn provisioning_device_name(target: &str, id: &str) -> String {
+    let normalized_target: String = target
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let normalized_id: String = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_uppercase();
+
+    let target_part = if normalized_target.is_empty() {
+        "device"
+    } else {
+        normalized_target.as_str()
+    };
+    let id_part = if normalized_id.is_empty() {
+        "0000"
+    } else {
+        normalized_id.as_str()
+    };
+
+    format!("rhythm-{}-{}", target_part, id_part)
+}
+
 /// Status payload surfaced to the provisioning client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProvisioningStatus {
@@ -297,10 +326,19 @@ mod tests {
 
     fn device_info() -> ProvisioningDeviceInfo {
         ProvisioningDeviceInfo {
-            name: "Rhythm-ABCD".to_string(),
+            name: provisioning_device_name("rpiz", "ABCD"),
             version: "1.2.3".to_string(),
             mac: Some("AA:BB:CC:DD:EE:FF".to_string()),
         }
+    }
+
+    #[test]
+    fn provisioning_device_name_uses_stable_format() {
+        assert_eq!(provisioning_device_name("rpiz", "abcd"), "rhythm-rpiz-ABCD");
+        assert_eq!(
+            provisioning_device_name("esp32", "12ef"),
+            "rhythm-esp32-12EF"
+        );
     }
 
     #[test]
