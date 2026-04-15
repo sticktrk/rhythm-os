@@ -91,6 +91,42 @@ log_net_inventory() {
     fi
 }
 
+log_lsmod_inventory() {
+    local lines
+
+    lines="$(lsmod 2>/dev/null || true)"
+    if [ -n "$lines" ]; then
+        printf '%s\n' "$lines" | while IFS= read -r line; do
+            log "lsmod: $line"
+        done
+    fi
+}
+
+log_sdio_inventory() {
+    local path modalias vendor device
+
+    for path in /sys/bus/sdio/devices/*; do
+        [ -e "$path" ] || continue
+        vendor="$(cat "$path/vendor" 2>/dev/null || true)"
+        device="$(cat "$path/device" 2>/dev/null || true)"
+        modalias="$(cat "$path/modalias" 2>/dev/null || true)"
+        log "sdio: ${path##*/} vendor=${vendor:-?} device=${device:-?} modalias=${modalias:-?}"
+    done
+}
+
+modprobe_logged() {
+    local module="$1"
+    local output status
+
+    output="$(modprobe "$module" 2>&1)" || status=$?
+    status="${status:-0}"
+    if [ "$status" -eq 0 ]; then
+        log "modprobe $module: ok"
+    else
+        log "modprobe $module: failed ($status): $output"
+    fi
+}
+
 start() {
     local iface attempt state ssid ip_addr
 
@@ -101,9 +137,9 @@ start() {
 
     log "starting wlan0"
 
-    modprobe cfg80211 2>/dev/null || true
-    modprobe brcmutil 2>/dev/null || true
-    modprobe brcmfmac 2>/dev/null || true
+    modprobe_logged cfg80211
+    modprobe_logged brcmutil
+    modprobe_logged brcmfmac
 
     iface=""
     attempt=1
@@ -119,6 +155,8 @@ start() {
     if [ -z "$iface" ]; then
         log "no wireless interface appeared after brcmfmac load"
         log_net_inventory
+        log_lsmod_inventory
+        log_sdio_inventory
         log_firmware_inventory
         log_kernel_excerpt
         return 0

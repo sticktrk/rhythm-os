@@ -138,6 +138,8 @@ mod tests {
         let commissioned = hub_data.commissioned.lock().unwrap();
         assert_eq!(commissioned.len(), 2);
         assert_eq!(commissioned[0].vendor_name, "Updated");
+        drop(commissioned);
+
         assert_eq!(hub_data.next_node_id(), 102);
     }
 }
