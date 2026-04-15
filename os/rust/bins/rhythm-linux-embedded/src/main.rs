@@ -4,6 +4,10 @@
 //! targets like rpiz their own binary crate so board-specific provisioning,
 //! networking, and packaging concerns do not accumulate in `rhythm-server`.
 
+mod ble_provision;
+mod http_server;
+mod wifi;
+
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -11,7 +15,7 @@ use clap::Parser;
 use log::{info, warn};
 use rhythm_os::state::{AppState, SharedState, WorkItem};
 use rhythm_os::storage::FileStorage;
-use rhythm_server::{http_server, hub};
+use rhythm_server::hub;
 
 /// Format tracing timestamps in local time instead of UTC.
 struct LocalTimer;
@@ -162,10 +166,19 @@ fn main() -> Result<()> {
             .expect("Failed to spawn periodic thread");
     }
 
+    let provisioning = ble_provision::ProvisioningManager::new(VERSION.to_string());
+    if let Err(e) = provisioning.ensure_running_if_needed("startup") {
+        warn!(
+            target: "sys",
+            "BLE provisioning sidecar did not start cleanly: {:#}",
+            e
+        );
+    }
+
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run_server(state, args.port))
+        .block_on(run_server(state, args.port, provisioning))
 }
 
 fn spawn_hub_bootstrap(state: SharedState) {
@@ -272,11 +285,15 @@ fn bootstrap_hubs(state: &SharedState) {
     }
 }
 
-async fn run_server(state: SharedState, port: u16) -> Result<()> {
+async fn run_server(
+    state: SharedState,
+    port: u16,
+    provisioning: ble_provision::ProvisioningManager,
+) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     info!(target: "sys", "Starting HTTP server on {}", addr);
 
-    let server = http_server::create_router(state.clone());
+    let server = http_server::create_router(state.clone(), provisioning);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .unwrap_or_else(|e| {

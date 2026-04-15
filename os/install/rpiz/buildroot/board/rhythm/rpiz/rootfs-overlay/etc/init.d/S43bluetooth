@@ -1,6 +1,9 @@
 #!/bin/sh
 
 LOGFILE=/var/log/bluetooth.log
+HCIATTACH="${HCIATTACH:-/usr/bin/hciattach}"
+HCICONFIG="${HCICONFIG:-/usr/bin/hciconfig}"
+BLUETOOTHD_INIT=/etc/init.d/S40bluetoothd
 
 log() {
     local msg="bluetooth: $*"
@@ -9,6 +12,10 @@ log() {
     if [ -w /dev/console ]; then
         printf '%s\n' "$msg" > /dev/console
     fi
+}
+
+read_dt_value() {
+    tr -d '\000' < "$1" 2>/dev/null || true
 }
 
 log_kernel_excerpt() {
@@ -22,11 +29,92 @@ log_kernel_excerpt() {
     fi
 }
 
+compute_bdaddr() {
+    local serial b1 b2 b3
+
+    if grep -q "raspberrypi,4" /proc/device-tree/compatible 2>/dev/null; then
+        return 1
+    fi
+
+    serial="$(read_dt_value /proc/device-tree/serial-number | cut -c9-)"
+    [ -n "$serial" ] || return 1
+
+    b1="$(printf '%s' "$serial" | cut -c3-4)"
+    b2="$(printf '%s' "$serial" | cut -c5-6)"
+    b3="$(printf '%s' "$serial" | cut -c7-8)"
+    printf 'b8:27:eb:%02x:%02x:%02x' $((0x$b1 ^ 0xaa)) $((0x$b2 ^ 0xaa)) $((0x$b3 ^ 0xaa))
+}
+
+attach_controller() {
+    local uart0 serial1 uart0_pins serial_dev speed flow bdaddr
+
+    if [ ! -x "$HCIATTACH" ]; then
+        log "hciattach not installed; skipping UART attach"
+        return 0
+    fi
+
+    if dmesg 2>/dev/null | grep -q -E 'hci[0-9]+: BCM: chip'; then
+        log "kernel already attached the Bluetooth controller"
+        return 0
+    fi
+
+    serial_dev=/dev/serial1
+    if [ ! -c "$serial_dev" ]; then
+        if [ -c /dev/ttyS0 ]; then
+            serial_dev=/dev/ttyS0
+        else
+            log "no serial device found for Bluetooth UART attach"
+            return 1
+        fi
+    fi
+
+    uart0="$(read_dt_value /proc/device-tree/aliases/uart0)"
+    serial1="$(read_dt_value /proc/device-tree/aliases/serial1)"
+
+    if [ "$uart0" = "$serial1" ] && [ -n "$uart0" ]; then
+        uart0_pins="$(wc -c /proc/device-tree/soc/gpio@7e200000/uart0_pins/brcm,pins 2>/dev/null | cut -d ' ' -f1)"
+        if [ "$uart0_pins" = "16" ]; then
+            speed=3000000
+            flow=flow
+        else
+            speed=921600
+            flow=noflow
+        fi
+    else
+        speed=460800
+        flow=noflow
+    fi
+
+    bdaddr="$(compute_bdaddr || true)"
+    log "attaching BCM controller on $serial_dev speed=$speed flow=$flow"
+    if [ -n "$bdaddr" ]; then
+        "$HCIATTACH" "$serial_dev" bcm43xx "$speed" "$flow" - "$bdaddr" >>"$LOGFILE" 2>&1
+    else
+        "$HCIATTACH" "$serial_dev" bcm43xx "$speed" "$flow" - >>"$LOGFILE" 2>&1
+    fi
+}
+
+bring_hci_up() {
+    if [ -x "$HCICONFIG" ] && "$HCICONFIG" hci0 >/dev/null 2>&1; then
+        "$HCICONFIG" hci0 up >/dev/null 2>&1 || true
+    fi
+}
+
+restart_bluetoothd() {
+    if [ -x "$BLUETOOTHD_INIT" ]; then
+        "$BLUETOOTHD_INIT" restart >>"$LOGFILE" 2>&1 || true
+    fi
+}
+
 start() {
     log "loading bluetooth modules"
     modprobe bluetooth 2>/dev/null || true
     modprobe hci_uart 2>/dev/null || true
-    sleep 2
+    sleep 1
+    attach_controller || true
+    sleep 1
+    bring_hci_up
+    restart_bluetoothd
     log_kernel_excerpt
 }
 

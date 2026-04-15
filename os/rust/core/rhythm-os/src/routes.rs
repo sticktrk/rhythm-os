@@ -2,7 +2,7 @@
 //!
 //! Lists every `(path, methods)` pair that all platform servers must implement.
 //! Excludes transport-dependent endpoints (SSE `/api/events`) and
-//! platform-specific routes (ESP32 diag/wifi, server discover/ota).
+//! platform-specific routes (hardware Wi-Fi/diag, server discover/ota).
 //!
 //! Used by:
 //! - Axum router test to verify all routes are registered
@@ -18,7 +18,7 @@ pub struct SharedRoute {
 ///
 /// Does NOT include:
 /// - `GET /api/events` (SSE — transport-dependent)
-/// - ESP32-only: `/api/wifi`, `/api/diag/*`, `/api/system/reboot`, `/api/ota/upload`
+/// - Hardware-specific: `/api/wifi`, `/api/diag/*`, `/api/system/reboot`, `/api/ota/upload`
 /// - Server-only: `/api/discover`, `/api/ota/check`, `/api/ota/update`
 pub const SHARED_API_ROUTES: &[SharedRoute] = &[
     SharedRoute {

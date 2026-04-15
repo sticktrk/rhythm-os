@@ -97,3 +97,19 @@ curl http://192.168.7.2:54448/api/state
 Once that works, you can decide whether to keep the device USB-managed, add Wi-Fi, or extend the image further.
 
 If your board is the original Pi Zero without onboard Wi-Fi, the Wi-Fi flags above will not connect anything unless you attach a supported USB Wi-Fi adapter.
+
+## BLE provisioning
+
+The rpiz image now includes a BlueZ-based BLE provisioning sidecar that reuses
+the shared Rhythm provisioning GATT contract.
+
+- On boot, BLE provisioning starts automatically when the Pi does not have an active Wi-Fi IP
+- `GET /api/wifi` returns the current Wi-Fi/provisioning status
+- `DELETE /api/wifi` clears `/etc/wpa_supplicant.conf`, restarts Wi-Fi, and re-enables BLE provisioning
+
+For test sessions on a Pi that is already connected to Wi-Fi, force the
+provisioning sidecar on with:
+
+```bash
+RHYTHM_BLE_PROVISION_ALWAYS=1 /usr/bin/rhythm-server --data-dir /data --log-level info
+```
