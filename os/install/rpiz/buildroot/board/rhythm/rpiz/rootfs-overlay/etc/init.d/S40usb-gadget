@@ -2,16 +2,12 @@
 
 case "$1" in
     start)
-        modprobe dwc2 2>/dev/null || true
-        modprobe g_ether 2>/dev/null || true
-        sleep 1
-        ifconfig usb0 192.168.7.2 netmask 255.255.255.0 up 2>/dev/null || true
+        :
         ;;
     stop)
-        ifconfig usb0 down 2>/dev/null || true
+        :
         ;;
     restart)
-        "$0" stop
-        "$0" start
+        :
         ;;
 esac

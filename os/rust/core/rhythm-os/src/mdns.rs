@@ -10,14 +10,38 @@ pub const MDNS_TXT_TYPE: &str = "type";
 #[cfg(feature = "desktop")]
 pub fn local_ipv4() -> Option<std::net::Ipv4Addr> {
     use std::net::IpAddr;
-    for iface in if_addrs::get_if_addrs().ok()? {
-        if !iface.is_loopback() {
-            if let IpAddr::V4(ip) = iface.addr.ip() {
-                return Some(ip);
-            }
+    let ifaces = if_addrs::get_if_addrs().ok()?;
+
+    let mut preferred = None;
+    let mut fallback = None;
+
+    for iface in ifaces {
+        if iface.is_loopback() {
+            continue;
         }
+
+        let IpAddr::V4(ip) = iface.addr.ip() else {
+            continue;
+        };
+
+        if iface.name.starts_with("usb") {
+            fallback.get_or_insert(ip);
+            continue;
+        }
+
+        if iface.name.starts_with("wlan")
+            || iface.name.starts_with("wl")
+            || iface.name.starts_with("eth")
+            || iface.name.starts_with("en")
+        {
+            preferred.get_or_insert(ip);
+            continue;
+        }
+
+        fallback.get_or_insert(ip);
     }
-    None
+
+    preferred.or(fallback)
 }
 
 /// Register an mDNS service for auto-discovery by clients.
