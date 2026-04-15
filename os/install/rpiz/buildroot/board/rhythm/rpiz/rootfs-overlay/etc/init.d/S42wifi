@@ -159,6 +159,11 @@ start() {
     modprobe_logged cfg80211
     modprobe_logged brcmutil
     modprobe_logged brcmfmac
+    # Linux 6.4+ splits brcmfmac into base + chip-family plugins.
+    # The BCM43430 (Pi Zero W) needs the Cypress/Infineon plugin.
+    # Without mdev/hotplug, request_module() from the kernel may not
+    # resolve, so load it explicitly.
+    modprobe_logged brcmfmac-cyw
 
     iface=""
     attempt=1
