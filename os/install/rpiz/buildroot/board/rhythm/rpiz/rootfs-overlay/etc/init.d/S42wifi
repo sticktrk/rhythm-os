@@ -1,8 +1,6 @@
 #!/bin/sh
 
 WPA_CONF=/etc/wpa_supplicant.conf
-WPA_PIDFILE=/var/run/wpa_supplicant.wlan0.pid
-DHCP_PIDFILE=/var/run/udhcpc.wlan0.pid
 LOGFILE=/var/log/wifi.log
 
 log() {
@@ -14,6 +12,25 @@ log() {
     fi
 }
 
+find_wifi_iface() {
+    local netdir path iface
+
+    netdir=/sys/class/net
+    [ -d "$netdir" ] || return 1
+
+    for path in "$netdir"/*; do
+        [ -e "$path" ] || continue
+        iface="${path##*/}"
+        [ "$iface" = "lo" ] && continue
+        if [ -d "$path/wireless" ]; then
+            printf '%s\n' "$iface"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 has_wifi_config() {
     [ -s "$WPA_CONF" ] && grep -q '^network={[[:space:]]*$' "$WPA_CONF"
 }
@@ -23,10 +40,39 @@ pid_is_running() {
 }
 
 status_field() {
-    /usr/sbin/wpa_cli -i wlan0 status 2>/dev/null | sed -n "s/^$1=//p" | head -n 1
+    local iface="$1"
+    local field="$2"
+
+    /usr/sbin/wpa_cli -i "$iface" status 2>/dev/null | sed -n "s/^$field=//p" | head -n 1
+}
+
+log_kernel_excerpt() {
+    local lines
+
+    lines="$(dmesg 2>/dev/null | grep -E 'brcmfmac|cfg80211|firmware|mmc[0-9]' | tail -n 20 || true)"
+    if [ -n "$lines" ]; then
+        printf '%s\n' "$lines" | while IFS= read -r line; do
+            log "kernel: $line"
+        done
+    fi
+}
+
+log_firmware_inventory() {
+    local fw_lines
+
+    fw_lines="$(find /lib/firmware/brcm -maxdepth 1 -type f 2>/dev/null | sort || true)"
+    if [ -n "$fw_lines" ]; then
+        printf '%s\n' "$fw_lines" | while IFS= read -r line; do
+            log "firmware: $line"
+        done
+    else
+        log "firmware: no files found under /lib/firmware/brcm"
+    fi
 }
 
 start() {
+    local iface attempt state ssid ip_addr
+
     if ! has_wifi_config; then
         log "no embedded credentials; skipping wlan0 bring-up"
         return 0
@@ -37,26 +83,44 @@ start() {
     modprobe cfg80211 2>/dev/null || true
     modprobe brcmutil 2>/dev/null || true
     modprobe brcmfmac 2>/dev/null || true
-    sleep 2
 
-    if [ ! -d /sys/class/net/wlan0 ]; then
-        log "wlan0 did not appear after brcmfmac load"
+    iface=""
+    attempt=1
+    while [ "$attempt" -le 15 ]; do
+        iface="$(find_wifi_iface || true)"
+        if [ -n "$iface" ]; then
+            break
+        fi
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+
+    if [ -z "$iface" ]; then
+        log "no wireless interface appeared after brcmfmac load"
+        log_firmware_inventory
+        log_kernel_excerpt
         return 0
     fi
 
-    ifconfig wlan0 up 2>/dev/null || true
+    WPA_PIDFILE="/var/run/wpa_supplicant.${iface}.pid"
+    DHCP_PIDFILE="/var/run/udhcpc.${iface}.pid"
+
+    log "using interface $iface"
+
+    ifconfig "$iface" up 2>/dev/null || true
 
     if ! pid_is_running "$WPA_PIDFILE"; then
-        if /usr/sbin/wpa_supplicant -B -i wlan0 -c "$WPA_CONF" -P "$WPA_PIDFILE"; then
+        if /usr/sbin/wpa_supplicant -B -i "$iface" -c "$WPA_CONF" -P "$WPA_PIDFILE"; then
             log "wpa_supplicant started"
         else
             log "wpa_supplicant failed to start"
+            log_kernel_excerpt
             return 0
         fi
     fi
 
     if ! pid_is_running "$DHCP_PIDFILE"; then
-        if udhcpc -b -i wlan0 -p "$DHCP_PIDFILE" >/dev/null 2>&1; then
+        if udhcpc -b -i "$iface" -p "$DHCP_PIDFILE" >/dev/null 2>&1; then
             log "udhcpc started"
         else
             log "udhcpc failed to start"
@@ -65,9 +129,9 @@ start() {
 
     attempt=1
     while [ "$attempt" -le 8 ]; do
-        state="$(status_field wpa_state)"
-        ssid="$(status_field ssid)"
-        ip_addr="$(status_field ip_address)"
+        state="$(status_field "$iface" wpa_state)"
+        ssid="$(status_field "$iface" ssid)"
+        ip_addr="$(status_field "$iface" ip_address)"
 
         if [ -n "$ip_addr" ]; then
             if [ -n "$ssid" ]; then
@@ -82,8 +146,8 @@ start() {
         attempt=$((attempt + 1))
     done
 
-    state="$(status_field wpa_state)"
-    ssid="$(status_field ssid)"
+    state="$(status_field "$iface" wpa_state)"
+    ssid="$(status_field "$iface" ssid)"
     if [ -n "$ssid" ]; then
         log "no IP yet; state=${state:-unknown} ssid='$ssid'"
     else
@@ -92,6 +156,13 @@ start() {
 }
 
 stop() {
+    local iface
+
+    iface="$(find_wifi_iface || true)"
+    [ -n "$iface" ] || iface="wlan0"
+    WPA_PIDFILE="/var/run/wpa_supplicant.${iface}.pid"
+    DHCP_PIDFILE="/var/run/udhcpc.${iface}.pid"
+
     if pid_is_running "$DHCP_PIDFILE"; then
         kill "$(cat "$DHCP_PIDFILE")" 2>/dev/null || true
     fi
@@ -102,7 +173,7 @@ stop() {
     fi
     rm -f "$WPA_PIDFILE"
 
-    ifconfig wlan0 down 2>/dev/null || true
+    ifconfig "$iface" down 2>/dev/null || true
 }
 
 case "$1" in
