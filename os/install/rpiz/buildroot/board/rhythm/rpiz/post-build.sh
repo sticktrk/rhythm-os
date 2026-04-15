@@ -8,6 +8,7 @@ WIFI_SSID="${RHYTHM_WIFI_SSID:-}"
 WIFI_PSK="${RHYTHM_WIFI_PSK:-}"
 WIFI_COUNTRY="${RHYTHM_WIFI_COUNTRY:-US}"
 WIFI_COUNTRY="$(printf '%s' "$WIFI_COUNTRY" | tr '[:lower:]' '[:upper:]')"
+FIRMWARE_ROOT_DIR="${TARGET_DIR}/lib/firmware"
 FIRMWARE_DIR="${TARGET_DIR}/lib/firmware/brcm"
 CYPRESS_FIRMWARE_DIR="${TARGET_DIR}/lib/firmware/cypress"
 
@@ -16,6 +17,7 @@ escape_wpa_string() {
 }
 
 mkdir -p "$(dirname "$WPA_CONF")"
+mkdir -p "$FIRMWARE_ROOT_DIR"
 mkdir -p "$FIRMWARE_DIR"
 
 {
@@ -78,8 +80,9 @@ copy_if_present \
     "${FIRMWARE_DIR}/brcmfmac43430-sdio.raspberrypi,model-zero-w.txt"
 
 # The Pi Zero W Bluetooth controller expects a Broadcom patch file at
-# /lib/firmware/brcm/BCM43430A1.hcd. Normalize whatever variant the firmware
-# packages provided to that canonical filename.
+# /lib/firmware/BCM43430A1.hcd or /lib/firmware/brcm/BCM43430A1.hcd depending
+# on which attach path is in use. Normalize whatever variant the firmware
+# packages provided to both canonical filenames.
 for src in \
     "${FIRMWARE_DIR}"/BCM43430A1*.hcd \
     "${FIRMWARE_DIR}"/BCM4343*.hcd \
@@ -87,5 +90,8 @@ for src in \
 do
     [ -f "$src" ] || continue
     copy_if_present "$src" "${FIRMWARE_DIR}/BCM43430A1.hcd"
-    [ -f "${FIRMWARE_DIR}/BCM43430A1.hcd" ] && break
+    copy_if_present "$src" "${FIRMWARE_ROOT_DIR}/BCM43430A1.hcd"
+    if [ -f "${FIRMWARE_DIR}/BCM43430A1.hcd" ] || [ -f "${FIRMWARE_ROOT_DIR}/BCM43430A1.hcd" ]; then
+        break
+    fi
 done
