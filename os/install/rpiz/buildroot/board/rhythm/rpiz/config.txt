@@ -1,4 +1,5 @@
 kernel=kernel.img
 dtoverlay=dwc2,dr_mode=peripheral
 dtoverlay=miniuart-bt
+core_freq=250
 enable_uart=1
