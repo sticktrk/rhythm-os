@@ -10,5 +10,10 @@ mkdir -p "$(dirname "$LOGFILE")" "$DATA_DIR"
 export RHYTHM_PLATFORM_TYPE=embedded
 export RHYTHM_PLATFORM_CONTEXT=rpiz
 
+# Mirror logs to the active console so HDMI/UART debugging works without a login shell.
+if [ -w /dev/console ]; then
+    exec /bin/sh -c '/usr/bin/rhythm-server --data-dir "$1" --log-level info 2>&1 | tee -a "$2" /dev/console >/dev/null' sh "$DATA_DIR" "$LOGFILE"
+fi
+
 # Stay in the foreground so BusyBox init can respawn the server if it exits.
 exec /usr/bin/rhythm-server --data-dir "$DATA_DIR" --log-level info >>"$LOGFILE" 2>&1
