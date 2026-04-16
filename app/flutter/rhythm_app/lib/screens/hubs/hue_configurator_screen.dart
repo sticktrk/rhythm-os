@@ -277,7 +277,9 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
 
     // Push credentials to server so it can connect to the hub
     if (mounted) {
-      context.read<ServerSyncProvider>().pushHubCredentials(RoomSourceDto.hue);
+      await context
+          .read<ServerSyncProvider>()
+          .pushHubCredentials(RoomSourceDto.hue);
     }
 
     if (!mounted) return;
@@ -960,14 +962,15 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
     );
   }
 
-  void _reconnect() {
+  Future<void> _reconnect() async {
     if (_isReconnecting) return;
     setState(() => _isReconnecting = true);
-    context.read<ServerSyncProvider>().pushHubCredentials(RoomSourceDto.hue);
-    // Clear after a short delay — SSE hub_status will update the real state.
-    Future.delayed(const Duration(seconds: 3), () {
-      if (mounted) setState(() => _isReconnecting = false);
-    });
+    await context
+        .read<ServerSyncProvider>()
+        .pushHubCredentials(RoomSourceDto.hue);
+    if (mounted) {
+      setState(() => _isReconnecting = false);
+    }
   }
 
   // ─── Shared UI Components ────────────────────────────────

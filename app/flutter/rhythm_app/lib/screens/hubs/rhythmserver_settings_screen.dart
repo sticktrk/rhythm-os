@@ -1457,7 +1457,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     } else {
       final result = await HAConfiguratorScreen.show(context);
       if (result == true && mounted) {
-        syncProvider.pushHubCredentials(RoomSourceDto.homeAssistant);
+        await syncProvider.pushHubCredentials(RoomSourceDto.homeAssistant);
       }
     }
   }
@@ -3824,7 +3824,7 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
           ),
       };
 
-  void _retryHub() {
+  Future<void> _retryHub() async {
     final syncProvider = context.read<ServerSyncProvider>();
     final source = switch (_type) {
       'hue' => RoomSourceDto.hue,
@@ -3832,9 +3832,9 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
       _ => null,
     };
     if (source != null) {
-      syncProvider.pushHubCredentials(source);
+      await syncProvider.pushHubCredentials(source);
     } else {
-      syncProvider.connection.reconnect();
+      await syncProvider.connection.reconnect();
     }
   }
 

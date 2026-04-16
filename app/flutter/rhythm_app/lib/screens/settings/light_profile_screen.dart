@@ -263,8 +263,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   Future<void> _loadConfig({bool checkConnection = true}) async {
+    final syncProvider = context.read<ServerSyncProvider>();
     if (checkConnection) {
-      final syncProvider = context.read<ServerSyncProvider>();
       _connected = syncProvider.synced;
 
       if (!_connected) {
@@ -273,13 +273,18 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       }
     }
 
-    final api = context.read<ServerSyncProvider>().api;
+    final api = syncProvider.api;
     final mode = await api.getMode();
+    final cachedModeConfigs = [...syncProvider.modeConfigs];
+    final cachedProfiles = [...syncProvider.profiles];
     final settingsProfiles = [...await api.getProfiles()];
     if (!mounted) return;
 
     _modeConfigs = [...?mode?.configs];
-    _serverActiveMode = mode?.active;
+    if (_modeConfigs.isEmpty) {
+      _modeConfigs = cachedModeConfigs;
+    }
+    _serverActiveMode = mode?.active ?? syncProvider.activeMode;
     settingsProfiles.sort((a, b) {
       final ia = _profileOrder.indexOf(a.id);
       final ib = _profileOrder.indexOf(b.id);
@@ -288,17 +293,40 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       return orderA.compareTo(orderB);
     });
     final profileConfigs = <String, sdk.RhythmCurveConfig>{
+      for (final profile in cachedProfiles)
+        if (profile.id.isNotEmpty) profile.id: profile,
       for (final profile in settingsProfiles)
         if (profile.id.isNotEmpty) profile.id: profile,
     };
 
-    final initialProfileId = profileConfigs.containsKey(_selectedProfileId)
-        ? _selectedProfileId
-        : mode?.activeConfig?.activeProfileId ??
-            settingsProfiles.firstOrNull?.id ??
+    final requestedProfileId = _selectedProfileId;
+    var initialProfileId = requestedProfileId;
+    var selectedConfig = requestedProfileId.isEmpty
+        ? null
+        : profileConfigs[requestedProfileId] ??
+            await api.getConfig(id: requestedProfileId);
+    if (selectedConfig != null && selectedConfig.id.isNotEmpty) {
+      initialProfileId = selectedConfig.id;
+      profileConfigs[selectedConfig.id] = selectedConfig;
+    }
+
+    if (selectedConfig == null) {
+      final fallbackMode =
+          _serverActiveMode ?? syncProvider.activeMode ?? sdk.RhythmMode.day;
+      final fallbackModeConfig = _modeConfigs.firstWhere(
+        (config) => config.mode == fallbackMode,
+        orElse: () => _defaultModeConfigForMode(fallbackMode),
+      );
+      initialProfileId = mode?.activeConfig?.activeProfileId ??
+          fallbackModeConfig.activeProfileId.trim();
+      if (initialProfileId.isEmpty) {
+        initialProfileId = settingsProfiles.firstOrNull?.id ??
+            cachedProfiles.firstOrNull?.id ??
             'rhythm';
-    final selectedConfig = profileConfigs[initialProfileId] ??
-        await api.getConfig(id: initialProfileId);
+      }
+      selectedConfig = profileConfigs[initialProfileId] ??
+          await api.getConfig(id: initialProfileId);
+    }
     if (selectedConfig == null) {
       setState(() {
         _selectedProfileId = initialProfileId;

@@ -71,7 +71,7 @@ class _HubPickerScreenState extends State<HubPickerScreen>
     final result = await HAConfiguratorScreen.show(context);
     if (result == true && mounted) {
       final serverSync = context.read<ServerSyncProvider>();
-      serverSync.pushHubCredentials(RoomSourceDto.homeAssistant);
+      await serverSync.pushHubCredentials(RoomSourceDto.homeAssistant);
     }
   }
 
@@ -80,7 +80,7 @@ class _HubPickerScreenState extends State<HubPickerScreen>
     final result = await HueConfiguratorScreen.show(context);
     if (result == true && mounted) {
       final serverSync = context.read<ServerSyncProvider>();
-      serverSync.pushHubCredentials(RoomSourceDto.hue);
+      await serverSync.pushHubCredentials(RoomSourceDto.hue);
     }
   }
 

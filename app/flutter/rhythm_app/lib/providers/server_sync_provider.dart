@@ -992,9 +992,9 @@ class ServerSyncProvider extends ChangeNotifier {
   ///
   /// Called after Hue pairing or other hub configuration changes so the
   /// server gets the credentials it needs to connect to the hub.
-  void pushHubCredentials(RoomSourceDto source) {
+  Future<void> pushHubCredentials(RoomSourceDto source) async {
     if (!_connection.connected) return;
-    _pushHubCredentialsForSource(source);
+    await _pushHubCredentialsForSource(source);
   }
 
   /// Tell the addon to auto-configure HA using its SUPERVISOR_TOKEN.
@@ -1006,7 +1006,8 @@ class ServerSyncProvider extends ChangeNotifier {
       address: '',
       credentials: {},
     );
-    _connection.reconnect(); // Re-fetch state with new rooms
+    _lastHubReconnectTime = DateTime.now();
+    await _connection.reconnect(); // Re-fetch state with new rooms
     return true;
   }
 
@@ -1025,7 +1026,7 @@ class ServerSyncProvider extends ChangeNotifier {
     await _connection.api.hubDisconnectOne(hubType: hubType, address: address);
   }
 
-  void _pushHubCredentialsForSource(RoomSourceDto source) {
+  Future<void> _pushHubCredentialsForSource(RoomSourceDto source) async {
     final hubType = _hubTypeForSource(source);
     if (hubType == null) return;
 
@@ -1039,11 +1040,13 @@ class ServerSyncProvider extends ChangeNotifier {
 
     debugPrint(
         'ServerSync: Pushing ${hub.typeName} credentials after source change');
-    _connection.api.hubCredentials(
+    await _connection.api.hubCredentials(
       hubType: _hubTypeWireName(hubType),
       address: '${hub.endpoint.host}:${hub.endpoint.port}',
       credentials: credentials,
     );
+    _lastHubReconnectTime = DateTime.now();
+    await _connection.reconnect();
   }
 
   /// Accept server config as authoritative — update app's Home if different.
