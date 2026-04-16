@@ -1710,6 +1710,8 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert_eq!(parsed["id"], rhythm_core::SLEEP_PROFILE_ID);
         assert_eq!(parsed["name"], rhythm_core::SLEEP_PROFILE_NAME);
+        assert_eq!(parsed["min_brightness"], 20);
+        assert_eq!(parsed["max_brightness"], 20);
         assert_eq!(parsed["curve"]["type"], "constant");
         assert_eq!(parsed["curve"]["direct_color"]["rgb"]["r"], 255);
         assert!(parsed.get("direct_color").is_none());

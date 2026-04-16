@@ -529,9 +529,7 @@ fn default_preserve_hard_off() -> bool {
 }
 
 fn default_mode_transition_duration_ms() -> TimerSetting {
-    TimerSetting::Fixed {
-        value: DEFAULT_MODE_TRANSITION_DURATION_MS,
-    }
+    TimerSetting::Auto
 }
 
 #[cfg(feature = "serde")]
@@ -767,6 +765,7 @@ pub fn default_mode_transition_configs() -> Vec<ModeTransitionConfig> {
             RhythmMode::Day,
             DEFAULT_MODE_TRANSITION_DURATION_MS,
         )
+        .with_duration(TimerSetting::Auto)
         .with_id("sleep_to_day")
         .with_label("Sleep to Day")
         .with_trigger(ModeTransitionTrigger::AstronomicalTwilight),
@@ -775,6 +774,7 @@ pub fn default_mode_transition_configs() -> Vec<ModeTransitionConfig> {
             RhythmMode::Sleep,
             DEFAULT_MODE_TRANSITION_DURATION_MS,
         )
+        .with_duration(TimerSetting::Auto)
         .with_id("day_to_sleep")
         .with_label("Day to Sleep")
         .with_trigger(ModeTransitionTrigger::NauticalTwilight),
@@ -1248,12 +1248,9 @@ mod tests {
     fn test_default_mode_transitions_use_default_duration() {
         let configs = default_mode_transition_configs();
         assert_eq!(configs.len(), 2);
-        assert!(configs.iter().all(|config| {
-            config.duration_ms
-                == TimerSetting::Fixed {
-                    value: DEFAULT_MODE_TRANSITION_DURATION_MS,
-                }
-        }));
+        assert!(configs
+            .iter()
+            .all(|config| config.duration_ms == TimerSetting::Auto));
         assert_eq!(configs[0].id, "sleep_to_day");
         assert_eq!(configs[1].id, "day_to_sleep");
         assert_eq!(configs[0].label, "Sleep to Day");
@@ -1506,12 +1503,7 @@ mod tests {
             }"#;
 
             let config: ModeTransitionConfig = serde_json::from_str(json).unwrap();
-            assert_eq!(
-                config.duration_ms,
-                TimerSetting::Fixed {
-                    value: DEFAULT_MODE_TRANSITION_DURATION_MS,
-                }
-            );
+            assert_eq!(config.duration_ms, TimerSetting::Auto);
             assert!(config.preserve_hard_off);
         }
 

@@ -22,6 +22,9 @@ pub const WARNING_BEFORE_SECS: u64 = 60;
 /// Brightness multiplier during warning dim (50% of adaptive).
 pub const WARNING_DIM_FACTOR: f32 = 0.5;
 
+/// Rate-limit reconnect-triggered full hub resyncs during SSE flapping.
+const RECONNECT_RESYNC_COOLDOWN: Duration = Duration::from_secs(120);
+
 /// Per-room motion timer state managed by the main loop.
 ///
 /// Hub-agnostic: any hub can emit `HubEvent::Motion` and this struct
@@ -283,12 +286,18 @@ fn spawn_reconnect_sync(state: &SharedState, hub_key: &crate::canonical::identit
                     crate::room_sync::poll_initial_light_state(&sync_state);
                 }
                 Err(e) => {
+                    if let Ok(mut s) = sync_state.lock() {
+                        s.clear_hub_reconnect_sync(&sync_hub_key);
+                    }
                     warn!(target: "conn", "Hub {} resync failed: {}", sync_hub_key, e);
                 }
             }
         });
 
     if let Err(e) = spawn_result {
+        if let Ok(mut s) = state.lock() {
+            s.clear_hub_reconnect_sync(hub_key);
+        }
         warn!(
             target: "conn",
             "Failed to spawn reconnect sync thread for {}: {}",
@@ -296,6 +305,41 @@ fn spawn_reconnect_sync(state: &SharedState, hub_key: &crate::canonical::identit
             e
         );
     }
+}
+
+fn spawn_light_state_poll(state: &SharedState, hub_key: &crate::canonical::identity::HubKey) {
+    let poll_state = state.clone();
+    let poll_hub_key = hub_key.clone();
+    let thread_name = format!("hub-light-poll-{}", poll_hub_key.hub_type.as_str());
+
+    let spawn_result = std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || crate::room_sync::poll_initial_light_state(&poll_state));
+
+    if let Err(e) = spawn_result {
+        warn!(
+            target: "conn",
+            "Failed to spawn reconnect light-state poll for {}: {}",
+            hub_key,
+            e
+        );
+    }
+}
+
+fn should_run_reconnect_resync(
+    state: &SharedState,
+    hub_key: &crate::canonical::identity::HubKey,
+) -> bool {
+    let Ok(mut s) = state.lock() else {
+        return true;
+    };
+
+    if s.reconnect_sync_recently_ran(hub_key, RECONNECT_RESYNC_COOLDOWN) {
+        return false;
+    }
+
+    s.note_hub_reconnect_sync(hub_key);
+    true
 }
 
 /// Handle a hub-agnostic event from the event stream.
@@ -323,7 +367,17 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             info!(target: "conn", "Hub connected");
             if became_connected {
                 if let Some(ref key) = hub_key {
-                    spawn_reconnect_sync(state, key);
+                    if should_run_reconnect_resync(state, key) {
+                        spawn_reconnect_sync(state, key);
+                    } else {
+                        info!(
+                            target: "conn",
+                            "Hub {} reconnected within {}s; skipping full resync",
+                            key,
+                            RECONNECT_RESYNC_COOLDOWN.as_secs()
+                        );
+                        spawn_light_state_poll(state, key);
+                    }
                 }
             }
 
@@ -887,7 +941,7 @@ mod tests {
     use rhythm_core::runtime::{RoomSnapshot, RuntimeHandle};
     use rhythm_core::{HubRegistry, LightProfileConfig, RoomProfileSettings, TimerSetting};
     use std::collections::HashMap;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -1117,6 +1171,7 @@ mod tests {
 
     struct MotionTestRuntime {
         snapshots: Vec<RoomSnapshot>,
+        any_lights_on_calls: Option<Arc<AtomicUsize>>,
     }
 
     impl RuntimeHandle for MotionTestRuntime {
@@ -1196,6 +1251,10 @@ mod tests {
             Ok(())
         }
         fn any_lights_on(&self, _: &str) -> anyhow::Result<bool> {
+            if let Some(ref calls) = self.any_lights_on_calls {
+                calls.fetch_add(1, Ordering::SeqCst);
+                return Ok(true);
+            }
             Ok(false)
         }
         fn current_hour(&self) -> f32 {
@@ -1242,6 +1301,7 @@ mod tests {
                     ..Default::default()
                 },
             }],
+            any_lights_on_calls: None,
         });
         let hub_type = HubType::new("test");
         let hub_key = HubKey::new(hub_type.clone(), "hub.local");
@@ -1265,6 +1325,26 @@ mod tests {
 
     impl HubDiscovery for ReconnectTestDiscovery {
         fn discover_rooms(&self) -> anyhow::Result<Vec<DiscoveredRoom>> {
+            Ok(vec![DiscoveredRoom {
+                id: "room_a".into(),
+                name: "Room A".into(),
+                grouped_light_id: "gl_room_a".into(),
+                device_ids: vec!["light-1".into()],
+            }])
+        }
+
+        fn discover_devices(&self) -> anyhow::Result<Vec<DiscoveredDevice>> {
+            Ok(vec![])
+        }
+    }
+
+    struct CountingReconnectDiscovery {
+        discover_rooms_calls: Arc<AtomicUsize>,
+    }
+
+    impl HubDiscovery for CountingReconnectDiscovery {
+        fn discover_rooms(&self) -> anyhow::Result<Vec<DiscoveredRoom>> {
+            self.discover_rooms_calls.fetch_add(1, Ordering::SeqCst);
             Ok(vec![DiscoveredRoom {
                 id: "room_a".into(),
                 name: "Room A".into(),
@@ -1361,6 +1441,120 @@ mod tests {
         assert_eq!(after_room["device_ids"], serde_json::json!(["light-1"]));
         assert_eq!(after_room["devices"][0]["id"], "light-1");
         assert_eq!(after_room["devices"][0]["type"], "light");
+    }
+
+    #[test]
+    fn rapid_reconnect_skips_full_resync_but_polls_light_state() {
+        let state = make_state();
+        let hub_type = HubType::new("test");
+        let hub_key = HubKey::new(hub_type.clone(), "hub.local");
+        let discover_rooms_calls = Arc::new(AtomicUsize::new(0));
+        let light_poll_calls = Arc::new(AtomicUsize::new(0));
+
+        let mut registry = crate::registry::HubDeviceRegistry::new();
+        registry.restore_from_snapshot(RegistrySnapshot {
+            rooms: vec![SnapshotRoom {
+                id: "room_a".into(),
+                name: "Room A".into(),
+                grouped_light_id: "gl_room_a".into(),
+            }],
+            devices: vec![],
+            buttons: HashMap::new(),
+            area_lights: HashMap::new(),
+        });
+        let registry: Arc<Mutex<dyn HubRegistry>> = Arc::new(Mutex::new(registry));
+
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(MotionTestRuntime {
+            snapshots: vec![RoomSnapshot {
+                id: "room_a".into(),
+                name: "Room A".into(),
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                hard_off: false,
+                profile_settings: RoomProfileSettings::default(),
+            }],
+            any_lights_on_calls: Some(light_poll_calls.clone()),
+        });
+
+        {
+            let mut s = state.lock().unwrap();
+            s.hubs.insert(
+                hub_key.clone(),
+                ActiveHub {
+                    hub_type,
+                    hub_key: hub_key.clone(),
+                    runtime: Some(runtime),
+                    hub_data: Box::new(()),
+                    registry: Some(registry),
+                    discovery: Some(Arc::new(CountingReconnectDiscovery {
+                        discover_rooms_calls: discover_rooms_calls.clone(),
+                    })),
+                    shutdown: Arc::new(AtomicBool::new(false)),
+                },
+            );
+            s.set_hub_connected(&hub_key, false);
+        }
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Connected {
+                hub_key: Some(hub_key.clone()),
+            },
+            &mut MotionTimerState::new(),
+        );
+
+        for _ in 0..50 {
+            if discover_rooms_calls.load(Ordering::SeqCst) >= 1
+                && light_poll_calls.load(Ordering::SeqCst) >= 1
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert_eq!(discover_rooms_calls.load(Ordering::SeqCst), 1);
+        let first_light_poll_calls = light_poll_calls.load(Ordering::SeqCst);
+        assert!(
+            first_light_poll_calls >= 1,
+            "first reconnect sync should poll light state"
+        );
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Disconnected {
+                hub_key: Some(hub_key.clone()),
+                reason: "SSE dropped".into(),
+            },
+            &mut MotionTimerState::new(),
+        );
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Connected {
+                hub_key: Some(hub_key.clone()),
+            },
+            &mut MotionTimerState::new(),
+        );
+
+        for _ in 0..50 {
+            if light_poll_calls.load(Ordering::SeqCst) > first_light_poll_calls {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert_eq!(
+            discover_rooms_calls.load(Ordering::SeqCst),
+            1,
+            "rapid reconnect should not trigger a second full resync"
+        );
+        assert!(
+            light_poll_calls.load(Ordering::SeqCst) > first_light_poll_calls,
+            "rapid reconnect should still refresh light state"
+        );
     }
 
     #[test]

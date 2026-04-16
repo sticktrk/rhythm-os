@@ -215,7 +215,7 @@ mod tests {
 
         let rhythm = profiles.get(RHYTHM_PROFILE_ID).unwrap();
         assert_eq!(rhythm.name, "Day");
-        assert_eq!(rhythm.min_brightness, 2);
+        assert_eq!(rhythm.min_brightness, 20);
         assert_eq!(rhythm.max_brightness, 100);
         assert_eq!(rhythm.min_color_temp, 1800);
         assert_eq!(rhythm.max_color_temp, 5500);
@@ -238,8 +238,8 @@ mod tests {
 
         let sleep = profiles.get(SLEEP_PROFILE_ID).unwrap();
         assert_eq!(sleep.name, "Sleep");
-        assert_eq!(sleep.min_brightness, 1);
-        assert_eq!(sleep.max_brightness, 1);
+        assert_eq!(sleep.min_brightness, 20);
+        assert_eq!(sleep.max_brightness, 20);
         assert!(matches!(
             sleep.curve,
             rhythm_core::LightCurveShape::Constant {
@@ -277,7 +277,7 @@ mod tests {
         );
         assert_eq!(
             transitions[0].duration_ms,
-            TimerSetting::Fixed { value: 30_000 }
+            TimerSetting::Auto
         );
         assert!(transitions[0].preserve_hard_off);
         assert_eq!(transitions[1].id, "day_to_sleep");
@@ -290,7 +290,7 @@ mod tests {
         );
         assert_eq!(
             transitions[1].duration_ms,
-            TimerSetting::Fixed { value: 30_000 }
+            TimerSetting::Auto
         );
         assert!(transitions[1].preserve_hard_off);
     }

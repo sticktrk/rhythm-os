@@ -21,7 +21,7 @@ pub const DAY_IDLE_PROFILE_ID: &str = "day_idle";
 pub const DAY_IDLE_PROFILE_NAME: &str = "Day Idle";
 pub const SLEEP_IDLE_PROFILE_ID: &str = "sleep_idle";
 pub const SLEEP_IDLE_PROFILE_NAME: &str = "Sleep Idle";
-pub const SLEEP_DEFAULT_BRIGHTNESS: u8 = 1;
+pub const SLEEP_DEFAULT_BRIGHTNESS: u8 = 20;
 pub const SLEEP_DEFAULT_RGB: Rgb = Rgb { r: 255, g: 0, b: 0 };
 const LEGACY_IDLE_UI_BRIGHTNESS: u8 = 15;
 

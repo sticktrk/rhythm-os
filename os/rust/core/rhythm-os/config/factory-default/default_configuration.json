@@ -52,8 +52,8 @@
             }
           }
         },
-        "min_brightness": 1,
-        "max_brightness": 1,
+        "min_brightness": 20,
+        "max_brightness": 20,
         "min_color_temp": 0,
         "max_color_temp": 0,
         "max_dim_steps": 1,
@@ -130,7 +130,9 @@
           "kind": "solar",
           "event": "astronomical_twilight"
         },
-        "duration_ms": 30000,
+        "duration_ms": {
+          "mode": "auto"
+        },
         "preserve_hard_off": true
       },
       {
@@ -142,7 +144,9 @@
           "kind": "solar",
           "event": "nautical_twilight"
         },
-        "duration_ms": 30000,
+        "duration_ms": {
+          "mode": "auto"
+        },
         "preserve_hard_off": true
       }
     ],

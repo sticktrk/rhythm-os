@@ -133,10 +133,16 @@ if [ "$RELEASE" = true ]; then
     TRACK="release"
     ADDON_GIT_REPO="git@github.com:sticktrk/rhythm-os-addon.git"
     ADDON_REPO_URL="https://github.com/sticktrk/rhythm-os-addon"
+    REPO_NAME="Rhythm OS"
+    README_TITLE="Rhythm OS Add-on for Home Assistant"
+    README_ADDON_NAME="Rhythm OS"
 else
     TRACK="beta"
     ADDON_GIT_REPO="git@github.com:sticktrk/rhythm-os-addon-beta.git"
     ADDON_REPO_URL="https://github.com/sticktrk/rhythm-os-addon-beta"
+    REPO_NAME="Rhythm OS BETA"
+    README_TITLE="Rhythm OS BETA Add-on for Home Assistant"
+    README_ADDON_NAME="Rhythm OS BETA"
 fi
 
 # Bump version: increments the build number in 4.2.024-alpha → 4.2.025-alpha
@@ -400,16 +406,26 @@ else
     ADDON_REPO_PATH="$TMPDIR/addon-repo"
 fi
 
+# Remove legacy addon directories so Home Assistant does not see stale slugs.
+LEGACY_ADDON_DIRS=("rhythm-lighting")
+if [ "$DRY_RUN" = true ]; then
+    for legacy_dir in "${LEGACY_ADDON_DIRS[@]}"; do
+        echo "[DRY RUN] Would remove legacy addon dir: $legacy_dir/"
+    done
+else
+    for legacy_dir in "${LEGACY_ADDON_DIRS[@]}"; do
+        if [ -d "$ADDON_REPO_PATH/$legacy_dir" ]; then
+            rm -rf "$ADDON_REPO_PATH/$legacy_dir"
+            echo "Removed legacy addon dir: $legacy_dir/"
+        fi
+    done
+fi
+
 # Create repository.yaml (HA addon repo metadata)
 if [ "$DRY_RUN" = true ]; then
     echo "[DRY RUN] Would create/update: repository.yaml"
 else
     echo "Updating repository.yaml..."
-    if [ "$RELEASE" = true ]; then
-        REPO_NAME="Rhythm OS"
-    else
-        REPO_NAME="Rhythm OS BETA"
-    fi
     cat > "$ADDON_REPO_PATH/repository.yaml" << EOF
 name: $REPO_NAME
 url: $ADDON_REPO_URL
@@ -461,15 +477,14 @@ else
     echo "Synced addon metadata to $ADDON_DEST/"
 fi
 
-# Create README if missing
+# Update README so repo landing page stays in sync with the deployed track.
 README="$ADDON_REPO_PATH/README.md"
-if [ ! -f "$README" ]; then
-    if [ "$DRY_RUN" = true ]; then
-        echo "[DRY RUN] Would create: README.md"
-    else
-        echo "Creating README.md..."
-        cat > "$README" << EOF
-# Rhythm OS Add-on for Home Assistant
+if [ "$DRY_RUN" = true ]; then
+    echo "[DRY RUN] Would create/update: README.md"
+else
+    echo "Updating README.md..."
+    cat > "$README" << EOF
+# $README_TITLE
 
 [![HA Add-on](https://img.shields.io/badge/HA-Add--on-41BDF5.svg)](https://www.home-assistant.io/addons/)
 
@@ -481,7 +496,7 @@ Adaptive lighting that follows the sun. Automatically adjusts brightness and col
 2. Go to **Settings** → **Add-ons** → **Add-on Store**
 3. Click the three dots menu → **Repositories**
 4. Add: \`$ADDON_REPO_URL\`
-5. Find **Rhythm OS** and click **Install**
+5. Find **$README_ADDON_NAME** and click **Install**
 6. Start the add-on and check **Show in sidebar**
 
 ## Features
@@ -499,7 +514,6 @@ The add-on auto-configures from Home Assistant (location, timezone, API token).
 
 - [Main repository](https://github.com/sticktrk/rhythm-os)
 EOF
-    fi
 fi
 
 # Commit and push if requested

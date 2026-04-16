@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rhythm_core::{
     normalize_mode_transition_configs, ButtonAction, LightProfileConfig, ModeChangeCause,
@@ -187,6 +187,11 @@ pub struct AppState {
     /// Used to avoid racing the initial bootstrap sync against reconnect-
     /// triggered syncs after the event stream comes back.
     pub hub_sync_in_progress: HashSet<HubKey>,
+    /// Last time a reconnect-triggered full hub sync was scheduled.
+    ///
+    /// Rapid SSE reconnect churn should refresh live light state, but it
+    /// should not keep re-running full room/device discovery every time.
+    pub hub_reconnect_sync_at: HashMap<HubKey, Instant>,
     /// Hub credentials keyed by HubKey. Supports multiple simultaneous hubs.
     pub hub_credentials: HashMap<HubKey, HubCredentials>,
 
@@ -378,6 +383,7 @@ impl Default for AppState {
             hubs: HashMap::new(),
             hub_connection_status: HashMap::new(),
             hub_sync_in_progress: HashSet::new(),
+            hub_reconnect_sync_at: HashMap::new(),
             hub_credentials: HashMap::new(),
             canonical_registry: CanonicalRegistry::new(),
             topology: RoomTopologyStore::new(),
@@ -647,6 +653,25 @@ impl AppState {
     /// Forget the live connection state for a hub.
     pub fn clear_hub_connected(&mut self, key: &HubKey) {
         self.hub_connection_status.remove(key);
+        self.hub_reconnect_sync_at.remove(key);
+    }
+
+    /// Whether a reconnect-triggered full sync ran recently for this hub.
+    pub fn reconnect_sync_recently_ran(&self, key: &HubKey, cooldown: Duration) -> bool {
+        self.hub_reconnect_sync_at
+            .get(key)
+            .is_some_and(|last| last.elapsed() < cooldown)
+    }
+
+    /// Record that a reconnect-triggered full sync was scheduled for this hub.
+    pub fn note_hub_reconnect_sync(&mut self, key: &HubKey) {
+        self.hub_reconnect_sync_at
+            .insert(key.clone(), Instant::now());
+    }
+
+    /// Clear reconnect-sync timing so the next reconnect can try again.
+    pub fn clear_hub_reconnect_sync(&mut self, key: &HubKey) {
+        self.hub_reconnect_sync_at.remove(key);
     }
 
     /// Mark a per-hub room sync as running.
