@@ -43,7 +43,7 @@ resolve_workspace_version() {
     latest_tag="$(git -C "$PROJECT_ROOT" describe --tags --abbrev=0 --match 'v[0-9]*' HEAD 2>/dev/null || true)"
     if [ -n "$latest_tag" ]; then
         latest_tag_version="${latest_tag#v}"
-        next_tag_version="$(bump_minor "$latest_tag_version")"
+        next_tag_version="$(bump_patch "$latest_tag_version")"
         if semver_gte "$next_tag_version" "$base_version"; then
             base_version="$next_tag_version"
         fi
@@ -94,18 +94,19 @@ EOF
     [ "$left_patch" -ge "$right_patch" ]
 }
 
-bump_minor() {
+bump_patch() {
     local version="$1"
-    local major minor
+    local major minor patch
 
-    IFS=. read -r major minor _rest <<EOF
+    IFS=. read -r major minor patch <<EOF
 $version
 EOF
 
     major="${major:-0}"
     minor="${minor:-0}"
+    patch="${patch:-0}"
 
-    echo "${major}.$((minor + 1)).0"
+    echo "${major}.${minor}.$((patch + 1))"
 }
 
 resolve_addon_version() {

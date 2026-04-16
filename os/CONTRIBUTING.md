@@ -24,21 +24,24 @@ cargo test -p rhythm-core solar       # Filter by crate + test name
 
 ## Code style
 
-All PRs must pass these checks:
+Recommended local checks:
 
 ```bash
-cargo fmt --check                     # Formatting
-cargo clippy --all-targets            # Linting (warnings are errors in CI)
+cargo fmt --check
+cargo clippy --all-targets
+cargo test
 ```
 
 Run `cargo fmt` to auto-fix formatting before committing.
+
+Current GitHub CI runs `cargo check` and `cargo test`. `fmt` and `clippy` are still good local gates before opening a PR.
 
 ## Making changes
 
 1. Fork the repository and create a branch from `main`
 2. Make your changes
 3. Add tests if applicable
-4. Ensure `cargo test`, `cargo clippy --all-targets`, and `cargo fmt --check` all pass
+4. Ensure your change builds cleanly and run the relevant local checks for the area you touched
 5. Submit a pull request
 
 ### Commit messages

@@ -46,6 +46,8 @@ cargo build -p rhythm-server --release
 cargo test
 ```
 
+Release versions for `rhythm-server` and `rhythm-esp32` are derived from Git tags such as `v0.4.0`. Untagged builds use Git-derived prerelease versions. The Home Assistant addon keeps its own separate version flow.
+
 See [install/](install/) for platform-specific setup (macOS, Linux, Raspberry Pi Zero, Home Assistant, ESP32).
 
 ## REST API

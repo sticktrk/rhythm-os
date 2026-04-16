@@ -123,6 +123,25 @@ With `--docker` and no explicit `--output-dir`, the default becomes `out/rpiz-do
 
 ## Deployment Scripts
 
+### Versioning
+
+Rhythm OS now uses two versioning tracks:
+
+- `rhythm-server` and `rhythm-esp32` derive their build version from Git tags.
+- `rhythm-addon` remains separate and uses `install/addon/config.yaml`.
+
+For server and ESP32:
+
+- Tagged release builds resolve to the exact tag version, for example `v0.4.0` -> `0.4.0`.
+- Untagged builds resolve to a Git-derived prerelease, for example `0.4.0-dev.66.g1b40e459`.
+- After a release tag exists, untagged builds move to the next patch line automatically. After `v0.4.0`, the next dev builds become `0.4.1-dev.N.g<sha>`.
+
+For the addon:
+
+- `deploy-addon.sh` still owns addon versioning.
+- If you do not pass `--version`, it auto-bumps `install/addon/config.yaml`.
+- If you want an explicit addon version for a release, pass `--version <semver>`.
+
 ### deploy-addon.sh
 
 Deploy the addon to Docker Hub or directly to a Home Assistant instance.
@@ -131,7 +150,7 @@ Deploy the addon to Docker Hub or directly to a Home Assistant instance.
 
 ```bash
 ./scripts/deploy-addon.sh                   # Build all + push to Docker Hub
-./scripts/deploy-addon.sh --version 1.0.0   # Specific version tag
+./scripts/deploy-addon.sh --version 0.4.0   # Explicit addon version
 ./scripts/deploy-addon.sh --skip-build      # Use existing builds
 ./scripts/deploy-addon.sh --dry-run         # Show what would happen
 ```
@@ -142,9 +161,11 @@ Deploy the addon to Docker Hub or directly to a Home Assistant instance.
 
 **What it does:**
 1. Builds Rust binaries for all architectures
-2. Adds `image: dtconcepts/rhythm-os-addon` to `config.yaml`
-4. Builds multi-arch Docker image
-5. Pushes to Docker Hub with version + `latest` tags
+2. Resolves the addon version from `config.yaml` unless `--version` is provided
+3. Auto-bumps `config.yaml` when `--version` is omitted
+4. Adds `image: dtconcepts/rhythm-os-addon` to `config.yaml`
+5. Builds multi-arch Docker image
+6. Pushes to Docker Hub with version + `latest` tags
 
 #### Local Development (--local)
 
@@ -171,8 +192,8 @@ Deploy the addon to Docker Hub or directly to a Home Assistant instance.
 **What it does:**
 1. Builds Rust binary for target arch only
 2. Removes `image:` from config.yaml (HA will build locally)
-4. Copies addon to HA via SCP
-5. HA rebuilds on next install/update
+3. Copies addon to HA via SCP
+4. HA rebuilds on next install/update
 
 ---
 
@@ -208,19 +229,25 @@ cargo install cross
 ### Release
 
 ```bash
-# 1. Update version in addon/config.yaml
+# 1. Update addon changelog if needed
 
-# 2. Update changelog in addon/CHANGELOG.md
-
-# 3. Deploy addon to Docker Hub
+# 2. Deploy addon
+# Auto-bumps addon version from install/addon/config.yaml
 ./scripts/deploy-addon.sh
 
-# 4. Commit and tag
+# Or pin the addon explicitly for a coordinated release
+./scripts/deploy-addon.sh --version 0.4.0
+
+# 3. Commit release changes
 git add -A
-git commit -m "Release v1.0.0"
-git tag v1.0.0
+git commit -m "Release v0.4.0"
+
+# 4. Tag the server/ESP32 release
+git tag v0.4.0
 git push && git push --tags
 ```
+
+Only the Git tag is manual for server and ESP32 releases. Their release version is derived from the tag.
 
 ---
 
