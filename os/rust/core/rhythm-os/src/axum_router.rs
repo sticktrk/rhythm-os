@@ -655,18 +655,7 @@ mod tests {
             self.snapshots.clone()
         }
 
-        fn restore_room_state(
-            &self,
-            _: &str,
-            _: bool,
-            _: bool,
-            _: f32,
-            _: f32,
-            _: bool,
-            _: bool,
-            _: rhythm_core::RoomProfileSettings,
-        ) {
-        }
+        fn restore_room_state(&self, _: &str, _: rhythm_core::RestoredRoomState) {}
 
         fn add_room(&self, _: &str, _: &str) {}
 
@@ -897,7 +886,8 @@ mod tests {
                 .min_brightness,
             8
         );
-        let factory_rhythm = crate::factory_default_config::factory_default_light_profile_config_map();
+        let factory_rhythm =
+            crate::factory_default_config::factory_default_light_profile_config_map();
         assert_eq!(
             state
                 .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)

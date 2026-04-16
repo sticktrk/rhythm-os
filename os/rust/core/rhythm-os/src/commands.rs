@@ -16,7 +16,7 @@ use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::{
     ButtonAction, HubRegistry, InputEvent, LightProfileConfig, LightProfileRegistry,
     LightingCommand, ModeChangeCause, ModeConfig, ModeTransitionConfig, ModeTransitionTrigger,
-    RhythmMode, RoomModeState, RoomProfileSettings, RuntimeHandle, TimerSetting,
+    RestoredRoomState, RhythmMode, RoomModeState, RoomProfileSettings, RuntimeHandle, TimerSetting,
 };
 use serde_json::Value;
 
@@ -125,11 +125,44 @@ fn render_state_for_display(room_state: RoomModeState) -> RoomModeState {
     room_state
 }
 
-fn mode_config_for_mode<'a>(
+fn mode_config_for_mode(mode_configs: &[ModeConfig], mode: RhythmMode) -> Option<&ModeConfig> {
+    mode_configs.iter().find(|config| config.mode == mode)
+}
+
+#[derive(Clone, Copy)]
+struct RoomLightingContext<'a> {
+    light_profile_configs: &'a BTreeMap<String, LightProfileConfig>,
     mode_configs: &'a [ModeConfig],
     mode: RhythmMode,
-) -> Option<&'a ModeConfig> {
-    mode_configs.iter().find(|config| config.mode == mode)
+    solar_noon: f32,
+    latitude: f32,
+    utc_offset: f32,
+}
+
+#[derive(Clone, Copy)]
+struct RoomLightingInput<'a> {
+    settings: &'a RoomProfileSettings,
+    room_state: RoomModeState,
+    time_offset_minutes: f32,
+    brightness_offset: f32,
+}
+
+impl<'a> RoomLightingInput<'a> {
+    fn from_snapshot(snapshot: &'a rhythm_core::RoomSnapshot, room_state: RoomModeState) -> Self {
+        Self {
+            settings: &snapshot.profile_settings,
+            room_state,
+            time_offset_minutes: snapshot.time_offset_minutes,
+            brightness_offset: snapshot.brightness_offset,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ModeDefaultApplyContext<'a> {
+    lighting: RoomLightingContext<'a>,
+    transition: Option<&'a ModeTransitionConfig>,
+    transition_started_at: chrono::NaiveDateTime,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -265,24 +298,16 @@ fn resolved_active_profile_id_for_mode_from_parts(
 }
 
 fn compute_room_display_values_for_settings_from_parts(
-    light_profile_configs: &BTreeMap<String, LightProfileConfig>,
-    mode_configs: &[ModeConfig],
-    active_mode: RhythmMode,
-    solar_noon: f32,
-    latitude: f32,
-    utc_offset: f32,
-    settings: &RoomProfileSettings,
-    room_state: RoomModeState,
-    time_offset_minutes: f32,
-    brightness_offset: f32,
+    lighting: RoomLightingContext<'_>,
+    room: RoomLightingInput<'_>,
 ) -> (u8, u16) {
     use rhythm_core::SolarTime;
 
-    if room_state == RoomModeState::HardOff {
+    if room.room_state == RoomModeState::HardOff {
         return (0, 0);
     }
 
-    let local = current_local_datetime(utc_offset);
+    let local = current_local_datetime(lighting.utc_offset);
     let (year, month, day) = (
         local.date().year(),
         local.date().month(),
@@ -292,22 +317,27 @@ fn compute_room_display_values_for_settings_from_parts(
     let t = local.time();
     let current_hour = t.hour() as f32 + t.minute() as f32 / 60.0 + t.second() as f32 / 3600.0;
 
-    let solar = SolarTime::new(solar_noon, latitude, day_of_year);
+    let solar = SolarTime::new(lighting.solar_noon, lighting.latitude, day_of_year);
     let ctx = rhythm_core::light_profile::CurveContext::new(current_hour, solar, None);
-    let render_state = render_state_for_display(room_state);
+    let render_state = render_state_for_display(room.room_state);
     if matches!(render_state, RoomModeState::HardOff) {
         return (0, 0);
     }
-    let registry =
-        light_profile_registry_from_parts(light_profile_configs, mode_configs, active_mode);
+    let registry = light_profile_registry_from_parts(
+        lighting.light_profile_configs,
+        lighting.mode_configs,
+        lighting.mode,
+    );
     let values = registry
-        .profile_for_room_state(active_mode, render_state, Some(settings))
-        .calculate_with_offset(&ctx, time_offset_minutes);
+        .profile_for_room_state(lighting.mode, render_state, Some(room.settings))
+        .calculate_with_offset(&ctx, room.time_offset_minutes);
     let adjusted_brightness =
-        (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
+        (values.brightness as f32 + room.brightness_offset).clamp(1.0, 100.0) as u8;
     let brightness = match render_state {
         RoomModeState::Idle => values.brightness,
-        RoomModeState::Warning if !warning_uses_custom_profile(mode_configs, active_mode) => {
+        RoomModeState::Warning
+            if !warning_uses_custom_profile(lighting.mode_configs, lighting.mode) =>
+        {
             ((adjusted_brightness as f32) * crate::event_loop::WARNING_DIM_FACTOR).clamp(1.0, 100.0)
                 as u8
         }
@@ -324,17 +354,22 @@ fn compute_room_display_values_for_settings(
     time_offset_minutes: f32,
     brightness_offset: f32,
 ) -> (u8, u16) {
+    let mode_configs = s.mode_configs();
     compute_room_display_values_for_settings_from_parts(
-        &s.light_profile_configs,
-        &s.mode_configs(),
-        s.active_mode,
-        s.solar_noon_hour(),
-        s.latitude.unwrap_or(35.0),
-        s.utc_offset_hours,
-        settings,
-        room_state,
-        time_offset_minutes,
-        brightness_offset,
+        RoomLightingContext {
+            light_profile_configs: &s.light_profile_configs,
+            mode_configs: &mode_configs,
+            mode: s.active_mode,
+            solar_noon: s.solar_noon_hour(),
+            latitude: s.latitude.unwrap_or(35.0),
+            utc_offset: s.utc_offset_hours,
+        },
+        RoomLightingInput {
+            settings,
+            room_state,
+            time_offset_minutes,
+            brightness_offset,
+        },
     )
 }
 
@@ -404,28 +439,26 @@ fn queue_motion_timer_clear(state: &SharedState, room_id: &str) {
 }
 
 fn resolved_room_motion_timeout_secs_from_parts(
-    light_profile_configs: &BTreeMap<String, LightProfileConfig>,
-    mode_configs: &[ModeConfig],
-    active_mode: RhythmMode,
-    solar_noon: f32,
-    latitude: f32,
-    utc_offset: f32,
+    lighting: RoomLightingContext<'_>,
     settings: &RoomProfileSettings,
     current_hour: f32,
 ) -> u64 {
-    let local = current_local_datetime(utc_offset);
+    let local = current_local_datetime(lighting.utc_offset);
     let (year, month, day) = (
         local.date().year(),
         local.date().month(),
         local.date().day(),
     );
     let day_of_year = rhythm_core::timezone::day_of_year(year, month, day);
-    let solar = rhythm_core::SolarTime::new(solar_noon, latitude, day_of_year);
-    let registry =
-        light_profile_registry_from_parts(light_profile_configs, mode_configs, active_mode);
+    let solar = rhythm_core::SolarTime::new(lighting.solar_noon, lighting.latitude, day_of_year);
+    let registry = light_profile_registry_from_parts(
+        lighting.light_profile_configs,
+        lighting.mode_configs,
+        lighting.mode,
+    );
     let ctx = rhythm_core::light_profile::CurveContext::new(current_hour, solar, None);
     registry
-        .profile_for_room_state(active_mode, RoomModeState::Active, Some(settings))
+        .profile_for_room_state(lighting.mode, RoomModeState::Active, Some(settings))
         .calculate(&ctx)
         .motion_timeout_secs as u64
 }
@@ -477,6 +510,7 @@ pub fn build_room_state_event(
     let (mode, room_state, lights_on, transitioning, brightness, kelvin) = {
         let s = state.lock().unwrap_or_else(|e| e.into_inner());
         let mode = s.active_mode;
+        let mode_configs = s.mode_configs();
         let room_state = room_mode_state_from_flags(
             snap.hard_off,
             snap.soft_off,
@@ -486,12 +520,16 @@ pub fn build_room_state_event(
         );
         let lights_on = s.room_lights_on.get(&snap.id).copied().unwrap_or(false);
         let transitioning = room_mode_transition_active(&s.room_mode_transitions, &snap.id, now);
-        let (curve_brightness, kelvin) = compute_room_display_values_for_settings(
-            &s,
-            &snap.profile_settings,
-            room_state,
-            snap.time_offset_minutes,
-            snap.brightness_offset,
+        let (curve_brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
+            RoomLightingContext {
+                light_profile_configs: &s.light_profile_configs,
+                mode_configs: &mode_configs,
+                mode,
+                solar_noon: s.solar_noon_hour(),
+                latitude: s.latitude.unwrap_or(35.0),
+                utc_offset: s.utc_offset_hours,
+            },
+            RoomLightingInput::from_snapshot(snap, room_state),
         );
         (
             mode,
@@ -510,7 +548,6 @@ pub fn build_room_state_event(
         transitioning,
         brightness,
         kelvin,
-        snap.profile_settings.clone(),
     )
 }
 
@@ -844,7 +881,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             &active_profile_cfg,
             current_hour,
             resolved_solar.solar,
-            resolved_solar.sun_times.clone(),
+            resolved_solar.sun_times,
         );
         let periodic_ctx = rhythm_core::CurveContext::new(
             current_hour,
@@ -1155,16 +1192,20 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
                 .is_some_and(|motion| motion.warning_active),
         );
         let (curve_brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
-            &disp_profiles,
-            &disp_mode_configs,
-            disp_active_mode,
-            disp_solar,
-            disp_lat,
-            disp_utc,
-            &room_profile,
-            room_state,
-            time_offset,
-            bri_offset,
+            RoomLightingContext {
+                light_profile_configs: &disp_profiles,
+                mode_configs: &disp_mode_configs,
+                mode: disp_active_mode,
+                solar_noon: disp_solar,
+                latitude: disp_lat,
+                utc_offset: disp_utc,
+            },
+            RoomLightingInput {
+                settings: &room_profile,
+                room_state,
+                time_offset_minutes: time_offset,
+                brightness_offset: bri_offset,
+            },
         );
 
         // Build enriched device list: all devices from device_ids (with canonical
@@ -1334,16 +1375,15 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                     .is_some_and(|motion| motion.warning_active),
             );
             let (curve_brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
-                &light_profile_configs,
-                &mode_configs,
-                active_mode,
-                solar_noon,
-                latitude,
-                utc_offset,
-                &snap.profile_settings,
-                room_state,
-                snap.time_offset_minutes,
-                snap.brightness_offset,
+                RoomLightingContext {
+                    light_profile_configs: &light_profile_configs,
+                    mode_configs: &mode_configs,
+                    mode: active_mode,
+                    solar_noon,
+                    latitude,
+                    utc_offset,
+                },
+                RoomLightingInput::from_snapshot(snap, room_state),
             );
             let rhythm = RoomRhythmState {
                 id: snap.id.clone(),
@@ -1370,12 +1410,14 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                 } else if rooms_with_sensors.contains(&snap.id) {
                     // Sensor exists but hasn't fired yet — idle defaults
                     let timeout = resolved_room_motion_timeout_secs_from_parts(
-                        &light_profile_configs,
-                        &mode_configs,
-                        active_mode,
-                        solar_noon,
-                        latitude,
-                        utc_offset,
+                        RoomLightingContext {
+                            light_profile_configs: &light_profile_configs,
+                            mode_configs: &mode_configs,
+                            mode: active_mode,
+                            solar_noon,
+                            latitude,
+                            utc_offset,
+                        },
                         &snap.profile_settings,
                         runtime.as_ref().map(|rt| rt.current_hour()).unwrap_or(12.0),
                     );
@@ -1396,16 +1438,20 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
         for room in mgr.iter() {
             let room_state = room_mode_state_from_flags(room.hard_off, room.soft_off, false);
             let (curve_brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
-                &light_profile_configs,
-                &mode_configs,
-                active_mode,
-                solar_noon,
-                latitude,
-                utc_offset,
-                &room.profile_settings,
-                room_state,
-                room.time_offset_minutes,
-                room.brightness_offset,
+                RoomLightingContext {
+                    light_profile_configs: &light_profile_configs,
+                    mode_configs: &mode_configs,
+                    mode: active_mode,
+                    solar_noon,
+                    latitude,
+                    utc_offset,
+                },
+                RoomLightingInput {
+                    settings: &room.profile_settings,
+                    room_state,
+                    time_offset_minutes: room.time_offset_minutes,
+                    brightness_offset: room.brightness_offset,
+                },
             );
             rooms.push(RoomPollState {
                 rhythm: RoomRhythmState {
@@ -1790,18 +1836,13 @@ fn optional_local_time_string_from_decimal_hour(hour: Option<f32>) -> Option<Str
 }
 
 fn mode_apply_cycle_duration(
-    light_profile_configs: &BTreeMap<String, LightProfileConfig>,
-    mode_configs: &[ModeConfig],
-    target_mode: RhythmMode,
-    solar_noon: f32,
-    latitude: f32,
-    utc_offset: f32,
+    lighting: RoomLightingContext<'_>,
     room_snapshots: &[rhythm_core::RoomSnapshot],
     update_interval: Duration,
     power_save: bool,
     room_commands: &[(String, LightingCommand)],
 ) -> Duration {
-    let sample_at = current_local_datetime(utc_offset);
+    let sample_at = current_local_datetime(lighting.utc_offset);
     let sample_date = sample_at.date();
     let sample_time = sample_at.time();
     let day_of_year = rhythm_core::timezone::day_of_year(
@@ -1812,10 +1853,13 @@ fn mode_apply_cycle_duration(
     let sample_hour = sample_time.hour() as f32
         + sample_time.minute() as f32 / 60.0
         + sample_time.second() as f32 / 3600.0;
-    let solar = rhythm_core::SolarTime::new(solar_noon, latitude, day_of_year);
+    let solar = rhythm_core::SolarTime::new(lighting.solar_noon, lighting.latitude, day_of_year);
     let ctx = rhythm_core::light_profile::CurveContext::new(sample_hour, solar, None);
-    let registry =
-        light_profile_registry_from_parts(light_profile_configs, mode_configs, target_mode);
+    let registry = light_profile_registry_from_parts(
+        lighting.light_profile_configs,
+        lighting.mode_configs,
+        lighting.mode,
+    );
 
     let periodic_cycle = crate::periodic::effective_cycle_duration(
         &registry,
@@ -1856,16 +1900,11 @@ fn emit_room_state_event_after_apply(
 fn apply_room_mode_defaults(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
-    light_profile_configs: &BTreeMap<String, LightProfileConfig>,
-    mode_configs: &[ModeConfig],
-    target_mode: RhythmMode,
-    transition: Option<&ModeTransitionConfig>,
-    solar_noon: f32,
-    latitude: f32,
-    transition_started_at: chrono::NaiveDateTime,
+    ctx: ModeDefaultApplyContext<'_>,
     snapshots: &[rhythm_core::RoomSnapshot],
 ) -> bool {
-    let Some(mode_config) = mode_config_for_mode(mode_configs, target_mode) else {
+    let Some(mode_config) = mode_config_for_mode(ctx.lighting.mode_configs, ctx.lighting.mode)
+    else {
         return false;
     };
     if mode_config.room_defaults.is_empty() {
@@ -1903,13 +1942,15 @@ fn apply_room_mode_defaults(
 
         runtime.restore_room_state(
             &snap.id,
-            if soft_off { true } else { snap.rhythm_enabled },
-            snap.disabled,
-            snap.time_offset_minutes,
-            snap.brightness_offset,
-            soft_off,
-            hard_off,
-            snap.profile_settings.clone(),
+            RestoredRoomState {
+                rhythm_enabled: if soft_off { true } else { snap.rhythm_enabled },
+                disabled: snap.disabled,
+                time_offset_minutes: snap.time_offset_minutes,
+                brightness_offset: snap.brightness_offset,
+                soft_off,
+                hard_off,
+                profile_settings: snap.profile_settings.clone(),
+            },
         );
 
         match room_default.state {
@@ -1918,20 +1959,14 @@ fn apply_room_mode_defaults(
             }
             RoomModeState::HardOff => {
                 lights_on_updates.push((snap.id.clone(), false));
-                let transition_ms = transition
+                let transition_ms = ctx
+                    .transition
                     .and_then(|config| {
                         resolve_mode_transition_duration_ms_for_room_from_parts(
                             config,
-                            light_profile_configs,
-                            mode_configs,
-                            target_mode,
-                            solar_noon,
-                            latitude,
-                            &snap.profile_settings,
-                            RoomModeState::HardOff,
-                            snap.time_offset_minutes,
-                            snap.brightness_offset,
-                            transition_started_at,
+                            ctx.lighting,
+                            RoomLightingInput::from_snapshot(snap, RoomModeState::HardOff),
+                            ctx.transition_started_at,
                         )
                     })
                     .filter(|ms| *ms > 0);
@@ -1967,7 +2002,7 @@ fn apply_room_mode_defaults(
             target: "cmd",
             "active_mode_apply: applied {} room defaults for {:?}, {} missing room ids",
             changed_room_ids.len(),
-            target_mode,
+            ctx.lighting.mode,
             missing_rooms
         );
     }
@@ -2113,18 +2148,11 @@ fn build_room_command_from_values(
 }
 
 fn resolve_room_output_for_state_at_from_parts(
-    light_profile_configs: &BTreeMap<String, LightProfileConfig>,
-    mode_configs: &[ModeConfig],
-    target_mode: RhythmMode,
-    solar_noon: f32,
-    latitude: f32,
-    settings: &RoomProfileSettings,
-    room_state: RoomModeState,
-    time_offset_minutes: f32,
-    brightness_offset: f32,
+    lighting: RoomLightingContext<'_>,
+    room: RoomLightingInput<'_>,
     sample_at: chrono::NaiveDateTime,
 ) -> Option<(rhythm_core::LightingValues, u8)> {
-    if room_state == RoomModeState::HardOff {
+    if room.room_state == RoomModeState::HardOff {
         return None;
     }
 
@@ -2138,19 +2166,24 @@ fn resolve_room_output_for_state_at_from_parts(
     let sample_hour = sample_time.hour() as f32
         + sample_time.minute() as f32 / 60.0
         + sample_time.second() as f32 / 3600.0;
-    let solar = rhythm_core::SolarTime::new(solar_noon, latitude, day_of_year);
+    let solar = rhythm_core::SolarTime::new(lighting.solar_noon, lighting.latitude, day_of_year);
     let ctx = rhythm_core::light_profile::CurveContext::new(sample_hour, solar, None);
-    let registry =
-        light_profile_registry_from_parts(light_profile_configs, mode_configs, target_mode);
-    let render_state = render_state_for_display(room_state);
+    let registry = light_profile_registry_from_parts(
+        lighting.light_profile_configs,
+        lighting.mode_configs,
+        lighting.mode,
+    );
+    let render_state = render_state_for_display(room.room_state);
     let values = registry
-        .profile_for_room_state(target_mode, render_state, Some(settings))
-        .calculate_with_offset(&ctx, time_offset_minutes);
+        .profile_for_room_state(lighting.mode, render_state, Some(room.settings))
+        .calculate_with_offset(&ctx, room.time_offset_minutes);
     let adjusted_brightness =
-        (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
+        (values.brightness as f32 + room.brightness_offset).clamp(1.0, 100.0) as u8;
     let brightness = match render_state {
         RoomModeState::Idle => values.brightness,
-        RoomModeState::Warning if !warning_uses_custom_profile(mode_configs, target_mode) => {
+        RoomModeState::Warning
+            if !warning_uses_custom_profile(lighting.mode_configs, lighting.mode) =>
+        {
             ((adjusted_brightness as f32) * crate::event_loop::WARNING_DIM_FACTOR).clamp(1.0, 100.0)
                 as u8
         }
@@ -2162,51 +2195,51 @@ fn resolve_room_output_for_state_at_from_parts(
 }
 
 fn resolved_profile_config_for_room_state_from_parts(
-    light_profile_configs: &BTreeMap<String, LightProfileConfig>,
-    mode_configs: &[ModeConfig],
-    target_mode: RhythmMode,
+    lighting: RoomLightingContext<'_>,
     settings: &RoomProfileSettings,
     room_state: RoomModeState,
 ) -> LightProfileConfig {
     let active_profile_id = resolved_active_profile_id_for_mode_from_parts(
-        light_profile_configs,
-        mode_configs,
-        target_mode,
+        lighting.light_profile_configs,
+        lighting.mode_configs,
+        lighting.mode,
     );
     let requested_id = settings.resolved_profile_id(active_profile_id.as_str());
     let base_id = if !rhythm_core::is_builtin_state_profile_id(requested_id)
-        && light_profile_configs.contains_key(requested_id)
+        && lighting.light_profile_configs.contains_key(requested_id)
     {
         requested_id
     } else {
         active_profile_id.as_str()
     };
 
-    let mut active_config = light_profile_configs
+    let mut active_config = lighting
+        .light_profile_configs
         .get(base_id)
         .cloned()
         .or_else(|| {
-            light_profile_configs
+            lighting
+                .light_profile_configs
                 .get(active_profile_id.as_str())
                 .cloned()
         })
-        .unwrap_or_else(|| factory_default_active_profile_config_for_mode(target_mode));
+        .unwrap_or_else(|| factory_default_active_profile_config_for_mode(lighting.mode));
     settings.apply_to_config(&mut active_config);
 
     if room_state == RoomModeState::Active {
         return active_config;
     }
 
-    let mode_config = mode_config_for_mode(mode_configs, target_mode)
+    let mode_config = mode_config_for_mode(lighting.mode_configs, lighting.mode)
         .cloned()
-        .unwrap_or_else(|| ModeConfig::default_for_mode(target_mode));
+        .unwrap_or_else(|| ModeConfig::default_for_mode(lighting.mode));
 
     mode_config
         .resolve_state_profile_id(room_state, active_profile_id.as_str())
-        .and_then(|target_id| light_profile_configs.get(target_id).cloned())
+        .and_then(|target_id| lighting.light_profile_configs.get(target_id).cloned())
         .unwrap_or_else(|| {
             if matches!(room_state, RoomModeState::Idle | RoomModeState::HardOff) {
-                factory_default_idle_profile_config_for_mode(target_mode)
+                factory_default_idle_profile_config_for_mode(lighting.mode)
             } else {
                 active_config.clone()
             }
@@ -2215,15 +2248,8 @@ fn resolved_profile_config_for_room_state_from_parts(
 
 fn resolve_mode_transition_duration_ms_for_room_from_parts(
     transition: &ModeTransitionConfig,
-    light_profile_configs: &BTreeMap<String, LightProfileConfig>,
-    mode_configs: &[ModeConfig],
-    target_mode: RhythmMode,
-    _solar_noon: f32,
-    _latitude: f32,
-    settings: &RoomProfileSettings,
-    room_state: RoomModeState,
-    _time_offset_minutes: f32,
-    _brightness_offset: f32,
+    lighting: RoomLightingContext<'_>,
+    room: RoomLightingInput<'_>,
     transition_started_at: chrono::NaiveDateTime,
 ) -> Option<u32> {
     let started_at_time = transition_started_at.time();
@@ -2235,43 +2261,20 @@ fn resolve_mode_transition_duration_ms_for_room_from_parts(
         return Some(duration_ms);
     }
 
-    resolved_profile_config_for_room_state_from_parts(
-        light_profile_configs,
-        mode_configs,
-        target_mode,
-        settings,
-        room_state,
-    )
-    .fade_ms
-    .resolve(started_at_hour)
-    .or(Some(rhythm_core::DEFAULT_MODE_TRANSITION_DURATION_MS))
+    resolved_profile_config_for_room_state_from_parts(lighting, room.settings, room.room_state)
+        .fade_ms
+        .resolve(started_at_hour)
+        .or(Some(rhythm_core::DEFAULT_MODE_TRANSITION_DURATION_MS))
 }
 
 fn resolve_room_command_for_state_at_from_parts(
-    light_profile_configs: &BTreeMap<String, LightProfileConfig>,
-    mode_configs: &[ModeConfig],
-    target_mode: RhythmMode,
-    solar_noon: f32,
-    latitude: f32,
-    settings: &RoomProfileSettings,
-    room_state: RoomModeState,
-    time_offset_minutes: f32,
-    brightness_offset: f32,
+    lighting: RoomLightingContext<'_>,
+    room: RoomLightingInput<'_>,
     sample_at: chrono::NaiveDateTime,
     transition_ms_override: Option<u32>,
 ) -> Option<LightingCommand> {
-    let (values, brightness) = resolve_room_output_for_state_at_from_parts(
-        light_profile_configs,
-        mode_configs,
-        target_mode,
-        solar_noon,
-        latitude,
-        settings,
-        room_state,
-        time_offset_minutes,
-        brightness_offset,
-        sample_at,
-    )?;
+    let (values, brightness) =
+        resolve_room_output_for_state_at_from_parts(lighting, room, sample_at)?;
     let transition_ms = transition_ms_override.unwrap_or(values.transition_ms);
     Some(build_room_command_from_values(
         &values,
@@ -2334,17 +2337,23 @@ fn apply_active_mode_outputs(
     };
 
     let transition_started_at = current_local_datetime(utc_offset);
+    let lighting = RoomLightingContext {
+        light_profile_configs: &light_profile_configs,
+        mode_configs: &mode_configs,
+        mode: target_mode,
+        solar_noon,
+        latitude,
+        utc_offset,
+    };
     let snapshots = runtime.engine_all_room_snapshots();
     let room_defaults_changed = apply_room_mode_defaults(
         state,
         &runtime,
-        &light_profile_configs,
-        &mode_configs,
-        target_mode,
-        transition.as_ref(),
-        solar_noon,
-        latitude,
-        transition_started_at,
+        ModeDefaultApplyContext {
+            lighting,
+            transition: transition.as_ref(),
+            transition_started_at,
+        },
         &snapshots,
     );
     if room_defaults_changed {
@@ -2404,15 +2413,8 @@ fn apply_active_mode_outputs(
             .and_then(|config| {
                 resolve_mode_transition_duration_ms_for_room_from_parts(
                     config,
-                    &light_profile_configs,
-                    &mode_configs,
-                    target_mode,
-                    solar_noon,
-                    latitude,
-                    &snap.profile_settings,
-                    room_state,
-                    snap.time_offset_minutes,
-                    snap.brightness_offset,
+                    lighting,
+                    RoomLightingInput::from_snapshot(snap, room_state),
                     transition_started_at,
                 )
             })
@@ -2420,15 +2422,8 @@ fn apply_active_mode_outputs(
         let sample_at =
             transition_started_at + chrono::Duration::milliseconds(i64::from(room_transition_ms));
         let Some(command) = resolve_room_command_for_state_at_from_parts(
-            &light_profile_configs,
-            &mode_configs,
-            target_mode,
-            solar_noon,
-            latitude,
-            &snap.profile_settings,
-            room_state,
-            snap.time_offset_minutes,
-            snap.brightness_offset,
+            lighting,
+            RoomLightingInput::from_snapshot(snap, room_state),
             sample_at,
             (room_transition_ms > 0).then_some(room_transition_ms),
         ) else {
@@ -2452,12 +2447,7 @@ fn apply_active_mode_outputs(
 
     let cycle_duration = (!room_commands.is_empty()).then(|| {
         mode_apply_cycle_duration(
-            &light_profile_configs,
-            &mode_configs,
-            target_mode,
-            solar_noon,
-            latitude,
-            utc_offset,
+            lighting,
             &dispatch_snapshots,
             update_interval,
             power_save,
@@ -2784,8 +2774,7 @@ fn validate_imported_configuration(configuration: &PortableConfiguration) -> Res
     validate_mode_configs(&configuration.mode_configs)?;
 
     let valid_profile_ids: HashSet<_> = factory_default_light_profile_config_map()
-        .into_iter()
-        .map(|(id, _)| id)
+        .into_keys()
         .chain(
             configuration
                 .profiles
@@ -3239,13 +3228,15 @@ pub fn do_room_set(
         );
         runtime.restore_room_state(
             &engine_room_id,
-            rhythm_enabled,
-            params.disabled,
-            time_offset,
-            bri_offset,
-            soft_off,
-            hard_off,
-            profile_settings,
+            RestoredRoomState {
+                rhythm_enabled,
+                disabled: params.disabled,
+                time_offset_minutes: time_offset,
+                brightness_offset: bri_offset,
+                soft_off,
+                hard_off,
+                profile_settings,
+            },
         );
     }
 
@@ -3451,13 +3442,11 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
         if snap.time_offset_minutes.abs() > 0.001 || snap.brightness_offset.abs() > 0.001 {
             runtime.restore_room_state(
                 &snap.id,
-                snap.rhythm_enabled,
-                snap.disabled,
-                0.0,
-                0.0,
-                snap.soft_off,
-                snap.hard_off,
-                snap.profile_settings.clone(),
+                RestoredRoomState {
+                    time_offset_minutes: 0.0,
+                    brightness_offset: 0.0,
+                    ..RestoredRoomState::from(*snap)
+                },
             );
         }
     }
@@ -3885,12 +3874,14 @@ pub(crate) fn resolved_room_motion_timeout_map(
         timeouts.insert(
             snap.id.clone(),
             resolved_room_motion_timeout_secs_from_parts(
-                &light_profile_configs,
-                &mode_configs,
-                active_mode,
-                solar_noon,
-                latitude,
-                utc_offset,
+                RoomLightingContext {
+                    light_profile_configs: &light_profile_configs,
+                    mode_configs: &mode_configs,
+                    mode: active_mode,
+                    solar_noon,
+                    latitude,
+                    utc_offset,
+                },
                 &snap.profile_settings,
                 current_hour,
             ),
@@ -4481,13 +4472,15 @@ pub fn do_room_preferences_set(
 
     runtime.restore_room_state(
         room_id,
-        rhythm_enabled,
-        disabled,
-        snap.time_offset_minutes,
-        snap.brightness_offset,
-        soft_off,
-        hard_off,
-        profile_settings.clone(),
+        RestoredRoomState {
+            rhythm_enabled,
+            disabled,
+            time_offset_minutes: snap.time_offset_minutes,
+            brightness_offset: snap.brightness_offset,
+            soft_off,
+            hard_off,
+            profile_settings: profile_settings.clone(),
+        },
     );
     clear_room_mode_transition(state, room_id);
 
@@ -4853,7 +4846,7 @@ pub fn do_canonical_assign_room(
                             &ep.native_id,
                             &device_name,
                             &ep.native_id,
-                            &[ep.native_id.clone()],
+                            std::slice::from_ref(&ep.native_id),
                         );
                     }
                 }
@@ -5117,16 +5110,7 @@ pub fn do_triage_bind_room_to(
         if let Some(snap) = runtime.engine_room_snapshot(&source_id) {
             if runtime.engine_room_snapshot(&target_id).is_none() {
                 runtime.add_room(&target_id, &target_name);
-                runtime.restore_room_state(
-                    &target_id,
-                    snap.rhythm_enabled,
-                    snap.disabled,
-                    snap.time_offset_minutes,
-                    snap.brightness_offset,
-                    snap.soft_off,
-                    snap.hard_off,
-                    snap.profile_settings.clone(),
-                );
+                runtime.restore_room_state(&target_id, RestoredRoomState::from(&snap));
             }
             runtime.remove_room(&source_id);
             info!(target: "triage", "Remapped engine room '{}' → '{}'", source_id, target_id);
@@ -5706,17 +5690,7 @@ mod tests {
         fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot> {
             self.snapshots.lock().unwrap().clone()
         }
-        fn restore_room_state(
-            &self,
-            room_id: &str,
-            rhythm_enabled: bool,
-            disabled: bool,
-            time_offset: f32,
-            bri_offset: f32,
-            soft_off: bool,
-            hard_off: bool,
-            profile_settings: rhythm_core::RoomProfileSettings,
-        ) {
+        fn restore_room_state(&self, room_id: &str, state: RestoredRoomState) {
             if let Some(snap) = self
                 .snapshots
                 .lock()
@@ -5724,18 +5698,19 @@ mod tests {
                 .iter_mut()
                 .find(|snap| snap.id == room_id)
             {
-                snap.rhythm_enabled = rhythm_enabled;
-                snap.disabled = disabled;
-                snap.time_offset_minutes = time_offset;
-                snap.brightness_offset = bri_offset;
-                snap.soft_off = soft_off;
-                snap.hard_off = hard_off;
-                snap.profile_settings = profile_settings;
+                snap.rhythm_enabled = state.rhythm_enabled;
+                snap.disabled = state.disabled;
+                snap.time_offset_minutes = state.time_offset_minutes;
+                snap.brightness_offset = state.brightness_offset;
+                snap.soft_off = state.soft_off;
+                snap.hard_off = state.hard_off;
+                snap.profile_settings = state.profile_settings;
             }
-            self.restore_calls
-                .lock()
-                .unwrap()
-                .push((room_id.to_string(), soft_off, hard_off));
+            self.restore_calls.lock().unwrap().push((
+                room_id.to_string(),
+                state.soft_off,
+                state.hard_off,
+            ));
         }
         fn add_room(&self, _: &str, _: &str) {}
         fn remove_room(&self, _: &str) {}
@@ -7049,7 +7024,7 @@ mod tests {
             let periodic_ctx = rhythm_core::CurveContext::new(
                 current_hour,
                 resolved_solar.solar,
-                resolved_solar.sun_times.clone(),
+                resolved_solar.sun_times,
             );
             let periodic_room_snapshots = s
                 .hub_runtime()

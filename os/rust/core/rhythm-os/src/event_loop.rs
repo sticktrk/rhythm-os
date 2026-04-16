@@ -1239,18 +1239,7 @@ mod tests {
         fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot> {
             self.snapshots.clone()
         }
-        fn restore_room_state(
-            &self,
-            _: &str,
-            _: bool,
-            _: bool,
-            _: f32,
-            _: f32,
-            _: bool,
-            _: bool,
-            _: RoomProfileSettings,
-        ) {
-        }
+        fn restore_room_state(&self, _: &str, _: rhythm_core::RestoredRoomState) {}
         fn add_room(&self, _: &str, _: &str) {}
         fn remove_room(&self, _: &str) {}
         fn dim_room(&self, _: &str, _: f32) -> anyhow::Result<()> {

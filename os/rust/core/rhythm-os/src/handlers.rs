@@ -1372,18 +1372,7 @@ mod tests {
             fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot> {
                 self.snapshots.clone()
             }
-            fn restore_room_state(
-                &self,
-                _: &str,
-                _: bool,
-                _: bool,
-                _: f32,
-                _: f32,
-                _: bool,
-                _: bool,
-                _: rhythm_core::RoomProfileSettings,
-            ) {
-            }
+            fn restore_room_state(&self, _: &str, _: rhythm_core::RestoredRoomState) {}
             fn add_room(&self, _: &str, _: &str) {}
             fn remove_room(&self, _: &str) {}
             fn dim_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
@@ -1744,7 +1733,8 @@ mod tests {
                 .min_brightness,
             7
         );
-        let factory_profiles = crate::factory_default_config::factory_default_light_profile_config_map();
+        let factory_profiles =
+            crate::factory_default_config::factory_default_light_profile_config_map();
         assert_eq!(
             state
                 .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)

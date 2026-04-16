@@ -52,17 +52,7 @@ pub trait RuntimeHandle: Send + Sync {
     fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot>;
 
     /// Restore persisted room state into the engine.
-    fn restore_room_state(
-        &self,
-        room_id: &str,
-        rhythm_enabled: bool,
-        disabled: bool,
-        time_offset: f32,
-        bri_offset: f32,
-        soft_off: bool,
-        hard_off: bool,
-        profile_settings: RoomProfileSettings,
-    );
+    fn restore_room_state(&self, room_id: &str, state: RestoredRoomState);
 
     /// Add a room to the engine's room manager.
     fn add_room(&self, room_id: &str, room_name: &str);
@@ -140,6 +130,32 @@ pub struct RoomSnapshot {
     pub soft_off: bool,
     pub hard_off: bool,
     pub profile_settings: RoomProfileSettings,
+}
+
+/// Persisted room state restored into the runtime.
+#[derive(Debug, Clone)]
+pub struct RestoredRoomState {
+    pub rhythm_enabled: bool,
+    pub disabled: bool,
+    pub time_offset_minutes: f32,
+    pub brightness_offset: f32,
+    pub soft_off: bool,
+    pub hard_off: bool,
+    pub profile_settings: RoomProfileSettings,
+}
+
+impl From<&RoomSnapshot> for RestoredRoomState {
+    fn from(snapshot: &RoomSnapshot) -> Self {
+        Self {
+            rhythm_enabled: snapshot.rhythm_enabled,
+            disabled: snapshot.disabled,
+            time_offset_minutes: snapshot.time_offset_minutes,
+            brightness_offset: snapshot.brightness_offset,
+            soft_off: snapshot.soft_off,
+            hard_off: snapshot.hard_off,
+            profile_settings: snapshot.profile_settings.clone(),
+        }
+    }
 }
 
 // ============================================================================
@@ -273,28 +289,18 @@ where
             .collect()
     }
 
-    fn restore_room_state(
-        &self,
-        room_id: &str,
-        rhythm_enabled: bool,
-        disabled: bool,
-        time_offset: f32,
-        bri_offset: f32,
-        soft_off: bool,
-        hard_off: bool,
-        profile_settings: RoomProfileSettings,
-    ) {
-        let has_room_profile = !profile_settings.is_empty();
+    fn restore_room_state(&self, room_id: &str, state: RestoredRoomState) {
+        let has_room_profile = !state.profile_settings.is_empty();
         if let Ok(mut engine) = self.engine().write() {
             let mut restored = false;
             if let Some(room) = engine.rooms_mut().get_mut(room_id) {
-                room.rhythm_enabled = rhythm_enabled;
-                room.disabled = disabled;
-                room.time_offset_minutes = time_offset;
-                room.brightness_offset = bri_offset;
-                room.soft_off = soft_off;
-                room.hard_off = hard_off;
-                room.profile_settings = profile_settings;
+                room.rhythm_enabled = state.rhythm_enabled;
+                room.disabled = state.disabled;
+                room.time_offset_minutes = state.time_offset_minutes;
+                room.brightness_offset = state.brightness_offset;
+                room.soft_off = state.soft_off;
+                room.hard_off = state.hard_off;
+                room.profile_settings = state.profile_settings;
                 restored = true;
             }
             if restored {
@@ -303,12 +309,12 @@ where
                     target: "sys",
                     "restore_room_state: '{}' rhythm={} disabled={} time_offset={} bri_offset={} soft_off={} hard_off={} room_profile={}",
                     room_id,
-                    rhythm_enabled,
-                    disabled,
-                    time_offset,
-                    bri_offset,
-                    soft_off,
-                    hard_off,
+                    state.rhythm_enabled,
+                    state.disabled,
+                    state.time_offset_minutes,
+                    state.brightness_offset,
+                    state.soft_off,
+                    state.hard_off,
                     has_room_profile
                 );
             }
@@ -551,13 +557,15 @@ mod tests {
 
         handle.restore_room_state(
             "living",
-            false,
-            true,
-            30.0,
-            5.0,
-            true,
-            false,
-            crate::RoomProfileSettings::default(),
+            RestoredRoomState {
+                rhythm_enabled: false,
+                disabled: true,
+                time_offset_minutes: 30.0,
+                brightness_offset: 5.0,
+                soft_off: true,
+                hard_off: false,
+                profile_settings: crate::RoomProfileSettings::default(),
+            },
         );
 
         let snap = handle.engine_room_snapshot("living").unwrap();

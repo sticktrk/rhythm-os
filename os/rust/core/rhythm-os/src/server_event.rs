@@ -87,7 +87,6 @@ impl RoomStateEvent {
         transitioning: bool,
         brightness: u8,
         kelvin: u16,
-        room_profile: RoomProfileSettings,
     ) -> Self {
         Self {
             id: snap.id.clone(),
@@ -101,7 +100,7 @@ impl RoomStateEvent {
             brightness,
             kelvin,
             tick: false,
-            room_profile,
+            room_profile: snap.profile_settings.clone(),
         }
     }
 }

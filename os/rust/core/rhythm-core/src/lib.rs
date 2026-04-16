@@ -92,9 +92,9 @@ pub use timezone::{default_timezone, lookup_timezone, Timezone, DEFAULT_TIMEZONE
 // Runtime re-exports
 pub use runtime::{
     ButtonAction, DeviceRegistry, InputEvent, MockTimeProvider, NoOpRoomStateStore, NoOpScheduler,
-    RhythmRuntime, RoomConfig, RoomSnapshot, RoomStateStore, RuntimeConfig, RuntimeError,
-    RuntimeHandle, RuntimeResult, ScheduleHandle, Scheduler, SimpleDeviceRegistry, StorageError,
-    StorageResult, TimeProvider, ZhaEventArgs,
+    RestoredRoomState, RhythmRuntime, RoomConfig, RoomSnapshot, RoomStateStore, RuntimeConfig,
+    RuntimeError, RuntimeHandle, RuntimeResult, ScheduleHandle, Scheduler, SimpleDeviceRegistry,
+    StorageError, StorageResult, TimeProvider, ZhaEventArgs,
 };
 
 #[cfg(feature = "serde")]

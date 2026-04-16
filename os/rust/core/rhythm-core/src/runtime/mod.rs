@@ -17,7 +17,7 @@ pub mod time;
 pub use config::{RoomConfig, RuntimeConfig};
 pub use error::{RuntimeError, RuntimeResult};
 pub use events::{ButtonAction, InputEvent, ZhaEventArgs};
-pub use handle::{RoomSnapshot, RuntimeHandle};
+pub use handle::{RestoredRoomState, RoomSnapshot, RuntimeHandle};
 #[cfg(feature = "serde")]
 pub use hub_registry::{DeviceType, HubRegistry};
 pub use orchestrator::RhythmRuntime;

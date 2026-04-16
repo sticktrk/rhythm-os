@@ -315,26 +315,30 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
                         for snap in runtime.engine_all_room_snapshots() {
                             runtime.restore_room_state(
                                 &snap.id,
-                                true,
-                                false,
-                                0.0,
-                                0.0,
-                                false,
-                                false,
-                                rhythm_core::RoomProfileSettings::default(),
+                                rhythm_core::RestoredRoomState {
+                                    rhythm_enabled: true,
+                                    disabled: false,
+                                    time_offset_minutes: 0.0,
+                                    brightness_offset: 0.0,
+                                    soft_off: false,
+                                    hard_off: false,
+                                    profile_settings: rhythm_core::RoomProfileSettings::default(),
+                                },
                             );
                         }
                     } else {
                         for room in persisted.iter() {
                             runtime.restore_room_state(
                                 &room.id,
-                                room.rhythm_enabled,
-                                room.disabled,
-                                room.time_offset_minutes,
-                                room.brightness_offset,
-                                room.soft_off,
-                                room.hard_off,
-                                room.profile_settings.clone(),
+                                rhythm_core::RestoredRoomState {
+                                    rhythm_enabled: room.rhythm_enabled,
+                                    disabled: room.disabled,
+                                    time_offset_minutes: room.time_offset_minutes,
+                                    brightness_offset: room.brightness_offset,
+                                    soft_off: room.soft_off,
+                                    hard_off: room.hard_off,
+                                    profile_settings: room.profile_settings.clone(),
+                                },
                             );
                             info!(target: "sys",
                                 "Restored room '{}': rhythm={}, disabled={}, time_offset={}, bri_offset={}, soft_off={}, hard_off={}, room_profile={}",
@@ -350,13 +354,15 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
                     for snap in runtime.engine_all_room_snapshots() {
                         runtime.restore_room_state(
                             &snap.id,
-                            true,
-                            false,
-                            0.0,
-                            0.0,
-                            false,
-                            false,
-                            rhythm_core::RoomProfileSettings::default(),
+                            rhythm_core::RestoredRoomState {
+                                rhythm_enabled: true,
+                                disabled: false,
+                                time_offset_minutes: 0.0,
+                                brightness_offset: 0.0,
+                                soft_off: false,
+                                hard_off: false,
+                                profile_settings: rhythm_core::RoomProfileSettings::default(),
+                            },
                         );
                     }
                 }
@@ -676,26 +682,30 @@ pub fn ensure_composite_runtime(
                         for snap in runtime.engine_all_room_snapshots() {
                             runtime.restore_room_state(
                                 &snap.id,
-                                true,
-                                false,
-                                0.0,
-                                0.0,
-                                false,
-                                false,
-                                rhythm_core::RoomProfileSettings::default(),
+                                rhythm_core::RestoredRoomState {
+                                    rhythm_enabled: true,
+                                    disabled: false,
+                                    time_offset_minutes: 0.0,
+                                    brightness_offset: 0.0,
+                                    soft_off: false,
+                                    hard_off: false,
+                                    profile_settings: rhythm_core::RoomProfileSettings::default(),
+                                },
                             );
                         }
                     } else {
                         for room in persisted.iter() {
                             runtime.restore_room_state(
                                 &room.id,
-                                room.rhythm_enabled,
-                                room.disabled,
-                                room.time_offset_minutes,
-                                room.brightness_offset,
-                                room.soft_off,
-                                room.hard_off,
-                                room.profile_settings.clone(),
+                                rhythm_core::RestoredRoomState {
+                                    rhythm_enabled: room.rhythm_enabled,
+                                    disabled: room.disabled,
+                                    time_offset_minutes: room.time_offset_minutes,
+                                    brightness_offset: room.brightness_offset,
+                                    soft_off: room.soft_off,
+                                    hard_off: room.hard_off,
+                                    profile_settings: room.profile_settings.clone(),
+                                },
                             );
                             debug!(
                                 target: "sys",
@@ -717,13 +727,15 @@ pub fn ensure_composite_runtime(
                     for snap in runtime.engine_all_room_snapshots() {
                         runtime.restore_room_state(
                             &snap.id,
-                            true,
-                            false,
-                            0.0,
-                            0.0,
-                            false,
-                            false,
-                            rhythm_core::RoomProfileSettings::default(),
+                            rhythm_core::RestoredRoomState {
+                                rhythm_enabled: true,
+                                disabled: false,
+                                time_offset_minutes: 0.0,
+                                brightness_offset: 0.0,
+                                soft_off: false,
+                                hard_off: false,
+                                profile_settings: rhythm_core::RoomProfileSettings::default(),
+                            },
                         );
                     }
                 }

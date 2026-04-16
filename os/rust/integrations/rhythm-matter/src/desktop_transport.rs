@@ -361,11 +361,13 @@ fn io_thread_main(
                     &dm,
                     &rt,
                     &mut connections,
-                    node_id,
-                    endpoint,
-                    cluster,
-                    cmd_id,
-                    &payload,
+                    MatterCommand {
+                        node_id,
+                        endpoint,
+                        cluster,
+                        cmd_id,
+                        payload: &payload,
+                    },
                 );
                 let _ = reply.send(result);
             }
@@ -607,14 +609,22 @@ fn cached_connection<'a>(
     connections: &'a mut HashMap<u64, matc::controller::Connection>,
     node_id: u64,
 ) -> Result<&'a mut matc::controller::Connection> {
-    if !connections.contains_key(&node_id) {
+    if let std::collections::hash_map::Entry::Vacant(entry) = connections.entry(node_id) {
         let conn = connect_with_drain(dm, rt, node_id)?;
-        connections.insert(node_id, conn);
+        entry.insert(conn);
     }
 
     connections.get_mut(&node_id).ok_or_else(|| {
         anyhow::anyhow!("Matter connection cache insert failed for node {}", node_id)
     })
+}
+
+struct MatterCommand<'a> {
+    node_id: u64,
+    endpoint: u16,
+    cluster: u32,
+    cmd_id: u32,
+    payload: &'a [u8],
 }
 
 fn reconnect_cached_connection<'a>(
@@ -642,15 +652,16 @@ fn handle_send_cmd(
     dm: &matc::devman::DeviceManager,
     rt: &tokio::runtime::Runtime,
     connections: &mut HashMap<u64, matc::controller::Connection>,
-    node_id: u64,
-    endpoint: u16,
-    cluster: u32,
-    cmd_id: u32,
-    payload: &[u8],
+    command: MatterCommand<'_>,
 ) -> Result<()> {
     let first_try = {
-        let conn = cached_connection(dm, rt, connections, node_id)?;
-        rt.block_on(conn.invoke_request(endpoint, cluster, cmd_id, payload))
+        let conn = cached_connection(dm, rt, connections, command.node_id)?;
+        rt.block_on(conn.invoke_request(
+            command.endpoint,
+            command.cluster,
+            command.cmd_id,
+            command.payload,
+        ))
     };
 
     match first_try {
@@ -663,14 +674,19 @@ fn handle_send_cmd(
     // Retry with a fresh CASE session. Cached sessions can go stale between
     // button presses; reconnect once before surfacing an error.
     let second_try = {
-        let conn = reconnect_cached_connection(dm, rt, connections, node_id)
-            .with_context(|| format!("Failed to reconnect to Matter node {}", node_id))?;
-        rt.block_on(conn.invoke_request(endpoint, cluster, cmd_id, payload))
+        let conn = reconnect_cached_connection(dm, rt, connections, command.node_id)
+            .with_context(|| format!("Failed to reconnect to Matter node {}", command.node_id))?;
+        rt.block_on(conn.invoke_request(
+            command.endpoint,
+            command.cluster,
+            command.cmd_id,
+            command.payload,
+        ))
     };
     second_try.with_context(|| {
         format!(
             "Matter command failed: node={} cluster=0x{:04x} cmd=0x{:02x}",
-            node_id, cluster, cmd_id
+            command.node_id, command.cluster, command.cmd_id
         )
     })?;
     Ok(())
