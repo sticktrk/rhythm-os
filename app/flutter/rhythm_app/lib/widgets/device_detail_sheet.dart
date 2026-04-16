@@ -1,9 +1,115 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import '../providers/server_sync_provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType, RhythmRoom;
+import '../providers/server_sync_provider.dart';
 import 'solar_orbit.dart'; // For CelestialColors
+
+Future<bool> showDeviceRoomAssignmentFlow(
+  BuildContext context, {
+  required RhythmDevice device,
+  required String currentRoomId,
+}) async {
+  final syncProvider = context.read<ServerSyncProvider>();
+  final rooms =
+      syncProvider.helloRooms.where((r) => r.id != currentRoomId).toList();
+
+  if (rooms.isEmpty) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('No other rooms available')),
+    );
+    return false;
+  }
+
+  final isUnassigned = currentRoomId.isEmpty;
+  final title = isUnassigned ? 'Assign to Room' : 'Move to Room';
+
+  final targetRoom = await showModalBottomSheet<RhythmRoom>(
+    context: context,
+    backgroundColor: Colors.transparent,
+    builder: (ctx) => Container(
+      decoration: const BoxDecoration(
+        color: CelestialColors.backgroundCard,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Text(
+              title,
+              style: TextStyle(
+                color: CelestialColors.textPrimary,
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          for (final room in rooms)
+            ListTile(
+              leading: const Icon(
+                Icons.meeting_room_rounded,
+                color: Color(0xFFFFC107),
+              ),
+              title: Text(
+                room.name,
+                style: const TextStyle(color: CelestialColors.textPrimary),
+              ),
+              subtitle: Text(
+                room.deviceSummary,
+                style: TextStyle(
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+                  fontSize: 12,
+                ),
+              ),
+              onTap: () => Navigator.of(ctx).pop(room),
+            ),
+          SizedBox(height: MediaQuery.of(ctx).padding.bottom + 16),
+        ],
+      ),
+    ),
+  );
+
+  if (targetRoom == null || !context.mounted) return false;
+
+  final success = isUnassigned
+      ? await syncProvider.api.assignDeviceRoom(device.id, targetRoom.id)
+      : await syncProvider.api.topologyMoveDevice(
+          deviceId: device.id,
+          fromRoomId: currentRoomId,
+          toRoomId: targetRoom.id,
+        );
+
+  if (!context.mounted) return false;
+
+  if (!success) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          isUnassigned
+              ? 'Failed to assign ${device.displayName}'
+              : 'Failed to move ${device.displayName}',
+        ),
+      ),
+    );
+    return false;
+  }
+
+  await syncProvider.connection.reconnect();
+  if (!context.mounted) return true;
+
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text(
+        isUnassigned
+            ? 'Assigned ${device.displayName} to ${targetRoom.name}'
+            : 'Moved ${device.displayName} to ${targetRoom.name}',
+      ),
+    ),
+  );
+  return true;
+}
 
 /// Bottom sheet showing canonical device details + connections.
 ///
@@ -429,88 +535,14 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   }
 
   Future<void> _showMoveDialog(BuildContext context) async {
-    final syncProvider = context.read<ServerSyncProvider>();
-    final rooms = syncProvider.helloRooms
-        .where((r) => r.id != widget.roomId)
-        .toList();
-
-    if (rooms.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No other rooms available')),
-      );
-      return;
-    }
-
-    final targetRoom = await showModalBottomSheet<RhythmRoom>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) => Container(
-        decoration: const BoxDecoration(
-          color: CelestialColors.backgroundCard,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(
-                'Move to Room',
-                style: TextStyle(
-                  color: CelestialColors.textPrimary,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-            for (final room in rooms)
-              ListTile(
-                leading: const Icon(
-                  Icons.meeting_room_rounded,
-                  color: Color(0xFFFFC107),
-                ),
-                title: Text(
-                  room.name,
-                  style: const TextStyle(color: CelestialColors.textPrimary),
-                ),
-                subtitle: Text(
-                  room.deviceSummary,
-                  style: TextStyle(
-                    color: CelestialColors.textSecondary.withValues(alpha: 0.7),
-                    fontSize: 12,
-                  ),
-                ),
-                onTap: () => Navigator.of(ctx).pop(room),
-              ),
-            SizedBox(height: MediaQuery.of(ctx).padding.bottom + 16),
-          ],
-        ),
-      ),
+    final success = await showDeviceRoomAssignmentFlow(
+      context,
+      device: widget.device,
+      currentRoomId: widget.roomId,
     );
 
-    if (targetRoom == null || !context.mounted) return;
-
-    final success = await syncProvider.api.topologyMoveDevice(
-      deviceId: widget.device.id,
-      fromRoomId: widget.roomId,
-      toRoomId: targetRoom.id,
-    );
-
-    if (context.mounted) {
-      if (success) {
-        Navigator.of(context).pop(); // Close detail sheet
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Moved ${widget.device.displayName} to ${targetRoom.name}'),
-          ),
-        );
-        // Trigger re-sync to update state
-        syncProvider.api.triggerSync();
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to move device')),
-        );
-      }
+    if (success && context.mounted) {
+      Navigator.of(context).pop();
     }
   }
 

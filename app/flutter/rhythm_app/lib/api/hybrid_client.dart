@@ -1,4 +1,5 @@
-import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
+import 'package:flutter/foundation.dart'
+    show debugPrint, kIsWeb, visibleForTesting;
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' as sdk;
 import '../services/settings_service.dart';
@@ -31,11 +32,15 @@ class HybridApiClient implements RhythmApi {
   /// Create a hybrid client with both remote and local capabilities.
   ///
   /// If Rust brain initialization fails, falls back to remote-only mode.
-  static Future<HybridApiClient> create({String? baseUrl}) async {
-    final effectiveBaseUrl = baseUrl ?? _defaultBaseUrl();
-    final remote =
-        _SdkConfigAdapter(sdk.RhythmConfigApi(baseUrl: effectiveBaseUrl));
-
+  static Future<HybridApiClient> create({
+    String? baseUrl,
+    Iterable<Hub> storedHubs = const [],
+  }) async {
+    final effectiveBaseUrl = resolveHybridApiBaseUrl(
+      baseUrl: baseUrl,
+      isWeb: kIsWeb,
+      storedHubs: storedHubs,
+    );
     NativeBrain? brain;
     try {
       brain = await NativeBrain.init();
@@ -45,7 +50,17 @@ class HybridApiClient implements RhythmApi {
       debugPrint('NativeBrain not available, using remote-only mode: $e');
     }
 
-    final client = HybridApiClient._(remote: remote, brain: brain);
+    final client = HybridApiClient._(
+      remote: effectiveBaseUrl == null
+          ? _LocalOnlyApi()
+          : _SdkConfigAdapter(sdk.RhythmConfigApi(baseUrl: effectiveBaseUrl)),
+      brain: brain,
+    );
+
+    if (effectiveBaseUrl == null) {
+      debugPrint(
+          'HybridApiClient: No remote base URL configured, starting in local-only mode');
+    }
 
     // Try to sync solar data from server
     try {
@@ -59,20 +74,17 @@ class HybridApiClient implements RhythmApi {
 
   /// Create a remote-only client (no local Rust calculations).
   static HybridApiClient remoteOnly({String? baseUrl}) {
+    final effectiveBaseUrl =
+        resolveHybridApiBaseUrl(baseUrl: baseUrl, isWeb: kIsWeb);
+    if (effectiveBaseUrl == null) {
+      throw ArgumentError(
+        'remoteOnly requires a non-empty baseUrl on native platforms',
+      );
+    }
     return HybridApiClient._(
-      remote: _SdkConfigAdapter(
-          sdk.RhythmConfigApi(baseUrl: baseUrl ?? _defaultBaseUrl())),
+      remote: _SdkConfigAdapter(sdk.RhythmConfigApi(baseUrl: effectiveBaseUrl)),
       brain: null,
     );
-  }
-
-  /// Default base URL: on web, use Uri.base (handles ingress path prefix).
-  static String _defaultBaseUrl() {
-    if (kIsWeb) {
-      final base = Uri.base.toString();
-      return base.endsWith('/') ? base : '$base/';
-    }
-    return '';
   }
 
   /// Create a local-only client (no remote API, just local brain).
@@ -369,6 +381,43 @@ class HybridApiClient implements RhythmApi {
       return null;
     }
   }
+}
+
+@visibleForTesting
+String? resolveHybridApiBaseUrl({
+  String? baseUrl,
+  required bool isWeb,
+  Uri? webBaseUri,
+  Iterable<Hub> storedHubs = const [],
+}) {
+  final explicitBaseUrl = _normalizeBaseUrl(baseUrl);
+  if (explicitBaseUrl != null) return explicitBaseUrl;
+
+  if (isWeb) {
+    return _normalizeBaseUrl((webBaseUri ?? Uri.base).toString());
+  }
+
+  final serverHub = _selectStartupServerHub(storedHubs);
+  if (serverHub == null) return null;
+  return _normalizeBaseUrl(serverHub.endpoint.baseUrl);
+}
+
+Hub? _selectStartupServerHub(Iterable<Hub> storedHubs) {
+  final candidates = storedHubs
+      .where((hub) => hub.type == HubType.server && hub.enabled)
+      .toList()
+    ..sort((a, b) {
+      final aRecency = a.lastConnected ?? a.updatedAt;
+      final bRecency = b.lastConnected ?? b.updatedAt;
+      return bRecency.compareTo(aRecency);
+    });
+  return candidates.isEmpty ? null : candidates.first;
+}
+
+String? _normalizeBaseUrl(String? baseUrl) {
+  final trimmed = baseUrl?.trim();
+  if (trimmed == null || trimmed.isEmpty) return null;
+  return trimmed.endsWith('/') ? trimmed : '$trimmed/';
 }
 
 /// Adapter wrapping [sdk.RhythmConfigApi] to implement [RhythmApi].

@@ -24,6 +24,82 @@ import 'ha_configurator_screen.dart';
 import 'hue_configurator_screen.dart';
 import 'matter_device_add_screen.dart';
 
+Future<void> _startMatterPairingFlow(BuildContext context) async {
+  final pairingResult = await MatterDeviceAddScreen.show(context);
+  if (!context.mounted || pairingResult == null) return;
+
+  final syncProvider = context.read<ServerSyncProvider>();
+  await syncProvider.connection.reconnect();
+  if (!context.mounted) return;
+
+  final resolved = await _resolvePairedMatterDevice(context, pairingResult);
+  if (!context.mounted) return;
+
+  if (resolved == null) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          '${pairingResult.name} was added. You can assign it to a room from the Matter device list once it appears.',
+        ),
+      ),
+    );
+    return;
+  }
+
+  await showDeviceRoomAssignmentFlow(
+    context,
+    device: resolved.device,
+    currentRoomId: resolved.roomId,
+  );
+}
+
+Future<({RhythmDevice device, String roomId})?> _resolvePairedMatterDevice(
+  BuildContext context,
+  MatterDevicePairingResult pairingResult,
+) async {
+  final connection = context.read<RhythmConnection>();
+
+  for (int attempt = 0; attempt < 5; attempt++) {
+    final devices = await connection.api.getCanonicalDevices();
+    if (!context.mounted) return null;
+
+    if (devices != null) {
+      for (final device in devices) {
+        final endpoints = device['endpoints'] as List<dynamic>? ?? const [];
+        final matchesNativeId = endpoints.any((endpoint) {
+          final nativeId =
+              (endpoint as Map<String, dynamic>)['native_id'] as String?;
+          return nativeId == pairingResult.nativeDeviceId;
+        });
+        if (!matchesNativeId) continue;
+
+        final canonicalId = device['id'] as String?;
+        if (canonicalId == null || canonicalId.isEmpty) continue;
+
+        return (
+          device: RhythmDevice(
+            id: canonicalId,
+            type: RhythmDeviceType.fromString(
+              device['device_type'] as String? ?? pairingResult.deviceType,
+            ),
+            name: device['name'] as String? ?? pairingResult.name,
+            manufacturer:
+                device['manufacturer'] as String? ?? pairingResult.manufacturer,
+            model: device['model'] as String? ?? pairingResult.model,
+          ),
+          roomId: device['room_id'] as String? ?? '',
+        );
+      }
+    }
+
+    if (attempt < 4) {
+      await Future.delayed(const Duration(seconds: 1));
+    }
+  }
+
+  return null;
+}
+
 /// Settings screen for a connected server hub (ESP32, standalone, HA addon).
 ///
 /// Adapts visible sections based on the server's platform context.
@@ -1291,7 +1367,11 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     icon: Icons.memory_outlined,
                     label: 'Matter',
                     color: const Color(0xFF26A69A),
-                    onTap: () => MatterDeviceAddScreen.show(context),
+                    onTap: () async {
+                      await _startMatterPairingFlow(context);
+                      if (!mounted) return;
+                      await _fetchHubSummaries();
+                    },
                   ),
                 ],
               ],
@@ -1337,7 +1417,11 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
           icon: Icons.memory_outlined,
           label: 'Add Matter Device',
           color: const Color(0xFF26A69A),
-          onTap: () => MatterDeviceAddScreen.show(context),
+          onTap: () async {
+            await _startMatterPairingFlow(context);
+            if (!mounted) return;
+            await _fetchHubSummaries();
+          },
         ));
       }
       children.add(
@@ -3474,12 +3558,9 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                         label: 'Add Device',
                         color: const Color(0xFF26A69A),
                         onTap: () async {
-                          final syncProvider =
-                              context.read<ServerSyncProvider>();
-                          await MatterDeviceAddScreen.show(context);
+                          await _startMatterPairingFlow(context);
                           if (!mounted) return;
-                          syncProvider.connection.reconnect();
-                          _fetchCanonicalDevices();
+                          await _fetchCanonicalDevices();
                         },
                       ),
                     ],

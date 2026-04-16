@@ -29,7 +29,6 @@ class HubPickerScreen extends StatefulWidget {
 class _HubPickerScreenState extends State<HubPickerScreen>
     with SingleTickerProviderStateMixin {
   bool _isConfiguringHa = false;
-  bool _dismissed = false;
 
   late AnimationController _breatheController;
   late Animation<double> _breathe;
@@ -87,10 +86,6 @@ class _HubPickerScreenState extends State<HubPickerScreen>
 
   @override
   Widget build(BuildContext context) {
-    if (_dismissed) {
-      return const SizedBox.shrink();
-    }
-
     final serverSync = context.watch<ServerSyncProvider>();
     final isAddon = serverSync.serverPlatformContext == 'ha_addon';
 
@@ -127,7 +122,8 @@ class _HubPickerScreenState extends State<HubPickerScreen>
                           'Connect a lighting system\nto use with Rhythm',
                           textAlign: TextAlign.center,
                           style: TextStyle(
-                            color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+                            color: CelestialColors.textSecondary
+                                .withValues(alpha: 0.7),
                             fontSize: 15,
                             height: 1.5,
                           ),
@@ -161,18 +157,6 @@ class _HubPickerScreenState extends State<HubPickerScreen>
                           subtitle: 'Connect via push-link pairing',
                           color: const Color(0xFFFFB900),
                           onTap: _configureHue,
-                        ),
-                        const SizedBox(height: 24),
-                        // Skip link
-                        GestureDetector(
-                          onTap: () => setState(() => _dismissed = true),
-                          child: Text(
-                            'Skip for now',
-                            style: TextStyle(
-                              color: CelestialColors.textSecondary.withValues(alpha: 0.5),
-                              fontSize: 14,
-                            ),
-                          ),
                         ),
                         // Space for bottom nav
                         const SizedBox(height: 100),
@@ -291,7 +275,8 @@ class _HubPickerScreenState extends State<HubPickerScreen>
                   Text(
                     subtitle,
                     style: TextStyle(
-                      color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+                      color:
+                          CelestialColors.textSecondary.withValues(alpha: 0.7),
                       fontSize: 13,
                     ),
                   ),

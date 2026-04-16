@@ -1,27 +1,33 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmConnection, RhythmRoom;
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnection;
 
-import '../../providers/server_sync_provider.dart';
 import '../../widgets/solar_orbit.dart';
 
-/// Phases of the Matter device commissioning flow.
-enum _PairingPhase { input, commissioning, roomAssignment }
+class MatterDevicePairingResult {
+  const MatterDevicePairingResult({
+    required this.nativeDeviceId,
+    required this.name,
+    required this.deviceType,
+    this.manufacturer,
+    this.model,
+  });
 
-/// Full-screen modal for commissioning a Matter device.
-///
-/// Three phases:
-///   1. Setup code entry
-///   2. Commissioning progress
-///   3. Room assignment
+  final String nativeDeviceId;
+  final String name;
+  final String deviceType;
+  final String? manufacturer;
+  final String? model;
+}
+
+enum _PairingPhase { input, pairing, failed }
+
+/// Full-screen modal for pairing a Matter device through Rhythm's backend.
 class MatterDeviceAddScreen extends StatefulWidget {
   const MatterDeviceAddScreen({super.key});
 
-  static Future<void> show(BuildContext context) {
+  static Future<MatterDevicePairingResult?> show(BuildContext context) {
     return Navigator.of(context).push(
       PageRouteBuilder(
         opaque: false,
@@ -57,31 +63,16 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     with SingleTickerProviderStateMixin {
   static const _teal = Color(0xFF00BCD4);
   static const _tealDeep = Color(0xFF00838F);
+  static const _segmentLengths = [4, 3, 4];
 
-  _PairingPhase _phase = _PairingPhase.input;
-
-  // ─── Phase 1: Setup code ───────────────────────────────────
   final _codeControllers = List.generate(3, (_) => TextEditingController());
   final _codeFocuses = List.generate(3, (_) => FocusNode());
-  static const _segmentLengths = [4, 3, 4]; // XXXX-XXX-XXXX
   final _prevLengths = [0, 0, 0];
   late final List<VoidCallback> _segmentListeners;
+  late final AnimationController _pulseController;
 
-  // ─── Phase 2: Commissioning ────────────────────────────────
-  String _statusText = '';
+  _PairingPhase _phase = _PairingPhase.input;
   String? _errorText;
-  String? _pairedDeviceId;
-  String? _pairedDeviceName;
-  String? _pairedManufacturer;
-  String? _pairedModel;
-  Timer? _pollTimer;
-  late AnimationController _pulseController;
-
-  // ─── Phase 3: Room assignment ──────────────────────────────
-  String? _selectedRoomId;
-  bool _isCreatingRoom = false;
-  final _newRoomController = TextEditingController();
-  bool _isSaving = false;
 
   @override
   void initState() {
@@ -91,22 +82,21 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       duration: const Duration(milliseconds: 2000),
     )..repeat(reverse: true);
 
-    // Store listeners so they can be properly removed/re-added.
     _segmentListeners = List.generate(3, (i) => () => _onSegmentChanged(i));
     for (int i = 0; i < 3; i++) {
       _codeControllers[i].addListener(_segmentListeners[i]);
     }
 
-    // Backspace in empty field → navigate to previous segment.
     for (int i = 1; i < 3; i++) {
       _codeFocuses[i].onKeyEvent = (node, event) {
         if (event is KeyDownEvent &&
             event.logicalKey == LogicalKeyboardKey.backspace &&
             _codeControllers[i].text.isEmpty) {
           _codeFocuses[i - 1].requestFocus();
-          final prev = _codeControllers[i - 1];
-          if (prev.text.isNotEmpty) {
-            prev.text = prev.text.substring(0, prev.text.length - 1);
+          final previous = _codeControllers[i - 1];
+          if (previous.text.isNotEmpty) {
+            previous.text =
+                previous.text.substring(0, previous.text.length - 1);
           }
           return KeyEventResult.handled;
         }
@@ -117,30 +107,30 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
 
   @override
   void dispose() {
-    _pollTimer?.cancel();
     _pulseController.dispose();
-    for (final c in _codeControllers) {
-      c.dispose();
+    for (int i = 0; i < 3; i++) {
+      _codeControllers[i].removeListener(_segmentListeners[i]);
     }
-    for (final f in _codeFocuses) {
-      f.dispose();
+    for (final controller in _codeControllers) {
+      controller.dispose();
     }
-    _newRoomController.dispose();
+    for (final focusNode in _codeFocuses) {
+      focusNode.dispose();
+    }
     super.dispose();
   }
 
   void _onSegmentChanged(int segment) {
     final text = _codeControllers[segment].text;
-    final prevLen = _prevLengths[segment];
+    final previousLength = _prevLengths[segment];
     _prevLengths[segment] = text.length;
 
-    // Paste: multiple chars added at once, exceeding segment capacity.
-    if (text.length > _segmentLengths[segment] && text.length - prevLen > 1) {
+    if (text.length > _segmentLengths[segment] &&
+        text.length - previousLength > 1) {
       _distributeCode(text);
       return;
     }
 
-    // Single char overflow (typed in a full field): truncate.
     if (text.length > _segmentLengths[segment]) {
       _removeSegmentListeners();
       _codeControllers[segment].text =
@@ -152,15 +142,13 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       return;
     }
 
-    // Auto-advance: segment just filled (was shorter, now full).
     if (text.length == _segmentLengths[segment] &&
-        prevLen < _segmentLengths[segment] &&
+        previousLength < _segmentLengths[segment] &&
         segment < 2) {
       _codeFocuses[segment + 1].requestFocus();
     }
 
-    // Auto-back: segment just emptied.
-    if (text.isEmpty && prevLen > 0 && segment > 0) {
+    if (text.isEmpty && previousLength > 0 && segment > 0) {
       _codeFocuses[segment - 1].requestFocus();
     }
   }
@@ -177,9 +165,8 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     }
   }
 
-  /// Distribute a raw digit string (e.g. from paste) across all three segments.
-  void _distributeCode(String digits) {
-    final clean = digits.replaceAll(RegExp(r'\D'), '');
+  void _distributeCode(String rawText) {
+    final clean = rawText.replaceAll(RegExp(r'\D'), '');
     _removeSegmentListeners();
     int offset = 0;
     for (int i = 0; i < 3; i++) {
@@ -189,7 +176,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       offset = end;
     }
     _addSegmentListeners();
-    // Focus the last non-full segment, or the last one.
+
     for (int i = 0; i < 3; i++) {
       if (_codeControllers[i].text.length < _segmentLengths[i]) {
         _codeFocuses[i].requestFocus();
@@ -197,227 +184,107 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         return;
       }
     }
+
     _codeFocuses[2].requestFocus();
     setState(() {});
   }
 
-  String get _fullCode =>
-      _codeControllers.map((c) => c.text).join();
+  String get _manualCodeDigits =>
+      _codeControllers.map((controller) => controller.text).join();
 
-  bool get _codeComplete => _fullCode.length == 11;
+  String get _manualCode =>
+      '${_codeControllers[0].text}-${_codeControllers[1].text}-${_codeControllers[2].text}';
 
-  // ─── Commission ────────────────────────────────────────────
+  bool get _codeComplete => _manualCodeDigits.length == 11;
 
-  Future<void> _startCommissioning() async {
+  Future<void> _startPairing() async {
     if (!_codeComplete) return;
+
+    FocusScope.of(context).unfocus();
     HapticFeedback.mediumImpact();
     setState(() {
-      _phase = _PairingPhase.commissioning;
-      _statusText = 'Searching...';
+      _phase = _PairingPhase.pairing;
       _errorText = null;
     });
 
-    final http = context.read<RhythmConnection>();
-    final result = await http.api.pairDevice(
+    final connection = context.read<RhythmConnection>();
+    final result = await connection.api.pairDevice(
       hubType: 'matter',
-      params: {'setup_code': _fullCode},
+      params: {
+        'setup_payload': _manualCode,
+        'network': 'wifi',
+        'rendezvous': 'on_network',
+      },
+      receiveTimeout: const Duration(seconds: 45),
     );
 
     if (!mounted) return;
 
     if (result == null) {
-      setState(() {
-        _statusText = 'Failed';
-        _errorText = 'Could not reach the server.';
-      });
+      _showPairingError('Could not reach the server.');
       return;
     }
 
-    final status = result['status'] as String? ?? 'failed';
-    final device = result['device'] as Map<String, dynamic>?;
+    final httpStatus = (result['http_status'] as num?)?.toInt();
     final error = result['error'] as String?;
-
-    if (status == 'complete' && device != null) {
-      _onPairingComplete(device);
+    if (httpStatus != null && httpStatus != 200) {
+      _showPairingError(
+        'The server rejected the pairing request.',
+        detail: error,
+      );
       return;
     }
+
+    final status = result['status'] as String?;
+    final device = result['device'] as Map<String, dynamic>?;
 
     if (status == 'failed') {
-      setState(() {
-        _statusText = 'Failed';
-        _errorText = error ?? 'Pairing failed.';
-      });
+      _showPairingError('Pairing failed.', detail: error);
       return;
     }
 
-    // Intermediate state — poll for completion.
-    _updateStatusFromString(status);
-    if (device != null) _extractDeviceInfo(device);
-    _startPolling();
-  }
-
-  void _updateStatusFromString(String status) {
-    setState(() {
-      switch (status) {
-        case 'searching':
-          _statusText = 'Searching...';
-        case 'found':
-          _statusText = 'Device found';
-        case 'commissioning':
-          _statusText = 'Commissioning...';
-        default:
-          _statusText = status;
-      }
-    });
-  }
-
-  void _extractDeviceInfo(Map<String, dynamic> device) {
-    setState(() {
-      _pairedDeviceId = device['device_id'] as String?;
-      _pairedDeviceName = device['name'] as String?;
-      _pairedManufacturer = device['manufacturer'] as String?;
-      _pairedModel = device['model'] as String?;
-    });
-  }
-
-  void _startPolling() {
-    int attempts = 0;
-    _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
-      attempts++;
-      if (attempts > 15) {
-        // 30s timeout.
-        timer.cancel();
-        if (mounted) {
-          setState(() {
-            _statusText = 'Timed out';
-            _errorText = 'Commissioning took too long. Please try again.';
-          });
-        }
+    if (status == 'complete' && device != null) {
+      final nativeDeviceId = device['device_id'] as String? ?? '';
+      if (nativeDeviceId.isEmpty) {
+        _showPairingError(
+          'Pairing completed, but the server returned no device ID.',
+        );
         return;
       }
 
-      final http = context.read<RhythmConnection>();
-      final devices = await http.api.getCanonicalDevices();
-      if (!mounted) {
-        timer.cancel();
-        return;
-      }
+      HapticFeedback.heavyImpact();
+      Navigator.of(context).pop(
+        MatterDevicePairingResult(
+          nativeDeviceId: nativeDeviceId,
+          name: device['name'] as String? ?? 'Matter Device',
+          deviceType: device['device_type'] as String? ?? 'light',
+          manufacturer: device['manufacturer'] as String?,
+          model: device['model'] as String?,
+        ),
+      );
+      return;
+    }
 
-      if (devices != null) {
-        // Look for a new matter device by checking endpoints for a
-        // matter native ID.  The canonical device list uses `id` for the
-        // stable UUID; native IDs live inside `endpoints[].native_id`.
-        for (final d in devices) {
-          final endpoints = d['endpoints'] as List<dynamic>? ?? [];
-          final hasMatter = endpoints.any((ep) {
-            final nativeId = (ep as Map<String, dynamic>)['native_id'] as String? ?? '';
-            return nativeId.startsWith('matter-') &&
-                (_pairedDeviceId == null || nativeId == _pairedDeviceId);
-          });
-          if (hasMatter) {
-            timer.cancel();
-            _onPairingComplete(d);
-            return;
-          }
-        }
-      }
-    });
+    _showPairingError(
+      'Pairing did not complete.',
+      detail: error ?? 'Unexpected status: ${status ?? 'unknown'}',
+    );
   }
 
-  void _onPairingComplete(Map<String, dynamic> device) {
-    _pollTimer?.cancel();
-    HapticFeedback.heavyImpact();
-
-    // Canonical devices from the registry have `id` (the stable UUID).
-    // PairedDeviceInfo from the pairing response has `device_id` (native).
-    // assignDeviceRoom needs the canonical UUID, so prefer `id`.
-    final canonicalId = device['id'] as String?;
-    final nativeId = device['device_id'] as String?;
-
+  void _showPairingError(String message, {String? detail}) {
     setState(() {
-      _pairedDeviceId = canonicalId ?? nativeId;
-      _pairedDeviceName =
-          device['name'] as String? ?? device['product_name'] as String?;
-      _pairedManufacturer =
-          device['manufacturer'] as String? ?? device['vendor_name'] as String?;
-      _pairedModel = device['model'] as String?;
-      _phase = _PairingPhase.roomAssignment;
+      _phase = _PairingPhase.failed;
+      _errorText =
+          detail == null || detail.isEmpty ? message : '$message\n\n$detail';
     });
-
-    // If we only have the native ID (immediate pairing result), resolve the
-    // canonical UUID so assignDeviceRoom uses the correct identifier.
-    if (canonicalId == null && nativeId != null) {
-      _resolveCanonicalId(nativeId);
-    }
   }
 
-  /// Fetch canonical devices and resolve the native ID to a canonical UUID.
-  Future<void> _resolveCanonicalId(String nativeId) async {
-    final http = context.read<RhythmConnection>();
-    // Retry a few times — the canonical device may not be registered yet.
-    for (int i = 0; i < 5; i++) {
-      final devices = await http.api.getCanonicalDevices();
-      if (!mounted) return;
-      if (devices != null) {
-        for (final d in devices) {
-          final endpoints = d['endpoints'] as List<dynamic>? ?? [];
-          final match = endpoints.any((ep) =>
-              (ep as Map<String, dynamic>)['native_id'] == nativeId);
-          if (match) {
-            setState(() => _pairedDeviceId = d['id'] as String?);
-            return;
-          }
-        }
-      }
-      await Future.delayed(const Duration(seconds: 1));
-    }
-  }
-
-  // ─── Room assignment ───────────────────────────────────────
-
-  Future<void> _assignAndFinish() async {
-    if (_pairedDeviceId == null) return;
-    setState(() => _isSaving = true);
-
-    final http = context.read<RhythmConnection>();
-
-    String? roomId = _selectedRoomId;
-
-    // Create new room if requested.
-    if (_isCreatingRoom && _newRoomController.text.trim().isNotEmpty) {
-      final result =
-          await http.api.createTopologyRoom(_newRoomController.text.trim());
-      if (result != null) {
-        roomId = result['id'] as String?;
-      }
-    }
-
-    if (roomId != null) {
-      await http.api.assignDeviceRoom(_pairedDeviceId!, roomId);
-    }
-
-    // Trigger sync to refresh room/device lists.
-    await http.api.triggerSync();
-
-    if (!mounted) return;
-    Navigator.of(context).pop();
-  }
-
-  void _tryAgain() {
-    _pollTimer?.cancel();
+  void _resetToInput() {
     setState(() {
       _phase = _PairingPhase.input;
-      _statusText = '';
       _errorText = null;
-      _pairedDeviceId = null;
-      _pairedDeviceName = null;
-      _pairedManufacturer = null;
-      _pairedModel = null;
     });
   }
-
-  // ─── Build ─────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -432,8 +299,8 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
                 padding: const EdgeInsets.symmetric(horizontal: 24),
                 child: switch (_phase) {
                   _PairingPhase.input => _buildInputPhase(),
-                  _PairingPhase.commissioning => _buildCommissioningPhase(),
-                  _PairingPhase.roomAssignment => _buildRoomAssignmentPhase(),
+                  _PairingPhase.pairing => _buildPairingPhase(),
+                  _PairingPhase.failed => _buildFailurePhase(),
                 },
               ),
             ),
@@ -466,7 +333,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
           ),
           const Expanded(
             child: Text(
-              'Add Device',
+              'Add Matter Device',
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: CelestialColors.textPrimary,
@@ -482,13 +349,10 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     );
   }
 
-  // ─── Phase 1: Setup code entry ─────────────────────────────
-
   Widget _buildInputPhase() {
     return Column(
       children: [
         const SizedBox(height: 40),
-        // Hero icon with glow.
         AnimatedBuilder(
           animation: _pulseController,
           builder: (context, child) {
@@ -519,7 +383,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
                     ),
                   ),
                   child: const Icon(
-                    Icons.developer_board,
+                    Icons.memory_outlined,
                     color: Colors.white,
                     size: 28,
                   ),
@@ -530,7 +394,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         ),
         const SizedBox(height: 32),
         Text(
-          'Enter Setup Code',
+          'Enter Manual Pairing Code',
           style: TextStyle(
             color: CelestialColors.textPrimary,
             fontSize: 20,
@@ -539,14 +403,24 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         ),
         const SizedBox(height: 8),
         Text(
-          'Find the 11-digit code on your Matter device',
+          'Use the 11-digit code printed on your Matter device.',
+          textAlign: TextAlign.center,
           style: TextStyle(
             color: CelestialColors.textSecondary.withValues(alpha: 0.7),
             fontSize: 14,
           ),
         ),
+        const SizedBox(height: 12),
+        Text(
+          'Rhythm handles the local Matter hub setup automatically. Pairing usually takes 15–30 seconds.',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: CelestialColors.textSecondary.withValues(alpha: 0.55),
+            fontSize: 13,
+            height: 1.4,
+          ),
+        ),
         const SizedBox(height: 40),
-        // Segmented code input: XXXX - XXX - XXXX
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
@@ -578,7 +452,6 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
           ],
         ),
         const SizedBox(height: 48),
-        // Commission button.
         SizedBox(
           width: double.infinity,
           height: 52,
@@ -593,11 +466,12 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
                   : CelestialColors.textSecondary.withValues(alpha: 0.15),
             ),
             child: MaterialButton(
-              onPressed: _codeComplete ? _startCommissioning : null,
+              onPressed: _codeComplete ? _startPairing : null,
               shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14)),
+                borderRadius: BorderRadius.circular(14),
+              ),
               child: Text(
-                'Commission',
+                'Pair Device',
                 style: TextStyle(
                   color: _codeComplete
                       ? Colors.white
@@ -608,6 +482,14 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
               ),
             ),
           ),
+        ),
+        const SizedBox(height: 20),
+        _buildInfoCard(
+          title: 'Right now',
+          lines: const [
+            'Only Matter-over-Wi-Fi with on-network rendezvous is supported.',
+            'If you only have a QR code, enter the printed manual pairing code instead. Raw Matter QR payloads are not accepted yet.',
+          ],
         ),
         const SizedBox(height: 40),
       ],
@@ -651,15 +533,10 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     );
   }
 
-  // ─── Phase 2: Commissioning progress ───────────────────────
-
-  Widget _buildCommissioningPhase() {
-    final isFailed = _errorText != null;
-
+  Widget _buildPairingPhase() {
     return Column(
       children: [
         const SizedBox(height: 60),
-        // Pulsing orbital animation.
         AnimatedBuilder(
           animation: _pulseController,
           builder: (context, child) {
@@ -670,33 +547,28 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
               child: Stack(
                 alignment: Alignment.center,
                 children: [
-                  // Outer ring.
                   Container(
                     width: 140,
                     height: 140,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       border: Border.all(
-                        color: (isFailed ? Colors.red : _teal)
-                            .withValues(alpha: 0.1 + pulse * 0.15),
+                        color: _teal.withValues(alpha: 0.1 + pulse * 0.15),
                         width: 1,
                       ),
                     ),
                   ),
-                  // Middle ring.
                   Container(
                     width: 100,
                     height: 100,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       border: Border.all(
-                        color: (isFailed ? Colors.red : _teal)
-                            .withValues(alpha: 0.15 + pulse * 0.2),
+                        color: _teal.withValues(alpha: 0.15 + pulse * 0.2),
                         width: 1.5,
                       ),
                     ),
                   ),
-                  // Center icon.
                   Container(
                     width: 64,
                     height: 64,
@@ -705,21 +577,18 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
                       gradient: LinearGradient(
                         begin: Alignment.topLeft,
                         end: Alignment.bottomRight,
-                        colors: isFailed
-                            ? [Colors.red.shade400, Colors.red.shade700]
-                            : [_teal, _tealDeep],
+                        colors: [_teal, _tealDeep],
                       ),
                       boxShadow: [
                         BoxShadow(
-                          color: (isFailed ? Colors.red : _teal)
-                              .withValues(alpha: 0.3 + pulse * 0.2),
+                          color: _teal.withValues(alpha: 0.3 + pulse * 0.2),
                           blurRadius: 20 + pulse * 10,
                           spreadRadius: pulse * 4,
                         ),
                       ],
                     ),
-                    child: Icon(
-                      isFailed ? Icons.close : Icons.bluetooth_searching,
+                    child: const Icon(
+                      Icons.memory_outlined,
                       color: Colors.white,
                       size: 28,
                     ),
@@ -731,72 +600,136 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         ),
         const SizedBox(height: 32),
         Text(
-          _statusText,
+          'Pairing Device...',
           style: TextStyle(
-            color: isFailed
-                ? Colors.red.shade300
-                : CelestialColors.textPrimary,
+            color: CelestialColors.textPrimary,
             fontSize: 20,
             fontWeight: FontWeight.w600,
           ),
         ),
-        if (_errorText != null) ...[
-          const SizedBox(height: 8),
-          Text(
-            _errorText!,
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.7),
-              fontSize: 14,
+        const SizedBox(height: 8),
+        Text(
+          'Keep this screen open while Rhythm scans your network over mDNS and commissions the device.',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+            fontSize: 14,
+            height: 1.4,
+          ),
+        ),
+        const SizedBox(height: 24),
+        _buildInfoCard(
+          title: 'This request is synchronous',
+          lines: const [
+            'Pairing usually completes in about 15–30 seconds.',
+            'No separate Matter hub connection step is needed in the app.',
+          ],
+        ),
+        const SizedBox(height: 32),
+        SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            valueColor: AlwaysStoppedAnimation(_teal.withValues(alpha: 0.6)),
+          ),
+        ),
+        const SizedBox(height: 40),
+      ],
+    );
+  }
+
+  Widget _buildFailurePhase() {
+    return Column(
+      children: [
+        const SizedBox(height: 60),
+        Container(
+          width: 72,
+          height: 72,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: Colors.red.shade900.withValues(alpha: 0.22),
+            border: Border.all(
+              color: Colors.red.shade300.withValues(alpha: 0.35),
             ),
           ),
-        ],
-        // Device info card (appears once device found).
-        if (_pairedDeviceName != null && !isFailed) ...[
-          const SizedBox(height: 32),
-          _buildDeviceInfoCard(),
-        ],
-        if (!isFailed && _errorText == null) ...[
-          const SizedBox(height: 32),
-          SizedBox(
-            width: 20,
-            height: 20,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              valueColor:
-                  AlwaysStoppedAnimation(_teal.withValues(alpha: 0.6)),
-            ),
+          child: Icon(Icons.close, color: Colors.red.shade300, size: 28),
+        ),
+        const SizedBox(height: 28),
+        Text(
+          'Pairing Failed',
+          style: TextStyle(
+            color: Colors.red.shade300,
+            fontSize: 20,
+            fontWeight: FontWeight.w600,
           ),
-        ],
-        if (isFailed) ...[
-          const SizedBox(height: 32),
-          SizedBox(
-            width: double.infinity,
-            height: 52,
-            child: OutlinedButton(
-              onPressed: _tryAgain,
-              style: OutlinedButton.styleFrom(
-                side: BorderSide(color: _teal.withValues(alpha: 0.5)),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14)),
+        ),
+        const SizedBox(height: 10),
+        Text(
+          _errorText ?? 'Pairing failed.',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: CelestialColors.textSecondary.withValues(alpha: 0.75),
+            fontSize: 14,
+            height: 1.45,
+          ),
+        ),
+        const SizedBox(height: 32),
+        SizedBox(
+          width: double.infinity,
+          height: 52,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              gradient: const LinearGradient(colors: [_teal, _tealDeep]),
+            ),
+            child: MaterialButton(
+              onPressed: _resetToInput,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
               ),
               child: const Text(
                 'Try Again',
                 style: TextStyle(
-                  color: _teal,
+                  color: Colors.white,
                   fontSize: 16,
                   fontWeight: FontWeight.w600,
                 ),
               ),
             ),
           ),
-        ],
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          width: double.infinity,
+          height: 52,
+          child: OutlinedButton(
+            onPressed: () => Navigator.of(context).pop(),
+            style: OutlinedButton.styleFrom(
+              side: BorderSide(color: _teal.withValues(alpha: 0.35)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+              ),
+            ),
+            child: const Text(
+              'Close',
+              style: TextStyle(
+                color: _teal,
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ),
         const SizedBox(height: 40),
       ],
     );
   }
 
-  Widget _buildDeviceInfoCard() {
+  Widget _buildInfoCard({
+    required String title,
+    required List<String> lines,
+  }) {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16),
@@ -804,372 +737,31 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         color: CelestialColors.backgroundCard,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
-          color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+          color: CelestialColors.orbitRing.withValues(alpha: 0.35),
         ),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: _teal.withValues(alpha: 0.15),
-            ),
-            child: Icon(
-              Icons.lightbulb_outline,
-              color: _teal.withValues(alpha: 0.8),
-              size: 20,
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  _pairedDeviceName ?? 'Unknown Device',
-                  style: const TextStyle(
-                    color: CelestialColors.textPrimary,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                if (_pairedManufacturer != null || _pairedModel != null) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    [_pairedManufacturer, _pairedModel]
-                        .where((s) => s != null)
-                        .join(' · '),
-                    style: TextStyle(
-                      color: CelestialColors.textSecondary
-                          .withValues(alpha: 0.6),
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ─── Phase 3: Room assignment ──────────────────────────────
-
-  Widget _buildRoomAssignmentPhase() {
-    final syncProvider = context.watch<ServerSyncProvider>();
-    final rooms = syncProvider.helloRooms;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const SizedBox(height: 32),
-        // Success header.
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              width: 32,
-              height: 32,
-              decoration: const BoxDecoration(
-                shape: BoxShape.circle,
-                color: Color(0xFF22C55E),
-              ),
-              child: const Icon(Icons.check, color: Colors.white, size: 18),
-            ),
-            const SizedBox(width: 12),
-            const Text(
-              'Device Added!',
-              style: TextStyle(
-                color: Color(0xFF22C55E),
-                fontSize: 20,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 24),
-        _buildDeviceInfoCard(),
-        const SizedBox(height: 32),
-        // Section header.
-        Padding(
-          padding: const EdgeInsets.only(left: 4, bottom: 10),
-          child: Text(
-            'ASSIGN TO ROOM',
+          Text(
+            title,
             style: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+              color: CelestialColors.textPrimary,
               fontSize: 13,
               fontWeight: FontWeight.w600,
-              letterSpacing: 1,
             ),
           ),
-        ),
-        // Room list.
-        Container(
-          decoration: BoxDecoration(
-            color: CelestialColors.backgroundCard,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: CelestialColors.orbitRing.withValues(alpha: 0.5),
-            ),
-          ),
-          child: Column(
-            children: [
-              for (final (index, room) in rooms.indexed) ...[
-                if (index > 0)
-                  Divider(
-                      height: 1,
-                      color:
-                          CelestialColors.orbitRing.withValues(alpha: 0.3)),
-                _buildRoomRow(room),
-              ],
-              if (rooms.isNotEmpty)
-                Divider(
-                    height: 1,
-                    color: CelestialColors.orbitRing.withValues(alpha: 0.3)),
-              _buildCreateRoomRow(),
-            ],
-          ),
-        ),
-        const SizedBox(height: 32),
-        // Done button.
-        SizedBox(
-          width: double.infinity,
-          height: 52,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(14),
-              gradient: (_selectedRoomId != null ||
-                      (_isCreatingRoom &&
-                          _newRoomController.text.trim().isNotEmpty))
-                  ? const LinearGradient(colors: [_teal, _tealDeep])
-                  : null,
-              color: (_selectedRoomId == null &&
-                      !(_isCreatingRoom &&
-                          _newRoomController.text.trim().isNotEmpty))
-                  ? CelestialColors.textSecondary.withValues(alpha: 0.15)
-                  : null,
-            ),
-            child: MaterialButton(
-              onPressed: (_selectedRoomId != null ||
-                          (_isCreatingRoom &&
-                              _newRoomController.text.trim().isNotEmpty)) &&
-                      !_isSaving
-                  ? _assignAndFinish
-                  : null,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14)),
-              child: _isSaving
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        valueColor: AlwaysStoppedAnimation(Colors.white),
-                      ),
-                    )
-                  : Text(
-                      'Done',
-                      style: TextStyle(
-                        color: (_selectedRoomId != null ||
-                                (_isCreatingRoom &&
-                                    _newRoomController.text
-                                        .trim()
-                                        .isNotEmpty))
-                            ? Colors.white
-                            : CelestialColors.textSecondary
-                                .withValues(alpha: 0.4),
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-            ),
-          ),
-        ),
-        // Skip option.
-        const SizedBox(height: 12),
-        Center(
-          child: GestureDetector(
-            onTap: _isSaving
-                ? null
-                : () {
-                    setState(() {
-                      _selectedRoomId = null;
-                      _isCreatingRoom = false;
-                    });
-                    _assignAndFinish();
-                  },
-            child: Text(
-              'Skip for now',
+          const SizedBox(height: 8),
+          for (final line in lines) ...[
+            Text(
+              line,
               style: TextStyle(
-                color: CelestialColors.textSecondary.withValues(alpha: 0.5),
-                fontSize: 14,
+                color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+                fontSize: 13,
+                height: 1.4,
               ),
             ),
-          ),
-        ),
-        const SizedBox(height: 40),
-      ],
-    );
-  }
-
-  Widget _buildRoomRow(RhythmRoom room) {
-    final isSelected = _selectedRoomId == room.id;
-    return GestureDetector(
-      onTap: () {
-        HapticFeedback.selectionClick();
-        setState(() {
-          _selectedRoomId = isSelected ? null : room.id;
-          _isCreatingRoom = false;
-        });
-      },
-      behavior: HitTestBehavior.opaque,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        color: isSelected ? _teal.withValues(alpha: 0.08) : null,
-        child: Row(
-          children: [
-            Icon(
-              Icons.meeting_room_outlined,
-              color: isSelected
-                  ? _teal
-                  : CelestialColors.textSecondary.withValues(alpha: 0.5),
-              size: 20,
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    room.name,
-                    style: TextStyle(
-                      color: CelestialColors.textPrimary,
-                      fontSize: 14,
-                      fontWeight:
-                          isSelected ? FontWeight.w600 : FontWeight.w500,
-                    ),
-                  ),
-                  if (room.deviceIds.isNotEmpty) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      '${room.deviceIds.length} device${room.deviceIds.length == 1 ? '' : 's'}',
-                      style: TextStyle(
-                        color: CelestialColors.textSecondary
-                            .withValues(alpha: 0.5),
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            if (isSelected)
-              Icon(Icons.check_circle, color: _teal, size: 20)
-            else
-              Icon(
-                Icons.circle_outlined,
-                color: CelestialColors.orbitRing.withValues(alpha: 0.4),
-                size: 20,
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildCreateRoomRow() {
-    return GestureDetector(
-      onTap: () {
-        HapticFeedback.selectionClick();
-        setState(() {
-          _isCreatingRoom = !_isCreatingRoom;
-          _selectedRoomId = null;
-        });
-      },
-      behavior: HitTestBehavior.opaque,
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: Row(
-              children: [
-                Icon(
-                  Icons.add_circle_outline,
-                  color: _isCreatingRoom
-                      ? _teal
-                      : CelestialColors.textSecondary.withValues(alpha: 0.5),
-                  size: 20,
-                ),
-                const SizedBox(width: 12),
-                const Expanded(
-                  child: Text(
-                    'Create New Room',
-                    style: TextStyle(
-                      color: CelestialColors.textPrimary,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ),
-                if (_isCreatingRoom)
-                  const Icon(Icons.check_circle, color: _teal, size: 20)
-                else
-                  Icon(
-                    Icons.circle_outlined,
-                    color: CelestialColors.orbitRing.withValues(alpha: 0.4),
-                    size: 20,
-                  ),
-              ],
-            ),
-          ),
-          if (_isCreatingRoom) ...[
-            Divider(
-                height: 1,
-                color: CelestialColors.orbitRing.withValues(alpha: 0.3)),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-              child: TextField(
-                controller: _newRoomController,
-                autofocus: true,
-                style: const TextStyle(
-                  color: CelestialColors.textPrimary,
-                  fontSize: 14,
-                ),
-                decoration: InputDecoration(
-                  hintText: 'Room name',
-                  hintStyle: TextStyle(
-                    color:
-                        CelestialColors.textSecondary.withValues(alpha: 0.4),
-                  ),
-                  contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 12, vertical: 10),
-                  filled: true,
-                  fillColor: CelestialColors.backgroundDark,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: BorderSide(
-                      color:
-                          CelestialColors.orbitRing.withValues(alpha: 0.5),
-                    ),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: BorderSide(
-                      color:
-                          CelestialColors.orbitRing.withValues(alpha: 0.5),
-                    ),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: const BorderSide(color: _teal),
-                  ),
-                ),
-                onChanged: (_) => setState(() {}),
-              ),
-            ),
+            if (line != lines.last) const SizedBox(height: 6),
           ],
         ],
       ),

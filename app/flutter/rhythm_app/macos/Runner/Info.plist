@@ -53,6 +53,8 @@
 		<string>_hue._tcp</string>
 		<string>_home-assistant._tcp</string>
 	</array>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Rhythm uses Bluetooth to provision nearby Rhythm devices onto Wi-Fi.</string>
 	<key>NSLocationUsageDescription</key>
 	<string>Rhythm needs your location to calculate sunrise and sunset times for adaptive lighting.</string>
 	<key>NSLocalNetworkUsageDescription</key>

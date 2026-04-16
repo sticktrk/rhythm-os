@@ -61,6 +61,10 @@
 		<string>_hue._tcp</string>
 		<string>_home-assistant._tcp</string>
 	</array>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Rhythm uses Bluetooth to provision nearby Rhythm devices onto Wi-Fi.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Rhythm uses Bluetooth to provision nearby Rhythm devices onto Wi-Fi.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Rhythm needs local network access to discover and communicate with RhythmServer, Hue, and HomeAssistant devices.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>

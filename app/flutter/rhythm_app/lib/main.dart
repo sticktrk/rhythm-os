@@ -12,6 +12,7 @@ import 'services/auth_service.dart';
 import 'services/analytics_service.dart';
 import 'services/settings_service.dart';
 import 'services/app_state_refresh.dart';
+import 'data/local_data_source.dart';
 import 'providers/hub_connection_provider.dart';
 import 'providers/room_provider.dart';
 import 'providers/room_page_provider.dart';
@@ -75,7 +76,9 @@ void main() async {
 
   try {
     // Try hybrid mode first (local brain + remote API)
-    client = await HybridApiClient.create();
+    client = await HybridApiClient.create(
+      storedHubs: LocalDataSource().getAllHubs(),
+    );
 
     // If remote API isn't available, fall back to local-only mode
     if (!await client.healthCheck()) {
