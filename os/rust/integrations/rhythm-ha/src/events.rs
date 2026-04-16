@@ -788,9 +788,9 @@ mod tests {
             }
         ));
 
-        // Press button 4 (off)
+        // Press button 4 (off — fires on short_release, not initial_press)
         let btn4 =
-            json!({"id": "dimmer", "device_id": "ha-dev-1", "type": "initial_press", "subtype": 4});
+            json!({"id": "dimmer", "device_id": "ha-dev-1", "type": "short_release", "subtype": 4});
         let r4 = translate_hue_event(&btn4, &registry, &cache);
         assert_eq!(r4.len(), 1);
         assert!(matches!(
@@ -824,7 +824,7 @@ mod tests {
         let event_data = json!({
             "id": "hue-btn-uuid",
             "device_id": "ha-dev-1",
-            "type": "initial_press",
+            "type": "short_release",
             "subtype": 4
         });
 
@@ -855,7 +855,11 @@ mod tests {
         });
 
         let results = translate_hue_event(&event_data, &registry, &cache);
-        assert!(results.is_empty());
+        assert_eq!(results.len(), 1);
+        assert!(
+            matches!(&results[0], HubEvent::UnroutableButton { .. }),
+            "Unresolvable button should produce UnroutableButton"
+        );
     }
 
     #[test]
@@ -1181,9 +1185,9 @@ mod tests {
             }
         ));
 
-        // Button 4 → OffPress
+        // Button 4 → OffPress (fires on short_release, not initial_press)
         let r4 = translate_state_changed(
-            &json!({"entity_id": "event.dimmer_button_4", "new_state": {"state": "t", "attributes": {"event_type": "initial_press"}}}),
+            &json!({"entity_id": "event.dimmer_button_4", "new_state": {"state": "t", "attributes": {"event_type": "short_release"}}}),
             &registry,
             &cache,
         );
@@ -1233,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn test_event_entity_not_in_cache_ignored() {
+    fn test_event_entity_not_in_cache_returns_unroutable() {
         let (registry, cache) = make_registry_and_cache();
         // Cache is empty
 
@@ -1246,7 +1250,11 @@ mod tests {
         });
 
         let results = translate_state_changed(&event_data, &registry, &cache);
-        assert!(results.is_empty());
+        assert_eq!(results.len(), 1);
+        assert!(
+            matches!(&results[0], HubEvent::UnroutableButton { .. }),
+            "Unresolvable button should produce UnroutableButton"
+        );
     }
 
     #[test]

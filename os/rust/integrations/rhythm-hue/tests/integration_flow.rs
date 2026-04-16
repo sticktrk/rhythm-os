@@ -132,7 +132,7 @@ fn sse_button_off_press_sends_soft_off() {
     runtime.handle_event(&input).unwrap();
     spy.reset();
 
-    // Add button 4 (control_id=4 → OffPress on initial_press)
+    // Add button 4 (control_id=4 → OffPress on short_release)
     registry.lock().unwrap().upsert_device(
         "switch-1",
         "room1",
@@ -142,7 +142,7 @@ fn sse_button_off_press_sends_soft_off() {
 
     let sse_event = HueSseEvent::ButtonEvent {
         button_id: "btn-4".to_string(),
-        event_type: "initial_press".to_string(),
+        event_type: "short_release".to_string(),
     };
 
     let hub_events = translate_sse_event(&registry, sse_event, None, None, None);
