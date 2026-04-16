@@ -89,6 +89,18 @@ pub trait HubDiscovery: Send + Sync {
         Ok(vec![])
     }
 
+    /// Discover devices with native hub automation configured.
+    ///
+    /// Returns `(behavior_id, device_id)` pairs for devices that have
+    /// hub-side automations (e.g. Hue behavior_instances). These conflict
+    /// with Rhythm and should be surfaced as triage items so the user can
+    /// remove them in the hub's native app.
+    ///
+    /// Default returns empty — hubs without native automation support.
+    fn discover_configured_devices(&self) -> Result<Vec<(String, String)>> {
+        Ok(vec![])
+    }
+
     /// Release cached network connections to free memory.
     ///
     /// Called after all discovery methods have been invoked so the

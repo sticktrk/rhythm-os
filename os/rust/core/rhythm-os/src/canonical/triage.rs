@@ -20,6 +20,8 @@ pub enum TriageKind {
     RoomBinding,
     /// Device has no room assignment and needs one.
     UnassignedDevice,
+    /// Device has native hub automation configured that conflicts with Rhythm.
+    HubConfigured,
 }
 
 /// Why a candidate was matched (for triage evidence).
@@ -349,6 +351,49 @@ impl TriageQueue {
         resolved
     }
 
+    /// Number of pending hub-configured device entries.
+    pub fn pending_hub_configured_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| e.status == TriageStatus::Pending && e.kind == TriageKind::HubConfigured)
+            .count()
+    }
+
+    /// Check if a pending HubConfigured entry exists for a device from a specific hub.
+    ///
+    /// Only matches `Pending` entries so dismissed entries can re-enter triage.
+    pub fn has_hub_configured(&self, hub_key: &HubKey, native_id: &str) -> bool {
+        self.entries.iter().any(|e| {
+            e.status == TriageStatus::Pending
+                && e.kind == TriageKind::HubConfigured
+                && e.hub_key == *hub_key
+                && e.discovered.native_id == native_id
+        })
+    }
+
+    /// Auto-resolve pending HubConfigured entries for a device (e.g. when behavior removed).
+    pub fn resolve_hub_configured_for_device(
+        &mut self,
+        hub_key: &HubKey,
+        native_id: &str,
+        now: u64,
+    ) -> bool {
+        let mut resolved = false;
+        for entry in &mut self.entries {
+            if entry.status == TriageStatus::Pending
+                && entry.kind == TriageKind::HubConfigured
+                && entry.hub_key == *hub_key
+                && entry.discovered.native_id == native_id
+            {
+                entry.status = TriageStatus::Confirmed;
+                entry.resolved_by = Some("auto".to_string());
+                entry.resolved_at = Some(now);
+                resolved = true;
+            }
+        }
+        resolved
+    }
+
     /// Check if a room binding proposal already exists for a hub room.
     ///
     /// Only matches `Pending` entries so dismissed proposals can re-enter triage.
@@ -633,6 +678,91 @@ mod tests {
         assert_eq!(q.pending_unassigned_count(), 1);
         assert_eq!(q.pending_device_count(), 1);
         assert_eq!(q.pending_room_count(), 1);
+        assert_eq!(q.pending_count(), 3);
+    }
+
+    // ---- HubConfigured triage tests ----
+
+    fn make_hub_configured_entry(id: &str, native_id: &str) -> TriageEntry {
+        TriageEntry {
+            id: id.to_string(),
+            kind: TriageKind::HubConfigured,
+            discovered: TriageDiscoveredDevice {
+                native_id: native_id.to_string(),
+                name: format!("Switch {}", id),
+                device_type: DeviceType::Button,
+                room_id: "room-1".to_string(),
+                room_name: "Kitchen".to_string(),
+                manufacturer: None,
+                model: None,
+            },
+            hub_key: HubKey::new(HubType::new("hue"), "192.168.1.1"),
+            candidate_matches: vec![],
+            room_binding: None,
+            confidence: 0,
+            status: TriageStatus::Pending,
+            resolved_by: None,
+            created_at: 1000,
+            resolved_at: None,
+            canonical_id: None,
+        }
+    }
+
+    #[test]
+    fn hub_configured_tracking() {
+        let mut q = TriageQueue::new();
+        let hub = HubKey::new(HubType::new("hue"), "192.168.1.1");
+        q.add(make_hub_configured_entry("hc1", "device-abc"));
+
+        assert!(q.has_hub_configured(&hub, "device-abc"));
+        assert!(!q.has_hub_configured(&hub, "device-xyz"));
+        assert_eq!(q.pending_hub_configured_count(), 1);
+        assert_eq!(q.pending_count(), 1);
+    }
+
+    #[test]
+    fn hub_configured_dedup() {
+        let mut q = TriageQueue::new();
+        let hub = HubKey::new(HubType::new("hue"), "192.168.1.1");
+        q.add(make_hub_configured_entry("hc1", "device-abc"));
+
+        // Second entry for same device — has_hub_configured returns true
+        assert!(q.has_hub_configured(&hub, "device-abc"));
+    }
+
+    #[test]
+    fn hub_configured_dismissed_allows_re_triage() {
+        let mut q = TriageQueue::new();
+        let hub = HubKey::new(HubType::new("hue"), "192.168.1.1");
+        q.add(make_hub_configured_entry("hc1", "device-abc"));
+        q.dismiss("hc1", 2000);
+
+        // Dismissed entry should not block re-triage
+        assert!(!q.has_hub_configured(&hub, "device-abc"));
+    }
+
+    #[test]
+    fn hub_configured_auto_resolve() {
+        let mut q = TriageQueue::new();
+        let hub = HubKey::new(HubType::new("hue"), "192.168.1.1");
+        q.add(make_hub_configured_entry("hc1", "device-abc"));
+
+        assert!(q.resolve_hub_configured_for_device(&hub, "device-abc", 2000));
+        assert_eq!(q.pending_hub_configured_count(), 0);
+        let entry = q.get("hc1").unwrap();
+        assert_eq!(entry.status, TriageStatus::Confirmed);
+        assert_eq!(entry.resolved_by.as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn pending_by_kind_includes_hub_configured() {
+        let mut q = TriageQueue::new();
+        q.add(make_entry("e1", TriageStatus::Pending));
+        q.add(make_hub_configured_entry("hc1", "device-abc"));
+        q.add(make_unassigned_entry("u1", "canonical-abc"));
+
+        assert_eq!(q.pending_by_kind(TriageKind::HubConfigured).len(), 1);
+        assert_eq!(q.pending_hub_configured_count(), 1);
         assert_eq!(q.pending_count(), 3);
     }
 }

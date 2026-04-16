@@ -541,6 +541,43 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             info!(target: "evt", "Device paired: {} ({})",
                 name, device_id);
         }
+
+        HubEvent::UnroutableButton {
+            ref hub_key,
+            ref device_id,
+            ref button_id,
+        } => {
+            // Try to create an UnassignedDevice triage entry so the user knows
+            // a switch needs attention. Requires the device to be in the
+            // canonical registry (populated during room sync).
+            let canonical_id_to_queue = if let (Some(key), Some(dev_id)) = (hub_key, device_id) {
+                let Ok(s) = state.lock() else { return };
+                s.canonical_registry
+                    .find_by_native_id(key, dev_id)
+                    .filter(|cd| !s.canonical_registry.triage().has_unassigned_device(&cd.id))
+                    .map(|cd| cd.id.clone())
+            } else {
+                warn!(target: "evt",
+                    "Unroutable button {} with no hub_key or device_id — \
+                     will surface at next sync", button_id);
+                None
+            };
+
+            if let Some(cid) = canonical_id_to_queue {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                if let Ok(mut s) = state.lock() {
+                    s.canonical_registry.queue_unassigned(&cid, now);
+                    info!(target: "evt",
+                        "Created UnassignedDevice triage entry for button {} (canonical={})",
+                        button_id, cid);
+                }
+                #[cfg(feature = "desktop")]
+                commands::emit_triage_changed(state);
+            }
+        }
     }
 }
 

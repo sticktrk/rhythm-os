@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::DeviceRegistry;
@@ -283,6 +283,79 @@ impl<H: HueTransport> HueDiscovery<H> {
 
         Ok(Self::extract_devices(dev_data, &device_to_room))
     }
+
+    /// Extract the device reference from a Hue V2 behavior_instance JSON.
+    ///
+    /// The behavior_instance JSON structure varies by behavior script type.
+    /// We try multiple known paths to find the device reference:
+    /// 1. `configuration.where[N].group.rid` (common for switch-configured behaviors)
+    /// 2. `configuration.device.rid` (direct device reference)
+    /// 3. `group.rid` (top-level group reference)
+    ///
+    /// Returns the device/group resource ID if found.
+    fn extract_device_from_behavior(bi: &serde_json::Value) -> Option<String> {
+        // Path 1: configuration.where[].group.rid
+        if let Some(wheres) = bi
+            .pointer("/configuration/where")
+            .and_then(|v| v.as_array())
+        {
+            for w in wheres {
+                if let Some(rid) = w.pointer("/group/rid").and_then(|v| v.as_str()) {
+                    return Some(rid.to_string());
+                }
+            }
+        }
+
+        // Path 2: configuration.device.rid
+        if let Some(rid) = bi
+            .pointer("/configuration/device/rid")
+            .and_then(|v| v.as_str())
+        {
+            return Some(rid.to_string());
+        }
+
+        // Path 3: group.rid (top-level)
+        if let Some(rid) = bi.pointer("/group/rid").and_then(|v| v.as_str()) {
+            return Some(rid.to_string());
+        }
+
+        // Path 4: Walk "configuration" looking for any object with "rid" + "rtype": "device"
+        if let Some(config) = bi.get("configuration") {
+            if let Some(rid) = Self::find_device_rid(config) {
+                return Some(rid);
+            }
+        }
+
+        None
+    }
+
+    /// Recursively search a JSON value for an object with `rtype: "device"` and extract its `rid`.
+    fn find_device_rid(value: &serde_json::Value) -> Option<String> {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.get("rtype").and_then(|v| v.as_str()) == Some("device") {
+                    if let Some(rid) = map.get("rid").and_then(|v| v.as_str()) {
+                        return Some(rid.to_string());
+                    }
+                }
+                for v in map.values() {
+                    if let Some(rid) = Self::find_device_rid(v) {
+                        return Some(rid);
+                    }
+                }
+                None
+            }
+            serde_json::Value::Array(arr) => {
+                for v in arr {
+                    if let Some(rid) = Self::find_device_rid(v) {
+                        return Some(rid);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
 }
 
 impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
@@ -483,6 +556,53 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
             "Discovered {} device identities ({} lights, {} buttons, {} motion) from Hue bridge",
             identities.len(), light_count, button_count, motion_count);
         Ok(identities)
+    }
+
+    fn discover_configured_devices(&self) -> Result<Vec<(String, String)>> {
+        let resp = self
+            .transport
+            .get_resources(&self.username, "behavior_instance")?;
+        let empty = Vec::new();
+        let data = resp
+            .get("data")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty);
+
+        debug!(target: "hue_discovery",
+            "behavior_instance response: {} entries, raw: {}",
+            data.len(),
+            serde_json::to_string_pretty(&resp).unwrap_or_default());
+
+        let mut mappings = Vec::new();
+        for bi in data {
+            let behavior_id = match bi.get("id").and_then(|v| v.as_str()) {
+                Some(id) => id.to_string(),
+                None => continue,
+            };
+
+            // Try multiple paths to find the device reference.
+            // Hue V2 behavior_instance JSON varies by behavior script type.
+            let device_id = Self::extract_device_from_behavior(bi);
+
+            match device_id {
+                Some(dev_id) => {
+                    debug!(target: "hue_discovery",
+                        "behavior_instance {} -> device {}", behavior_id, dev_id);
+                    mappings.push((behavior_id, dev_id));
+                }
+                None => {
+                    debug!(target: "hue_discovery",
+                        "behavior_instance {} — could not extract device reference",
+                        behavior_id);
+                }
+            }
+        }
+
+        info!(target: "hue_discovery",
+            "Discovered {} behavior_instances across {} devices from Hue bridge",
+            mappings.len(),
+            mappings.iter().map(|(_, d)| d.as_str()).collect::<std::collections::HashSet<_>>().len());
+        Ok(mappings)
     }
 }
 

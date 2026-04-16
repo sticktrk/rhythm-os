@@ -198,7 +198,7 @@ fn direct_engine_action_uses_correct_grouped_light() {
 }
 
 #[test]
-fn unknown_button_produces_no_event() {
+fn unknown_button_produces_unroutable_event() {
     let (_runtime, registry, _spy) = make_hue_pipeline();
 
     let sse_event = HueSseEvent::ButtonEvent {
@@ -208,10 +208,25 @@ fn unknown_button_produces_no_event() {
 
     let hub_events = translate_sse_event(&registry, sse_event, None, None, None);
 
-    assert!(
-        hub_events.is_empty(),
-        "Unknown button should produce no events"
+    assert_eq!(
+        hub_events.len(),
+        1,
+        "Unknown button should produce one UnroutableButton event"
     );
+    match &hub_events[0] {
+        HubEvent::UnroutableButton {
+            device_id,
+            button_id,
+            ..
+        } => {
+            assert_eq!(button_id, "unknown-btn");
+            assert!(
+                device_id.is_none(),
+                "Unknown button should have no device_id"
+            );
+        }
+        other => panic!("Expected UnroutableButton, got {:?}", other),
+    }
 }
 
 #[test]

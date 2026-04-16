@@ -523,6 +523,105 @@ fn sync_with_discovery(
                 // translate_or_create to add rooms with topology IDs from the
                 // start, so no post-hoc remap is needed.
             }
+
+            // ============================================================
+            // Phase 4e: Hub-configured device triage
+            // ============================================================
+            // Check for devices with native hub automation (e.g. Hue
+            // behavior_instances). These conflict with Rhythm and should
+            // be surfaced as triage items.
+            match discovery.discover_configured_devices() {
+                Ok(mappings) if !mappings.is_empty() => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+
+                    // Collect currently-configured device IDs for stale entry cleanup
+                    let configured_device_ids: HashSet<&str> =
+                        mappings.iter().map(|(_, d)| d.as_str()).collect();
+
+                    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+
+                    // Create triage entries for newly-configured devices
+                    for (_, device_id) in &mappings {
+                        if s.canonical_registry
+                            .triage()
+                            .has_hub_configured(&canonical_hub_key, device_id)
+                        {
+                            continue; // already pending
+                        }
+
+                        // Look up device info from canonical registry
+                        let (name, device_type) = s
+                            .canonical_registry
+                            .find_by_native_id(&canonical_hub_key, device_id)
+                            .map(|cd| (cd.name.clone(), cd.device_type.clone()))
+                            .unwrap_or_else(|| (device_id.clone(), DeviceType::Button));
+
+                        let entry = TriageEntry {
+                            id: format!("hub-configured-{}-{}", now, device_id),
+                            kind: TriageKind::HubConfigured,
+                            discovered: TriageDiscoveredDevice {
+                                native_id: device_id.clone(),
+                                name,
+                                device_type,
+                                room_id: String::new(),
+                                room_name: String::new(),
+                                manufacturer: None,
+                                model: None,
+                            },
+                            hub_key: canonical_hub_key.clone(),
+                            candidate_matches: vec![],
+                            room_binding: None,
+                            confidence: 0,
+                            status: TriageStatus::Pending,
+                            resolved_by: None,
+                            created_at: now,
+                            resolved_at: None,
+                            canonical_id: None,
+                        };
+                        s.canonical_registry.triage_mut().add(entry);
+                        info!(target: "room_sync",
+                            "Queued HubConfigured triage: device '{}' has native automation",
+                            device_id);
+                    }
+
+                    // Auto-resolve stale HubConfigured entries for devices that
+                    // no longer have behavior_instances (user removed them in Hue app)
+                    let stale_ids: Vec<String> = s
+                        .canonical_registry
+                        .triage()
+                        .pending_by_kind(TriageKind::HubConfigured)
+                        .iter()
+                        .filter(|e| {
+                            e.hub_key == canonical_hub_key
+                                && !configured_device_ids.contains(e.discovered.native_id.as_str())
+                        })
+                        .map(|e| e.id.clone())
+                        .collect();
+                    for entry_id in &stale_ids {
+                        s.canonical_registry.triage_mut().resolve(
+                            entry_id,
+                            TriageStatus::Confirmed,
+                            "auto",
+                            now,
+                        );
+                        info!(target: "room_sync",
+                            "Auto-resolved HubConfigured triage '{}': behavior removed",
+                            entry_id);
+                    }
+
+                    if !mappings.is_empty() || !stale_ids.is_empty() {
+                        commands::persist_canonical(&s);
+                    }
+                }
+                Ok(_) => {} // no configured devices
+                Err(e) => {
+                    warn!(target: "room_sync",
+                        "Behavior instance discovery failed (non-fatal): {}", e);
+                }
+            }
         }
     }
 

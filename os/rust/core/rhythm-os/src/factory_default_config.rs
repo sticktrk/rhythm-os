@@ -275,10 +275,7 @@ mod tests {
             transitions[0].trigger,
             ModeTransitionTrigger::AstronomicalTwilight
         );
-        assert_eq!(
-            transitions[0].duration_ms,
-            TimerSetting::Auto
-        );
+        assert_eq!(transitions[0].duration_ms, TimerSetting::Auto);
         assert!(transitions[0].preserve_hard_off);
         assert_eq!(transitions[1].id, "day_to_sleep");
         assert_eq!(transitions[1].label, "Day to Sleep");
@@ -288,10 +285,7 @@ mod tests {
             transitions[1].trigger,
             ModeTransitionTrigger::NauticalTwilight
         );
-        assert_eq!(
-            transitions[1].duration_ms,
-            TimerSetting::Auto
-        );
+        assert_eq!(transitions[1].duration_ms, TimerSetting::Auto);
         assert!(transitions[1].preserve_hard_off);
     }
 

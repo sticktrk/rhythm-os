@@ -63,6 +63,18 @@ pub enum HubEvent {
         name: String,
         device_type: rhythm_core::runtime::hub_registry::DeviceType,
     },
+    /// A button was pressed but could not be routed to a room.
+    ///
+    /// Emitted by `resolve_button_event` when the button's device has no room
+    /// mapping. The event loop uses this to create an `UnassignedDevice` triage
+    /// entry so the user knows a switch needs attention.
+    UnroutableButton {
+        hub_key: Option<HubKey>,
+        /// Hub-native device ID (if button is in the registry).
+        device_id: Option<String>,
+        /// Button resource ID that triggered the event.
+        button_id: String,
+    },
 }
 
 impl HubEvent {
@@ -75,6 +87,7 @@ impl HubEvent {
             HubEvent::Heartbeat { hub_key } => hub_key.as_ref(),
             HubEvent::Disconnected { hub_key, .. } => hub_key.as_ref(),
             HubEvent::DevicePaired { hub_key, .. } => hub_key.as_ref(),
+            HubEvent::UnroutableButton { hub_key, .. } => hub_key.as_ref(),
         }
     }
 
@@ -87,6 +100,7 @@ impl HubEvent {
             HubEvent::Heartbeat { hub_key } => *hub_key = Some(key),
             HubEvent::Disconnected { hub_key, .. } => *hub_key = Some(key),
             HubEvent::DevicePaired { hub_key, .. } => *hub_key = Some(key),
+            HubEvent::UnroutableButton { hub_key, .. } => *hub_key = Some(key),
         }
         self
     }

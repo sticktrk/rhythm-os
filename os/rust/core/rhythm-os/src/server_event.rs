@@ -43,6 +43,8 @@ pub enum ServerEvent {
         pending_rooms: usize,
         /// Pending unassigned device entries.
         pending_unassigned: usize,
+        /// Pending hub-configured device entries.
+        pending_hub_configured: usize,
     },
 }
 

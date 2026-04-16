@@ -5152,10 +5152,11 @@ pub fn build_triage_count(state: &SharedState) -> Result<String> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let triage = s.canonical_registry.triage();
     let json = format!(
-        r#"{{"devices":{},"rooms":{},"unassigned":{},"total":{}}}"#,
+        r#"{{"devices":{},"rooms":{},"unassigned":{},"hub_configured":{},"total":{}}}"#,
         triage.pending_device_count(),
         triage.pending_room_count(),
         triage.pending_unassigned_count(),
+        triage.pending_hub_configured_count(),
         triage.pending_count(),
     );
     Ok(json)
@@ -5172,9 +5173,10 @@ pub fn emit_triage_changed(state: &SharedState) {
             triage.pending_device_count(),
             triage.pending_room_count(),
             triage.pending_unassigned_count(),
+            triage.pending_hub_configured_count(),
         )
     });
-    if let Some((total, devices, rooms, unassigned)) = counts {
+    if let Some((total, devices, rooms, unassigned, hub_configured)) = counts {
         crate::state::emit_server_event(
             state,
             crate::server_event::ServerEvent::TriageChanged {
@@ -5182,6 +5184,7 @@ pub fn emit_triage_changed(state: &SharedState) {
                 pending_devices: devices,
                 pending_rooms: rooms,
                 pending_unassigned: unassigned,
+                pending_hub_configured: hub_configured,
             },
         );
     }

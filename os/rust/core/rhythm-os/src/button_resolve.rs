@@ -62,8 +62,12 @@ pub fn resolve_button_event(
         }
 
         if !known {
-            info!(target: "evt", "Button {}: unknown after discovery, ignoring", event.button_id);
-            return Vec::new();
+            info!(target: "evt", "Button {}: unknown after discovery, unroutable", event.button_id);
+            return vec![HubEvent::UnroutableButton {
+                hub_key: None,
+                device_id: None,
+                button_id: event.button_id.to_string(),
+            }];
         }
     }
 
@@ -87,8 +91,13 @@ pub fn resolve_button_event(
     let room_id = match reg.get_room_for_button(event.button_id) {
         Some(id) => id,
         None => {
-            info!(target: "evt", "Button {} has no room mapping, ignoring", event.button_id);
-            return Vec::new();
+            info!(target: "evt", "Button {} (device={}) has no room mapping, unroutable",
+                event.button_id, device_id);
+            return vec![HubEvent::UnroutableButton {
+                hub_key: None,
+                device_id: Some(device_id),
+                button_id: event.button_id.to_string(),
+            }];
         }
     };
 
@@ -166,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_button_without_callback_ignored() {
+    fn test_unknown_button_without_callback_returns_unroutable() {
         let registry = make_registry();
         let event = RawButtonEvent {
             button_id: "unknown-btn",
@@ -182,7 +191,18 @@ mod tests {
             &crate::hue_buttons::map_hue_button_str,
         );
 
-        assert!(results.is_empty());
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            HubEvent::UnroutableButton {
+                device_id,
+                button_id,
+                ..
+            } => {
+                assert_eq!(button_id, "unknown-btn");
+                assert!(device_id.is_none());
+            }
+            _ => panic!("Expected UnroutableButton event"),
+        }
     }
 
     #[test]
@@ -266,6 +286,45 @@ mod tests {
                 assert_eq!(*action, ButtonAction::Reset); // control_id=1, initial_press
             }
             _ => panic!("Expected Button event"),
+        }
+    }
+
+    #[test]
+    fn test_no_room_returns_unroutable() {
+        let registry = make_registry();
+
+        // Remove the room mapping for device-1 while keeping its buttons registered
+        {
+            use rhythm_core::DeviceRegistry;
+            let mut reg = registry.lock().unwrap();
+            reg.unregister_device("device-1");
+        }
+
+        let event = RawButtonEvent {
+            button_id: "button-1",
+            event_type: "initial_press",
+            fallback_control_id: None,
+            device_hint: None,
+        };
+
+        let results = resolve_button_event(
+            &registry,
+            &event,
+            None,
+            &crate::hue_buttons::map_hue_button_str,
+        );
+
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            HubEvent::UnroutableButton {
+                device_id,
+                button_id,
+                ..
+            } => {
+                assert_eq!(device_id.as_deref(), Some("device-1"));
+                assert_eq!(button_id, "button-1");
+            }
+            _ => panic!("Expected UnroutableButton event"),
         }
     }
 
