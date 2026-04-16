@@ -544,7 +544,7 @@ mod tests {
     use super::*;
     use crate::light_profile::defaults::{
         default_day_idle_profile, default_rhythm_profile, default_sleep_idle_profile,
-        default_sleep_profile, SLEEP_DEFAULT_RGB,
+        default_sleep_profile, SLEEP_DEFAULT_BRIGHTNESS, SLEEP_DEFAULT_RGB,
     };
     use rhythm_profile::{solar::SolarTime, TimerSetting};
 
@@ -650,12 +650,12 @@ mod tests {
     }
 
     #[test]
-    fn test_sleep_brightness_is_constant_one_percent() {
+    fn test_sleep_brightness_is_constant_default_brightness() {
         let profile = LightProfile::new(default_sleep_profile());
         let noon = profile.calculate(&test_context(12.0));
         let midnight = profile.calculate(&test_context(0.0));
-        assert_eq!(noon.brightness, 1);
-        assert_eq!(midnight.brightness, 1);
+        assert_eq!(noon.brightness, SLEEP_DEFAULT_BRIGHTNESS);
+        assert_eq!(midnight.brightness, SLEEP_DEFAULT_BRIGHTNESS);
     }
 
     #[test]

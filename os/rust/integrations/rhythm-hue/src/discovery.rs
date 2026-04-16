@@ -286,27 +286,16 @@ impl<H: HueTransport> HueDiscovery<H> {
 
     /// Extract the device reference from a Hue V2 behavior_instance JSON.
     ///
-    /// The behavior_instance JSON structure varies by behavior script type.
-    /// We try multiple known paths to find the device reference:
-    /// 1. `configuration.where[N].group.rid` (common for switch-configured behaviors)
-    /// 2. `configuration.device.rid` (direct device reference)
-    /// 3. `group.rid` (top-level group reference)
+    /// Verified against live Hue bridge responses. The structure is:
+    /// ```text
+    /// { "configuration": { "device": { "rid": "...", "rtype": "device" } },
+    ///   "dependees": [{ "target": { "rid": "...", "rtype": "device" } }, ...] }
+    /// ```
     ///
-    /// Returns the device/group resource ID if found.
+    /// Primary: `configuration.device.rid` (direct device reference).
+    /// Fallback: first `dependees[].target` with `rtype == "device"`.
     fn extract_device_from_behavior(bi: &serde_json::Value) -> Option<String> {
-        // Path 1: configuration.where[].group.rid
-        if let Some(wheres) = bi
-            .pointer("/configuration/where")
-            .and_then(|v| v.as_array())
-        {
-            for w in wheres {
-                if let Some(rid) = w.pointer("/group/rid").and_then(|v| v.as_str()) {
-                    return Some(rid.to_string());
-                }
-            }
-        }
-
-        // Path 2: configuration.device.rid
+        // Primary: configuration.device.rid
         if let Some(rid) = bi
             .pointer("/configuration/device/rid")
             .and_then(|v| v.as_str())
@@ -314,47 +303,20 @@ impl<H: HueTransport> HueDiscovery<H> {
             return Some(rid.to_string());
         }
 
-        // Path 3: group.rid (top-level)
-        if let Some(rid) = bi.pointer("/group/rid").and_then(|v| v.as_str()) {
-            return Some(rid.to_string());
-        }
-
-        // Path 4: Walk "configuration" looking for any object with "rid" + "rtype": "device"
-        if let Some(config) = bi.get("configuration") {
-            if let Some(rid) = Self::find_device_rid(config) {
-                return Some(rid);
+        // Fallback: dependees[] where target.rtype == "device"
+        if let Some(dependees) = bi.get("dependees").and_then(|v| v.as_array()) {
+            for dep in dependees {
+                if let Some(target) = dep.get("target") {
+                    if target.get("rtype").and_then(|v| v.as_str()) == Some("device") {
+                        if let Some(rid) = target.get("rid").and_then(|v| v.as_str()) {
+                            return Some(rid.to_string());
+                        }
+                    }
+                }
             }
         }
 
         None
-    }
-
-    /// Recursively search a JSON value for an object with `rtype: "device"` and extract its `rid`.
-    fn find_device_rid(value: &serde_json::Value) -> Option<String> {
-        match value {
-            serde_json::Value::Object(map) => {
-                if map.get("rtype").and_then(|v| v.as_str()) == Some("device") {
-                    if let Some(rid) = map.get("rid").and_then(|v| v.as_str()) {
-                        return Some(rid.to_string());
-                    }
-                }
-                for v in map.values() {
-                    if let Some(rid) = Self::find_device_rid(v) {
-                        return Some(rid);
-                    }
-                }
-                None
-            }
-            serde_json::Value::Array(arr) => {
-                for v in arr {
-                    if let Some(rid) = Self::find_device_rid(v) {
-                        return Some(rid);
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
     }
 }
 
@@ -711,4 +673,76 @@ pub fn discover_device<H: HueTransport>(
     info!(target: "hue_discovery", "Discovered {} {} on device {} for room {}",
         resource_type, resource_id, device_id, room_id);
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_device_from_hue_accessories_behavior() {
+        // Real structure from a live Hue bridge (RWL022 dimmer switch)
+        let bi: serde_json::Value = serde_json::json!({
+            "id": "7e929366-df9e-4044-8f4c-0ccec3a43d5a",
+            "type": "behavior_instance",
+            "script_id": "67d9395b-4403-42cc-b5f0-740b699d67c6",
+            "enabled": true,
+            "configuration": {
+                "device": {
+                    "rid": "4c7a67d9-2c1f-4c8e-b456-018c48f5521b",
+                    "rtype": "device"
+                },
+                "model_id": "RWL022"
+            },
+            "dependees": [
+                { "target": { "rid": "4c7a67d9-2c1f-4c8e-b456-018c48f5521b", "rtype": "device" }, "level": "critical", "type": "ResourceDependee" },
+                { "target": { "rid": "b902b016-69af-418a-9b47-597ae712626b", "rtype": "room" }, "level": "critical", "type": "ResourceDependee" }
+            ]
+        });
+
+        let device_id =
+            HueDiscovery::<crate::test_support::SpyHueTransport>::extract_device_from_behavior(
+                &bi,
+            );
+        assert_eq!(
+            device_id.as_deref(),
+            Some("4c7a67d9-2c1f-4c8e-b456-018c48f5521b")
+        );
+    }
+
+    #[test]
+    fn extract_device_falls_back_to_dependees() {
+        // Behavior instance without configuration.device but with dependees
+        let bi: serde_json::Value = serde_json::json!({
+            "id": "test-behavior",
+            "configuration": {},
+            "dependees": [
+                { "target": { "rid": "room-1", "rtype": "room" }, "level": "critical", "type": "ResourceDependee" },
+                { "target": { "rid": "device-abc", "rtype": "device" }, "level": "critical", "type": "ResourceDependee" }
+            ]
+        });
+
+        let device_id =
+            HueDiscovery::<crate::test_support::SpyHueTransport>::extract_device_from_behavior(
+                &bi,
+            );
+        assert_eq!(device_id.as_deref(), Some("device-abc"));
+    }
+
+    #[test]
+    fn extract_device_returns_none_when_no_device_ref() {
+        let bi: serde_json::Value = serde_json::json!({
+            "id": "test-behavior",
+            "configuration": {},
+            "dependees": [
+                { "target": { "rid": "room-1", "rtype": "room" }, "level": "critical", "type": "ResourceDependee" }
+            ]
+        });
+
+        let device_id =
+            HueDiscovery::<crate::test_support::SpyHueTransport>::extract_device_from_behavior(
+                &bi,
+            );
+        assert!(device_id.is_none());
+    }
 }
