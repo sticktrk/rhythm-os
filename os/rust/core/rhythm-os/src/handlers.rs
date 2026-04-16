@@ -1744,12 +1744,13 @@ mod tests {
                 .min_brightness,
             7
         );
+        let factory_profiles = crate::factory_default_config::factory_default_light_profile_config_map();
         assert_eq!(
             state
                 .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
                 .unwrap()
                 .min_brightness,
-            rhythm_core::default_rhythm_profile().min_brightness
+            factory_profiles[rhythm_core::RHYTHM_PROFILE_ID].min_brightness
         );
     }
 

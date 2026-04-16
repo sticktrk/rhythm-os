@@ -701,9 +701,7 @@ mod tests {
         });
 
         let device_id =
-            HueDiscovery::<crate::test_support::SpyHueTransport>::extract_device_from_behavior(
-                &bi,
-            );
+            HueDiscovery::<crate::test_support::SpyHueTransport>::extract_device_from_behavior(&bi);
         assert_eq!(
             device_id.as_deref(),
             Some("4c7a67d9-2c1f-4c8e-b456-018c48f5521b")
@@ -723,9 +721,7 @@ mod tests {
         });
 
         let device_id =
-            HueDiscovery::<crate::test_support::SpyHueTransport>::extract_device_from_behavior(
-                &bi,
-            );
+            HueDiscovery::<crate::test_support::SpyHueTransport>::extract_device_from_behavior(&bi);
         assert_eq!(device_id.as_deref(), Some("device-abc"));
     }
 
@@ -740,9 +736,7 @@ mod tests {
         });
 
         let device_id =
-            HueDiscovery::<crate::test_support::SpyHueTransport>::extract_device_from_behavior(
-                &bi,
-            );
+            HueDiscovery::<crate::test_support::SpyHueTransport>::extract_device_from_behavior(&bi);
         assert!(device_id.is_none());
     }
 }
