@@ -108,6 +108,8 @@ case "$BUILD_MODE" in
         ;;
 esac
 
+BUILD_VERSION="$("$SCRIPT_DIR/resolve-version.sh" server)"
+
 server_args_include_log_level() {
     local arg
     for arg in "${SERVER_ARGS[@]}"; do
@@ -250,7 +252,8 @@ build_for_target() {
         cargo_bin_flags+=(--bin "$bin")
     done
 
-    "$builder" build $CARGO_FLAGS -p "$package" --target "$rust_target" "${cargo_bin_flags[@]}"
+    RHYTHM_BUILD_VERSION="$BUILD_VERSION" \
+        "$builder" build $CARGO_FLAGS -p "$package" --target "$rust_target" "${cargo_bin_flags[@]}"
 
     # Copy to dist
     local output_dir="$PROJECT_ROOT/dist/bin/$target"
@@ -281,7 +284,8 @@ build_native() {
         cargo_bin_flags+=(--bin "$bin")
     done
 
-    cargo build $CARGO_FLAGS -p rhythm-server "${cargo_bin_flags[@]}"
+    RHYTHM_BUILD_VERSION="$BUILD_VERSION" \
+        cargo build $CARGO_FLAGS -p rhythm-server "${cargo_bin_flags[@]}"
 
     if [ "$RUN" = true ]; then
         echo "Built: target/$PROFILE/rhythm-server"

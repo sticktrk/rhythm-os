@@ -158,18 +158,7 @@ fi
 
 cd "$ESP32_DIR"
 
-# Auto-bump patch version in Cargo.toml
-CARGO_TOML="$ESP32_DIR/Cargo.toml"
-CURRENT_VERSION=$(grep -E '^version = "' "$CARGO_TOML" | head -1 | sed 's/version = "\(.*\)"/\1/')
-if [ -n "$CURRENT_VERSION" ]; then
-    MAJOR=$(echo "$CURRENT_VERSION" | cut -d. -f1)
-    MINOR=$(echo "$CURRENT_VERSION" | cut -d. -f2)
-    PATCH=$(echo "$CURRENT_VERSION" | cut -d. -f3)
-    NEW_PATCH=$((PATCH + 1))
-    NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
-    sed -i '' "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" "$CARGO_TOML"
-    echo "Version: $CURRENT_VERSION → $NEW_VERSION"
-fi
+BUILD_VERSION=$("$SCRIPT_DIR/resolve-version.sh" esp32)
 
 # Load .env for WiFi credentials when flashing
 if [ "$FLASH" = true ]; then
@@ -225,7 +214,7 @@ if [ "$FLASH" = true ]; then
     fi
 
     # Build first
-    cargo build $BUILD_MODE $FEATURES
+    RHYTHM_BUILD_VERSION="$BUILD_VERSION" cargo build $BUILD_MODE $FEATURES
 
     # Find the esp-idf-sys build output directory
     ESP_IDF_BUILD_DIR=$(find "$BUILD_DIR/build/esp-idf-sys-"* -maxdepth 0 -type d 2>/dev/null | head -1)
@@ -269,10 +258,10 @@ else
         echo "Zigbee: enabled"
     fi
     if [ "$RELEASE" = true ]; then
-        cargo build --release $FEATURES
+        RHYTHM_BUILD_VERSION="$BUILD_VERSION" cargo build --release $FEATURES
         BINARY="target/riscv32imac-esp-espidf/release/rhythm-esp32"
     else
-        cargo build $FEATURES
+        RHYTHM_BUILD_VERSION="$BUILD_VERSION" cargo build $FEATURES
         BINARY="target/riscv32imac-esp-espidf/debug/rhythm-esp32"
     fi
 

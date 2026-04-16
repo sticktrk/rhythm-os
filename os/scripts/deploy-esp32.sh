@@ -57,10 +57,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Read version from Cargo.toml
-VERSION=$(grep '^version' "$ESP32_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+# Resolve current firmware version
+VERSION=$("$SCRIPT_DIR/resolve-version.sh" esp32)
 if [ -z "$VERSION" ]; then
-    echo "Error: Could not read version from Cargo.toml"
+    echo "Error: Could not resolve ESP32 version"
     exit 1
 fi
 echo "Firmware version: $VERSION"
@@ -70,8 +70,8 @@ echo ""
 echo "=== Building release firmware ==="
 "$SCRIPT_DIR/build-esp32.sh" --release
 
-# Re-read version after build (build-esp32.sh may have bumped it)
-VERSION=$(grep '^version' "$ESP32_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+# Re-read version after build so packaging matches the built artifact
+VERSION=$("$SCRIPT_DIR/resolve-version.sh" esp32)
 
 # Find the built ELF
 RELEASE_DIR="$ESP32_DIR/target/riscv32imac-esp-espidf/release"

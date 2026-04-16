@@ -11,7 +11,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SERVER_CRATE_DIR="$PROJECT_ROOT/rust/bins/rhythm-server"
 
 ARTIFACT_ROOT="$PROJECT_ROOT/dist/bin"
 OUTPUT_DIR="$PROJECT_ROOT/out/server-updates"
@@ -41,7 +40,7 @@ Package rhythm-server binaries into a static OTA feed.
 Options:
   --artifact-root PATH  Root containing dist/bin/<target>/ (default: $ARTIFACT_ROOT)
   --output-dir PATH     Output directory for packaged feed (default: $OUTPUT_DIR)
-  --version VERSION     Version to package (default: read from rhythm-server Cargo.toml)
+  --version VERSION     Version to package (default: resolve workspace/server version)
   --dry-run             Print planned outputs without writing files
   -h, --help            Show this help
 EOF
@@ -77,7 +76,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ -z "$VERSION" ]; then
-    VERSION=$(grep '^version' "$SERVER_CRATE_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+    VERSION="$("$SCRIPT_DIR/resolve-version.sh" server)"
 fi
 
 if [ -z "$VERSION" ]; then

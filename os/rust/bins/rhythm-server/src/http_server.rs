@@ -15,7 +15,7 @@ use tower_http::trace::TraceLayer;
 
 /// Create the Axum router with all API routes.
 pub fn create_router(state: SharedState) -> Router {
-    let ota_status = crate::self_update::OtaStatusHandle::new(env!("CARGO_PKG_VERSION"));
+    let ota_status = crate::self_update::OtaStatusHandle::new(crate::BUILD_VERSION);
 
     rhythm_os::axum_router::api_routes()
         // Server-specific endpoints
@@ -90,7 +90,7 @@ fn err_409(message: impl Into<String>) -> Response {
 // ---------------------------------------------------------------------------
 
 async fn check_update(ota_status: crate::self_update::OtaStatusHandle) -> Response {
-    let version = env!("CARGO_PKG_VERSION");
+    let version = crate::BUILD_VERSION;
     ota_status.mark_checking();
     match tokio::task::spawn_blocking(move || crate::self_update::check_blocking(version)).await {
         Ok(Ok(info)) => {
@@ -220,7 +220,7 @@ async fn do_update(ota_status: crate::self_update::OtaStatusHandle) -> Response 
         return err_409("Update already in progress");
     }
 
-    let version = env!("CARGO_PKG_VERSION");
+    let version = crate::BUILD_VERSION;
     ota_status.mark_checking();
 
     // Check for update

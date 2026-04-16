@@ -25,7 +25,10 @@ impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
     }
 }
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+const VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 fn main() -> Result<()> {
     // Read config from environment

@@ -37,7 +37,10 @@ use rhythm_os::provisioning::{ProvisioningConnectResult, WifiCredentials};
 use rhythm_os::state::{AppState, SharedState, WorkItem};
 
 /// Firmware version from Cargo.toml, used in mDNS, BLE, HTTP API, and OTA.
-pub const FIRMWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const FIRMWARE_VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 /// NVS partition clone held for the panic hook. Set early in main(), read by the hook.
 /// If NVS isn't initialized yet when a panic fires, `get()` returns `None` and

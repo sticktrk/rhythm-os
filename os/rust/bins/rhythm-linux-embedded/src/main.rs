@@ -17,6 +17,11 @@ use rhythm_os::state::{AppState, SharedState, WorkItem};
 use rhythm_os::storage::FileStorage;
 use rhythm_server::hub;
 
+const VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 /// Format tracing timestamps in local time instead of UTC.
 struct LocalTimer;
 impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
@@ -31,7 +36,7 @@ impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
 
 /// Rhythm OS Linux embedded appliance.
 #[derive(Parser, Debug)]
-#[command(name = "rhythm-linux-embedded", version, about)]
+#[command(name = "rhythm-linux-embedded", version = VERSION, about)]
 struct Args {
     /// HTTP server port.
     #[arg(short, long, default_value_t = 54448)]
@@ -45,8 +50,6 @@ struct Args {
     #[arg(long, default_value = "info")]
     log_level: String,
 }
-
-const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() -> Result<()> {
     let args = Args::parse();

@@ -1,6 +1,6 @@
 [package]
 name = "rhythm-addon"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 license.workspace = true
 description = "Home Assistant add-on binary for Rhythm OS"
@@ -27,4 +27,3 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 reqwest = { workspace = true }
 log = "0.4"
-

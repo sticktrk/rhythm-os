@@ -12,10 +12,10 @@ mod service_ctl;
 use clap::{Parser, Subcommand};
 use rhythm_server::self_update;
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+const VERSION: &str = rhythm_server::BUILD_VERSION;
 
 #[derive(Parser)]
-#[command(name = "rhythm-cli", version, about = "Manage the Rhythm OS server")]
+#[command(name = "rhythm-cli", version = VERSION, about = "Manage the Rhythm OS server")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

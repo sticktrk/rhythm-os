@@ -185,7 +185,7 @@ fn macos_status() -> Result<(), String> {
         println!("Install: ./install/install.sh");
     }
 
-    println!("Version: {}", env!("CARGO_PKG_VERSION"));
+    println!("Version: {}", crate::VERSION);
     Ok(())
 }
 
@@ -289,7 +289,7 @@ fn linux_status() -> Result<(), String> {
         SYSTEMD_UNIT,
         if user { " (user)" } else { "" }
     );
-    println!("Version: {}", env!("CARGO_PKG_VERSION"));
+    println!("Version: {}", crate::VERSION);
     Ok(())
 }
 

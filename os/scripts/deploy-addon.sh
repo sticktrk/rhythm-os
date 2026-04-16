@@ -148,7 +148,7 @@ fi
 # Bump version: increments the build number in 4.2.024-alpha → 4.2.025-alpha
 bump_version() {
     local current
-    current=$(grep '^version:' "$ADDON_DIR/config.yaml" | awk '{print $2}' | tr -d '"')
+    current=$("$SCRIPT_DIR/resolve-version.sh" addon)
     if [ -z "$current" ]; then
         echo "Error: Could not read version from config.yaml"
         exit 1
@@ -179,7 +179,7 @@ fi
 
 # Get version from config.yaml if not specified
 if [ -z "$VERSION" ]; then
-    VERSION=$(grep '^version:' "$ADDON_DIR/config.yaml" | awk '{print $2}' | tr -d '"')
+    VERSION=$("$SCRIPT_DIR/resolve-version.sh" addon)
     if [ -z "$VERSION" ]; then
         echo "Error: Could not read version from config.yaml"
         exit 1

@@ -51,6 +51,8 @@ else
     CARGO_FLAGS=""
 fi
 
+BUILD_VERSION="$("$SCRIPT_DIR/resolve-version.sh" addon)"
+
 # Map target names to Rust target triples (bash 3.2 compatible)
 get_rust_target() {
     case "$1" in
@@ -74,7 +76,8 @@ build_for_target() {
         rustup target add "$rust_target"
     fi
 
-    cargo build $CARGO_FLAGS -p rhythm-addon --target "$rust_target"
+    RHYTHM_BUILD_VERSION="$BUILD_VERSION" \
+        cargo build $CARGO_FLAGS -p rhythm-addon --target "$rust_target"
 
     # Copy to dist
     local output_dir="$PROJECT_ROOT/dist/bin/$arch"
@@ -85,7 +88,8 @@ build_for_target() {
 
 build_native() {
     echo "Building for native target..."
-    cargo build $CARGO_FLAGS -p rhythm-addon
+    RHYTHM_BUILD_VERSION="$BUILD_VERSION" \
+        cargo build $CARGO_FLAGS -p rhythm-addon
 
     # Determine native arch (arm64 is macOS Apple Silicon)
     local native_arch
