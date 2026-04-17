@@ -1,7 +1,6 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-const CHIP_LIB_SUBDIR: &str = "obj/src/controller/python/matter";
 const BRIDGE_HEADER: &str = "native/chip_bridge.h";
 const BRIDGE_SOURCE: &str = "native/chip_bridge.cc";
 
@@ -21,18 +20,34 @@ fn main() {
         return;
     }
 
-    match resolve_chip_lib_dir() {
-        Ok(chip_library) => {
-            cc::Build::new()
+    match resolve_chip_artifacts() {
+        Ok(artifacts) => {
+            let mut build = cc::Build::new();
+            build
                 .cpp(true)
                 .file(BRIDGE_SOURCE)
                 .flag_if_supported("-std=c++17")
-                .compile("rhythm_chip_bridge");
+                .warnings(false)
+                .define("CHIP_HAVE_CONFIG_H", "1")
+                .define("OPENSSL_NO_ASM", "1");
 
-            println!(
-                "cargo:rustc-link-arg={}",
-                chip_library.library_path.display()
-            );
+            for include_dir in artifacts.include_dirs() {
+                build.include(include_dir);
+            }
+            match artifacts.link_mode {
+                LinkMode::NativeLibChip => {
+                    build.define("RHYTHM_CHIP_BRIDGE_NATIVE_LIBCHIP", "1");
+                }
+                LinkMode::PythonExtension => {
+                    build.define("RHYTHM_CHIP_BRIDGE_PYTHON_EXTENSION", "1");
+                    build.include(artifacts.chip_root.join("src/controller/python"));
+                }
+            }
+
+            build.compile("rhythm_chip_bridge");
+
+            println!("cargo:rustc-link-arg={}", artifacts.link_path.display());
+            emit_platform_link_args(&artifacts.target);
             println!("cargo:rustc-cfg=rhythm_chipd_chip_ffi");
         }
         Err(error) => {
@@ -43,17 +58,35 @@ fn main() {
     }
 }
 
-fn resolve_chip_lib_dir() -> Result<ChipLibrary, String> {
+fn emit_platform_link_args(target: &str) {
+    if target.contains("apple-darwin") {
+        for framework in [
+            "CoreData",
+            "CoreFoundation",
+            "CoreBluetooth",
+            "Foundation",
+            "Network",
+            "SystemConfiguration",
+            "CoreWLAN",
+            "IOKit",
+        ] {
+            println!("cargo:rustc-link-lib=framework={framework}");
+        }
+    }
+}
+
+fn resolve_chip_artifacts() -> Result<ChipArtifacts, String> {
+    let host = env::var("HOST").unwrap_or_default();
+    let target = env::var("TARGET").unwrap_or_default();
+
     if let Some(lib_dir) = env::var_os("RHYTHM_CHIP_LIB_DIR").map(PathBuf::from) {
-        return require_chip_library(lib_dir);
+        return resolve_from_lib_dir(lib_dir, target);
     }
 
     if let Some(out_dir) = env::var_os("RHYTHM_CHIP_OUT_DIR").map(PathBuf::from) {
-        return require_chip_library(out_dir.join(CHIP_LIB_SUBDIR));
+        return resolve_from_out_dir(out_dir, target);
     }
 
-    let host = env::var("HOST").unwrap_or_default();
-    let target = env::var("TARGET").unwrap_or_default();
     if host != target {
         return Err(
             "cross-compiles need RHYTHM_CHIP_OUT_DIR or RHYTHM_CHIP_LIB_DIR pointing at target-specific connectedhomeip artifacts"
@@ -62,13 +95,12 @@ fn resolve_chip_lib_dir() -> Result<ChipLibrary, String> {
     }
 
     if let Some(root) = env::var_os("RHYTHM_CHIP_ROOT").map(PathBuf::from) {
-        return require_chip_library(root.join("out/host").join(CHIP_LIB_SUBDIR));
+        return resolve_from_root(root, target);
     }
 
     for root in inferred_chip_roots() {
-        let candidate = root.join("out/host").join(CHIP_LIB_SUBDIR);
-        if let Ok(lib_dir) = require_chip_library(candidate) {
-            return Ok(lib_dir);
+        if let Ok(artifacts) = resolve_from_root(root, target.clone()) {
+            return Ok(artifacts);
         }
     }
 
@@ -78,25 +110,96 @@ fn resolve_chip_lib_dir() -> Result<ChipLibrary, String> {
     )
 }
 
-fn require_chip_library(lib_dir: PathBuf) -> Result<ChipLibrary, String> {
-    let candidates = [
-        "_ChipDeviceCtrl.so",
-        "_ChipDeviceCtrl.dylib",
-        "_ChipDeviceCtrl.dll",
-        "lib_ChipDeviceCtrl.so",
-        "lib_ChipDeviceCtrl.dylib",
-    ];
-    for name in candidates {
-        let library_path = lib_dir.join(name);
-        if library_path.is_file() {
-            return Ok(ChipLibrary { library_path });
-        }
+fn resolve_from_root(chip_root: PathBuf, target: String) -> Result<ChipArtifacts, String> {
+    resolve_from_out_dir_with_root(chip_root.join("out/host"), chip_root, target)
+}
+
+fn resolve_from_out_dir(out_dir: PathBuf, target: String) -> Result<ChipArtifacts, String> {
+    let chip_root = out_dir
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| format!("unable to determine CHIP root from {}", out_dir.display()))?
+        .to_path_buf();
+
+    resolve_from_out_dir_with_root(out_dir, chip_root, target)
+}
+
+fn resolve_from_out_dir_with_root(
+    out_dir: PathBuf,
+    chip_root: PathBuf,
+    target: String,
+) -> Result<ChipArtifacts, String> {
+    let chip_root = chip_root.canonicalize().unwrap_or(chip_root);
+    let out_dir = out_dir.canonicalize().unwrap_or(out_dir);
+
+    let libchip = out_dir.join("lib/libCHIP.a");
+    if libchip.is_file() {
+        return Ok(ChipArtifacts {
+            chip_root,
+            target,
+            link_path: libchip,
+            link_mode: LinkMode::NativeLibChip,
+        });
+    }
+
+    let python_extension = out_dir.join("obj/src/controller/python/matter/_ChipDeviceCtrl.so");
+    if python_extension.is_file() {
+        return Ok(ChipArtifacts {
+            chip_root,
+            target,
+            link_path: python_extension,
+            link_mode: LinkMode::PythonExtension,
+        });
     }
 
     Err(format!(
-        "no _ChipDeviceCtrl shared library found under {}",
+        "no native libCHIP.a or _ChipDeviceCtrl.so found under {}",
+        out_dir.display()
+    ))
+}
+
+fn resolve_from_lib_dir(lib_dir: PathBuf, target: String) -> Result<ChipArtifacts, String> {
+    let chip_root = infer_root_from_lib_dir(&lib_dir)
+        .ok_or_else(|| format!("unable to infer CHIP root from {}", lib_dir.display()))?;
+
+    let libchip = lib_dir.join("libCHIP.a");
+    if libchip.is_file() {
+        return Ok(ChipArtifacts {
+            chip_root,
+            target,
+            link_path: libchip,
+            link_mode: LinkMode::NativeLibChip,
+        });
+    }
+
+    let python_extension = lib_dir.join("_ChipDeviceCtrl.so");
+    if python_extension.is_file() {
+        return Ok(ChipArtifacts {
+            chip_root,
+            target,
+            link_path: python_extension,
+            link_mode: LinkMode::PythonExtension,
+        });
+    }
+
+    Err(format!(
+        "no libCHIP.a or _ChipDeviceCtrl.so found under {}",
         lib_dir.display()
     ))
+}
+
+fn infer_root_from_lib_dir(lib_dir: &Path) -> Option<PathBuf> {
+    let parent = lib_dir.parent()?;
+    if parent.file_name()? == "host" && lib_dir.file_name()? == "lib" {
+        return parent.parent().map(Path::to_path_buf);
+    }
+
+    for ancestor in lib_dir.ancestors() {
+        if ancestor.join("src").is_dir() && ancestor.join("config/standalone").is_dir() {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
 }
 
 fn inferred_chip_roots() -> Vec<PathBuf> {
@@ -118,6 +221,49 @@ fn inferred_chip_roots() -> Vec<PathBuf> {
     roots
 }
 
-struct ChipLibrary {
-    library_path: PathBuf,
+struct ChipArtifacts {
+    chip_root: PathBuf,
+    target: String,
+    link_path: PathBuf,
+    link_mode: LinkMode,
+}
+
+impl ChipArtifacts {
+    fn include_dirs(&self) -> Vec<PathBuf> {
+        let out_dir = self
+            .link_path
+            .ancestors()
+            .find(|path| path.file_name().is_some_and(|name| name == "host"))
+            .or_else(|| {
+                self.link_path
+                    .ancestors()
+                    .find(|path| path.join("gen/include").is_dir())
+            })
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.chip_root.join("out/host"));
+
+        let mut dirs = vec![
+            self.chip_root.join("src/include"),
+            self.chip_root.join("src"),
+            out_dir.join("gen/include"),
+            self.chip_root.join("config/standalone"),
+            self.chip_root.join("zzz_generated/app-common"),
+            self.chip_root.join("third_party/nlassert/repo/include"),
+            self.chip_root.join("third_party/nlio/repo/include"),
+            self.chip_root.join("third_party/nlfaultinjection/include"),
+            self.chip_root
+                .join("third_party/boringssl/repo/src/include"),
+        ];
+
+        if self.target.contains("apple-darwin") {
+            dirs.push(self.chip_root.join("src/tracing/darwin/include"));
+        }
+
+        dirs
+    }
+}
+
+enum LinkMode {
+    NativeLibChip,
+    PythonExtension,
 }
