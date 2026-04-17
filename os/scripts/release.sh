@@ -19,13 +19,28 @@ BUMP_KIND="patch"
 PUSH=true
 DRY_RUN=false
 MESSAGE=""
+WORKSPACE_VERSION_FILES=("Cargo.toml" "Cargo.lock")
+WORKSPACE_PACKAGES=(
+    rhythm-addon
+    rhythm-core
+    rhythm-devices
+    rhythm-ha
+    rhythm-hue
+    rhythm-linux-embedded
+    rhythm-matter
+    rhythm-os
+    rhythm-profile
+    rhythm-server
+)
 
 usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
 
 Create and push a release tag. The GitHub release workflow then builds and
-uploads the release assets for that tag.
+uploads the release assets for that tag. The script updates the workspace crate
+version first so Cargo metadata, runtime version reporting, and the git tag all
+match.
 
 Options:
   --version X.Y.Z   Use an explicit version instead of auto-bumping
@@ -97,6 +112,14 @@ require_command() {
         echo "Error: Required command not found: $1" >&2
         exit 1
     fi
+}
+
+read_workspace_version() {
+    awk -F'"' '
+        /^\[workspace\.package\]/ { in_workspace = 1; next }
+        /^\[/ && in_workspace { exit }
+        in_workspace && $0 ~ /^version[[:space:]]*=/ { print $2; exit }
+    ' "$PROJECT_ROOT/Cargo.toml"
 }
 
 normalize_version() {
@@ -190,7 +213,49 @@ github_repo_url() {
     echo ""
 }
 
+update_workspace_version_files() {
+    local new_version="$1"
+    local current_version="$2"
+    local pkg
+
+    if [ "$current_version" = "$new_version" ]; then
+        return 0
+    fi
+
+    NEW_VERSION="$new_version" perl -0pi -e '
+        s/(\[workspace\.package\]\n(?:[^\[]*\n)*?version = ")[^"]+(")/$1.$ENV{NEW_VERSION}.$2/se
+    ' "$PROJECT_ROOT/Cargo.toml"
+
+    for pkg in "${WORKSPACE_PACKAGES[@]}"; do
+        PKG_NAME="$pkg" NEW_VERSION="$new_version" perl -0pi -e '
+            s/(\[\[package\]\]\nname = "\Q$ENV{PKG_NAME}\E"\nversion = ")[^"]+(")/$1.$ENV{NEW_VERSION}.$2/se
+        ' "$PROJECT_ROOT/Cargo.lock"
+    done
+}
+
+commit_release_version_update() {
+    local tag="$1"
+    local commit_message="Release $tag"
+    local file
+    local changed=false
+
+    for file in "${WORKSPACE_VERSION_FILES[@]}"; do
+        if ! git -C "$PROJECT_ROOT" diff --quiet -- "$file"; then
+            changed=true
+            break
+        fi
+    done
+
+    if [ "$changed" = false ]; then
+        return 0
+    fi
+
+    git -C "$PROJECT_ROOT" add "${WORKSPACE_VERSION_FILES[@]}"
+    git -C "$PROJECT_ROOT" commit -m "$commit_message"
+}
+
 require_command git
+require_command perl
 
 if ! git -C "$PROJECT_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     echo "Error: $PROJECT_ROOT is not a git repository" >&2
@@ -242,17 +307,12 @@ if git -C "$PROJECT_ROOT" rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1
     exit 1
 fi
 
-EXACT_TAG="$(git -C "$PROJECT_ROOT" describe --tags --exact-match --match 'v[0-9]*' HEAD 2>/dev/null || true)"
-if [ -n "$EXACT_TAG" ]; then
-    echo "Error: HEAD is already tagged with $EXACT_TAG" >&2
-    exit 1
-fi
-
 if [ -z "$MESSAGE" ]; then
     MESSAGE="Release $TAG"
 fi
 
 REPO_URL="$(github_repo_url)"
+CURRENT_WORKSPACE_VERSION="$(read_workspace_version)"
 
 echo "Release plan"
 echo "  Branch:  $CURRENT_BRANCH"
@@ -262,15 +322,32 @@ if [ -n "$LATEST_TAG" ]; then
 fi
 echo "  New tag: $TAG"
 echo "  Message: $MESSAGE"
+if [ "$CURRENT_WORKSPACE_VERSION" != "$VERSION" ]; then
+    echo "  Workspace version: $CURRENT_WORKSPACE_VERSION -> $VERSION"
+fi
 echo ""
 
 if [ "$DRY_RUN" = true ]; then
+    if [ "$CURRENT_WORKSPACE_VERSION" != "$VERSION" ]; then
+        echo "[dry-run] Would update workspace version files: Cargo.toml, Cargo.lock"
+        echo "[dry-run] Would create release commit: git commit -m \"Release $TAG\""
+    fi
     echo "[dry-run] Would create annotated tag: git tag -a $TAG -m \"$MESSAGE\""
     if [ "$PUSH" = true ]; then
         echo "[dry-run] Would push branch: git push $REMOTE HEAD:refs/heads/$CURRENT_BRANCH"
         echo "[dry-run] Would push tag:    git push $REMOTE refs/tags/$TAG"
     fi
     exit 0
+fi
+
+update_workspace_version_files "$VERSION" "$CURRENT_WORKSPACE_VERSION"
+
+commit_release_version_update "$TAG"
+
+EXACT_TAG="$(git -C "$PROJECT_ROOT" describe --tags --exact-match --match 'v[0-9]*' HEAD 2>/dev/null || true)"
+if [ -n "$EXACT_TAG" ]; then
+    echo "Error: HEAD is already tagged with $EXACT_TAG" >&2
+    exit 1
 fi
 
 git -C "$PROJECT_ROOT" tag -a "$TAG" -m "$MESSAGE"

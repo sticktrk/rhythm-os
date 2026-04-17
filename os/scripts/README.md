@@ -151,8 +151,10 @@ publish the release assets.
 
 **Behavior:**
 - Requires a clean tracked worktree before tagging.
+- Updates `Cargo.toml` and workspace package versions in `Cargo.lock` to the release version first.
+- Creates the release commit automatically when those version files change.
 - Pushes the current branch and the new tag to `origin` by default.
-- The GitHub Actions release workflow turns that tag into the GitHub release with binaries and the rpiz image.
+- The GitHub Actions release workflow turns that tag into the GitHub release with the platform binary tarballs.
 
 ### Versioning
 
@@ -277,9 +279,9 @@ git commit -m "Release v0.4.0"
 ./scripts/release.sh
 ```
 
-With `v0.4.0` as the latest tag, `./scripts/release.sh` defaults to `v0.4.1`.
+`./scripts/release.sh` defaults to the next patch tag after the latest `vX.Y.Z`.
 Once the GitHub `Release` workflow finishes, the GitHub release page contains
-the server tarballs and the compressed rpiz SD-card image.
+the platform binary tarballs.
 
 ---
 

@@ -5,7 +5,7 @@
 
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
@@ -18,6 +18,7 @@ const GITHUB_REPO: &str = "sticktrk/rhythm-os";
 const GITHUB_API: &str = "https://api.github.com";
 const CHECKSUM_ASSET_NAME: &str = "SHA256SUMS.txt";
 const DEFAULT_UPDATE_BASE_URL: &str = "https://dl.rhythm.lighting/server";
+const EMBEDDED_INSTALL_PATH: &str = "/usr/bin/rhythm-server";
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -468,8 +469,7 @@ pub fn apply_blocking(
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
-    let current_exe =
-        std::env::current_exe().map_err(|e| format!("Cannot determine exe path: {}", e))?;
+    let current_exe = install_target_executable()?;
     let download_path = current_exe.with_extension("download");
     let new_path = current_exe.with_extension("new");
     let old_path = current_exe.with_extension("old");
@@ -560,6 +560,22 @@ fn download_release(
     file.flush()
         .map_err(|e| format!("Failed to flush download: {}", e))?;
     Ok(())
+}
+
+fn install_target_executable() -> Result<PathBuf, String> {
+    let platform_type = std::env::var("RHYTHM_PLATFORM_TYPE").ok();
+    let platform_context = std::env::var("RHYTHM_PLATFORM_CONTEXT").ok();
+
+    if platform_type.as_deref() == Some("embedded")
+        && matches!(
+            platform_context.as_deref(),
+            Some("rpiz") | Some("linux-embedded")
+        )
+    {
+        return Ok(PathBuf::from(EMBEDDED_INSTALL_PATH));
+    }
+
+    std::env::current_exe().map_err(|e| format!("Cannot determine exe path: {}", e))
 }
 
 fn fetch_expected_sha256(
@@ -743,5 +759,17 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  rhythm-server-
         assert_eq!(snapshot.state, OtaUpdateState::Idle);
         assert_eq!(snapshot.current_version, "1.0.0");
         assert_eq!(snapshot.latest_version, None);
+    }
+
+    #[test]
+    fn install_target_executable_prefers_embedded_install_path() {
+        std::env::set_var("RHYTHM_PLATFORM_TYPE", "embedded");
+        std::env::set_var("RHYTHM_PLATFORM_CONTEXT", "rpiz");
+
+        let path = install_target_executable().unwrap();
+        assert_eq!(path, PathBuf::from(EMBEDDED_INSTALL_PATH));
+
+        std::env::remove_var("RHYTHM_PLATFORM_TYPE");
+        std::env::remove_var("RHYTHM_PLATFORM_CONTEXT");
     }
 }
