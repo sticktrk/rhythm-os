@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -41,7 +40,6 @@ class DefaultTransitionEditorScreen extends StatefulWidget {
 
 class _DefaultTransitionEditorScreenState
     extends State<DefaultTransitionEditorScreen> with TickerProviderStateMixin {
-  static const Duration _updateDebounceDuration = Duration(milliseconds: 250);
   static const double _eventSnapThresholdHours = 0.25;
   static const double _minimumHandleGapHours = 0.25;
   static const double _maxEditableHour = 23.99;
@@ -50,13 +48,12 @@ class _DefaultTransitionEditorScreenState
   static const double _durationStepSeconds = 10.0;
 
   late Map<RhythmMode, RhythmModeTransitionConfig> _transitionConfigs;
+  late Map<RhythmMode, RhythmModeTransitionConfig> _savedTransitionConfigs;
   late RhythmMode _selectedMode;
   late AnimationController _breatheController;
   late Animation<double> _breatheAnimation;
   late AnimationController _flowController;
   late Animation<double> _flowAnimation;
-  final Map<RhythmMode, Timer> _updateDebounceTimers = {};
-  final Map<RhythmMode, RhythmModeTransitionConfig> _pendingUpdates = {};
   final Map<RhythmMode, double> _handleHours = {};
   final Map<RhythmMode, _ModeCurveVisual> _curveVisuals = {};
   late final ServerSyncProvider _serverSync;
@@ -65,6 +62,7 @@ class _DefaultTransitionEditorScreenState
   double? _dragPreviewHour;
   _TriggerAnchor? _proximateAnchor;
   double _anchorProximity = 0.0;
+  bool _isSaving = false;
 
   SunTimesDto? get _sunTimes => _solarClockData?.sunTimes;
   TwilightTimesDto? get _twilightTimes => _solarClockData?.twilightTimes;
@@ -75,6 +73,7 @@ class _DefaultTransitionEditorScreenState
     super.initState();
     _serverSync = context.read<ServerSyncProvider>();
     _transitionConfigs = _initialTransitionConfigs();
+    _savedTransitionConfigs = Map.of(_transitionConfigs);
     _selectedMode = RhythmMode.day;
     _breatheController = AnimationController(
       duration: const Duration(milliseconds: 3500),
@@ -99,12 +98,6 @@ class _DefaultTransitionEditorScreenState
 
   @override
   void dispose() {
-    for (final timer in _updateDebounceTimers.values) {
-      timer.cancel();
-    }
-    for (final pending in _pendingUpdates.values) {
-      _serverSync.dispatchUpdateTransition(pending);
-    }
     _breatheController.dispose();
     _flowController.dispose();
     super.dispose();
@@ -306,12 +299,6 @@ class _DefaultTransitionEditorScreenState
         _selectedMode = updated.toMode;
       }
     });
-    _pendingUpdates[updated.toMode] = updated;
-    _updateDebounceTimers[updated.toMode]?.cancel();
-    _updateDebounceTimers[updated.toMode] = Timer(
-      _updateDebounceDuration,
-      () => _flushPendingUpdate(updated.toMode),
-    );
   }
 
   void _updateSelectedDuration(TransitionDuration duration) {
@@ -321,11 +308,109 @@ class _DefaultTransitionEditorScreenState
     );
   }
 
-  void _flushPendingUpdate(RhythmMode mode) {
-    _updateDebounceTimers.remove(mode)?.cancel();
-    final pending = _pendingUpdates.remove(mode);
-    if (pending == null || !mounted) return;
-    _serverSync.dispatchUpdateTransition(pending);
+  bool get _hasUnsavedChanges {
+    for (final mode in [RhythmMode.day, RhythmMode.sleep]) {
+      final current = _transitionConfigs[mode];
+      final saved = _savedTransitionConfigs[mode];
+      if (current == null || saved == null) {
+        if (current != saved) return true;
+        continue;
+      }
+      if (!_transitionConfigEquals(current, saved)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool _transitionConfigEquals(
+    RhythmModeTransitionConfig a,
+    RhythmModeTransitionConfig b,
+  ) {
+    return a.id == b.id &&
+        a.fromMode == b.fromMode &&
+        a.toMode == b.toMode &&
+        a.preserveHardOff == b.preserveHardOff &&
+        a.duration.isAuto == b.duration.isAuto &&
+        a.durationMs == b.durationMs &&
+        a.trigger.kind == b.trigger.kind &&
+        a.trigger.event == b.trigger.event &&
+        a.trigger.time == b.trigger.time;
+  }
+
+  List<RhythmModeTransitionConfig> _buildTransitionsForSave(
+    Map<RhythmMode, RhythmModeTransitionConfig> drafts,
+  ) {
+    final merged = <RhythmModeTransitionConfig>[];
+    final includedModes = <RhythmMode>{};
+
+    for (final transition in _serverSync.modeTransitions) {
+      if (_isSupportedTransition(transition)) {
+        final replacement = drafts[transition.toMode];
+        if (replacement != null) {
+          merged.add(replacement);
+          includedModes.add(transition.toMode);
+          continue;
+        }
+      }
+      merged.add(transition);
+    }
+
+    for (final mode in [RhythmMode.day, RhythmMode.sleep]) {
+      if (includedModes.contains(mode)) continue;
+      final transition = drafts[mode];
+      if (transition != null) {
+        merged.add(transition);
+      }
+    }
+
+    return merged;
+  }
+
+  Future<void> _saveChanges() async {
+    if (_isSaving || !_hasUnsavedChanges) return;
+    if (!_serverSync.synced) {
+      _showSaveFeedback('Connect to the server to save changes.', error: true);
+      return;
+    }
+
+    HapticFeedback.mediumImpact();
+    setState(() => _isSaving = true);
+
+    final savedSnapshot = Map<RhythmMode, RhythmModeTransitionConfig>.of(
+      _transitionConfigs,
+    );
+    final success = await _serverSync.api.setTransitions(
+      _buildTransitionsForSave(savedSnapshot),
+    );
+    if (success) {
+      await _serverSync.fullRefresh();
+    }
+
+    if (!mounted) return;
+
+    setState(() {
+      _isSaving = false;
+      if (success) {
+        _savedTransitionConfigs = savedSnapshot;
+      }
+    });
+
+    _showSaveFeedback(
+      success ? 'Daily Rhythm saved.' : 'Could not save Daily Rhythm.',
+      error: !success,
+    );
+  }
+
+  void _showSaveFeedback(String message, {required bool error}) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor:
+            error ? const Color(0xFF7A2E2E) : CelestialColors.backgroundCard,
+      ),
+    );
   }
 
   void _focusMode(RhythmMode mode) {
@@ -407,21 +492,118 @@ class _DefaultTransitionEditorScreenState
           children: [
             _buildHeader(context),
             Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 20),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    const SizedBox(height: 8),
-                    _buildHero(),
-                    const SizedBox(height: 20),
-                    _buildDurationRow(),
-                    const SizedBox(height: 40),
-                  ],
-                ),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final compactLayout = constraints.maxHeight < 680;
+                  final topSpacing = compactLayout ? 2.0 : 6.0;
+                  final sectionSpacing = compactLayout ? 12.0 : 16.0;
+                  final bottomSpacing = compactLayout ? 8.0 : 12.0;
+
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        SizedBox(height: topSpacing),
+                        Expanded(
+                          child: _buildHero(compactLayout: compactLayout),
+                        ),
+                        SizedBox(height: sectionSpacing),
+                        _buildDurationRow(compactLayout: compactLayout),
+                        SizedBox(height: bottomSpacing),
+                      ],
+                    ),
+                  );
+                },
               ),
             ),
+            _buildSaveBar(),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSaveBar() {
+    final synced = context.select<ServerSyncProvider, bool>((p) => p.synced);
+    final accentColor = widget.profileColors[_selectedMode] ??
+        _fallbackModeColor(_selectedMode);
+    final canSave = synced && _hasUnsavedChanges && !_isSaving;
+    final label = _isSaving
+        ? 'Saving...'
+        : !synced
+            ? 'Connect to Save'
+            : _hasUnsavedChanges
+                ? 'Save Changes'
+                : 'Saved';
+    final icon = _isSaving
+        ? null
+        : !synced
+            ? Icons.cloud_off_rounded
+            : _hasUnsavedChanges
+                ? Icons.save_rounded
+                : Icons.check_rounded;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
+      child: GestureDetector(
+        onTap: canSave ? _saveChanges : null,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.symmetric(vertical: 14),
+          decoration: BoxDecoration(
+            color: canSave
+                ? accentColor.withValues(alpha: 0.12)
+                : CelestialColors.backgroundCard,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: canSave
+                  ? accentColor.withValues(alpha: 0.26)
+                  : accentColor.withValues(alpha: 0.10),
+            ),
+            boxShadow: [
+              if (canSave)
+                BoxShadow(
+                  color: accentColor.withValues(alpha: 0.18),
+                  blurRadius: 18,
+                  spreadRadius: 1,
+                ),
+            ],
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              if (_isSaving)
+                SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    valueColor: AlwaysStoppedAnimation<Color>(accentColor),
+                  ),
+                )
+              else if (icon != null)
+                Icon(
+                  icon,
+                  color: canSave
+                      ? accentColor
+                      : CelestialColors.textSecondary.withValues(alpha: 0.65),
+                  size: 18,
+                ),
+              const SizedBox(width: 8),
+              Text(
+                label,
+                style: TextStyle(
+                  color: canSave
+                      ? accentColor
+                      : CelestialColors.textSecondary.withValues(alpha: 0.75),
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.2,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -465,7 +647,7 @@ class _DefaultTransitionEditorScreenState
     );
   }
 
-  Widget _buildHero() {
+  Widget _buildHero({required bool compactLayout}) {
     final dayColor = widget.profileColors[RhythmMode.day] ??
         _fallbackModeColor(RhythmMode.day);
     final sleepColor = widget.profileColors[RhythmMode.sleep] ??
@@ -474,47 +656,78 @@ class _DefaultTransitionEditorScreenState
 
     return AnimatedBuilder(
       animation: _breatheAnimation,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 28, 20, 24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              'Daily Rhythm',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: CelestialColors.textPrimary,
-                fontSize: 20,
-                fontWeight: FontWeight.w300,
-                letterSpacing: 1.0,
-              ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final ultraCompactLayout = constraints.maxHeight < 360;
+          final titleFontSize = ultraCompactLayout ? 18.0 : 20.0;
+          final subtitleFontSize = ultraCompactLayout ? 11.0 : 12.0;
+          final subtitleSpacing = ultraCompactLayout ? 4.0 : 6.0;
+          final clockSpacing = ultraCompactLayout
+              ? 14.0
+              : compactLayout
+                  ? 16.0
+                  : 20.0;
+          final summarySpacing = ultraCompactLayout ? 10.0 : 14.0;
+          final contentPadding = EdgeInsets.fromLTRB(
+            20,
+            ultraCompactLayout
+                ? 18
+                : compactLayout
+                    ? 22
+                    : 28,
+            20,
+            ultraCompactLayout
+                ? 16
+                : compactLayout
+                    ? 18
+                    : 24,
+          );
+
+          return Padding(
+            padding: contentPadding,
+            child: Column(
+              mainAxisSize: MainAxisSize.max,
+              children: [
+                Text(
+                  'Daily Rhythm',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: CelestialColors.textPrimary,
+                    fontSize: titleFontSize,
+                    fontWeight: FontWeight.w300,
+                    letterSpacing: 1.0,
+                  ),
+                ),
+                SizedBox(height: subtitleSpacing),
+                Text(
+                  'Drag handles to set when each mode begins',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color:
+                        CelestialColors.textSecondary.withValues(alpha: 0.62),
+                    fontSize: subtitleFontSize,
+                    fontWeight: FontWeight.w500,
+                    letterSpacing: 0.4,
+                  ),
+                ),
+                SizedBox(height: clockSpacing),
+                Expanded(
+                  child: _solarClockData != null
+                      ? _buildInteractiveTransitionFlow(
+                          dayColor: dayColor,
+                          sleepColor: sleepColor,
+                        )
+                      : _buildNoSolarState(),
+                ),
+                SizedBox(height: summarySpacing),
+                _buildFocusedTransitionSummary(
+                  dayColor: dayColor,
+                  sleepColor: sleepColor,
+                ),
+              ],
             ),
-            const SizedBox(height: 6),
-            Text(
-              'Drag handles to set when each mode begins',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: CelestialColors.textSecondary.withValues(alpha: 0.62),
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-                letterSpacing: 0.4,
-              ),
-            ),
-            const SizedBox(height: 20),
-            if (_solarClockData != null)
-              _buildInteractiveTransitionFlow(
-                dayColor: dayColor,
-                sleepColor: sleepColor,
-              )
-            else
-              _buildNoSolarState(),
-            const SizedBox(height: 14),
-            _buildFocusedTransitionSummary(
-              dayColor: dayColor,
-              sleepColor: sleepColor,
-            ),
-          ],
-        ),
+          );
+        },
       ),
       builder: (context, child) {
         final breathe = _breatheAnimation.value;
@@ -573,12 +786,11 @@ class _DefaultTransitionEditorScreenState
   }) {
     final solarClockData = _solarClockData!;
 
-    return SizedBox(
-      height: 380,
-      child: AnimatedBuilder(
-        animation: Listenable.merge([_flowAnimation, _breatheAnimation]),
-        builder: (context, _) {
-          return SolarClock(
+    return AnimatedBuilder(
+      animation: Listenable.merge([_flowAnimation, _breatheAnimation]),
+      builder: (context, _) {
+        return SizedBox.expand(
+          child: SolarClock(
             data: solarClockData,
             use24: MediaQuery.alwaysUse24HourFormatOf(context),
             showUpperArc: false,
@@ -599,16 +811,14 @@ class _DefaultTransitionEditorScreenState
               dayColor: dayColor,
               sleepColor: sleepColor,
             ),
-          );
-        },
-      ),
+          ),
+        );
+      },
     );
   }
 
   Widget _buildNoSolarState() {
-    return Container(
-      height: 280,
-      alignment: Alignment.center,
+    return Center(
       child: Text(
         'Set a home location to unlock the solar rhythm editor.',
         textAlign: TextAlign.center,
@@ -724,6 +934,7 @@ class _DefaultTransitionEditorScreenState
             _ModeCurveVisual(fallbackColor: dayColor),
         sleepVisual: _curveVisuals[RhythmMode.sleep] ??
             _ModeCurveVisual(fallbackColor: sleepColor),
+        selectedMode: _dragMode ?? _selectedMode,
         use24: use24,
       ),
     );
@@ -1002,7 +1213,6 @@ class _DefaultTransitionEditorScreenState
         snappedAnchor?.hour ?? finalHour,
         snappedAnchor: snappedAnchor,
       );
-      _flushPendingUpdate(mode);
     }
   }
 
@@ -1205,7 +1415,7 @@ class _DefaultTransitionEditorScreenState
 
   bool get _durationAuto => _config.duration.isAuto;
 
-  Widget _buildDurationRow() {
+  Widget _buildDurationRow({required bool compactLayout}) {
     final accentColor = widget.profileColors[_selectedMode] ??
         _fallbackModeColor(_selectedMode);
     final modeKey = _selectedMode.name;
@@ -1217,7 +1427,8 @@ class _DefaultTransitionEditorScreenState
             _durationStepSeconds;
 
     return Container(
-      padding: const EdgeInsets.fromLTRB(20, 14, 16, 14),
+      padding: EdgeInsets.fromLTRB(
+          20, compactLayout ? 12 : 14, 16, compactLayout ? 12 : 14),
       decoration: BoxDecoration(
         color: CelestialColors.backgroundCard,
         borderRadius: BorderRadius.circular(18),
@@ -1296,7 +1507,7 @@ class _DefaultTransitionEditorScreenState
             child: _durationAuto
                 ? const SizedBox.shrink()
                 : Padding(
-                    padding: const EdgeInsets.only(top: 8),
+                    padding: EdgeInsets.only(top: compactLayout ? 6 : 8),
                     child: Column(
                       children: [
                         SliderTheme(
@@ -1857,6 +2068,7 @@ class _RhythmClockRingPainter extends CustomPainter {
   final double sleepStartHour;
   final _ModeCurveVisual dayVisual;
   final _ModeCurveVisual sleepVisual;
+  final RhythmMode selectedMode;
   final bool use24;
 
   const _RhythmClockRingPainter({
@@ -1865,6 +2077,7 @@ class _RhythmClockRingPainter extends CustomPainter {
     required this.sleepStartHour,
     required this.dayVisual,
     required this.sleepVisual,
+    required this.selectedMode,
     required this.use24,
   });
 
@@ -1882,8 +2095,18 @@ class _RhythmClockRingPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 16
       ..strokeCap = StrokeCap.round;
+    final glowPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 24
+      ..strokeCap = StrokeCap.round
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10);
+    final accentPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 18
+      ..strokeCap = StrokeCap.round;
     const hourStep = 24.0 / segments;
     final sweep = (2 * math.pi) / segments;
+    final selectedIsDay = selectedMode == RhythmMode.day;
 
     for (int i = 0; i < segments; i++) {
       final startHour = i * hourStep;
@@ -1895,15 +2118,47 @@ class _RhythmClockRingPainter extends CustomPainter {
       );
       final (color, opacity) =
           (isDayHour ? dayVisual : sleepVisual).styleAt(midHour);
-      final effectiveOpacity = isDayHour ? opacity : math.max(opacity, 0.38);
+      final baseOpacity = isDayHour ? opacity : math.max(opacity, 0.38);
+      final isSelectedSegment = isDayHour == selectedIsDay;
+      final effectiveOpacity = isSelectedSegment
+          ? math.min(0.98, baseOpacity * 1.08 + 0.12)
+          : math.max(0.18, baseOpacity * 0.62);
+      final accentColor = Color.lerp(color, Colors.white, 0.18)!;
+      final startAngle = geometry.angleForHour(startHour);
+
+      if (isSelectedSegment) {
+        glowPaint.color =
+            color.withValues(alpha: math.min(0.24, 0.06 + baseOpacity * 0.18));
+        canvas.drawArc(
+          rect,
+          startAngle,
+          sweep + 0.02,
+          false,
+          glowPaint,
+        );
+      }
+
       paint.color = color.withValues(alpha: effectiveOpacity);
       canvas.drawArc(
         rect,
-        geometry.angleForHour(startHour),
+        startAngle,
         sweep + 0.02,
         false,
         paint,
       );
+
+      if (isSelectedSegment) {
+        accentPaint.color = accentColor.withValues(
+          alpha: math.min(0.34, 0.12 + baseOpacity * 0.18),
+        );
+        canvas.drawArc(
+          rect,
+          startAngle,
+          sweep + 0.02,
+          false,
+          accentPaint,
+        );
+      }
     }
   }
 
@@ -2027,6 +2282,7 @@ class _RhythmClockRingPainter extends CustomPainter {
         sleepStartHour != oldDelegate.sleepStartHour ||
         dayVisual != oldDelegate.dayVisual ||
         sleepVisual != oldDelegate.sleepVisual ||
+        selectedMode != oldDelegate.selectedMode ||
         use24 != oldDelegate.use24;
   }
 }
