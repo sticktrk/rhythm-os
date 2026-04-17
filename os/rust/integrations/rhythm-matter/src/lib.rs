@@ -10,6 +10,10 @@
 //! the `rhythm-devices` database.
 
 pub mod capabilities;
+#[cfg(feature = "desktop")]
+pub mod chip_rpc;
+#[cfg(feature = "desktop")]
+pub mod chip_transport;
 pub mod clusters;
 pub mod commissioning;
 pub mod controller;
@@ -24,5 +28,3 @@ pub mod transport;
 
 #[cfg(feature = "desktop")]
 pub mod desktop_lifecycle;
-#[cfg(feature = "desktop")]
-pub mod desktop_transport;

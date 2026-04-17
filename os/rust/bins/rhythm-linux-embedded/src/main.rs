@@ -169,7 +169,7 @@ fn main() -> Result<()> {
             .expect("Failed to spawn periodic thread");
     }
 
-    let provisioning = ble_provision::ProvisioningManager::new(VERSION.to_string());
+    let provisioning = ble_provision::ProvisioningManager::new(VERSION.to_string(), state.clone());
     if let Err(e) = provisioning.ensure_running_if_needed("startup") {
         warn!(
             target: "sys",

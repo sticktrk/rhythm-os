@@ -93,6 +93,26 @@ pub trait Storage: Send + Sync {
     fn save_topology(&self, _data: &Value) -> Result<()> {
         Ok(())
     }
+
+    /// Load stored appliance Wi-Fi credentials used for accessory commissioning.
+    fn load_commissioning_wifi_credentials(
+        &self,
+    ) -> Result<Option<crate::provisioning::WifiCredentials>> {
+        Ok(None)
+    }
+
+    /// Persist appliance Wi-Fi credentials used for accessory commissioning.
+    fn save_commissioning_wifi_credentials(
+        &self,
+        _creds: &crate::provisioning::WifiCredentials,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Clear persisted appliance Wi-Fi credentials.
+    fn clear_commissioning_wifi_credentials(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Stored light profile configurations for persistence.
@@ -477,6 +497,51 @@ impl Storage for FileStorage {
     fn save_topology(&self, data: &serde_json::Value) -> Result<()> {
         let json = serde_json::to_string_pretty(data)?;
         self.write_atomic("topology.json", json.as_bytes())
+    }
+
+    fn load_commissioning_wifi_credentials(
+        &self,
+    ) -> Result<Option<crate::provisioning::WifiCredentials>> {
+        let path = self.file_path("commissioning_wifi.json");
+        match self.read_json::<crate::provisioning::WifiCredentials>("commissioning_wifi.json") {
+            Ok(creds) => Ok(Some(creds)),
+            Err(e) => {
+                if path.exists() {
+                    warn!(
+                        target: "sys",
+                        "Failed to load commissioning Wi-Fi config {}: {}",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    debug!(
+                        target: "sys",
+                        "No persisted commissioning Wi-Fi config at {}",
+                        path.display()
+                    );
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    fn save_commissioning_wifi_credentials(
+        &self,
+        creds: &crate::provisioning::WifiCredentials,
+    ) -> Result<()> {
+        let json = serde_json::to_string_pretty(creds)?;
+        self.write_atomic("commissioning_wifi.json", json.as_bytes())
+    }
+
+    fn clear_commissioning_wifi_credentials(&self) -> Result<()> {
+        let path = self.file_path("commissioning_wifi.json");
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => {
+                Err(anyhow::anyhow!(e)).with_context(|| format!("removing {}", path.display()))
+            }
+        }
     }
 }
 
@@ -1368,6 +1433,24 @@ mod tests {
             let (storage, path) = temp_storage();
             let loaded = storage.load_topology().unwrap();
             assert!(loaded.is_none());
+            cleanup(&path);
+        }
+
+        #[test]
+        fn commissioning_wifi_save_load_and_clear_roundtrip() {
+            let (storage, path) = temp_storage();
+            let creds = crate::provisioning::WifiCredentials {
+                ssid: "RhythmNet".to_string(),
+                password: "secret-pass".to_string(),
+            };
+
+            storage.save_commissioning_wifi_credentials(&creds).unwrap();
+            let loaded = storage.load_commissioning_wifi_credentials().unwrap();
+            assert_eq!(loaded, Some(creds.clone()));
+
+            storage.clear_commissioning_wifi_credentials().unwrap();
+            let cleared = storage.load_commissioning_wifi_credentials().unwrap();
+            assert!(cleared.is_none());
             cleanup(&path);
         }
 

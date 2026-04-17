@@ -1,7 +1,4 @@
 //! Matter hub lifecycle — connect, disconnect, runtime creation.
-//!
-//! Thin wrappers around `rhythm_os::lifecycle` helpers with Matter-specific
-//! configuration. The Matter fabric is the "hub" — `HubKey("matter", "local")`.
 
 use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
@@ -15,37 +12,37 @@ use rhythm_os::registry::HubDeviceRegistry;
 use rhythm_os::state::SharedState;
 
 use crate::hub_state::MatterHubData;
-use crate::transport::MatterTransport;
+use crate::transport::{MatterDeviceInfo, MatterTransport};
 
 /// Connect to the local Matter fabric.
-///
-/// Creates an `ActiveHub` with a `MatterHubData` containing the device
-/// registry and commissioned device list.
-pub fn connect_matter<T: MatterTransport + 'static>(
+pub fn connect_matter(
     state: &SharedState,
-    transport: Arc<T>,
+    transport: Arc<dyn MatterTransport>,
 ) -> Result<(ActiveHub, Receiver<HubEvent>)> {
     let hub_key = HubKey::new(HubType::new("matter"), "local");
+    let commissioned = transport.list_devices().unwrap_or_default();
+    let next_node_id = next_node_id_seed(&commissioned);
+    let fabric_id = configured_fabric_id(state, &hub_key);
 
-    // Discover commissioned devices
-    let commissioned = transport.commissioned_devices().unwrap_or_default();
     info!(target: "sys", "Matter: {} commissioned devices", commissioned.len());
 
-    // Load persisted registry snapshot if available
     let snapshot = {
-        let s = state
+        let state = state
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
-        s.storage
+        state
+            .storage
             .as_ref()
-            .and_then(|st| st.load_hub_registry_for(&hub_key).ok().flatten())
-            .and_then(|v| serde_json::from_value::<rhythm_os::registry::RegistrySnapshot>(v).ok())
+            .and_then(|storage| storage.load_hub_registry_for(&hub_key).ok().flatten())
+            .and_then(|value| {
+                serde_json::from_value::<rhythm_os::registry::RegistrySnapshot>(value).ok()
+            })
     };
 
     let commissioned_for_closure = commissioned.clone();
+    let transport_for_closure = transport.clone();
+    let fabric_id_for_closure = fabric_id.clone();
 
-    // Create event channel — tx is held by MatterHubData (keeps channel alive),
-    // rx goes to the event loop. Later, subscription handling can send real events.
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let _ = event_tx.send(HubEvent::Connected {
         hub_key: Some(hub_key.clone()),
@@ -55,28 +52,50 @@ pub fn connect_matter<T: MatterTransport + 'static>(
         state,
         HubType::new("matter"),
         hub_key,
-        true, // default_grouped_light_to_room_id: room_id IS the control target
+        true,
         snapshot,
-        // hub_data_builder: receives the registry Arc from connect_hub
         move |registry: Arc<Mutex<HubDeviceRegistry>>| -> Box<dyn std::any::Any + Send + Sync> {
+            #[cfg(feature = "desktop")]
+            let transport_cell = {
+                let cell = std::sync::OnceLock::new();
+                let _ = cell.set(transport_for_closure.clone());
+                cell
+            };
+
             Box::new(Arc::new(MatterHubData {
                 #[cfg(feature = "desktop")]
-                transport: std::sync::OnceLock::new(),
+                transport: transport_cell,
                 registry,
-                fabric_id: "default".to_string(),
-                commissioned: std::sync::Mutex::new(commissioned_for_closure),
+                fabric_id: fabric_id_for_closure.clone(),
+                commissioned: std::sync::Mutex::new(commissioned_for_closure.clone()),
+                next_node_id: std::sync::atomic::AtomicU64::new(next_node_id),
                 device_caps: std::sync::Mutex::new(HashMap::new()),
                 event_tx,
             }))
         },
-        // start_event_stream: return pre-created rx (tx lives in MatterHubData)
         move |_registry, _shutdown| event_rx,
     )
 }
 
+fn configured_fabric_id(state: &SharedState, hub_key: &HubKey) -> String {
+    state
+        .lock()
+        .ok()
+        .and_then(|state| state.hub_credentials.get(hub_key).cloned())
+        .and_then(|creds| crate::provider::matter_fabric_id(&creds).map(ToOwned::to_owned))
+        .unwrap_or_else(|| "default".to_string())
+}
+
+fn next_node_id_seed(commissioned: &[MatterDeviceInfo]) -> u64 {
+    commissioned
+        .iter()
+        .map(|device| device.node_id)
+        .max()
+        .unwrap_or(99)
+        .saturating_add(1)
+}
+
 /// Format a Matter node ID as a device ID string.
-///
-/// Format: `"matter-{node_id}"` (endpoint appended if non-default).
 pub fn format_device_id(node_id: u64, endpoint: u16) -> String {
     if endpoint == 1 {
         format!("matter-{}", node_id)
@@ -86,15 +105,12 @@ pub fn format_device_id(node_id: u64, endpoint: u16) -> String {
 }
 
 /// Parse a device ID string back into `(node_id, endpoint)`.
-///
-/// Accepts `"matter-{node_id}"` (default endpoint 1) or
-/// `"matter-{node_id}-{endpoint}"`.
 pub fn parse_device_id(device_id: &str) -> Option<(u64, u16)> {
     let rest = device_id.strip_prefix("matter-")?;
     match rest.split_once('-') {
-        Some((node_str, ep_str)) => {
+        Some((node_str, endpoint_str)) => {
             let node_id = node_str.parse::<u64>().ok()?;
-            let endpoint = ep_str.parse::<u16>().ok()?;
+            let endpoint = endpoint_str.parse::<u16>().ok()?;
             Some((node_id, endpoint))
         }
         None => {
@@ -132,5 +148,25 @@ mod tests {
     fn roundtrip() {
         assert_eq!(parse_device_id(&format_device_id(55, 1)), Some((55, 1)));
         assert_eq!(parse_device_id(&format_device_id(55, 3)), Some((55, 3)));
+    }
+
+    #[test]
+    fn next_node_id_seed_uses_max_commissioned_node() {
+        let commissioned = vec![
+            MatterDeviceInfo {
+                node_id: 100,
+                vendor_name: "A".to_string(),
+                product_name: "Light".to_string(),
+                reachable: true,
+            },
+            MatterDeviceInfo {
+                node_id: 105,
+                vendor_name: "B".to_string(),
+                product_name: "Lamp".to_string(),
+                reachable: true,
+            },
+        ];
+
+        assert_eq!(next_node_id_seed(&commissioned), 106);
     }
 }

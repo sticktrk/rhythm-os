@@ -1,108 +1,105 @@
-//! Matter transport abstraction.
+//! Typed Matter controller transport abstraction.
 //!
-//! Defines the `MatterTransport` trait that platform-specific crates implement
-//! to provide Matter communication. On desktop this could use `matter-rs` or
-//! shell out to `chip-tool`; on ESP32 it could use the ESP-IDF Matter SDK.
+//! The transport boundary is intentionally shaped around the light operations
+//! Rhythm actually needs, not around raw cluster/TLV plumbing. Desktop builds
+//! map this to the official Python CHIP controller APIs; embedded targets can
+//! provide their own controller implementation later.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 /// Matter network type for commissioning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MatterCommissioningNetwork {
     /// Matter-over-WiFi.
     Wifi,
 }
 
 /// Rendezvous method used during commissioning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MatterCommissioningRendezvous {
-    /// The device is already IP-reachable and advertises `_matterc._udp.local`.
+    /// Let the backend choose the best supported flow for the device.
+    Auto,
+    /// Force BLE rendezvous.
+    Ble,
+    /// Force on-network rendezvous.
     OnNetwork,
 }
 
-/// Shared commissioning request built by the orchestrator.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Appliance Wi-Fi credentials used for Matter accessory commissioning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatterCommissioningWifiCredentials {
+    pub ssid: String,
+    pub password: String,
+}
+
+/// Shared typed commissioning request built by the orchestrator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MatterCommissionRequest {
-    /// Manual pairing code used for PASE.
-    pub setup_code: String,
+    /// Raw Matter setup payload. May be a QR payload (`MT:`) or a manual code.
+    pub setup_payload: String,
     /// Matter node ID to assign on our fabric.
     pub node_id: u64,
     /// Matter network type being commissioned.
     pub network: MatterCommissioningNetwork,
     /// Rendezvous method used to reach the device.
     pub rendezvous: MatterCommissioningRendezvous,
+    /// Stored appliance Wi-Fi credentials used during commissioning.
+    pub wifi_credentials: MatterCommissioningWifiCredentials,
 }
 
-/// Platform-agnostic interface to a Matter controller/commissioner.
-///
-/// Implementors provide the actual Matter stack. On desktop this uses
-/// `matter-rs` or `chip-tool`; on ESP32 it could use ESP-IDF's Matter SDK.
+/// Platform-agnostic typed interface to a Matter light controller.
 pub trait MatterTransport: Send + Sync {
-    /// Commission a new device using its setup code (from QR or manual entry).
-    ///
-    /// Performs the full PASE → CASE commissioning flow and adds the device
-    /// to the local Matter fabric.
-    fn commission(&self, setup_code: &str) -> Result<CommissionedDevice>;
+    /// Commission a light and return the fully probed device description.
+    fn commission_light(&self, request: &MatterCommissionRequest) -> Result<CommissionedDevice>;
 
-    /// Commission a device using an orchestrator-built request.
-    ///
-    /// The default implementation preserves the old trait contract and only
-    /// supports on-network Wi-Fi commissioning.
-    fn commission_request(&self, request: &MatterCommissionRequest) -> Result<CommissionedDevice> {
-        match (request.network, request.rendezvous) {
-            (MatterCommissioningNetwork::Wifi, MatterCommissioningRendezvous::OnNetwork) => {
-                self.commission(&request.setup_code)
-            }
-        }
-    }
+    /// Remove a device from the local fabric.
+    fn decommission_device(&self, node_id: u64, force: bool) -> Result<()>;
 
-    /// Send a cluster command to a specific device endpoint.
-    ///
-    /// # Arguments
-    /// * `node_id` - Matter node ID of the target device
-    /// * `endpoint` - Endpoint on the device (typically 1 for lights)
-    /// * `cluster` - Cluster ID (e.g., 0x0006 for On/Off)
-    /// * `cmd_id` - Command ID within the cluster
-    /// * `payload` - TLV-encoded command payload
-    fn send_cluster_cmd(
+    /// List devices currently known to the controller.
+    fn list_devices(&self) -> Result<Vec<MatterDeviceInfo>>;
+
+    /// Probe a single node and return its typed light capabilities.
+    fn probe_light(&self, node_id: u64) -> Result<CommissionedDevice>;
+
+    /// Set the On/Off state of a light endpoint.
+    fn set_on_off(&self, node_id: u64, endpoint: u16, on: bool) -> Result<()>;
+
+    /// Set a light level using Matter's 0-254 level encoding.
+    fn set_brightness(
         &self,
         node_id: u64,
         endpoint: u16,
-        cluster: u16,
-        cmd_id: u8,
-        payload: &[u8],
+        level: u8,
+        transition_ms: Option<u32>,
     ) -> Result<()>;
 
-    /// Read an attribute from a device.
-    ///
-    /// # Arguments
-    /// * `node_id` - Matter node ID
-    /// * `endpoint` - Endpoint on the device
-    /// * `cluster` - Cluster ID
-    /// * `attr_id` - Attribute ID within the cluster
-    fn read_attribute(
+    /// Set a color temperature in Kelvin.
+    fn set_color_temperature(
         &self,
         node_id: u64,
         endpoint: u16,
-        cluster: u16,
-        attr_id: u16,
-    ) -> Result<Vec<u8>>;
+        kelvin: u16,
+        transition_ms: Option<u32>,
+    ) -> Result<()>;
 
-    /// Subscribe to attribute change reports from a device.
-    fn subscribe(&self, node_id: u64, specs: &[SubscribeSpec]) -> Result<()>;
+    /// Set a CIE xy color.
+    fn set_xy(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        x: f32,
+        y: f32,
+        transition_ms: Option<u32>,
+    ) -> Result<()>;
 
-    /// List all devices commissioned into the local fabric.
-    fn commissioned_devices(&self) -> Result<Vec<MatterDeviceInfo>>;
-
-    /// Test connectivity to a specific device.
-    fn ping(&self, node_id: u64) -> Result<bool> {
-        // Default: try reading the basic cluster's vendor name attribute
-        self.read_attribute(node_id, 0, 0x0028, 1).map(|_| true)
-    }
+    /// Read the On/Off state from a light endpoint.
+    fn read_on_off(&self, node_id: u64, endpoint: u16) -> Result<bool>;
 }
 
-/// A device that has been commissioned into the local Matter fabric.
+/// A light that has been commissioned into the local Matter fabric.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommissionedDevice {
     /// Matter node ID assigned during commissioning.
@@ -120,7 +117,7 @@ pub struct CommissionedDevice {
     pub serial_number: Option<String>,
     /// Light endpoint (typically 1).
     pub light_endpoint: u16,
-    /// Supported color modes discovered during commissioning.
+    /// Supported color modes discovered during probing.
     pub color_modes: Vec<MatterColorMode>,
     /// Color temperature range in Kelvin (if CT supported).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -129,42 +126,20 @@ pub struct CommissionedDevice {
     pub max_kelvin: Option<u16>,
 }
 
-/// Matter color modes (from Color Control cluster features).
+/// Matter color modes (from the Color Control cluster).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MatterColorMode {
-    /// Hue/Saturation control.
     HueSaturation,
-    /// CIE xy color.
     Xy,
-    /// Color temperature in mireds.
     ColorTemperature,
 }
 
-/// Subscription specification for attribute reports.
-#[derive(Debug, Clone)]
-pub struct SubscribeSpec {
-    /// Endpoint to subscribe on.
-    pub endpoint: u16,
-    /// Cluster containing the attribute.
-    pub cluster: u16,
-    /// Attribute to subscribe to.
-    pub attr_id: u16,
-    /// Minimum reporting interval in seconds.
-    pub min_interval_secs: u16,
-    /// Maximum reporting interval in seconds.
-    pub max_interval_secs: u16,
-}
-
-/// Basic device info returned by `commissioned_devices()`.
+/// Basic device info returned by `MatterTransport::list_devices()`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatterDeviceInfo {
-    /// Matter node ID.
     pub node_id: u64,
-    /// Vendor name.
     pub vendor_name: String,
-    /// Product name.
     pub product_name: String,
-    /// Whether the device is currently reachable.
     pub reachable: bool,
 }

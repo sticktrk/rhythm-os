@@ -1,8 +1,4 @@
 //! Shared Matter commissioning orchestration.
-//!
-//! The lifecycle wrappers stay thin and platform-specific. The integration
-//! crate owns request parsing, hub bootstrap, node-id allocation, capability
-//! registration, and canonical identity updates.
 
 use std::sync::Arc;
 
@@ -18,14 +14,14 @@ use serde_json::Value;
 use crate::hub_state::MatterHubData;
 use crate::transport::{
     CommissionedDevice, MatterCommissionRequest, MatterCommissioningNetwork,
-    MatterCommissioningRendezvous, MatterTransport,
+    MatterCommissioningRendezvous, MatterCommissioningWifiCredentials, MatterTransport,
 };
 
 /// Parsed Matter pairing request owned by `rhythm-matter`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatterPairingParams {
-    /// Manual Matter pairing code.
-    pub setup_code: String,
+    /// Raw Matter setup payload. May be an `MT:` QR payload or a manual code.
+    pub setup_payload: String,
     /// Matter network being commissioned.
     pub network: MatterCommissioningNetwork,
     /// How the commissioner reaches the device.
@@ -36,27 +32,21 @@ impl MatterPairingParams {
     /// Parse the integration-specific request payload.
     ///
     /// `setup_payload` is the preferred field name. The legacy `setup_code`
-    /// field remains accepted for existing clients.
+    /// field remains accepted for older clients.
     pub fn from_value(params: &Value) -> Result<Self> {
-        let setup_code = params
+        let setup_payload = params
             .get("setup_payload")
             .or_else(|| params.get("setup_code"))
-            .and_then(|v| v.as_str())
+            .and_then(|value| value.as_str())
             .map(str::trim)
-            .filter(|v| !v.is_empty())
+            .filter(|value| !value.is_empty())
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "Missing 'setup_payload' (or legacy 'setup_code') in pairing params"
                 )
             })?;
 
-        if setup_code.starts_with("MT:") {
-            anyhow::bail!(
-                "Matter QR payloads are not supported yet; pass the manual pairing code instead"
-            );
-        }
-
-        let network = match params.get("network").and_then(|v| v.as_str()) {
+        let network = match params.get("network").and_then(|value| value.as_str()) {
             None | Some("wifi") => MatterCommissioningNetwork::Wifi,
             Some(other) => anyhow::bail!(
                 "Unsupported Matter network '{}'; only 'wifi' is currently supported",
@@ -64,31 +54,35 @@ impl MatterPairingParams {
             ),
         };
 
-        let rendezvous = match params.get("rendezvous").and_then(|v| v.as_str()) {
-            None | Some("on_network") => MatterCommissioningRendezvous::OnNetwork,
-            Some("ble") => anyhow::bail!(
-                "Matter BLE rendezvous is not implemented by the current backend; the device must already be IP-reachable"
-            ),
+        let rendezvous = match params.get("rendezvous").and_then(|value| value.as_str()) {
+            None | Some("auto") => MatterCommissioningRendezvous::Auto,
+            Some("ble") => MatterCommissioningRendezvous::Ble,
+            Some("on_network") => MatterCommissioningRendezvous::OnNetwork,
             Some(other) => anyhow::bail!(
-                "Unsupported Matter rendezvous '{}'; only 'on_network' is currently supported",
+                "Unsupported Matter rendezvous '{}'; expected 'auto', 'ble', or 'on_network'",
                 other
             ),
         };
 
         Ok(Self {
-            setup_code: setup_code.to_string(),
+            setup_payload: setup_payload.to_string(),
             network,
             rendezvous,
         })
     }
 
     /// Build the transport-facing request for a specific local node ID.
-    pub fn to_commission_request(&self, node_id: u64) -> MatterCommissionRequest {
+    pub fn to_commission_request(
+        &self,
+        node_id: u64,
+        wifi_credentials: MatterCommissioningWifiCredentials,
+    ) -> MatterCommissionRequest {
         MatterCommissionRequest {
-            setup_code: self.setup_code.clone(),
+            setup_payload: self.setup_payload.clone(),
             node_id,
             network: self.network,
             rendezvous: self.rendezvous,
+            wifi_credentials,
         }
     }
 }
@@ -98,7 +92,7 @@ pub fn ensure_matter_hub_connected(state: &SharedState) -> Result<()> {
     let hub_key = HubKey::new(HubType::new("matter"), "local");
     let already_connected = state
         .lock()
-        .map(|s| s.hubs.contains_key(&hub_key))
+        .map(|state| state.hubs.contains_key(&hub_key))
         .unwrap_or(false);
 
     if !already_connected {
@@ -110,27 +104,53 @@ pub fn ensure_matter_hub_connected(state: &SharedState) -> Result<()> {
     Ok(())
 }
 
-/// Commission a Matter-over-WiFi device using the shared transport.
-pub fn pair_device<T: MatterTransport + ?Sized + 'static>(
+/// Commission a Matter-over-WiFi light using the shared transport.
+pub fn pair_device(
     state: &SharedState,
-    transport: Arc<T>,
+    transport: Arc<dyn MatterTransport>,
     hub_data: Arc<MatterHubData>,
     request: &MatterPairingParams,
 ) -> Result<PairingSession> {
-    let commission_request = request.to_commission_request(hub_data.next_node_id());
+    let wifi_credentials = load_commissioning_wifi_credentials(state)?;
+    let node_id = hub_data.reserve_node_id();
+    let commission_request = request.to_commission_request(node_id, wifi_credentials);
 
-    match transport.commission_request(&commission_request) {
+    match transport.commission_light(&commission_request) {
         Ok(device) => build_success_session(state, &hub_data, device),
-        Err(e) => {
-            error!(target: "pair", "Matter commissioning error: {:#}", e);
+        Err(error) => {
+            error!(target: "pair", "Matter commissioning error: {:#}", error);
             Ok(PairingSession {
                 hub_type: "matter".to_string(),
                 status: PairingStatus::Failed,
                 device: None,
-                error: Some(format!("{:#}", e)),
+                error: Some(format!("{:#}", error)),
             })
         }
     }
+}
+
+fn load_commissioning_wifi_credentials(
+    state: &SharedState,
+) -> Result<MatterCommissioningWifiCredentials> {
+    let wifi = state
+        .lock()
+        .ok()
+        .and_then(|state| state.storage.as_ref().and_then(|storage| {
+            storage
+                .load_commissioning_wifi_credentials()
+                .ok()
+                .flatten()
+        }))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Matter Wi-Fi commissioning requires stored appliance Wi-Fi credentials; provision the appliance over Wi-Fi before pairing Matter lights"
+            )
+        })?;
+
+    Ok(MatterCommissioningWifiCredentials {
+        ssid: wifi.ssid,
+        password: wifi.password,
+    })
 }
 
 fn build_success_session(
@@ -142,8 +162,13 @@ fn build_success_session(
     let device_name = format!("{} {}", device.vendor_name, device.product_name);
     let hub_key = HubKey::new(HubType::new("matter"), "local");
 
-    info!(target: "sys", "Matter: paired {} (node {}, id={})",
-        device_name, device.node_id, device_id);
+    info!(
+        target: "sys",
+        "Matter: paired {} (node {}, id={})",
+        device_name,
+        device.node_id,
+        device_id
+    );
 
     hub_data.record_commissioned_device(&device);
     store_device_capabilities(hub_data, &device, &device_id);
@@ -180,11 +205,13 @@ fn store_device_capabilities(
     let mut caps = crate::capabilities::capabilities_from_commissioned(device);
     crate::capabilities::enrich_from_db(&mut caps, device, rhythm_devices::builtin_db());
 
-    if let Ok(mut dc) = hub_data.device_caps.lock() {
-        dc.insert(device_id.to_string(), caps);
-        info!(target: "sys",
+    if let Ok(mut device_caps) = hub_data.device_caps.lock() {
+        device_caps.insert(device_id.to_string(), caps);
+        info!(
+            target: "sys",
             "Matter: stored caps for {} ({} devices tracked)",
-            device_id, dc.len()
+            device_id,
+            device_caps.len()
         );
     }
 }
@@ -212,8 +239,8 @@ fn register_canonical_identity(
         model: Some(device.product_name.clone()),
     };
 
-    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    s.canonical_registry.resolve(&identity, hub_key, now);
+    let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    state.canonical_registry.resolve(&identity, hub_key, now);
     Ok(())
 }
 
@@ -229,44 +256,40 @@ mod tests {
 
         let parsed = MatterPairingParams::from_value(&params).unwrap();
 
-        assert_eq!(parsed.setup_code, "34970112332");
+        assert_eq!(parsed.setup_payload, "34970112332");
         assert_eq!(parsed.network, MatterCommissioningNetwork::Wifi);
-        assert_eq!(parsed.rendezvous, MatterCommissioningRendezvous::OnNetwork);
+        assert_eq!(parsed.rendezvous, MatterCommissioningRendezvous::Auto);
     }
 
     #[test]
-    fn pairing_params_accept_setup_payload() {
+    fn pairing_params_accept_raw_mt_payload() {
         let params = serde_json::json!({
-            "setup_payload": "3497-011-2332",
+            "setup_payload": "MT:Y.K908OC16750648G00",
             "network": "wifi",
-            "rendezvous": "on_network"
-        });
-
-        let parsed = MatterPairingParams::from_value(&params).unwrap();
-        let request = parsed.to_commission_request(123);
-
-        assert_eq!(request.setup_code, "3497-011-2332");
-        assert_eq!(request.node_id, 123);
-    }
-
-    #[test]
-    fn pairing_params_reject_qr_payloads() {
-        let params = serde_json::json!({
-            "setup_payload": "MT:Y.K908OC16750648G00"
-        });
-
-        let err = MatterPairingParams::from_value(&params).unwrap_err();
-        assert!(err.to_string().contains("manual pairing code"));
-    }
-
-    #[test]
-    fn pairing_params_reject_ble_rendezvous() {
-        let params = serde_json::json!({
-            "setup_payload": "34970112332",
             "rendezvous": "ble"
         });
 
-        let err = MatterPairingParams::from_value(&params).unwrap_err();
-        assert!(err.to_string().contains("BLE rendezvous"));
+        let parsed = MatterPairingParams::from_value(&params).unwrap();
+        let request = parsed.to_commission_request(
+            123,
+            MatterCommissioningWifiCredentials {
+                ssid: "wifi".to_string(),
+                password: "secret".to_string(),
+            },
+        );
+
+        assert_eq!(request.setup_payload, "MT:Y.K908OC16750648G00");
+        assert_eq!(request.node_id, 123);
+        assert_eq!(request.rendezvous, MatterCommissioningRendezvous::Ble);
+    }
+
+    #[test]
+    fn pairing_params_default_to_auto_rendezvous() {
+        let params = serde_json::json!({
+            "setup_payload": "3497-011-2332",
+        });
+
+        let parsed = MatterPairingParams::from_value(&params).unwrap();
+        assert_eq!(parsed.rendezvous, MatterCommissioningRendezvous::Auto);
     }
 }

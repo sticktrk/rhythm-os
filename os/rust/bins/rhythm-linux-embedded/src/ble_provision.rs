@@ -20,6 +20,7 @@ use rhythm_os::provisioning::{
     PROVISIONING_DEVICE_INFO_UUID, PROVISIONING_SERVICE_UUID, PROVISIONING_STATUS_UUID,
     PROVISIONING_WIFI_CMD_UUID,
 };
+use rhythm_os::state::SharedState;
 
 use crate::wifi;
 
@@ -32,14 +33,16 @@ pub struct ProvisioningManager {
 
 struct ProvisioningManagerInner {
     version: String,
+    state: SharedState,
     running: Mutex<bool>,
 }
 
 impl ProvisioningManager {
-    pub fn new(version: impl Into<String>) -> Self {
+    pub fn new(version: impl Into<String>, state: SharedState) -> Self {
         Self {
             inner: Arc::new(ProvisioningManagerInner {
                 version: version.into(),
+                state,
                 running: Mutex::new(false),
             }),
         }
@@ -76,11 +79,14 @@ impl ProvisioningManager {
 
                 let result = run_service(&manager.inner.version);
                 match result {
-                    Ok(creds) => info!(
-                        target: "sys",
-                        "BLE provisioning completed for SSID '{}'",
-                        creds.ssid
-                    ),
+                    Ok(creds) => {
+                        persist_commissioning_wifi_credentials(&manager.inner.state, &creds);
+                        info!(
+                            target: "sys",
+                            "BLE provisioning completed for SSID '{}'",
+                            creds.ssid
+                        );
+                    }
                     Err(e) => warn!(target: "sys", "BLE provisioning stopped: {:#}", e),
                 }
 
@@ -109,6 +115,27 @@ impl ProvisioningManager {
             ),
             Err(_) => false,
         }
+    }
+}
+
+fn persist_commissioning_wifi_credentials(state: &SharedState, creds: &WifiCredentials) {
+    let result = state
+        .lock()
+        .map_err(|_| anyhow!("state lock poisoned"))
+        .and_then(|state| {
+            let storage = state
+                .storage
+                .as_ref()
+                .ok_or_else(|| anyhow!("storage not configured"))?;
+            storage.save_commissioning_wifi_credentials(creds)
+        });
+
+    if let Err(e) = result {
+        warn!(
+            target: "sys",
+            "Failed to persist commissioning Wi-Fi credentials after provisioning: {:#}",
+            e
+        );
     }
 }
 

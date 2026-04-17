@@ -12,7 +12,8 @@ use crate::ble_provision::ProvisioningManager;
 use crate::wifi;
 
 pub fn create_router(state: SharedState, provisioning: ProvisioningManager) -> Router {
-    rhythm_server::http_server::create_router(state).route(
+    let router_state = state.clone();
+    rhythm_server::http_server::create_router(router_state).route(
         "/api/wifi",
         get({
             let provisioning = provisioning.clone();
@@ -20,7 +21,8 @@ pub fn create_router(state: SharedState, provisioning: ProvisioningManager) -> R
         })
         .delete({
             let provisioning = provisioning.clone();
-            move || async move { handle_delete_wifi(&provisioning) }
+            let state = state.clone();
+            move || async move { handle_delete_wifi(&state, &provisioning) }
         }),
     )
 }
@@ -40,9 +42,14 @@ fn handle_get_wifi(provisioning: &ProvisioningManager) -> ApiResponse {
     ApiResponse::json_ok(body.to_string())
 }
 
-fn handle_delete_wifi(provisioning: &ProvisioningManager) -> ApiResponse {
+fn handle_delete_wifi(state: &SharedState, provisioning: &ProvisioningManager) -> ApiResponse {
     match wifi::clear_credentials_and_restart() {
         Ok(()) => {
+            if let Ok(state) = state.lock() {
+                if let Some(storage) = state.storage.as_ref() {
+                    let _ = storage.clear_commissioning_wifi_credentials();
+                }
+            }
             if let Err(e) = provisioning.ensure_running("api-delete-wifi") {
                 return ApiResponse::server_error(e);
             }

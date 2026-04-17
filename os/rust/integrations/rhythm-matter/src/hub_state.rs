@@ -1,47 +1,38 @@
 //! Matter hub-specific state stored in `ActiveHub::hub_data`.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rhythm_devices::LightCapabilities;
 use rhythm_os::hub::HubEvent;
 
 use crate::controller::MatterDeviceRegistry;
-#[cfg(feature = "desktop")]
-use crate::desktop_transport::MatcTransport;
-use crate::transport::{CommissionedDevice, MatterDeviceInfo};
+use crate::transport::{CommissionedDevice, MatterDeviceInfo, MatterTransport};
 
 /// Matter-specific state stored in `ActiveHub::hub_data`.
-///
-/// Downcast via `active_hub.data::<Arc<MatterHubData>>()`.
 pub struct MatterHubData {
-    /// Shared transport — single `DeviceManager` instance for the fabric.
-    /// All code paths (commands, commissioning, probing) share this to avoid
-    /// port 5555 conflicts from multiple DMs.
-    /// Initialized via `OnceLock::set()` after `connect_matter()` returns.
+    /// Shared transport for all controller, commissioning, and probe paths.
     #[cfg(feature = "desktop")]
-    pub transport: std::sync::OnceLock<Arc<MatcTransport>>,
+    pub transport: std::sync::OnceLock<Arc<dyn MatterTransport>>,
     /// Device registry (shared with controller).
     pub registry: Arc<Mutex<MatterDeviceRegistry>>,
     /// Matter fabric identifier.
     pub fabric_id: String,
     /// Currently commissioned devices.
     pub commissioned: Mutex<Vec<MatterDeviceInfo>>,
-    /// Per-device capabilities, keyed by device ID (e.g., "matter-42").
-    /// Populated during commissioning via `capabilities_from_commissioned()`.
+    /// Next monotonic local node ID to assign.
+    pub next_node_id: AtomicU64,
+    /// Per-device capabilities keyed by device ID (for example `matter-42`).
     pub device_caps: Mutex<HashMap<String, LightCapabilities>>,
-    /// Event channel sender — keeps the channel alive for the event loop.
-    /// Subscription handling can later use this to emit real device events.
+    /// Event channel sender kept alive by the hub data.
     pub event_tx: std::sync::mpsc::Sender<HubEvent>,
 }
 
 impl MatterHubData {
-    /// Allocate the next local node ID for a new commission.
-    pub fn next_node_id(&self) -> u64 {
-        self.commissioned
-            .lock()
-            .map(|c| c.iter().map(|d| d.node_id).max().unwrap_or(99) + 1)
-            .unwrap_or(100)
+    /// Reserve the next node ID.
+    pub fn reserve_node_id(&self) -> u64 {
+        self.next_node_id.fetch_add(1, Ordering::SeqCst)
     }
 
     /// Upsert a newly commissioned device into the in-memory fabric cache.
@@ -60,20 +51,31 @@ impl MatterHubData {
                 list.push(info);
             }
         }
+
+        let next_after_device = device.node_id.saturating_add(1);
+        let mut current = self.next_node_id.load(Ordering::SeqCst);
+        while next_after_device > current {
+            match self.next_node_id.compare_exchange(
+                current,
+                next_after_device,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     /// Remove a device from the commissioned list and capabilities cache.
-    ///
-    /// Called during decommission — protocol + integration-specific cleanup.
-    /// Does NOT touch the hub device registry or canonical registry (that's
-    /// the rhythm-os handler's responsibility).
     pub fn remove_device(&self, node_id: u64) {
         if let Ok(mut list) = self.commissioned.lock() {
-            list.retain(|d| d.node_id != node_id);
+            list.retain(|device| device.node_id != node_id);
         }
+
         let prefix = format!("matter-{}", node_id);
         if let Ok(mut caps) = self.device_caps.lock() {
-            caps.retain(|k, _| k != &prefix && !k.starts_with(&format!("{}-", prefix)));
+            caps.retain(|key, _| key != &prefix && !key.starts_with(&format!("{}-", prefix)));
         }
     }
 }
@@ -109,19 +111,21 @@ mod tests {
             registry: Arc::new(Mutex::new(MatterDeviceRegistry::new())),
             fabric_id: "default".to_string(),
             commissioned: Mutex::new(Vec::new()),
+            next_node_id: AtomicU64::new(100),
             device_caps: Mutex::new(HashMap::new()),
             event_tx,
         }
     }
 
     #[test]
-    fn next_node_id_defaults_to_100() {
+    fn reserve_node_id_starts_at_100() {
         let hub_data = hub_data();
-        assert_eq!(hub_data.next_node_id(), 100);
+        assert_eq!(hub_data.reserve_node_id(), 100);
+        assert_eq!(hub_data.reserve_node_id(), 101);
     }
 
     #[test]
-    fn record_commissioned_device_updates_cache() {
+    fn record_commissioned_device_updates_cache_and_counter() {
         let hub_data = hub_data();
 
         hub_data.record_commissioned_device(&commissioned_device(100, "Vendor", "Lamp"));
@@ -140,6 +144,6 @@ mod tests {
         assert_eq!(commissioned[0].vendor_name, "Updated");
         drop(commissioned);
 
-        assert_eq!(hub_data.next_node_id(), 102);
+        assert_eq!(hub_data.reserve_node_id(), 102);
     }
 }
