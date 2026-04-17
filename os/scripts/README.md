@@ -133,6 +133,7 @@ publish the release assets.
 ./scripts/release.sh                    # Tags and pushes the next patch release
 ./scripts/release.sh --minor            # Tags and pushes the next minor release
 ./scripts/release.sh --version 0.4.1    # Tags and pushes an explicit version
+./scripts/release.sh --version 0.4.101  # Explicit high patch version is valid semver
 ./scripts/release.sh --dry-run          # Preview without creating the tag
 ```
 
