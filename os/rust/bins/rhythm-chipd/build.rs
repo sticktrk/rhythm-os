@@ -12,6 +12,7 @@ fn main() {
         "RHYTHM_CHIP_ROOT",
         "RHYTHM_CHIP_OUT_DIR",
         "RHYTHM_CHIP_LIB_DIR",
+        "RHYTHM_CHIP_CRYPTO",
     ] {
         println!("cargo:rerun-if-env-changed={key}");
     }
@@ -84,9 +85,26 @@ fn emit_platform_link_args(target: &str) {
             println!("cargo:rustc-link-lib=framework={framework}");
         }
     } else if target.contains("linux") {
-        for link_arg in ["-lssl", "-lcrypto", "-levent_core", "-levent_pthreads"] {
+        let chip_crypto = chip_crypto_backend(target);
+        let mut link_args = vec!["-levent_core", "-levent_pthreads"];
+        if chip_crypto != "mbedtls" {
+            link_args.splice(0..0, ["-lssl", "-lcrypto"]);
+        }
+        for link_arg in link_args {
             println!("cargo:rustc-link-arg={link_arg}");
         }
+    }
+}
+
+fn chip_crypto_backend(target: &str) -> String {
+    if let Ok(value) = env::var("RHYTHM_CHIP_CRYPTO") {
+        return value;
+    }
+
+    if target.contains("musl") {
+        "mbedtls".to_string()
+    } else {
+        "openssl".to_string()
     }
 }
 
