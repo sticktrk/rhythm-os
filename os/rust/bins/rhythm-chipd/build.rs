@@ -1,5 +1,7 @@
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const BRIDGE_HEADER: &str = "native/chip_bridge.h";
 const BRIDGE_SOURCE: &str = "native/chip_bridge.cc";
@@ -13,6 +15,7 @@ fn main() {
         "RHYTHM_CHIP_OUT_DIR",
         "RHYTHM_CHIP_LIB_DIR",
         "RHYTHM_CHIP_CRYPTO",
+        "RHYTHM_CHIP_SYSROOT",
     ] {
         println!("cargo:rerun-if-env-changed={key}");
     }
@@ -125,6 +128,11 @@ fn add_platform_include_deps(target: &str, build: &mut cc::Build) -> Result<(), 
         return Ok(());
     }
 
+    let host = env::var("HOST").unwrap_or_default();
+    if host != target {
+        return add_cross_linux_include_deps(target, build);
+    }
+
     for package in [
         "gio-2.0",
         "glib-2.0",
@@ -147,6 +155,119 @@ fn add_platform_include_deps(target: &str, build: &mut cc::Build) -> Result<(), 
     }
 
     Ok(())
+}
+
+fn add_cross_linux_include_deps(target: &str, build: &mut cc::Build) -> Result<(), String> {
+    let sysroot = resolve_cross_sysroot(target).ok_or_else(|| {
+        "pkg-config is unavailable for this cross-compile, and no sysroot could be resolved. Set RHYTHM_CHIP_SYSROOT or configure the target linker so `-print-sysroot` works.".to_string()
+    })?;
+
+    let mut added_any = false;
+    for path in [
+        sysroot.join("usr/include"),
+        sysroot.join("usr/include/glib-2.0"),
+        sysroot.join("usr/include/gio-unix-2.0"),
+        sysroot.join("usr/include/dbus-1.0"),
+        sysroot.join("usr/include/libmount"),
+        sysroot.join("usr/include/blkid"),
+    ] {
+        if path.is_dir() {
+            build.include(&path);
+            added_any = true;
+        }
+    }
+
+    for subdir in ["usr/lib", "usr/lib64", "lib", "lib64"] {
+        let base = sysroot.join(subdir);
+        add_nested_include_if_present(build, &base, "glib-2.0/include", &mut added_any);
+        add_nested_include_if_present(build, &base, "dbus-1.0/include", &mut added_any);
+    }
+
+    if !added_any {
+        return Err(format!(
+            "resolved cross sysroot at {}, but no GLib/DBus include directories were found",
+            sysroot.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn add_nested_include_if_present(
+    build: &mut cc::Build,
+    base: &Path,
+    suffix: &str,
+    added_any: &mut bool,
+) {
+    if !base.is_dir() {
+        return;
+    }
+
+    let direct = base.join(suffix);
+    if direct.is_dir() {
+        build.include(&direct);
+        *added_any = true;
+    }
+
+    let Ok(entries) = fs::read_dir(base) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let candidate = entry.path().join(suffix);
+        if candidate.is_dir() {
+            build.include(&candidate);
+            *added_any = true;
+        }
+    }
+}
+
+fn resolve_cross_sysroot(target: &str) -> Option<PathBuf> {
+    if let Some(sysroot) = env::var_os("RHYTHM_CHIP_SYSROOT").map(PathBuf::from) {
+        return Some(sysroot);
+    }
+
+    for program in cross_compiler_candidates(target) {
+        let Ok(output) = Command::new(&program).arg("-print-sysroot").output() else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if value.is_empty() {
+            continue;
+        }
+
+        let path = PathBuf::from(value);
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+fn cross_compiler_candidates(target: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let target_upper = target.replace('-', "_").to_ascii_uppercase();
+    let target_lower = target.replace('-', "_");
+
+    for key in [
+        format!("CARGO_TARGET_{target_upper}_LINKER"),
+        format!("CC_{target_lower}"),
+        "CC".to_string(),
+    ] {
+        if let Ok(value) = env::var(&key) {
+            if !value.trim().is_empty() && !candidates.iter().any(|candidate| candidate == &value)
+            {
+                candidates.push(value);
+            }
+        }
+    }
+
+    candidates
 }
 
 fn resolve_chip_artifacts() -> Result<ChipArtifacts, String> {
