@@ -26,6 +26,11 @@ fn main() {
             build
                 .cpp(true)
                 .file(BRIDGE_SOURCE)
+                .file(
+                    artifacts
+                        .chip_root
+                        .join("src/controller/ExamplePersistentStorage.cpp"),
+                )
                 .flag_if_supported("-std=c++17")
                 .warnings(false)
                 .define("CHIP_HAVE_CONFIG_H", "1")
@@ -291,7 +296,8 @@ impl ChipArtifacts {
             self.chip_root.join("third_party/nlio/repo/include"),
             self.chip_root.join("third_party/nlfaultinjection/include"),
             self.chip_root.join("third_party/inipp/repo/inipp"),
-            self.chip_root.join("third_party/ot-commissioner/repo/include"),
+            self.chip_root
+                .join("third_party/ot-commissioner/repo/include"),
             self.chip_root.join("third_party/ot-commissioner/repo/src"),
             self.chip_root
                 .join("third_party/ot-commissioner/repo/third_party/fmtlib/repo/include"),

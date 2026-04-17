@@ -15,13 +15,18 @@ pub struct ChipFfiController {
 
 impl ChipFfiController {
     pub fn initialize(
-        _state: &CommissioningState,
-        _existing_devices: &[CommissionedDevice],
+        state: &CommissioningState,
+        existing_devices: &[CommissionedDevice],
     ) -> Result<Self> {
+        let _ = state;
+        let _ = existing_devices;
+        #[cfg(rhythm_chipd_chip_ffi)]
+        ffi_probe::initialize_bridge(&state.storage_path, &state.fabric_id, state.ble_controller)?;
+
         Ok(Self {
             mode: ChipBridgeMode::detect()?,
             #[cfg(rhythm_chipd_chip_ffi)]
-            storage_path: _state.storage_path.clone(),
+            storage_path: state.storage_path.clone(),
         })
     }
 
@@ -125,13 +130,24 @@ impl ChipBridgeMode {
 
 #[cfg(rhythm_chipd_chip_ffi)]
 mod ffi_probe {
-    use std::ffi::{c_char, CStr};
+    use std::ffi::{c_char, c_ushort, CStr, CString};
+    use std::path::Path;
 
     use anyhow::{Context, Result};
 
     unsafe extern "C" {
         fn rhythm_chip_bridge_link_mode() -> *const c_char;
+        fn rhythm_chip_bridge_init(
+            storage_path: *const c_char,
+            fabric_id: *const c_char,
+            has_ble_controller: bool,
+            ble_controller: c_ushort,
+            error_message: *mut c_char,
+            error_message_size: usize,
+        ) -> bool;
     }
+
+    const ERROR_BUFFER_SIZE: usize = 512;
 
     pub fn linked_mode() -> Result<String> {
         let raw = unsafe { rhythm_chip_bridge_link_mode() };
@@ -143,5 +159,36 @@ mod ffi_probe {
             .to_str()
             .context("decoding bridge mode")
             .map(ToString::to_string)
+    }
+
+    pub fn initialize_bridge(
+        storage_path: &Path,
+        fabric_id: &str,
+        ble_controller: Option<u16>,
+    ) -> Result<()> {
+        let storage_path = CString::new(storage_path.display().to_string())
+            .context("encoding CHIP storage path")?;
+        let fabric_id = CString::new(fabric_id).context("encoding CHIP fabric id")?;
+        let mut error_buffer = [0_i8; ERROR_BUFFER_SIZE];
+
+        let success = unsafe {
+            rhythm_chip_bridge_init(
+                storage_path.as_ptr(),
+                fabric_id.as_ptr(),
+                ble_controller.is_some(),
+                ble_controller.unwrap_or_default(),
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        };
+
+        if success {
+            return Ok(());
+        }
+
+        let message = unsafe { CStr::from_ptr(error_buffer.as_ptr()) }
+            .to_str()
+            .unwrap_or("unknown CHIP bridge initialization error");
+        anyhow::bail!(message.to_string())
     }
 }
