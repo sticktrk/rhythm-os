@@ -20,3 +20,4 @@ rhythm-matter = { path = "../../integrations/rhythm-matter", features = ["deskto
 
 [build-dependencies]
 cc = "1.2"
+pkg-config = "0.3"

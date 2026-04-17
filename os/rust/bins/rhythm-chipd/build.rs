@@ -34,6 +34,12 @@ fn main() {
             for include_dir in artifacts.include_dirs() {
                 build.include(include_dir);
             }
+            if let Err(error) = add_platform_include_deps(&artifacts.target, &mut build) {
+                println!(
+                    "cargo:warning=chip-ffi requested, but Linux system headers are unavailable: {error}"
+                );
+                return;
+            }
             match artifacts.link_mode {
                 LinkMode::NativeLibChip => {
                     build.define("RHYTHM_CHIP_BRIDGE_NATIVE_LIBCHIP", "1");
@@ -72,7 +78,40 @@ fn emit_platform_link_args(target: &str) {
         ] {
             println!("cargo:rustc-link-lib=framework={framework}");
         }
+    } else if target.contains("linux") {
+        for link_arg in ["-lssl", "-lcrypto", "-levent_core", "-levent_pthreads"] {
+            println!("cargo:rustc-link-arg={link_arg}");
+        }
     }
+}
+
+fn add_platform_include_deps(target: &str, build: &mut cc::Build) -> Result<(), String> {
+    if !target.contains("linux") {
+        return Ok(());
+    }
+
+    for package in [
+        "gio-2.0",
+        "glib-2.0",
+        "gobject-2.0",
+        "dbus-1",
+        "avahi-client",
+    ] {
+        let library = pkg_config::Config::new()
+            .cargo_metadata(true)
+            .probe(package)
+            .map_err(|error| {
+                format!(
+                    "pkg-config could not resolve {package}: {error}. Install the Linux CHIP build dependencies, especially libglib2.0-dev, libdbus-1-dev, and libavahi-client-dev."
+                )
+            })?;
+
+        for include_path in library.include_paths {
+            build.include(include_path);
+        }
+    }
+
+    Ok(())
 }
 
 fn resolve_chip_artifacts() -> Result<ChipArtifacts, String> {
@@ -251,6 +290,21 @@ impl ChipArtifacts {
             self.chip_root.join("third_party/nlassert/repo/include"),
             self.chip_root.join("third_party/nlio/repo/include"),
             self.chip_root.join("third_party/nlfaultinjection/include"),
+            self.chip_root.join("third_party/inipp/repo/inipp"),
+            self.chip_root.join("third_party/ot-commissioner/repo/include"),
+            self.chip_root.join("third_party/ot-commissioner/repo/src"),
+            self.chip_root
+                .join("third_party/ot-commissioner/repo/third_party/fmtlib/repo/include"),
+            self.chip_root
+                .join("third_party/ot-commissioner/repo/third_party/cn-cbor/repo/include"),
+            self.chip_root
+                .join("third_party/ot-commissioner/repo/third_party/COSE-C/repo/include"),
+            self.chip_root
+                .join("third_party/ot-commissioner/repo/third_party/json/repo/single_include"),
+            self.chip_root
+                .join("third_party/ot-commissioner/repo/third_party/mbedtls/repo/include"),
+            self.chip_root
+                .join("third_party/ot-commissioner/repo/third_party/mdns/repo/include"),
             self.chip_root
                 .join("third_party/boringssl/repo/src/include"),
         ];
