@@ -105,8 +105,9 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   String? _connectError;
   BonsoirDiscovery? _bonsoirDiscovery;
 
-  // Manual IP input
+  // Manual IP state (inline field)
   final _manualIpController = TextEditingController();
+  final _manualIpFocus = FocusNode();
   bool _isManualConnecting = false;
   String? _manualConnectError;
 
@@ -161,16 +162,25 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
 
     AnalyticsService().logScreenView('connect_hub');
 
+    // Rebuild when focus state changes so the IP field border reflects it.
+    _manualIpFocus.addListener(_onManualIpFocusChanged);
+
     // Auto-start mDNS scanning in rhythmServer mode
     if (widget.mode == ConnectHubMode.rhythmServer) {
       _scanForDevices();
     }
   }
 
+  void _onManualIpFocusChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
     _bonsoirDiscovery?.stop();
+    _manualIpFocus.removeListener(_onManualIpFocusChanged);
     _manualIpController.dispose();
+    _manualIpFocus.dispose();
     _breatheController.dispose();
     _rippleController.dispose();
     super.dispose();
@@ -314,12 +324,12 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     }
   }
 
-  /// Connect to a manually entered IP address.
-  Future<void> _connectManualIp() async {
+  /// Submit the inline manual-IP form.
+  Future<void> _submitManualIp() async {
     final input = _manualIpController.text.trim();
     if (input.isEmpty) return;
 
-    // Parse IP:port (default port 54448 for rhythm-server)
+    // Parse IP:port (default 54448)
     String ip;
     int port;
     if (input.contains(':')) {
@@ -331,31 +341,33 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       port = 54448;
     }
 
+    _manualIpFocus.unfocus();
     setState(() {
       _isManualConnecting = true;
       _manualConnectError = null;
     });
 
-    final client = RhythmDiagnosticsApi(host: ip, port: port);
-    final isHealthy = await client.healthCheck();
+    final healthy =
+        await RhythmDiagnosticsApi(host: ip, port: port).healthCheck();
 
     if (!mounted) return;
-
-    if (isHealthy) {
-      final hub = DiscoveredHub(
-        host: ip,
-        port: port,
-        address: ip,
-        name: 'RhythmServer',
-        type: HubType.server,
-      );
-      await _connectToDevice(hub);
-    } else {
+    if (!healthy) {
       setState(() {
         _isManualConnecting = false;
-        _manualConnectError = 'Could not connect to $ip:$port';
+        _manualConnectError = 'Could not reach $ip:$port';
       });
+      return;
     }
+
+    setState(() => _isManualConnecting = false);
+    final hub = DiscoveredHub(
+      host: ip,
+      port: port,
+      address: ip,
+      name: 'RhythmServer',
+      type: HubType.server,
+    );
+    await _connectToDevice(hub);
   }
 
   Future<void> _connectToDevice(DiscoveredHub hub) async {
@@ -383,7 +395,6 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       if (result == null) {
         setState(() {
           _isConnecting = false;
-          _isManualConnecting = false;
           _connectError = hub.address;
         });
         return;
@@ -402,7 +413,6 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     } else {
       setState(() {
         _isConnecting = false;
-        _isManualConnecting = false;
         _connectError = hub.address;
       });
     }
@@ -432,84 +442,88 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         _rippleController,
       ]),
       builder: (context, _) {
-        final bottomClearance =
-            widget.mode == ConnectHubMode.rhythmServer ? 112.0 : 88.0;
+        final isServer = widget.mode == ConnectHubMode.rhythmServer;
+        final keyboardOpen = MediaQuery.of(context).viewInsets.bottom > 0;
+        final bottomClearance = isServer ? 112.0 : 88.0;
 
-        return LayoutBuilder(
-          builder: (context, constraints) {
-            final minContentHeight = constraints.maxHeight > bottomClearance
-                ? constraints.maxHeight - bottomClearance
-                : 0.0;
-
-            return SingleChildScrollView(
-              physics: const ClampingScrollPhysics(),
-              padding: EdgeInsets.only(bottom: bottomClearance),
-              child: ConstrainedBox(
-                constraints: BoxConstraints(
-                  minHeight: minContentHeight,
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.only(top: 20),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      // Ripple rings + central icon
-                      _buildHeroSection(),
-                      const SizedBox(height: 24),
-                      // Text content
-                      _buildTextContent(),
-                      // Scanning indicator or discovered devices
-                      if (widget.mode == ConnectHubMode.rhythmServer) ...[
-                        if (_isScanning && _discoveredDevices.isEmpty)
-                          _buildScanningIndicator(),
-                        if (_discoveredDevices.isNotEmpty)
-                          _buildDiscoveredDevices(),
-                        if (!_isScanning) _buildScanAgainButton(),
-                        if (!kIsWeb) ...[
-                          const SizedBox(height: 24),
-                          _buildBleProvisioningButton(),
-                        ],
-                        const SizedBox(height: 24),
-                        _buildManualIpInput(),
-                      ],
-                      const SizedBox(height: 24),
-                      // Connect button (Hue mode only)
-                      if (widget.mode == ConnectHubMode.hue)
-                        _buildConnectButton(),
-                      const SizedBox(height: 24),
-                    ],
-                  ),
-                ),
-              ),
-            );
-          },
+        return Padding(
+          padding: EdgeInsets.only(
+            top: widget.isModal ? 24 : 8,
+            bottom: bottomClearance,
+          ),
+          child: isServer
+              ? _buildRhythmServerLayout(keyboardOpen)
+              : _buildHueLayout(),
         );
       },
     );
   }
 
+  // ── Layouts ────────────────────────────────────────────────────────────────
+
+  Widget _buildRhythmServerLayout(bool keyboardOpen) {
+    // Keep the IP TextField rendered in one stable spot so focus survives.
+    // Only peripheral sections (hero, scan pill, new-box setup) collapse
+    // away when the keyboard is up, giving the field room to lift.
+    return Column(
+      children: [
+        if (!keyboardOpen) ...[
+          _buildHeroSection(),
+          const SizedBox(height: 8),
+        ],
+        _buildTitleAndStatus(),
+        const SizedBox(height: 10),
+        if (!keyboardOpen) ...[
+          _buildScanButton(),
+          const SizedBox(height: 10),
+        ],
+        Expanded(child: _buildMiddleContent()),
+        const SizedBox(height: 10),
+        _buildBottomActions(keyboardOpen),
+        const SizedBox(height: 4),
+      ],
+    );
+  }
+
+  Widget _buildHueLayout() {
+    return Column(
+      children: [
+        const SizedBox(height: 24),
+        _buildHeroSection(),
+        const SizedBox(height: 20),
+        _buildTitleAndStatus(),
+        const Spacer(),
+        _buildConnectButton(),
+        const SizedBox(height: 16),
+      ],
+    );
+  }
+
+  // ── Hero: compact beacon with breathing glow + ripples ─────────────────────
+
   Widget _buildHeroSection() {
     final b = _breathe.value;
-    const iconSize = 80.0;
+    const heroSize = 150.0;
+    const iconSize = 60.0;
 
     return SizedBox(
-      width: 260,
-      height: 260,
+      width: heroSize,
+      height: heroSize,
       child: Stack(
         alignment: Alignment.center,
         children: [
           // Ripple rings (3 staggered)
-          for (int i = 0; i < 3; i++) _buildRippleRing(i),
+          for (int i = 0; i < 3; i++) _buildRippleRing(i, heroSize),
 
-          // Ambient horizon glow behind the icon
+          // Ambient horizon glow
           Container(
-            width: iconSize + 60 + b * 20,
-            height: iconSize + 60 + b * 20,
+            width: iconSize + 40 + b * 16,
+            height: iconSize + 40 + b * 16,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               gradient: RadialGradient(
                 colors: [
-                  _primary.withValues(alpha: 0.08 + b * 0.06),
+                  _primary.withValues(alpha: 0.10 + b * 0.06),
                   _primary.withValues(alpha: 0.02),
                   Colors.transparent,
                 ],
@@ -518,7 +532,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
             ),
           ),
 
-          // Central icon container
+          // Central icon
           Container(
             width: iconSize,
             height: iconSize,
@@ -528,26 +542,26 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
                 colors: [
-                  _primary.withValues(alpha: 0.15 + b * 0.08),
+                  _primary.withValues(alpha: 0.18 + b * 0.08),
                   _primaryDeep.withValues(alpha: 0.08 + b * 0.05),
                 ],
               ),
               border: Border.all(
-                color: _primary.withValues(alpha: 0.2 + b * 0.15),
-                width: 1.5,
+                color: _primary.withValues(alpha: 0.25 + b * 0.15),
+                width: 1.2,
               ),
               boxShadow: [
                 BoxShadow(
-                  color: _primary.withValues(alpha: 0.1 + b * 0.12),
-                  blurRadius: 32 + b * 16,
-                  spreadRadius: b * 4,
+                  color: _primary.withValues(alpha: 0.12 + b * 0.12),
+                  blurRadius: 24 + b * 12,
+                  spreadRadius: b * 2,
                 ),
               ],
             ),
             child: Icon(
               _icon,
-              color: _primary.withValues(alpha: 0.7 + b * 0.3),
-              size: 36,
+              color: _primary.withValues(alpha: 0.78 + b * 0.22),
+              size: 28,
             ),
           ),
         ],
@@ -555,253 +569,244 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     );
   }
 
-  Widget _buildRippleRing(int index) {
-    // Each ring is offset in phase
+  Widget _buildRippleRing(int index, double size) {
     final phase = (_ripple.value + index * 0.33) % 1.0;
-    // Rings expand from 0.3 to 1.0 of container size and fade out
-    final scale = 0.35 + phase * 0.65;
-    final opacity = (1.0 - phase).clamp(0.0, 1.0) * 0.25;
+    final scale = 0.4 + phase * 0.6;
+    final opacity = (1.0 - phase).clamp(0.0, 1.0) * 0.28;
 
     return Transform.scale(
       scale: scale,
-      child: Container(
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          border: Border.all(
-            color: _primary.withValues(alpha: opacity),
-            width: 1.0,
+      child: SizedBox(
+        width: size,
+        height: size,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: _primary.withValues(alpha: opacity),
+              width: 1.0,
+            ),
           ),
         ),
       ),
     );
   }
 
-  Widget _buildTextContent() {
+  // ── Title + Dynamic Status ─────────────────────────────────────────────────
+
+  Widget _buildTitleAndStatus() {
+    final isServer = widget.mode == ConnectHubMode.rhythmServer;
+
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 40),
+      padding: const EdgeInsets.symmetric(horizontal: 32),
       child: Column(
         children: [
           Text(
             _title,
-            style: TextStyle(
-              color: CelestialColors.textPrimary,
-              fontSize: 24,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.5,
-            ),
-          ),
-          const SizedBox(height: 12),
-          Text(
-            _subtitle,
             textAlign: TextAlign.center,
             style: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.85),
-              fontSize: 15,
-              height: 1.5,
-              letterSpacing: 0.2,
+              color: CelestialColors.textPrimary,
+              fontSize: 22,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.3,
+              height: 1.1,
             ),
           ),
+          const SizedBox(height: 8),
+          if (isServer)
+            _buildScanStatusLine()
+          else
+            Text(
+              _subtitle,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.75),
+                fontSize: 14,
+                height: 1.45,
+                letterSpacing: 0.1,
+              ),
+            ),
         ],
       ),
     );
   }
 
-  Widget _buildScanningIndicator() {
-    return Padding(
-      padding: const EdgeInsets.only(top: 16),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          SizedBox(
-            width: 12,
-            height: 12,
-            child: CircularProgressIndicator(
-              strokeWidth: 1.5,
-              color: CelestialColors.textSecondary.withValues(alpha: 0.5),
-            ),
+  Widget _buildScanStatusLine() {
+    final count = _discoveredDevices.length;
+    final b = _breathe.value;
+
+    String label;
+    if (_isScanning && count == 0) {
+      label = 'Searching your network\u2026';
+    } else if (count > 0) {
+      label = count == 1 ? 'Found 1 box nearby' : 'Found $count boxes nearby';
+    } else {
+      label = 'No devices yet';
+    }
+
+    final isLive = _isScanning || count > 0;
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        // Pulsing status dot (breathing teal while scanning, steady when found)
+        Container(
+          width: 7,
+          height: 7,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: _isScanning
+                ? _teal.withValues(alpha: 0.35 + b * 0.55)
+                : (count > 0
+                    ? _teal.withValues(alpha: 0.85)
+                    : Colors.white.withValues(alpha: 0.22)),
+            boxShadow: isLive
+                ? [
+                    BoxShadow(
+                      color: _teal.withValues(alpha: 0.35 + b * 0.35),
+                      blurRadius: 8 + b * 5,
+                    ),
+                  ]
+                : null,
           ),
-          const SizedBox(width: 8),
-          Text(
-            'Searching your network\u2026',
+        ),
+        const SizedBox(width: 9),
+        Flexible(
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.6),
-              fontSize: 13,
+              color: CelestialColors.textSecondary.withValues(alpha: 0.85),
+              fontSize: 13.5,
+              letterSpacing: 0.2,
+              fontWeight: FontWeight.w500,
             ),
           ),
-        ],
+        ),
+      ],
+    );
+  }
+
+  // ── Scan button (prominent primary action) ─────────────────────────────────
+
+  Widget _buildScanButton() {
+    final isScanning = _isScanning;
+
+    return Center(
+      child: GestureDetector(
+        onTap: isScanning ? null : _scanForDevices,
+        behavior: HitTestBehavior.opaque,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOut,
+          height: 40,
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(22),
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: isScanning
+                  ? [
+                      _teal.withValues(alpha: 0.10),
+                      _tealDeep.withValues(alpha: 0.06),
+                    ]
+                  : [
+                      _teal.withValues(alpha: 0.28),
+                      _tealDeep.withValues(alpha: 0.18),
+                    ],
+            ),
+            border: Border.all(
+              color: _teal.withValues(alpha: isScanning ? 0.3 : 0.55),
+              width: 1.2,
+            ),
+            boxShadow: isScanning
+                ? null
+                : [
+                    BoxShadow(
+                      color: _teal.withValues(alpha: 0.22),
+                      blurRadius: 16,
+                      offset: const Offset(0, 4),
+                      spreadRadius: -2,
+                    ),
+                  ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (isScanning)
+                SizedBox(
+                  width: 15,
+                  height: 15,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 1.8,
+                    color: _teal.withValues(alpha: 0.85),
+                  ),
+                )
+              else
+                Icon(
+                  Icons.radar_rounded,
+                  color: _teal,
+                  size: 17,
+                ),
+              const SizedBox(width: 9),
+              Text(
+                isScanning ? 'Scanning\u2026' : 'Scan Again',
+                style: TextStyle(
+                  color: isScanning
+                      ? _teal.withValues(alpha: 0.8)
+                      : CelestialColors.textPrimary,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.4,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── Middle: devices list or empty state ────────────────────────────────────
+
+  Widget _buildMiddleContent() {
+    if (_discoveredDevices.isNotEmpty) {
+      return _buildDiscoveredDevices();
+    }
+
+    // Empty state: soft guidance
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 40),
+        child: Text(
+          _isScanning
+              ? 'Keep your Box powered on and\non the same Wi-Fi network'
+              : 'Make sure your Box is powered on\nand connected to Wi-Fi',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: CelestialColors.textSecondary.withValues(alpha: 0.45),
+            fontSize: 12.5,
+            height: 1.55,
+            letterSpacing: 0.15,
+          ),
+        ),
       ),
     );
   }
 
   Widget _buildDiscoveredDevices() {
     return Padding(
-      padding: const EdgeInsets.only(top: 24, left: 32, right: 32),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            'Found on your network',
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.6),
-              fontSize: 12,
-              fontWeight: FontWeight.w500,
-              letterSpacing: 0.5,
-            ),
-          ),
-          const SizedBox(height: 10),
-          for (final hub in _discoveredDevices) _buildDeviceCard(hub),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildScanAgainButton() {
-    return Padding(
-      padding: const EdgeInsets.only(top: 16),
-      child: GestureDetector(
-        onTap: _scanForDevices,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-          decoration: BoxDecoration(
-            color: _teal.withValues(alpha: 0.15),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: _teal.withValues(alpha: 0.3),
-              width: 1,
-            ),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.refresh,
-                color: _teal,
-                size: 18,
-              ),
-              const SizedBox(width: 8),
-              Text(
-                'Scan Again',
-                style: TextStyle(
-                  color: _teal,
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildBleProvisioningButton() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 32),
-      child: Column(
-        children: [
-          // Divider with label
-          Row(
-            children: [
-              Expanded(
-                child: Container(
-                  height: 0.5,
-                  color: CelestialColors.textSecondary.withValues(alpha: 0.15),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 14),
-                child: Text(
-                  'NEW DEVICE',
-                  style: TextStyle(
-                    color: CelestialColors.textSecondary.withValues(alpha: 0.4),
-                    fontSize: 10,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 1.5,
-                  ),
-                ),
-              ),
-              Expanded(
-                child: Container(
-                  height: 0.5,
-                  color: CelestialColors.textSecondary.withValues(alpha: 0.15),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          // Setup card
-          GestureDetector(
-            onTap: _openBleProvisioning,
-            child: Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(16),
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [
-                    _teal.withValues(alpha: 0.10),
-                    _tealDeep.withValues(alpha: 0.05),
-                  ],
-                ),
-                border: Border.all(
-                  color: _teal.withValues(alpha: 0.18),
-                ),
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    width: 44,
-                    height: 44,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _teal.withValues(alpha: 0.12),
-                      border: Border.all(
-                        color: _teal.withValues(alpha: 0.2),
-                      ),
-                    ),
-                    child: Icon(
-                      Icons.add_rounded,
-                      color: _teal.withValues(alpha: 0.9),
-                      size: 22,
-                    ),
-                  ),
-                  const SizedBox(width: 14),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Set Up New Box',
-                          style: TextStyle(
-                            color: CelestialColors.textPrimary,
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        const SizedBox(height: 3),
-                        Text(
-                          'Pair and configure a new Rhythm Box',
-                          style: TextStyle(
-                            color: CelestialColors.textSecondary
-                                .withValues(alpha: 0.6),
-                            fontSize: 12.5,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  Icon(
-                    Icons.chevron_right,
-                    color: CelestialColors.textSecondary.withValues(alpha: 0.4),
-                    size: 20,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
+      padding: const EdgeInsets.symmetric(horizontal: 24),
+      child: ListView.separated(
+        physics: const BouncingScrollPhysics(),
+        padding: EdgeInsets.zero,
+        itemCount: _discoveredDevices.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 8),
+        itemBuilder: (context, index) =>
+            _buildDeviceCard(_discoveredDevices[index]),
       ),
     );
   }
@@ -809,192 +814,345 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   Widget _buildDeviceCard(DiscoveredHub hub) {
     final hasError = _connectError == hub.address;
     final isBusy = _isConnecting && !hasError;
+    final b = _breathe.value;
 
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: GestureDetector(
-        onTap: _isConnecting ? null : () => _connectToDevice(hub),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            color: Colors.white.withValues(alpha: 0.06),
-            border: Border.all(
-              color: hasError
-                  ? Colors.red.withValues(alpha: 0.3)
-                  : _teal.withValues(alpha: 0.15),
-              width: 1,
-            ),
+    return GestureDetector(
+      onTap: _isConnecting ? null : () => _connectToDevice(hub),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          color: Colors.white.withValues(alpha: 0.04),
+          border: Border.all(
+            color: hasError
+                ? Colors.red.withValues(alpha: 0.35)
+                : _teal.withValues(alpha: 0.22),
+            width: 1,
           ),
-          child: Row(
-            children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: _teal.withValues(alpha: 0.12),
-                ),
-                child: Icon(
-                  Icons.developer_board,
-                  color: _teal.withValues(alpha: 0.8),
-                  size: 18,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      hub.name ?? 'RhythmServer',
-                      style: TextStyle(
-                        color: CelestialColors.textPrimary,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w500,
-                      ),
+        ),
+        child: Row(
+          children: [
+            // Icon puck with a tiny live pip in the top-right corner
+            SizedBox(
+              width: 34,
+              height: 34,
+              child: Stack(
+                children: [
+                  Container(
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _teal.withValues(alpha: 0.12),
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      hasError
-                          ? 'Connection failed - tap to retry'
-                          : hub.address,
-                      style: TextStyle(
-                        color: hasError
-                            ? Colors.red.withValues(alpha: 0.7)
-                            : CelestialColors.textSecondary
-                                .withValues(alpha: 0.6),
-                        fontSize: 12,
-                      ),
+                    child: Icon(
+                      Icons.developer_board_rounded,
+                      color: _teal.withValues(alpha: 0.9),
+                      size: 17,
                     ),
-                  ],
-                ),
-              ),
-              if (isBusy)
-                SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: _teal.withValues(alpha: 0.6),
                   ),
-                )
-              else
-                Icon(
-                  Icons.chevron_right,
-                  color: CelestialColors.textSecondary.withValues(alpha: 0.4),
-                  size: 20,
+                  Positioned(
+                    top: 1,
+                    right: 1,
+                    child: Container(
+                      width: 7,
+                      height: 7,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: hasError
+                            ? Colors.red.withValues(alpha: 0.85)
+                            : Color.lerp(
+                                _teal.withValues(alpha: 0.45),
+                                _teal,
+                                b,
+                              ),
+                        border: Border.all(
+                          color:
+                              CelestialColors.backgroundDark.withValues(alpha: 0.9),
+                          width: 1.2,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    hub.name ?? 'RhythmServer',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: CelestialColors.textPrimary,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      letterSpacing: 0.1,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    hasError ? 'tap to retry' : hub.address,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: hasError
+                          ? Colors.red.withValues(alpha: 0.75)
+                          : CelestialColors.textSecondary
+                              .withValues(alpha: 0.55),
+                      fontSize: 11.5,
+                      fontFamily: 'monospace',
+                      letterSpacing: 0.3,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (isBusy)
+              SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.6,
+                  color: _teal.withValues(alpha: 0.7),
                 ),
-            ],
-          ),
+              )
+            else
+              Icon(
+                Icons.arrow_forward_rounded,
+                color: _teal.withValues(alpha: 0.6),
+                size: 18,
+              ),
+          ],
         ),
       ),
     );
   }
 
-  Widget _buildManualIpInput() {
+  // ── Bottom: compact secondary actions ──────────────────────────────────────
+
+  Widget _buildBottomActions(bool keyboardOpen) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 32),
+      padding: const EdgeInsets.symmetric(horizontal: 24),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            'Or enter IP address',
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.6),
-              fontSize: 12,
-              fontWeight: FontWeight.w500,
-              letterSpacing: 0.5,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              Expanded(
-                child: Container(
-                  height: 44,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(12),
-                    color: Colors.white.withValues(alpha: 0.06),
-                    border: Border.all(
-                      color: _manualConnectError != null
-                          ? Colors.red.withValues(alpha: 0.3)
-                          : _teal.withValues(alpha: 0.15),
-                      width: 1,
-                    ),
-                  ),
-                  child: TextField(
-                    controller: _manualIpController,
-                    style: TextStyle(
-                      color: CelestialColors.textPrimary,
-                      fontSize: 14,
-                    ),
-                    decoration: InputDecoration(
-                      hintText: '192.168.1.100',
-                      hintStyle: TextStyle(
-                        color: CelestialColors.textSecondary
-                            .withValues(alpha: 0.4),
-                        fontSize: 14,
-                      ),
-                      border: InputBorder.none,
-                      contentPadding:
-                          const EdgeInsets.symmetric(horizontal: 14),
-                    ),
-                    onSubmitted: (_) => _connectManualIp(),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              GestureDetector(
-                onTap: _isManualConnecting ? null : _connectManualIp,
-                child: Container(
-                  width: 44,
-                  height: 44,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(12),
-                    color: _teal.withValues(alpha: 0.15),
-                    border: Border.all(
-                      color: _teal.withValues(alpha: 0.2),
-                      width: 1,
-                    ),
-                  ),
-                  child: _isManualConnecting
-                      ? Center(
-                          child: SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: _teal.withValues(alpha: 0.6),
-                            ),
-                          ),
-                        )
-                      : Icon(
-                          Icons.arrow_forward,
-                          color: _teal.withValues(alpha: 0.8),
-                          size: 20,
-                        ),
-                ),
-              ),
-            ],
-          ),
-          if (_manualConnectError != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Text(
-                _manualConnectError!,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: Colors.red.withValues(alpha: 0.7),
-                  fontSize: 12,
-                ),
-              ),
-            ),
+          // Manual IP sits with the "find an existing box" family
+          _buildCompactManualIp(),
+          if (!keyboardOpen && !kIsWeb) ...[
+            const SizedBox(height: 14),
+            _buildPairSectionDivider(),
+            const SizedBox(height: 10),
+            _buildCompactBleCard(),
+          ],
         ],
       ),
     );
   }
+
+  Widget _buildPairSectionDivider() {
+    return Row(
+      children: [
+        Expanded(
+          child: Container(
+            height: 0.5,
+            color: CelestialColors.textSecondary.withValues(alpha: 0.14),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Text(
+            'FIRST TIME\u2009?',
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.42),
+              fontSize: 9.5,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 1.5,
+            ),
+          ),
+        ),
+        Expanded(
+          child: Container(
+            height: 0.5,
+            color: CelestialColors.textSecondary.withValues(alpha: 0.14),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCompactBleCard() {
+    return GestureDetector(
+      onTap: _openBleProvisioning,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              _teal.withValues(alpha: 0.12),
+              _tealDeep.withValues(alpha: 0.06),
+            ],
+          ),
+          border: Border.all(color: _teal.withValues(alpha: 0.22)),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: _teal.withValues(alpha: 0.15),
+                border: Border.all(color: _teal.withValues(alpha: 0.22)),
+              ),
+              child: Icon(
+                Icons.add_rounded,
+                color: _teal.withValues(alpha: 0.92),
+                size: 16,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Set up a new Rhythm Box',
+                    style: TextStyle(
+                      color: CelestialColors.textPrimary,
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.1,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Guided setup in a few taps',
+                    style: TextStyle(
+                      color: CelestialColors.textSecondary
+                          .withValues(alpha: 0.58),
+                      fontSize: 11,
+                      letterSpacing: 0.1,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Icon(
+              Icons.arrow_forward_rounded,
+              color: _teal.withValues(alpha: 0.6),
+              size: 18,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCompactManualIp() {
+    final hasError = _manualConnectError != null;
+    final isBusy = _isManualConnecting;
+
+    return Container(
+      height: 46,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        color: Colors.white.withValues(alpha: 0.04),
+        border: Border.all(
+          color: hasError
+              ? Colors.red.withValues(alpha: 0.4)
+              : _manualIpFocus.hasFocus
+                  ? _teal.withValues(alpha: 0.55)
+                  : Colors.white.withValues(alpha: 0.10),
+          width: 1,
+        ),
+      ),
+      child: Row(
+        children: [
+          const SizedBox(width: 12),
+          Icon(
+            Icons.dns_rounded,
+            color: _manualIpFocus.hasFocus
+                ? _teal.withValues(alpha: 0.9)
+                : CelestialColors.textSecondary.withValues(alpha: 0.55),
+            size: 16,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: TextField(
+              controller: _manualIpController,
+              focusNode: _manualIpFocus,
+              enabled: !isBusy,
+              keyboardType: TextInputType.url,
+              textInputAction: TextInputAction.go,
+              autocorrect: false,
+              enableSuggestions: false,
+              style: TextStyle(
+                color: CelestialColors.textPrimary,
+                fontSize: 14,
+                fontFamily: 'monospace',
+                letterSpacing: 0.4,
+              ),
+              decoration: InputDecoration(
+                isDense: true,
+                hintText: hasError
+                    ? _manualConnectError
+                    : 'Connect by IP (e.g. 192.168.1.100)',
+                hintStyle: TextStyle(
+                  color: hasError
+                      ? Colors.red.withValues(alpha: 0.7)
+                      : CelestialColors.textSecondary
+                          .withValues(alpha: 0.42),
+                  fontSize: 12.5,
+                  fontFamily: hasError ? null : 'monospace',
+                ),
+                border: InputBorder.none,
+                contentPadding: EdgeInsets.zero,
+              ),
+              onChanged: (_) {
+                if (_manualConnectError != null) {
+                  setState(() => _manualConnectError = null);
+                }
+              },
+              onSubmitted: (_) => _submitManualIp(),
+            ),
+          ),
+          GestureDetector(
+            onTap: isBusy ? null : _submitManualIp,
+            behavior: HitTestBehavior.opaque,
+            child: Container(
+              width: 44,
+              height: 46,
+              alignment: Alignment.center,
+              child: isBusy
+                  ? SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.6,
+                        color: _teal.withValues(alpha: 0.75),
+                      ),
+                    )
+                  : Icon(
+                      Icons.arrow_forward_rounded,
+                      color: _teal.withValues(alpha: 0.85),
+                      size: 18,
+                    ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Hue-only primary button ────────────────────────────────────────────────
 
   Widget _buildConnectButton() {
     return Padding(
@@ -1050,3 +1208,4 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     );
   }
 }
+

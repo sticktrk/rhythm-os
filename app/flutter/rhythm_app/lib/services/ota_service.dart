@@ -399,6 +399,14 @@ class OtaService extends ChangeNotifier {
           return;
         }
 
+        if (_shouldInferCompletedRestart(
+          status,
+          expectingReconnect: expectingReconnect,
+        )) {
+          _markComplete(_completedVersionForStatus(status));
+          return;
+        }
+
         if (status.state == 'restarting') {
           expectingReconnect = true;
         }
@@ -579,17 +587,43 @@ class OtaService extends ChangeNotifier {
   }
 
   bool _isUpdatedVersion(String version) {
-    final normalized = _normalizeVersion(version);
+    final normalized = _canonicalizeVersion(version);
     if (normalized == null) return false;
 
-    final expected =
-        _normalizeVersion(_targetVersion) ?? _normalizeVersion(_latestVersion);
+    final expected = _canonicalizeVersion(_targetVersion) ??
+        _canonicalizeVersion(_latestVersion);
     if (expected != null && normalized == expected) {
       return true;
     }
 
-    final previous = _normalizeVersion(_preUpdateVersion);
+    final previous = _canonicalizeVersion(_preUpdateVersion);
     return previous != null && normalized != previous;
+  }
+
+  bool _shouldInferCompletedRestart(
+    _OtaStatusPayload status, {
+    required bool expectingReconnect,
+  }) {
+    if (!expectingReconnect) return false;
+    if (status.state != 'idle' && status.state != 'ready') return false;
+    if (status.updateAvailable) return false;
+
+    final lastError = status.lastError?.trim();
+    if (lastError != null && lastError.isNotEmpty) return false;
+
+    return true;
+  }
+
+  String _completedVersionForStatus(_OtaStatusPayload status) {
+    final current = _normalizeVersion(status.currentVersion);
+    if (_isUpdatedVersion(status.currentVersion) && current != null) {
+      return current;
+    }
+
+    return _normalizeVersion(status.targetVersion) ??
+        _normalizeVersion(status.latestVersion) ??
+        current ??
+        _currentVersion;
   }
 
   bool _isTerminalState(OtaState state) =>
@@ -650,6 +684,23 @@ class OtaService extends ChangeNotifier {
     if (version == null) return null;
     final trimmed = version.trim();
     return trimmed.isEmpty ? null : trimmed;
+  }
+
+  String? _canonicalizeVersion(String? version) {
+    final normalized = _normalizeVersion(version);
+    if (normalized == null) return null;
+
+    var canonical = normalized;
+    if (canonical.startsWith('v') || canonical.startsWith('V')) {
+      canonical = canonical.substring(1);
+    }
+
+    final metadataIndex = canonical.indexOf('+');
+    if (metadataIndex >= 0) {
+      canonical = canonical.substring(0, metadataIndex);
+    }
+
+    return canonical;
   }
 
   /// Reset the OTA UI back to idle.

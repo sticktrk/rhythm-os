@@ -15,6 +15,10 @@ import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
+import '../backend/auth/auth_user.dart';
+import '../services/cloud_backed_server_api.dart';
+import '../services/cloud_backup_service.dart';
+import '../services/auth_service.dart';
 import '../services/hue/hue_service_locator.dart';
 import 'home_provider.dart';
 import 'room_provider.dart';
@@ -40,6 +44,7 @@ class ServerSyncProvider extends ChangeNotifier {
   final RhythmConnection _connection;
   final RoomProvider _roomProvider;
   final HomeProvider _homeProvider;
+  final CloudBackupService _cloudBackupService = CloudBackupService.instance;
 
   StreamSubscription<RhythmHello>? _helloSub;
   StreamSubscription<RhythmRoomState>? _rhythmStateSub;
@@ -49,6 +54,7 @@ class ServerSyncProvider extends ChangeNotifier {
   StreamSubscription<void>? _newRoomsSub;
   StreamSubscription<Map<String, dynamic>>? _triageChangedSub;
   StreamSubscription<RhythmConnectionState>? _connectionStateSub;
+  StreamSubscription<AuthUser?>? _authStateSub;
 
   /// Suppresses push-back when receiving rhythm_state from server.
   bool _receivingFromServer = false;
@@ -311,7 +317,12 @@ class ServerSyncProvider extends ChangeNotifier {
   RhythmConnection get connection => _connection;
 
   /// The server API client (available after connect).
-  RhythmServerApi get api => _connection.api;
+  ///
+  /// Mutating methods schedule a debounced cloud snapshot for signed-in users.
+  CloudBackedServerApi get api => CloudBackedServerApi(
+        delegate: _connection.api,
+        scheduleCloudCapture: _scheduleCloudBackupCapture,
+      );
 
   ServerSyncProvider({
     required RhythmConnection connection,
@@ -336,6 +347,11 @@ class ServerSyncProvider extends ChangeNotifier {
     // Listen for connection state changes
     _connectionStateSub =
         _connection.connectionStateStream.listen(_onConnectionStateChanged);
+
+    // If the user upgrades from anonymous while a server is already connected,
+    // schedule the initial cloud snapshot immediately instead of waiting for
+    // the next hello or settings mutation.
+    _authStateSub = AuthService().authStateChanges.listen(_onAuthStateChanged);
   }
 
   /// Connect to server if a hub is available.
@@ -488,10 +504,14 @@ class ServerSyncProvider extends ChangeNotifier {
     }
 
     // Fetch initial triage count (non-blocking).
-    _connection.api.getTriageCount().then((data) {
+    api.getTriageCount().then((data) {
       if (data != null) _onTriageChanged(data);
     });
 
+    _scheduleCloudBackupCapture(
+      delay: const Duration(seconds: 3),
+      reason: 'hello_sync',
+    );
     notifyListeners();
   }
 
@@ -828,7 +848,7 @@ class ServerSyncProvider extends ChangeNotifier {
     if (!_connection.connected || _receivingFromServer) return;
     debugPrint(
         'ServerSync: pushRoomPreferences $roomId rhythmEnabled=$rhythmEnabled disabled=$disabled state=${state?.wireValue}');
-    _connection.api.roomPreferencesSet(
+    api.roomPreferencesSet(
       roomId: roomId,
       rhythmEnabled: rhythmEnabled,
       disabled: disabled,
@@ -842,7 +862,7 @@ class ServerSyncProvider extends ChangeNotifier {
   void pushBatchRoomPreferences(List<Map<String, dynamic>> items) {
     if (!_connection.connected || _receivingFromServer || items.isEmpty) return;
     debugPrint('ServerSync: pushBatchRoomPreferences (${items.length} rooms)');
-    _connection.api.roomPreferencesBatchSet(items);
+    api.roomPreferencesBatchSet(items);
   }
 
   /// Reset a single room to its current adaptive curve position.
@@ -911,7 +931,7 @@ class ServerSyncProvider extends ChangeNotifier {
     if (!_connection.connected) return;
     _activeMode = mode;
     notifyListeners();
-    await _connection.api.setActiveMode(mode);
+    await api.setActiveMode(mode);
     await fullRefresh();
   }
 
@@ -931,7 +951,7 @@ class ServerSyncProvider extends ChangeNotifier {
     }).toList();
     _modeTransitions = newList;
     notifyListeners();
-    final success = await _connection.api.setTransitions(newList);
+    final success = await api.setTransitions(newList);
     if (success) await fullRefresh();
     return success;
   }
@@ -939,7 +959,7 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Run a saved transition by ID.
   Future<bool> dispatchRunTransition(String transitionId) async {
     if (!_connection.connected) return false;
-    final success = await _connection.api.triggerTransition(transitionId);
+    final success = await api.triggerTransition(transitionId);
     if (success) {
       await fullRefresh();
     }
@@ -962,7 +982,7 @@ class ServerSyncProvider extends ChangeNotifier {
   Future<void> triggerServerSync() async {
     if (!_connection.connected) return;
     debugPrint('ServerSync: Triggering server-side sync');
-    await _connection.api.triggerSync();
+    await api.triggerSync();
     await _connection.reconnect();
   }
 
@@ -974,14 +994,18 @@ class ServerSyncProvider extends ChangeNotifier {
     String? timezoneName,
   }) {
     if (!_connection.connected) return;
-    _connection.api.locationSet(
-        lat: lat, lon: lon, utcOffset: utcOffset, timezoneName: timezoneName);
+    api.locationSet(
+      lat: lat,
+      lon: lon,
+      utcOffset: utcOffset,
+      timezoneName: timezoneName,
+    );
   }
 
   /// Push per-room motion timeout to the server.
   void pushMotionTimeout(String roomId, int timeoutSecs) {
     if (!_connection.connected) return;
-    _connection.api.motionTimeoutSet(roomId: roomId, timeoutSecs: timeoutSecs);
+    api.motionTimeoutSet(roomId: roomId, timeoutSecs: timeoutSecs);
   }
 
   // ============================================================================
@@ -1001,7 +1025,7 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Sends empty credentials — server fills them from its environment.
   Future<bool> configureAddonHaHub() async {
     if (!_connection.connected) return false;
-    await _connection.api.hubCredentials(
+    await api.hubCredentials(
       hubType: 'homeassistant',
       address: '',
       credentials: {},
@@ -1016,14 +1040,14 @@ class ServerSyncProvider extends ChangeNotifier {
   Future<void> disconnectHub() async {
     if (!_connection.connected) return;
     debugPrint('ServerSync: Sending hub disconnect to server');
-    await _connection.api.hubDisconnect();
+    await api.hubDisconnect();
   }
 
   /// Disconnect a single hub by type + address.
   Future<void> disconnectOneHub(String hubType, String address) async {
     if (!_connection.connected) return;
     debugPrint('ServerSync: Disconnecting hub $hubType @ $address');
-    await _connection.api.hubDisconnectOne(hubType: hubType, address: address);
+    await api.hubDisconnectOne(hubType: hubType, address: address);
   }
 
   Future<void> _pushHubCredentialsForSource(RoomSourceDto source) async {
@@ -1040,7 +1064,7 @@ class ServerSyncProvider extends ChangeNotifier {
 
     debugPrint(
         'ServerSync: Pushing ${hub.typeName} credentials after source change');
-    await _connection.api.hubCredentials(
+    await api.hubCredentials(
       hubType: _hubTypeWireName(hubType),
       address: '${hub.endpoint.host}:${hub.endpoint.port}',
       credentials: credentials,
@@ -1146,16 +1170,22 @@ class ServerSyncProvider extends ChangeNotifier {
   void _pushLocationWithIanaTimezone(HomeLocation loc) {
     final homeTz = _homeProvider.currentHome?.timezone;
     if (_isIanaTimezone(homeTz)) {
-      _connection.api.locationSet(
-          lat: loc.latitude, lon: loc.longitude, timezoneName: homeTz);
+      api.locationSet(
+        lat: loc.latitude,
+        lon: loc.longitude,
+        timezoneName: homeTz,
+      );
     } else {
       // Resolve proper IANA name asynchronously.
       FlutterTimezone.getLocalTimezone().then((tz) {
         final ianaTz = tz.identifier;
         debugPrint(
             'ServerSync: Resolved IANA timezone: $ianaTz (was: $homeTz)');
-        _connection.api.locationSet(
-            lat: loc.latitude, lon: loc.longitude, timezoneName: ianaTz);
+        api.locationSet(
+          lat: loc.latitude,
+          lon: loc.longitude,
+          timezoneName: ianaTz,
+        );
 
         // Also fix the Home model so future syncs don't need this fallback.
         final home = _homeProvider.currentHome;
@@ -1168,10 +1198,36 @@ class ServerSyncProvider extends ChangeNotifier {
       }).catchError((e) {
         debugPrint(
             'ServerSync: FlutterTimezone failed: $e, using home timezone');
-        _connection.api.locationSet(
-            lat: loc.latitude, lon: loc.longitude, timezoneName: homeTz);
+        api.locationSet(
+          lat: loc.latitude,
+          lon: loc.longitude,
+          timezoneName: homeTz,
+        );
       });
     }
+  }
+
+  void _scheduleCloudBackupCapture({
+    Duration delay = const Duration(seconds: 2),
+    String reason = 'unspecified',
+  }) {
+    final serverHub = _serverHub;
+    if (serverHub == null) return;
+
+    _cloudBackupService.scheduleCapture(
+      serverHub: serverHub,
+      home: _homeProvider.currentHome,
+      delay: delay,
+      reason: reason,
+    );
+  }
+
+  void _onAuthStateChanged(AuthUser? user) {
+    if (user == null || user.isAnonymous) return;
+    _scheduleCloudBackupCapture(
+      delay: const Duration(seconds: 2),
+      reason: 'auth_state_signed_in',
+    );
   }
 
   // ============================================================================
@@ -1214,6 +1270,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _newRoomsSub?.cancel();
     _triageChangedSub?.cancel();
     _connectionStateSub?.cancel();
+    _authStateSub?.cancel();
     super.dispose();
   }
 }

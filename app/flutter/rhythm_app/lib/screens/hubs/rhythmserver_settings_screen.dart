@@ -151,12 +151,14 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   bool _checkingHealth = true;
   bool _isResetting = false;
   bool _isRebooting = false;
+  bool _isFactoryResetting = false;
   bool _isRefreshing = false;
   bool _isConfiguringHub = false;
   OtaState? _lastHandledOtaState;
 
   // Per-hub-type device summaries from /api/devices/canonical
   Map<String, String> _hubSummaries = {};
+  bool _hubSummariesLoaded = false;
 
   late AnimationController _glowController;
   late Animation<double> _glowAnimation;
@@ -310,7 +312,10 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       summaries[entry.key] = parts.isEmpty ? 'No devices' : parts.join(', ');
     }
 
-    setState(() => _hubSummaries = summaries);
+    setState(() {
+      _hubSummaries = summaries;
+      _hubSummariesLoaded = true;
+    });
   }
 
   Future<void> _handleRefresh() async {
@@ -460,8 +465,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                       ..._buildPerHubSections(http),
                       _buildHubPairingSuggestions(),
                       const SizedBox(height: 16),
-                      _buildDeviceInfoSection(),
-                      const SizedBox(height: 16),
                       _buildVersionSection(),
                       const SizedBox(height: 16),
                       _buildConnectionStatusSection(http),
@@ -473,6 +476,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                         const SizedBox(height: 12),
                       ],
                       _buildResetButton(),
+                      const SizedBox(height: 12),
+                      _buildFactoryResetButton(),
                       const SizedBox(height: 40),
                     ],
                   ),
@@ -529,7 +534,13 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   }
 
   Widget _buildHeroSection(RhythmConnection http) {
+    final connState = http.connectionState;
     final fullyOffline = !http.connected && !_isOnline;
+    final statusText = _connectionStatusText(connState);
+    final statusColor = _connectionStatusColor(connState);
+    final isLive = connState == RhythmConnectionState.connected;
+    final isWorking = connState == RhythmConnectionState.connecting ||
+        connState == RhythmConnectionState.reconnecting;
 
     return AnimatedBuilder(
       animation: _glowAnimation,
@@ -538,7 +549,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
         final glowIntensity = fullyOffline ? 0.15 : _glowAnimation.value;
 
         return Container(
-          padding: const EdgeInsets.all(24),
+          padding: const EdgeInsets.fromLTRB(24, 28, 24, 24),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(24),
             gradient: RadialGradient(
@@ -556,38 +567,90 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
           ),
           child: Column(
             children: [
-              Container(
-                width: 72,
-                height: 72,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: fullyOffline
-                        ? [
-                            _teal.withValues(alpha: 0.3),
-                            _tealDeep.withValues(alpha: 0.2),
-                          ]
-                        : [_teal, _tealDeep],
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: _teal.withValues(alpha: glowIntensity),
-                      blurRadius: 24,
-                      spreadRadius: 2,
+              SizedBox(
+                width: 96,
+                height: 96,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    // Outer halo ring tinted by connection state
+                    Container(
+                      width: 96,
+                      height: 96,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: statusColor.withValues(
+                              alpha: isWorking ? 0.55 : (isLive ? 0.45 : 0.2)),
+                          width: 1.2,
+                        ),
+                      ),
+                    ),
+                    // Hero disc
+                    Container(
+                      width: 72,
+                      height: 72,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: fullyOffline
+                              ? [
+                                  _teal.withValues(alpha: 0.3),
+                                  _tealDeep.withValues(alpha: 0.2),
+                                ]
+                              : [_teal, _tealDeep],
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: _teal.withValues(alpha: glowIntensity),
+                            blurRadius: 24,
+                            spreadRadius: 2,
+                          ),
+                        ],
+                      ),
+                      child: Icon(
+                        _heroIcon,
+                        color: fullyOffline
+                            ? Colors.white.withValues(alpha: 0.5)
+                            : Colors.white,
+                        size: 36,
+                      ),
+                    ),
+                    // Status pip — anchored to the halo ring
+                    Positioned(
+                      top: 4,
+                      right: 4,
+                      child: Container(
+                        width: 14,
+                        height: 14,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: statusColor,
+                          border: Border.all(
+                            color: CelestialColors.backgroundCard,
+                            width: 2,
+                          ),
+                          boxShadow: isLive || isWorking
+                              ? [
+                                  BoxShadow(
+                                    color: statusColor.withValues(
+                                        alpha: isWorking
+                                            ? _glowAnimation.value
+                                            : 0.6),
+                                    blurRadius: 8,
+                                    spreadRadius: 1,
+                                  ),
+                                ]
+                              : null,
+                        ),
+                      ),
                     ),
                   ],
                 ),
-                child: Icon(
-                  _heroIcon,
-                  color: fullyOffline
-                      ? Colors.white.withValues(alpha: 0.5)
-                      : Colors.white,
-                  size: 36,
-                ),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 18),
               Text(
                 widget.hub.name,
                 style: TextStyle(
@@ -602,10 +665,17 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               Text(
                 widget.hub.endpoint.host,
                 style: TextStyle(
-                  color: CelestialColors.textSecondary.withValues(alpha: 0.8),
-                  fontSize: 13,
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+                  fontSize: 12,
                   fontFamily: 'monospace',
+                  letterSpacing: 0.3,
                 ),
+              ),
+              const SizedBox(height: 12),
+              _buildHeroStatusPill(
+                statusText: statusText,
+                statusColor: statusColor,
+                isWorking: isWorking,
               ),
             ],
           ),
@@ -614,17 +684,65 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     );
   }
 
-  // ─── Sections ──────────────────────────────────────────────
-
-  Widget _buildDeviceInfoSection() {
-    return _buildSection(
-      title: 'DEVICE INFO',
-      children: [
-        _buildInfoRow('IP Address', widget.hub.endpoint.host),
-        if (!_isHaAddon) _buildInfoRow('mDNS', '${widget.hub.name}.local'),
-      ],
+  Widget _buildHeroStatusPill({
+    required String statusText,
+    required Color statusColor,
+    required bool isWorking,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(999),
+        color: statusColor.withValues(alpha: 0.10),
+        border: Border.all(
+          color: statusColor.withValues(alpha: 0.30),
+          width: 1,
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (isWorking)
+            SizedBox(
+              width: 10,
+              height: 10,
+              child: CircularProgressIndicator(
+                strokeWidth: 1.5,
+                valueColor: AlwaysStoppedAnimation(statusColor),
+              ),
+            )
+          else
+            Container(
+              width: 6,
+              height: 6,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: statusColor,
+                boxShadow: [
+                  BoxShadow(
+                    color: statusColor.withValues(alpha: 0.5),
+                    blurRadius: 4,
+                    spreadRadius: 0.5,
+                  ),
+                ],
+              ),
+            ),
+          const SizedBox(width: 8),
+          Text(
+            statusText,
+            style: TextStyle(
+              color: statusColor,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.4,
+            ),
+          ),
+        ],
+      ),
     );
   }
+
+  // ─── Sections ──────────────────────────────────────────────
 
   Widget _buildVersionSection() {
     final syncProvider = context.watch<ServerSyncProvider>();
@@ -1206,7 +1324,10 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     final connected = hubInfo['connected'] as bool? ?? false;
     final label = _hubLabel(type);
     final hubColor = _hubColor(type);
-    final deviceSummary = _hubSummaries[type] ?? 'Loading...';
+    final deviceSummary = _hubSummaries[type] ??
+        (_hubSummariesLoaded
+            ? (connected ? 'Connected · no devices' : 'No devices')
+            : 'Loading…');
 
     return GestureDetector(
       onTap: () => _HubDetailScreen.show(context, hubInfo: hubInfo),
@@ -1726,6 +1847,333 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     );
   }
 
+  // ─── Factory Reset ─────────────────────────────────────────
+
+  Future<void> _handleFactoryReset() async {
+    final hubName = widget.hub.name;
+
+    // Step 1: explain what will happen.
+    final acknowledged = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: CelestialColors.backgroundCard,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+          side: BorderSide(color: Colors.red.shade400.withValues(alpha: 0.4)),
+        ),
+        titlePadding: const EdgeInsets.fromLTRB(24, 24, 24, 8),
+        title: Row(
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.red.shade400.withValues(alpha: 0.15),
+                border: Border.all(
+                    color: Colors.red.shade400.withValues(alpha: 0.4)),
+              ),
+              child: Icon(Icons.warning_amber_rounded,
+                  color: Colors.red.shade400, size: 20),
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text(
+                'Factory Reset',
+                style: TextStyle(
+                  color: CelestialColors.textPrimary,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'This will erase all settings on $hubName and clear its Wi-Fi credentials. The device will restart in setup mode and you’ll need to re-pair it from scratch.',
+              style: const TextStyle(
+                color: CelestialColors.textSecondary,
+                fontSize: 14,
+                height: 1.4,
+              ),
+            ),
+            const SizedBox(height: 16),
+            _buildResetBullet('All paired hubs will be removed'),
+            _buildResetBullet('Wi-Fi credentials will be cleared'),
+            _buildResetBullet('Device returns to BLE setup mode'),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(
+              'Cancel',
+              style: TextStyle(color: CelestialColors.textSecondary),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(
+              'Continue',
+              style: TextStyle(color: Colors.red.shade400),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (acknowledged != true || !mounted) return;
+
+    // Step 2: hard confirmation, type-to-confirm.
+    final confirmed = await _showFactoryResetConfirm(hubName);
+    if (confirmed != true || !mounted) return;
+
+    AnalyticsService().logRhythmServerReset(wasOnline: _isOnline);
+    setState(() => _isFactoryResetting = true);
+
+    final success = await _client.resetWifi();
+    if (!mounted) return;
+
+    if (!success) {
+      setState(() => _isFactoryResetting = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to reach $hubName for factory reset.'),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: Colors.red.shade400,
+        ),
+      );
+      return;
+    }
+
+    // Tear down the local pairing — device is going away to provisioning mode.
+    if (mounted) {
+      await context.read<RoomProvider>().clearAllRooms();
+    }
+    if (mounted) {
+      context.read<ServerSyncProvider>().connection.disconnect();
+    }
+    if (mounted) {
+      await context.read<HomeProvider>().deleteHub(widget.hub.id);
+    }
+
+    if (mounted) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+              '$hubName factory reset. It will reappear in setup mode shortly.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  Future<bool?> _showFactoryResetConfirm(String hubName) {
+    final controller = TextEditingController();
+    const phrase = 'RESET';
+    return showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) {
+          final matches = controller.text.trim().toUpperCase() == phrase;
+          return AlertDialog(
+            backgroundColor: CelestialColors.backgroundCard,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+              side:
+                  BorderSide(color: Colors.red.shade400.withValues(alpha: 0.4)),
+            ),
+            title: const Text(
+              'Confirm factory reset',
+              style: TextStyle(
+                color: CelestialColors.textPrimary,
+                fontSize: 17,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Type RESET to wipe $hubName.',
+                  style: const TextStyle(
+                    color: CelestialColors.textSecondary,
+                    fontSize: 14,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                TextField(
+                  controller: controller,
+                  autofocus: true,
+                  textCapitalization: TextCapitalization.characters,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z]')),
+                    LengthLimitingTextInputFormatter(8),
+                  ],
+                  style: const TextStyle(
+                    color: CelestialColors.textPrimary,
+                    fontFamily: 'monospace',
+                    fontSize: 16,
+                    letterSpacing: 2,
+                  ),
+                  decoration: InputDecoration(
+                    hintText: phrase,
+                    hintStyle: TextStyle(
+                      color:
+                          CelestialColors.textSecondary.withValues(alpha: 0.4),
+                      letterSpacing: 2,
+                      fontFamily: 'monospace',
+                    ),
+                    filled: true,
+                    fillColor: Colors.red.shade400.withValues(alpha: 0.06),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide(
+                          color: Colors.red.shade400.withValues(alpha: 0.3)),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide(
+                          color: Colors.red.shade400.withValues(alpha: 0.7)),
+                    ),
+                  ),
+                  onChanged: (_) => setLocal(() {}),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: Text(
+                  'Cancel',
+                  style: TextStyle(color: CelestialColors.textSecondary),
+                ),
+              ),
+              TextButton(
+                onPressed: matches ? () => Navigator.of(ctx).pop(true) : null,
+                child: Text(
+                  'Erase device',
+                  style: TextStyle(
+                    color: matches
+                        ? Colors.red.shade400
+                        : CelestialColors.textSecondary.withValues(alpha: 0.4),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildResetBullet(String text) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Container(
+              width: 4,
+              height: 4,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.red.shade400.withValues(alpha: 0.7),
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(
+                color: CelestialColors.textPrimary.withValues(alpha: 0.85),
+                fontSize: 13,
+                height: 1.35,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFactoryResetButton() {
+    final disabled = _isFactoryResetting || _isResetting || _isRebooting;
+    final color = Colors.red.shade400;
+
+    return GestureDetector(
+      onTap: disabled ? null : _handleFactoryReset,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 16),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(14),
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              color.withValues(alpha: disabled ? 0.10 : 0.22),
+              color.withValues(alpha: disabled ? 0.04 : 0.10),
+            ],
+          ),
+          border: Border.all(
+            color: color.withValues(alpha: disabled ? 0.25 : 0.55),
+            width: 1.2,
+          ),
+          boxShadow: disabled
+              ? null
+              : [
+                  BoxShadow(
+                    color: color.withValues(alpha: 0.18),
+                    blurRadius: 14,
+                    spreadRadius: -2,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            if (_isFactoryResetting)
+              SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation(color),
+                ),
+              )
+            else
+              Icon(Icons.restart_alt_rounded, color: color, size: 20),
+            const SizedBox(width: 10),
+            Text(
+              _isFactoryResetting
+                  ? 'Resetting…'
+                  : 'Factory Reset Device',
+              style: TextStyle(
+                color: color,
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.4,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // ─── Shared UI ─────────────────────────────────────────────
 
   Widget _buildSection({
@@ -1752,42 +2200,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     );
   }
 
-  Widget _buildInfoRow(String label, String value) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 1),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: CelestialColors.backgroundCard,
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text(
-            label,
-            style: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.8),
-              fontSize: 14,
-            ),
-          ),
-          const SizedBox(width: 12),
-          Flexible(
-            child: Text(
-              value,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.end,
-              style: const TextStyle(
-                color: CelestialColors.textPrimary,
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-                fontFamily: 'monospace',
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 class _DeviceCounts {

@@ -362,6 +362,14 @@ class _TriageScreenState extends State<TriageScreen> {
     }
   }
 
+  Future<void> _refreshRoomsAfterTopologyChange() async {
+    try {
+      await context.read<ServerSyncProvider>().connection.reconnect();
+    } catch (e, st) {
+      debugPrint('TriageScreen: topology refresh failed: $e\n$st');
+    }
+  }
+
   Future<void> _resolveNew(Map<String, dynamic> entry) async {
     debugPrint(
         'TriageScreen: _resolveNew called (busy=$_busy, entryId=${entry['id']})');
@@ -371,6 +379,9 @@ class _TriageScreenState extends State<TriageScreen> {
       final entryId = entry['id']?.toString() ?? '';
       final http = context.read<ServerSyncProvider>().api;
       await http.resolveTriageNew(entryId);
+      if ((entry['kind'] as String?) == 'room_binding') {
+        await _refreshRoomsAfterTopologyChange();
+      }
       AnalyticsService().logTriageResolution(
         kind: entry['kind'] as String? ?? 'device_merge',
         action: 'keep_separate',
@@ -400,6 +411,7 @@ class _TriageScreenState extends State<TriageScreen> {
       final entryId = entry['id']?.toString() ?? '';
       final http = context.read<ServerSyncProvider>().api;
       await http.resolveTriageBind(entryId, targetRoomId: targetRoomId);
+      await _refreshRoomsAfterTopologyChange();
       AnalyticsService().logTriageResolution(
         kind: 'room_binding',
         action: 'merge',
