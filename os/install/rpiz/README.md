@@ -20,6 +20,18 @@ cargo install cross
 ./scripts/build-server.sh --release --target rpiz
 ```
 
+To include the direct native Matter bridge in `rhythm-chipd`, point the build at
+target-specific `connectedhomeip` artifacts first:
+
+```bash
+RHYTHM_CHIP_OUT_DIR=/path/to/connectedhomeip/out/<rpiz-target> \
+./scripts/build-server.sh --release --target rpiz
+```
+
+For cross-target builds, `RHYTHM_CHIP_ROOT` alone is not enough; the bridge
+needs a target-matched `libCHIP.a` via `RHYTHM_CHIP_OUT_DIR` or
+`RHYTHM_CHIP_LIB_DIR`.
+
 That produces:
 
 ```bash

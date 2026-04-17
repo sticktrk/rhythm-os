@@ -206,6 +206,37 @@ setup_cross_env() {
     esac
 }
 
+CHIPD_FEATURE_ARGS=()
+
+should_enable_chip_ffi() {
+    local target="$1"
+
+    if [ -n "${RHYTHM_CHIPD_FEATURES:-}" ]; then
+        return 0
+    fi
+
+    if [ "$target" = "native" ]; then
+        [ -n "${RHYTHM_CHIP_ROOT:-}" ] || [ -n "${RHYTHM_CHIP_OUT_DIR:-}" ] || [ -n "${RHYTHM_CHIP_LIB_DIR:-}" ]
+        return $?
+    fi
+
+    [ -n "${RHYTHM_CHIP_OUT_DIR:-}" ] || [ -n "${RHYTHM_CHIP_LIB_DIR:-}" ]
+}
+
+collect_chipd_feature_args() {
+    local target="$1"
+    CHIPD_FEATURE_ARGS=()
+
+    if [ -n "${RHYTHM_CHIPD_FEATURES:-}" ]; then
+        CHIPD_FEATURE_ARGS+=(--features "$RHYTHM_CHIPD_FEATURES")
+        return
+    fi
+
+    if should_enable_chip_ffi "$target"; then
+        CHIPD_FEATURE_ARGS+=(--features chip-ffi)
+    fi
+}
+
 should_use_cross() {
     [ "$1" = "rpiz" ] && [ "$(uname -s)" = "Linux" ] && command -v cross &>/dev/null
 }
@@ -251,12 +282,13 @@ build_for_target() {
     for bin in "${bins[@]}"; do
         cargo_bin_flags+=(--bin "$bin")
     done
+    collect_chipd_feature_args "$target"
 
     RHYTHM_BUILD_VERSION="$BUILD_VERSION" \
         "$builder" build $CARGO_FLAGS -p "$package" --target "$rust_target" "${cargo_bin_flags[@]}"
 
     RHYTHM_BUILD_VERSION="$BUILD_VERSION" \
-        "$builder" build $CARGO_FLAGS -p rhythm-chipd --target "$rust_target" --bin rhythm-chipd
+        "$builder" build $CARGO_FLAGS -p rhythm-chipd --target "$rust_target" --bin rhythm-chipd "${CHIPD_FEATURE_ARGS[@]}"
 
     # Copy to dist
     local output_dir="$PROJECT_ROOT/dist/bin/$target"
@@ -288,11 +320,12 @@ build_native() {
     for bin in "${bins[@]}"; do
         cargo_bin_flags+=(--bin "$bin")
     done
+    collect_chipd_feature_args "native"
 
     RHYTHM_BUILD_VERSION="$BUILD_VERSION" \
         cargo build $CARGO_FLAGS -p rhythm-server "${cargo_bin_flags[@]}"
     RHYTHM_BUILD_VERSION="$BUILD_VERSION" \
-        cargo build $CARGO_FLAGS -p rhythm-chipd --bin rhythm-chipd
+        cargo build $CARGO_FLAGS -p rhythm-chipd --bin rhythm-chipd "${CHIPD_FEATURE_ARGS[@]}"
 
     if [ "$RUN" = true ]; then
         echo "Built: target/$PROFILE/{rhythm-server,rhythm-chipd}"

@@ -78,6 +78,7 @@ Build the native Rhythm OS binaries and package them into `dist/bin/...`.
 ./scripts/build-server.sh --release                    # Release build, native target
 ./scripts/build-server.sh --release --target rpiz      # Raspberry Pi Zero / Zero W
 ./scripts/build-server.sh --release --target all-linux # All Linux targets
+RHYTHM_CHIP_OUT_DIR=/path/to/connectedhomeip/out/rpiz ./scripts/build-server.sh --release --target rpiz
 ```
 
 **Options:**
@@ -91,6 +92,7 @@ Build the native Rhythm OS binaries and package them into `dist/bin/...`.
 
 **Output:** `dist/bin/{target}/{rhythm-server,rhythm-cli}`
 For `rpiz`, the build comes from the `rhythm-linux-embedded` crate and writes both `dist/bin/rpiz/rhythm-linux-embedded` and the compatibility appliance binary `dist/bin/rpiz/rhythm-server`.
+If `RHYTHM_CHIP_OUT_DIR` or `RHYTHM_CHIP_LIB_DIR` is set, the helper automatically builds `rhythm-chipd` with `--features chip-ffi`. For native builds, `RHYTHM_CHIP_ROOT` also enables the direct bridge.
 
 ### build-rpiz-image.sh
 

@@ -1,6 +1,3 @@
-#[cfg(rhythm_chipd_chip_ffi)]
-use std::path::PathBuf;
-
 use anyhow::Result;
 
 use rhythm_matter::transport::{CommissionedDevice, MatterCommissionRequest};
@@ -8,9 +5,8 @@ use rhythm_matter::transport::{CommissionedDevice, MatterCommissionRequest};
 use crate::service::CommissioningState;
 
 pub struct ChipFfiController {
+    #[cfg(not(rhythm_chipd_chip_ffi))]
     mode: ChipBridgeMode,
-    #[cfg(rhythm_chipd_chip_ffi)]
-    storage_path: PathBuf,
 }
 
 impl ChipFfiController {
@@ -19,13 +15,14 @@ impl ChipFfiController {
         existing_devices: &[CommissionedDevice],
     ) -> Result<Self> {
         let _ = existing_devices;
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        let _ = state;
         #[cfg(rhythm_chipd_chip_ffi)]
         ffi_probe::initialize_bridge(&state.storage_path, &state.fabric_id, state.ble_controller)?;
 
         Ok(Self {
+            #[cfg(not(rhythm_chipd_chip_ffi))]
             mode: ChipBridgeMode::detect()?,
-            #[cfg(rhythm_chipd_chip_ffi)]
-            storage_path: state.storage_path.clone(),
         })
     }
 
@@ -155,20 +152,13 @@ impl ChipFfiController {
         }
     }
 
+    #[cfg(not(rhythm_chipd_chip_ffi))]
     fn unsupported(&self, operation: &str) -> anyhow::Error {
         match &self.mode {
-            #[cfg(not(rhythm_chipd_chip_ffi))]
             ChipBridgeMode::Stub { reason } => anyhow::anyhow!(
                 "Direct CHIP bridge operation '{}' is unavailable: {}",
                 operation,
                 reason
-            ),
-            #[cfg(rhythm_chipd_chip_ffi)]
-            ChipBridgeMode::Linked { link_mode } => anyhow::anyhow!(
-                "Direct CHIP bridge operation '{}' is unavailable in linked mode='{}' storage='{}'",
-                operation,
-                link_mode,
-                self.storage_path.display()
             ),
         }
     }
@@ -185,16 +175,15 @@ enum ChipBridgeMode {
     #[cfg(not(rhythm_chipd_chip_ffi))]
     Stub { reason: String },
     #[cfg(rhythm_chipd_chip_ffi)]
-    Linked { link_mode: String },
+    Linked,
 }
 
 impl ChipBridgeMode {
     fn detect() -> Result<Self> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
-            return Ok(Self::Linked {
-                link_mode: ffi_probe::linked_mode()?,
-            });
+            let _ = ffi_probe::linked_mode()?;
+            return Ok(Self::Linked);
         }
 
         #[cfg(not(rhythm_chipd_chip_ffi))]
