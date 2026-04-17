@@ -1,9 +1,12 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:provider/provider.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnection;
+import 'package:rhythm_core/rhythm_core.dart' show HubEndpoint;
 
+import '../../services/matter_pairing_api.dart';
+import '../../services/matter_setup_payload.dart';
 import '../../widgets/solar_orbit.dart';
+import 'matter_qr_scanner_screen.dart';
 
 class MatterDevicePairingResult {
   const MatterDevicePairingResult({
@@ -25,15 +28,23 @@ enum _PairingPhase { input, pairing, failed }
 
 /// Full-screen modal for pairing a Matter device through Rhythm's backend.
 class MatterDeviceAddScreen extends StatefulWidget {
-  const MatterDeviceAddScreen({super.key});
+  const MatterDeviceAddScreen({
+    super.key,
+    required this.endpoint,
+  });
 
-  static Future<MatterDevicePairingResult?> show(BuildContext context) {
+  final HubEndpoint endpoint;
+
+  static Future<MatterDevicePairingResult?> show(
+    BuildContext context, {
+    required HubEndpoint endpoint,
+  }) {
     return Navigator.of(context).push(
       PageRouteBuilder(
         opaque: false,
         barrierColor: Colors.black54,
         pageBuilder: (context, animation, secondaryAnimation) {
-          return const MatterDeviceAddScreen();
+          return MatterDeviceAddScreen(endpoint: endpoint);
         },
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
           final curve = CurvedAnimation(
@@ -63,13 +74,10 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     with SingleTickerProviderStateMixin {
   static const _teal = Color(0xFF00BCD4);
   static const _tealDeep = Color(0xFF00838F);
-  static const _segmentLengths = [4, 3, 4];
 
-  final _codeControllers = List.generate(3, (_) => TextEditingController());
-  final _codeFocuses = List.generate(3, (_) => FocusNode());
-  final _prevLengths = [0, 0, 0];
-  late final List<VoidCallback> _segmentListeners;
+  final _setupPayloadController = TextEditingController();
   late final AnimationController _pulseController;
+  late final MatterPairingApi _pairingApi;
 
   _PairingPhase _phase = _PairingPhase.input;
   String? _errorText;
@@ -77,128 +85,57 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   @override
   void initState() {
     super.initState();
+    _pairingApi = MatterPairingApi(endpoint: widget.endpoint);
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2000),
     )..repeat(reverse: true);
-
-    _segmentListeners = List.generate(3, (i) => () => _onSegmentChanged(i));
-    for (int i = 0; i < 3; i++) {
-      _codeControllers[i].addListener(_segmentListeners[i]);
-    }
-
-    for (int i = 1; i < 3; i++) {
-      _codeFocuses[i].onKeyEvent = (node, event) {
-        if (event is KeyDownEvent &&
-            event.logicalKey == LogicalKeyboardKey.backspace &&
-            _codeControllers[i].text.isEmpty) {
-          _codeFocuses[i - 1].requestFocus();
-          final previous = _codeControllers[i - 1];
-          if (previous.text.isNotEmpty) {
-            previous.text =
-                previous.text.substring(0, previous.text.length - 1);
-          }
-          return KeyEventResult.handled;
-        }
-        return KeyEventResult.ignored;
-      };
-    }
+    _setupPayloadController.addListener(_handlePayloadChanged);
   }
 
   @override
   void dispose() {
+    _setupPayloadController.removeListener(_handlePayloadChanged);
+    _setupPayloadController.dispose();
     _pulseController.dispose();
-    for (int i = 0; i < 3; i++) {
-      _codeControllers[i].removeListener(_segmentListeners[i]);
-    }
-    for (final controller in _codeControllers) {
-      controller.dispose();
-    }
-    for (final focusNode in _codeFocuses) {
-      focusNode.dispose();
-    }
     super.dispose();
   }
 
-  void _onSegmentChanged(int segment) {
-    final text = _codeControllers[segment].text;
-    final previousLength = _prevLengths[segment];
-    _prevLengths[segment] = text.length;
+  bool get _supportsQrScan {
+    if (kIsWeb) return false;
+    return defaultTargetPlatform == TargetPlatform.iOS ||
+        defaultTargetPlatform == TargetPlatform.macOS;
+  }
 
-    if (text.length > _segmentLengths[segment] &&
-        text.length - previousLength > 1) {
-      _distributeCode(text);
-      return;
-    }
+  String get _setupPayload =>
+      normalizeMatterSetupPayload(_setupPayloadController.text);
 
-    if (text.length > _segmentLengths[segment]) {
-      _removeSegmentListeners();
-      _codeControllers[segment].text =
-          text.substring(0, _segmentLengths[segment]);
-      _prevLengths[segment] = _segmentLengths[segment];
-      _addSegmentListeners();
-      if (segment < 2) _codeFocuses[segment + 1].requestFocus();
+  bool get _hasSetupPayload => _setupPayload.isNotEmpty;
+
+  bool get _looksLikeMatterPayload =>
+      isLikelyMatterSetupPayload(_setupPayloadController.text);
+
+  void _handlePayloadChanged() {
+    if (mounted) {
       setState(() {});
-      return;
-    }
-
-    if (text.length == _segmentLengths[segment] &&
-        previousLength < _segmentLengths[segment] &&
-        segment < 2) {
-      _codeFocuses[segment + 1].requestFocus();
-    }
-
-    if (text.isEmpty && previousLength > 0 && segment > 0) {
-      _codeFocuses[segment - 1].requestFocus();
     }
   }
 
-  void _removeSegmentListeners() {
-    for (int i = 0; i < 3; i++) {
-      _codeControllers[i].removeListener(_segmentListeners[i]);
-    }
+  Future<void> _scanQrCode() async {
+    final payload = await MatterQrScannerScreen.show(context);
+    if (!mounted || payload == null) return;
+
+    _setupPayloadController.text = payload;
+    _setupPayloadController.selection = TextSelection.collapsed(
+      offset: payload.length,
+    );
+
+    await _startPairing();
   }
-
-  void _addSegmentListeners() {
-    for (int i = 0; i < 3; i++) {
-      _codeControllers[i].addListener(_segmentListeners[i]);
-    }
-  }
-
-  void _distributeCode(String rawText) {
-    final clean = rawText.replaceAll(RegExp(r'\D'), '');
-    _removeSegmentListeners();
-    int offset = 0;
-    for (int i = 0; i < 3; i++) {
-      final end = (offset + _segmentLengths[i]).clamp(0, clean.length);
-      _codeControllers[i].text = clean.substring(offset, end);
-      _prevLengths[i] = _codeControllers[i].text.length;
-      offset = end;
-    }
-    _addSegmentListeners();
-
-    for (int i = 0; i < 3; i++) {
-      if (_codeControllers[i].text.length < _segmentLengths[i]) {
-        _codeFocuses[i].requestFocus();
-        setState(() {});
-        return;
-      }
-    }
-
-    _codeFocuses[2].requestFocus();
-    setState(() {});
-  }
-
-  String get _manualCodeDigits =>
-      _codeControllers.map((controller) => controller.text).join();
-
-  String get _manualCode =>
-      '${_codeControllers[0].text}-${_codeControllers[1].text}-${_codeControllers[2].text}';
-
-  bool get _codeComplete => _manualCodeDigits.length == 11;
 
   Future<void> _startPairing() async {
-    if (!_codeComplete) return;
+    final setupPayload = _setupPayload;
+    if (setupPayload.isEmpty) return;
 
     FocusScope.of(context).unfocus();
     HapticFeedback.mediumImpact();
@@ -207,43 +144,49 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       _errorText = null;
     });
 
-    final connection = context.read<RhythmConnection>();
-    final result = await connection.api.pairDevice(
-      hubType: 'matter',
-      params: {
-        'setup_payload': _manualCode,
-        'network': 'wifi',
-        'rendezvous': 'on_network',
-      },
+    final wifiStatus = await _pairingApi.getWifiStatus();
+    if (!mounted) return;
+
+    if (wifiStatus != null && !wifiStatus.readyForMatterPairing) {
+      final details = <String>[
+        if (wifiStatus.configPresent != true)
+          'Wi-Fi configuration is not present on the server appliance.',
+        if (wifiStatus.connected != true)
+          'The server appliance is not currently connected to Wi-Fi.',
+        'Provision the appliance onto Wi-Fi first, then retry Matter pairing.',
+        'The app no longer asks for accessory Wi-Fi credentials.',
+      ];
+      _showPairingError(
+        'This Rhythm appliance is not ready for Matter pairing.',
+        detail: details.join(' '),
+      );
+      return;
+    }
+
+    final result = await _pairingApi.pairDevice(
+      setupPayload: setupPayload,
+      rendezvous: 'auto',
+      network: 'wifi',
       receiveTimeout: const Duration(seconds: 45),
     );
 
     if (!mounted) return;
 
-    if (result == null) {
-      _showPairingError('Could not reach the server.');
-      return;
-    }
-
-    final httpStatus = (result['http_status'] as num?)?.toInt();
-    final error = result['error'] as String?;
-    if (httpStatus != null && httpStatus != 200) {
+    if (result.httpStatus != null && result.httpStatus != 200) {
       _showPairingError(
         'The server rejected the pairing request.',
-        detail: error,
+        detail: result.error,
       );
       return;
     }
 
-    final status = result['status'] as String?;
-    final device = result['device'] as Map<String, dynamic>?;
-
-    if (status == 'failed') {
-      _showPairingError('Pairing failed.', detail: error);
+    if (result.status == 'failed') {
+      _showPairingError('Pairing failed.', detail: result.error);
       return;
     }
 
-    if (status == 'complete' && device != null) {
+    final device = result.device;
+    if (result.status == 'complete' && device != null) {
       final nativeDeviceId = device['device_id'] as String? ?? '';
       if (nativeDeviceId.isEmpty) {
         _showPairingError(
@@ -267,7 +210,8 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
 
     _showPairingError(
       'Pairing did not complete.',
-      detail: error ?? 'Unexpected status: ${status ?? 'unknown'}',
+      detail:
+          result.error ?? 'Unexpected status: ${result.status ?? 'unknown'}',
     );
   }
 
@@ -394,7 +338,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         ),
         const SizedBox(height: 32),
         Text(
-          'Enter Manual Pairing Code',
+          'Scan or Paste Setup Payload',
           style: TextStyle(
             color: CelestialColors.textPrimary,
             fontSize: 20,
@@ -403,7 +347,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         ),
         const SizedBox(height: 8),
         Text(
-          'Use the 11-digit code printed on your Matter device.',
+          'Use the Matter QR code, paste the raw MT: payload, or enter the device manual code.',
           textAlign: TextAlign.center,
           style: TextStyle(
             color: CelestialColors.textSecondary.withValues(alpha: 0.7),
@@ -412,7 +356,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         ),
         const SizedBox(height: 12),
         Text(
-          'Rhythm handles the local Matter hub setup automatically. Pairing usually takes 15–30 seconds.',
+          'Rhythm sends the setup payload to the server. The server handles Matter, BLE, and Wi-Fi commissioning automatically.',
           textAlign: TextAlign.center,
           style: TextStyle(
             color: CelestialColors.textSecondary.withValues(alpha: 0.55),
@@ -420,60 +364,107 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
             height: 1.4,
           ),
         ),
-        const SizedBox(height: 40),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            _buildCodeSegment(0, 4),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: Text(
-                '–',
+        const SizedBox(height: 32),
+        if (_supportsQrScan) ...[
+          SizedBox(
+            width: double.infinity,
+            height: 52,
+            child: OutlinedButton.icon(
+              onPressed: _scanQrCode,
+              style: OutlinedButton.styleFrom(
+                side: BorderSide(color: _teal.withValues(alpha: 0.45)),
+                backgroundColor: _teal.withValues(alpha: 0.06),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+              icon: const Icon(
+                Icons.qr_code_scanner_rounded,
+                color: _teal,
+              ),
+              label: const Text(
+                'Scan QR Code',
                 style: TextStyle(
-                  color: CelestialColors.textSecondary.withValues(alpha: 0.4),
-                  fontSize: 24,
-                  fontWeight: FontWeight.w300,
+                  color: _teal,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
             ),
-            _buildCodeSegment(1, 3),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: Text(
-                '–',
-                style: TextStyle(
-                  color: CelestialColors.textSecondary.withValues(alpha: 0.4),
-                  fontSize: 24,
-                  fontWeight: FontWeight.w300,
-                ),
+          ),
+          const SizedBox(height: 20),
+        ],
+        TextField(
+          controller: _setupPayloadController,
+          keyboardType: TextInputType.visiblePassword,
+          textInputAction: TextInputAction.done,
+          autocorrect: false,
+          enableSuggestions: false,
+          style: const TextStyle(
+            color: CelestialColors.textPrimary,
+            fontSize: 15,
+            fontWeight: FontWeight.w500,
+          ),
+          minLines: 1,
+          maxLines: 3,
+          decoration: InputDecoration(
+            labelText: 'Setup payload or manual code',
+            hintText: 'MT:Y.K908OC16750648G00 or 3497-123-4567',
+            helperText: _setupPayloadController.text.isEmpty
+                ? 'Paste the raw MT: payload or the code printed on the device.'
+                : (_looksLikeMatterPayload
+                    ? 'Ready to send to the server.'
+                    : 'This does not look like a typical Matter code, but you can still try pairing.'),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 16,
+              vertical: 16,
+            ),
+            filled: true,
+            fillColor: CelestialColors.backgroundCard,
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(14),
+              borderSide: BorderSide(
+                color: CelestialColors.orbitRing.withValues(alpha: 0.5),
               ),
             ),
-            _buildCodeSegment(2, 4),
-          ],
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(14),
+              borderSide: const BorderSide(color: _teal, width: 1.5),
+            ),
+            labelStyle: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.8),
+            ),
+            hintStyle: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.45),
+            ),
+            helperStyle: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.65),
+            ),
+          ),
         ),
-        const SizedBox(height: 48),
+        const SizedBox(height: 32),
         SizedBox(
           width: double.infinity,
           height: 52,
           child: DecoratedBox(
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(14),
-              gradient: _codeComplete
+              gradient: _hasSetupPayload
                   ? const LinearGradient(colors: [_teal, _tealDeep])
                   : null,
-              color: _codeComplete
+              color: _hasSetupPayload
                   ? null
                   : CelestialColors.textSecondary.withValues(alpha: 0.15),
             ),
             child: MaterialButton(
-              onPressed: _codeComplete ? _startPairing : null,
+              onPressed: _hasSetupPayload ? _startPairing : null,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(14),
               ),
               child: Text(
                 'Pair Device',
                 style: TextStyle(
-                  color: _codeComplete
+                  color: _hasSetupPayload
                       ? Colors.white
                       : CelestialColors.textSecondary.withValues(alpha: 0.4),
                   fontSize: 16,
@@ -485,51 +476,15 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         ),
         const SizedBox(height: 20),
         _buildInfoCard(
-          title: 'Right now',
+          title: 'Pairing Contract',
           lines: const [
-            'Only Matter-over-Wi-Fi with on-network rendezvous is supported.',
-            'If you only have a QR code, enter the printed manual pairing code instead. Raw Matter QR payloads are not accepted yet.',
+            'Matter-over-Wi-Fi is supported. The server chooses BLE or on-network rendezvous automatically.',
+            'Send the raw setup payload to the server. Do not ask for accessory Wi-Fi credentials here.',
+            'No separate Matter hub setup flow is needed in the app.',
           ],
         ),
         const SizedBox(height: 40),
       ],
-    );
-  }
-
-  Widget _buildCodeSegment(int index, int maxLength) {
-    return SizedBox(
-      width: maxLength == 4 ? 80 : 64,
-      child: TextField(
-        controller: _codeControllers[index],
-        focusNode: _codeFocuses[index],
-        keyboardType: TextInputType.number,
-        textAlign: TextAlign.center,
-        style: const TextStyle(
-          color: CelestialColors.textPrimary,
-          fontSize: 16,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 2,
-        ),
-        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-        decoration: InputDecoration(
-          counterText: '',
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 8, vertical: 14),
-          filled: true,
-          fillColor: CelestialColors.backgroundCard,
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: BorderSide(
-              color: CelestialColors.orbitRing.withValues(alpha: 0.5),
-            ),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: _teal, width: 1.5),
-          ),
-        ),
-        onChanged: (_) => setState(() {}),
-      ),
     );
   }
 
@@ -615,6 +570,16 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
             color: CelestialColors.textSecondary.withValues(alpha: 0.7),
             fontSize: 14,
             height: 1.4,
+          ),
+        ),
+        const SizedBox(height: 16),
+        Text(
+          _setupPayload,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: CelestialColors.textSecondary.withValues(alpha: 0.48),
+            fontSize: 12,
+            height: 1.35,
           ),
         ),
         const SizedBox(height: 24),

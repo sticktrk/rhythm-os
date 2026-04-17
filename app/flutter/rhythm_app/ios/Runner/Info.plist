@@ -65,6 +65,8 @@
 	<string>Rhythm uses Bluetooth to provision nearby Rhythm devices onto Wi-Fi.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>Rhythm uses Bluetooth to provision nearby Rhythm devices onto Wi-Fi.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Rhythm uses the camera to scan Matter setup QR codes.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Rhythm needs local network access to discover and communicate with RhythmServer, Hue, and HomeAssistant devices.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>

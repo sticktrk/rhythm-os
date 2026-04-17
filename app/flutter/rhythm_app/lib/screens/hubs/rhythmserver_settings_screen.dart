@@ -25,7 +25,16 @@ import 'hue_configurator_screen.dart';
 import 'matter_device_add_screen.dart';
 
 Future<void> _startMatterPairingFlow(BuildContext context) async {
-  final pairingResult = await MatterDeviceAddScreen.show(context);
+  final homeProvider = context.read<HomeProvider>();
+  final serverHub = homeProvider.currentHomeHubs
+      .where((hub) => hub.type == HubType.server)
+      .firstOrNull;
+  if (serverHub == null) return;
+
+  final pairingResult = await MatterDeviceAddScreen.show(
+    context,
+    endpoint: serverHub.endpoint,
+  );
   if (!context.mounted || pairingResult == null) return;
 
   final syncProvider = context.read<ServerSyncProvider>();
@@ -2158,9 +2167,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               Icon(Icons.restart_alt_rounded, color: color, size: 20),
             const SizedBox(width: 10),
             Text(
-              _isFactoryResetting
-                  ? 'Resetting…'
-                  : 'Factory Reset Device',
+              _isFactoryResetting ? 'Resetting…' : 'Factory Reset Device',
               style: TextStyle(
                 color: color,
                 fontSize: 15,
@@ -2199,7 +2206,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       ],
     );
   }
-
 }
 
 class _DeviceCounts {

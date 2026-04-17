@@ -55,6 +55,8 @@
 	</array>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Rhythm uses Bluetooth to provision nearby Rhythm devices onto Wi-Fi.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Rhythm uses the camera to scan Matter setup QR codes.</string>
 	<key>NSLocationUsageDescription</key>
 	<string>Rhythm needs your location to calculate sunrise and sunset times for adaptive lighting.</string>
 	<key>NSLocalNetworkUsageDescription</key>
