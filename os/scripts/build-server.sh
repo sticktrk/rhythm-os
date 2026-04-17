@@ -238,7 +238,14 @@ collect_chipd_feature_args() {
 }
 
 should_use_cross() {
-    [ "$1" = "rpiz" ] && [ "$(uname -s)" = "Linux" ] && command -v cross &>/dev/null
+    [ "$1" = "rpiz" ] || return 1
+    [ "$(uname -s)" = "Linux" ] || return 1
+    command -v cross &>/dev/null || return 1
+
+    # For direct CHIP FFI builds, prefer the host toolchain over `cross` so
+    # RHYTHM_CHIP_OUT_DIR / RHYTHM_CHIP_LIB_DIR resolve against the real host
+    # filesystem instead of the container's /project mount.
+    [ -z "${RHYTHM_CHIP_OUT_DIR:-}" ] && [ -z "${RHYTHM_CHIP_LIB_DIR:-}" ]
 }
 
 build_for_target() {

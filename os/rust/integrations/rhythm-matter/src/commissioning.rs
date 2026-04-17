@@ -123,10 +123,29 @@ pub fn pair_device(
                 hub_type: "matter".to_string(),
                 status: PairingStatus::Failed,
                 device: None,
-                error: Some(format!("{:#}", error)),
+                error: Some(summarize_commissioning_error(&error)),
             })
         }
     }
+}
+
+fn summarize_commissioning_error(error: &anyhow::Error) -> String {
+    let detail = format!("{:#}", error);
+    let lower = detail.to_ascii_lowercase();
+
+    if lower.contains("gatt write characteristic operation failed") {
+        return "Matter BLE commissioning reached the bulb, but macOS CoreBluetooth failed the GATT write. This matches the current official Matter controller behavior on this host. Try Linux/BlueZ or the appliance target for real commissioning.".to_string();
+    }
+
+    if lower.contains("connectiondelegate timeout") || lower.contains("discovery timed out") {
+        return "Matter BLE commissioning timed out while discovering the bulb from this host. Factory-reset the bulb, keep it close to the machine, and if it still fails, try Linux/BlueZ or the appliance target.".to_string();
+    }
+
+    if lower.contains("matter wi-fi commissioning requires stored appliance wi-fi credentials") {
+        return "Matter pairing needs stored appliance Wi-Fi credentials on the server before a light can be commissioned.".to_string();
+    }
+
+    detail
 }
 
 fn load_commissioning_wifi_credentials(
@@ -291,5 +310,26 @@ mod tests {
 
         let parsed = MatterPairingParams::from_value(&params).unwrap();
         assert_eq!(parsed.rendezvous, MatterCommissioningRendezvous::Auto);
+    }
+
+    #[test]
+    fn commissioning_error_summarizes_darwin_gatt_failures() {
+        let error = anyhow::anyhow!(
+            "commissioning Matter light: Ble Error 0x00000407: GATT write characteristic operation failed"
+        );
+
+        let message = summarize_commissioning_error(&error);
+
+        assert!(message.contains("CoreBluetooth failed the GATT write"));
+        assert!(message.contains("Linux/BlueZ"));
+    }
+
+    #[test]
+    fn commissioning_error_summarizes_ble_timeouts() {
+        let error = anyhow::anyhow!("commissioning Matter light: ConnectionDelegate timeout");
+
+        let message = summarize_commissioning_error(&error);
+
+        assert!(message.contains("timed out while discovering the bulb"));
     }
 }
