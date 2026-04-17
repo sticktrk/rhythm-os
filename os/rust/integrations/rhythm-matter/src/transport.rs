@@ -2,8 +2,8 @@
 //!
 //! The transport boundary is intentionally shaped around the light operations
 //! Rhythm actually needs, not around raw cluster/TLV plumbing. Desktop builds
-//! map this to the official Python CHIP controller APIs; embedded targets can
-//! provide their own controller implementation later.
+//! map this to the official CHIP controller stack through a native daemon;
+//! embedded targets can provide their own controller implementation later.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

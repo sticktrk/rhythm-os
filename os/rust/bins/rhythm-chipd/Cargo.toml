@@ -1,0 +1,22 @@
+[package]
+name = "rhythm-chipd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native Matter controller daemon for Rhythm OS"
+
+[features]
+default = []
+chip-ffi = []
+
+[[bin]]
+name = "rhythm-chipd"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+serde_json = "1.0"
+rhythm-matter = { path = "../../integrations/rhythm-matter", features = ["desktop"] }
+
+[build-dependencies]
+cc = "1.2"

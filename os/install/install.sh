@@ -154,7 +154,9 @@ install_binaries() {
     local bin_dir="$1"
     local need_sudo="$2"
     local cli_binary
+    local chipd_binary
     cli_binary="$(dirname "$BINARY")/rhythm-cli"
+    chipd_binary="$(dirname "$BINARY")/rhythm-chipd"
 
     echo "Installing binaries to $bin_dir/..."
     if [ "$need_sudo" = true ]; then
@@ -162,15 +164,24 @@ install_binaries() {
         if [ -f "$cli_binary" ]; then
             sudo cp "$cli_binary" "$bin_dir/rhythm-cli"
         fi
+        if [ -f "$chipd_binary" ]; then
+            sudo cp "$chipd_binary" "$bin_dir/rhythm-chipd"
+        fi
     else
         cp "$BINARY" "$bin_dir/rhythm-server"
         if [ -f "$cli_binary" ]; then
             cp "$cli_binary" "$bin_dir/rhythm-cli"
         fi
+        if [ -f "$chipd_binary" ]; then
+            cp "$chipd_binary" "$bin_dir/rhythm-chipd"
+        fi
     fi
     chmod +x "$bin_dir/rhythm-server"
     if [ -f "$bin_dir/rhythm-cli" ]; then
         chmod +x "$bin_dir/rhythm-cli"
+    fi
+    if [ -f "$bin_dir/rhythm-chipd" ]; then
+        chmod +x "$bin_dir/rhythm-chipd"
     fi
 }
 
@@ -242,6 +253,7 @@ macos_uninstall() {
     local bin_dir="/usr/local/bin"
     local bin_path="$bin_dir/rhythm-server"
     local cli_path="$bin_dir/rhythm-cli"
+    local chipd_path="$bin_dir/rhythm-chipd"
     local data_dir="$HOME/.rhythm"
     local log_dir="$HOME/Library/Logs/Rhythm"
     local plist_path="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
@@ -259,7 +271,7 @@ macos_uninstall() {
     fi
 
     # Remove binaries
-    for bin in "$bin_path" "$cli_path"; do
+    for bin in "$bin_path" "$cli_path" "$chipd_path"; do
         if [ -f "$bin" ]; then
             if [ -w "$bin" ]; then
                 rm "$bin"
@@ -361,6 +373,7 @@ linux_system_uninstall() {
     local bin_dir="/usr/local/bin"
     local bin_path="$bin_dir/rhythm-server"
     local cli_path="$bin_dir/rhythm-cli"
+    local chipd_path="$bin_dir/rhythm-chipd"
     local data_dir="/var/lib/rhythm"
     local service_path="/etc/systemd/system/$SERVICE_NAME.service"
 
@@ -381,7 +394,7 @@ linux_system_uninstall() {
     fi
 
     # Remove binaries
-    for bin in "$bin_path" "$cli_path"; do
+    for bin in "$bin_path" "$cli_path" "$chipd_path"; do
         if [ -f "$bin" ]; then
             rm "$bin"
             echo "Removed $bin"
@@ -476,6 +489,7 @@ linux_user_uninstall() {
     local bin_dir="$HOME/.local/bin"
     local bin_path="$bin_dir/rhythm-server"
     local cli_path="$bin_dir/rhythm-cli"
+    local chipd_path="$bin_dir/rhythm-chipd"
     local data_dir="$HOME/.rhythm"
     local service_path="$HOME/.config/systemd/user/$SERVICE_NAME.service"
 
@@ -496,7 +510,7 @@ linux_user_uninstall() {
     fi
 
     # Remove binaries
-    for bin in "$bin_path" "$cli_path"; do
+    for bin in "$bin_path" "$cli_path" "$chipd_path"; do
         if [ -f "$bin" ]; then
             rm "$bin"
             echo "Removed $bin"

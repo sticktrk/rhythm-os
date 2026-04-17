@@ -1,4 +1,4 @@
-//! Local RPC protocol shared by the Rust Matter transport and the Python CHIP sidecar.
+//! Local RPC protocol shared by the Rust Matter transport and the native CHIP daemon.
 
 use anyhow::Result;
 use serde::de::DeserializeOwned;

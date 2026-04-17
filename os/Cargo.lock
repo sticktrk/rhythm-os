@@ -1680,6 +1680,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhythm-chipd"
+version = "0.4.104"
+dependencies = [
+ "anyhow",
+ "cc",
+ "rhythm-matter",
+ "serde_json",
+]
+
+[[package]]
 name = "rhythm-core"
 version = "0.4.104"
 dependencies = [

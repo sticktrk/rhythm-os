@@ -1,6 +1,5 @@
-//! Desktop Matter transport backed by a local Python CHIP controller sidecar.
+//! Desktop Matter transport backed by a local native CHIP controller daemon.
 
-use std::ffi::OsString;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -24,14 +23,14 @@ use crate::transport::{
 const SOCKET_NAME: &str = "chip-controller.sock";
 const STORAGE_NAME: &str = "controller-storage.json";
 const SIDECAR_START_TIMEOUT: Duration = Duration::from_secs(10);
-const RPC_TIMEOUT: Duration = Duration::from_secs(10);
+const RPC_TIMEOUT: Duration = Duration::from_secs(120);
 
 struct SidecarConfig {
-    python_command: String,
-    repo_root: PathBuf,
+    command: PathBuf,
+    working_dir: PathBuf,
 }
 
-/// Desktop Matter transport backed by a Python CHIP sidecar over a Unix socket.
+/// Desktop Matter transport backed by a native CHIP daemon over a Unix socket.
 pub struct ChipTransport {
     socket_path: PathBuf,
     init_request: ChipInitControllerRequest,
@@ -48,12 +47,7 @@ impl ChipTransport {
         fs::create_dir_all(&chip_dir)
             .with_context(|| format!("creating CHIP data dir {}", chip_dir.display()))?;
 
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../..")
-            .canonicalize()
-            .context("resolving repo root for CHIP sidecar")?;
-        let python_command =
-            std::env::var("RHYTHM_MATTER_CHIP_PYTHON").unwrap_or_else(|_| "python3".to_string());
+        let command = resolve_chipd_command().context("resolving rhythm-chipd helper")?;
         let ble_controller = std::env::var("RHYTHM_MATTER_BLE_CONTROLLER")
             .ok()
             .and_then(|value| value.parse::<u16>().ok());
@@ -67,8 +61,8 @@ impl ChipTransport {
             },
             sidecar: Mutex::new(None),
             sidecar_config: Some(SidecarConfig {
-                python_command,
-                repo_root,
+                command,
+                working_dir: chip_dir.clone(),
             }),
             initialized: AtomicBool::new(false),
             next_request_id: AtomicU64::new(1),
@@ -202,26 +196,18 @@ impl ChipTransport {
                 let _ = child.wait();
             }
 
-            let python_path = append_python_path(
-                std::env::var_os("PYTHONPATH"),
-                config.repo_root.join("python"),
-            );
-
-            let child = Command::new(&config.python_command)
-                .arg("-m")
-                .arg("rhythm_chip_controller")
+            let child = Command::new(&config.command)
                 .arg("--socket")
                 .arg(&self.socket_path)
-                .current_dir(&config.repo_root)
-                .env("PYTHONPATH", python_path)
+                .current_dir(&config.working_dir)
                 .stdin(Stdio::null())
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .spawn()
                 .with_context(|| {
                     format!(
-                        "starting CHIP controller sidecar with {}",
-                        config.python_command
+                        "starting CHIP controller daemon with {}",
+                        config.command.display()
                     )
                 })?;
 
@@ -241,6 +227,30 @@ impl ChipTransport {
             self.socket_path.display()
         )
     }
+}
+
+fn resolve_chipd_command() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("RHYTHM_MATTER_CHIPD") {
+        return Ok(PathBuf::from(path));
+    }
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(parent) = current_exe.parent() {
+            let sibling = parent.join("rhythm-chipd");
+            if sibling.is_file() {
+                return Ok(sibling);
+            }
+        }
+    }
+
+    for candidate in ["/usr/local/bin/rhythm-chipd", "/usr/bin/rhythm-chipd"] {
+        let path = PathBuf::from(candidate);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+
+    Ok(PathBuf::from("rhythm-chipd"))
 }
 
 impl Drop for ChipTransport {
@@ -342,18 +352,6 @@ impl MatterTransport for ChipTransport {
             self.call(ChipRpcRequest::ReadOnOff { node_id, endpoint })?;
         Ok(response.on)
     }
-}
-
-fn append_python_path(existing: Option<OsString>, new_path: PathBuf) -> OsString {
-    let mut combined = OsString::new();
-    combined.push(new_path);
-    if let Some(existing) = existing {
-        if !existing.is_empty() {
-            combined.push(":");
-            combined.push(existing);
-        }
-    }
-    combined
 }
 
 #[cfg(test)]

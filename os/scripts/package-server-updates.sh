@@ -97,6 +97,7 @@ for target in $TARGETS; do
     target_dir="$ARTIFACT_ROOT/$target"
     server_bin="$target_dir/rhythm-server"
     cli_bin="$target_dir/rhythm-cli"
+    chipd_bin="$target_dir/rhythm-chipd"
 
     if [ ! -f "$server_bin" ]; then
         echo "Skipping $target: missing $server_bin"
@@ -113,11 +114,10 @@ for target in $TARGETS; do
     if [ "$DRY_RUN" = true ]; then
         echo "Would package:"
         echo "  $server_bin -> $output_bin"
-        if [ -f "$cli_bin" ]; then
-            echo "  $server_bin + $cli_bin -> $archive_path"
-        else
-            echo "  $server_bin -> $archive_path"
-        fi
+        archive_members=("rhythm-server")
+        [ -f "$cli_bin" ] && archive_members+=("rhythm-cli")
+        [ -f "$chipd_bin" ] && archive_members+=("rhythm-chipd")
+        echo "  ${archive_members[*]} -> $archive_path"
         continue
     fi
 
@@ -125,11 +125,10 @@ for target in $TARGETS; do
     cp "$server_bin" "$output_bin"
     chmod 755 "$output_bin"
 
-    if [ -f "$cli_bin" ]; then
-        tar -czf "$archive_path" -C "$target_dir" rhythm-server rhythm-cli
-    else
-        tar -czf "$archive_path" -C "$target_dir" rhythm-server
-    fi
+    archive_members=("rhythm-server")
+    [ -f "$cli_bin" ] && archive_members+=("rhythm-cli")
+    [ -f "$chipd_bin" ] && archive_members+=("rhythm-chipd")
+    tar -czf "$archive_path" -C "$target_dir" "${archive_members[@]}"
 
     bin_sha="$(sha256_file "$output_bin")"
     bin_size="$(file_size "$output_bin")"

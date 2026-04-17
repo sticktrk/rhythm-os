@@ -14,6 +14,7 @@ fi
 
 export RHYTHM_PLATFORM_TYPE=embedded
 export RHYTHM_PLATFORM_CONTEXT=rpiz
+export RHYTHM_MATTER_CHIPD=/usr/bin/rhythm-chipd
 
 # Mirror logs to the active console so HDMI/UART debugging works without a login shell.
 if [ -w /dev/console ]; then

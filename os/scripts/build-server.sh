@@ -255,17 +255,22 @@ build_for_target() {
     RHYTHM_BUILD_VERSION="$BUILD_VERSION" \
         "$builder" build $CARGO_FLAGS -p "$package" --target "$rust_target" "${cargo_bin_flags[@]}"
 
+    RHYTHM_BUILD_VERSION="$BUILD_VERSION" \
+        "$builder" build $CARGO_FLAGS -p rhythm-chipd --target "$rust_target" --bin rhythm-chipd
+
     # Copy to dist
     local output_dir="$PROJECT_ROOT/dist/bin/$target"
     mkdir -p "$output_dir"
     if [ "$target" = "rpiz" ]; then
         cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-linux-embedded" "$output_dir/"
         cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-linux-embedded" "$output_dir/rhythm-server"
-        echo "Output: dist/bin/$target/{rhythm-linux-embedded,rhythm-server}"
+        cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-chipd" "$output_dir/"
+        echo "Output: dist/bin/$target/{rhythm-linux-embedded,rhythm-server,rhythm-chipd}"
     else
         cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-server" "$output_dir/"
         cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-cli" "$output_dir/"
-        echo "Output: dist/bin/$target/{rhythm-server,rhythm-cli}"
+        cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-chipd" "$output_dir/"
+        echo "Output: dist/bin/$target/{rhythm-server,rhythm-cli,rhythm-chipd}"
     fi
 }
 
@@ -286,9 +291,11 @@ build_native() {
 
     RHYTHM_BUILD_VERSION="$BUILD_VERSION" \
         cargo build $CARGO_FLAGS -p rhythm-server "${cargo_bin_flags[@]}"
+    RHYTHM_BUILD_VERSION="$BUILD_VERSION" \
+        cargo build $CARGO_FLAGS -p rhythm-chipd --bin rhythm-chipd
 
     if [ "$RUN" = true ]; then
-        echo "Built: target/$PROFILE/rhythm-server"
+        echo "Built: target/$PROFILE/{rhythm-server,rhythm-chipd}"
         return
     fi
 
@@ -299,7 +306,8 @@ build_native() {
     for bin in "${bins[@]}"; do
         cp "$PROJECT_ROOT/target/$PROFILE/$bin" "$output_dir/"
     done
-    echo "Output: dist/bin/$output_dir_name/{rhythm-server,rhythm-cli}"
+    cp "$PROJECT_ROOT/target/$PROFILE/rhythm-chipd" "$output_dir/"
+    echo "Output: dist/bin/$output_dir_name/{rhythm-server,rhythm-cli,rhythm-chipd}"
 }
 
 cd "$PROJECT_ROOT"
@@ -307,6 +315,7 @@ cd "$PROJECT_ROOT"
 if [ "$CLEAN" = true ]; then
     echo "Cleaning target artifacts..."
     cargo clean -p rhythm-server
+    cargo clean -p rhythm-chipd
     cargo clean -p rhythm-linux-embedded
 fi
 
