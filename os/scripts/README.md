@@ -16,6 +16,7 @@ This directory contains all build and deployment scripts for Rhythm OS.
 # Deploy
 ./scripts/deploy-addon.sh               # Push addon to Docker Hub
 ./scripts/deploy-addon.sh --local       # Deploy to local HA for testing
+./scripts/release.sh                    # Tag and push the next GitHub release
 ```
 
 ---
@@ -122,6 +123,35 @@ With `--docker` and no explicit `--output-dir`, the default becomes `out/rpiz-do
 ---
 
 ## Deployment Scripts
+
+### release.sh
+
+Create and push a Git release tag so the GitHub release workflow can build and
+publish the release assets.
+
+```bash
+./scripts/release.sh                    # Tags and pushes the next patch release
+./scripts/release.sh --minor            # Tags and pushes the next minor release
+./scripts/release.sh --version 0.4.1    # Tags and pushes an explicit version
+./scripts/release.sh --dry-run          # Preview without creating the tag
+```
+
+**Options:**
+| Flag | Description |
+|------|-------------|
+| `--version <semver>` | Explicit version, accepts `X.Y.Z` or `vX.Y.Z` |
+| `--major` | Bump the latest release tag to the next major version |
+| `--minor` | Bump the latest release tag to the next minor version |
+| `--patch` | Bump the latest release tag to the next patch version (default) |
+| `--message <text>` | Custom annotated tag message |
+| `--remote <name>` | Git remote to push to, default `origin` |
+| `--no-push` | Create the local tag without pushing |
+| `--dry-run` | Show the planned actions without changing git state |
+
+**Behavior:**
+- Requires a clean tracked worktree before tagging.
+- Pushes the current branch and the new tag to `origin` by default.
+- The GitHub Actions release workflow turns that tag into the GitHub release with binaries and the rpiz image.
 
 ### Versioning
 
@@ -242,12 +272,13 @@ cargo install cross
 git add -A
 git commit -m "Release v0.4.0"
 
-# 4. Tag the server/ESP32 release
-git tag v0.4.0
-git push && git push --tags
+# 4. Tag and push the server/embedded release
+./scripts/release.sh
 ```
 
-Only the Git tag is manual for server and ESP32 releases. Their release version is derived from the tag.
+With `v0.4.0` as the latest tag, `./scripts/release.sh` defaults to `v0.4.1`.
+Once the GitHub `Release` workflow finishes, the GitHub release page contains
+the server tarballs and the compressed rpiz SD-card image.
 
 ---
 
