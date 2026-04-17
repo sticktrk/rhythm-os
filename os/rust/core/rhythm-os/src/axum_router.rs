@@ -57,7 +57,7 @@ fn shared_routes() -> Router<SharedState> {
             get(get_factory_default_configuration),
         )
         .route("/api/configuration/reset", post(post_configuration_reset))
-        .route("/api/backup", get(get_backup))
+        .route("/api/backup", get(get_backup).put(put_backup))
         .route("/api/rooms/state", get(get_rooms_state))
         .route("/api/events", get(sse_events))
         .route("/api/rooms", put(put_rooms).delete(delete_room))
@@ -166,6 +166,10 @@ async fn get_backup(
         .and_then(|value| value.parse::<bool>().ok())
         .unwrap_or(false);
     run_blocking(move || handlers::handle_get_backup(&state, include_secrets)).await
+}
+
+async fn put_backup(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {
+    run_blocking(move || handlers::handle_put_backup(&state, &body)).await
 }
 
 async fn get_rooms_state(State(state): State<SharedState>) -> ApiResponse {

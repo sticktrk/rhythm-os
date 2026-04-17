@@ -123,6 +123,18 @@ pub fn handle_get_backup(state: &SharedState, include_secrets: bool) -> ApiRespo
     }
 }
 
+pub fn handle_put_backup(state: &SharedState, body: &Value) -> ApiResponse {
+    let bundle: crate::bundle::BackupBundle = match serde_json::from_value(body.clone()) {
+        Ok(bundle) => bundle,
+        Err(e) => return ApiResponse::bad_request(&format!("Invalid backup bundle: {}", e)),
+    };
+
+    match commands::do_backup_restore(state, bundle) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::bad_request(&e.to_string()),
+    }
+}
+
 pub fn handle_get_rooms_state(state: &SharedState) -> ApiResponse {
     match commands::build_rooms_state(state) {
         Ok(json) => ApiResponse::json_ok(json),

@@ -58,6 +58,7 @@ Rhythm OS exposes a complete REST API for managing lights, rooms, and curves. Al
 |----------|-----------|-------------|
 | **State** | `GET /api/state`, `GET /api/rooms/state` | Full snapshot or lightweight room state |
 | **Events** | `GET /api/events` | SSE stream (room state, motion, hub status, config changes) |
+| **Backup** | `GET /api/configuration`, `PUT /api/configuration`, `GET /api/backup`, `PUT /api/backup` | Portable configuration import/export plus full installation backup/restore |
 | **Rooms** | `PUT /api/rooms`, `PUT /api/rooms/action`, `PUT /api/rooms/brightness` | Create rooms, dispatch actions, set brightness |
 | **Devices** | `PUT /api/devices`, `PUT /api/sensors` | Register lights, buttons, and motion sensors |
 | **Config** | `GET /api/config`, `PUT /api/config`, `PUT /api/location` | Read/write curve config and location |

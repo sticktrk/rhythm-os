@@ -1816,6 +1816,237 @@ pub fn build_backup_bundle(state: &SharedState, include_secrets: bool) -> Result
         .map_err(|e| anyhow::anyhow!("serialize backup bundle: {}", e))
 }
 
+fn restore_backup_location(state: &SharedState, location: Option<StoredLocation>) -> Result<()> {
+    let cleared_location = StoredLocation {
+        latitude: None,
+        longitude: None,
+        utc_offset_hours: 0.0,
+        timezone_name: None,
+    };
+    let location_to_apply = location.unwrap_or(cleared_location);
+
+    let (runtime, solar_noon, latitude, utc_offset_hours, timezone_name) = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let mut latitude = s.latitude;
+        let mut longitude = s.longitude;
+        let mut utc_offset_hours = s.utc_offset_hours;
+        let mut runtime_config = s.runtime_config.clone();
+        let mut timezone_name = s.timezone_name.clone();
+        location_to_apply.apply_to_state(
+            &mut latitude,
+            &mut longitude,
+            &mut utc_offset_hours,
+            &mut runtime_config,
+            &mut timezone_name,
+        );
+        if latitude.is_none() && longitude.is_none() && timezone_name.is_none() {
+            runtime_config.solar_noon_hour = rhythm_core::RuntimeConfig::default().solar_noon_hour;
+        }
+        s.latitude = latitude;
+        s.longitude = longitude;
+        s.utc_offset_hours = utc_offset_hours;
+        s.runtime_config = runtime_config;
+        s.timezone_name = timezone_name;
+        if let Some(storage) = s.storage.as_ref() {
+            if let Err(e) = storage.save_location(&location_to_apply) {
+                warn!(target: "cmd", "Failed to save restored location: {}", e);
+            }
+        }
+        (
+            s.hub_runtime(),
+            s.runtime_config.solar_noon_hour,
+            s.latitude,
+            s.utc_offset_hours,
+            s.timezone_name.clone(),
+        )
+    };
+
+    if let Some(runtime) = runtime {
+        let local_now = if let Some(ref tz_name) = timezone_name {
+            rhythm_core::Timezone::new(tz_name)
+                .local_datetime_from_utc(chrono::Utc::now().naive_utc())
+        } else {
+            current_local_datetime(utc_offset_hours)
+        };
+        let day_of_year = rhythm_core::timezone::day_of_year(
+            local_now.date().year(),
+            local_now.date().month(),
+            local_now.date().day(),
+        );
+        if let Err(e) = runtime.set_solar(rhythm_core::SolarTime::new(
+            solar_noon,
+            latitude.unwrap_or(0.0),
+            day_of_year,
+        )) {
+            warn!(target: "cmd", "Failed to apply restored solar location: {}", e);
+        }
+    }
+
+    Ok(())
+}
+
+fn restore_backup_installation_metadata(
+    state: &SharedState,
+    installation: &BackupInstallation,
+) -> Result<()> {
+    let mut topology = installation.topology.clone();
+    topology.rebuild_indices();
+    let mut canonical_registry = installation.canonical_registry.clone();
+    canonical_registry.rebuild_indices();
+
+    {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.topology = topology;
+        s.canonical_registry = canonical_registry;
+    }
+
+    if let Ok(s) = state.lock() {
+        persist_canonical(&s);
+        persist_topology(&s);
+    }
+
+    #[cfg(feature = "desktop")]
+    rebuild_composite_routing(state);
+
+    Ok(())
+}
+
+fn restore_backup_room_manager(
+    state: &SharedState,
+    rooms: &rhythm_core::RoomManager,
+) -> Result<()> {
+    let needs_runtime = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let has_runtime = s.hubs.values().any(|hub| hub.runtime.is_some());
+        !has_runtime && s.has_any_hub()
+    };
+    if needs_runtime {
+        ensure_runtime(state);
+    }
+
+    let runtime = state.lock().ok().and_then(|s| s.hub_runtime());
+    let desired_ids: HashSet<String> = rooms.iter().map(|room| room.id.clone()).collect();
+
+    {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.room_lights_on
+            .retain(|room_id, _| desired_ids.contains(room_id));
+        s.motion_snapshots
+            .retain(|room_id, _| desired_ids.contains(room_id));
+        s.room_mode_transitions
+            .retain(|room_id, _| desired_ids.contains(room_id));
+        s.pending_motion_clear
+            .retain(|room_id| desired_ids.contains(room_id));
+    }
+
+    if let Some(runtime) = runtime {
+        for snapshot in runtime.engine_all_room_snapshots() {
+            if !desired_ids.contains(&snapshot.id) {
+                runtime.remove_room(&snapshot.id);
+            }
+        }
+
+        for room in rooms.iter() {
+            runtime.add_room(&room.id, &room.name);
+            runtime.restore_room_state(
+                &room.id,
+                RestoredRoomState {
+                    rhythm_enabled: room.rhythm_enabled,
+                    disabled: room.disabled,
+                    time_offset_minutes: room.time_offset_minutes,
+                    brightness_offset: room.brightness_offset,
+                    soft_off: room.soft_off,
+                    hard_off: room.hard_off,
+                    profile_settings: room.profile_settings.clone(),
+                },
+            );
+        }
+
+        persist_rooms(state);
+    } else {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if let Some(storage) = s.storage.as_ref() {
+            if let Err(e) = storage.save_rooms(rooms) {
+                warn!(target: "cmd", "Failed to save restored rooms: {}", e);
+            }
+        }
+    }
+
+    #[cfg(feature = "desktop")]
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::RoomsChanged);
+
+    Ok(())
+}
+
+fn restore_backup_runtime_state(
+    state: &SharedState,
+    runtime_state: &BackupRuntimeState,
+) -> Result<()> {
+    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    s.active_mode = runtime_state.active_mode;
+    s.last_active_mode_cause = runtime_state.last_change_cause;
+    s.last_active_mode_transition_id = runtime_state.last_change_transition_id.clone();
+    s.last_active_mode_change_utc_ms = runtime_state.last_change_epoch_ms;
+    s.sync_active_mode_runtime_overrides();
+    persist_settings_locked(&s);
+    Ok(())
+}
+
+fn save_backup_hub_registries_to_storage(
+    state: &SharedState,
+    registries: &[BackupHubRegistry],
+) -> Result<()> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let Some(storage) = s.storage.as_ref() else {
+        return Ok(());
+    };
+
+    for registry in registries {
+        if let Err(e) = storage.save_hub_registry_for(&registry.hub_key, &registry.snapshot) {
+            warn!(
+                target: "cmd",
+                "Failed to save restored hub registry for {}: {}",
+                registry.hub_key,
+                e
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn restore_backup_hub_credentials(
+    state: &SharedState,
+    credentials: &[BackupHubCredentials],
+) -> Result<()> {
+    for credential in credentials {
+        let Some(hub_type) = credential.hub_type.as_ref() else {
+            continue;
+        };
+        let Some(data) = credential.data.as_ref() else {
+            warn!(
+                target: "cmd",
+                "Skipping restored hub {} at {} because the backup is redacted",
+                hub_type.as_str(),
+                credential.address
+            );
+            continue;
+        };
+
+        if let Err(e) = do_hub_credentials(state, hub_type.as_str(), &credential.address, data) {
+            warn!(
+                target: "cmd",
+                "Failed to restore hub {} at {}: {}",
+                hub_type.as_str(),
+                credential.address,
+                e
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn current_local_datetime(utc_offset: f32) -> chrono::NaiveDateTime {
     let now = chrono::Utc::now().naive_utc();
     let offset_secs = (utc_offset * 3600.0) as i64;
@@ -2836,6 +3067,60 @@ fn configuration_room_target_id(
         .map(|snapshot| snapshot.id)
 }
 
+fn apply_configuration_room_preferences(
+    state: &SharedState,
+    imported_rooms: &[ConfigurationRoom],
+) -> (usize, usize) {
+    let runtime = state.lock().ok().and_then(|s| s.hub_runtime());
+    let mut applied_rooms = 0usize;
+    let mut skipped_rooms = 0usize;
+
+    if let Some(runtime) = runtime {
+        for imported_room in imported_rooms {
+            let Some(room_id) = configuration_room_target_id(state, &runtime, imported_room) else {
+                skipped_rooms += 1;
+                info!(
+                    target: "cmd",
+                    "configuration_import: skipped room '{}' ({}) because no local match was found",
+                    imported_room.name,
+                    imported_room.id
+                );
+                continue;
+            };
+
+            let patch = imported_room_profile_patch(imported_room);
+            if let Err(e) = do_room_preferences_set(
+                state,
+                &room_id,
+                Some(imported_room.rhythm_enabled),
+                Some(imported_room.disabled),
+                Some(imported_room.state),
+                Some(&patch),
+                false,
+            ) {
+                skipped_rooms += 1;
+                warn!(
+                    target: "cmd",
+                    "configuration_import: failed to apply room '{}' to '{}': {}",
+                    imported_room.id,
+                    room_id,
+                    e
+                );
+                continue;
+            }
+            applied_rooms += 1;
+        }
+
+        if !imported_rooms.is_empty() {
+            persist_rooms(state);
+        }
+    } else {
+        skipped_rooms = imported_rooms.len();
+    }
+
+    (applied_rooms, skipped_rooms)
+}
+
 pub fn do_configuration_import(
     state: &SharedState,
     payload: ConfigurationImportPayload,
@@ -2897,52 +3182,8 @@ pub fn do_configuration_import(
         true,
     )?;
 
-    let runtime = state.lock().ok().and_then(|s| s.hub_runtime());
-    let mut applied_rooms = 0usize;
-    let mut skipped_rooms = 0usize;
-
-    if let Some(runtime) = runtime {
-        for imported_room in &imported_rooms {
-            let Some(room_id) = configuration_room_target_id(state, &runtime, imported_room) else {
-                skipped_rooms += 1;
-                info!(
-                    target: "cmd",
-                    "configuration_import: skipped room '{}' ({}) because no local match was found",
-                    imported_room.name,
-                    imported_room.id
-                );
-                continue;
-            };
-
-            let patch = imported_room_profile_patch(imported_room);
-            if let Err(e) = do_room_preferences_set(
-                state,
-                &room_id,
-                Some(imported_room.rhythm_enabled),
-                Some(imported_room.disabled),
-                Some(imported_room.state),
-                Some(&patch),
-                false,
-            ) {
-                skipped_rooms += 1;
-                warn!(
-                    target: "cmd",
-                    "configuration_import: failed to apply room '{}' to '{}': {}",
-                    imported_room.id,
-                    room_id,
-                    e
-                );
-                continue;
-            }
-            applied_rooms += 1;
-        }
-
-        if !imported_rooms.is_empty() {
-            persist_rooms(state);
-        }
-    } else {
-        skipped_rooms = imported_rooms.len();
-    }
+    let (applied_rooms, skipped_rooms) =
+        apply_configuration_room_preferences(state, &imported_rooms);
 
     info!(
         target: "cmd",
@@ -2962,6 +3203,49 @@ pub fn do_configuration_import(
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
 
     build_configuration_bundle(state)
+}
+
+pub fn do_backup_restore(state: &SharedState, bundle: BackupBundle) -> Result<String> {
+    if bundle.schema_version != BUNDLE_SCHEMA_VERSION {
+        return Err(anyhow::anyhow!(
+            "Unsupported backup schema version: {}",
+            bundle.schema_version
+        ));
+    }
+    if bundle.kind != crate::bundle::BundleKind::BackupBundle {
+        return Err(anyhow::anyhow!(
+            "Backup restore requires kind=backup_bundle"
+        ));
+    }
+
+    validate_imported_configuration(&bundle.configuration)?;
+
+    do_hub_disconnect(state)?;
+    save_backup_hub_registries_to_storage(state, &bundle.installation.hub_registries)?;
+
+    let mut configuration = bundle.configuration.clone();
+    configuration.active_mode = bundle.runtime_state.active_mode;
+    do_configuration_import(
+        state,
+        ConfigurationImportPayload::Bundle(ConfigurationBundle {
+            schema_version: bundle.schema_version,
+            kind: crate::bundle::BundleKind::ConfigurationBundle,
+            name: None,
+            description: None,
+            configuration,
+        }),
+    )?;
+
+    restore_backup_location(state, bundle.installation.location.clone())?;
+    restore_backup_hub_credentials(state, &bundle.installation.hub_credentials)?;
+    restore_backup_installation_metadata(state, &bundle.installation)?;
+    restore_backup_room_manager(state, &bundle.installation.rooms)?;
+    restore_backup_runtime_state(state, &bundle.runtime_state)?;
+
+    #[cfg(feature = "desktop")]
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
+
+    build_backup_bundle(state, false)
 }
 
 pub fn do_set_active_mode(state: &SharedState, mode: RhythmMode) -> Result<()> {
@@ -5579,17 +5863,17 @@ pub fn build_curve_solar(state: &SharedState, date: Option<&str>) -> Result<Stri
 mod tests {
     use super::*;
     use crate::bundle::{
-        BundleKind, ConfigurationBundle, ConfigurationImportPayload, ConfigurationRoom,
-        PortableConfiguration,
+        BackupBundle, BackupHubCredentials, BackupInstallation, BackupRuntimeState, BundleKind,
+        ConfigurationBundle, ConfigurationImportPayload, ConfigurationRoom, PortableConfiguration,
     };
     use crate::factory_default_config::{
         factory_default_active_mode, factory_default_configuration_bundle,
         factory_default_light_profile_config, factory_default_mode_transition_configs,
         factory_default_power_save,
     };
-    use crate::hub::HubCredentials;
-    use crate::hub::{ActiveHub, HubType};
+    use crate::hub::{ActiveHub, HubCredentials, HubProvider, HubType};
     use crate::state::{AppState, MotionSnapshot};
+    use crate::storage::{Storage, StoredLightProfiles, StoredSettings};
     use chrono::{Datelike, Timelike};
     use rhythm_core::{LightProfileConfig, RoomSnapshot, RuntimeHandle};
     use std::sync::{Arc, Mutex};
@@ -5712,8 +5996,29 @@ mod tests {
                 state.hard_off,
             ));
         }
-        fn add_room(&self, _: &str, _: &str) {}
-        fn remove_room(&self, _: &str) {}
+        fn add_room(&self, room_id: &str, name: &str) {
+            let mut snapshots = self.snapshots.lock().unwrap();
+            if snapshots.iter().any(|snap| snap.id == room_id) {
+                return;
+            }
+            snapshots.push(RoomSnapshot {
+                id: room_id.to_string(),
+                name: name.to_string(),
+                rhythm_enabled: false,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                hard_off: false,
+                profile_settings: RoomProfileSettings::default(),
+            });
+        }
+        fn remove_room(&self, room_id: &str) {
+            self.snapshots
+                .lock()
+                .unwrap()
+                .retain(|snap| snap.id != room_id);
+        }
         fn dim_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
             Ok(())
         }
@@ -5854,6 +6159,216 @@ mod tests {
         drop(app);
 
         (state, runtime)
+    }
+
+    #[derive(Clone, Default)]
+    struct TestStorage {
+        inner: Arc<Mutex<TestStorageInner>>,
+    }
+
+    #[derive(Default)]
+    struct TestStorageInner {
+        rooms: rhythm_core::RoomManager,
+        light_profiles: Option<StoredLightProfiles>,
+        location: Option<StoredLocation>,
+        settings: Option<StoredSettings>,
+        hub_credentials: Vec<HubCredentials>,
+        hub_registries: HashMap<String, Value>,
+        canonical_registry: Option<Value>,
+        topology: Option<Value>,
+    }
+
+    impl Storage for TestStorage {
+        fn load_rooms(&self) -> Result<rhythm_core::RoomManager> {
+            Ok(self.inner.lock().unwrap().rooms.clone())
+        }
+
+        fn save_rooms(&self, rooms: &rhythm_core::RoomManager) -> Result<()> {
+            self.inner.lock().unwrap().rooms = rooms.clone();
+            Ok(())
+        }
+
+        fn load_light_profiles(&self) -> Result<StoredLightProfiles> {
+            self.inner
+                .lock()
+                .unwrap()
+                .light_profiles
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("missing light profiles"))
+        }
+
+        fn save_light_profiles(&self, config: &StoredLightProfiles) -> Result<()> {
+            self.inner.lock().unwrap().light_profiles = Some(config.clone());
+            Ok(())
+        }
+
+        fn load_location(&self) -> Result<StoredLocation> {
+            self.inner
+                .lock()
+                .unwrap()
+                .location
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("missing location"))
+        }
+
+        fn save_location(&self, loc: &StoredLocation) -> Result<()> {
+            self.inner.lock().unwrap().location = Some(loc.clone());
+            Ok(())
+        }
+
+        fn load_settings(&self) -> Result<StoredSettings> {
+            self.inner
+                .lock()
+                .unwrap()
+                .settings
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("missing settings"))
+        }
+
+        fn save_settings(&self, settings: &StoredSettings) -> Result<()> {
+            self.inner.lock().unwrap().settings = Some(settings.clone());
+            Ok(())
+        }
+
+        fn load_hub_credentials(&self) -> Result<HubCredentials> {
+            Ok(self
+                .inner
+                .lock()
+                .unwrap()
+                .hub_credentials
+                .first()
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        fn save_hub_credentials(&self, creds: &HubCredentials) -> Result<()> {
+            let mut inner = self.inner.lock().unwrap();
+            inner.hub_credentials = if creds.is_configured() {
+                vec![creds.clone()]
+            } else {
+                Vec::new()
+            };
+            Ok(())
+        }
+
+        fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>> {
+            Ok(self.inner.lock().unwrap().hub_credentials.clone())
+        }
+
+        fn save_all_hub_credentials(&self, creds: &[HubCredentials]) -> Result<()> {
+            self.inner.lock().unwrap().hub_credentials = creds.to_vec();
+            Ok(())
+        }
+
+        fn load_hub_registry(&self) -> Result<Option<Value>> {
+            Ok(self
+                .inner
+                .lock()
+                .unwrap()
+                .hub_registries
+                .values()
+                .next()
+                .cloned())
+        }
+
+        fn save_hub_registry(&self, data: &Value) -> Result<()> {
+            self.inner
+                .lock()
+                .unwrap()
+                .hub_registries
+                .insert("legacy".into(), data.clone());
+            Ok(())
+        }
+
+        fn load_hub_registry_for(&self, key: &HubKey) -> Result<Option<Value>> {
+            Ok(self
+                .inner
+                .lock()
+                .unwrap()
+                .hub_registries
+                .get(&key.to_string())
+                .cloned())
+        }
+
+        fn save_hub_registry_for(&self, key: &HubKey, data: &Value) -> Result<()> {
+            self.inner
+                .lock()
+                .unwrap()
+                .hub_registries
+                .insert(key.to_string(), data.clone());
+            Ok(())
+        }
+
+        fn load_canonical_registry(&self) -> Result<Option<Value>> {
+            Ok(self.inner.lock().unwrap().canonical_registry.clone())
+        }
+
+        fn save_canonical_registry(&self, data: &Value) -> Result<()> {
+            self.inner.lock().unwrap().canonical_registry = Some(data.clone());
+            Ok(())
+        }
+
+        fn load_topology(&self) -> Result<Option<Value>> {
+            Ok(self.inner.lock().unwrap().topology.clone())
+        }
+
+        fn save_topology(&self, data: &Value) -> Result<()> {
+            self.inner.lock().unwrap().topology = Some(data.clone());
+            Ok(())
+        }
+    }
+
+    struct MockBackupHubProvider;
+
+    impl HubProvider for MockBackupHubProvider {
+        fn hub_type(&self) -> HubType {
+            HubType::new("mock")
+        }
+
+        fn configure(
+            &self,
+            address: &str,
+            credentials_json: &str,
+            state: &SharedState,
+        ) -> Result<()> {
+            let hub_key = HubKey::new(HubType::new("mock"), address);
+            let address = address.to_string();
+            crate::lifecycle::configure_hub(
+                state,
+                &address,
+                credentials_json,
+                |addr, credentials_json| {
+                    Ok(HubCredentials::new(
+                        "mock",
+                        addr,
+                        serde_json::from_str::<Value>(credentials_json)?,
+                    ))
+                },
+                |_state, _creds| false,
+                move |_state| {
+                    let runtime = Arc::new(MockRuntime::new(Vec::new(), 12.0));
+                    let registry: Arc<Mutex<dyn HubRegistry>> =
+                        Arc::new(Mutex::new(crate::registry::HubDeviceRegistry::new()));
+                    let hub = ActiveHub {
+                        hub_type: HubType::new("mock"),
+                        hub_key: hub_key.clone(),
+                        runtime: Some(runtime as Arc<dyn RuntimeHandle>),
+                        hub_data: Box::new(()),
+                        registry: Some(registry),
+                        discovery: None,
+                        shutdown: Default::default(),
+                    };
+                    let (_tx, rx) = std::sync::mpsc::channel();
+                    Ok((hub, rx))
+                },
+            )
+        }
+    }
+
+    static MOCK_BACKUP_HUB_PROVIDER: MockBackupHubProvider = MockBackupHubProvider;
+
+    fn install_mock_hub_provider(state: &SharedState) {
+        state.lock().unwrap().get_hub_provider_fn = Some(Arc::new(|_| &MOCK_BACKUP_HUB_PROVIDER));
     }
 
     fn make_focus_profile() -> LightProfileConfig {
@@ -6720,6 +7235,222 @@ mod tests {
             included.installation.hub_credentials[0].data,
             Some(serde_json::json!({ "username": "secret-user" }))
         );
+    }
+
+    #[test]
+    fn backup_restore_applies_installation_state_after_hub_restore() {
+        let storage = TestStorage::default();
+        let mut app = AppState::default();
+        app.storage = Some(Box::new(storage.clone()));
+        let state = Arc::new(Mutex::new(app));
+        install_mock_hub_provider(&state);
+
+        let focus = make_focus_profile();
+        let transition =
+            rhythm_core::ModeTransitionConfig::new(RhythmMode::Day, RhythmMode::Sleep, 4_321)
+                .with_id("custom_day_to_sleep")
+                .with_label("Custom Day to Sleep")
+                .with_trigger(ModeTransitionTrigger::Sunset);
+
+        let mut rooms = rhythm_core::RoomManager::new();
+        let room = rooms.get_or_create("living", "Living Room");
+        room.rhythm_enabled = true;
+        room.disabled = true;
+        room.time_offset_minutes = 27.0;
+        room.brightness_offset = 11.0;
+        room.soft_off = true;
+        room.profile_settings = rhythm_core::RoomProfileSettings {
+            profile_id: Some("focus".into()),
+            fade_ms: Some(TimerSetting::Fixed { value: 3_210 }),
+            motion_timeout_secs: Some(TimerSetting::Fixed { value: 654 }),
+        };
+
+        let hub_key = HubKey::new(HubType::new("mock"), "bridge.local");
+        let bundle = BackupBundle {
+            schema_version: BUNDLE_SCHEMA_VERSION,
+            kind: BundleKind::BackupBundle,
+            created_at: "2026-04-16T00:00:00Z".into(),
+            secrets_included: true,
+            configuration: PortableConfiguration {
+                power_save: true,
+                active_mode: RhythmMode::Sleep,
+                profiles: vec![focus.clone()],
+                mode_configs: vec![
+                    ModeConfig {
+                        mode: RhythmMode::Day,
+                        active_profile_id: Some("focus".into()),
+                        idle_profile_id: None,
+                        wake_profile_id: None,
+                        warning_profile_id: None,
+                        room_defaults: vec![],
+                    },
+                    ModeConfig::default_for_mode(RhythmMode::Sleep),
+                ],
+                mode_transitions: vec![transition.clone()],
+                rooms: vec![],
+            },
+            installation: BackupInstallation {
+                location: Some(StoredLocation {
+                    latitude: Some(40.7128),
+                    longitude: Some(-74.0060),
+                    utc_offset_hours: -5.0,
+                    timezone_name: Some("America/New_York".into()),
+                }),
+                rooms: rooms.clone(),
+                topology: crate::topology::RoomTopologyStore::new(),
+                canonical_registry: crate::canonical::registry::CanonicalRegistry::new(),
+                hub_credentials: vec![BackupHubCredentials {
+                    hub_type: Some(HubType::new("mock")),
+                    address: "bridge.local".into(),
+                    data: Some(serde_json::json!({ "token": "secret-token" })),
+                }],
+                hub_registries: vec![crate::bundle::BackupHubRegistry {
+                    hub_key: hub_key.clone(),
+                    snapshot: serde_json::json!({ "rooms": [] }),
+                }],
+            },
+            runtime_state: BackupRuntimeState {
+                active_mode: RhythmMode::Day,
+                last_change_cause: ModeChangeCause::Schedule,
+                last_change_transition_id: Some("custom_day_to_sleep".into()),
+                last_change_epoch_ms: Some(1_700_000_000_000),
+            },
+        };
+
+        let json = do_backup_restore(&state, bundle).unwrap();
+        let restored: BackupBundle = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.kind, BundleKind::BackupBundle);
+        assert_eq!(restored.configuration.active_mode, RhythmMode::Day);
+        assert!(restored.configuration.power_save);
+        assert_eq!(restored.installation.hub_credentials.len(), 1);
+        assert_eq!(
+            restored.installation.hub_credentials[0].address,
+            "bridge.local"
+        );
+        assert_eq!(restored.installation.hub_credentials[0].data, None);
+
+        let restored_room = restored
+            .installation
+            .rooms
+            .get("living")
+            .expect("restored room should be present");
+        assert_eq!(restored_room.name, "Living Room");
+        assert!(restored_room.rhythm_enabled);
+        assert!(restored_room.disabled);
+        assert_eq!(restored_room.time_offset_minutes, 27.0);
+        assert_eq!(restored_room.brightness_offset, 11.0);
+        assert!(restored_room.soft_off);
+        assert_eq!(
+            restored_room.profile_settings.profile_id.as_deref(),
+            Some("focus")
+        );
+
+        let saved = storage.inner.lock().unwrap();
+        assert_eq!(
+            saved.settings.as_ref().unwrap().last_active_mode_cause,
+            ModeChangeCause::Schedule
+        );
+        assert_eq!(
+            saved
+                .settings
+                .as_ref()
+                .unwrap()
+                .last_active_mode_transition_id
+                .as_deref(),
+            Some("custom_day_to_sleep")
+        );
+        assert_eq!(
+            saved
+                .settings
+                .as_ref()
+                .unwrap()
+                .last_active_mode_change_utc_ms,
+            Some(1_700_000_000_000)
+        );
+        assert_eq!(saved.location.as_ref().unwrap().latitude, Some(40.7128));
+        assert!(saved.hub_registries.contains_key(&hub_key.to_string()));
+        drop(saved);
+
+        let s = state.lock().unwrap();
+        assert_eq!(s.active_mode, RhythmMode::Day);
+        assert_eq!(s.last_active_mode_cause, ModeChangeCause::Schedule);
+        assert_eq!(
+            s.last_active_mode_transition_id.as_deref(),
+            Some("custom_day_to_sleep")
+        );
+    }
+
+    #[test]
+    fn backup_restore_redacted_backup_restores_without_hubs() {
+        let storage = TestStorage::default();
+        let mut app = AppState::default();
+        app.storage = Some(Box::new(storage.clone()));
+        let state = Arc::new(Mutex::new(app));
+
+        let mut rooms = rhythm_core::RoomManager::new();
+        let room = rooms.get_or_create("office", "Office");
+        room.rhythm_enabled = true;
+        room.time_offset_minutes = 12.0;
+        room.brightness_offset = 5.0;
+
+        let bundle = BackupBundle {
+            schema_version: BUNDLE_SCHEMA_VERSION,
+            kind: BundleKind::BackupBundle,
+            created_at: "2026-04-16T00:00:00Z".into(),
+            secrets_included: false,
+            configuration: PortableConfiguration {
+                power_save: false,
+                active_mode: RhythmMode::Sleep,
+                profiles: vec![],
+                mode_configs: vec![],
+                mode_transitions: vec![],
+                rooms: vec![],
+            },
+            installation: BackupInstallation {
+                location: None,
+                rooms,
+                topology: crate::topology::RoomTopologyStore::new(),
+                canonical_registry: crate::canonical::registry::CanonicalRegistry::new(),
+                hub_credentials: vec![BackupHubCredentials {
+                    hub_type: Some(HubType::new("mock")),
+                    address: "bridge.local".into(),
+                    data: None,
+                }],
+                hub_registries: vec![],
+            },
+            runtime_state: BackupRuntimeState {
+                active_mode: RhythmMode::Sleep,
+                last_change_cause: ModeChangeCause::Manual,
+                last_change_transition_id: None,
+                last_change_epoch_ms: Some(1_600_000_000_000),
+            },
+        };
+
+        let json = do_backup_restore(&state, bundle).unwrap();
+        let restored: BackupBundle = serde_json::from_str(&json).unwrap();
+
+        assert!(restored.installation.hub_credentials.is_empty());
+        let restored_room = restored
+            .installation
+            .rooms
+            .get("office")
+            .expect("restored room should be persisted without a runtime");
+        assert_eq!(restored_room.name, "Office");
+        assert_eq!(restored_room.time_offset_minutes, 12.0);
+        assert_eq!(restored_room.brightness_offset, 5.0);
+
+        let saved = storage.inner.lock().unwrap();
+        assert_eq!(
+            saved
+                .settings
+                .as_ref()
+                .unwrap()
+                .last_active_mode_change_utc_ms,
+            Some(1_600_000_000_000)
+        );
+        assert!(saved.location.is_some());
+        assert!(saved.hub_credentials.is_empty());
     }
 
     #[test]

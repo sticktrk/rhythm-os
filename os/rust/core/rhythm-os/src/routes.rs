@@ -43,7 +43,7 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
     },
     SharedRoute {
         path: "/api/backup",
-        methods: &["GET"],
+        methods: &["GET", "PUT"],
     },
     SharedRoute {
         path: "/api/rooms/state",
