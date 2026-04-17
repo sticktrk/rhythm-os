@@ -202,6 +202,12 @@ setup_cross_env() {
         rpiz)
             export CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_LINKER="arm-linux-musleabihf-gcc"
             export CC_arm_unknown_linux_musleabihf="arm-linux-musleabihf-gcc"
+            if [ -z "${RHYTHM_CHIP_SYSROOT:-}" ]; then
+                local buildroot_sysroot="$PROJECT_ROOT/out/rpiz/host/arm-buildroot-linux-musleabihf/sysroot"
+                if [ -d "$buildroot_sysroot" ]; then
+                    export RHYTHM_CHIP_SYSROOT="$buildroot_sysroot"
+                fi
+            fi
             ;;
     esac
 }

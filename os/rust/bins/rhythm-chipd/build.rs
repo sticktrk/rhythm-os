@@ -190,7 +190,51 @@ fn add_cross_linux_include_deps(target: &str, build: &mut cc::Build) -> Result<(
         ));
     }
 
+    emit_cross_linux_link_deps(&sysroot);
+
     Ok(())
+}
+
+fn emit_cross_linux_link_deps(sysroot: &Path) {
+    for dir in collect_cross_link_dirs(sysroot) {
+        println!("cargo:rustc-link-search=native={}", dir.display());
+    }
+
+    for lib in [
+        "gio-2.0",
+        "gobject-2.0",
+        "glib-2.0",
+        "dbus-1",
+        "avahi-client",
+        "avahi-common",
+    ] {
+        println!("cargo:rustc-link-lib={lib}");
+    }
+}
+
+fn collect_cross_link_dirs(sysroot: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    for subdir in ["usr/lib", "usr/lib64", "lib", "lib64"] {
+        let base = sysroot.join(subdir);
+        push_link_dir(&mut dirs, &base);
+
+        let Ok(entries) = fs::read_dir(&base) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            push_link_dir(&mut dirs, &entry.path());
+        }
+    }
+
+    dirs
+}
+
+fn push_link_dir(dirs: &mut Vec<PathBuf>, path: &Path) {
+    if path.is_dir() && !dirs.iter().any(|existing| existing == path) {
+        dirs.push(path.to_path_buf());
+    }
 }
 
 fn add_nested_include_if_present(
