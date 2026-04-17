@@ -317,7 +317,7 @@ mod ffi_probe {
             .context("encoding CHIP storage path")?;
         let fabric_id = CString::new(fabric_id).context("encoding CHIP fabric id")?;
         let controller_vendor_id = controller_vendor_id()?;
-        let mut error_buffer = [0_i8; ERROR_BUFFER_SIZE];
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
 
         let success = unsafe {
             rhythm_chip_bridge_init(
@@ -358,7 +358,7 @@ mod ffi_probe {
             wifi_password: wifi_password.as_ptr(),
         };
         let mut ffi_device = zeroed_device();
-        let mut error_buffer = [0_i8; ERROR_BUFFER_SIZE];
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
 
         let success = unsafe {
             rhythm_chip_bridge_commission_light(
@@ -408,7 +408,7 @@ mod ffi_probe {
 
     pub fn probe_light(node_id: u64) -> Result<CommissionedDevice> {
         let mut ffi_device = zeroed_device();
-        let mut error_buffer = [0_i8; ERROR_BUFFER_SIZE];
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
 
         let success = unsafe {
             rhythm_chip_bridge_probe_light(
@@ -427,7 +427,7 @@ mod ffi_probe {
     }
 
     pub fn decommission_device(node_id: u64, force: bool) -> Result<()> {
-        let mut error_buffer = [0_i8; ERROR_BUFFER_SIZE];
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
         let success = unsafe {
             rhythm_chip_bridge_decommission_device(
                 node_id,
@@ -444,7 +444,7 @@ mod ffi_probe {
     }
 
     pub fn set_on_off(node_id: u64, endpoint: u16, on: bool) -> Result<()> {
-        let mut error_buffer = [0_i8; ERROR_BUFFER_SIZE];
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
         let success = unsafe {
             rhythm_chip_bridge_set_on_off(
                 node_id,
@@ -467,7 +467,7 @@ mod ffi_probe {
         level: u8,
         transition_ms: Option<u32>,
     ) -> Result<()> {
-        let mut error_buffer = [0_i8; ERROR_BUFFER_SIZE];
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
         let success = unsafe {
             rhythm_chip_bridge_set_brightness(
                 node_id,
@@ -492,7 +492,7 @@ mod ffi_probe {
         kelvin: u16,
         transition_ms: Option<u32>,
     ) -> Result<()> {
-        let mut error_buffer = [0_i8; ERROR_BUFFER_SIZE];
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
         let success = unsafe {
             rhythm_chip_bridge_set_color_temperature(
                 node_id,
@@ -518,7 +518,7 @@ mod ffi_probe {
         y: f32,
         transition_ms: Option<u32>,
     ) -> Result<()> {
-        let mut error_buffer = [0_i8; ERROR_BUFFER_SIZE];
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
         let success = unsafe {
             rhythm_chip_bridge_set_xy(
                 node_id,
@@ -540,7 +540,7 @@ mod ffi_probe {
 
     pub fn read_on_off(node_id: u64, endpoint: u16) -> Result<bool> {
         let mut on = false;
-        let mut error_buffer = [0_i8; ERROR_BUFFER_SIZE];
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
         let success = unsafe {
             rhythm_chip_bridge_read_on_off(
                 node_id,

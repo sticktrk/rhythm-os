@@ -174,9 +174,11 @@ check_musl_cross() {
             fi
             ;;
         rpiz)
-            if ! command -v arm-linux-musleabihf-gcc &>/dev/null; then
-                echo "Error: arm-linux-musleabihf-gcc not found."
-                echo "Install a musl ARMv6 hard-float cross compiler or use: cargo install cross"
+            if ! command -v arm-unknown-linux-musleabihf-gcc &>/dev/null \
+                && ! command -v arm-linux-musleabihf-gcc &>/dev/null; then
+                echo "Error: no ARMv6 hard-float musl cross compiler on PATH."
+                echo "Install one (e.g. crosstool-NG arm-unknown-linux-musleabihf, or"
+                echo "brew install filosottile/musl-cross/musl-cross) and re-run."
                 exit 1
             fi
             ;;
@@ -200,10 +202,26 @@ setup_cross_env() {
             export CC_aarch64_unknown_linux_musl="aarch64-linux-musl-gcc"
             ;;
         rpiz)
-            export CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_LINKER="arm-linux-musleabihf-gcc"
-            export CC_arm_unknown_linux_musleabihf="arm-linux-musleabihf-gcc"
+            # Prefer the crosstool-NG "arm-unknown-linux-musleabihf-gcc" when present
+            # since CHIP's libCHIP.a is typically built against that toolchain's
+            # libstdc++; fall back to the musl-cross "arm-linux-musleabihf-gcc".
+            # If the crosstool-NG toolchain is installed at its default location
+            # but not on PATH, add it so `command -v` can find it below.
+            local ctng_bin="${HOME}/x-tools/arm-unknown-linux-musleabihf/bin"
+            if [ -x "$ctng_bin/arm-unknown-linux-musleabihf-gcc" ]; then
+                case ":$PATH:" in
+                    *":$ctng_bin:"*) ;;
+                    *) export PATH="$ctng_bin:$PATH" ;;
+                esac
+            fi
+            local rpiz_cross="arm-linux-musleabihf-gcc"
+            if command -v arm-unknown-linux-musleabihf-gcc &>/dev/null; then
+                rpiz_cross="arm-unknown-linux-musleabihf-gcc"
+            fi
+            export CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_LINKER="$rpiz_cross"
+            export CC_arm_unknown_linux_musleabihf="$rpiz_cross"
             if [ -z "${RHYTHM_CHIP_SYSROOT:-}" ]; then
-                local buildroot_sysroot="$PROJECT_ROOT/out/rpiz/host/arm-buildroot-linux-musleabihf/sysroot"
+                local buildroot_sysroot="$PROJECT_ROOT/out/rpiz/staging"
                 if [ -d "$buildroot_sysroot" ]; then
                     export RHYTHM_CHIP_SYSROOT="$buildroot_sysroot"
                 fi
@@ -300,8 +318,24 @@ build_for_target() {
     RHYTHM_BUILD_VERSION="$BUILD_VERSION" \
         "$builder" build $CARGO_FLAGS -p "$package" --target "$rust_target" "${cargo_bin_flags[@]}"
 
+    # chip-ffi links to glib/dbus/avahi, which Buildroot only provides as shared libs
+    # (avahi explicitly can't be built static). Drop +crt-static for rhythm-chipd on
+    # musl targets so the linker can pick up the .so files; the Buildroot rootfs
+    # already ships musl's dynamic loader and the matching shared libs.
+    local chipd_rustflags_var=""
+    if [ ${#CHIPD_FEATURE_ARGS[@]} -gt 0 ] \
+        && printf '%s\n' "${CHIPD_FEATURE_ARGS[@]}" | grep -q chip-ffi \
+        && [[ "$rust_target" == *-linux-musl* ]]; then
+        chipd_rustflags_var="CARGO_TARGET_$(printf '%s' "$rust_target" | tr 'a-z-' 'A-Z_')_RUSTFLAGS"
+        export "$chipd_rustflags_var=-C target-feature=-crt-static"
+    fi
+
     RHYTHM_BUILD_VERSION="$BUILD_VERSION" \
         "$builder" build $CARGO_FLAGS -p rhythm-chipd --target "$rust_target" --bin rhythm-chipd "${CHIPD_FEATURE_ARGS[@]}"
+
+    if [ -n "$chipd_rustflags_var" ]; then
+        unset "$chipd_rustflags_var"
+    fi
 
     # Copy to dist
     local output_dir="$PROJECT_ROOT/dist/bin/$target"

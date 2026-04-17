@@ -8,6 +8,7 @@ const BRIDGE_SOURCE: &str = "native/chip_bridge.cc";
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(rhythm_chipd_chip_ffi)");
+    println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={BRIDGE_HEADER}");
     println!("cargo:rerun-if-changed={BRIDGE_SOURCE}");
     for key in [
@@ -105,6 +106,11 @@ fn emit_platform_link_args(target: &str) {
         if chip_crypto != "mbedtls" {
             link_args.splice(0..0, ["-lssl", "-lcrypto"]);
         }
+        // Rust links with -nodefaultlibs, so pull in libgcc/libatomic for
+        // compiler builtins like __sync_synchronize and __sync_fetch_and_add_*,
+        // which ARMv6 and other sub-archs without native atomics call into.
+        link_args.push("-latomic");
+        link_args.push("-lgcc");
         for link_arg in link_args {
             println!("cargo:rustc-link-arg={link_arg}");
         }
@@ -200,6 +206,14 @@ fn emit_cross_linux_link_deps(sysroot: &Path) {
         println!("cargo:rustc-link-search=native={}", dir.display());
     }
 
+    // Emit as link-arg (not link-lib) so the libraries land at the end of the
+    // linker command, after the CHIP object files and libCHIP.a. Force
+    // --no-as-needed around the group so rustc's default `-Wl,--as-needed`
+    // doesn't drop libs whose symbols are only referenced by later archives.
+    // Allow undefined symbols in shared libs (e.g. glib's transitive pcre2/ffi/
+    // zlib deps) — those resolve at runtime via the dynamic loader.
+    println!("cargo:rustc-link-arg=-Wl,--allow-shlib-undefined");
+    println!("cargo:rustc-link-arg=-Wl,--no-as-needed");
     for lib in [
         "gio-2.0",
         "gobject-2.0",
@@ -208,8 +222,9 @@ fn emit_cross_linux_link_deps(sysroot: &Path) {
         "avahi-client",
         "avahi-common",
     ] {
-        println!("cargo:rustc-link-lib={lib}");
+        println!("cargo:rustc-link-arg=-l{lib}");
     }
+    println!("cargo:rustc-link-arg=-Wl,--as-needed");
 }
 
 fn collect_cross_link_dirs(sysroot: &Path) -> Vec<PathBuf> {
