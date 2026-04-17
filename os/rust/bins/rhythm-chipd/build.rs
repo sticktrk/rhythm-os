@@ -58,6 +58,18 @@ fn main() {
 
             build.compile("rhythm_chip_bridge");
 
+            match artifacts.link_mode {
+                LinkMode::NativeLibChip => {
+                    if let Err(error) = emit_native_chip_link_inputs(&artifacts) {
+                        println!(
+                            "cargo:warning=chip-ffi requested, but native CHIP controller data-model objects are unavailable: {error}"
+                        );
+                        return;
+                    }
+                }
+                LinkMode::PythonExtension => {}
+            }
+
             println!("cargo:rustc-link-arg={}", artifacts.link_path.display());
             emit_platform_link_args(&artifacts.target);
             println!("cargo:rustc-cfg=rhythm_chipd_chip_ffi");
@@ -198,6 +210,7 @@ fn resolve_from_out_dir_with_root(
     if libchip.is_file() {
         return Ok(ChipArtifacts {
             chip_root,
+            out_dir,
             target,
             link_path: libchip,
             link_mode: LinkMode::NativeLibChip,
@@ -208,6 +221,7 @@ fn resolve_from_out_dir_with_root(
     if python_extension.is_file() {
         return Ok(ChipArtifacts {
             chip_root,
+            out_dir,
             target,
             link_path: python_extension,
             link_mode: LinkMode::PythonExtension,
@@ -223,11 +237,14 @@ fn resolve_from_out_dir_with_root(
 fn resolve_from_lib_dir(lib_dir: PathBuf, target: String) -> Result<ChipArtifacts, String> {
     let chip_root = infer_root_from_lib_dir(&lib_dir)
         .ok_or_else(|| format!("unable to infer CHIP root from {}", lib_dir.display()))?;
+    let out_dir = infer_out_dir_from_lib_dir(&lib_dir)
+        .ok_or_else(|| format!("unable to infer CHIP out dir from {}", lib_dir.display()))?;
 
     let libchip = lib_dir.join("libCHIP.a");
     if libchip.is_file() {
         return Ok(ChipArtifacts {
             chip_root,
+            out_dir,
             target,
             link_path: libchip,
             link_mode: LinkMode::NativeLibChip,
@@ -238,6 +255,7 @@ fn resolve_from_lib_dir(lib_dir: PathBuf, target: String) -> Result<ChipArtifact
     if python_extension.is_file() {
         return Ok(ChipArtifacts {
             chip_root,
+            out_dir,
             target,
             link_path: python_extension,
             link_mode: LinkMode::PythonExtension,
@@ -264,6 +282,27 @@ fn infer_root_from_lib_dir(lib_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+fn infer_out_dir_from_lib_dir(lib_dir: &Path) -> Option<PathBuf> {
+    let parent = lib_dir.parent()?;
+    if lib_dir.file_name()? == "lib" && parent.join("gen/include").is_dir() {
+        return Some(parent.to_path_buf());
+    }
+
+    for ancestor in lib_dir.ancestors() {
+        if ancestor.join("gen/include").is_dir() && ancestor.join("obj").is_dir() {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
+}
+
+fn emit_native_chip_link_inputs(artifacts: &ChipArtifacts) -> Result<(), String> {
+    for path in artifacts.native_link_inputs()? {
+        println!("cargo:rustc-link-arg={}", path.display());
+    }
+    Ok(())
+}
+
 fn inferred_chip_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
@@ -285,6 +324,7 @@ fn inferred_chip_roots() -> Vec<PathBuf> {
 
 struct ChipArtifacts {
     chip_root: PathBuf,
+    out_dir: PathBuf,
     target: String,
     link_path: PathBuf,
     link_mode: LinkMode,
@@ -292,22 +332,10 @@ struct ChipArtifacts {
 
 impl ChipArtifacts {
     fn include_dirs(&self) -> Vec<PathBuf> {
-        let out_dir = self
-            .link_path
-            .ancestors()
-            .find(|path| path.file_name().is_some_and(|name| name == "host"))
-            .or_else(|| {
-                self.link_path
-                    .ancestors()
-                    .find(|path| path.join("gen/include").is_dir())
-            })
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.chip_root.join("out/host"));
-
         let mut dirs = vec![
             self.chip_root.join("src/include"),
             self.chip_root.join("src"),
-            out_dir.join("gen/include"),
+            self.out_dir.join("gen/include"),
             self.chip_root.join("config/standalone"),
             self.chip_root.join("zzz_generated/app-common"),
             self.chip_root.join("third_party/nlassert/repo/include"),
@@ -338,6 +366,55 @@ impl ChipArtifacts {
         }
 
         dirs
+    }
+
+    fn native_link_inputs(&self) -> Result<Vec<PathBuf>, String> {
+        const REQUIRED_OBJECTS: &[&str] = &[
+            "obj/zzz_generated/app-common/app-common/zap-generated/attributes/data_model.Accessors.cpp.o",
+            "obj/src/data-model-providers/codegen/data_model.ClusterIntegration.cpp.o",
+            "obj/src/data-model-providers/codegen/data_model.CodegenDataModelProvider.cpp.o",
+            "obj/src/data-model-providers/codegen/data_model.CodegenDataModelProvider_Read.cpp.o",
+            "obj/src/data-model-providers/codegen/data_model.CodegenDataModelProvider_Write.cpp.o",
+            "obj/src/data-model-providers/codegen/data_model.EmberAttributeDataBuffer.cpp.o",
+            "obj/src/data-model-providers/codegen/data_model.Instance.cpp.o",
+            "obj/src/app/util/data_model.generic-callback-stubs.cpp.o",
+            "obj/src/app/util/data_model.privilege-storage.cpp.o",
+            "obj/src/app/reporting/data_model.reporting.cpp.o",
+            "obj/src/app/util/data_model.DataModelHandler.cpp.o",
+            "obj/src/app/util/data_model.attribute-storage.cpp.o",
+            "obj/src/app/util/data_model.attribute-table.cpp.o",
+            "obj/src/app/util/data_model.ember-io-storage.cpp.o",
+            "obj/src/app/util/data_model.util.cpp.o",
+            "obj/src/app/server-cluster/server-cluster.AttributeListBuilder.cpp.o",
+            "obj/src/app/server-cluster/server-cluster.DefaultServerCluster.cpp.o",
+            "obj/src/app/server-cluster/server-cluster.ServerClusterExtension.cpp.o",
+            "obj/src/app/server-cluster/server-cluster.ServerClusterInterface.cpp.o",
+            "obj/src/app/server-cluster/registry.ServerClusterInterfaceRegistry.cpp.o",
+            "obj/src/app/server-cluster/registry.SingleEndpointServerClusterRegistry.cpp.o",
+            "obj/BUILD_DIR/gen/src/controller/data_model/app/data_model_codegen.callback-stub.cpp.o",
+            "obj/BUILD_DIR/gen/src/controller/data_model/app/data_model_codegen.cluster-callbacks.cpp.o",
+            "obj/BUILD_DIR/gen/src/controller/data_model/zapgen/zap-generated/data_model_zapgen.CodeDrivenInitShutdown.cpp.o",
+            "obj/BUILD_DIR/gen/src/controller/data_model/zapgen/zap-generated/data_model_zapgen.IMClusterCommandHandler.cpp.o",
+            "obj/src/app/persistence/persistence.AttributePersistence.cpp.o",
+            "obj/src/app/persistence/persistence.String.cpp.o",
+            "obj/src/app/persistence/default.DefaultAttributePersistenceProvider.cpp.o",
+            "obj/src/app/persistence/singleton.AttributePersistenceProviderInstance.cpp.o",
+        ];
+
+        let mut inputs = Vec::with_capacity(REQUIRED_OBJECTS.len());
+        for relative in REQUIRED_OBJECTS {
+            let path = self.out_dir.join(relative);
+            if !path.is_file() {
+                return Err(format!(
+                    "expected CHIP object '{}' under {}",
+                    relative,
+                    self.out_dir.display()
+                ));
+            }
+            inputs.push(path);
+        }
+
+        Ok(inputs)
     }
 }
 

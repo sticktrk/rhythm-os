@@ -93,6 +93,7 @@ RHYTHM_CHIP_OUT_DIR=/path/to/connectedhomeip/out/rpiz ./scripts/build-server.sh 
 **Output:** `dist/bin/{target}/{rhythm-server,rhythm-cli}`
 For `rpiz`, the build comes from the `rhythm-linux-embedded` crate and writes both `dist/bin/rpiz/rhythm-linux-embedded` and the compatibility appliance binary `dist/bin/rpiz/rhythm-server`.
 If `RHYTHM_CHIP_OUT_DIR` or `RHYTHM_CHIP_LIB_DIR` is set, the helper automatically builds `rhythm-chipd` with `--features chip-ffi`. For native builds, `RHYTHM_CHIP_ROOT` also enables the direct bridge.
+The native Matter bridge also accepts `RHYTHM_MATTER_CONTROLLER_VENDOR_ID` to override the controller vendor ID used by `rhythm-chipd`. It defaults to `0xFFF1` for development and accepts either hex (`0xFFF1`) or decimal.
 
 ### build-rpiz-image.sh
 

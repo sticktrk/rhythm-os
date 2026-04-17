@@ -12,9 +12,8 @@ pub struct ChipFfiController {
 impl ChipFfiController {
     pub fn initialize(
         state: &CommissioningState,
-        existing_devices: &[CommissionedDevice],
+        _existing_devices: &[CommissionedDevice],
     ) -> Result<Self> {
-        let _ = existing_devices;
         #[cfg(not(rhythm_chipd_chip_ffi))]
         let _ = state;
         #[cfg(rhythm_chipd_chip_ffi)]
@@ -22,7 +21,7 @@ impl ChipFfiController {
 
         Ok(Self {
             #[cfg(not(rhythm_chipd_chip_ffi))]
-            mode: ChipBridgeMode::detect()?,
+            mode: ChipBridgeMode::stub(),
         })
     }
 
@@ -164,6 +163,20 @@ impl ChipFfiController {
     }
 }
 
+#[cfg(not(rhythm_chipd_chip_ffi))]
+enum ChipBridgeMode {
+    Stub { reason: String },
+}
+
+#[cfg(not(rhythm_chipd_chip_ffi))]
+impl ChipBridgeMode {
+    fn stub() -> Self {
+        Self::Stub {
+            reason: "rhythm-chipd was built without the optional direct CHIP FFI bridge. Build with `--features chip-ffi` and set `RHYTHM_CHIP_OUT_DIR` or `RHYTHM_CHIP_LIB_DIR` to target-specific connectedhomeip artifacts.".to_string(),
+        }
+    }
+}
+
 #[cfg(rhythm_chipd_chip_ffi)]
 impl Drop for ChipFfiController {
     fn drop(&mut self) {
@@ -171,32 +184,9 @@ impl Drop for ChipFfiController {
     }
 }
 
-enum ChipBridgeMode {
-    #[cfg(not(rhythm_chipd_chip_ffi))]
-    Stub { reason: String },
-    #[cfg(rhythm_chipd_chip_ffi)]
-    Linked,
-}
-
-impl ChipBridgeMode {
-    fn detect() -> Result<Self> {
-        #[cfg(rhythm_chipd_chip_ffi)]
-        {
-            let _ = ffi_probe::linked_mode()?;
-            return Ok(Self::Linked);
-        }
-
-        #[cfg(not(rhythm_chipd_chip_ffi))]
-        {
-            Ok(Self::Stub {
-                reason: "rhythm-chipd was built without the optional direct CHIP FFI bridge. Build with `--features chip-ffi` and set `RHYTHM_CHIP_OUT_DIR` or `RHYTHM_CHIP_LIB_DIR` to target-specific connectedhomeip artifacts.".to_string(),
-            })
-        }
-    }
-}
-
 #[cfg(rhythm_chipd_chip_ffi)]
 mod ffi_probe {
+    use std::env;
     use std::ffi::{c_char, c_uchar, c_ushort, CStr, CString};
     use std::path::Path;
 
@@ -212,6 +202,7 @@ mod ffi_probe {
     const RENDEZVOUS_AUTO: u8 = 0;
     const RENDEZVOUS_BLE: u8 = 1;
     const RENDEZVOUS_ON_NETWORK: u8 = 2;
+    const DEFAULT_CONTROLLER_VENDOR_ID: u16 = 0xFFF1;
 
     const COLOR_MODE_HUE_SATURATION: u32 = 1 << 0;
     const COLOR_MODE_XY: u32 = 1 << 1;
@@ -245,12 +236,12 @@ mod ffi_probe {
     }
 
     unsafe extern "C" {
-        fn rhythm_chip_bridge_link_mode() -> *const c_char;
         fn rhythm_chip_bridge_init(
             storage_path: *const c_char,
             fabric_id: *const c_char,
             has_ble_controller: bool,
             ble_controller: c_ushort,
+            controller_vendor_id: c_ushort,
             error_message: *mut c_char,
             error_message_size: usize,
         ) -> bool;
@@ -317,18 +308,6 @@ mod ffi_probe {
         fn rhythm_chip_bridge_shutdown();
     }
 
-    pub fn linked_mode() -> Result<String> {
-        let raw = unsafe { rhythm_chip_bridge_link_mode() };
-        if raw.is_null() {
-            anyhow::bail!("bridge probe returned a null mode pointer");
-        }
-
-        unsafe { CStr::from_ptr(raw) }
-            .to_str()
-            .context("decoding bridge mode")
-            .map(ToString::to_string)
-    }
-
     pub fn initialize_bridge(
         storage_path: &Path,
         fabric_id: &str,
@@ -337,6 +316,7 @@ mod ffi_probe {
         let storage_path = CString::new(storage_path.display().to_string())
             .context("encoding CHIP storage path")?;
         let fabric_id = CString::new(fabric_id).context("encoding CHIP fabric id")?;
+        let controller_vendor_id = controller_vendor_id()?;
         let mut error_buffer = [0_i8; ERROR_BUFFER_SIZE];
 
         let success = unsafe {
@@ -345,6 +325,7 @@ mod ffi_probe {
                 fabric_id.as_ptr(),
                 ble_controller.is_some(),
                 ble_controller.unwrap_or_default(),
+                controller_vendor_id,
                 error_buffer.as_mut_ptr(),
                 error_buffer.len(),
             )
@@ -393,6 +374,36 @@ mod ffi_probe {
         }
 
         decode_device(ffi_device)
+    }
+
+    fn controller_vendor_id() -> Result<u16> {
+        match env::var("RHYTHM_MATTER_CONTROLLER_VENDOR_ID") {
+            Ok(raw) => parse_vendor_id(&raw).with_context(|| {
+                format!(
+                    "parsing RHYTHM_MATTER_CONTROLLER_VENDOR_ID='{}' as a Matter vendor id",
+                    raw
+                )
+            }),
+            Err(env::VarError::NotPresent) => Ok(DEFAULT_CONTROLLER_VENDOR_ID),
+            Err(error) => Err(anyhow::anyhow!(error))
+                .context("reading RHYTHM_MATTER_CONTROLLER_VENDOR_ID"),
+        }
+    }
+
+    fn parse_vendor_id(raw: &str) -> Result<u16> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("vendor id cannot be empty");
+        }
+
+        if let Some(hex) = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
+        {
+            return Ok(u16::from_str_radix(hex, 16)?);
+        }
+
+        Ok(trimmed.parse::<u16>()?)
     }
 
     pub fn probe_light(node_id: u64) -> Result<CommissionedDevice> {

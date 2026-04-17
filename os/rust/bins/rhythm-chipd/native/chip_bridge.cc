@@ -11,6 +11,7 @@
 #include <credentials/PersistentStorageOpCertStore.h>
 #include <credentials/attestation_verifier/DefaultDeviceAttestationVerifier.h>
 #include <crypto/RawKeySessionKeystore.h>
+#include <data-model-providers/codegen/Instance.h>
 #include <lib/core/CHIPCallback.h>
 #include <lib/core/ErrorStr.h>
 #include <lib/support/CodeUtils.h>
@@ -56,6 +57,7 @@ using chip::Controller::WiFiCredentials;
 constexpr std::chrono::seconds kOperationTimeout(30);
 constexpr std::chrono::seconds kCommissioningTimeout(180);
 constexpr EndpointId kRootEndpoint = kRootEndpointId;
+constexpr VendorId kDefaultControllerVendorId = VendorId::TestVendor1;
 
 void WriteErrorMessage(char * buffer, size_t bufferSize, const std::string & message)
 {
@@ -89,7 +91,16 @@ std::string FormatChipError(CHIP_ERROR error, const std::string & context)
         return context;
     }
 
-    return context + ": " + chip::ErrorStr(error);
+    std::string message = context + ": " + chip::ErrorStr(error);
+
+    if (message.find("GATT write characteristic operation failed") != std::string::npos)
+    {
+        message +=
+            " (official Matter BLE commissioning reached the device, but the Darwin/CoreBluetooth GATT write failed; "
+            "this matches chip-tool behavior on this host)";
+    }
+
+    return message;
 }
 
 std::string NormalizeSetupPayload(std::string_view setupPayload)
@@ -429,7 +440,8 @@ private:
 class ChipBridgeContext
 {
 public:
-    CHIP_ERROR Init(const char * storagePath, const char * fabricId, bool hasBleController, uint16_t bleController)
+    CHIP_ERROR Init(const char * storagePath, const char * fabricId, bool hasBleController, uint16_t bleController,
+                    uint16_t controllerVendorId)
     {
         std::lock_guard<std::mutex> lock(mMutex);
 
@@ -443,6 +455,7 @@ public:
         {
             if (requestedStorage == mStoragePath)
             {
+                VerifyOrReturnError(mControllerVendorId == controllerVendorId, CHIP_ERROR_INCORRECT_STATE);
                 return CHIP_NO_ERROR;
             }
             return CHIP_ERROR_INCORRECT_STATE;
@@ -450,6 +463,7 @@ public:
 
         mStoragePath = requestedStorage;
         mFabricId    = fabricId != nullptr ? fabricId : "";
+        mControllerVendorId = controllerVendorId;
 
         if (!mFactoryInitialized)
         {
@@ -485,23 +499,9 @@ public:
         switch (request.rendezvous_mode)
         {
         case RHYTHM_CHIP_BRIDGE_RENDEZVOUS_BLE: {
-#if CONFIG_NETWORK_LAYER_BLE
             SetupPayload parsedPayload;
             ReturnErrorOnFailure(ParseSetupPayload(setupPayload, parsedPayload));
-
-            RendezvousParameters rendezvousParams = RendezvousParameters()
-                                                        .SetPeerAddress(Transport::PeerAddress(Transport::Type::kBle))
-                                                        .SetSetupPINCode(parsedPayload.setUpPINCode)
-                                                        .SetSetupDiscriminator(parsedPayload.discriminator);
-
-            ReturnErrorOnFailure(
-                ExecuteOnMatterThread([this, &err, &request, &rendezvousParams, &commissioningParams]() {
-                    err = mCommissioner->PairDevice(request.node_id, rendezvousParams, commissioningParams);
-                }));
-#else
-            mPairingDelegate.Cancel(CHIP_ERROR_NOT_IMPLEMENTED);
-            return CHIP_ERROR_NOT_IMPLEMENTED;
-#endif
+            ReturnErrorOnFailure(StartBlePairing(request.node_id, parsedPayload, commissioningParams, err));
             break;
         }
         case RHYTHM_CHIP_BRIDGE_RENDEZVOUS_ON_NETWORK:
@@ -512,9 +512,7 @@ public:
             break;
         case RHYTHM_CHIP_BRIDGE_RENDEZVOUS_AUTO:
         default:
-            ReturnErrorOnFailure(ExecuteOnMatterThread([this, &err, &request, &setupPayload, &commissioningParams]() {
-                err = mCommissioner->PairDevice(request.node_id, setupPayload.c_str(), commissioningParams, DiscoveryType::kAll);
-            }));
+            ReturnErrorOnFailure(StartAutoPairing(request.node_id, setupPayload, wifiSsid, wifiPassword, commissioningParams, err));
             break;
         }
 
@@ -526,6 +524,80 @@ public:
 
         ReturnErrorOnFailure(mPairingDelegate.WaitForCompletion(kCommissioningTimeout));
         return ProbeLight(request.node_id, device);
+    }
+
+    CHIP_ERROR StartBlePairing(NodeId nodeId, const SetupPayload & parsedPayload,
+                               CommissioningParameters & commissioningParams, CHIP_ERROR & outErr)
+    {
+#if CONFIG_NETWORK_LAYER_BLE
+        RendezvousParameters rendezvousParams;
+        rendezvousParams.SetSetupPINCode(parsedPayload.setUpPINCode);
+        rendezvousParams.SetBleLayer(chip::DeviceLayer::ConnectivityMgr().GetBleLayer());
+        rendezvousParams.SetPeerAddress(Transport::PeerAddress::BLE());
+
+        if (parsedPayload.discriminator.IsShortDiscriminator())
+        {
+            rendezvousParams.SetSetupDiscriminator(parsedPayload.discriminator);
+        }
+        else
+        {
+            rendezvousParams.SetDiscriminator(parsedPayload.discriminator.GetLongValue());
+        }
+
+        return ExecuteOnMatterThread([this, &outErr, nodeId, &rendezvousParams, &commissioningParams]() {
+            outErr = mCommissioner->PairDevice(nodeId, rendezvousParams, commissioningParams);
+        });
+#else
+        (void) nodeId;
+        (void) parsedPayload;
+        (void) commissioningParams;
+        (void) outErr;
+        mPairingDelegate.Cancel(CHIP_ERROR_NOT_IMPLEMENTED);
+        return CHIP_ERROR_NOT_IMPLEMENTED;
+#endif
+    }
+
+    CHIP_ERROR StartAutoPairing(NodeId nodeId, const std::string & setupPayload, const std::string & wifiSsid,
+                                const std::string & wifiPassword, CommissioningParameters & commissioningParams,
+                                CHIP_ERROR & outErr)
+    {
+        SetupPayload parsedPayload;
+        const bool parsed = (ParseSetupPayload(setupPayload, parsedPayload) == CHIP_NO_ERROR);
+        const bool hasWiFiCredentials = !wifiSsid.empty() || !wifiPassword.empty();
+
+        if (parsed)
+        {
+            const auto rendezvousInformation = parsedPayload.rendezvousInformation;
+            if (rendezvousInformation.HasValue())
+            {
+                const auto flags = rendezvousInformation.Value();
+                const bool supportsBle = flags.Has(RendezvousInformationFlag::kBLE);
+                const bool supportsOnNetwork = flags.Has(RendezvousInformationFlag::kOnNetwork);
+
+                // Prefer explicit BLE when onboarding a fresh Wi-Fi device or when BLE is the only advertised rendezvous path.
+                if (supportsBle && (hasWiFiCredentials || !supportsOnNetwork))
+                {
+                    return StartBlePairing(nodeId, parsedPayload, commissioningParams, outErr);
+                }
+
+                if (supportsOnNetwork && !supportsBle)
+                {
+                    return ExecuteOnMatterThread([this, &outErr, nodeId, &setupPayload, &commissioningParams]() {
+                        outErr = mCommissioner->PairDevice(nodeId, setupPayload.c_str(), commissioningParams,
+                                                           DiscoveryType::kDiscoveryNetworkOnly);
+                    });
+                }
+            }
+
+            if (hasWiFiCredentials)
+            {
+                return StartBlePairing(nodeId, parsedPayload, commissioningParams, outErr);
+            }
+        }
+
+        return ExecuteOnMatterThread([this, &outErr, nodeId, &setupPayload, &commissioningParams]() {
+            outErr = mCommissioner->PairDevice(nodeId, setupPayload.c_str(), commissioningParams, DiscoveryType::kAll);
+        });
     }
 
     CHIP_ERROR ProbeLight(NodeId nodeId, rhythm_chip_bridge_device & device)
@@ -713,6 +785,7 @@ public:
         mStorage.reset();
         mStoragePath.clear();
         mFabricId.clear();
+        mControllerVendorId = static_cast<uint16_t>(kDefaultControllerVendorId);
     }
 
 private:
@@ -743,6 +816,7 @@ private:
         FactoryInitParams factoryParams;
         factoryParams.fabricIndependentStorage = mStorage.get();
         factoryParams.sessionKeystore          = &mSessionKeystore;
+        factoryParams.dataModelProvider        = chip::app::CodegenDataModelProviderInstance(mStorage.get());
 
         mGroupDataProvider.SetStorageDelegate(mStorage.get());
         mGroupDataProvider.SetSessionKeystore(factoryParams.sessionKeystore);
@@ -784,6 +858,7 @@ private:
         commissionerParams.deviceAttestationVerifier      = dacVerifier;
         commissionerParams.operationalCredentialsDelegate = &mOperationalCredentialsIssuer;
         commissionerParams.pairingDelegate               = &mPairingDelegate;
+        commissionerParams.controllerVendorId            = static_cast<VendorId>(mControllerVendorId);
 
         ReturnErrorOnFailure(mOperationalKeypair.Initialize(chip::Crypto::ECPKeyTarget::ECDSA));
         commissionerParams.operationalKeypair = &mOperationalKeypair;
@@ -906,6 +981,7 @@ private:
     std::unique_ptr<DeviceCommissioner> mCommissioner;
     std::string mStoragePath;
     std::string mFabricId;
+    uint16_t mControllerVendorId = static_cast<uint16_t>(kDefaultControllerVendorId);
     bool mFactoryInitialized = false;
     bool mEventLoopStarted   = false;
 };
@@ -942,10 +1018,12 @@ const char * rhythm_chip_bridge_link_mode(void)
 }
 
 bool rhythm_chip_bridge_init(const char * storage_path, const char * fabric_id, bool has_ble_controller,
-                             uint16_t ble_controller, char * error_message, size_t error_message_size)
+                             uint16_t ble_controller, uint16_t controller_vendor_id, char * error_message,
+                             size_t error_message_size)
 {
-    return HandleBridgeResult(gContext.Init(storage_path, fabric_id, has_ble_controller, ble_controller), error_message,
-                              error_message_size, "initializing CHIP controller bridge");
+    return HandleBridgeResult(
+        gContext.Init(storage_path, fabric_id, has_ble_controller, ble_controller, controller_vendor_id), error_message,
+        error_message_size, "initializing CHIP controller bridge");
 }
 
 bool rhythm_chip_bridge_commission_light(const struct rhythm_chip_bridge_commission_request * request,

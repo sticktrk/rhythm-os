@@ -17,7 +17,6 @@ use crate::backend::ChipControllerBackend;
 pub struct CommissioningState {
     pub fabric_id: String,
     pub storage_path: PathBuf,
-    #[allow(dead_code)] // Reserved for the direct CHIP bridge once BLE selection is wired through.
     pub ble_controller: Option<u16>,
 }
 

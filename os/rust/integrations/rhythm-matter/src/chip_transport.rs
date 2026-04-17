@@ -98,7 +98,9 @@ impl ChipTransport {
         }
 
         let response: ChipInitControllerResponse =
-            self.send_rpc_once(ChipRpcRequest::InitController(self.init_request.clone()))?;
+            self.decode_rpc_response(self.send_rpc_envelope(ChipRpcRequest::InitController(
+                self.init_request.clone(),
+            ))?)?;
         if response.fabric_id != self.init_request.fabric_id {
             anyhow::bail!(
                 "CHIP sidecar initialized unexpected fabric '{}'",
@@ -112,14 +114,15 @@ impl ChipTransport {
 
     fn call<T: serde::de::DeserializeOwned>(&self, request: ChipRpcRequest) -> Result<T> {
         self.ensure_sidecar()?;
-        match self.send_rpc_once(request.clone()) {
-            Ok(value) => Ok(value),
+        match self.send_rpc_envelope(request.clone()) {
+            Ok(response) => self.decode_rpc_response(response),
             Err(first_error) => {
                 self.initialized.store(false, Ordering::SeqCst);
                 if self.sidecar_config.is_some() {
                     self.start_sidecar()?;
                     self.ensure_sidecar()?;
-                    self.send_rpc_once(request).with_context(|| {
+                    self.decode_rpc_response(self.send_rpc_envelope(request)?)
+                        .with_context(|| {
                         format!(
                             "CHIP RPC retry failed after restarting sidecar: {:#}",
                             first_error
@@ -132,7 +135,14 @@ impl ChipTransport {
         }
     }
 
-    fn send_rpc_once<T: serde::de::DeserializeOwned>(&self, request: ChipRpcRequest) -> Result<T> {
+    fn decode_rpc_response<T: serde::de::DeserializeOwned>(
+        &self,
+        response: ChipRpcResponseEnvelope,
+    ) -> Result<T> {
+        response.into_result()
+    }
+
+    fn send_rpc_envelope(&self, request: ChipRpcRequest) -> Result<ChipRpcResponseEnvelope> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::SeqCst);
         let envelope = ChipRpcRequestEnvelope {
             id: request_id,
@@ -172,7 +182,7 @@ impl ChipTransport {
                 response.id
             );
         }
-        response.into_result()
+        Ok(response)
     }
 
     fn can_connect(&self) -> Result<()> {
