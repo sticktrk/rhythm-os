@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -59,6 +60,7 @@ constexpr std::chrono::seconds kOperationTimeout(30);
 constexpr std::chrono::seconds kCommissioningTimeout(180);
 constexpr EndpointId kRootEndpoint = kRootEndpointId;
 constexpr VendorId kDefaultControllerVendorId = VendorId::TestVendor1;
+constexpr const char * kBypassAttestationEnv = "RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION";
 
 // DEV-ONLY attestation verifier that waves every device through.
 // Use only on a trusted LAN during rpiz bring-up; production must use
@@ -115,6 +117,20 @@ public:
         }
     }
 };
+
+bool EnvFlagEnabled(const char * name)
+{
+    const char * value = std::getenv(name);
+    if (value == nullptr)
+    {
+        return false;
+    }
+
+    std::string normalized(value);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
+}
 
 void WriteErrorMessage(char * buffer, size_t bufferSize, const std::string & message)
 {
@@ -915,17 +931,28 @@ private:
             return CHIP_NO_ERROR;
         }
 
-        // DEV-ONLY: skip Matter device attestation so we can commission Matter
-        // devices whose PAA isn't in CHIP's test trust store (e.g. Espressif-
-        // based bulbs) while we're iterating on the rpiz appliance. Replace
-        // with GetDefaultDACVerifier + a real PAA trust store before shipping.
+        chip::Credentials::DeviceAttestationVerifier * dacVerifier = nullptr;
         static BypassAttestationVerifier sBypassVerifier;
-        chip::Credentials::SetDeviceAttestationVerifier(&sBypassVerifier);
+        if (EnvFlagEnabled(kBypassAttestationEnv))
+        {
+            // DEV-ONLY: skip Matter device attestation only when explicitly
+            // requested for bring-up against devices whose PAA is missing from
+            // the configured trust store.
+            dacVerifier = &sBypassVerifier;
+        }
+        else
+        {
+            dacVerifier = chip::Credentials::GetDefaultDACVerifier(
+                chip::Credentials::GetTestAttestationTrustStore(),
+                /* revocationDelegate = */ nullptr);
+            VerifyOrReturnError(dacVerifier != nullptr, CHIP_ERROR_INCORRECT_STATE);
+        }
+        chip::Credentials::SetDeviceAttestationVerifier(dacVerifier);
 
         auto commissioner = std::make_unique<DeviceCommissioner>();
 
         SetupParams commissionerParams;
-        commissionerParams.deviceAttestationVerifier      = &sBypassVerifier;
+        commissionerParams.deviceAttestationVerifier      = dacVerifier;
         commissionerParams.operationalCredentialsDelegate = &mOperationalCredentialsIssuer;
         commissionerParams.pairingDelegate               = &mPairingDelegate;
         commissionerParams.controllerVendorId            = static_cast<VendorId>(mControllerVendorId);

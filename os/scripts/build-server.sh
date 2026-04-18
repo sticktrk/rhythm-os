@@ -323,18 +323,33 @@ build_for_target() {
     # musl targets so the linker can pick up the .so files; the Buildroot rootfs
     # already ships musl's dynamic loader and the matching shared libs.
     local chipd_rustflags_var=""
+    local chipd_previous_rustflags=""
+    local chipd_restore_rustflags=false
     if [ ${#CHIPD_FEATURE_ARGS[@]} -gt 0 ] \
         && printf '%s\n' "${CHIPD_FEATURE_ARGS[@]}" | grep -q chip-ffi \
         && [[ "$rust_target" == *-linux-musl* ]]; then
         chipd_rustflags_var="CARGO_TARGET_$(printf '%s' "$rust_target" | tr 'a-z-' 'A-Z_')_RUSTFLAGS"
-        export "$chipd_rustflags_var=-C target-feature=-crt-static"
+        if [[ -v $chipd_rustflags_var ]]; then
+            chipd_previous_rustflags="${!chipd_rustflags_var}"
+            chipd_restore_rustflags=true
+        fi
+        local chipd_required_rustflags="-C target-feature=-crt-static"
+        if [ -n "$chipd_previous_rustflags" ]; then
+            export "$chipd_rustflags_var=$chipd_previous_rustflags $chipd_required_rustflags"
+        else
+            export "$chipd_rustflags_var=$chipd_required_rustflags"
+        fi
     fi
 
     RHYTHM_BUILD_VERSION="$BUILD_VERSION" \
         "$builder" build $CARGO_FLAGS -p rhythm-chipd --target "$rust_target" --bin rhythm-chipd "${CHIPD_FEATURE_ARGS[@]}"
 
     if [ -n "$chipd_rustflags_var" ]; then
-        unset "$chipd_rustflags_var"
+        if [ "$chipd_restore_rustflags" = true ]; then
+            export "$chipd_rustflags_var=$chipd_previous_rustflags"
+        else
+            unset "$chipd_rustflags_var"
+        fi
     fi
 
     # Copy to dist

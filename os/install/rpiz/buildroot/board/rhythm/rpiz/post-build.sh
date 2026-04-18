@@ -13,6 +13,15 @@ BOARD_FIRMWARE_DIR="${SCRIPT_DIR}/firmware"
 FIRMWARE_ROOT_DIR="${TARGET_DIR}/lib/firmware"
 FIRMWARE_DIR="${TARGET_DIR}/lib/firmware/brcm"
 CYPRESS_FIRMWARE_DIR="${TARGET_DIR}/lib/firmware/cypress"
+RHYTHM_DEFAULTS_DIR="${TARGET_DIR}/etc/default"
+RHYTHM_DEV_DEFAULTS="${RHYTHM_DEFAULTS_DIR}/rhythm-dev"
+
+is_truthy() {
+    case "${1:-}" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 escape_wpa_string() {
     printf '%s' "$1" | sed 's/[\\"]/\\&/g'
@@ -131,4 +140,13 @@ done
 if [ -e "${TARGET_DIR}/lib/ld-musl-arm.so.1" ] \
     && [ ! -e "${TARGET_DIR}/lib/ld-musl-armhf.so.1" ]; then
     ln -s ld-musl-arm.so.1 "${TARGET_DIR}/lib/ld-musl-armhf.so.1"
+fi
+
+mkdir -p "$RHYTHM_DEFAULTS_DIR"
+rm -f "$RHYTHM_DEV_DEFAULTS"
+if is_truthy "${RHYTHM_DEV_MODE:-}"; then
+    cat > "$RHYTHM_DEV_DEFAULTS" <<'EOF'
+RHYTHM_DEV_MODE=1
+RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION=1
+EOF
 fi

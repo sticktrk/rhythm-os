@@ -32,6 +32,13 @@ For cross-target builds, `RHYTHM_CHIP_ROOT` alone is not enough; the bridge
 needs a target-matched `libCHIP.a` via `RHYTHM_CHIP_OUT_DIR` or
 `RHYTHM_CHIP_LIB_DIR`.
 
+For `rpiz` bring-up images, `RHYTHM_DEV_MODE=1` enables the lab-only extras that
+help early commissioning:
+
+- Dropbear SSH
+- root password `rhythm`
+- `RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION=1` for the appliance at boot
+
 That produces:
 
 ```bash
@@ -45,6 +52,7 @@ If `./buildroot` does not exist, the helper script now clones Buildroot there au
 
 ```bash
 ./scripts/build-rpiz-image.sh --release
+RHYTHM_DEV_MODE=1 ./scripts/build-rpiz-image.sh --release
 ```
 
 The image lands at:

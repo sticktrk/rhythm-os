@@ -18,9 +18,17 @@ SKIP_SERVER_BUILD=false
 WIFI_SSID="${RHYTHM_WIFI_SSID:-}"
 WIFI_PSK="${RHYTHM_WIFI_PSK:-}"
 WIFI_COUNTRY="${RHYTHM_WIFI_COUNTRY:-US}"
+DEV_MODE="${RHYTHM_DEV_MODE:-}"
 DOCKER_BUILD=false
 DOCKER_IMAGE="rhythm-rpiz-builder:local"
 BUILDROOT_GIT_URL="${RHYTHM_BUILDROOT_GIT_URL:-https://git.buildroot.net/buildroot}"
+
+is_truthy() {
+    case "${1:-}" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -77,6 +85,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --wifi-ssid <ssid>      Embed Wi-Fi SSID for Pi Zero W / Zero 2 W"
             echo "  --wifi-psk <psk>        Embed WPA/WPA2 passphrase"
             echo "  --wifi-country <code>   Wi-Fi regulatory country (default: $WIFI_COUNTRY)"
+            echo "Environment:"
+            echo "  RHYTHM_DEV_MODE=1       Enable rpiz bring-up mode (Dropbear + known root password + Matter attestation bypass)"
             echo "  --docker                Run the Buildroot image step inside Docker"
             echo "  --docker-image <name>   Docker image tag to build/use (default: $DOCKER_IMAGE)"
             echo "  -h, --help              Show this help"
@@ -201,6 +211,9 @@ run_in_docker() {
             -e "RHYTHM_WIFI_COUNTRY=$WIFI_COUNTRY"
         )
     fi
+    if is_truthy "$DEV_MODE"; then
+        docker_args+=(-e "RHYTHM_DEV_MODE=1")
+    fi
 
     inner_args=("--buildroot-dir" "/buildroot" "--output-dir" "/output" "--skip-server-build")
     if [ "$BUILD_MODE" = "release" ]; then
@@ -251,10 +264,25 @@ if [ -n "$WIFI_SSID" ]; then
     export RHYTHM_WIFI_PSK="$WIFI_PSK"
     export RHYTHM_WIFI_COUNTRY="$WIFI_COUNTRY"
 fi
+if is_truthy "$DEV_MODE"; then
+    echo "Building rpiz image in dev mode (Dropbear, known root password, Matter attestation bypass)"
+    export RHYTHM_DEV_MODE=1
+else
+    unset RHYTHM_DEV_MODE
+fi
 
 EXTERNAL_DIR="$PROJECT_ROOT/install/rpiz/buildroot"
 
 make -C "$BUILDROOT_DIR" BR2_EXTERNAL="$EXTERNAL_DIR" O="$OUTPUT_DIR" rhythm_rpiz_defconfig
+if is_truthy "${RHYTHM_DEV_MODE:-}"; then
+    DEV_FRAGMENT="$OUTPUT_DIR/rhythm-dev.fragment"
+    cat >"$DEV_FRAGMENT" <<'EOF'
+BR2_TARGET_GENERIC_ROOT_PASSWD="rhythm"
+BR2_PACKAGE_DROPBEAR=y
+EOF
+    cat "$DEV_FRAGMENT" >> "$OUTPUT_DIR/.config"
+    make -C "$BUILDROOT_DIR" BR2_EXTERNAL="$EXTERNAL_DIR" O="$OUTPUT_DIR" olddefconfig
+fi
 # The prebuilt server comes from dist/bin/rpiz via a local-site package. Force
 # that package to refresh each run so Buildroot does not reuse a stale unpacked
 # copy when the host-side binary changes between image builds.
