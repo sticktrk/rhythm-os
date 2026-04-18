@@ -88,7 +88,8 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
               ),
             ),
             // Room orb preview with live CCT + light output
-            Selector<RoomProvider, (int?, int?, (int, int, int)?, bool, bool, DateTime?)>(
+            Selector<RoomProvider,
+                (int?, int?, (int, int, int)?, bool, bool, DateTime?)>(
               selector: (_, rp) {
                 final r = rp.getRoom(room.id);
                 return (
@@ -101,8 +102,16 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
                 );
               },
               builder: (context, data, _) {
-                final (brightness, kelvin, color, lightsOn, rhythmEnabled, lastTickTime) = data;
-                final intervalSecs = context.read<ServerSyncProvider>().rhythmIntervalSecs;
+                final (
+                  brightness,
+                  kelvin,
+                  color,
+                  lightsOn,
+                  rhythmEnabled,
+                  lastTickTime
+                ) = data;
+                final intervalSecs =
+                    context.read<ServerSyncProvider>().rhythmIntervalSecs;
                 return _AnimatedRoomOrb(
                   roomId: room.id,
                   roomName: room.name,
@@ -142,7 +151,10 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
             // Done button — pinned at bottom
             Padding(
               padding: EdgeInsets.fromLTRB(
-                20, 12, 20, MediaQuery.of(context).padding.bottom + 16,
+                20,
+                12,
+                20,
+                MediaQuery.of(context).padding.bottom + 16,
               ),
               child: SizedBox(
                 width: double.infinity,
@@ -290,8 +302,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
             ),
           ),
           Selector<RoomProvider, bool>(
-            selector: (_, rp) =>
-                rp.getRoom(room.id)?.disabled ?? room.disabled,
+            selector: (_, rp) => rp.getRoom(room.id)?.disabled ?? room.disabled,
             builder: (context, isHidden, _) {
               return _SettingsRow(
                 icon: Icons.visibility_off_outlined,
@@ -378,7 +389,10 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
       ),
     );
 
-    if (newName != null && newName.isNotEmpty && newName != room.name && context.mounted) {
+    if (newName != null &&
+        newName.isNotEmpty &&
+        newName != room.name &&
+        context.mounted) {
       final http = context.read<ServerSyncProvider>().api;
       await http.topologyRenameRoom(room.id, newName);
       // Trigger re-sync so the name updates
@@ -390,7 +404,8 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     final devices = context.read<ServerSyncProvider>().devicesForRoom(room.id);
     if (devices.isEmpty) {
       // Fallback: show summary from device IDs count
-      final summary = context.read<ServerSyncProvider>().deviceSummaryForRoom(room.id);
+      final summary =
+          context.read<ServerSyncProvider>().deviceSummaryForRoom(room.id);
       if (summary.isEmpty) return const SizedBox.shrink();
       return _buildSettingsGroup('Devices', [
         _SettingsRow(
@@ -413,13 +428,14 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
       });
 
     return _buildSettingsGroup('Devices', [
-      for (final device in sorted)
-        _DeviceRow(device: device, roomId: room.id),
+      for (final device in sorted) _DeviceRow(device: device, roomId: room.id),
     ]);
   }
 
   String _sourceLabel(RoomSourceDto source) {
     switch (source) {
+      case RoomSourceDto.matter:
+        return 'Matter';
       case RoomSourceDto.hue:
         return 'Philips Hue';
       case RoomSourceDto.homeAssistant:
@@ -593,7 +609,8 @@ class _DeviceRow extends StatelessWidget {
                       child: Text(
                         device.productInfo!,
                         style: TextStyle(
-                          color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+                          color: CelestialColors.textSecondary
+                              .withValues(alpha: 0.6),
                           fontSize: 11,
                         ),
                         maxLines: 1,
@@ -617,10 +634,19 @@ class _DeviceRow extends StatelessWidget {
   }
 
   (IconData, Color) _iconForType(RhythmDeviceType type) => switch (type) {
-    RhythmDeviceType.light => (Icons.lightbulb_outline, const Color(0xFFFFB74D)),
-    RhythmDeviceType.button => (Icons.touch_app_outlined, const Color(0xFF64B5F6)),
-    RhythmDeviceType.motion => (Icons.sensors_outlined, const Color(0xFF81C784)),
-  };
+        RhythmDeviceType.light => (
+            Icons.lightbulb_outline,
+            const Color(0xFFFFB74D)
+          ),
+        RhythmDeviceType.button => (
+            Icons.touch_app_outlined,
+            const Color(0xFF64B5F6)
+          ),
+        RhythmDeviceType.motion => (
+            Icons.sensors_outlined,
+            const Color(0xFF81C784)
+          ),
+      };
 }
 
 /// Custom toggle switch matching the celestial design system.
@@ -772,12 +798,10 @@ class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb>
         _pulseController.repeat(reverse: true);
       }
       _activeController.animateTo(1.0,
-          duration: const Duration(milliseconds: 500),
-          curve: Curves.easeOut);
+          duration: const Duration(milliseconds: 500), curve: Curves.easeOut);
     } else {
       _activeController.animateTo(0.0,
-          duration: const Duration(milliseconds: 600),
-          curve: Curves.easeIn);
+          duration: const Duration(milliseconds: 600), curve: Curves.easeIn);
     }
   }
 
@@ -859,8 +883,8 @@ class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb>
                           boxShadow: [
                             BoxShadow(
                               color: cctColor.withValues(
-                                alpha: (widget.lightsOn ? 0.2 : 0.05) +
-                                    extraGlow,
+                                alpha:
+                                    (widget.lightsOn ? 0.2 : 0.05) + extraGlow,
                               ),
                               blurRadius: 16 + extraSpread * 2,
                               spreadRadius: 2 + extraSpread,
@@ -874,9 +898,7 @@ class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb>
                 },
                 child: Center(
                   child: Icon(
-                    _active
-                        ? Icons.pause_rounded
-                        : Icons.play_arrow_rounded,
+                    _active ? Icons.pause_rounded : Icons.play_arrow_rounded,
                     color: cctColor,
                     size: 32,
                   ),
@@ -963,8 +985,7 @@ class _RhythmStatusLabel extends StatelessWidget {
                 Text(
                   'Rhythm',
                   style: TextStyle(
-                    color:
-                        CelestialColors.textSecondary.withValues(alpha: 0.8),
+                    color: CelestialColors.textSecondary.withValues(alpha: 0.8),
                     fontSize: 12,
                     fontWeight: FontWeight.w500,
                   ),
@@ -977,16 +998,14 @@ class _RhythmStatusLabel extends StatelessWidget {
               children: [
                 Icon(
                   Icons.play_arrow_rounded,
-                  color:
-                      CelestialColors.textSecondary.withValues(alpha: 0.5),
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.5),
                   size: 14,
                 ),
                 const SizedBox(width: 2),
                 Text(
                   'Paused',
                   style: TextStyle(
-                    color:
-                        CelestialColors.textSecondary.withValues(alpha: 0.6),
+                    color: CelestialColors.textSecondary.withValues(alpha: 0.6),
                     fontSize: 12,
                     fontWeight: FontWeight.w500,
                   ),
@@ -1045,7 +1064,5 @@ class _CountdownRingPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_CountdownRingPainter old) =>
-      progress != old.progress ||
-      opacity != old.opacity ||
-      color != old.color;
+      progress != old.progress || opacity != old.opacity || color != old.color;
 }

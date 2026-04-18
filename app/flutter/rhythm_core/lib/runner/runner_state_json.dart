@@ -66,8 +66,7 @@ RoomDto _roomFromMap(Map<String, dynamic> map) {
     rhythmEnabled: map['rhythm_enabled'] as bool? ?? false,
     disabled: map['disabled'] as bool? ?? false,
     lightsOn: map['lights_on'] as bool? ?? false,
-    timeOffsetMinutes:
-        (map['time_offset_minutes'] as num?)?.toDouble() ?? 0.0,
+    timeOffsetMinutes: (map['time_offset_minutes'] as num?)?.toDouble() ?? 0.0,
     brightnessOffset: (map['brightness_offset'] as num?)?.toDouble() ?? 0.0,
     curveConfig: map['curve_config'] != null
         ? _curveConfigFromMap(map['curve_config'] as Map<String, dynamic>)
@@ -77,6 +76,7 @@ RoomDto _roomFromMap(Map<String, dynamic> map) {
 
 String _sourceToString(RoomSourceDto source) {
   return switch (source) {
+    RoomSourceDto.matter => 'matter',
     RoomSourceDto.hue => 'hue',
     RoomSourceDto.homeAssistant => 'home_assistant',
     RoomSourceDto.esp32 => 'esp32',
@@ -86,6 +86,7 @@ String _sourceToString(RoomSourceDto source) {
 
 RoomSourceDto _sourceFromString(String s) {
   return switch (s.toLowerCase()) {
+    'matter' => RoomSourceDto.matter,
     'hue' => RoomSourceDto.hue,
     'home_assistant' || 'homeassistant' => RoomSourceDto.homeAssistant,
     'esp32' => RoomSourceDto.esp32,

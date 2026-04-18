@@ -23,6 +23,8 @@ class _FakeTriageServerApi extends RhythmServerApi {
   int getTriageEntriesCalls = 0;
   int resolveTriageBindCalls = 0;
   int resolveTriageNewCalls = 0;
+  int resolveTriageRoomCalls = 0;
+  int createTopologyRoomCalls = 0;
 
   @override
   Future<List<Map<String, dynamic>>?> getTriageEntries() async {
@@ -32,8 +34,11 @@ class _FakeTriageServerApi extends RhythmServerApi {
 
   @override
   Future<Map<String, dynamic>?> getTriageCount() async {
-    final roomCount =
-        triageEntries.where((entry) => entry['kind'] == 'room_binding').length;
+    final roomCount = triageEntries
+        .where((entry) =>
+            entry['kind'] == 'room_binding' ||
+            entry['kind'] == 'hub_configured')
+        .length;
     return {
       'total': triageEntries.length,
       'devices': triageEntries.length - roomCount,
@@ -49,10 +54,26 @@ class _FakeTriageServerApi extends RhythmServerApi {
   }
 
   @override
-  Future<String?> resolveTriageNew(String entryId) async {
+  Future<Map<String, dynamic>?> resolveTriageNewResult(String entryId) async {
     resolveTriageNewCalls++;
     triageEntries = [];
-    return 'new-room';
+    return {'status': 'kept_separate'};
+  }
+
+  @override
+  Future<bool> resolveTriageRoom(String entryId, String roomId) async {
+    resolveTriageRoomCalls++;
+    triageEntries = [];
+    return true;
+  }
+
+  @override
+  Future<Map<String, dynamic>?> createTopologyRoom(String name) async {
+    createTopologyRoomCalls++;
+    return {
+      'id': 'room-created',
+      'name': name,
+    };
   }
 }
 
@@ -74,9 +95,13 @@ class _FakeRhythmConnection extends RhythmConnection {
   }
 }
 
-Widget _buildTestApp(ServerSyncProvider serverSyncProvider) {
+Widget _buildTestApp({
+  required RoomProvider roomProvider,
+  required ServerSyncProvider serverSyncProvider,
+}) {
   return MultiProvider(
     providers: [
+      ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
       ChangeNotifierProvider<ServerSyncProvider>.value(
           value: serverSyncProvider),
     ],
@@ -104,18 +129,42 @@ Map<String, dynamic> _roomBindingEntry() {
   };
 }
 
+Map<String, dynamic> _unassignedDeviceEntry() {
+  return {
+    'id': 'device-entry-1',
+    'kind': 'unassigned_device',
+    'unassigned_device': {
+      'name': 'Matter Bulb',
+      'device_type': 'light',
+      'manufacturer': 'Acme',
+      'model': 'A19',
+    },
+  };
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  group('TriageScreen room binding refresh', () {
+  group('TriageScreen actions', () {
     late RoomProvider roomProvider;
     late _TestHomeProvider homeProvider;
     late _FakeTriageServerApi api;
     late _FakeRhythmConnection connection;
     late ServerSyncProvider serverSyncProvider;
 
-    setUp(() {
+    setUp(() async {
       roomProvider = RoomProvider();
+      await roomProvider.addRoom(const RoomDto(
+        id: 'room-kitchen',
+        name: 'Kitchen',
+        source: RoomSourceDto.hue,
+        deviceIds: [],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: false,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ));
       homeProvider = _TestHomeProvider();
       api = _FakeTriageServerApi(triageEntries: [_roomBindingEntry()]);
       connection = _FakeRhythmConnection(api);
@@ -134,7 +183,12 @@ void main() {
     });
 
     testWidgets('reconnects after merging a room binding', (tester) async {
-      await tester.pumpWidget(_buildTestApp(serverSyncProvider));
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
       await tester.pumpAndSettle();
 
       expect(find.text('Merge Rooms'), findsOneWidget);
@@ -149,13 +203,73 @@ void main() {
 
     testWidgets('reconnects after keeping a room binding separate',
         (tester) async {
-      await tester.pumpWidget(_buildTestApp(serverSyncProvider));
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
       await tester.pumpAndSettle();
 
       await tester.tap(find.text('Keep Separate'));
       await tester.pumpAndSettle();
 
       expect(api.resolveTriageNewCalls, 1);
+      expect(connection.reconnectCalls, 1);
+      expect(find.text('All clear'), findsOneWidget);
+    });
+
+    testWidgets('assigns an unassigned device through triage room endpoint',
+        (tester) async {
+      api.triageEntries = [_unassignedDeviceEntry()];
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Assign Room'), findsOneWidget);
+
+      await tester.tap(find.text('Assign Room'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Kitchen'));
+      await tester.pumpAndSettle();
+
+      expect(api.resolveTriageRoomCalls, 1);
+      expect(connection.reconnectCalls, 1);
+      expect(find.text('All clear'), findsOneWidget);
+    });
+
+    testWidgets(
+        'can create a room inline before assigning an unassigned device',
+        (tester) async {
+      api.triageEntries = [_unassignedDeviceEntry()];
+      await roomProvider.clearAllRooms();
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Assign Room'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Create New Room'));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byType(TextField), 'Office');
+      await tester.tap(find.text('Create'));
+      await tester.pumpAndSettle();
+
+      expect(api.createTopologyRoomCalls, 1);
+      expect(api.resolveTriageRoomCalls, 1);
       expect(connection.reconnectCalls, 1);
       expect(find.text('All clear'), findsOneWidget);
     });

@@ -76,6 +76,9 @@ class ServerSyncProvider extends ChangeNotifier {
   /// All hub infos from the last server hello: [{type, address, connected}, ...].
   List<Map<String, dynamic>> _lastHubInfos = [];
 
+  /// Host capability metadata from the last server hello.
+  RhythmCapabilities? _capabilities;
+
   /// Cooldown: last time a hub-connected event triggered a re-hello.
   DateTime? _lastHubReconnectTime;
 
@@ -191,12 +194,41 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Pending room binding entries.
   int get triagePendingRooms => _triagePendingRooms;
 
-  /// Primary hub info from last server hello (backward compat).
-  Map<String, dynamic> get serverHubInfo =>
-      _lastHubInfos.isNotEmpty ? _lastHubInfos.first : {};
-
   /// All hub infos from last server hello.
   List<Map<String, dynamic>> get serverHubInfos => _lastHubInfos;
+
+  /// Host capabilities from the last server hello, if the server advertises them.
+  RhythmCapabilities? get serverCapabilities => _capabilities;
+
+  /// Explicit per-hub capabilities, keyed by hub type.
+  RhythmHubCapabilities? hubCapabilities(String hubType) =>
+      _capabilities?.hub(hubType);
+
+  RhythmHubCapabilities? get matterCapabilities => hubCapabilities('matter');
+
+  /// Whether the server advertises explicit Matter add methods.
+  bool get hasExplicitMatterCapabilities => matterCapabilities != null;
+
+  /// Whether the UI should offer any Matter add-device entry point.
+  bool get canAddMatterDevice =>
+      matterCapabilities?.canAddDevice ??
+      true; // Legacy servers expose only the generic flow.
+
+  /// Add an already-on-network Matter device via setup code / QR.
+  bool get canAddMatterOnNetworkDevice =>
+      matterCapabilities?.addDevice.onNetworkSetupCode ?? false;
+
+  /// Commission a new Matter device over BLE using stored Wi-Fi credentials.
+  bool get canCommissionMatterBleWifi =>
+      matterCapabilities?.addDevice.bleWifiCommissioning ?? false;
+
+  /// Whether the UI should allow Matter decommissioning.
+  bool get canUnpairMatterDevices =>
+      matterCapabilities?.supportsUnpairing ?? true;
+
+  /// Whether a Matter device may exist before room assignment.
+  bool get supportsMatterRoomlessDevices =>
+      matterCapabilities?.supportsRoomlessDevices ?? true;
 
   /// Whether no hubs are configured on the server.
   bool get hasNoHubConfigured =>
@@ -218,6 +250,7 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Whether a room's hub is currently connected on the server.
   bool isRoomHubConnected(RoomSourceDto source) {
     final hubType = switch (source) {
+      RoomSourceDto.matter => 'matter',
       RoomSourceDto.hue => 'hue',
       RoomSourceDto.homeAssistant => 'homeassistant',
       RoomSourceDto.esp32 => 'esp32',
@@ -461,6 +494,7 @@ class ServerSyncProvider extends ChangeNotifier {
         hello.effectiveMotionTimeoutSecs;
     _helloRooms = hello.rooms;
     _lastHubInfos = hello.hubs;
+    _capabilities = hello.capabilities;
 
     // Bootstrap countdown timer from server's last tick timestamp
     if (hello.lastTickEpochMs != null) {
@@ -481,9 +515,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _suppressNextSourceSync = hello.rooms.isNotEmpty;
     try {
       // 1. Accept server rooms as authoritative.
-      // Prefer the new `hubs` array; fall back to the synthesized primary hub.
-      _acceptServerRooms(
-          hello.rooms, hello.hubs.isNotEmpty ? hello.hubs.first : hello.hub);
+      _acceptServerRooms(hello.rooms);
 
       // 2. Reconcile motion sensors — mark rooms that have sensors,
       //    unmark rooms that lost their sensors since last hello
@@ -519,8 +551,7 @@ class ServerSyncProvider extends ChangeNotifier {
   ///
   /// The server discovers rooms from connected hubs. Each room carries its
   /// own `hub_types`, so we group by source and add each group atomically.
-  void _acceptServerRooms(
-      List<RhythmRoom> serverRooms, Map<String, dynamic> hubInfo) {
+  void _acceptServerRooms(List<RhythmRoom> serverRooms) {
     // Filter out empty rooms (e.g. from stale server-side rooms.json)
     final validRooms = serverRooms.where((r) => r.id.isNotEmpty).toList();
     if (validRooms.isEmpty) {
@@ -529,26 +560,11 @@ class ServerSyncProvider extends ChangeNotifier {
       return;
     }
 
-    // Fallback source from the primary hub (backward compat for rooms
-    // without per-room hub_types).
-    final fallbackHubType = hubInfo['type'] as String?;
-    final fallbackSource = switch (fallbackHubType) {
-      'hue' => RoomSourceDto.hue,
-      'homeassistant' || 'home_assistant' => RoomSourceDto.homeAssistant,
-      'esp32' => RoomSourceDto.esp32,
-      _ => RoomSourceDto.unknown,
-    };
-
-    // Group rooms by their primary hub type (first entry in hub_types).
+    // Group rooms by a canonical source derived from the room's own hub types.
+    // This no longer relies on a singular "primary hub" from the hello payload.
     final grouped = <RoomSourceDto, List<RhythmRoom>>{};
     for (final sr in validRooms) {
-      final primaryType = sr.hubTypes.isNotEmpty ? sr.hubTypes.first : null;
-      final source = switch (primaryType) {
-        'hue' => RoomSourceDto.hue,
-        'homeassistant' || 'home_assistant' => RoomSourceDto.homeAssistant,
-        'esp32' => RoomSourceDto.esp32,
-        _ => fallbackSource,
-      };
+      final source = _canonicalSourceForRoom(sr);
       (grouped[source] ??= []).add(sr);
     }
     debugPrint(
@@ -737,15 +753,21 @@ class ServerSyncProvider extends ChangeNotifier {
   /// They'll be re-synced via hello on reconnect. Widgets can check
   /// [connectionState] to show a reconnecting indicator.
   void _onTriageChanged(Map<String, dynamic> data) {
+    final pendingDevices = (data['pending_devices'] as num?)?.toInt() ??
+        (data['devices'] as num?)?.toInt() ??
+        0;
+    final pendingUnassigned =
+        (data['pending_unassigned'] as num?)?.toInt() ?? 0;
+    final pendingRooms = (data['pending_rooms'] as num?)?.toInt() ??
+        (data['rooms'] as num?)?.toInt() ??
+        0;
+    final pendingHubConfigured =
+        (data['pending_hub_configured'] as num?)?.toInt() ?? 0;
+    final devices = pendingDevices + pendingUnassigned;
+    final rooms = pendingRooms + pendingHubConfigured;
     final count = (data['total'] as num?)?.toInt() ??
         (data['pending_count'] as num?)?.toInt() ??
-        0;
-    final devices = (data['devices'] as num?)?.toInt() ??
-        (data['pending_devices'] as num?)?.toInt() ??
-        0;
-    final rooms = (data['rooms'] as num?)?.toInt() ??
-        (data['pending_rooms'] as num?)?.toInt() ??
-        0;
+        (devices + rooms);
     if (_triagePendingCount != count ||
         _triagePendingDevices != devices ||
         _triagePendingRooms != rooms) {
@@ -773,6 +795,7 @@ class ServerSyncProvider extends ChangeNotifier {
       _activeProfileId = null;
       _helloRooms = [];
       _lastHubInfos = [];
+      _capabilities = null;
       _rhythmIntervalSecs = 60;
       _effectiveFadeMs = null;
       _effectiveMotionTimeoutSecs = null;
@@ -1236,6 +1259,8 @@ class ServerSyncProvider extends ChangeNotifier {
 
   HubType? _hubTypeForSource(RoomSourceDto source) {
     switch (source) {
+      case RoomSourceDto.matter:
+        return null;
       case RoomSourceDto.hue:
         return HubType.hue;
       case RoomSourceDto.homeAssistant:
@@ -1243,6 +1268,45 @@ class ServerSyncProvider extends ChangeNotifier {
       default:
         return null;
     }
+  }
+
+  RoomSourceDto _canonicalSourceForRoom(RhythmRoom room) {
+    final sources =
+        room.hubTypes.map(_sourceForHubType).whereType<RoomSourceDto>().toSet();
+
+    if (sources.isEmpty) {
+      return _roomProvider.getRoom(room.id)?.source ?? RoomSourceDto.unknown;
+    }
+
+    final existingSource = _roomProvider.getRoom(room.id)?.source;
+    if (existingSource != null && sources.contains(existingSource)) {
+      return existingSource;
+    }
+
+    if (sources.length == 1) {
+      return sources.first;
+    }
+
+    for (final candidate in const [
+      RoomSourceDto.matter,
+      RoomSourceDto.hue,
+      RoomSourceDto.homeAssistant,
+      RoomSourceDto.esp32,
+    ]) {
+      if (sources.contains(candidate)) return candidate;
+    }
+
+    return RoomSourceDto.unknown;
+  }
+
+  RoomSourceDto? _sourceForHubType(String hubType) {
+    return switch (hubType) {
+      'matter' => RoomSourceDto.matter,
+      'hue' => RoomSourceDto.hue,
+      'homeassistant' || 'home_assistant' => RoomSourceDto.homeAssistant,
+      'esp32' => RoomSourceDto.esp32,
+      _ => null,
+    };
   }
 
   /// Map Dart HubType to the Rust wire string.

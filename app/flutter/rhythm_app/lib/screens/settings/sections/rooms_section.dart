@@ -25,8 +25,10 @@ class RoomsSection extends StatelessWidget {
         }
 
         // Group rooms by source
+        final matterRooms = roomProvider.getRoomsBySource(RoomSourceDto.matter);
         final hueRooms = roomProvider.getRoomsBySource(RoomSourceDto.hue);
-        final haRooms = roomProvider.getRoomsBySource(RoomSourceDto.homeAssistant);
+        final haRooms =
+            roomProvider.getRoomsBySource(RoomSourceDto.homeAssistant);
         final esp32Rooms = roomProvider.getRoomsBySource(RoomSourceDto.esp32);
 
         return Column(
@@ -46,6 +48,13 @@ class RoomsSection extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 16),
+            // Matter rooms
+            if (matterRooms.isNotEmpty) ...[
+              _buildSourceHeader('Matter', const Color(0xFF26A69A)),
+              const SizedBox(height: 8),
+              _buildRoomGroup(context, roomProvider, matterRooms),
+              const SizedBox(height: 16),
+            ],
             // Hue rooms
             if (hueRooms.isNotEmpty) ...[
               _buildSourceHeader('Philips Hue', const Color(0xFFFFB900)),
@@ -191,11 +200,15 @@ class _RoomRow extends StatelessWidget {
             ),
             // Device summary or light count
             Builder(builder: (context) {
-              final summary = context.read<ServerSyncProvider>().deviceSummaryForRoom(room.id);
+              final summary = context
+                  .read<ServerSyncProvider>()
+                  .deviceSummaryForRoom(room.id);
               final label = summary.isNotEmpty
                   ? summary
                   : () {
-                      final count = context.read<ServerSyncProvider>().lightCountForRoom(room.id);
+                      final count = context
+                          .read<ServerSyncProvider>()
+                          .lightCountForRoom(room.id);
                       return count > 0
                           ? '$count ${count == 1 ? 'light' : 'lights'}'
                           : '${room.deviceIds.length} lights';
@@ -204,7 +217,8 @@ class _RoomRow extends StatelessWidget {
                 child: Text(
                   label,
                   style: TextStyle(
-                    color: CelestialColors.textSecondary.withValues(alpha: isEnabled ? 0.6 : 0.3),
+                    color: CelestialColors.textSecondary
+                        .withValues(alpha: isEnabled ? 0.6 : 0.3),
                     fontSize: 13,
                   ),
                   maxLines: 1,
