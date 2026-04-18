@@ -971,8 +971,10 @@ mod tests {
             ..Default::default()
         };
 
-        let mut app = crate::state::AppState::default();
-        app.storage = Some(Box::new(storage));
+        let mut app = crate::state::AppState {
+            storage: Some(Box::new(storage)),
+            ..Default::default()
+        };
         load_persisted_state(&mut app);
 
         assert_eq!(app.active_mode, RhythmMode::Day);
@@ -1006,8 +1008,10 @@ mod tests {
             ..Default::default()
         };
 
-        let mut app = crate::state::AppState::default();
-        app.storage = Some(Box::new(storage));
+        let mut app = crate::state::AppState {
+            storage: Some(Box::new(storage)),
+            ..Default::default()
+        };
         load_persisted_state(&mut app);
 
         assert_eq!(app.active_mode, RhythmMode::Day);
@@ -1040,8 +1044,10 @@ mod tests {
             ..Default::default()
         };
 
-        let mut app = crate::state::AppState::default();
-        app.storage = Some(Box::new(storage));
+        let mut app = crate::state::AppState {
+            storage: Some(Box::new(storage)),
+            ..Default::default()
+        };
         load_persisted_state(&mut app);
 
         assert_eq!(app.active_mode, RhythmMode::Sleep);
@@ -1086,8 +1092,10 @@ mod tests {
             ..Default::default()
         };
 
-        let mut app = crate::state::AppState::default();
-        app.storage = Some(Box::new(storage));
+        let mut app = crate::state::AppState {
+            storage: Some(Box::new(storage)),
+            ..Default::default()
+        };
         load_persisted_state(&mut app);
 
         let modes = app.mode_configs();
@@ -1129,8 +1137,10 @@ mod tests {
             ..Default::default()
         };
 
-        let mut app = crate::state::AppState::default();
-        app.storage = Some(Box::new(storage));
+        let mut app = crate::state::AppState {
+            storage: Some(Box::new(storage)),
+            ..Default::default()
+        };
         load_persisted_state(&mut app);
 
         let transitions = app.mode_transition_configs();
@@ -1172,8 +1182,10 @@ mod tests {
             ..Default::default()
         };
 
-        let mut app = crate::state::AppState::default();
-        app.storage = Some(Box::new(storage));
+        let mut app = crate::state::AppState {
+            storage: Some(Box::new(storage)),
+            ..Default::default()
+        };
         load_persisted_state(&mut app);
 
         assert_eq!(app.active_mode, RhythmMode::Sleep);
@@ -1209,8 +1221,10 @@ mod tests {
             ..Default::default()
         };
 
-        let mut app = crate::state::AppState::default();
-        app.storage = Some(Box::new(storage));
+        let mut app = crate::state::AppState {
+            storage: Some(Box::new(storage)),
+            ..Default::default()
+        };
         load_persisted_state(&mut app);
 
         assert!(app.canonical_registry.get(&canonical_id).is_some());
@@ -1271,8 +1285,10 @@ mod tests {
             ..Default::default()
         };
 
-        let mut app = crate::state::AppState::default();
-        app.storage = Some(Box::new(storage));
+        let mut app = crate::state::AppState {
+            storage: Some(Box::new(storage)),
+            ..Default::default()
+        };
         load_persisted_state(&mut app);
 
         assert_eq!(

@@ -12,12 +12,13 @@ pub struct ChipFfiController {
 impl ChipFfiController {
     pub fn initialize(
         state: &CommissioningState,
+        ble_controller: Option<u16>,
         _existing_devices: &[CommissionedDevice],
     ) -> Result<Self> {
         #[cfg(not(rhythm_chipd_chip_ffi))]
-        let _ = state;
+        let _ = (state, ble_controller);
         #[cfg(rhythm_chipd_chip_ffi)]
-        ffi_probe::initialize_bridge(&state.storage_path, &state.fabric_id, state.ble_controller)?;
+        ffi_probe::initialize_bridge(&state.storage_path, &state.fabric_id, ble_controller)?;
 
         Ok(Self {
             #[cfg(not(rhythm_chipd_chip_ffi))]

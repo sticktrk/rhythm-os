@@ -80,18 +80,29 @@ pub struct RoomStateEvent {
     pub room_profile: RoomProfileSettings,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct RoomStateEventParams {
+    pub hub_types: Vec<String>,
+    pub mode: RhythmMode,
+    pub state: RoomModeState,
+    pub lights_on: bool,
+    pub transitioning: bool,
+    pub brightness: u8,
+    pub kelvin: u16,
+}
+
 impl RoomStateEvent {
     /// Build from an engine room snapshot with display values.
-    pub fn from_snapshot(
-        snap: &RoomSnapshot,
-        hub_types: Vec<String>,
-        mode: RhythmMode,
-        state: RoomModeState,
-        lights_on: bool,
-        transitioning: bool,
-        brightness: u8,
-        kelvin: u16,
-    ) -> Self {
+    pub(crate) fn from_snapshot(snap: &RoomSnapshot, params: RoomStateEventParams) -> Self {
+        let RoomStateEventParams {
+            hub_types,
+            mode,
+            state,
+            lights_on,
+            transitioning,
+            brightness,
+            kelvin,
+        } = params;
         Self {
             id: snap.id.clone(),
             hub_types,

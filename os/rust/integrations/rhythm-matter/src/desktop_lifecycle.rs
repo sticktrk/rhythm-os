@@ -124,10 +124,18 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
     }
 
     fn api_capabilities(&self) -> rhythm_os::hub::HubIntegrationCapability {
+        let mut device_onboarding_methods =
+            vec![rhythm_os::hub::DEVICE_ONBOARDING_METHOD_MATTER_ON_NETWORK_SETUP_CODE.to_string()];
+        if !cfg!(target_os = "macos") {
+            device_onboarding_methods.push(
+                rhythm_os::hub::DEVICE_ONBOARDING_METHOD_MATTER_BLE_WIFI_COMMISSIONING.to_string(),
+            );
+        }
+
         rhythm_os::hub::HubIntegrationCapability {
             hub_type: "matter".to_string(),
             configurable: true,
-            supports_pairing: !cfg!(target_os = "macos"),
+            device_onboarding_methods,
             supports_unpairing: true,
             supports_roomless_devices: true,
         }

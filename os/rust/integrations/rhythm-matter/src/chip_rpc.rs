@@ -113,12 +113,12 @@ impl ChipRpcResponseEnvelope {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChipRpcEmpty {}
 
 impl ChipRpcEmpty {
     pub fn new() -> Self {
-        Self {}
+        Self::default()
     }
 }
 

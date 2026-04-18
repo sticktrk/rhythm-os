@@ -585,13 +585,15 @@ pub fn build_room_state_event(
     };
     crate::server_event::RoomStateEvent::from_snapshot(
         snap,
-        hub_types,
-        mode,
-        room_state,
-        lights_on,
-        transitioning,
-        brightness,
-        kelvin,
+        crate::server_event::RoomStateEventParams {
+            hub_types,
+            mode,
+            state: room_state,
+            lights_on,
+            transitioning,
+            brightness,
+            kelvin,
+        },
     )
 }
 
@@ -896,7 +898,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
                 .map(|capability| HubCapabilityDto {
                     hub_type: capability.hub_type.clone(),
                     configurable: capability.configurable,
-                    supports_pairing: capability.supports_pairing,
+                    device_onboarding_methods: capability.device_onboarding_methods.clone(),
                     supports_unpairing: capability.supports_unpairing,
                     supports_roomless_devices: capability.supports_roomless_devices,
                 })
@@ -6292,7 +6294,7 @@ mod tests {
         let mut room = crate::topology::TopologyRoom::new(room_id, room_id);
         for (index, hub_type) in hub_types.iter().enumerate() {
             room.upsert_hub_target(crate::topology::HubControlTarget {
-                hub_key: HubKey::new(HubType::new(*hub_type), &format!("{hub_type}-{index}")),
+                hub_key: HubKey::new(HubType::new(*hub_type), format!("{hub_type}-{index}")),
                 hub_room_id: format!("{room_id}-{index}"),
                 control_id: format!("control-{index}"),
                 light_device_ids: Vec::new(),
@@ -7436,8 +7438,10 @@ mod tests {
     #[test]
     fn backup_restore_applies_installation_state_after_hub_restore() {
         let storage = TestStorage::default();
-        let mut app = AppState::default();
-        app.storage = Some(Box::new(storage.clone()));
+        let app = AppState {
+            storage: Some(Box::new(storage.clone())),
+            ..Default::default()
+        };
         let state = Arc::new(Mutex::new(app));
         install_mock_hub_provider(&state);
 
@@ -7580,8 +7584,10 @@ mod tests {
     #[test]
     fn backup_restore_redacted_backup_restores_without_hubs() {
         let storage = TestStorage::default();
-        let mut app = AppState::default();
-        app.storage = Some(Box::new(storage.clone()));
+        let app = AppState {
+            storage: Some(Box::new(storage.clone())),
+            ..Default::default()
+        };
         let state = Arc::new(Mutex::new(app));
 
         let mut rooms = rhythm_core::RoomManager::new();
@@ -7902,8 +7908,10 @@ mod tests {
         rooms.get_or_create("r1", "Room 1");
         storage.save_rooms(&rooms).unwrap();
 
-        let mut app = AppState::default();
-        app.storage = Some(Box::new(storage));
+        let app = AppState {
+            storage: Some(Box::new(storage)),
+            ..Default::default()
+        };
         let state: SharedState = Arc::new(Mutex::new(app));
         add_topology_room(&state, "r1", &["matter", "mock"]);
 

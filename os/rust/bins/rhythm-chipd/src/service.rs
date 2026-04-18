@@ -17,7 +17,6 @@ use crate::backend::ChipControllerBackend;
 pub struct CommissioningState {
     pub fabric_id: String,
     pub storage_path: PathBuf,
-    pub ble_controller: Option<u16>,
 }
 
 impl CommissioningState {
@@ -128,15 +127,21 @@ impl ChipControllerService {
         &mut self,
         request: ChipInitControllerRequest,
     ) -> Result<ChipInitControllerResponse> {
+        let ChipInitControllerRequest {
+            fabric_id,
+            storage_path,
+            ble_controller,
+        } = request;
         let state = CommissioningState {
-            fabric_id: request.fabric_id,
-            storage_path: PathBuf::from(request.storage_path),
-            ble_controller: request.ble_controller,
+            fabric_id,
+            storage_path: PathBuf::from(storage_path),
         };
 
         self.device_store.configure(state.devices_path())?;
         let existing_devices = self.device_store.devices();
-        let response = self.backend.init_controller(&state, &existing_devices)?;
+        let response = self
+            .backend
+            .init_controller(&state, ble_controller, &existing_devices)?;
         self.state = Some(state);
         Ok(response)
     }

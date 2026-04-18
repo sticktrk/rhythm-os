@@ -1614,7 +1614,7 @@ mod tests {
                 solar: SolarTriggerContext {
                     solar_noon: 12.5,
                     latitude: Some(35.804102),
-                    longitude: Some(-78.7992983),
+                    longitude: Some(-78.799_3),
                     timezone_name: Some(tz_name),
                 },
                 utc_offset: -4.0,
@@ -1653,7 +1653,7 @@ mod tests {
                 solar: SolarTriggerContext {
                     solar_noon: 12.5,
                     latitude: Some(35.804102),
-                    longitude: Some(-78.7992983),
+                    longitude: Some(-78.799_3),
                     timezone_name: Some(tz_name),
                 },
                 utc_offset: -4.0,
@@ -1696,7 +1696,7 @@ mod tests {
                 solar: SolarTriggerContext {
                     solar_noon: 12.5,
                     latitude: Some(35.804102),
-                    longitude: Some(-78.7992983),
+                    longitude: Some(-78.799_3),
                     timezone_name: Some(tz_name),
                 },
                 utc_offset: -4.0,

@@ -135,7 +135,8 @@ pub struct HubCapabilityDto {
     #[serde(rename = "type")]
     pub hub_type: String,
     pub configurable: bool,
-    pub supports_pairing: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub device_onboarding_methods: Vec<String>,
     pub supports_unpairing: bool,
     pub supports_roomless_devices: bool,
 }
@@ -630,14 +631,17 @@ mod tests {
         let capability = HubCapabilityDto {
             hub_type: "matter".into(),
             configurable: true,
-            supports_pairing: false,
+            device_onboarding_methods: vec!["matter_on_network_setup_code".into()],
             supports_unpairing: true,
             supports_roomless_devices: true,
         };
         let json: Value = serde_json::to_value(&capability).unwrap();
         assert_eq!(json["type"], "matter");
         assert!(json.get("hub_type").is_none());
-        assert_eq!(json["supports_pairing"], false);
+        assert_eq!(
+            json["device_onboarding_methods"][0],
+            "matter_on_network_setup_code"
+        );
         assert_eq!(json["supports_roomless_devices"], true);
     }
 
@@ -876,7 +880,7 @@ mod tests {
                 hubs: vec![HubCapabilityDto {
                     hub_type: "matter".into(),
                     configurable: true,
-                    supports_pairing: false,
+                    device_onboarding_methods: vec!["matter_on_network_setup_code".into()],
                     supports_unpairing: true,
                     supports_roomless_devices: true,
                 }],
@@ -951,7 +955,10 @@ mod tests {
         assert_eq!(json["rooms"][0]["name"], "Office");
         assert_eq!(json["hubs"][0]["type"], "hue");
         assert_eq!(json["capabilities"]["hubs"][0]["type"], "matter");
-        assert_eq!(json["capabilities"]["hubs"][0]["supports_pairing"], false);
+        assert_eq!(
+            json["capabilities"]["hubs"][0]["device_onboarding_methods"][0],
+            "matter_on_network_setup_code"
+        );
         assert_eq!(json["last_tick_epoch_ms"], 1700000000000u64);
         assert_eq!(json["location"]["solar_noon"], 12.4_f32 as f64);
         assert_eq!(json["location"]["solar_noon_local_time"], "12:24:00");

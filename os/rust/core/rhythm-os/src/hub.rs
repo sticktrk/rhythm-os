@@ -144,17 +144,22 @@ impl HubType {
 pub struct HubIntegrationCapability {
     pub hub_type: String,
     pub configurable: bool,
-    pub supports_pairing: bool,
+    pub device_onboarding_methods: Vec<String>,
     pub supports_unpairing: bool,
     pub supports_roomless_devices: bool,
 }
+
+pub const DEVICE_ONBOARDING_METHOD_MATTER_ON_NETWORK_SETUP_CODE: &str =
+    "matter_on_network_setup_code";
+pub const DEVICE_ONBOARDING_METHOD_MATTER_BLE_WIFI_COMMISSIONING: &str =
+    "matter_ble_wifi_commissioning";
 
 impl HubIntegrationCapability {
     pub fn new(hub_type: impl Into<String>) -> Self {
         Self {
             hub_type: hub_type.into(),
             configurable: true,
-            supports_pairing: false,
+            device_onboarding_methods: Vec::new(),
             supports_unpairing: false,
             supports_roomless_devices: false,
         }

@@ -352,8 +352,10 @@ mod tests {
             ip: "192.168.1.10".to_string(),
         })]);
 
-        let mut config = ProvisioningSessionConfig::default();
-        config.success_grace_period = Duration::from_millis(0);
+        let config = ProvisioningSessionConfig {
+            success_grace_period: Duration::from_millis(0),
+            ..Default::default()
+        };
 
         let result =
             run_provisioning_session(&mut frontend, &mut backend, &device_info(), &config).unwrap();
@@ -396,8 +398,10 @@ mod tests {
             }),
         ]);
 
-        let mut config = ProvisioningSessionConfig::default();
-        config.success_grace_period = Duration::from_millis(0);
+        let config = ProvisioningSessionConfig {
+            success_grace_period: Duration::from_millis(0),
+            ..Default::default()
+        };
 
         let result =
             run_provisioning_session(&mut frontend, &mut backend, &device_info(), &config).unwrap();

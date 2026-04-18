@@ -13,6 +13,7 @@ pub trait ChipControllerBackend {
     fn init_controller(
         &mut self,
         state: &CommissioningState,
+        ble_controller: Option<u16>,
         existing_devices: &[CommissionedDevice],
     ) -> Result<ChipInitControllerResponse>;
 
@@ -70,10 +71,12 @@ impl ChipControllerBackend for NativeChipBackend {
     fn init_controller(
         &mut self,
         state: &CommissioningState,
+        ble_controller: Option<u16>,
         existing_devices: &[CommissionedDevice],
     ) -> Result<ChipInitControllerResponse> {
-        let controller = chip_ffi::ChipFfiController::initialize(state, existing_devices)
-            .context("initializing direct CHIP controller bridge")?;
+        let controller =
+            chip_ffi::ChipFfiController::initialize(state, ble_controller, existing_devices)
+                .context("initializing direct CHIP controller bridge")?;
         self.controller = Some(controller);
         Ok(ChipInitControllerResponse {
             fabric_id: state.fabric_id.clone(),
@@ -171,6 +174,7 @@ impl ChipControllerBackend for FakeChipBackend {
     fn init_controller(
         &mut self,
         state: &CommissioningState,
+        _ble_controller: Option<u16>,
         existing_devices: &[CommissionedDevice],
     ) -> Result<ChipInitControllerResponse> {
         self.state = Some(state.clone());
