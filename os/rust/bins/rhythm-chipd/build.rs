@@ -79,6 +79,19 @@ fn main() {
             }
 
             println!("cargo:rustc-link-arg={}", artifacts.link_path.display());
+            // Track libCHIP.a / individual CHIP object files so cargo reruns
+            // this build script and re-links rhythm-chipd when any of them
+            // changes (e.g. after a CHIP source edit + `ninja lib/libCHIP.a`).
+            // Cargo treats link-args as opaque strings and does not track
+            // files referenced through them on its own.
+            println!("cargo:rerun-if-changed={}", artifacts.link_path.display());
+            if let LinkMode::NativeLibChip = artifacts.link_mode {
+                if let Ok(inputs) = artifacts.native_link_inputs() {
+                    for path in inputs {
+                        println!("cargo:rerun-if-changed={}", path.display());
+                    }
+                }
+            }
             emit_platform_link_args(&artifacts.target);
             println!("cargo:rustc-cfg=rhythm_chipd_chip_ffi");
         }

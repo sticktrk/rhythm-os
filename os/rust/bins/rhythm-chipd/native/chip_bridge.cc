@@ -10,6 +10,7 @@
 #include <credentials/GroupDataProviderImpl.h>
 #include <credentials/PersistentStorageOpCertStore.h>
 #include <credentials/attestation_verifier/DefaultDeviceAttestationVerifier.h>
+#include <credentials/attestation_verifier/DeviceAttestationVerifier.h>
 #include <crypto/RawKeySessionKeystore.h>
 #include <data-model-providers/codegen/Instance.h>
 #include <lib/core/CHIPCallback.h>
@@ -58,6 +59,62 @@ constexpr std::chrono::seconds kOperationTimeout(30);
 constexpr std::chrono::seconds kCommissioningTimeout(180);
 constexpr EndpointId kRootEndpoint = kRootEndpointId;
 constexpr VendorId kDefaultControllerVendorId = VendorId::TestVendor1;
+
+// DEV-ONLY attestation verifier that waves every device through.
+// Use only on a trusted LAN during rpiz bring-up; production must use
+// GetDefaultDACVerifier with a real PAA trust store.
+class BypassAttestationVerifier : public chip::Credentials::DeviceAttestationVerifier
+{
+public:
+    void VerifyAttestationInformation(const AttestationInfo & info,
+                                      chip::Callback::Callback<OnAttestationInformationVerification> * onCompletion) override
+    {
+        if (onCompletion != nullptr && onCompletion->mCall != nullptr)
+        {
+            onCompletion->mCall(onCompletion->mContext, info, chip::Credentials::AttestationVerificationResult::kSuccess);
+        }
+    }
+
+    chip::Credentials::AttestationVerificationResult
+    ValidateCertificationDeclarationSignature(const chip::ByteSpan & cmsEnvelopeBuffer, chip::ByteSpan & certDeclBuffer) override
+    {
+        certDeclBuffer = cmsEnvelopeBuffer;
+        return chip::Credentials::AttestationVerificationResult::kSuccess;
+    }
+
+    chip::Credentials::AttestationVerificationResult
+    ValidateCertificateDeclarationPayload(const chip::ByteSpan & certDeclBuffer, const chip::ByteSpan & firmwareInfo,
+                                          const chip::Credentials::DeviceInfoForAttestation & deviceInfo) override
+    {
+        (void) certDeclBuffer;
+        (void) firmwareInfo;
+        (void) deviceInfo;
+        return chip::Credentials::AttestationVerificationResult::kSuccess;
+    }
+
+    CHIP_ERROR VerifyNodeOperationalCSRInformation(const chip::ByteSpan & nocsrElementsBuffer,
+                                                   const chip::ByteSpan & attestationChallengeBuffer,
+                                                   const chip::ByteSpan & attestationSignatureBuffer,
+                                                   const chip::Crypto::P256PublicKey & dacPublicKey,
+                                                   const chip::ByteSpan & csrNonce) override
+    {
+        (void) nocsrElementsBuffer;
+        (void) attestationChallengeBuffer;
+        (void) attestationSignatureBuffer;
+        (void) dacPublicKey;
+        (void) csrNonce;
+        return CHIP_NO_ERROR;
+    }
+
+    void CheckForRevokedDACChain(const AttestationInfo & info,
+                                 chip::Callback::Callback<OnAttestationInformationVerification> * onCompletion) override
+    {
+        if (onCompletion != nullptr && onCompletion->mCall != nullptr)
+        {
+            onCompletion->mCall(onCompletion->mContext, info, chip::Credentials::AttestationVerificationResult::kSuccess);
+        }
+    }
+};
 
 void WriteErrorMessage(char * buffer, size_t bufferSize, const std::string & message)
 {
@@ -794,11 +851,16 @@ private:
         ReturnErrorOnFailure(chip::Platform::MemoryInit());
 
 #if CHIP_DEVICE_LAYER_TARGET_LINUX && CHIP_DEVICE_CONFIG_ENABLE_CHIPOBLE
-        if (hasBleController)
-        {
-            ReturnErrorOnFailure(
-                chip::DeviceLayer::Internal::BLEMgrImpl().ConfigureBle(bleController, /* BLE central */ true));
-        }
+        // Always ConfigureBle in central role — we are a commissioner, not a
+        // commissionable device. Without this call, mIsCentral stays at its
+        // default false, which registers a peripheral GATT service and makes
+        // HandleNewConnection skip posting kPlatformLinuxBLECentralConnected,
+        // so the BTP endpoint is never established after a successful GATT
+        // connect. Fall back to adapter 0 (hci0) when the caller did not
+        // select a specific controller.
+        const uint16_t adapterId = hasBleController ? bleController : 0;
+        ReturnErrorOnFailure(
+            chip::DeviceLayer::Internal::BLEMgrImpl().ConfigureBle(adapterId, /* BLE central */ true));
 #else
         (void) hasBleController;
         (void) bleController;
@@ -853,16 +915,17 @@ private:
             return CHIP_NO_ERROR;
         }
 
-        auto * dacVerifier = chip::Credentials::GetDefaultDACVerifier(
-            chip::Credentials::GetTestAttestationTrustStore(),
-            /* revocationDelegate = */ nullptr);
-        VerifyOrReturnError(dacVerifier != nullptr, CHIP_ERROR_INCORRECT_STATE);
-        chip::Credentials::SetDeviceAttestationVerifier(dacVerifier);
+        // DEV-ONLY: skip Matter device attestation so we can commission Matter
+        // devices whose PAA isn't in CHIP's test trust store (e.g. Espressif-
+        // based bulbs) while we're iterating on the rpiz appliance. Replace
+        // with GetDefaultDACVerifier + a real PAA trust store before shipping.
+        static BypassAttestationVerifier sBypassVerifier;
+        chip::Credentials::SetDeviceAttestationVerifier(&sBypassVerifier);
 
         auto commissioner = std::make_unique<DeviceCommissioner>();
 
         SetupParams commissionerParams;
-        commissionerParams.deviceAttestationVerifier      = dacVerifier;
+        commissionerParams.deviceAttestationVerifier      = &sBypassVerifier;
         commissionerParams.operationalCredentialsDelegate = &mOperationalCredentialsIssuer;
         commissionerParams.pairingDelegate               = &mPairingDelegate;
         commissionerParams.controllerVendorId            = static_cast<VendorId>(mControllerVendorId);
