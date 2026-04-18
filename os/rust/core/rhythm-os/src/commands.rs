@@ -4958,6 +4958,46 @@ pub fn ensure_runtime(state: &SharedState) {
     }
 }
 
+/// Ensure the shared runtime exists and contains the given topology room.
+///
+/// Matter can route directly by device endpoint and discover zero hub rooms, so
+/// runtime creation cannot rely solely on `do_room_set()` during room sync.
+fn ensure_runtime_room_exists(state: &SharedState, room_id: &str, room_name: &str) {
+    let needs_runtime = {
+        let Ok(s) = state.lock() else { return };
+        let has_runtime = s.hubs.values().any(|h| h.runtime.is_some());
+        !has_runtime && s.has_any_hub()
+    };
+
+    if needs_runtime {
+        ensure_runtime(state);
+    }
+
+    if let Some(runtime) = state.lock().ok().and_then(|s| s.hub_runtime()) {
+        if runtime.engine_room_snapshot(room_id).is_none() {
+            runtime.add_room(room_id, room_name);
+            runtime.restore_room_state(
+                room_id,
+                RestoredRoomState {
+                    rhythm_enabled: true,
+                    disabled: false,
+                    time_offset_minutes: 0.0,
+                    brightness_offset: 0.0,
+                    soft_off: false,
+                    hard_off: false,
+                    profile_settings: RoomProfileSettings::default(),
+                },
+            );
+            debug!(
+                target: "cmd",
+                "Ensured runtime room '{}' exists as '{}'",
+                room_id,
+                room_name
+            );
+        }
+    }
+}
+
 // ============================================================================
 // Composite controller registration
 // ============================================================================
@@ -5164,6 +5204,11 @@ pub fn do_canonical_assign_room(
     let endpoints: Vec<_> = device.endpoints.clone();
     let device_name = device.name.clone();
     let old_room_id = device.room_id.clone();
+    let target_room = room_id.and_then(|target_room_id| {
+        s.topology
+            .get(target_room_id)
+            .map(|room| (target_room_id.to_string(), room.name.clone()))
+    });
 
     if let Some(target_room_id) = room_id {
         if s.topology.get(target_room_id).is_none() {
@@ -5221,6 +5266,10 @@ pub fn do_canonical_assign_room(
     drop(s);
 
     persist_registry(state);
+
+    if let Some((target_room_id, target_room_name)) = target_room {
+        ensure_runtime_room_exists(state, &target_room_id, &target_room_name);
+    }
 
     #[cfg(feature = "desktop")]
     {
@@ -5620,6 +5669,8 @@ pub fn do_topology_create_room(state: &SharedState, name: &str) -> Result<String
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let id = s.topology.create_room(name);
     persist_topology(&s);
+    drop(s);
+    ensure_runtime_room_exists(state, &id, name);
     Ok(format!(r#"{{"id":"{}","name":"{}"}}"#, id, name))
 }
 
@@ -6305,6 +6356,40 @@ mod tests {
         drop(app);
 
         (state, runtime)
+    }
+
+    fn setup_state_with_deferred_runtime() -> (SharedState, Arc<MockRuntime>, HubKey) {
+        let runtime = Arc::new(MockRuntime::new(Vec::new(), 12.0));
+        let mut app = AppState::default();
+        let hub_type = HubType::new("matter");
+        let hub_key = HubKey::new(hub_type.clone(), "local");
+        let registry: Arc<Mutex<dyn HubRegistry>> =
+            Arc::new(Mutex::new(crate::registry::HubDeviceRegistry::with_options(true)));
+
+        app.hubs.insert(
+            hub_key.clone(),
+            ActiveHub {
+                hub_type,
+                hub_key: hub_key.clone(),
+                runtime: None,
+                hub_data: Box::new(()),
+                registry: Some(registry),
+                discovery: None,
+                shutdown: Default::default(),
+            },
+        );
+
+        let runtime_for_closure = runtime.clone();
+        let hub_key_for_closure = hub_key.clone();
+        app.ensure_runtime_fn = Some(Arc::new(move |state: &SharedState| {
+            let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            if let Some(hub) = s.hubs.get_mut(&hub_key_for_closure) {
+                hub.runtime = Some(runtime_for_closure.clone() as Arc<dyn RuntimeHandle>);
+            }
+            Ok(())
+        }));
+
+        (Arc::new(Mutex::new(app)), runtime, hub_key)
     }
 
     fn add_topology_room(state: &SharedState, room_id: &str, hub_types: &[&str]) {
@@ -9164,6 +9249,39 @@ mod tests {
                 .room_id,
             None
         );
+    }
+
+    #[test]
+    fn canonical_assign_room_initializes_runtime_for_roomless_matter() {
+        let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
+        let room_id = state.lock().unwrap().topology.create_room("Office");
+        let device_id =
+            insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+
+        do_canonical_assign_room(&state, &device_id, Some(&room_id)).unwrap();
+
+        assert!(state.lock().unwrap().hub_runtime().is_some());
+        let snap = runtime
+            .engine_room_snapshot(&room_id)
+            .expect("assigned topology room should exist in runtime");
+        assert_eq!(snap.name, "Office");
+        assert!(snap.rhythm_enabled);
+    }
+
+    #[test]
+    fn topology_create_room_initializes_runtime_when_hub_exists() {
+        let (state, runtime, _hub_key) = setup_state_with_deferred_runtime();
+
+        let result = do_topology_create_room(&state, "Office").unwrap();
+        let created: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let room_id = created["id"].as_str().unwrap();
+
+        assert!(state.lock().unwrap().hub_runtime().is_some());
+        let snap = runtime
+            .engine_room_snapshot(room_id)
+            .expect("created topology room should exist in runtime");
+        assert_eq!(snap.name, "Office");
+        assert!(snap.rhythm_enabled);
     }
 
     #[test]
