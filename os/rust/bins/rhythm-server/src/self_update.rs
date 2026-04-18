@@ -6,6 +6,7 @@
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
@@ -19,6 +20,12 @@ const GITHUB_API: &str = "https://api.github.com";
 const CHECKSUM_ASSET_NAME: &str = "SHA256SUMS.txt";
 const DEFAULT_UPDATE_BASE_URL: &str = "https://dl.rhythm.lighting/server";
 const EMBEDDED_INSTALL_PATH: &str = "/usr/bin/rhythm-server";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RestartStrategy {
+    SupervisorExit,
+    EmbeddedReboot,
+}
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -576,6 +583,61 @@ fn install_target_executable() -> Result<PathBuf, String> {
     }
 
     std::env::current_exe().map_err(|e| format!("Cannot determine exe path: {}", e))
+}
+
+fn restart_strategy() -> RestartStrategy {
+    let platform_type = std::env::var("RHYTHM_PLATFORM_TYPE").ok();
+    let platform_context = std::env::var("RHYTHM_PLATFORM_CONTEXT").ok();
+
+    if platform_type.as_deref() == Some("embedded")
+        && matches!(
+            platform_context.as_deref(),
+            Some("rpiz") | Some("linux-embedded")
+        )
+    {
+        RestartStrategy::EmbeddedReboot
+    } else {
+        RestartStrategy::SupervisorExit
+    }
+}
+
+pub fn schedule_post_update_restart() {
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        match restart_strategy() {
+            RestartStrategy::EmbeddedReboot => {
+                log::info!(target: "sys", "Rebooting appliance after self-update...");
+
+                let reboot_result = Command::new("/sbin/reboot")
+                    .status()
+                    .or_else(|_| Command::new("reboot").status());
+
+                match reboot_result {
+                    Ok(status) if status.success() => {}
+                    Ok(status) => {
+                        log::error!(
+                            target: "sys",
+                            "Embedded reboot command exited with status {:?}; falling back to process exit",
+                            status.code()
+                        );
+                        std::process::exit(1);
+                    }
+                    Err(error) => {
+                        log::error!(
+                            target: "sys",
+                            "Failed to invoke embedded reboot after self-update: {}; falling back to process exit",
+                            error
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+            RestartStrategy::SupervisorExit => {
+                log::info!(target: "sys", "Restarting after self-update...");
+                std::process::exit(1);
+            }
+        }
+    });
 }
 
 fn fetch_expected_sha256(

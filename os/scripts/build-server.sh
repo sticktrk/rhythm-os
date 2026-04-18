@@ -329,7 +329,7 @@ build_for_target() {
         && printf '%s\n' "${CHIPD_FEATURE_ARGS[@]}" | grep -q chip-ffi \
         && [[ "$rust_target" == *-linux-musl* ]]; then
         chipd_rustflags_var="CARGO_TARGET_$(printf '%s' "$rust_target" | tr 'a-z-' 'A-Z_')_RUSTFLAGS"
-        if [[ -v $chipd_rustflags_var ]]; then
+        if [ "${!chipd_rustflags_var+set}" = set ]; then
             chipd_previous_rustflags="${!chipd_rustflags_var}"
             chipd_restore_rustflags=true
         fi
