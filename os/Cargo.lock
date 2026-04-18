@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-chipd"
-version = "0.4.107"
+version = "0.4.108"
 dependencies = [
  "anyhow",
  "cc",

@@ -50,7 +50,7 @@ pub fn http_trace_layer<S>() -> impl tower::Layer<S> + Clone {
             let matched_path = request
                 .extensions()
                 .get::<axum::extract::MatchedPath>()
-                .map(axum::extract::MatchedPath::as_str)
+                .map(|matched_path| matched_path.as_str())
                 .unwrap_or("<unmatched>");
             tracing::info_span!(
                 "http_request",
