@@ -436,6 +436,19 @@ fn sync_with_discovery(
                             ResolveResult::Queued { .. } => continue,
                             ResolveResult::Created { canonical_id } => canonical_id,
                         };
+
+                        if identity.room_id.is_empty() {
+                            let still_unassigned = s
+                                .canonical_registry
+                                .get(&canonical_id)
+                                .map(|device| device.room_id.is_none())
+                                .unwrap_or(false);
+                            if still_unassigned {
+                                s.canonical_registry.assign_room(&canonical_id, None);
+                            }
+                            continue;
+                        }
+
                         canonical_room_devices
                             .entry(identity.room_id.clone())
                             .or_default()

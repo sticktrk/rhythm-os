@@ -32,8 +32,8 @@ For cross-target builds, `RHYTHM_CHIP_ROOT` alone is not enough; the bridge
 needs a target-matched `libCHIP.a` via `RHYTHM_CHIP_OUT_DIR` or
 `RHYTHM_CHIP_LIB_DIR`.
 
-For `rpiz` bring-up images, `RHYTHM_DEV_MODE=1` enables the lab-only extras that
-help early commissioning:
+`rpiz` image builds now default to bring-up mode so early commissioning works
+out of the box. The lab-only extras are:
 
 - Dropbear SSH
 - root password `rhythm`
@@ -52,8 +52,12 @@ If `./buildroot` does not exist, the helper script now clones Buildroot there au
 
 ```bash
 ./scripts/build-rpiz-image.sh --release
-RHYTHM_DEV_MODE=1 ./scripts/build-rpiz-image.sh --release
+./scripts/build-rpiz-image.sh --release --prod
 ```
+
+Use `--prod` or `RHYTHM_DEV_MODE=0` when you want a production-style image
+without Dropbear, without the known root password, and with Matter device
+attestation enforced.
 
 The image lands at:
 

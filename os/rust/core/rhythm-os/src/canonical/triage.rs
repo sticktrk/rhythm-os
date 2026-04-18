@@ -70,6 +70,8 @@ pub enum TriageStatus {
     Confirmed,
     /// User chose to create a new device (rejected merge).
     NewDevice,
+    /// User chose to keep a proposed room binding as separate rooms.
+    KeptSeparate,
     /// User dismissed (don't track this device).
     Dismissed,
 }
@@ -264,6 +266,11 @@ impl TriageQueue {
         self.resolve(entry_id, TriageStatus::NewDevice, "api", now)
     }
 
+    /// Resolve a room binding by keeping the rooms separate.
+    pub fn resolve_keep_separate(&mut self, entry_id: &str, now: u64) -> bool {
+        self.resolve(entry_id, TriageStatus::KeptSeparate, "api", now)
+    }
+
     /// Dismiss an entry.
     pub fn dismiss(&mut self, entry_id: &str, now: u64) -> bool {
         self.resolve(entry_id, TriageStatus::Dismissed, "api", now)
@@ -272,7 +279,13 @@ impl TriageQueue {
     /// Remove all resolved entries older than `before` timestamp.
     pub fn prune_resolved(&mut self, before: u64) {
         self.entries.retain(|e| {
-            e.status == TriageStatus::Pending || e.resolved_at.map(|t| t >= before).unwrap_or(true)
+            e.status == TriageStatus::Pending
+                || matches!(
+                    (&e.kind, &e.status),
+                    (TriageKind::RoomBinding, TriageStatus::KeptSeparate)
+                        | (TriageKind::RoomBinding, TriageStatus::NewDevice)
+                )
+                || e.resolved_at.map(|t| t >= before).unwrap_or(true)
         });
     }
 
@@ -396,10 +409,11 @@ impl TriageQueue {
 
     /// Check if a room binding proposal already exists for a hub room.
     ///
-    /// Only matches `Pending` entries so dismissed proposals can re-enter triage.
+    /// Dismissed proposals can re-enter triage, but confirmed and "kept separate"
+    /// decisions should continue blocking repeat proposals for the same hub room.
     pub fn has_room_binding(&self, hub_key: &HubKey, hub_room_id: &str) -> bool {
         self.entries.iter().any(|e| {
-            e.status == TriageStatus::Pending
+            e.status != TriageStatus::Dismissed
                 && e.kind == TriageKind::RoomBinding
                 && e.hub_key == *hub_key
                 && e.room_binding
@@ -537,6 +551,15 @@ mod tests {
     }
 
     #[test]
+    fn resolve_keep_separate() {
+        let mut q = TriageQueue::new();
+        q.add(make_room_binding_entry("rb1", "ha-area-1", "rhythm-room-1"));
+
+        assert!(q.resolve_keep_separate("rb1", 2000));
+        assert_eq!(q.get("rb1").unwrap().status, TriageStatus::KeptSeparate);
+    }
+
+    #[test]
     fn dismiss() {
         let mut q = TriageQueue::new();
         q.add(make_entry("e1", TriageStatus::Pending));
@@ -622,6 +645,28 @@ mod tests {
 
         // Dismissed binding should not block re-triage
         assert!(!q.has_room_binding(&ha_key, "ha-area-1"));
+    }
+
+    #[test]
+    fn kept_separate_room_binding_blocks_retriage() {
+        let mut q = TriageQueue::new();
+        let ha_key = HubKey::new(HubType::new("ha"), "192.168.1.2");
+        q.add(make_room_binding_entry("rb1", "ha-area-1", "rhythm-room-1"));
+        q.resolve_keep_separate("rb1", 2000);
+
+        assert!(q.has_room_binding(&ha_key, "ha-area-1"));
+    }
+
+    #[test]
+    fn legacy_room_binding_new_device_blocks_retriage() {
+        let mut q = TriageQueue::new();
+        let ha_key = HubKey::new(HubType::new("ha"), "192.168.1.2");
+        let mut entry = make_room_binding_entry("rb1", "ha-area-1", "rhythm-room-1");
+        entry.status = TriageStatus::NewDevice;
+        entry.resolved_at = Some(2000);
+        q.add(entry);
+
+        assert!(q.has_room_binding(&ha_key, "ha-area-1"));
     }
 
     #[test]
@@ -764,5 +809,18 @@ mod tests {
         assert_eq!(q.pending_by_kind(TriageKind::HubConfigured).len(), 1);
         assert_eq!(q.pending_hub_configured_count(), 1);
         assert_eq!(q.pending_count(), 3);
+    }
+
+    #[test]
+    fn prune_resolved_keeps_room_binding_keep_separate() {
+        let mut q = TriageQueue::new();
+        let mut kept_separate = make_room_binding_entry("rb1", "ha-area-1", "rhythm-room-1");
+        kept_separate.status = TriageStatus::KeptSeparate;
+        kept_separate.resolved_at = Some(500);
+        q.add(kept_separate);
+
+        q.prune_resolved(1000);
+
+        assert!(q.get("rb1").is_some());
     }
 }

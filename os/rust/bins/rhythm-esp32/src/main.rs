@@ -190,6 +190,8 @@ fn main() -> Result<()> {
     app_state.platform_type = "embedded";
     app_state.platform_context = "esp32";
     app_state.platform = rhythm_os::state::PlatformConfig::embedded();
+    app_state.hub_capabilities =
+        vec![rhythm_os::hub::HubIntegrationCapability::new(rhythm_os::hub::HubType::HUE)];
     rhythm_os::storage::load_persisted_state(&mut app_state);
 
     // Set platform-specific callbacks

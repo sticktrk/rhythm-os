@@ -43,8 +43,13 @@ where
     let transport = Arc::new(SpyTransport::new());
     init_transport(&transport);
     let transport_obj: Arc<dyn MatterTransport> = transport.clone();
-    let (hub, _event_rx) = rhythm_matter::lifecycle::connect_matter(&state, transport_obj).unwrap();
+    let (mut hub, _event_rx) =
+        rhythm_matter::lifecycle::connect_matter(&state, transport_obj.clone()).unwrap();
     let hub_data = hub.data::<Arc<MatterHubData>>().cloned().unwrap();
+    hub.discovery = Some(Arc::new(rhythm_matter::discovery::MatterDiscovery::new(
+        transport_obj,
+        hub_data.clone(),
+    )));
 
     {
         let mut state_guard = state.lock().unwrap();

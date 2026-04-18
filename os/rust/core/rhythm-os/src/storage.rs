@@ -707,6 +707,11 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
             match serde_json::from_value::<crate::canonical::registry::CanonicalRegistry>(value) {
                 Ok(mut registry) => {
                     registry.rebuild_indices();
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    registry.backfill_unassigned_triage(now);
                     let count = registry.device_count();
                     s.canonical_registry = registry;
                     info!(target: "sys", "Loaded canonical registry: {} devices", count);
@@ -750,6 +755,7 @@ mod tests {
         location: Option<StoredLocation>,
         settings: Option<StoredSettings>,
         saved_settings: Arc<Mutex<Vec<StoredSettings>>>,
+        canonical_registry: Option<Value>,
     }
 
     impl Storage for TestStorage {
@@ -805,6 +811,14 @@ mod tests {
         }
 
         fn save_hub_registry(&self, _data: &Value) -> Result<()> {
+            Ok(())
+        }
+
+        fn load_canonical_registry(&self) -> Result<Option<Value>> {
+            Ok(self.canonical_registry.clone())
+        }
+
+        fn save_canonical_registry(&self, _data: &Value) -> Result<()> {
             Ok(())
         }
     }
@@ -1166,6 +1180,53 @@ mod tests {
         assert_eq!(app.active_mode_profile_id(), rhythm_core::SLEEP_PROFILE_ID);
         assert_eq!(app.default_motion_timeout_secs, 42);
         assert_eq!(app.runtime_config.update_interval_secs, 17);
+    }
+
+    #[test]
+    fn load_persisted_state_backfills_unassigned_triage_for_roomless_devices() {
+        let mut registry = crate::canonical::registry::CanonicalRegistry::new();
+        let hub_key = HubKey::new(crate::hub::HubType::new("matter"), "local");
+        let identity = crate::canonical::identity::DiscoveredIdentity {
+            native_id: "matter-device-1".to_string(),
+            room_id: String::new(),
+            room_name: String::new(),
+            name: "Desk Lamp".to_string(),
+            device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+            hardware_ids: vec![crate::canonical::identity::HardwareId::matter(
+                "matter-device-1",
+            )],
+            manufacturer: None,
+            model: None,
+        };
+        let canonical_id = match registry.resolve(&identity, &hub_key, 1000) {
+            crate::canonical::registry::ResolveResult::Created { canonical_id } => canonical_id,
+            other => panic!("unexpected resolve result: {:?}", other),
+        };
+        assert_eq!(registry.triage().pending_unassigned_count(), 0);
+
+        let storage = TestStorage {
+            canonical_registry: Some(serde_json::to_value(&registry).unwrap()),
+            ..Default::default()
+        };
+
+        let mut app = crate::state::AppState::default();
+        app.storage = Some(Box::new(storage));
+        load_persisted_state(&mut app);
+
+        assert!(app.canonical_registry.get(&canonical_id).is_some());
+        assert_eq!(
+            app.canonical_registry.triage().pending_unassigned_count(),
+            1
+        );
+        let pending = app
+            .canonical_registry
+            .triage()
+            .pending_by_kind(crate::canonical::triage::TriageKind::UnassignedDevice);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].canonical_id.as_deref(),
+            Some(canonical_id.as_str())
+        );
     }
 
     #[test]

@@ -62,8 +62,14 @@ pub fn connect_and_start(state: SharedState, _key: &HubKey) -> Result<Receiver<H
     let transport: Arc<dyn MatterTransport> =
         Arc::new(ChipTransport::load_or_create(&data_path, &fabric_id)?);
     let (mut hub, event_rx) = crate::lifecycle::connect_matter(&state, transport.clone())?;
+    let hub_data = hub
+        .data::<Arc<MatterHubData>>()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Matter hub data missing"))?;
 
-    hub.discovery = Some(Arc::new(crate::discovery::MatterDiscovery::new(transport)));
+    hub.discovery = Some(Arc::new(crate::discovery::MatterDiscovery::new(
+        transport, hub_data,
+    )));
 
     {
         let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;

@@ -410,7 +410,10 @@ fn resolve_from_out_dir_with_root(
         });
     }
 
-    Err(format!("no native libCHIP.a found under {}", out_dir.display()))
+    Err(format!(
+        "no native libCHIP.a found under {}",
+        out_dir.display()
+    ))
 }
 
 fn resolve_from_lib_dir(lib_dir: PathBuf, target: String) -> Result<ChipArtifacts, String> {

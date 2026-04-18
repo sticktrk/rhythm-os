@@ -102,6 +102,7 @@ Build a Raspberry Pi Zero SD-card image using the Buildroot external tree in `in
 
 ```bash
 ./scripts/build-rpiz-image.sh --release
+./scripts/build-rpiz-image.sh --release --prod
 ./scripts/build-rpiz-image.sh --skip-server-build
 ./scripts/build-rpiz-image.sh --release --docker
 ./scripts/build-rpiz-image.sh --release --wifi-ssid "MyNet" --wifi-psk "secretpass"
@@ -114,6 +115,8 @@ Build a Raspberry Pi Zero SD-card image using the Buildroot external tree in `in
 | `--output-dir <path>` | Buildroot output directory (default: `out/rpiz`) |
 | `--release` | Build the server binary in release mode before packaging |
 | `--debug` | Build the server binary in debug mode before packaging |
+| `--dev` | Build the rpiz bring-up image. This is the default |
+| `--prod`, `--production` | Disable the rpiz bring-up extras for a production image |
 | `--skip-server-build` | Reuse an existing `dist/bin/rpiz/rhythm-server` |
 | `--wifi-ssid <ssid>` | Embed Wi-Fi SSID for Pi Zero W / Zero 2 W |
 | `--wifi-psk <psk>` | Embed WPA/WPA2 passphrase |
@@ -123,6 +126,7 @@ Build a Raspberry Pi Zero SD-card image using the Buildroot external tree in `in
 
 **Output:** `out/rpiz/images/sdcard.img`
 With `--docker` and no explicit `--output-dir`, the default becomes `out/rpiz-docker/images/sdcard.img`.
+By default, rpiz image builds include the bring-up extras: Dropbear SSH, root password `rhythm`, and Matter device attestation bypass. Use `--prod` or `RHYTHM_DEV_MODE=0` to turn those off.
 
 ---
 

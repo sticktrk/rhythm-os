@@ -929,11 +929,11 @@ pub fn handle_pair_device(
         Ok(session) => {
             log::info!(target: "pair", "Pairing result: status={:?} error={:?}", session.status, session.error);
             if session.status == crate::pairing::PairingStatus::Complete {
-                // Persist canonical registry (resolve() was called during pairing)
+                // Persist canonical registry changes made during pairing
                 if let Ok(s) = state.lock() {
                     commands::persist_canonical(&s);
                 }
-                // Persist hub device registry (upsert_room was called during pairing)
+                // Persist hub registry updates if the integration created any
                 commands::persist_registry(state);
                 // Notify SSE clients
                 #[cfg(feature = "desktop")]
@@ -1025,8 +1025,11 @@ pub fn handle_get_canonical_device(state: &SharedState, id: &str) -> ApiResponse
 }
 
 pub fn handle_put_device_room(state: &SharedState, device_id: &str, body: &Value) -> ApiResponse {
-    let room_id = body.get("room_id").and_then(|v| v.as_str());
-    match commands::do_canonical_assign_room(state, device_id, room_id) {
+    let room_id = body
+        .get("room_id")
+        .and_then(|v| v.as_str())
+        .map(|raw_room_id| commands::resolve_room_id(state, raw_room_id));
+    match commands::do_canonical_assign_room(state, device_id, room_id.as_deref()) {
         Ok(()) => ApiResponse::no_content(),
         Err(e) => ApiResponse::server_error(e),
     }
@@ -1095,6 +1098,17 @@ pub fn handle_put_triage_bind(state: &SharedState, entry_id: &str, body: &Value)
     // Optional target_room_id for the 3+ hub case
     let target = body.get("target_room_id").and_then(|v| v.as_str());
     match commands::do_triage_bind_room_to(state, entry_id, target) {
+        Ok(()) => ApiResponse::no_content(),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_put_triage_room(state: &SharedState, entry_id: &str, body: &Value) -> ApiResponse {
+    let room_id = match body.get("room_id").and_then(|v| v.as_str()) {
+        Some(room_id) => room_id,
+        None => return ApiResponse::bad_request("Missing room_id"),
+    };
+    match commands::do_triage_assign_room(state, entry_id, room_id) {
         Ok(()) => ApiResponse::no_content(),
         Err(e) => ApiResponse::server_error(e),
     }

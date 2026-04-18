@@ -455,8 +455,10 @@ pub struct IntegrationCallbacks {
 pub fn integration_callbacks(
     integrations: &'static [&'static dyn ExternalLightHubIntegration],
 ) -> IntegrationCallbacks {
-    let mut hub_capabilities: Vec<HubIntegrationCapability> =
-        integrations.iter().map(|integration| integration.api_capabilities()).collect();
+    let mut hub_capabilities: Vec<HubIntegrationCapability> = integrations
+        .iter()
+        .map(|integration| integration.api_capabilities())
+        .collect();
     hub_capabilities.sort_by(|left, right| left.hub_type.cmp(&right.hub_type));
     hub_capabilities.dedup_by(|left, right| left.hub_type == right.hub_type);
 

@@ -52,6 +52,9 @@ pub enum ServerEvent {
 #[derive(Clone, Debug, Serialize)]
 pub struct RoomStateEvent {
     pub id: String,
+    /// Which hub types have lights in this room (e.g. ["hue"], ["hue", "matter"]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hub_types: Vec<String>,
     pub mode: RhythmMode,
     pub state: RoomModeState,
     pub rhythm_enabled: bool,
@@ -81,6 +84,7 @@ impl RoomStateEvent {
     /// Build from an engine room snapshot with display values.
     pub fn from_snapshot(
         snap: &RoomSnapshot,
+        hub_types: Vec<String>,
         mode: RhythmMode,
         state: RoomModeState,
         lights_on: bool,
@@ -90,6 +94,7 @@ impl RoomStateEvent {
     ) -> Self {
         Self {
             id: snap.id.clone(),
+            hub_types,
             mode,
             state,
             rhythm_enabled: snap.rhythm_enabled,

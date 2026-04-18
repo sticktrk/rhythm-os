@@ -98,12 +98,14 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/triage/:id/merge", put(put_triage_merge))
         .route("/api/triage/:id/new", put(put_triage_new))
         .route("/api/triage/:id/dismiss", put(put_triage_dismiss))
+        .route("/api/triage/:id/room", put(put_triage_room))
         .route("/api/triage/:id/bind", put(put_triage_bind))
         // Legacy triage paths (backward compat)
         .route("/api/devices/triage", get(get_triage))
         .route("/api/devices/triage/:id/merge", put(put_triage_merge))
         .route("/api/devices/triage/:id/new", put(put_triage_new))
         .route("/api/devices/triage/:id/dismiss", put(put_triage_dismiss))
+        .route("/api/devices/triage/:id/room", put(put_triage_room))
         // Topology room management
         .route(
             "/api/topology/rooms",
@@ -350,6 +352,14 @@ async fn put_triage_dismiss(
     Path(id): Path<String>,
 ) -> ApiResponse {
     handlers::handle_put_triage_dismiss(&state, &id)
+}
+
+async fn put_triage_room(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    handlers::handle_put_triage_room(&state, &id, &body)
 }
 
 async fn put_triage_bind(

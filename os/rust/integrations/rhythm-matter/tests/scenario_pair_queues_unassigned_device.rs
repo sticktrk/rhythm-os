@@ -32,5 +32,8 @@ fn scenario_pair_queues_unassigned_device() {
         .expect("paired Matter device should be in canonical registry");
 
     assert!(canonical.room_id.is_none());
-    assert_eq!(state.canonical_registry.triage().pending_unassigned_count(), 1);
+    assert_eq!(
+        state.canonical_registry.triage().pending_unassigned_count(),
+        1
+    );
 }

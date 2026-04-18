@@ -177,6 +177,10 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["PUT"],
     },
     SharedRoute {
+        path: "/api/triage/:id/room",
+        methods: &["PUT"],
+    },
+    SharedRoute {
         path: "/api/triage/:id/bind",
         methods: &["PUT"],
     },
@@ -195,6 +199,10 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
     },
     SharedRoute {
         path: "/api/devices/triage/:id/dismiss",
+        methods: &["PUT"],
+    },
+    SharedRoute {
+        path: "/api/devices/triage/:id/room",
         methods: &["PUT"],
     },
     // Topology room management

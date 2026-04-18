@@ -235,7 +235,7 @@ fn build_success_session(
     })
 }
 
-fn store_device_capabilities(
+pub(crate) fn store_device_capabilities(
     hub_data: &Arc<MatterHubData>,
     device: &CommissionedDevice,
     device_id: &str,
@@ -297,10 +297,17 @@ fn queue_unassigned_canonical_device(
         .canonical_registry
         .find_by_native_id(hub_key, device_id)
         .map(|device| (device.id.clone(), device.room_id.is_some()))
-        .ok_or_else(|| anyhow::anyhow!("Canonical device missing after Matter pairing: {}", device_id))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Canonical device missing after Matter pairing: {}",
+                device_id
+            )
+        })?;
 
     if !already_assigned {
-        state.canonical_registry.queue_unassigned(&canonical_id, now);
+        state
+            .canonical_registry
+            .queue_unassigned(&canonical_id, now);
     }
 
     Ok(())

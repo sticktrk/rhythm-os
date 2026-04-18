@@ -21,10 +21,10 @@ use rhythm_core::{
 use serde_json::Value;
 
 use crate::api_types::{
-    ActiveProfileDto, ActiveProfileEffectiveDto, ApiCapabilitiesDto, FixResponse,
-    HubCapabilityDto, HubDto, LocationDto, ModeLastChangeDto, ModeSettingsDto,
-    ModeTransitionsDto, ProfilesDto, RoomFullState, RoomPollState, RoomRhythmState,
-    RoomsPollResponse, SettingsDto, StateSnapshot, TypedDeviceDto,
+    ActiveProfileDto, ActiveProfileEffectiveDto, ApiCapabilitiesDto, FixResponse, HubCapabilityDto,
+    HubDto, LocationDto, ModeLastChangeDto, ModeSettingsDto, ModeTransitionsDto, ProfilesDto,
+    RoomFullState, RoomPollState, RoomRhythmState, RoomsPollResponse, SettingsDto, StateSnapshot,
+    TypedDeviceDto,
 };
 use crate::bundle::{
     BackupBundle, BackupHubCredentials, BackupHubRegistry, BackupInstallation, BackupRuntimeState,
@@ -498,6 +498,46 @@ impl RoomProfileSettingsPatch {
     }
 }
 
+fn collect_room_hub_types<'a>(
+    targets: impl IntoIterator<Item = &'a crate::topology::HubControlTarget>,
+) -> Vec<String> {
+    let mut hub_types = Vec::new();
+    let mut seen = HashSet::new();
+
+    for target in targets {
+        let hub_type = target.hub_key.hub_type.as_str();
+        if seen.insert(hub_type) {
+            hub_types.push(hub_type.to_string());
+        }
+    }
+
+    hub_types
+}
+
+fn topology_hub_types_map(s: &AppState) -> HashMap<String, Vec<String>> {
+    s.topology
+        .rooms()
+        .map(|room| {
+            (
+                room.id.clone(),
+                collect_room_hub_types(room.hub_targets.iter()),
+            )
+        })
+        .collect()
+}
+
+fn room_hub_types_from_topology(s: &AppState, room_id: &str) -> Vec<String> {
+    if let Some(room) = s.topology.get(room_id) {
+        return collect_room_hub_types(room.hub_targets.iter());
+    }
+
+    s.topology
+        .translate_room_id_any_hub(room_id)
+        .and_then(|topo_id| s.topology.get(topo_id))
+        .map(|room| collect_room_hub_types(room.hub_targets.iter()))
+        .unwrap_or_default()
+}
+
 /// Build a RoomStateEvent for a room, computing display values from AppState.
 ///
 /// For soft-off rooms, brightness is the soft-off percentage (not curve value).
@@ -508,7 +548,7 @@ pub fn build_room_state_event(
     snap: &rhythm_core::RoomSnapshot,
 ) -> crate::server_event::RoomStateEvent {
     let now = std::time::Instant::now();
-    let (mode, room_state, lights_on, transitioning, brightness, kelvin) = {
+    let (mode, room_state, lights_on, transitioning, brightness, kelvin, hub_types) = {
         let s = state.lock().unwrap_or_else(|e| e.into_inner());
         let mode = s.active_mode;
         let mode_configs = s.mode_configs();
@@ -521,6 +561,7 @@ pub fn build_room_state_event(
         );
         let lights_on = s.room_lights_on.get(&snap.id).copied().unwrap_or(false);
         let transitioning = room_mode_transition_active(&s.room_mode_transitions, &snap.id, now);
+        let hub_types = room_hub_types_from_topology(&s, &snap.id);
         let (curve_brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
             RoomLightingContext {
                 light_profile_configs: &s.light_profile_configs,
@@ -539,10 +580,12 @@ pub fn build_room_state_event(
             transitioning,
             curve_brightness,
             kelvin,
+            hub_types,
         )
     };
     crate::server_event::RoomStateEvent::from_snapshot(
         snap,
+        hub_types,
         mode,
         room_state,
         lights_on,
@@ -976,18 +1019,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             .collect();
 
         // Build topology_room_id → Vec<hub_type_string> for API responses.
-        let topo_hub_types: std::collections::HashMap<String, Vec<String>> = s
-            .topology
-            .rooms()
-            .map(|room| {
-                let types: Vec<String> = room
-                    .hub_targets
-                    .iter()
-                    .map(|t| t.hub_key.hub_type.as_str().to_string())
-                    .collect();
-                (room.id.clone(), types)
-            })
-            .collect();
+        let topo_hub_types = topology_hub_types_map(&s);
 
         let last_tick_epoch_ms = s.last_tick_epoch_ms;
         let update_interval = std::time::Duration::from_secs(s.runtime_config.update_interval_secs);
@@ -1087,7 +1119,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
                 room_infos.push(RoomInfo {
                     topology_id: room.id.clone(),
                     name: room.name.clone(),
-                    hub_types: vec![],
+                    hub_types: topo_hub_types.get(&room.id).cloned().unwrap_or_default(),
                     grouped_light_id: String::new(),
                     device_ids: Vec::new(),
                     typed_devices: Vec::new(),
@@ -1343,6 +1375,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
         solar_noon,
         latitude,
         utc_offset,
+        topo_hub_types,
         rooms_with_sensors,
         transitioning_rooms,
     ) = {
@@ -1369,6 +1402,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
             s.solar_noon_hour(),
             s.latitude.unwrap_or(35.0),
             s.utc_offset_hours,
+            topology_hub_types_map(&s),
             sensor_rooms,
             active_transition_room_ids(&s.room_mode_transitions, now),
         )
@@ -1405,7 +1439,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
             );
             let rhythm = RoomRhythmState {
                 id: snap.id.clone(),
-                hub_types: vec![],
+                hub_types: topo_hub_types.get(&snap.id).cloned().unwrap_or_default(),
                 state: room_state,
                 rhythm_enabled: snap.rhythm_enabled,
                 time_offset: snap.time_offset_minutes,
@@ -1474,7 +1508,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
             rooms.push(RoomPollState {
                 rhythm: RoomRhythmState {
                     id: room.id.clone(),
-                    hub_types: vec![],
+                    hub_types: topo_hub_types.get(&room.id).cloned().unwrap_or_default(),
                     state: room_state,
                     rhythm_enabled: room.rhythm_enabled,
                     time_offset: room.time_offset_minutes,
@@ -1504,7 +1538,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
 /// Build a `RoomRhythmState` for a single room from engine state.
 pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<RoomRhythmState> {
     let now = std::time::Instant::now();
-    let (runtime, lights_on, warning_active, transitioning) = {
+    let (runtime, lights_on, warning_active, transitioning, hub_types) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             s.hub_runtime(),
@@ -1513,6 +1547,7 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
                 .get(room_id)
                 .is_some_and(|motion| motion.warning_active),
             room_mode_transition_active(&s.room_mode_transitions, room_id, now),
+            room_hub_types_from_topology(&s, room_id),
         )
     };
 
@@ -1534,7 +1569,7 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
 
     Ok(RoomRhythmState {
         id: snap.id.clone(),
-        hub_types: vec![],
+        hub_types,
         state: room_state,
         rhythm_enabled: snap.rhythm_enabled,
         time_offset: snap.time_offset_minutes,
@@ -5111,6 +5146,12 @@ pub fn do_canonical_assign_room(
     let device_name = device.name.clone();
     let old_room_id = device.room_id.clone();
 
+    if let Some(target_room_id) = room_id {
+        if s.topology.get(target_room_id).is_none() {
+            return Err(anyhow::anyhow!("Room not found: {}", target_room_id));
+        }
+    }
+
     if !s.canonical_registry.assign_room(device_id, room_id) {
         return Err(anyhow::anyhow!("Device not found: {}", device_id));
     }
@@ -5166,6 +5207,7 @@ pub fn do_canonical_assign_room(
     {
         rebuild_composite_routing(state);
         emit_triage_changed(state);
+        crate::state::emit_server_event(state, crate::server_event::ServerEvent::RoomsChanged);
     }
     Ok(())
 }
@@ -5209,15 +5251,22 @@ pub fn build_triage_queue(state: &SharedState) -> Result<String> {
 /// Merges the discovered device's endpoint into the chosen canonical device
 /// and removes the silo device that was created during Phase 4 of resolve().
 pub fn do_triage_merge(state: &SharedState, entry_id: &str, canonical_id: &str) -> Result<()> {
+    use crate::canonical::triage::TriageKind;
+
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    let (hub_key, native_id, hub_room_id) = match s.canonical_registry.triage().get(entry_id) {
-        Some(entry) => (
-            entry.hub_key.clone(),
-            entry.discovered.native_id.clone(),
-            entry.discovered.room_id.clone(),
-        ),
+    let entry = match s.canonical_registry.triage().get(entry_id) {
+        Some(entry) => entry.clone(),
         None => return Err(anyhow::anyhow!("Triage entry not found: {}", entry_id)),
     };
+    if entry.kind != TriageKind::DeviceMerge {
+        return Err(anyhow::anyhow!(
+            "Triage entry '{}' is not a device merge",
+            entry_id
+        ));
+    }
+    let hub_key = entry.hub_key.clone();
+    let native_id = entry.discovered.native_id.clone();
+    let hub_room_id = entry.discovered.room_id.clone();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -5266,42 +5315,95 @@ pub fn do_triage_merge(state: &SharedState, entry_id: &str, canonical_id: &str) 
 
 /// Create a new device from a triage entry (rejected merge, keep separate).
 pub fn do_triage_new_device(state: &SharedState, entry_id: &str) -> Result<String> {
+    use crate::canonical::triage::TriageKind;
+
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    let (hub_key, hub_room_id) = match s.canonical_registry.triage().get(entry_id) {
-        Some(entry) => (entry.hub_key.clone(), entry.discovered.room_id.clone()),
+    let entry = match s.canonical_registry.triage().get(entry_id) {
+        Some(entry) => entry.clone(),
         None => return Err(anyhow::anyhow!("Triage entry not found: {}", entry_id)),
     };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    match s
-        .canonical_registry
-        .complete_new_device(entry_id, &hub_key, now)
-    {
-        Some(canonical_id) => {
-            if !hub_room_id.is_empty() {
-                if let Some(rhythm_room_id) = s
-                    .topology
-                    .translate_room_id(&hub_key, &hub_room_id)
-                    .map(|s| s.to_string())
-                {
-                    if let Some(room) = s.topology.get_mut(&rhythm_room_id) {
-                        room.add_device_hub_default(&canonical_id);
+    match entry.kind {
+        TriageKind::DeviceMerge => {
+            let hub_key = entry.hub_key.clone();
+            let hub_room_id = entry.discovered.room_id.clone();
+            match s
+                .canonical_registry
+                .complete_new_device(entry_id, &hub_key, now)
+            {
+                Some(canonical_id) => {
+                    if !hub_room_id.is_empty() {
+                        if let Some(rhythm_room_id) = s
+                            .topology
+                            .translate_room_id(&hub_key, &hub_room_id)
+                            .map(|s| s.to_string())
+                        {
+                            if let Some(room) = s.topology.get_mut(&rhythm_room_id) {
+                                room.add_device_hub_default(&canonical_id);
+                            }
+                            s.canonical_registry
+                                .assign_room(&canonical_id, Some(&rhythm_room_id));
+                        }
                     }
-                    s.canonical_registry
-                        .assign_room(&canonical_id, Some(&rhythm_room_id));
+                    persist_canonical(&s);
+                    persist_topology(&s);
+                    drop(s);
+                    #[cfg(feature = "desktop")]
+                    emit_triage_changed(state);
+                    Ok(format!(r#"{{"canonical_id":"{}"}}"#, canonical_id))
                 }
+                None => Err(anyhow::anyhow!("Failed to create new device")),
             }
-            persist_canonical(&s);
-            persist_topology(&s);
-            drop(s);
-            #[cfg(feature = "desktop")]
-            emit_triage_changed(state);
-            Ok(format!(r#"{{"canonical_id":"{}"}}"#, canonical_id))
         }
-        None => Err(anyhow::anyhow!("Failed to create new device")),
+        TriageKind::RoomBinding => {
+            if s.canonical_registry
+                .triage_mut()
+                .resolve_keep_separate(entry_id, now)
+            {
+                persist_canonical(&s);
+                drop(s);
+                #[cfg(feature = "desktop")]
+                emit_triage_changed(state);
+                Ok(r#"{"status":"kept_separate"}"#.to_string())
+            } else {
+                Err(anyhow::anyhow!("Failed to keep room binding separate"))
+            }
+        }
+        _ => Err(anyhow::anyhow!(
+            "Triage entry '{}' does not support /new",
+            entry_id
+        )),
     }
+}
+
+/// Assign an unassigned-device triage entry to a room.
+pub fn do_triage_assign_room(state: &SharedState, entry_id: &str, room_id: &str) -> Result<()> {
+    use crate::canonical::triage::TriageKind;
+
+    let resolved_room_id = resolve_room_id(state, room_id);
+    let canonical_id = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let entry = s
+            .canonical_registry
+            .triage()
+            .get(entry_id)
+            .ok_or_else(|| anyhow::anyhow!("Triage entry not found: {}", entry_id))?;
+        if entry.kind != TriageKind::UnassignedDevice {
+            return Err(anyhow::anyhow!(
+                "Triage entry '{}' is not an unassigned device",
+                entry_id
+            ));
+        }
+        entry
+            .canonical_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Triage entry '{}' is missing canonical_id", entry_id))?
+    };
+
+    do_canonical_assign_room(state, &canonical_id, Some(&resolved_room_id))
 }
 
 /// Dismiss a triage entry.
@@ -5338,6 +5440,9 @@ pub fn do_triage_bind_room_to(
     entry_id: &str,
     target_override: Option<&str>,
 ) -> Result<()> {
+    use crate::canonical::triage::TriageKind;
+
+    let resolved_target_override = target_override.map(|id| resolve_room_id(state, id));
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -5351,14 +5456,18 @@ pub fn do_triage_bind_room_to(
         .get(entry_id)
         .ok_or_else(|| anyhow::anyhow!("Triage entry not found: {}", entry_id))?
         .clone();
+    if entry.kind != TriageKind::RoomBinding {
+        return Err(anyhow::anyhow!(
+            "Triage entry '{}' is not a room binding",
+            entry_id
+        ));
+    }
 
     let binding = entry
         .room_binding
         .ok_or_else(|| anyhow::anyhow!("Not a room binding entry: {}", entry_id))?;
 
-    let target_id = target_override
-        .map(|s| s.to_string())
-        .unwrap_or(binding.target_rhythm_room_id.clone());
+    let target_id = resolved_target_override.unwrap_or(binding.target_rhythm_room_id.clone());
 
     // Validate target room exists
     let target_name = s
@@ -6179,6 +6288,49 @@ mod tests {
         (state, runtime)
     }
 
+    fn add_topology_room(state: &SharedState, room_id: &str, hub_types: &[&str]) {
+        let mut room = crate::topology::TopologyRoom::new(room_id, room_id);
+        for (index, hub_type) in hub_types.iter().enumerate() {
+            room.upsert_hub_target(crate::topology::HubControlTarget {
+                hub_key: HubKey::new(HubType::new(*hub_type), &format!("{hub_type}-{index}")),
+                hub_room_id: format!("{room_id}-{index}"),
+                control_id: format!("control-{index}"),
+                light_device_ids: Vec::new(),
+                topology_aligned: true,
+            });
+        }
+        state.lock().unwrap().topology.insert_room(room);
+    }
+
+    fn insert_canonical_device(
+        state: &SharedState,
+        hub_key: HubKey,
+        native_id: &str,
+        name: &str,
+        room_id: &str,
+        room_name: &str,
+    ) -> String {
+        let identity = crate::canonical::identity::DiscoveredIdentity {
+            native_id: native_id.to_string(),
+            room_id: room_id.to_string(),
+            room_name: room_name.to_string(),
+            name: name.to_string(),
+            device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+            hardware_ids: vec![crate::canonical::identity::HardwareId::matter(native_id)],
+            manufacturer: None,
+            model: None,
+        };
+
+        let mut s = state.lock().unwrap();
+        match s.canonical_registry.resolve(&identity, &hub_key, 1000) {
+            crate::canonical::registry::ResolveResult::Created { canonical_id }
+            | crate::canonical::registry::ResolveResult::AlreadyKnown { canonical_id } => {
+                canonical_id
+            }
+            other => panic!("unexpected resolve result: {:?}", other),
+        }
+    }
+
     #[derive(Clone, Default)]
     struct TestStorage {
         inner: Arc<Mutex<TestStorageInner>>,
@@ -6835,6 +6987,18 @@ mod tests {
     }
 
     #[test]
+    fn build_room_rhythm_state_includes_deduped_hub_types_from_topology() {
+        let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
+        add_topology_room(&state, "r1", &["mock", "mock", "matter"]);
+
+        let room_state = build_room_rhythm_state(&state, "r1").unwrap();
+        let json = serde_json::to_value(&room_state).unwrap();
+
+        assert_eq!(room_state.hub_types, vec!["mock", "matter"]);
+        assert_eq!(json["hub_types"], serde_json::json!(["mock", "matter"]));
+    }
+
+    #[test]
     fn build_room_rhythm_state_warning_uses_dimmed_brightness() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
         state
@@ -6928,6 +7092,20 @@ mod tests {
 
         assert!(event.transitioning);
         assert_eq!(json["transitioning"], true);
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn build_room_state_event_includes_hub_types_from_topology() {
+        let (state, rt) = setup_state(vec![make_snapshot("r1", false, false)]);
+        add_topology_room(&state, "r1", &["matter", "mock"]);
+        let snap = rt.engine_room_snapshot("r1").unwrap();
+
+        let event = build_room_state_event(&state, &snap);
+        let json = serde_json::to_value(&event).unwrap();
+
+        assert_eq!(event.hub_types, vec!["matter", "mock"]);
+        assert_eq!(json["hub_types"], serde_json::json!(["matter", "mock"]));
     }
 
     #[test]
@@ -7620,6 +7798,20 @@ mod tests {
     }
 
     #[test]
+    fn build_rooms_state_includes_hub_types_from_topology() {
+        let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
+        add_topology_room(&state, "r1", &["matter", "mock"]);
+
+        let result = build_rooms_state(&state).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(
+            parsed["rooms"][0]["hub_types"],
+            serde_json::json!(["matter", "mock"])
+        );
+    }
+
+    #[test]
     fn build_rooms_state_sensor_no_motion_snapshot_populates_defaults() {
         // Room has a motion sensor in the registry but no MotionSnapshot yet.
         let runtime = Arc::new(MockRuntime::new(
@@ -7701,6 +7893,27 @@ mod tests {
         assert!(parsed["rooms"][0]["transitioning"].is_boolean());
         // No status wrapper
         assert!(parsed.get("status").is_none());
+    }
+
+    #[test]
+    fn build_state_snapshot_storage_fallback_includes_hub_types_from_topology() {
+        let storage = TestStorage::default();
+        let mut rooms = rhythm_core::RoomManager::new();
+        rooms.get_or_create("r1", "Room 1");
+        storage.save_rooms(&rooms).unwrap();
+
+        let mut app = AppState::default();
+        app.storage = Some(Box::new(storage));
+        let state: SharedState = Arc::new(Mutex::new(app));
+        add_topology_room(&state, "r1", &["matter", "mock"]);
+
+        let result = build_state_snapshot(&state).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(
+            parsed["rooms"][0]["hub_types"],
+            serde_json::json!(["matter", "mock"])
+        );
     }
 
     #[test]
@@ -8806,5 +9019,116 @@ mod tests {
             "non-super-gaussian target should not push config updates"
         );
         assert_eq!(runtime.time_offset_updates(), vec![("r1".to_string(), 0.0)]);
+    }
+
+    #[test]
+    fn triage_new_on_room_binding_keeps_rooms_separate() {
+        let (state, _runtime) = setup_state(vec![]);
+        {
+            let mut s = state.lock().unwrap();
+            s.canonical_registry
+                .triage_mut()
+                .add(crate::canonical::triage::TriageEntry {
+                    id: "rb1".to_string(),
+                    kind: crate::canonical::triage::TriageKind::RoomBinding,
+                    discovered: crate::canonical::triage::TriageDiscoveredDevice::default(),
+                    hub_key: HubKey::new(HubType::new("matter"), "local"),
+                    candidate_matches: vec![],
+                    room_binding: Some(crate::canonical::triage::RoomBindingProposal {
+                        hub_room_id: "matter-room-1".to_string(),
+                        hub_room_name: "Kitchen".to_string(),
+                        control_id: "control-1".to_string(),
+                        light_device_ids: vec![],
+                        canonical_device_ids: vec![],
+                        target_rhythm_room_id: "room-1".to_string(),
+                        target_rhythm_room_name: "Kitchen".to_string(),
+                        candidate_rooms: vec![],
+                    }),
+                    confidence: 80,
+                    status: crate::canonical::triage::TriageStatus::Pending,
+                    resolved_by: None,
+                    created_at: 1000,
+                    resolved_at: None,
+                    canonical_id: None,
+                });
+        }
+
+        let result = do_triage_new_device(&state, "rb1").unwrap();
+        let s = state.lock().unwrap();
+
+        assert_eq!(result, r#"{"status":"kept_separate"}"#);
+        assert_eq!(s.canonical_registry.device_count(), 0);
+        assert_eq!(
+            s.canonical_registry.triage().get("rb1").unwrap().status,
+            crate::canonical::triage::TriageStatus::KeptSeparate
+        );
+    }
+
+    #[test]
+    fn canonical_assign_room_rejects_unknown_room() {
+        let (state, _runtime) = setup_state(vec![]);
+        let device_id = insert_canonical_device(
+            &state,
+            HubKey::new(HubType::new("matter"), "local"),
+            "matter-device-1",
+            "Desk Lamp",
+            "",
+            "",
+        );
+
+        let err = do_canonical_assign_room(&state, &device_id, Some("missing-room")).unwrap_err();
+
+        assert!(err.to_string().contains("Room not found: missing-room"));
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .canonical_registry
+                .get(&device_id)
+                .unwrap()
+                .room_id,
+            None
+        );
+    }
+
+    #[test]
+    fn triage_assign_room_resolves_unassigned_device() {
+        let (state, _runtime) = setup_state(vec![]);
+        add_topology_room(&state, "room-1", &["matter"]);
+        let hub_key = HubKey::new(HubType::new("matter"), "local");
+        let device_id = insert_canonical_device(
+            &state,
+            hub_key.clone(),
+            "matter-device-1",
+            "Desk Lamp",
+            "",
+            "",
+        );
+        let entry_id = {
+            let mut s = state.lock().unwrap();
+            s.canonical_registry.queue_unassigned(&device_id, 1000);
+            s.canonical_registry
+                .triage()
+                .pending_by_kind(crate::canonical::triage::TriageKind::UnassignedDevice)[0]
+                .id
+                .clone()
+        };
+
+        do_triage_assign_room(&state, &entry_id, "room-1").unwrap();
+
+        let s = state.lock().unwrap();
+        let device = s.canonical_registry.get(&device_id).unwrap();
+        let room = s.topology.get("room-1").unwrap();
+
+        assert_eq!(device.room_id.as_deref(), Some("room-1"));
+        assert_eq!(s.canonical_registry.triage().pending_unassigned_count(), 0);
+        assert!(
+            room.hub_targets.iter().any(|target| {
+                target.hub_key == hub_key
+                    && target.hub_room_id == "matter-device-1"
+                    && target.light_device_ids == vec!["matter-device-1".to_string()]
+            }),
+            "assigned device should become a hub target in the target room"
+        );
     }
 }

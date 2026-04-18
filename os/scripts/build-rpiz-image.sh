@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build a Raspberry Pi Zero SD-card image around the prebuilt Linux embedded appliance binary.
 #
-# Usage: ./scripts/build-rpiz-image.sh --buildroot-dir <path> [--release|--debug] [--output-dir <path>] [--skip-server-build]
+# Usage: ./scripts/build-rpiz-image.sh --buildroot-dir <path> [--release|--debug] [--dev|--prod] [--output-dir <path>] [--skip-server-build]
 
 set -euo pipefail
 
@@ -18,7 +18,7 @@ SKIP_SERVER_BUILD=false
 WIFI_SSID="${RHYTHM_WIFI_SSID:-}"
 WIFI_PSK="${RHYTHM_WIFI_PSK:-}"
 WIFI_COUNTRY="${RHYTHM_WIFI_COUNTRY:-US}"
-DEV_MODE="${RHYTHM_DEV_MODE:-}"
+DEV_MODE="${RHYTHM_DEV_MODE:-1}"
 DOCKER_BUILD=false
 DOCKER_IMAGE="rhythm-rpiz-builder:local"
 BUILDROOT_GIT_URL="${RHYTHM_BUILDROOT_GIT_URL:-https://git.buildroot.net/buildroot}"
@@ -47,6 +47,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --debug)
             BUILD_MODE="debug"
+            shift
+            ;;
+        --dev)
+            DEV_MODE=1
+            shift
+            ;;
+        --prod|--production)
+            DEV_MODE=0
             shift
             ;;
         --skip-server-build)
@@ -81,12 +89,14 @@ while [[ $# -gt 0 ]]; do
             echo "  --output-dir <path>     Buildroot output directory (default: $OUTPUT_DIR)"
             echo "  --release               Build dist/bin/rpiz/rhythm-server in release mode (default)"
             echo "  --debug                 Build dist/bin/rpiz/rhythm-server in debug mode first"
+            echo "  --dev                   Build rpiz image in bring-up mode (default)"
+            echo "  --prod, --production    Disable bring-up extras for a production image"
             echo "  --skip-server-build     Reuse existing dist/bin/rpiz/rhythm-server"
             echo "  --wifi-ssid <ssid>      Embed Wi-Fi SSID for Pi Zero W / Zero 2 W"
             echo "  --wifi-psk <psk>        Embed WPA/WPA2 passphrase"
             echo "  --wifi-country <code>   Wi-Fi regulatory country (default: $WIFI_COUNTRY)"
             echo "Environment:"
-            echo "  RHYTHM_DEV_MODE=1       Enable rpiz bring-up mode (Dropbear + known root password + Matter attestation bypass)"
+            echo "  RHYTHM_DEV_MODE=0       Disable rpiz bring-up mode; default is dev (Dropbear + known root password + Matter attestation bypass)"
             echo "  --docker                Run the Buildroot image step inside Docker"
             echo "  --docker-image <name>   Docker image tag to build/use (default: $DOCKER_IMAGE)"
             echo "  -h, --help              Show this help"
@@ -211,9 +221,7 @@ run_in_docker() {
             -e "RHYTHM_WIFI_COUNTRY=$WIFI_COUNTRY"
         )
     fi
-    if is_truthy "$DEV_MODE"; then
-        docker_args+=(-e "RHYTHM_DEV_MODE=1")
-    fi
+    docker_args+=(-e "RHYTHM_DEV_MODE=$DEV_MODE")
 
     inner_args=("--buildroot-dir" "/buildroot" "--output-dir" "/output" "--skip-server-build")
     if [ "$BUILD_MODE" = "release" ]; then
@@ -268,6 +276,7 @@ if is_truthy "$DEV_MODE"; then
     echo "Building rpiz image in dev mode (Dropbear, known root password, Matter attestation bypass)"
     export RHYTHM_DEV_MODE=1
 else
+    echo "Building rpiz image in production mode (no Dropbear, no known root password, Matter attestation enforced)"
     unset RHYTHM_DEV_MODE
 fi
 
