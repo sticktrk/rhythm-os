@@ -1410,8 +1410,12 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
         .toList();
     final hasAnyHub = configuredHubs.isNotEmpty;
 
-    final showHa = !configuredTypes.contains('homeassistant');
-    final showHue = !configuredTypes.contains('hue');
+    final haConfigured = configuredTypes.contains('homeassistant') ||
+        configuredTypes.contains('home_assistant');
+    final showHa =
+        syncProvider.canConfigureHub('homeassistant') && !haConfigured;
+    final showHue =
+        syncProvider.canConfigureHub('hue') && !configuredTypes.contains('hue');
     final matterOptions = _buildMatterAddOptionRows(syncProvider);
     final hasMatterOptions = matterOptions.isNotEmpty;
 

@@ -7,7 +7,7 @@ enum MatterAddMethod {
 extension MatterAddMethodCopy on MatterAddMethod {
   String get actionLabel => switch (this) {
         MatterAddMethod.automatic => 'Add Matter Device',
-        MatterAddMethod.onNetworkSetupCode => 'Add On-Network Matter Device',
+        MatterAddMethod.onNetworkSetupCode => 'Add Matter Device',
         MatterAddMethod.bleWifiCommissioning => 'Commission New Matter Device',
       };
 

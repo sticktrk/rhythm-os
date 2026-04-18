@@ -200,9 +200,26 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Host capabilities from the last server hello, if the server advertises them.
   RhythmCapabilities? get serverCapabilities => _capabilities;
 
+  /// Whether the host explicitly advertised supported hub types.
+  bool get hasExplicitHubCapabilities => _capabilities != null;
+
   /// Explicit per-hub capabilities, keyed by hub type.
-  RhythmHubCapabilities? hubCapabilities(String hubType) =>
-      _capabilities?.hub(hubType);
+  RhythmHubCapabilities? hubCapabilities(String hubType) {
+    final normalized = switch (hubType) {
+      'home_assistant' => 'homeassistant',
+      _ => hubType,
+    };
+    return _capabilities?.hub(normalized) ?? _capabilities?.hub(hubType);
+  }
+
+  /// Whether the current host supports configuring the given hub type.
+  ///
+  /// Legacy servers omit hub capability metadata entirely, so we default to
+  /// the historical UI behavior when that block is absent.
+  bool canConfigureHub(String hubType) {
+    if (!hasExplicitHubCapabilities) return true;
+    return hubCapabilities(hubType)?.configurable ?? false;
+  }
 
   RhythmHubCapabilities? get matterCapabilities => hubCapabilities('matter');
 
@@ -211,24 +228,30 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Whether the UI should offer any Matter add-device entry point.
   bool get canAddMatterDevice =>
-      matterCapabilities?.canAddDevice ??
-      true; // Legacy servers expose only the generic flow.
+      matterCapabilities?.canAddDevice ?? !hasExplicitHubCapabilities;
 
   /// Add an already-on-network Matter device via setup code / QR.
   bool get canAddMatterOnNetworkDevice =>
-      matterCapabilities?.addDevice.onNetworkSetupCode ?? false;
+      matterCapabilities?.supportsDeviceOnboardingMethod(
+        RhythmDeviceOnboardingMethod.matterOnNetworkSetupCode,
+      ) ??
+      false;
 
   /// Commission a new Matter device over BLE using stored Wi-Fi credentials.
   bool get canCommissionMatterBleWifi =>
-      matterCapabilities?.addDevice.bleWifiCommissioning ?? false;
+      matterCapabilities?.supportsDeviceOnboardingMethod(
+        RhythmDeviceOnboardingMethod.matterBleWifiCommissioning,
+      ) ??
+      false;
 
   /// Whether the UI should allow Matter decommissioning.
   bool get canUnpairMatterDevices =>
-      matterCapabilities?.supportsUnpairing ?? true;
+      matterCapabilities?.supportsUnpairing ?? !hasExplicitHubCapabilities;
 
   /// Whether a Matter device may exist before room assignment.
   bool get supportsMatterRoomlessDevices =>
-      matterCapabilities?.supportsRoomlessDevices ?? true;
+      matterCapabilities?.supportsRoomlessDevices ??
+      !hasExplicitHubCapabilities;
 
   /// Whether no hubs are configured on the server.
   bool get hasNoHubConfigured =>
