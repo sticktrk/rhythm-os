@@ -3059,7 +3059,18 @@ pub fn do_transitions_set(
 fn validate_imported_configuration(configuration: &PortableConfiguration) -> Result<()> {
     validate_mode_configs(&configuration.mode_configs)?;
 
-    let valid_profile_ids: HashSet<_> = factory_default_light_profile_config_map()
+    let valid_profile_ids = valid_import_profile_ids(configuration);
+
+    for room in &configuration.rooms {
+        room_flags_for_target_state(room.state)?;
+        validate_room_profile_settings(&room.id, &room.room_profile, &valid_profile_ids)?;
+    }
+
+    Ok(())
+}
+
+fn valid_import_profile_ids(configuration: &PortableConfiguration) -> HashSet<String> {
+    factory_default_light_profile_config_map()
         .into_keys()
         .chain(
             configuration
@@ -3067,26 +3078,28 @@ fn validate_imported_configuration(configuration: &PortableConfiguration) -> Res
                 .iter()
                 .map(|config| config.id.clone()),
         )
-        .collect();
+        .collect()
+}
 
-    for room in &configuration.rooms {
-        room_flags_for_target_state(room.state)?;
-
-        if let Some(profile_id) = room.room_profile.profile_id.as_deref() {
-            if rhythm_core::is_builtin_state_profile_id(profile_id) {
-                return Err(anyhow::anyhow!(
-                    "Room '{}' cannot select built-in state profile '{}'",
-                    room.id,
-                    profile_id
-                ));
-            }
-            if !valid_profile_ids.contains(profile_id) {
-                return Err(anyhow::anyhow!(
-                    "Room '{}' references unknown light profile '{}'",
-                    room.id,
-                    profile_id
-                ));
-            }
+fn validate_room_profile_settings(
+    room_id: &str,
+    room_profile: &RoomProfileSettings,
+    valid_profile_ids: &HashSet<String>,
+) -> Result<()> {
+    if let Some(profile_id) = room_profile.profile_id.as_deref() {
+        if rhythm_core::is_builtin_state_profile_id(profile_id) {
+            return Err(anyhow::anyhow!(
+                "Room '{}' cannot select built-in state profile '{}'",
+                room_id,
+                profile_id
+            ));
+        }
+        if !valid_profile_ids.contains(profile_id) {
+            return Err(anyhow::anyhow!(
+                "Room '{}' references unknown light profile '{}'",
+                room_id,
+                profile_id
+            ));
         }
     }
 
@@ -3274,6 +3287,10 @@ pub fn do_backup_restore(state: &SharedState, bundle: BackupBundle) -> Result<St
     }
 
     validate_imported_configuration(&bundle.configuration)?;
+    let valid_profile_ids = valid_import_profile_ids(&bundle.configuration);
+    for room in bundle.installation.rooms.iter() {
+        validate_room_profile_settings(&room.id, &room.profile_settings, &valid_profile_ids)?;
+    }
 
     do_hub_disconnect(state)?;
     save_backup_hub_registries_to_storage(state, &bundle.installation.hub_registries)?;
@@ -7653,6 +7670,56 @@ mod tests {
         );
         assert!(saved.location.is_some());
         assert!(saved.hub_credentials.is_empty());
+    }
+
+    #[test]
+    fn backup_restore_rejects_unknown_installation_room_profile_reference() {
+        let (state, _rt) = setup_state(vec![]);
+
+        let mut rooms = rhythm_core::RoomManager::new();
+        let room = rooms.get_or_create("office", "Office");
+        room.profile_settings = rhythm_core::RoomProfileSettings {
+            profile_id: Some("missing_profile".into()),
+            fade_ms: None,
+            motion_timeout_secs: None,
+        };
+
+        let err = do_backup_restore(
+            &state,
+            BackupBundle {
+                schema_version: BUNDLE_SCHEMA_VERSION,
+                kind: BundleKind::BackupBundle,
+                created_at: "2026-04-16T00:00:00Z".into(),
+                secrets_included: false,
+                configuration: PortableConfiguration {
+                    power_save: false,
+                    active_mode: RhythmMode::Day,
+                    profiles: vec![],
+                    mode_configs: vec![],
+                    mode_transitions: vec![],
+                    rooms: vec![],
+                },
+                installation: BackupInstallation {
+                    location: None,
+                    rooms,
+                    topology: crate::topology::RoomTopologyStore::new(),
+                    canonical_registry: crate::canonical::registry::CanonicalRegistry::new(),
+                    hub_credentials: vec![],
+                    hub_registries: vec![],
+                },
+                runtime_state: BackupRuntimeState {
+                    active_mode: RhythmMode::Day,
+                    last_change_cause: ModeChangeCause::Manual,
+                    last_change_transition_id: None,
+                    last_change_epoch_ms: None,
+                },
+            },
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("unknown light profile 'missing_profile'"));
     }
 
     #[test]

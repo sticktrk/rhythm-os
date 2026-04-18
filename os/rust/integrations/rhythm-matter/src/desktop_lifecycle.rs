@@ -55,6 +55,32 @@ fn configured_fabric_id(state: &SharedState) -> String {
         .unwrap_or_else(|| "default".to_string())
 }
 
+fn resolve_unpair_device_id(state: &SharedState, device_id: &str) -> Result<String> {
+    if crate::lifecycle::parse_device_id(device_id).is_some() {
+        return Ok(device_id.to_string());
+    }
+
+    let matter_hub_key = HubKey::new(HubType::new("matter"), "local");
+    let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let device = state
+        .canonical_registry
+        .get(device_id)
+        .ok_or_else(|| anyhow::anyhow!("Invalid Matter device ID: {}", device_id))?;
+
+    let endpoint = device
+        .endpoints
+        .iter()
+        .find(|endpoint| {
+            endpoint.hub_key == matter_hub_key
+                && crate::lifecycle::parse_device_id(&endpoint.native_id).is_some()
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!("Canonical device '{}' has no Matter endpoint", device_id)
+        })?;
+
+    Ok(endpoint.native_id.clone())
+}
+
 /// Connect to the local Matter fabric and store the hub in state.
 pub fn connect_and_start(state: SharedState, _key: &HubKey) -> Result<Receiver<HubEvent>> {
     let data_path = matter_data_path(&state)?;
@@ -232,8 +258,9 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
             .get("force")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
+        let device_id = resolve_unpair_device_id(state, device_id)?;
 
-        let (node_id, _endpoint) = crate::lifecycle::parse_device_id(device_id)
+        let (node_id, _endpoint) = crate::lifecycle::parse_device_id(&device_id)
             .ok_or_else(|| anyhow::anyhow!("Invalid Matter device ID: {}", device_id))?;
 
         let transport = get_transport(state)?;

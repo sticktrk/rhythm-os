@@ -231,7 +231,96 @@ pub fn handle_put_devices(state: &SharedState, body: &Value, persist: bool) -> A
     ApiResponse::no_content()
 }
 
+fn perform_unpair_device(
+    state: &SharedState,
+    request: &crate::pairing::UnpairingRequest,
+) -> anyhow::Result<crate::pairing::UnpairingResult> {
+    let start_unpairing = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.start_unpairing_fn.clone()
+    };
+
+    let Some(start_fn) = start_unpairing else {
+        anyhow::bail!("No unpairing support configured");
+    };
+
+    log::info!(
+        target: "pair",
+        "Unpairing request: hub_type={}, params={}",
+        request.hub_type,
+        request.params
+    );
+
+    let result = start_fn(state, &request.hub_type, &request.params)?;
+    log::info!(
+        target: "pair",
+        "Unpairing result: status={:?} error={:?}",
+        result.status,
+        result.error
+    );
+
+    if result.status == crate::pairing::PairingStatus::Complete {
+        if let Some(device_id) = &result.device_id {
+            let hub_key = crate::canonical::identity::HubKey::new(
+                crate::hub::HubType::new(&request.hub_type),
+                "local",
+            );
+            commands::do_device_hard_remove(state, device_id, Some(&hub_key))?;
+        }
+    }
+
+    Ok(result)
+}
+
+fn embedded_delete_unpair_request(
+    state: &SharedState,
+    id: &str,
+) -> anyhow::Result<Option<crate::pairing::UnpairingRequest>> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    if s.platform_type != "embedded" {
+        return Ok(None);
+    }
+
+    let matter_hub_key =
+        crate::canonical::identity::HubKey::new(crate::hub::HubType::new("matter"), "local");
+    let native_id = if id.starts_with("matter-") {
+        Some(id.to_string())
+    } else {
+        s.canonical_registry.get(id).and_then(|device| {
+            device
+                .endpoints
+                .iter()
+                .find(|endpoint| {
+                    endpoint.hub_key == matter_hub_key && endpoint.native_id.starts_with("matter-")
+                })
+                .map(|endpoint| endpoint.native_id.clone())
+        })
+    };
+
+    Ok(native_id.map(|device_id| crate::pairing::UnpairingRequest {
+        hub_type: "matter".to_string(),
+        params: serde_json::json!({ "device_id": device_id }),
+    }))
+}
+
 pub fn handle_delete_device(state: &SharedState, id: &str) -> ApiResponse {
+    match embedded_delete_unpair_request(state, id) {
+        Ok(Some(request)) => match perform_unpair_device(state, &request) {
+            Ok(result) if result.status == crate::pairing::PairingStatus::Complete => {
+                return ApiResponse::no_content();
+            }
+            Ok(result) => {
+                let message = result
+                    .error
+                    .unwrap_or_else(|| format!("Unpairing failed for {}", request.hub_type));
+                return ApiResponse::server_error(message);
+            }
+            Err(e) => return ApiResponse::server_error(e),
+        },
+        Ok(None) => {}
+        Err(e) => return ApiResponse::server_error(e),
+    }
+
     match commands::do_device_hard_remove(state, id, None) {
         Ok(()) => ApiResponse::no_content(),
         Err(e) => ApiResponse::server_error(e),
@@ -965,40 +1054,11 @@ pub fn handle_unpair_device(
     state: &SharedState,
     request: &crate::pairing::UnpairingRequest,
 ) -> ApiResponse {
-    let start_unpairing = {
-        let Ok(s) = state.lock() else {
-            return ApiResponse::server_error("lock");
-        };
-        s.start_unpairing_fn.clone()
-    };
-
-    let Some(start_fn) = start_unpairing else {
-        return ApiResponse::server_error("No unpairing support configured");
-    };
-
-    log::info!(target: "pair", "Unpairing request: hub_type={}, params={}", request.hub_type, request.params);
-
-    match start_fn(state, &request.hub_type, &request.params) {
-        Ok(result) => {
-            log::info!(target: "pair", "Unpairing result: status={:?} error={:?}", result.status, result.error);
-            if result.status == crate::pairing::PairingStatus::Complete {
-                if let Some(device_id) = &result.device_id {
-                    let hub_key = crate::canonical::identity::HubKey::new(
-                        crate::hub::HubType::new(&request.hub_type),
-                        "local",
-                    );
-                    if let Err(e) =
-                        commands::do_device_hard_remove(state, device_id, Some(&hub_key))
-                    {
-                        return ApiResponse::server_error(e);
-                    }
-                }
-            }
-            match serde_json::to_string(&result) {
-                Ok(json) => ApiResponse::json_ok(json),
-                Err(e) => ApiResponse::server_error(e),
-            }
-        }
+    match perform_unpair_device(state, request) {
+        Ok(result) => match serde_json::to_string(&result) {
+            Ok(json) => ApiResponse::json_ok(json),
+            Err(e) => ApiResponse::server_error(e),
+        },
         Err(e) => {
             log::error!(target: "pair", "Unpairing failed: {}", e);
             ApiResponse::server_error(e)
@@ -1499,7 +1559,10 @@ mod tests {
         Arc::new(Mutex::new(app))
     }
 
-    fn handler_state_with_canonical_light() -> (
+    fn handler_state_with_canonical_light_for_hub(
+        hub_type_name: &str,
+        native_id: &str,
+    ) -> (
         SharedState,
         Arc<Mutex<HubDeviceRegistry>>,
         String,
@@ -1508,7 +1571,7 @@ mod tests {
     ) {
         let registry = Arc::new(Mutex::new(HubDeviceRegistry::with_options(true)));
         let mut app = AppState::default();
-        let hub_type = HubType::new("mock");
+        let hub_type = HubType::new(hub_type_name);
         let hub_key = HubKey::new(hub_type.clone(), "local");
         app.hubs.insert(
             hub_key.clone(),
@@ -1525,8 +1588,8 @@ mod tests {
 
         let room_id = app.topology.create_room("Office");
         let identity = DiscoveredIdentity {
-            native_id: "device-1".to_string(),
-            room_id: "device-1".to_string(),
+            native_id: native_id.to_string(),
+            room_id: native_id.to_string(),
             room_name: "Office Lamp".to_string(),
             name: "Office Lamp".to_string(),
             device_type: DeviceType::Light,
@@ -1551,17 +1614,17 @@ mod tests {
             .unwrap()
             .upsert_hub_target(HubControlTarget {
                 hub_key: hub_key.clone(),
-                hub_room_id: "device-1".to_string(),
-                control_id: "device-1".to_string(),
-                light_device_ids: vec!["device-1".to_string()],
+                hub_room_id: native_id.to_string(),
+                control_id: native_id.to_string(),
+                light_device_ids: vec![native_id.to_string()],
                 topology_aligned: false,
             });
 
         registry.lock().unwrap().upsert_room(
-            "device-1",
+            native_id,
             "Office Lamp",
-            "device-1",
-            &["device-1".to_string()],
+            native_id,
+            &[native_id.to_string()],
         );
 
         (
@@ -1571,6 +1634,16 @@ mod tests {
             room_id,
             hub_key,
         )
+    }
+
+    fn handler_state_with_canonical_light() -> (
+        SharedState,
+        Arc<Mutex<HubDeviceRegistry>>,
+        String,
+        String,
+        HubKey,
+    ) {
+        handler_state_with_canonical_light_for_hub("mock", "device-1")
     }
 
     // -- Void mutations return 204 --
@@ -1953,6 +2026,54 @@ mod tests {
         let reg = registry.lock().unwrap();
         assert!(reg.get_light_entities("device-1").is_empty());
         assert!(!reg.rooms().iter().any(|room| room.id == "device-1"));
+    }
+
+    #[test]
+    fn delete_device_on_embedded_matter_uses_unpairing() {
+        let (state, registry, canonical_id, room_id, hub_key) =
+            handler_state_with_canonical_light_for_hub("matter", "matter-100");
+        let calls = Arc::new(Mutex::new(Vec::<(String, serde_json::Value)>::new()));
+        {
+            let calls = calls.clone();
+            let mut s = state.lock().unwrap();
+            s.platform_type = "embedded";
+            s.platform_context = "rpiz";
+            s.start_unpairing_fn = Some(Arc::new(move |_, hub_type, params| {
+                calls
+                    .lock()
+                    .unwrap()
+                    .push((hub_type.to_string(), params.clone()));
+                Ok(UnpairingResult {
+                    hub_type: hub_type.to_string(),
+                    status: PairingStatus::Complete,
+                    device_id: Some("matter-100".to_string()),
+                    error: None,
+                })
+            }));
+        }
+
+        let r = handle_delete_device(&state, &canonical_id);
+        assert_eq!(r.status, 204);
+
+        let recorded = calls.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "matter");
+        assert_eq!(recorded[0].1["device_id"], "matter-100");
+        drop(recorded);
+
+        let s = state.lock().unwrap();
+        assert!(s.canonical_registry.get(&canonical_id).is_none());
+        let room = s.topology.get(&room_id).unwrap();
+        assert!(!room.devices.iter().any(|d| d.device_id == canonical_id));
+        assert!(!room
+            .hub_targets
+            .iter()
+            .any(|t| t.hub_key == hub_key && t.hub_room_id == "matter-100"));
+        drop(s);
+
+        let reg = registry.lock().unwrap();
+        assert!(reg.get_light_entities("matter-100").is_empty());
+        assert!(!reg.rooms().iter().any(|room| room.id == "matter-100"));
     }
 
     #[test]
