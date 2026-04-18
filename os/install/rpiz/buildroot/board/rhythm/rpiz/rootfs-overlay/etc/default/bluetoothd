@@ -1,0 +1,4 @@
+# Matter's BLE transport (BTP) needs bluetoothd's experimental D-Bus surface
+# for reliable GATT characteristic notifications; without -E commissioning
+# hangs right after the BLE connect handshake.
+BLUETOOTHD_ARGS="-n -E"

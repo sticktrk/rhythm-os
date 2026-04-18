@@ -158,19 +158,25 @@ impl ChipTransport {
             .set_write_timeout(Some(RPC_TIMEOUT))
             .context("setting CHIP RPC write timeout")?;
 
-        serde_json::to_writer(&mut stream, &envelope).context("encoding CHIP RPC request")?;
+        serde_json::to_writer(&mut stream, &envelope)
+            .with_context(|| format!("encoding CHIP RPC request (chipd status: {})", self.chipd_status_hint()))?;
         stream
             .write_all(b"\n")
-            .context("writing CHIP RPC newline")?;
-        stream.flush().context("flushing CHIP RPC request")?;
+            .with_context(|| format!("writing CHIP RPC newline (chipd status: {})", self.chipd_status_hint()))?;
+        stream
+            .flush()
+            .with_context(|| format!("flushing CHIP RPC request (chipd status: {})", self.chipd_status_hint()))?;
 
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         let bytes = reader
             .read_line(&mut line)
-            .context("reading CHIP RPC response")?;
+            .with_context(|| format!("reading CHIP RPC response (chipd status: {})", self.chipd_status_hint()))?;
         if bytes == 0 {
-            anyhow::bail!("CHIP sidecar closed the socket without a response");
+            anyhow::bail!(
+                "CHIP sidecar closed the socket without a response (chipd status: {})",
+                self.chipd_status_hint()
+            );
         }
 
         let response: ChipRpcResponseEnvelope =
@@ -236,6 +242,40 @@ impl ChipTransport {
             "Timed out waiting for CHIP sidecar socket at {}",
             self.socket_path.display()
         )
+    }
+
+    /// Non-blockingly report the spawned chipd process's state so RPC errors
+    /// can distinguish "socket stalled" from "daemon crashed" and identify
+    /// common kill signals (OOM, SIGSEGV, SIGABRT).
+    fn chipd_status_hint(&self) -> String {
+        use std::os::unix::process::ExitStatusExt;
+
+        let Ok(mut guard) = self.sidecar.lock() else {
+            return "lock poisoned".to_string();
+        };
+        let Some(child) = guard.as_mut() else {
+            return "not spawned".to_string();
+        };
+        match child.try_wait() {
+            Ok(None) => "running".to_string(),
+            Ok(Some(status)) => {
+                if let Some(signal) = status.signal() {
+                    let name = match signal {
+                        6 => " SIGABRT (assert/abort)",
+                        9 => " SIGKILL (likely OOM-kill)",
+                        11 => " SIGSEGV (segfault)",
+                        15 => " SIGTERM",
+                        _ => "",
+                    };
+                    format!("killed by signal {}{}", signal, name)
+                } else if let Some(code) = status.code() {
+                    format!("exited with code {}", code)
+                } else {
+                    format!("exited: {:?}", status)
+                }
+            }
+            Err(err) => format!("try_wait failed: {}", err),
+        }
     }
 }
 

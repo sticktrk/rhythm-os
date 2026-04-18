@@ -123,3 +123,12 @@ do
         break
     fi
 done
+
+# rhythm-chipd is linked against the x-tools crosstool-NG musl toolchain that
+# built libCHIP.a, whose binaries request "/lib/ld-musl-armhf.so.1". Buildroot
+# ships the same ARMv6/v7 hard-float loader as "/lib/ld-musl-arm.so.1", so add
+# the armhf alias as a symlink to the actual loader.
+if [ -e "${TARGET_DIR}/lib/ld-musl-arm.so.1" ] \
+    && [ ! -e "${TARGET_DIR}/lib/ld-musl-armhf.so.1" ]; then
+    ln -s ld-musl-arm.so.1 "${TARGET_DIR}/lib/ld-musl-armhf.so.1"
+fi

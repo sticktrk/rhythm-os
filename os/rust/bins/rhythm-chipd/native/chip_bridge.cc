@@ -836,6 +836,13 @@ private:
         ReturnErrorOnFailure(chip::DeviceLayer::PlatformMgr().StartEventLoopTask());
         mEventLoopStarted   = true;
         mFactoryInitialized = true;
+
+#if CHIP_DEVICE_LAYER_TARGET_LINUX && CHIP_DEVICE_CONFIG_ENABLE_CHIPOBLE
+        // We're a commissioner, not a commissionable device — defensively
+        // disable BLE peripheral advertising in case AUTOSTART flipped it on
+        // before ConfigureBle set the central-role flag.
+        (void) chip::DeviceLayer::ConnectivityMgr().SetBLEAdvertisingEnabled(false);
+#endif
         return CHIP_NO_ERROR;
     }
 

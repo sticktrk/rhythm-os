@@ -30,6 +30,10 @@ fn main() {
             let mut build = cc::Build::new();
             build
                 .cpp(true)
+                // Suppress cc's default `cargo:rustc-link-lib=stdc++` (dylib) so
+                // we can pick the linkage mode ourselves — on musl targets we
+                // static-link libstdc++ to avoid shipping a C++ runtime .so.
+                .cpp_link_stdlib(None::<&str>)
                 .file(BRIDGE_SOURCE)
                 .file(
                     artifacts
@@ -106,11 +110,23 @@ fn emit_platform_link_args(target: &str) {
         if chip_crypto != "mbedtls" {
             link_args.splice(0..0, ["-lssl", "-lcrypto"]);
         }
-        // Rust links with -nodefaultlibs, so pull in libgcc/libatomic for
-        // compiler builtins like __sync_synchronize and __sync_fetch_and_add_*,
-        // which ARMv6 and other sub-archs without native atomics call into.
+        // Rust links with -nodefaultlibs. Fold the C++ runtime and libgcc
+        // support into the binary so we don't have to ship libstdc++.so.6 /
+        // libgcc_s.so.1 on targets (e.g. Buildroot musl rootfs) that don't
+        // install a C++ runtime by default. The `-l:<filename>.a` syntax
+        // forces ld to the static archive regardless of -Bstatic/-Bdynamic
+        // state, which `-static-libstdc++` does not reliably override when
+        // the -lstdc++ reference comes from a prior rustc-link-lib. libatomic
+        // covers the ARMv6 __sync_* builtins that the compiler emits as
+        // libcalls when the arch has no native atomics.
+        link_args.push("-l:libstdc++.a");
+        link_args.push("-l:libgcc.a");
+        link_args.push("-l:libgcc_eh.a");
+        // libatomic is shadowed by Buildroot staging's soft-float build, so
+        // link it dynamically — the hard-float libatomic.so.1 is on the
+        // target rootfs and the runtime dynamic loader will find the right
+        // ABI match.
         link_args.push("-latomic");
-        link_args.push("-lgcc");
         for link_arg in link_args {
             println!("cargo:rustc-link-arg={link_arg}");
         }
