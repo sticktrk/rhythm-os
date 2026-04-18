@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType, RhythmRoom;
+import 'package:rhythm_sdk/rhythm_sdk.dart'
+    show RhythmDevice, RhythmDeviceType, RhythmRoom;
 import '../providers/server_sync_provider.dart';
 import 'solar_orbit.dart'; // For CelestialColors
 
@@ -172,6 +173,9 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     final topPad = MediaQuery.of(context).padding.top;
     final device = widget.device;
     final (icon, iconColor) = _iconForType(device.type);
+    final canUnpairMatter = context.select<ServerSyncProvider, bool>(
+      (sync) => sync.canUnpairMatterDevices,
+    );
 
     return Padding(
       padding: EdgeInsets.only(top: topPad + 100),
@@ -235,7 +239,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                       child: Text(
                         device.productInfo!,
                         style: TextStyle(
-                          color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+                          color: CelestialColors.textSecondary
+                              .withValues(alpha: 0.7),
                           fontSize: 13,
                         ),
                       ),
@@ -269,7 +274,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                     _buildConnectionsSection(),
                     const SizedBox(height: 16),
                     _buildMoveButton(context),
-                    if (_matterNativeId != null) ...[
+                    if (_matterNativeId != null && canUnpairMatter) ...[
                       const SizedBox(height: 12),
                       _buildRemoveButton(context),
                     ],
@@ -281,7 +286,10 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
             // Done button
             Padding(
               padding: EdgeInsets.fromLTRB(
-                20, 12, 20, MediaQuery.of(context).padding.bottom + 16,
+                20,
+                12,
+                20,
+                MediaQuery.of(context).padding.bottom + 16,
               ),
               child: SizedBox(
                 width: double.infinity,
@@ -326,8 +334,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       _InfoRow(label: 'Type', value: typeLabel),
       if (device.manufacturer != null)
         _InfoRow(label: 'Manufacturer', value: device.manufacturer!),
-      if (device.model != null)
-        _InfoRow(label: 'Model', value: device.model!),
+      if (device.model != null) _InfoRow(label: 'Model', value: device.model!),
       if (rhythmId != null)
         _InfoRow(
           label: 'Rhythm ID',
@@ -396,7 +403,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   String? get _matterNativeId {
     final endpoints = _canonicalData?['endpoints'] as List<dynamic>? ?? [];
     for (final ep in endpoints) {
-      final nativeId = (ep as Map<String, dynamic>)['native_id'] as String? ?? '';
+      final nativeId =
+          (ep as Map<String, dynamic>)['native_id'] as String? ?? '';
       if (nativeId.startsWith('matter-')) return nativeId;
     }
     return null;
@@ -477,7 +485,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     await _removeDevice(context, force: true);
   }
 
-  Future<void> _removeDevice(BuildContext context, {required bool force}) async {
+  Future<void> _removeDevice(BuildContext context,
+      {required bool force}) async {
     final nativeId = _matterNativeId;
     if (nativeId == null) return;
 
@@ -523,7 +532,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
             ),
             TextButton(
               onPressed: () => Navigator.of(ctx).pop(true),
-              child: Text('Force Remove', style: TextStyle(color: Colors.red.shade300)),
+              child: Text('Force Remove',
+                  style: TextStyle(color: Colors.red.shade300)),
             ),
           ],
         ),
@@ -590,10 +600,19 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   }
 
   (IconData, Color) _iconForType(RhythmDeviceType type) => switch (type) {
-    RhythmDeviceType.light => (Icons.lightbulb_outline, const Color(0xFFFFB74D)),
-    RhythmDeviceType.button => (Icons.touch_app_outlined, const Color(0xFF64B5F6)),
-    RhythmDeviceType.motion => (Icons.sensors_outlined, const Color(0xFF81C784)),
-  };
+        RhythmDeviceType.light => (
+            Icons.lightbulb_outline,
+            const Color(0xFFFFB74D)
+          ),
+        RhythmDeviceType.button => (
+            Icons.touch_app_outlined,
+            const Color(0xFF64B5F6)
+          ),
+        RhythmDeviceType.motion => (
+            Icons.sensors_outlined,
+            const Color(0xFF81C784)
+          ),
+      };
 }
 
 class _InfoRow extends StatelessWidget {

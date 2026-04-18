@@ -286,6 +286,7 @@ class _RoomOrbitPageState extends State<RoomOrbitPage> {
             roomId: widget.room.id,
           );
           break;
+        case RoomSourceDto.matter:
         case RoomSourceDto.homeAssistant:
         case RoomSourceDto.esp32:
         case RoomSourceDto.unknown:
@@ -601,6 +602,8 @@ class _RoomOrbitPageState extends State<RoomOrbitPage> {
 
   String _getSourceLabel(RoomSourceDto source) {
     switch (source) {
+      case RoomSourceDto.matter:
+        return 'Matter';
       case RoomSourceDto.hue:
         return 'Philips Hue';
       case RoomSourceDto.homeAssistant:

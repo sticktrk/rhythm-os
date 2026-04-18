@@ -6,12 +6,13 @@ import 'package:rhythm_core/rhythm_core.dart';
 import '../providers/server_sync_provider.dart';
 import '../screens/hubs/ha_configurator_screen.dart';
 import '../screens/hubs/hue_configurator_screen.dart';
+import '../screens/hubs/matter_pairing_flow.dart';
 import 'solar_orbit.dart';
 import 'bottom_nav_overlay.dart';
 
 /// Shown when the server is connected but has no hub paired (hub.type == "none").
 ///
-/// Offers one-tap HA pairing (addon only) and Hue push-link pairing.
+/// Offers Home Assistant, Hue, and Matter pairing options.
 class HubPickerScreen extends StatefulWidget {
   final VoidCallback onSettingsTap;
   final VoidCallback onSunPositionTap;
@@ -84,10 +85,32 @@ class _HubPickerScreenState extends State<HubPickerScreen>
     }
   }
 
+  Future<void> _configureMatter() async {
+    HapticFeedback.mediumImpact();
+    await startMatterPairingFlow(context);
+  }
+
+  String _matterSubtitle(ServerSyncProvider serverSync) {
+    final onNetwork = serverSync.canAddMatterOnNetworkDevice;
+    final bleWifi = serverSync.canCommissionMatterBleWifi;
+    return switch ((
+      onNetwork,
+      bleWifi,
+      serverSync.hasExplicitMatterCapabilities
+    )) {
+      (true, true, _) => 'Add on-network devices or commission new ones',
+      (true, false, _) => 'Add an on-network device with a setup code or QR',
+      (false, true, _) => 'Commission a new device over BLE',
+      (_, _, true) => 'Matter add is not available on this host',
+      _ => 'Add a Matter device directly with Rhythm',
+    };
+  }
+
   @override
   Widget build(BuildContext context) {
     final serverSync = context.watch<ServerSyncProvider>();
     final isAddon = serverSync.serverPlatformContext == 'ha_addon';
+    final canAddMatter = serverSync.canAddMatterDevice;
 
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,
@@ -158,6 +181,15 @@ class _HubPickerScreenState extends State<HubPickerScreen>
                           color: const Color(0xFFFFB900),
                           onTap: _configureHue,
                         ),
+                        const SizedBox(height: 12),
+                        if (canAddMatter)
+                          _buildHubCard(
+                            icon: Icons.memory_outlined,
+                            title: 'Matter',
+                            subtitle: _matterSubtitle(serverSync),
+                            color: const Color(0xFF26A69A),
+                            onTap: _configureMatter,
+                          ),
                         // Space for bottom nav
                         const SizedBox(height: 100),
                       ],

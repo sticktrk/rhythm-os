@@ -293,12 +293,17 @@ class CloudBackedServerApi {
     return success;
   }
 
-  Future<String?> resolveTriageNew(String entryId) async {
-    final canonicalId = await _delegate.resolveTriageNew(entryId);
-    if (canonicalId != null && canonicalId.isNotEmpty) {
+  Future<Map<String, dynamic>?> resolveTriageNewResult(String entryId) async {
+    final result = await _delegate.resolveTriageNewResult(entryId);
+    if (result != null) {
       _scheduleCloudCapture(reason: 'triage_new', delay: _defaultDelay);
     }
-    return canonicalId;
+    return result;
+  }
+
+  Future<String?> resolveTriageNew(String entryId) async {
+    final result = await resolveTriageNewResult(entryId);
+    return result?['canonical_id'] as String?;
   }
 
   Future<bool> resolveTriageDismiss(String entryId) async {
@@ -319,6 +324,14 @@ class CloudBackedServerApi {
     );
     if (success) {
       _scheduleCloudCapture(reason: 'triage_bind', delay: _defaultDelay);
+    }
+    return success;
+  }
+
+  Future<bool> resolveTriageRoom(String entryId, String roomId) async {
+    final success = await _delegate.resolveTriageRoom(entryId, roomId);
+    if (success) {
+      _scheduleCloudCapture(reason: 'triage_room', delay: _defaultDelay);
     }
     return success;
   }

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../services/analytics_service.dart';
 import '../widgets/solar_orbit.dart'; // For CelestialColors
@@ -18,6 +19,9 @@ class TriageScreen extends StatefulWidget {
 }
 
 class _TriageScreenState extends State<TriageScreen> {
+  static const _deviceKinds = <String>{'device_merge', 'unassigned_device'};
+  static const _roomKinds = <String>{'room_binding', 'hub_configured'};
+
   List<Map<String, dynamic>> _entries = [];
   bool _loading = true;
   bool _busy = false;
@@ -31,20 +35,24 @@ class _TriageScreenState extends State<TriageScreen> {
     _loadEntries();
   }
 
-  int get _deviceCount => _entries
-      .where((e) => (e['kind'] ?? 'device_merge') == 'device_merge')
-      .length;
+  String _kindForEntry(Map<String, dynamic> entry) =>
+      entry['kind'] as String? ?? 'device_merge';
 
-  int get _roomCount =>
-      _entries.where((e) => e['kind'] == 'room_binding').length;
+  bool _isDeviceEntry(Map<String, dynamic> entry) =>
+      _deviceKinds.contains(_kindForEntry(entry));
+
+  bool _isRoomEntry(Map<String, dynamic> entry) =>
+      _roomKinds.contains(_kindForEntry(entry));
+
+  int get _deviceCount => _entries.where(_isDeviceEntry).length;
+
+  int get _roomCount => _entries.where(_isRoomEntry).length;
 
   List<Map<String, dynamic>> get _filteredEntries {
     if (_filter == _TriageFilter.all) return _entries;
-    final targetKind =
-        _filter == _TriageFilter.devices ? 'device_merge' : 'room_binding';
-    return _entries
-        .where((e) => (e['kind'] ?? 'device_merge') == targetKind)
-        .toList();
+    final matches =
+        _filter == _TriageFilter.devices ? _isDeviceEntry : _isRoomEntry;
+    return _entries.where(matches).toList();
   }
 
   Future<void> _loadEntries({bool sync = false}) async {
@@ -73,11 +81,8 @@ class _TriageScreenState extends State<TriageScreen> {
         });
       }
       if (entries != null) {
-        final deviceCount = entries
-            .where((e) => (e['kind'] ?? 'device_merge') == 'device_merge')
-            .length;
-        final roomCount =
-            entries.where((e) => e['kind'] == 'room_binding').length;
+        final deviceCount = entries.where(_isDeviceEntry).length;
+        final roomCount = entries.where(_isRoomEntry).length;
         AnalyticsService().logTriageViewed(
           entryCount: entries.length,
           deviceCount: deviceCount,
@@ -300,7 +305,7 @@ class _TriageScreenState extends State<TriageScreen> {
           );
         }
         final entry = filtered[index - headerCount];
-        final kind = entry['kind'] as String? ?? 'device_merge';
+        final kind = _kindForEntry(entry);
         if (kind == 'room_binding') {
           return Padding(
             padding: const EdgeInsets.only(bottom: 16),
@@ -311,6 +316,29 @@ class _TriageScreenState extends State<TriageScreen> {
               onBind: ({String? targetRoomId}) =>
                   _resolveBind(entry, targetRoomId: targetRoomId),
               onKeepSeparate: () => _resolveNew(entry),
+              onDismiss: () => _resolveDismiss(entry),
+            ),
+          );
+        }
+        if (kind == 'unassigned_device') {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 16),
+            child: _UnassignedDeviceCard(
+              key: ValueKey(entry['id']),
+              entry: entry,
+              busy: _busy,
+              onAssignRoom: () => _resolveAssignRoom(entry),
+              onDismiss: () => _resolveDismiss(entry),
+            ),
+          );
+        }
+        if (kind == 'hub_configured') {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 16),
+            child: _InfoTriageCard(
+              key: ValueKey(entry['id']),
+              entry: entry,
+              busy: _busy,
               onDismiss: () => _resolveDismiss(entry),
             ),
           );
@@ -341,7 +369,10 @@ class _TriageScreenState extends State<TriageScreen> {
     try {
       final entryId = entry['id']?.toString() ?? '';
       final http = context.read<ServerSyncProvider>().api;
-      await http.resolveTriageMerge(entryId, canonicalId);
+      final success = await http.resolveTriageMerge(entryId, canonicalId);
+      if (!success) {
+        throw StateError('The server rejected this merge.');
+      }
       AnalyticsService().logTriageResolution(
         kind: 'device_merge',
         action: 'merge',
@@ -378,12 +409,15 @@ class _TriageScreenState extends State<TriageScreen> {
     try {
       final entryId = entry['id']?.toString() ?? '';
       final http = context.read<ServerSyncProvider>().api;
-      await http.resolveTriageNew(entryId);
-      if ((entry['kind'] as String?) == 'room_binding') {
+      final result = await http.resolveTriageNewResult(entryId);
+      if (result == null) {
+        throw StateError('The server did not accept this resolution.');
+      }
+      if (_kindForEntry(entry) == 'room_binding') {
         await _refreshRoomsAfterTopologyChange();
       }
       AnalyticsService().logTriageResolution(
-        kind: entry['kind'] as String? ?? 'device_merge',
+        kind: _kindForEntry(entry),
         action: 'keep_separate',
       );
       if (mounted) await _loadEntries();
@@ -410,7 +444,11 @@ class _TriageScreenState extends State<TriageScreen> {
     try {
       final entryId = entry['id']?.toString() ?? '';
       final http = context.read<ServerSyncProvider>().api;
-      await http.resolveTriageBind(entryId, targetRoomId: targetRoomId);
+      final success =
+          await http.resolveTriageBind(entryId, targetRoomId: targetRoomId);
+      if (!success) {
+        throw StateError('The server rejected this room merge.');
+      }
       await _refreshRoomsAfterTopologyChange();
       AnalyticsService().logTriageResolution(
         kind: 'room_binding',
@@ -432,6 +470,180 @@ class _TriageScreenState extends State<TriageScreen> {
     }
   }
 
+  Future<void> _resolveAssignRoom(Map<String, dynamic> entry) async {
+    debugPrint(
+        'TriageScreen: _resolveAssignRoom called (busy=$_busy, entryId=${entry['id']})');
+    if (_busy) return;
+
+    final roomId = await _selectRoomId();
+    if (roomId == null || !mounted) return;
+
+    setState(() => _busy = true);
+    try {
+      final entryId = entry['id']?.toString() ?? '';
+      final http = context.read<ServerSyncProvider>().api;
+      final success = await http.resolveTriageRoom(entryId, roomId);
+      if (!success) {
+        throw StateError('The server rejected this room assignment.');
+      }
+      await _refreshRoomsAfterTopologyChange();
+      AnalyticsService().logTriageResolution(
+        kind: 'unassigned_device',
+        action: 'assign_room',
+        hasTarget: true,
+      );
+      if (mounted) await _loadEntries();
+    } catch (e) {
+      debugPrint('TriageScreen: assign-room failed: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('Room assignment failed: $e'),
+              backgroundColor: Colors.red.shade800),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<String?> _selectRoomId() async {
+    final rooms = context.read<RoomProvider>().rooms;
+    final selection = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) => Container(
+        decoration: const BoxDecoration(
+          color: CelestialColors.backgroundCard,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text(
+                'Assign to Room',
+                style: TextStyle(
+                  color: CelestialColors.textPrimary,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            if (rooms.isEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                child: Text(
+                  'No rooms exist yet. Create one now to finish assigning this device.',
+                  style: TextStyle(
+                    color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+            for (final room in rooms)
+              ListTile(
+                leading: const Icon(
+                  Icons.meeting_room_rounded,
+                  color: CelestialColors.sunWarm,
+                ),
+                title: Text(
+                  room.name,
+                  style: const TextStyle(color: CelestialColors.textPrimary),
+                ),
+                onTap: () => Navigator.of(sheetContext).pop(room.id),
+              ),
+            ListTile(
+              leading: const Icon(
+                Icons.add_circle_outline,
+                color: Color(0xFF81C784),
+              ),
+              title: const Text(
+                'Create New Room',
+                style: TextStyle(color: CelestialColors.textPrimary),
+              ),
+              onTap: () => Navigator.of(sheetContext).pop('__create_room__'),
+            ),
+            SizedBox(height: MediaQuery.of(sheetContext).padding.bottom + 16),
+          ],
+        ),
+      ),
+    );
+
+    if (selection == '__create_room__') {
+      return _createRoomForAssignment();
+    }
+    return selection;
+  }
+
+  Future<String?> _createRoomForAssignment() async {
+    final roomName = await _promptForRoomName();
+    final trimmedName = roomName?.trim() ?? '';
+    if (trimmedName.isEmpty || !mounted) return null;
+
+    final result =
+        await context.read<ServerSyncProvider>().api.createTopologyRoom(
+              trimmedName,
+            );
+    final roomId = result?['id'] as String?;
+    if (roomId != null && roomId.isNotEmpty) {
+      return roomId;
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Room creation failed')),
+      );
+    }
+    return null;
+  }
+
+  Future<String?> _promptForRoomName() async {
+    final controller = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: CelestialColors.backgroundCard,
+        title: const Text(
+          'Create Room',
+          style: TextStyle(color: CelestialColors.textPrimary),
+        ),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          style: const TextStyle(color: CelestialColors.textPrimary),
+          decoration: InputDecoration(
+            hintText: 'Room name',
+            hintStyle: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+            ),
+          ),
+          onSubmitted: (value) => Navigator.of(dialogContext).pop(value.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: Text(
+              'Cancel',
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.8),
+              ),
+            ),
+          ),
+          TextButton(
+            onPressed: () =>
+                Navigator.of(dialogContext).pop(controller.text.trim()),
+            child: const Text(
+              'Create',
+              style: TextStyle(color: CelestialColors.sunWarm),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _resolveDismiss(Map<String, dynamic> entry) async {
     debugPrint(
         'TriageScreen: _resolveDismiss called (busy=$_busy, entryId=${entry['id']})');
@@ -440,9 +652,12 @@ class _TriageScreenState extends State<TriageScreen> {
     try {
       final entryId = entry['id']?.toString() ?? '';
       final http = context.read<ServerSyncProvider>().api;
-      await http.resolveTriageDismiss(entryId);
+      final success = await http.resolveTriageDismiss(entryId);
+      if (!success) {
+        throw StateError('The server rejected this dismissal.');
+      }
       AnalyticsService().logTriageResolution(
-        kind: entry['kind'] as String? ?? 'device_merge',
+        kind: _kindForEntry(entry),
         action: 'dismiss',
       );
       if (mounted) await _loadEntries();
@@ -465,6 +680,30 @@ class _TriageScreenState extends State<TriageScreen> {
 // Device merge card (existing)
 // =============================================================================
 
+Map<String, dynamic> _mapField(Map<String, dynamic> source, String key) {
+  final value = source[key];
+  if (value is Map<String, dynamic>) return value;
+  if (value is Map) return Map<String, dynamic>.from(value);
+  return const {};
+}
+
+Map<String, dynamic> _triageDeviceData(Map<String, dynamic> entry) {
+  for (final key in ['unassigned_device', 'discovered', 'device']) {
+    final data = _mapField(entry, key);
+    if (data.isNotEmpty) return data;
+  }
+  return entry;
+}
+
+String _deviceTypeLabel(String deviceType) {
+  return switch (deviceType) {
+    'light' => 'Light',
+    'button' => 'Button',
+    'motion' => 'Motion Sensor',
+    _ => deviceType,
+  };
+}
+
 class _TriageCard extends StatelessWidget {
   final Map<String, dynamic> entry;
   final bool busy;
@@ -484,7 +723,7 @@ class _TriageCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     debugPrint('_TriageCard: build (id=${entry['id']}, busy=$busy)');
-    final discovered = (entry['discovered'] as Map<String, dynamic>?) ?? {};
+    final discovered = _triageDeviceData(entry);
     final name = discovered['name'] as String? ?? 'Unknown Device';
     final deviceType = discovered['device_type'] as String? ?? 'light';
     final manufacturer = discovered['manufacturer'] as String?;
@@ -492,12 +731,7 @@ class _TriageCard extends StatelessWidget {
     final roomName = discovered['room_name'] as String? ?? '';
     final candidates = (entry['candidate_matches'] as List<dynamic>?) ?? [];
 
-    final typeLabel = switch (deviceType) {
-      'light' => 'Light',
-      'button' => 'Button',
-      'motion' => 'Motion Sensor',
-      _ => deviceType,
-    };
+    final typeLabel = _deviceTypeLabel(deviceType);
 
     final productInfo =
         [manufacturer, model].whereType<String>().join(' \u00B7 ');
@@ -729,6 +963,263 @@ class _TriageCard extends StatelessWidget {
       'same_room' => 'Same room',
       _ => reason,
     };
+  }
+}
+
+// =============================================================================
+// Unassigned device card
+// =============================================================================
+
+class _UnassignedDeviceCard extends StatelessWidget {
+  final Map<String, dynamic> entry;
+  final bool busy;
+  final VoidCallback onAssignRoom;
+  final VoidCallback onDismiss;
+
+  const _UnassignedDeviceCard({
+    super.key,
+    required this.entry,
+    this.busy = false,
+    required this.onAssignRoom,
+    required this.onDismiss,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final device = _triageDeviceData(entry);
+    final name = device['name'] as String? ??
+        device['display_name'] as String? ??
+        'Unknown Device';
+    final deviceType = device['device_type'] as String? ?? 'light';
+    final manufacturer = device['manufacturer'] as String?;
+    final model = device['model'] as String?;
+    final hubName = device['hub_name'] as String? ??
+        device['hub_room_name'] as String? ??
+        '';
+    final productInfo =
+        [manufacturer, model].whereType<String>().join(' \u00B7 ');
+
+    return Container(
+      decoration: BoxDecoration(
+        color: CelestialColors.backgroundCard,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: const Color(0xFF81C784).withValues(alpha: 0.25),
+        ),
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: const Color(0xFF81C784).withValues(alpha: 0.15),
+                ),
+                child: const Icon(
+                  Icons.device_hub_outlined,
+                  color: Color(0xFF81C784),
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Assign room: "$name"',
+                      style: const TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    Text(
+                      '${_deviceTypeLabel(deviceType)}${productInfo.isNotEmpty ? ' \u00B7 $productInfo' : ''}',
+                      style: TextStyle(
+                        color: CelestialColors.textSecondary
+                            .withValues(alpha: 0.7),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(
+            'This device does not have a Rhythm room yet.',
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+              fontSize: 13,
+            ),
+          ),
+          if (hubName.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              'Discovered from: $hubName',
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.5),
+                fontSize: 12,
+              ),
+            ),
+          ],
+          const SizedBox(height: 16),
+          Opacity(
+            opacity: busy ? 0.5 : 1.0,
+            child: IgnorePointer(
+              ignoring: busy,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: _ActionButton(
+                      label: 'Assign Room',
+                      color: const Color(0xFF81C784),
+                      onTap: onAssignRoom,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  _ActionButton(
+                    label: 'Dismiss',
+                    color: CelestialColors.textSecondary,
+                    onTap: onDismiss,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// Informational triage card
+// =============================================================================
+
+class _InfoTriageCard extends StatelessWidget {
+  final Map<String, dynamic> entry;
+  final bool busy;
+  final VoidCallback onDismiss;
+
+  const _InfoTriageCard({
+    super.key,
+    required this.entry,
+    this.busy = false,
+    required this.onDismiss,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final info = _mapField(entry, 'hub_configured');
+    final hubKey = _mapField(entry, 'hub_key');
+    final hubType =
+        info['hub_type'] as String? ?? hubKey['hub_type'] as String? ?? 'hub';
+    final address = info['address'] as String? ?? hubKey['address'] as String?;
+    final title = switch (entry['kind'] as String?) {
+      'hub_configured' => 'Hub configured',
+      _ => 'Review item',
+    };
+    final details = [
+      hubType.toUpperCase(),
+      if (address != null && address.isNotEmpty) address,
+    ].join(' \u00B7 ');
+    final message = switch (entry['kind'] as String?) {
+      'hub_configured' =>
+        'The backend reported a hub-level triage item. Review the updated rooms and dismiss this entry when finished.',
+      _ => 'This triage item is not yet specialized in the UI.',
+    };
+
+    return Container(
+      decoration: BoxDecoration(
+        color: CelestialColors.backgroundCard,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: CelestialColors.textSecondary.withValues(alpha: 0.2),
+        ),
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.12),
+                ),
+                child: const Icon(
+                  Icons.info_outline,
+                  color: CelestialColors.textSecondary,
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    if (details.isNotEmpty)
+                      Text(
+                        details,
+                        style: TextStyle(
+                          color: CelestialColors.textSecondary
+                              .withValues(alpha: 0.7),
+                          fontSize: 12,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(
+            message,
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+              fontSize: 13,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Opacity(
+            opacity: busy ? 0.5 : 1.0,
+            child: IgnorePointer(
+              ignoring: busy,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: _ActionButton(
+                      label: 'Dismiss',
+                      color: CelestialColors.textSecondary,
+                      onTap: onDismiss,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

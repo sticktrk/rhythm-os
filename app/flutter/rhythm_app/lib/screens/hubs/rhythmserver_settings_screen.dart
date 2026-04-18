@@ -22,92 +22,8 @@ import '../../services/ota_service.dart';
 import '../../widgets/device_detail_sheet.dart';
 import 'ha_configurator_screen.dart';
 import 'hue_configurator_screen.dart';
-import 'matter_device_add_screen.dart';
-
-Future<void> _startMatterPairingFlow(BuildContext context) async {
-  final homeProvider = context.read<HomeProvider>();
-  final serverHub = homeProvider.currentHomeHubs
-      .where((hub) => hub.type == HubType.server)
-      .firstOrNull;
-  if (serverHub == null) return;
-
-  final pairingResult = await MatterDeviceAddScreen.show(
-    context,
-    endpoint: serverHub.endpoint,
-  );
-  if (!context.mounted || pairingResult == null) return;
-
-  final syncProvider = context.read<ServerSyncProvider>();
-  await syncProvider.connection.reconnect();
-  if (!context.mounted) return;
-
-  final resolved = await _resolvePairedMatterDevice(context, pairingResult);
-  if (!context.mounted) return;
-
-  if (resolved == null) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          '${pairingResult.name} was added. You can assign it to a room from the Matter device list once it appears.',
-        ),
-      ),
-    );
-    return;
-  }
-
-  await showDeviceRoomAssignmentFlow(
-    context,
-    device: resolved.device,
-    currentRoomId: resolved.roomId,
-  );
-}
-
-Future<({RhythmDevice device, String roomId})?> _resolvePairedMatterDevice(
-  BuildContext context,
-  MatterDevicePairingResult pairingResult,
-) async {
-  final connection = context.read<RhythmConnection>();
-
-  for (int attempt = 0; attempt < 5; attempt++) {
-    final devices = await connection.api.getCanonicalDevices();
-    if (!context.mounted) return null;
-
-    if (devices != null) {
-      for (final device in devices) {
-        final endpoints = device['endpoints'] as List<dynamic>? ?? const [];
-        final matchesNativeId = endpoints.any((endpoint) {
-          final nativeId =
-              (endpoint as Map<String, dynamic>)['native_id'] as String?;
-          return nativeId == pairingResult.nativeDeviceId;
-        });
-        if (!matchesNativeId) continue;
-
-        final canonicalId = device['id'] as String?;
-        if (canonicalId == null || canonicalId.isEmpty) continue;
-
-        return (
-          device: RhythmDevice(
-            id: canonicalId,
-            type: RhythmDeviceType.fromString(
-              device['device_type'] as String? ?? pairingResult.deviceType,
-            ),
-            name: device['name'] as String? ?? pairingResult.name,
-            manufacturer:
-                device['manufacturer'] as String? ?? pairingResult.manufacturer,
-            model: device['model'] as String? ?? pairingResult.model,
-          ),
-          roomId: device['room_id'] as String? ?? '',
-        );
-      }
-    }
-
-    if (attempt < 4) {
-      await Future.delayed(const Duration(seconds: 1));
-    }
-  }
-
-  return null;
-}
+import 'matter_add_method.dart';
+import 'matter_pairing_flow.dart';
 
 /// Settings screen for a connected server hub (ESP32, standalone, HA addon).
 ///
@@ -1427,6 +1343,63 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
         _ => Icons.hub_outlined,
       };
 
+  Future<void> _startMatterAddFlow({
+    MatterAddMethod? preferredMethod,
+  }) async {
+    await startMatterPairingFlow(
+      context,
+      preferredMethod: preferredMethod,
+    );
+    if (!mounted) return;
+    await _fetchHubSummaries();
+  }
+
+  List<Widget> _buildMatterAddOptionRows(ServerSyncProvider syncProvider) {
+    final methods = <MatterAddMethod>[];
+    if (syncProvider.canAddMatterOnNetworkDevice) {
+      methods.add(MatterAddMethod.onNetworkSetupCode);
+    }
+    if (syncProvider.canCommissionMatterBleWifi) {
+      methods.add(MatterAddMethod.bleWifiCommissioning);
+    }
+
+    if (methods.isEmpty) {
+      if (!syncProvider.canAddMatterDevice) return const [];
+      return [
+        _buildHubOptionRow(
+          icon: Icons.memory_outlined,
+          label: 'Add Matter Device',
+          color: const Color(0xFF26A69A),
+          onTap: () => _startMatterAddFlow(),
+        ),
+      ];
+    }
+
+    final rows = <Widget>[];
+    for (var i = 0; i < methods.length; i++) {
+      if (i > 0) {
+        rows.add(
+          Divider(
+            height: 1,
+            color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+          ),
+        );
+      }
+      final method = methods[i];
+      rows.add(
+        _buildHubOptionRow(
+          icon: method == MatterAddMethod.onNetworkSetupCode
+              ? Icons.wifi_tethering_rounded
+              : Icons.bluetooth_searching_rounded,
+          label: method.actionLabel,
+          color: const Color(0xFF26A69A),
+          onTap: () => _startMatterAddFlow(preferredMethod: method),
+        ),
+      );
+    }
+    return rows;
+  }
+
   // ─── Hub Pairing Suggestions ─────────────────────────────
 
   Widget _buildHubPairingSuggestions() {
@@ -1439,9 +1412,10 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
     final showHa = !configuredTypes.contains('homeassistant');
     final showHue = !configuredTypes.contains('hue');
-    final showMatter = !configuredTypes.contains('matter');
+    final matterOptions = _buildMatterAddOptionRows(syncProvider);
+    final hasMatterOptions = matterOptions.isNotEmpty;
 
-    if (!showHa && !showHue && !showMatter && !hasAnyHub) {
+    if (!showHa && !showHue && !hasMatterOptions && !hasAnyHub) {
       return const SizedBox.shrink();
     }
 
@@ -1489,20 +1463,11 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     onTap: () => HueConfiguratorScreen.show(context),
                   ),
                 ],
-                if (showMatter) ...[
+                if (hasMatterOptions) ...[
                   Divider(
                       height: 1,
                       color: CelestialColors.orbitRing.withValues(alpha: 0.3)),
-                  _buildHubOptionRow(
-                    icon: Icons.memory_outlined,
-                    label: 'Matter',
-                    color: const Color(0xFF26A69A),
-                    onTap: () async {
-                      await _startMatterPairingFlow(context);
-                      if (!mounted) return;
-                      await _fetchHubSummaries();
-                    },
-                  ),
+                  ...matterOptions,
                 ],
               ],
             ),
@@ -1513,7 +1478,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
     // Hubs exist — show add options + disconnect all (if multiple)
     final children = <Widget>[];
-    if (showHa || showHue || showMatter) {
+    if (showHa || showHue || hasMatterOptions) {
       final options = <Widget>[];
       if (showHa) {
         options.add(_buildHubOptionRow(
@@ -1537,22 +1502,13 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
           onTap: () => HueConfiguratorScreen.show(context),
         ));
       }
-      if (showMatter) {
+      if (hasMatterOptions) {
         if (options.isNotEmpty) {
           options.add(Divider(
               height: 1,
               color: CelestialColors.orbitRing.withValues(alpha: 0.3)));
         }
-        options.add(_buildHubOptionRow(
-          icon: Icons.memory_outlined,
-          label: 'Add Matter Device',
-          color: const Color(0xFF26A69A),
-          onTap: () async {
-            await _startMatterPairingFlow(context);
-            if (!mounted) return;
-            await _fetchHubSummaries();
-          },
-        ));
+        options.addAll(matterOptions);
       }
       children.add(
         Container(
@@ -3816,12 +3772,22 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
   @override
   Widget build(BuildContext context) {
     context.watch<ServerSyncProvider>();
+    final syncProvider = context.read<ServerSyncProvider>();
     final rooms = _canonicalRooms ?? [];
     final deviceSummary =
         _canonicalLoading ? 'Loading...' : (_canonicalSummary ?? 'No devices');
     final label = _RhythmServerSettingsScreenState._hubLabel(_type);
     final hubColor = _RhythmServerSettingsScreenState._hubColor(_type);
     final hubIcon = _RhythmServerSettingsScreenState._hubIcon(_type);
+    final canAddMatter = syncProvider.canAddMatterDevice;
+    final matterActionLabel = switch ((
+      syncProvider.canAddMatterOnNetworkDevice,
+      syncProvider.canCommissionMatterBleWifi,
+    )) {
+      (true, false) => 'Add On-Network Device',
+      (false, true) => 'Commission New Device',
+      _ => 'Add Matter Device',
+    };
 
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,
@@ -3969,14 +3935,14 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                     _buildSectionHeader('DEVICES'),
                     const SizedBox(height: 8),
                     _buildDevicesCard(rooms),
-                    if (_type == 'matter') ...[
+                    if (_type == 'matter' && canAddMatter) ...[
                       const SizedBox(height: 10),
                       _buildActionButton(
                         icon: Icons.add_circle_outline,
-                        label: 'Add Device',
+                        label: matterActionLabel,
                         color: const Color(0xFF26A69A),
                         onTap: () async {
-                          await _startMatterPairingFlow(context);
+                          await startMatterPairingFlow(context);
                           if (!mounted) return;
                           await _fetchCanonicalDevices();
                         },

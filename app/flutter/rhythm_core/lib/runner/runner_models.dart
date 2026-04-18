@@ -6,6 +6,7 @@ import '../src/rust/api/dto/curve.dart' show CurveConfigDto;
 
 enum RoomSourceDto {
   unknown,
+  matter,
   hue,
   homeAssistant,
   esp32,
@@ -133,7 +134,8 @@ class RunnerActionResultDto {
   });
 
   @override
-  int get hashCode => Object.hash(state, Object.hashAll(commands), stateChanged);
+  int get hashCode =>
+      Object.hash(state, Object.hashAll(commands), stateChanged);
 
   @override
   bool operator ==(Object other) =>
