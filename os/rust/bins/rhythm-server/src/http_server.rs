@@ -1,16 +1,22 @@
 //! Axum HTTP server — uses shared routes from rhythm-os plus server-specific endpoints.
 
+use axum::extract::MatchedPath;
+use axum::http::Request;
 use axum::http::StatusCode;
+use axum::response::Response as AxumResponse;
 use std::net::IpAddr;
 use std::time::Duration;
 
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use rhythm_os::axum_router::ApiErrorContext;
 use rhythm_os::handlers::ApiResponse;
 use rhythm_os::mdns::MDNS_HOSTNAME_PREFIX;
 use rhythm_os::state::SharedState;
 use tower_http::cors::CorsLayer;
+use tower_http::trace::TraceLayer;
+use tracing::Span;
 
 /// Create the Axum router with all API routes.
 pub fn create_router(state: SharedState) -> Router {
@@ -50,7 +56,41 @@ pub fn create_router(state: SharedState) -> Router {
         .with_state(state)
         // CORS + trace at outer level so they cover fallback/404 responses too
         .layer(CorsLayer::permissive())
-        .layer(rhythm_os::axum_router::http_trace_layer())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &Request<axum::body::Body>| {
+                    let matched_path = request
+                        .extensions()
+                        .get::<MatchedPath>()
+                        .map(|matched_path| matched_path.as_str())
+                        .unwrap_or("<unmatched>");
+                    tracing::info_span!(
+                        "http_request",
+                        method = %request.method(),
+                        uri = %request.uri(),
+                        matched_path = matched_path,
+                    )
+                })
+                .on_response(
+                    |response: &AxumResponse, latency: Duration, span: &Span| {
+                        if response.status().is_server_error() {
+                            let error = response
+                                .extensions()
+                                .get::<ApiErrorContext>()
+                                .map(|context| context.0.as_str())
+                                .unwrap_or("<no error body>");
+                            tracing::error!(
+                                parent: span,
+                                status = %response.status(),
+                                latency_ms = latency.as_millis(),
+                                error = %error,
+                                "request returned server error"
+                            );
+                        }
+                    },
+                )
+                .on_failure(()),
+        )
 }
 
 // ---------------------------------------------------------------------------
