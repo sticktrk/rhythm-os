@@ -752,6 +752,9 @@ fn remove_if_exists(path: &Path) {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn unique_test_dir(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -825,11 +828,36 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  rhythm-server-
 
     #[test]
     fn install_target_executable_prefers_embedded_install_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("RHYTHM_PLATFORM_TYPE", "embedded");
         std::env::set_var("RHYTHM_PLATFORM_CONTEXT", "rpiz");
 
         let path = install_target_executable().unwrap();
         assert_eq!(path, PathBuf::from(EMBEDDED_INSTALL_PATH));
+
+        std::env::remove_var("RHYTHM_PLATFORM_TYPE");
+        std::env::remove_var("RHYTHM_PLATFORM_CONTEXT");
+    }
+
+    #[test]
+    fn restart_strategy_uses_embedded_reboot_for_rpiz() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("RHYTHM_PLATFORM_TYPE", "embedded");
+        std::env::set_var("RHYTHM_PLATFORM_CONTEXT", "rpiz");
+
+        assert_eq!(restart_strategy(), RestartStrategy::EmbeddedReboot);
+
+        std::env::remove_var("RHYTHM_PLATFORM_TYPE");
+        std::env::remove_var("RHYTHM_PLATFORM_CONTEXT");
+    }
+
+    #[test]
+    fn restart_strategy_uses_supervisor_exit_for_desktop_server() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("RHYTHM_PLATFORM_TYPE", "desktop");
+        std::env::set_var("RHYTHM_PLATFORM_CONTEXT", "server");
+
+        assert_eq!(restart_strategy(), RestartStrategy::SupervisorExit);
 
         std::env::remove_var("RHYTHM_PLATFORM_TYPE");
         std::env::remove_var("RHYTHM_PLATFORM_CONTEXT");

@@ -71,24 +71,22 @@ pub fn create_router(state: SharedState) -> Router {
                         matched_path = matched_path,
                     )
                 })
-                .on_response(
-                    |response: &AxumResponse, latency: Duration, span: &Span| {
-                        if response.status().is_server_error() {
-                            let error = response
-                                .extensions()
-                                .get::<ApiErrorContext>()
-                                .map(|context| context.0.as_str())
-                                .unwrap_or("<no error body>");
-                            tracing::error!(
-                                parent: span,
-                                status = %response.status(),
-                                latency_ms = latency.as_millis(),
-                                error = %error,
-                                "request returned server error"
-                            );
-                        }
-                    },
-                )
+                .on_response(|response: &AxumResponse, latency: Duration, span: &Span| {
+                    if response.status().is_server_error() {
+                        let error = response
+                            .extensions()
+                            .get::<ApiErrorContext>()
+                            .map(|context| context.0.as_str())
+                            .unwrap_or("<no error body>");
+                        tracing::error!(
+                            parent: span,
+                            status = %response.status(),
+                            latency_ms = latency.as_millis(),
+                            error = %error,
+                            "request returned server error"
+                        );
+                    }
+                })
                 .on_failure(()),
         )
 }
@@ -325,12 +323,7 @@ async fn do_update(ota_status: crate::self_update::OtaStatusHandle) -> Response 
     };
     ota_status.mark_restarting(&previous, &latest, apply_result.checksum_verified);
 
-    // Exit non-zero after responding so the service manager restarts us
-    tokio::spawn(async {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        log::info!(target: "sys", "Restarting after self-update...");
-        std::process::exit(1);
-    });
+    crate::self_update::schedule_post_update_restart();
 
     json_ok(format!(
         r#"{{"status":"ok","message":"Updated to v{}, restarting...","previous_version":"{}","new_version":"{}","checksum_verified":{}}}"#,
