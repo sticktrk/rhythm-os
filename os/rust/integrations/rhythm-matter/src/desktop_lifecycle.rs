@@ -117,6 +117,16 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
         get_hub_provider()
     }
 
+    fn api_capabilities(&self) -> rhythm_os::hub::HubIntegrationCapability {
+        rhythm_os::hub::HubIntegrationCapability {
+            hub_type: "matter".to_string(),
+            configurable: true,
+            supports_pairing: !cfg!(target_os = "macos"),
+            supports_unpairing: true,
+            supports_roomless_devices: true,
+        }
+    }
+
     fn connect_and_start(&self, state: SharedState, key: &HubKey) -> Result<Receiver<HubEvent>> {
         connect_and_start(state, key)
     }

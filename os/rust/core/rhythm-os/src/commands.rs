@@ -21,9 +21,10 @@ use rhythm_core::{
 use serde_json::Value;
 
 use crate::api_types::{
-    ActiveProfileDto, ActiveProfileEffectiveDto, FixResponse, HubDto, LocationDto,
-    ModeLastChangeDto, ModeSettingsDto, ModeTransitionsDto, ProfilesDto, RoomFullState,
-    RoomPollState, RoomRhythmState, RoomsPollResponse, SettingsDto, StateSnapshot, TypedDeviceDto,
+    ActiveProfileDto, ActiveProfileEffectiveDto, ApiCapabilitiesDto, FixResponse,
+    HubCapabilityDto, HubDto, LocationDto, ModeLastChangeDto, ModeSettingsDto,
+    ModeTransitionsDto, ProfilesDto, RoomFullState, RoomPollState, RoomRhythmState,
+    RoomsPollResponse, SettingsDto, StateSnapshot, TypedDeviceDto,
 };
 use crate::bundle::{
     BackupBundle, BackupHubCredentials, BackupHubRegistry, BackupInstallation, BackupRuntimeState,
@@ -797,6 +798,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         runtime,
         storage_rooms,
         hubs_dto,
+        capabilities_dto,
         active_profile_cfg,
         mut active_profile_effective,
         location_dto,
@@ -843,6 +845,20 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
                 connected: s.hub_is_connected(key),
             })
             .collect();
+
+        let capabilities_dto = ApiCapabilitiesDto {
+            hubs: s
+                .hub_capabilities
+                .iter()
+                .map(|capability| HubCapabilityDto {
+                    hub_type: capability.hub_type.clone(),
+                    configurable: capability.configurable,
+                    supports_pairing: capability.supports_pairing,
+                    supports_unpairing: capability.supports_unpairing,
+                    supports_roomless_devices: capability.supports_roomless_devices,
+                })
+                .collect(),
+        };
 
         let active_profile_id = s.active_mode_profile_id();
         let mut profile_registry = LightProfileRegistry::with_profiles(
@@ -995,6 +1011,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             runtime,
             storage_rooms,
             hubs_dto,
+            capabilities_dto,
             active_profile_cfg,
             active_profile_effective,
             location_dto,
@@ -1296,6 +1313,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         context: platform_ctx.to_string(),
         listen_port,
         hubs: hubs_dto,
+        capabilities: capabilities_dto,
         active_profile: ActiveProfileDto {
             config: active_profile_cfg,
             effective: active_profile_effective,

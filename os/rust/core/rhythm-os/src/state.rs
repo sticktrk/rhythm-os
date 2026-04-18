@@ -194,6 +194,8 @@ pub struct AppState {
     pub hub_reconnect_sync_at: HashMap<HubKey, Instant>,
     /// Hub credentials keyed by HubKey. Supports multiple simultaneous hubs.
     pub hub_credentials: HashMap<HubKey, HubCredentials>,
+    /// API-facing capability metadata for integrations available on this platform.
+    pub hub_capabilities: Vec<crate::hub::HubIntegrationCapability>,
 
     // ---- Canonical device registry + topology ----
     /// Canonical device registry (cross-hub device identity and dedup).
@@ -385,6 +387,7 @@ impl Default for AppState {
             hub_sync_in_progress: HashSet::new(),
             hub_reconnect_sync_at: HashMap::new(),
             hub_credentials: HashMap::new(),
+            hub_capabilities: Vec::new(),
             canonical_registry: CanonicalRegistry::new(),
             topology: RoomTopologyStore::new(),
             room_lights_on: HashMap::new(),

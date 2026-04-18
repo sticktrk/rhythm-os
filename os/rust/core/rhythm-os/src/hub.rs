@@ -139,6 +139,28 @@ impl HubType {
     }
 }
 
+/// Shared API-facing capability metadata for a registered hub integration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HubIntegrationCapability {
+    pub hub_type: String,
+    pub configurable: bool,
+    pub supports_pairing: bool,
+    pub supports_unpairing: bool,
+    pub supports_roomless_devices: bool,
+}
+
+impl HubIntegrationCapability {
+    pub fn new(hub_type: impl Into<String>) -> Self {
+        Self {
+            hub_type: hub_type.into(),
+            configurable: true,
+            supports_pairing: false,
+            supports_unpairing: false,
+            supports_roomless_devices: false,
+        }
+    }
+}
+
 // ============================================================================
 // HubCredentials — per-hub credential storage for persistence
 // ============================================================================
@@ -265,6 +287,14 @@ pub trait ExternalLightHubIntegration: Send + Sync {
 
     /// The [`HubProvider`] for HTTP credential pushes.
     fn provider(&self) -> &'static dyn HubProvider;
+
+    /// API-facing capability metadata for this integration.
+    ///
+    /// Used by `/api/state` so clients can distinguish "supported here" from
+    /// "currently configured" and adapt UI to platform constraints.
+    fn api_capabilities(&self) -> HubIntegrationCapability {
+        HubIntegrationCapability::new(self.hub_type())
+    }
 
     /// Boot-time connection when credentials are already stored.
     ///
@@ -414,6 +444,8 @@ pub struct IntegrationCallbacks {
             + Send
             + Sync,
     >,
+    /// API-facing capability metadata for all registered integrations.
+    pub hub_capabilities: Vec<HubIntegrationCapability>,
 }
 
 /// Build callbacks from a static integration registry.
@@ -423,6 +455,11 @@ pub struct IntegrationCallbacks {
 pub fn integration_callbacks(
     integrations: &'static [&'static dyn ExternalLightHubIntegration],
 ) -> IntegrationCallbacks {
+    let mut hub_capabilities: Vec<HubIntegrationCapability> =
+        integrations.iter().map(|integration| integration.api_capabilities()).collect();
+    hub_capabilities.sort_by(|left, right| left.hub_type.cmp(&right.hub_type));
+    hub_capabilities.dedup_by(|left, right| left.hub_type == right.hub_type);
+
     let ensure_runtime_fn = Arc::new(move |state: &SharedState| -> Result<()> {
         // Use composite runtime on desktop (creates CompositeController + single shared runtime).
         // Falls back to per-integration ensure_runtime for backward compat (ESP32).
@@ -511,6 +548,7 @@ pub fn integration_callbacks(
         register_controller_fn,
         start_pairing_fn,
         start_unpairing_fn,
+        hub_capabilities,
     }
 }
 

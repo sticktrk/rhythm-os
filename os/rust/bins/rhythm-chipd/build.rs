@@ -54,28 +54,15 @@ fn main() {
                 );
                 return;
             }
-            match artifacts.link_mode {
-                LinkMode::NativeLibChip => {
-                    build.define("RHYTHM_CHIP_BRIDGE_NATIVE_LIBCHIP", "1");
-                }
-                LinkMode::PythonExtension => {
-                    build.define("RHYTHM_CHIP_BRIDGE_PYTHON_EXTENSION", "1");
-                    build.include(artifacts.chip_root.join("src/controller/python"));
-                }
-            }
+            build.define("RHYTHM_CHIP_BRIDGE_NATIVE_LIBCHIP", "1");
 
             build.compile("rhythm_chip_bridge");
 
-            match artifacts.link_mode {
-                LinkMode::NativeLibChip => {
-                    if let Err(error) = emit_native_chip_link_inputs(&artifacts) {
-                        println!(
-                            "cargo:warning=chip-ffi requested, but native CHIP controller data-model objects are unavailable: {error}"
-                        );
-                        return;
-                    }
-                }
-                LinkMode::PythonExtension => {}
+            if let Err(error) = emit_native_chip_link_inputs(&artifacts) {
+                println!(
+                    "cargo:warning=chip-ffi requested, but native CHIP controller data-model objects are unavailable: {error}"
+                );
+                return;
             }
 
             println!("cargo:rustc-link-arg={}", artifacts.link_path.display());
@@ -85,11 +72,9 @@ fn main() {
             // Cargo treats link-args as opaque strings and does not track
             // files referenced through them on its own.
             println!("cargo:rerun-if-changed={}", artifacts.link_path.display());
-            if let LinkMode::NativeLibChip = artifacts.link_mode {
-                if let Ok(inputs) = artifacts.native_link_inputs() {
-                    for path in inputs {
-                        println!("cargo:rerun-if-changed={}", path.display());
-                    }
+            if let Ok(inputs) = artifacts.native_link_inputs() {
+                for path in inputs {
+                    println!("cargo:rerun-if-changed={}", path.display());
                 }
             }
             emit_platform_link_args(&artifacts.target);
@@ -105,6 +90,7 @@ fn main() {
 
 fn emit_platform_link_args(target: &str) {
     if target.contains("apple-darwin") {
+        println!("cargo:rustc-link-lib=c++");
         for framework in [
             "CoreData",
             "CoreFoundation",
@@ -348,8 +334,7 @@ fn cross_compiler_candidates(target: &str) -> Vec<String> {
         "CC".to_string(),
     ] {
         if let Ok(value) = env::var(&key) {
-            if !value.trim().is_empty() && !candidates.iter().any(|candidate| candidate == &value)
-            {
+            if !value.trim().is_empty() && !candidates.iter().any(|candidate| candidate == &value) {
                 candidates.push(value);
             }
         }
@@ -422,25 +407,10 @@ fn resolve_from_out_dir_with_root(
             out_dir,
             target,
             link_path: libchip,
-            link_mode: LinkMode::NativeLibChip,
         });
     }
 
-    let python_extension = out_dir.join("obj/src/controller/python/matter/_ChipDeviceCtrl.so");
-    if python_extension.is_file() {
-        return Ok(ChipArtifacts {
-            chip_root,
-            out_dir,
-            target,
-            link_path: python_extension,
-            link_mode: LinkMode::PythonExtension,
-        });
-    }
-
-    Err(format!(
-        "no native libCHIP.a or _ChipDeviceCtrl.so found under {}",
-        out_dir.display()
-    ))
+    Err(format!("no native libCHIP.a found under {}", out_dir.display()))
 }
 
 fn resolve_from_lib_dir(lib_dir: PathBuf, target: String) -> Result<ChipArtifacts, String> {
@@ -456,25 +426,10 @@ fn resolve_from_lib_dir(lib_dir: PathBuf, target: String) -> Result<ChipArtifact
             out_dir,
             target,
             link_path: libchip,
-            link_mode: LinkMode::NativeLibChip,
         });
     }
 
-    let python_extension = lib_dir.join("_ChipDeviceCtrl.so");
-    if python_extension.is_file() {
-        return Ok(ChipArtifacts {
-            chip_root,
-            out_dir,
-            target,
-            link_path: python_extension,
-            link_mode: LinkMode::PythonExtension,
-        });
-    }
-
-    Err(format!(
-        "no libCHIP.a or _ChipDeviceCtrl.so found under {}",
-        lib_dir.display()
-    ))
+    Err(format!("no libCHIP.a found under {}", lib_dir.display()))
 }
 
 fn infer_root_from_lib_dir(lib_dir: &Path) -> Option<PathBuf> {
@@ -536,7 +491,6 @@ struct ChipArtifacts {
     out_dir: PathBuf,
     target: String,
     link_path: PathBuf,
-    link_mode: LinkMode,
 }
 
 impl ChipArtifacts {
@@ -625,9 +579,4 @@ impl ChipArtifacts {
 
         Ok(inputs)
     }
-}
-
-enum LinkMode {
-    NativeLibChip,
-    PythonExtension,
 }

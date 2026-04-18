@@ -32,7 +32,9 @@ impl MatterPairingParams {
     /// Parse the integration-specific request payload.
     ///
     /// `setup_payload` is the preferred field name. The legacy `setup_code`
-    /// field remains accepted for older clients.
+    /// field remains accepted for older clients. When clients omit
+    /// `rendezvous`, manual setup codes default to on-network commissioning
+    /// while QR payloads keep the existing auto behavior.
     pub fn from_value(params: &Value) -> Result<Self> {
         let setup_payload = params
             .get("setup_payload")
@@ -55,7 +57,8 @@ impl MatterPairingParams {
         };
 
         let rendezvous = match params.get("rendezvous").and_then(|value| value.as_str()) {
-            None | Some("auto") => MatterCommissioningRendezvous::Auto,
+            None => default_rendezvous_for_payload(setup_payload),
+            Some("auto") => MatterCommissioningRendezvous::Auto,
             Some("ble") => MatterCommissioningRendezvous::Ble,
             Some("on_network") => MatterCommissioningRendezvous::OnNetwork,
             Some(other) => anyhow::bail!(
@@ -85,6 +88,21 @@ impl MatterPairingParams {
             wifi_credentials,
         }
     }
+}
+
+fn default_rendezvous_for_payload(setup_payload: &str) -> MatterCommissioningRendezvous {
+    if is_qr_setup_payload(setup_payload) {
+        MatterCommissioningRendezvous::Auto
+    } else {
+        MatterCommissioningRendezvous::OnNetwork
+    }
+}
+
+fn is_qr_setup_payload(setup_payload: &str) -> bool {
+    setup_payload
+        .get(..3)
+        .map(|prefix| prefix.eq_ignore_ascii_case("MT:"))
+        .unwrap_or(false)
 }
 
 /// Ensure the local Matter hub exists before commissioning.
@@ -192,6 +210,7 @@ fn build_success_session(
     hub_data.record_commissioned_device(&device);
     store_device_capabilities(hub_data, &device, &device_id);
     register_canonical_identity(state, &hub_key, &device, &device_id, &device_name)?;
+    queue_unassigned_canonical_device(state, &hub_key, &device_id)?;
 
     let _ = hub_data.event_tx.send(
         crate::events::device_paired_event(
@@ -263,6 +282,30 @@ fn register_canonical_identity(
     Ok(())
 }
 
+fn queue_unassigned_canonical_device(
+    state: &SharedState,
+    hub_key: &HubKey,
+    device_id: &str,
+) -> Result<()> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let (canonical_id, already_assigned) = state
+        .canonical_registry
+        .find_by_native_id(hub_key, device_id)
+        .map(|device| (device.id.clone(), device.room_id.is_some()))
+        .ok_or_else(|| anyhow::anyhow!("Canonical device missing after Matter pairing: {}", device_id))?;
+
+    if !already_assigned {
+        state.canonical_registry.queue_unassigned(&canonical_id, now);
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,7 +320,7 @@ mod tests {
 
         assert_eq!(parsed.setup_payload, "34970112332");
         assert_eq!(parsed.network, MatterCommissioningNetwork::Wifi);
-        assert_eq!(parsed.rendezvous, MatterCommissioningRendezvous::Auto);
+        assert_eq!(parsed.rendezvous, MatterCommissioningRendezvous::OnNetwork);
     }
 
     #[test]
@@ -305,7 +348,7 @@ mod tests {
     #[test]
     fn pairing_params_default_to_auto_rendezvous() {
         let params = serde_json::json!({
-            "setup_payload": "3497-011-2332",
+            "setup_payload": "MT:Y.K908OC16750648G00",
         });
 
         let parsed = MatterPairingParams::from_value(&params).unwrap();

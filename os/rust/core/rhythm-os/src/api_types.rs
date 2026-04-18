@@ -98,6 +98,8 @@ pub struct StateSnapshot {
     pub listen_port: Option<u16>,
     /// All configured hubs with their current live connection state.
     pub hubs: Vec<HubDto>,
+    /// Capability metadata for integrations available on this platform.
+    pub capabilities: ApiCapabilitiesDto,
     pub active_profile: ActiveProfileDto,
     pub location: LocationDto,
     pub settings: SettingsDto,
@@ -119,6 +121,23 @@ pub struct HubDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
     pub connected: bool,
+}
+
+/// API capability metadata in state snapshot.
+#[derive(Clone, Debug, Serialize)]
+pub struct ApiCapabilitiesDto {
+    pub hubs: Vec<HubCapabilityDto>,
+}
+
+/// Capabilities for one available hub integration.
+#[derive(Clone, Debug, Serialize)]
+pub struct HubCapabilityDto {
+    #[serde(rename = "type")]
+    pub hub_type: String,
+    pub configurable: bool,
+    pub supports_pairing: bool,
+    pub supports_unpairing: bool,
+    pub supports_roomless_devices: bool,
 }
 
 /// Location in state snapshot.
@@ -606,6 +625,22 @@ mod tests {
         assert_eq!(json["connected"], false);
     }
 
+    #[test]
+    fn hub_capability_dto_type_field_renamed() {
+        let capability = HubCapabilityDto {
+            hub_type: "matter".into(),
+            configurable: true,
+            supports_pairing: false,
+            supports_unpairing: true,
+            supports_roomless_devices: true,
+        };
+        let json: Value = serde_json::to_value(&capability).unwrap();
+        assert_eq!(json["type"], "matter");
+        assert!(json.get("hub_type").is_none());
+        assert_eq!(json["supports_pairing"], false);
+        assert_eq!(json["supports_roomless_devices"], true);
+    }
+
     // ---- LocationDto ----
 
     #[test]
@@ -762,6 +797,7 @@ mod tests {
             context: "server".into(),
             listen_port: None,
             hubs: vec![],
+            capabilities: ApiCapabilitiesDto { hubs: vec![] },
             active_profile: ActiveProfileDto {
                 config: rhythm_core::default_rhythm_profile(),
                 effective: ActiveProfileEffectiveDto {
@@ -836,6 +872,15 @@ mod tests {
                 address: Some("192.168.1.2".into()),
                 connected: true,
             }],
+            capabilities: ApiCapabilitiesDto {
+                hubs: vec![HubCapabilityDto {
+                    hub_type: "matter".into(),
+                    configurable: true,
+                    supports_pairing: false,
+                    supports_unpairing: true,
+                    supports_roomless_devices: true,
+                }],
+            },
             active_profile: ActiveProfileDto {
                 config: rhythm_core::default_rhythm_profile(),
                 effective: ActiveProfileEffectiveDto {
@@ -905,6 +950,8 @@ mod tests {
         assert_eq!(json["rooms"].as_array().unwrap().len(), 1);
         assert_eq!(json["rooms"][0]["name"], "Office");
         assert_eq!(json["hubs"][0]["type"], "hue");
+        assert_eq!(json["capabilities"]["hubs"][0]["type"], "matter");
+        assert_eq!(json["capabilities"]["hubs"][0]["supports_pairing"], false);
         assert_eq!(json["last_tick_epoch_ms"], 1700000000000u64);
         assert_eq!(json["location"]["solar_noon"], 12.4_f32 as f64);
         assert_eq!(json["location"]["solar_noon_local_time"], "12:24:00");

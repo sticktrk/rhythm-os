@@ -343,8 +343,8 @@ mod ffi_probe {
     }
 
     pub fn commission_light(request: &MatterCommissionRequest) -> Result<CommissionedDevice> {
-        let setup_payload =
-            CString::new(request.setup_payload.as_str()).context("encoding Matter setup payload")?;
+        let setup_payload = CString::new(request.setup_payload.as_str())
+            .context("encoding Matter setup payload")?;
         let wifi_ssid = CString::new(request.wifi_credentials.ssid.as_str())
             .context("encoding Matter commissioning SSID")?;
         let wifi_password = CString::new(request.wifi_credentials.password.as_str())
@@ -385,8 +385,9 @@ mod ffi_probe {
                 )
             }),
             Err(env::VarError::NotPresent) => Ok(DEFAULT_CONTROLLER_VENDOR_ID),
-            Err(error) => Err(anyhow::anyhow!(error))
-                .context("reading RHYTHM_MATTER_CONTROLLER_VENDOR_ID"),
+            Err(error) => {
+                Err(anyhow::anyhow!(error)).context("reading RHYTHM_MATTER_CONTROLLER_VENDOR_ID")
+            }
         }
     }
 

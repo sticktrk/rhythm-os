@@ -94,6 +94,7 @@ fn main() -> Result<()> {
         s.register_controller_fn = Some(callbacks.register_controller_fn);
         s.start_pairing_fn = Some(callbacks.start_pairing_fn);
         s.start_unpairing_fn = Some(callbacks.start_unpairing_fn);
+        s.hub_capabilities = callbacks.hub_capabilities.clone();
         s.hub_credentials_interceptor = Some(rhythm_os::hub::combined_credentials_interceptor(
             hub::INTEGRATIONS,
         ));

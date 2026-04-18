@@ -97,10 +97,9 @@ impl ChipTransport {
             self.start_sidecar()?;
         }
 
-        let response: ChipInitControllerResponse =
-            self.decode_rpc_response(self.send_rpc_envelope(ChipRpcRequest::InitController(
-                self.init_request.clone(),
-            ))?)?;
+        let response: ChipInitControllerResponse = self.decode_rpc_response(
+            self.send_rpc_envelope(ChipRpcRequest::InitController(self.init_request.clone()))?,
+        )?;
         if response.fabric_id != self.init_request.fabric_id {
             anyhow::bail!(
                 "CHIP sidecar initialized unexpected fabric '{}'",
@@ -123,11 +122,11 @@ impl ChipTransport {
                     self.ensure_sidecar()?;
                     self.decode_rpc_response(self.send_rpc_envelope(request)?)
                         .with_context(|| {
-                        format!(
-                            "CHIP RPC retry failed after restarting sidecar: {:#}",
-                            first_error
-                        )
-                    })
+                            format!(
+                                "CHIP RPC retry failed after restarting sidecar: {:#}",
+                                first_error
+                            )
+                        })
                 } else {
                     Err(first_error)
                 }
@@ -158,20 +157,33 @@ impl ChipTransport {
             .set_write_timeout(Some(RPC_TIMEOUT))
             .context("setting CHIP RPC write timeout")?;
 
-        serde_json::to_writer(&mut stream, &envelope)
-            .with_context(|| format!("encoding CHIP RPC request (chipd status: {})", self.chipd_status_hint()))?;
-        stream
-            .write_all(b"\n")
-            .with_context(|| format!("writing CHIP RPC newline (chipd status: {})", self.chipd_status_hint()))?;
-        stream
-            .flush()
-            .with_context(|| format!("flushing CHIP RPC request (chipd status: {})", self.chipd_status_hint()))?;
+        serde_json::to_writer(&mut stream, &envelope).with_context(|| {
+            format!(
+                "encoding CHIP RPC request (chipd status: {})",
+                self.chipd_status_hint()
+            )
+        })?;
+        stream.write_all(b"\n").with_context(|| {
+            format!(
+                "writing CHIP RPC newline (chipd status: {})",
+                self.chipd_status_hint()
+            )
+        })?;
+        stream.flush().with_context(|| {
+            format!(
+                "flushing CHIP RPC request (chipd status: {})",
+                self.chipd_status_hint()
+            )
+        })?;
 
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
-        let bytes = reader
-            .read_line(&mut line)
-            .with_context(|| format!("reading CHIP RPC response (chipd status: {})", self.chipd_status_hint()))?;
+        let bytes = reader.read_line(&mut line).with_context(|| {
+            format!(
+                "reading CHIP RPC response (chipd status: {})",
+                self.chipd_status_hint()
+            )
+        })?;
         if bytes == 0 {
             anyhow::bail!(
                 "CHIP sidecar closed the socket without a response (chipd status: {})",

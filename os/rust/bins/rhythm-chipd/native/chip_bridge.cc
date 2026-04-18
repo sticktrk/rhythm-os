@@ -1107,8 +1107,6 @@ const char * rhythm_chip_bridge_link_mode(void)
     (void) factory;
 #if defined(RHYTHM_CHIP_BRIDGE_NATIVE_LIBCHIP)
     return "connectedhomeip-libchip";
-#elif defined(RHYTHM_CHIP_BRIDGE_PYTHON_EXTENSION)
-    return "connectedhomeip-python-extension";
 #else
     return "connectedhomeip-unknown";
 #endif
