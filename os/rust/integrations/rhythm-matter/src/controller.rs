@@ -43,6 +43,32 @@ impl MatterLightController {
             .unwrap_or(1);
         Some((node_id, endpoint))
     }
+
+    /// Resolve the concrete Matter device IDs for a room or direct device target.
+    ///
+    /// Assigned devices are stored in the hub registry under a synthetic
+    /// per-device room, while newly paired roomless devices may arrive here as a
+    /// raw `matter-{node}` identifier through the composite controller's
+    /// single-hub fallback routing. Accept both forms.
+    fn target_device_ids(&self, room_id: &str) -> LightControlResult<Vec<String>> {
+        let registry = self.hub_data.registry.lock().map_err(|e| {
+            LightControlError::Internal(format!("Failed to lock registry: {}", e))
+        })?;
+
+        let device_ids = registry.get_light_entities(room_id);
+        if !device_ids.is_empty() || registry.get_grouped_light_id(room_id).is_some() {
+            return Ok(device_ids);
+        }
+
+        if Self::parse_device_id(room_id).is_some() {
+            return Ok(vec![room_id.to_string()]);
+        }
+
+        Err(LightControlError::RoomNotFound(format!(
+            "No target for room {}",
+            room_id
+        )))
+    }
 }
 
 #[async_trait]
@@ -50,15 +76,7 @@ impl LightController for MatterLightController {
     async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
         let room_label =
             rhythm_os::controller_helpers::format_room_label(&self.hub_data.registry, room_id);
-        let _target =
-            rhythm_os::controller_helpers::resolve_room_target(&self.hub_data.registry, room_id)?;
-
-        let device_ids = {
-            let registry = self.hub_data.registry.lock().map_err(|e| {
-                LightControlError::Internal(format!("Failed to lock registry: {}", e))
-            })?;
-            registry.get_light_entities(room_id)
-        };
+        let device_ids = self.target_device_ids(room_id)?;
 
         let default_caps = LightCapabilities::defaults_for(LightType::ExtendedColor);
         let device_caps = self.hub_data.device_caps.lock().map_err(|e| {
@@ -196,12 +214,7 @@ impl LightController for MatterLightController {
     async fn turn_off(&self, room_id: &str, _transition_ms: Option<u32>) -> LightControlResult<()> {
         let room_label =
             rhythm_os::controller_helpers::format_room_label(&self.hub_data.registry, room_id);
-        let device_ids = {
-            let registry = self.hub_data.registry.lock().map_err(|e| {
-                LightControlError::Internal(format!("Failed to lock registry: {}", e))
-            })?;
-            registry.get_light_entities(room_id)
-        };
+        let device_ids = self.target_device_ids(room_id)?;
 
         let mut successful_devices = 0usize;
         let mut failed_devices = 0usize;
@@ -250,12 +263,7 @@ impl LightController for MatterLightController {
     }
 
     async fn any_lights_on(&self, room_id: &str) -> LightControlResult<bool> {
-        let device_ids = {
-            let registry = self.hub_data.registry.lock().map_err(|e| {
-                LightControlError::Internal(format!("Failed to lock registry: {}", e))
-            })?;
-            registry.get_light_entities(room_id)
-        };
+        let device_ids = self.target_device_ids(room_id)?;
 
         if device_ids.is_empty() {
             return Ok(false);
@@ -432,6 +440,21 @@ mod tests {
     }
 
     #[test]
+    fn turn_on_direct_device_id_without_registry_room_succeeds() {
+        let (controller, spy, _) = make_controller();
+
+        block_on(controller.turn_on("matter-42", LightingCommand::new(50, 3000))).unwrap();
+
+        assert!(
+            spy.operations().iter().any(|operation| matches!(
+                operation,
+                RecordedOperation::SetBrightness { node_id: 42, .. }
+            )),
+            "expected direct device control to address node 42",
+        );
+    }
+
+    #[test]
     fn turn_off_sends_off_to_all_devices() {
         let (controller, spy, _) = make_controller();
 
@@ -455,6 +478,22 @@ mod tests {
     }
 
     #[test]
+    fn turn_off_direct_device_id_without_registry_room_succeeds() {
+        let (controller, spy, _) = make_controller();
+
+        block_on(controller.turn_off("matter-42", None)).unwrap();
+
+        assert_eq!(
+            spy.operations(),
+            vec![RecordedOperation::SetOnOff {
+                node_id: 42,
+                endpoint: 1,
+                on: false,
+            }]
+        );
+    }
+
+    #[test]
     fn any_lights_on_returns_true_when_device_on() {
         let (controller, spy, _) = make_controller();
         spy.set_on_off_state(42, true);
@@ -468,6 +507,15 @@ mod tests {
         let (controller, _, _) = make_controller();
         let result = block_on(controller.any_lights_on("kitchen")).unwrap();
         assert!(!result);
+    }
+
+    #[test]
+    fn any_lights_on_direct_device_id_reads_state() {
+        let (controller, spy, _) = make_controller();
+        spy.set_on_off_state(42, true);
+
+        let result = block_on(controller.any_lights_on("matter-42")).unwrap();
+        assert!(result);
     }
 
     #[test]

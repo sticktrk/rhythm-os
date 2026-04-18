@@ -11,7 +11,6 @@ use rhythm_os::handlers::ApiResponse;
 use rhythm_os::mdns::MDNS_HOSTNAME_PREFIX;
 use rhythm_os::state::SharedState;
 use tower_http::cors::CorsLayer;
-use tower_http::trace::TraceLayer;
 
 /// Create the Axum router with all API routes.
 pub fn create_router(state: SharedState) -> Router {
@@ -51,7 +50,7 @@ pub fn create_router(state: SharedState) -> Router {
         .with_state(state)
         // CORS + trace at outer level so they cover fallback/404 responses too
         .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
+        .layer(rhythm_os::axum_router::http_trace_layer())
 }
 
 // ---------------------------------------------------------------------------

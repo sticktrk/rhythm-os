@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-chipd"
-version = "0.4.106"
+version = "0.4.107"
 dependencies = [
  "anyhow",
  "cc",
@@ -1809,6 +1809,7 @@ dependencies = [
  "tokio",
  "tower 0.4.13",
  "tower-http 0.5.2",
+ "tracing",
 ]
 
 [[package]]

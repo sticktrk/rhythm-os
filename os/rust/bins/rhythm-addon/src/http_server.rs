@@ -4,7 +4,6 @@ use axum::routing::get;
 use axum::Router;
 use rhythm_os::state::SharedState;
 use tower_http::cors::CorsLayer;
-use tower_http::trace::TraceLayer;
 
 /// Create the Axum router with all API routes.
 pub fn create_router(state: SharedState) -> Router {
@@ -17,5 +16,5 @@ pub fn create_router(state: SharedState) -> Router {
         .with_state(state);
 
     api.layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
+        .layer(rhythm_os::axum_router::http_trace_layer())
 }
