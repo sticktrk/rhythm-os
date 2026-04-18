@@ -5,7 +5,6 @@ import 'package:rhythm_core/rhythm_core.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../backend/backend.dart';
-import '../backend/auth/supabase_auth_backend.dart';
 import 'auth_service.dart';
 import 'server_bundle_api.dart';
 
@@ -166,6 +165,8 @@ class CloudBackupService {
     try {
       final api = ServerBundleApi(endpoint: serverHub.endpoint);
       final configurationBundle = await api.getConfigurationBundle();
+      // Persist the secret-bearing GET /api/backup payload. The PUT response is
+      // intentionally redacted and must not replace the stored backup.
       final backupBundle = await api.getBackupBundle(includeSecrets: true);
       final snapshot = buildSnapshot(
         userId: userId,

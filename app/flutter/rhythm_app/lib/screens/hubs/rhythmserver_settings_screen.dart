@@ -1355,49 +1355,15 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   }
 
   List<Widget> _buildMatterAddOptionRows(ServerSyncProvider syncProvider) {
-    final methods = <MatterAddMethod>[];
-    if (syncProvider.canAddMatterOnNetworkDevice) {
-      methods.add(MatterAddMethod.onNetworkSetupCode);
-    }
-    if (syncProvider.canCommissionMatterBleWifi) {
-      methods.add(MatterAddMethod.bleWifiCommissioning);
-    }
-
-    if (methods.isEmpty) {
-      if (!syncProvider.canAddMatterDevice) return const [];
-      return [
-        _buildHubOptionRow(
-          icon: Icons.memory_outlined,
-          label: 'Add Matter Device',
-          color: const Color(0xFF26A69A),
-          onTap: () => _startMatterAddFlow(),
-        ),
-      ];
-    }
-
-    final rows = <Widget>[];
-    for (var i = 0; i < methods.length; i++) {
-      if (i > 0) {
-        rows.add(
-          Divider(
-            height: 1,
-            color: CelestialColors.orbitRing.withValues(alpha: 0.3),
-          ),
-        );
-      }
-      final method = methods[i];
-      rows.add(
-        _buildHubOptionRow(
-          icon: method == MatterAddMethod.onNetworkSetupCode
-              ? Icons.wifi_tethering_rounded
-              : Icons.bluetooth_searching_rounded,
-          label: method.actionLabel,
-          color: const Color(0xFF26A69A),
-          onTap: () => _startMatterAddFlow(preferredMethod: method),
-        ),
-      );
-    }
-    return rows;
+    if (!syncProvider.canAddMatterDevice) return const [];
+    return [
+      _buildHubOptionRow(
+        icon: Icons.memory_outlined,
+        label: 'Add Matter Device',
+        color: const Color(0xFF26A69A),
+        onTap: () => _startMatterAddFlow(),
+      ),
+    ];
   }
 
   // ─── Hub Pairing Suggestions ─────────────────────────────
@@ -3784,14 +3750,7 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
     final hubColor = _RhythmServerSettingsScreenState._hubColor(_type);
     final hubIcon = _RhythmServerSettingsScreenState._hubIcon(_type);
     final canAddMatter = syncProvider.canAddMatterDevice;
-    final matterActionLabel = switch ((
-      syncProvider.canAddMatterOnNetworkDevice,
-      syncProvider.canCommissionMatterBleWifi,
-    )) {
-      (true, false) => 'Add On-Network Device',
-      (false, true) => 'Commission New Device',
-      _ => 'Add Matter Device',
-    };
+    const matterActionLabel = 'Add Matter Device';
 
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,

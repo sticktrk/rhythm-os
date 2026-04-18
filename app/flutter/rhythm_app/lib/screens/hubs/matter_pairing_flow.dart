@@ -7,7 +7,6 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
 import '../../providers/home_provider.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../widgets/device_detail_sheet.dart';
-import '../../widgets/solar_orbit.dart';
 import 'matter_add_method.dart';
 import 'matter_device_add_screen.dart';
 
@@ -116,100 +115,5 @@ Future<MatterAddMethod?> _resolveMatterAddMethod(
   MatterAddMethod? preferredMethod,
 }) async {
   if (preferredMethod != null) return preferredMethod;
-
-  final methods = _availableMatterAddMethods(syncProvider);
-  if (methods.isEmpty) {
-    return syncProvider.canAddMatterDevice ? MatterAddMethod.automatic : null;
-  }
-  if (methods.length == 1) return methods.single;
-
-  return showModalBottomSheet<MatterAddMethod>(
-    context: context,
-    backgroundColor: Colors.transparent,
-    builder: (ctx) => Container(
-      decoration: BoxDecoration(
-        color: CelestialColors.backgroundCard,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const SizedBox(height: 12),
-          Container(
-            width: 36,
-            height: 4,
-            decoration: BoxDecoration(
-              color: CelestialColors.orbitRing,
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-          const SizedBox(height: 18),
-          Text(
-            'Add Matter Device',
-            style: const TextStyle(
-              color: CelestialColors.textPrimary,
-              fontSize: 18,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: Text(
-              'Choose how Rhythm should add this Matter device.',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: CelestialColors.textSecondary.withValues(alpha: 0.72),
-                fontSize: 14,
-                height: 1.4,
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          for (final method in methods) ...[
-            ListTile(
-              leading: Icon(
-                method == MatterAddMethod.onNetworkSetupCode
-                    ? Icons.wifi_tethering_rounded
-                    : Icons.bluetooth_searching_rounded,
-                color: const Color(0xFF26A69A),
-              ),
-              title: Text(
-                method.actionLabel,
-                style: const TextStyle(color: CelestialColors.textPrimary),
-              ),
-              subtitle: Text(
-                method.description,
-                style: TextStyle(
-                  color: CelestialColors.textSecondary.withValues(alpha: 0.72),
-                  fontSize: 12,
-                  height: 1.35,
-                ),
-              ),
-              onTap: () => Navigator.of(ctx).pop(method),
-            ),
-            if (method != methods.last)
-              Divider(
-                height: 1,
-                color: CelestialColors.orbitRing.withValues(alpha: 0.3),
-              ),
-          ],
-          SizedBox(height: MediaQuery.of(ctx).padding.bottom + 16),
-        ],
-      ),
-    ),
-  );
-}
-
-List<MatterAddMethod> _availableMatterAddMethods(
-  ServerSyncProvider syncProvider,
-) {
-  final methods = <MatterAddMethod>[];
-  if (syncProvider.canAddMatterOnNetworkDevice) {
-    methods.add(MatterAddMethod.onNetworkSetupCode);
-  }
-  if (syncProvider.canCommissionMatterBleWifi) {
-    methods.add(MatterAddMethod.bleWifiCommissioning);
-  }
-  return methods;
+  return syncProvider.canAddMatterDevice ? MatterAddMethod.automatic : null;
 }

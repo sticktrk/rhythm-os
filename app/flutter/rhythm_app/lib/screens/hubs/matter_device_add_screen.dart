@@ -164,11 +164,11 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
             'Wi-Fi configuration is not present on the server appliance.',
           if (wifiStatus.connected != true)
             'The server appliance is not currently connected to Wi-Fi.',
-          'Provision the appliance onto Wi-Fi first, then retry Matter commissioning.',
-          'The app does not ask for accessory Wi-Fi credentials here.',
+          'Connect the appliance to Wi-Fi first, then try again.',
+          'You do not need to enter network credentials here.',
         ];
         _showPairingError(
-          'This Rhythm appliance is not ready to commission a new Matter device.',
+          'This Rhythm appliance is not ready to add a new device.',
           detail: details.join(' '),
         );
         return;
@@ -211,7 +211,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       Navigator.of(context).pop(
         MatterDevicePairingResult(
           nativeDeviceId: nativeDeviceId,
-          name: device['name'] as String? ?? 'Matter Device',
+          name: device['name'] as String? ?? 'Device',
           deviceType: device['device_type'] as String? ?? 'light',
           manufacturer: device['manufacturer'] as String?,
           model: device['model'] as String?,
@@ -350,7 +350,11 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         ),
         const SizedBox(height: 32),
         Text(
-          widget.addMethod.actionLabel,
+          switch (widget.addMethod) {
+            MatterAddMethod.automatic => 'Add Device',
+            MatterAddMethod.onNetworkSetupCode => 'Add Device',
+            MatterAddMethod.bleWifiCommissioning => 'Add Device',
+          },
           style: TextStyle(
             color: CelestialColors.textPrimary,
             fontSize: 20,
@@ -361,11 +365,11 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         Text(
           switch (widget.addMethod) {
             MatterAddMethod.automatic =>
-              'Use the Matter QR code, paste the raw MT: payload, or enter the device manual code.',
+              'Scan the QR code, paste the setup payload, or enter the manual code from the device.',
             MatterAddMethod.onNetworkSetupCode =>
-              'The device should already be on your IP/Wi-Fi network. Enter its setup code or QR payload.',
+              'Enter the setup code or scan the QR payload from the device.',
             MatterAddMethod.bleWifiCommissioning =>
-              'Power on the new device nearby, then enter its setup code or QR payload to start BLE commissioning.',
+              'Power on the device nearby, then enter its setup code or QR payload to continue.',
           },
           textAlign: TextAlign.center,
           style: TextStyle(
@@ -377,11 +381,11 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         Text(
           switch (widget.addMethod) {
             MatterAddMethod.automatic =>
-              'Rhythm sends the setup payload to the server. The server chooses the Matter add path.',
+              'Rhythm sends the setup data to the server and the server chooses the best available path.',
             MatterAddMethod.onNetworkSetupCode =>
-              'Rhythm sends the setup payload to the server so it can add the already-on-network device to your fabric.',
+              'Rhythm sends the setup data to the server and asks it to add the device.',
             MatterAddMethod.bleWifiCommissioning =>
-              'Rhythm sends the setup payload to the server so it can use BLE and the appliance\'s stored Wi-Fi credentials to commission the device.',
+              'Rhythm sends the setup data to the server and asks it to finish setup for the device.',
           },
           textAlign: TextAlign.center,
           style: TextStyle(
@@ -437,10 +441,10 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
             labelText: 'Setup payload or manual code',
             hintText: 'MT:Y.K908OC16750648G00 or 3497-123-4567',
             helperText: _setupPayloadController.text.isEmpty
-                ? 'Paste the raw MT: payload or the code printed on the device.'
+                ? 'Paste the setup payload or the code printed on the device.'
                 : (_looksLikeMatterPayload
                     ? 'Ready to send to the server.'
-                    : 'This does not look like a typical Matter code, but you can still try pairing.'),
+                    : 'This does not look like a typical setup code, but you can still try adding the device.'),
             contentPadding: const EdgeInsets.symmetric(
               horizontal: 16,
               vertical: 16,
@@ -491,7 +495,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
                 switch (widget.addMethod) {
                   MatterAddMethod.automatic => 'Add Device',
                   MatterAddMethod.onNetworkSetupCode => 'Add Device',
-                  MatterAddMethod.bleWifiCommissioning => 'Commission Device',
+                  MatterAddMethod.bleWifiCommissioning => 'Add Device',
                 },
                 style: TextStyle(
                   color: _hasSetupPayload
@@ -506,22 +510,22 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         ),
         const SizedBox(height: 20),
         _buildInfoCard(
-          title: 'Pairing Contract',
+          title: 'What Happens Next',
           lines: switch (widget.addMethod) {
             MatterAddMethod.automatic => const [
-                'Matter add support is host-driven. The server decides whether to use on-network or BLE commissioning.',
-                'Send the raw setup payload to the server. Do not ask for accessory Wi-Fi credentials here.',
-                'No separate Matter hub setup flow is needed in the app.',
+                'Rhythm sends the setup data to the server.',
+                'The server picks the best available way to add the device.',
+                'You do not need a separate hub setup flow here.',
               ],
             MatterAddMethod.onNetworkSetupCode => const [
-                'Use this when the device is already on IP/Wi-Fi and ready to join your fabric with a setup code.',
-                'This path should not depend on appliance Wi-Fi provisioning checks.',
-                'No separate Matter hub setup flow is needed in the app.',
+                'Use this when the device is already ready to be added.',
+                'Rhythm sends the setup data to the server.',
+                'You do not need a separate hub setup flow here.',
               ],
             MatterAddMethod.bleWifiCommissioning => const [
-                'Use this when the device is not on Wi-Fi yet and needs BLE commissioning.',
-                'The server appliance must already have Wi-Fi configured and connected.',
-                'No accessory Wi-Fi credentials are entered in the app.',
+                'Use this when the device still needs a full setup path.',
+                'The server appliance must already be connected and ready.',
+                'You do not need to enter network credentials here.',
               ],
           },
         ),
@@ -600,7 +604,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
           switch (widget.addMethod) {
             MatterAddMethod.automatic => 'Adding Device...',
             MatterAddMethod.onNetworkSetupCode => 'Adding Device...',
-            MatterAddMethod.bleWifiCommissioning => 'Commissioning Device...',
+            MatterAddMethod.bleWifiCommissioning => 'Adding Device...',
           },
           style: TextStyle(
             color: CelestialColors.textPrimary,
@@ -612,11 +616,11 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         Text(
           switch (widget.addMethod) {
             MatterAddMethod.automatic =>
-              'Keep this screen open while Rhythm adds the device to your Matter fabric.',
+              'Keep this screen open while Rhythm adds the device.',
             MatterAddMethod.onNetworkSetupCode =>
-              'Keep this screen open while Rhythm looks for the already-on-network device and adds it to your Matter fabric.',
+              'Keep this screen open while Rhythm finds the device and adds it.',
             MatterAddMethod.bleWifiCommissioning =>
-              'Keep this screen open while Rhythm uses BLE and Wi-Fi commissioning to bring the device onto your Matter fabric.',
+              'Keep this screen open while Rhythm completes setup and adds the device.',
           },
           textAlign: TextAlign.center,
           style: TextStyle(
@@ -639,10 +643,8 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         _buildInfoCard(
           title: 'This request is synchronous',
           lines: [
-            widget.addMethod == MatterAddMethod.bleWifiCommissioning
-                ? 'Commissioning usually completes in about 15-30 seconds.'
-                : 'Adding usually completes in about 15-30 seconds.',
-            'No separate Matter hub connection step is needed in the app.',
+            'Adding usually completes in about 15-30 seconds.',
+            'No separate hub connection step is needed in the app.',
           ],
         ),
         const SizedBox(height: 32),
