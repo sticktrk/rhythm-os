@@ -4,16 +4,16 @@ import 'package:test/test.dart';
 void main() {
   group('RhythmCurveConfig', () {
     group('static constants', () {
-      test('defaultMinColorTemp is 1800', () {
-        expect(RhythmCurveConfig.defaultMinColorTemp, 1800);
+      test('defaultMinColorTemp is 2200', () {
+        expect(RhythmCurveConfig.defaultMinColorTemp, 2200);
       });
 
-      test('defaultMaxColorTemp is 5500', () {
-        expect(RhythmCurveConfig.defaultMaxColorTemp, 5500);
+      test('defaultMaxColorTemp is 6500', () {
+        expect(RhythmCurveConfig.defaultMaxColorTemp, 6500);
       });
 
-      test('defaultMinBrightness is 2', () {
-        expect(RhythmCurveConfig.defaultMinBrightness, 2);
+      test('defaultMinBrightness is 1', () {
+        expect(RhythmCurveConfig.defaultMinBrightness, 1);
       });
 
       test('defaultMaxBrightness is 100', () {
@@ -40,8 +40,8 @@ void main() {
         expect(RhythmCurveConfig.defaultShapeP, 6.0);
       });
 
-      test('defaultMaxDimSteps is 6', () {
-        expect(RhythmCurveConfig.defaultMaxDimSteps, 6);
+      test('defaultMaxDimSteps is 12', () {
+        expect(RhythmCurveConfig.defaultMaxDimSteps, 12);
       });
     });
 
@@ -173,17 +173,28 @@ void main() {
       test('produces a map with snake_case keys', () {
         const config = RhythmCurveConfig();
         final json = config.toJson();
-        expect(json, containsPair('min_color_temp', 1800));
-        expect(json, containsPair('max_color_temp', 5500));
-        expect(json, containsPair('min_brightness', 2));
+        expect(json, containsPair('id', ''));
+        expect(json, containsPair('name', ''));
+        expect(json, containsPair('min_color_temp', 2200));
+        expect(json, containsPair('max_color_temp', 6500));
+        expect(json, containsPair('min_brightness', 1));
         expect(json, containsPair('max_brightness', 100));
-        expect(json, containsPair('width_left_bri', 0.95));
-        expect(json, containsPair('width_right_bri', 0.85));
-        expect(json, containsPair('width_left_cct', 0.95));
-        expect(json, containsPair('width_right_cct', 1.15));
-        expect(json, containsPair('shape_p', 6.0));
-        expect(json, containsPair('max_dim_steps', 6));
-        expect(json.length, 10);
+        expect(json, containsPair('max_dim_steps', 12));
+        expect(json, containsPair('fade_ms', 500));
+        expect(json, containsPair('motion_timeout_secs', 600));
+        expect(json, containsPair('rhythm_interval_secs', 60));
+        expect(
+          json['curve'],
+          {
+            'type': 'super-gaussian',
+            'width_left_bri': 0.95,
+            'width_right_bri': 0.85,
+            'width_left_cct': 0.95,
+            'width_right_cct': 1.15,
+            'shape_p': 6.0,
+          },
+        );
+        expect(json.length, 11);
       });
 
       test('round-trips through fromJson', () {
@@ -205,25 +216,17 @@ void main() {
     });
 
     group('toQueryParams', () {
-      test('excludes max_dim_steps', () {
+      test('includes profile id, common bounds, and cadence', () {
         const config = RhythmCurveConfig();
         final params = config.toQueryParams();
-        expect(params, isNot(contains('max_dim_steps')));
-        expect(params.length, 9);
-      });
-
-      test('includes all other fields', () {
-        const config = RhythmCurveConfig();
-        final params = config.toQueryParams();
-        expect(params, containsPair('min_color_temp', 1800));
-        expect(params, containsPair('max_color_temp', 5500));
-        expect(params, containsPair('min_brightness', 2));
+        expect(params, containsPair('id', ''));
+        expect(params, containsPair('min_color_temp', 2200));
+        expect(params, containsPair('max_color_temp', 6500));
+        expect(params, containsPair('min_brightness', 1));
         expect(params, containsPair('max_brightness', 100));
-        expect(params, containsPair('width_left_bri', 0.95));
-        expect(params, containsPair('width_right_bri', 0.85));
-        expect(params, containsPair('width_left_cct', 0.95));
-        expect(params, containsPair('width_right_cct', 1.15));
-        expect(params, containsPair('shape_p', 6.0));
+        expect(params, containsPair('max_dim_steps', 12));
+        expect(params, containsPair('rhythm_interval_secs', 60));
+        expect(params.length, 7);
       });
     });
 

@@ -1,3 +1,4 @@
+import '../json_parsing.dart';
 import 'rhythm_curve_config.dart';
 
 /// Solar context with sunrise/sunset times for the current day.
@@ -47,7 +48,7 @@ class RhythmSolarContext {
   }
 }
 
-/// Raw user configuration using super-Gaussian curve parameters.
+/// Legacy raw config view used by the app's existing super-Gaussian tools.
 class RhythmRawConfig {
   final int minColorTemp;
   final int maxColorTemp;
@@ -59,6 +60,8 @@ class RhythmRawConfig {
   final double widthRightCct;
   final double shapeP;
   final int maxDimSteps;
+  final int fadeMs;
+  final int motionTimeoutSecs;
 
   const RhythmRawConfig({
     required this.minColorTemp,
@@ -71,9 +74,15 @@ class RhythmRawConfig {
     required this.widthRightCct,
     required this.shapeP,
     required this.maxDimSteps,
+    required this.fadeMs,
+    required this.motionTimeoutSecs,
   });
 
   factory RhythmRawConfig.fromJson(Map<String, dynamic> json) {
+    final curveJson = json['curve'] as Map<String, dynamic>?;
+    final curve =
+        curveJson != null ? RhythmCurveShape.fromJson(curveJson) : null;
+    final superGaussian = curve is RhythmSuperGaussianCurve ? curve : null;
     return RhythmRawConfig(
       minColorTemp: (json['min_color_temp'] as num?)?.toInt() ??
           RhythmCurveConfig.defaultMinColorTemp,
@@ -83,18 +92,27 @@ class RhythmRawConfig {
           RhythmCurveConfig.defaultMinBrightness,
       maxBrightness: (json['max_brightness'] as num?)?.toInt() ??
           RhythmCurveConfig.defaultMaxBrightness,
-      widthLeftBri: (json['width_left_bri'] as num?)?.toDouble() ??
+      widthLeftBri: superGaussian?.widthLeftBri ??
+          (json['width_left_bri'] as num?)?.toDouble() ??
           RhythmCurveConfig.defaultWidthLeftBri,
-      widthRightBri: (json['width_right_bri'] as num?)?.toDouble() ??
+      widthRightBri: superGaussian?.widthRightBri ??
+          (json['width_right_bri'] as num?)?.toDouble() ??
           RhythmCurveConfig.defaultWidthRightBri,
-      widthLeftCct: (json['width_left_cct'] as num?)?.toDouble() ??
+      widthLeftCct: superGaussian?.widthLeftCct ??
+          (json['width_left_cct'] as num?)?.toDouble() ??
           RhythmCurveConfig.defaultWidthLeftCct,
-      widthRightCct: (json['width_right_cct'] as num?)?.toDouble() ??
+      widthRightCct: superGaussian?.widthRightCct ??
+          (json['width_right_cct'] as num?)?.toDouble() ??
           RhythmCurveConfig.defaultWidthRightCct,
-      shapeP:
-          (json['shape_p'] as num?)?.toDouble() ?? RhythmCurveConfig.defaultShapeP,
+      shapeP: superGaussian?.shapeP ??
+          (json['shape_p'] as num?)?.toDouble() ??
+          RhythmCurveConfig.defaultShapeP,
       maxDimSteps: (json['max_dim_steps'] as num?)?.toInt() ??
           RhythmCurveConfig.defaultMaxDimSteps,
+      fadeMs:
+          (json['fade_ms'] as num?)?.toInt() ?? RhythmCurveConfig.defaultFadeMs,
+      motionTimeoutSecs: (json['motion_timeout_secs'] as num?)?.toInt() ??
+          RhythmCurveConfig.defaultMotionTimeoutSecs,
     );
   }
 
@@ -110,6 +128,8 @@ class RhythmRawConfig {
       widthRightCct: RhythmCurveConfig.defaultWidthRightCct,
       shapeP: RhythmCurveConfig.defaultShapeP,
       maxDimSteps: RhythmCurveConfig.defaultMaxDimSteps,
+      fadeMs: RhythmCurveConfig.defaultFadeMs,
+      motionTimeoutSecs: RhythmCurveConfig.defaultMotionTimeoutSecs,
     );
   }
 
@@ -125,6 +145,8 @@ class RhythmRawConfig {
       'width_right_cct': widthRightCct,
       'shape_p': shapeP,
       'max_dim_steps': maxDimSteps,
+      'fade_ms': fadeMs,
+      'motion_timeout_secs': motionTimeoutSecs,
     };
   }
 
@@ -139,6 +161,8 @@ class RhythmRawConfig {
     double? widthRightCct,
     double? shapeP,
     int? maxDimSteps,
+    int? fadeMs,
+    int? motionTimeoutSecs,
   }) {
     return RhythmRawConfig(
       minColorTemp: minColorTemp ?? this.minColorTemp,
@@ -151,6 +175,8 @@ class RhythmRawConfig {
       widthRightCct: widthRightCct ?? this.widthRightCct,
       shapeP: shapeP ?? this.shapeP,
       maxDimSteps: maxDimSteps ?? this.maxDimSteps,
+      fadeMs: fadeMs ?? this.fadeMs,
+      motionTimeoutSecs: motionTimeoutSecs ?? this.motionTimeoutSecs,
     );
   }
 }
@@ -172,11 +198,13 @@ class RhythmConfigState {
   });
 
   factory RhythmConfigState.fromJson(Map<String, dynamic> json) {
-    final configMap = json['config'] as Map<String, dynamic>?;
-    final solarMap = json['solar'] as Map<String, dynamic>?;
+    final configMap = normalizeActiveProfile(json);
+    final solarMap = jsonMap(json['solar']);
 
     return RhythmConfigState(
-      config: RhythmRawConfig.fromJson(configMap ?? json),
+      config: RhythmRawConfig.fromJson(
+        configMap.isNotEmpty ? configMap : json,
+      ),
       solar: solarMap != null
           ? RhythmSolarContext.fromJson(solarMap)
           : RhythmSolarContext.defaults(),
@@ -203,19 +231,23 @@ class RhythmConfigState {
     );
   }
 
-  /// Convert RhythmRawConfig to RhythmCurveConfig for API interop.
+  /// Convert legacy raw config to a full profile config.
   static RhythmCurveConfig rawConfigToCurveConfig(RhythmRawConfig config) {
     return RhythmCurveConfig(
       minColorTemp: config.minColorTemp,
       maxColorTemp: config.maxColorTemp,
       minBrightness: config.minBrightness,
       maxBrightness: config.maxBrightness,
-      widthLeftBri: config.widthLeftBri,
-      widthRightBri: config.widthRightBri,
-      widthLeftCct: config.widthLeftCct,
-      widthRightCct: config.widthRightCct,
-      shapeP: config.shapeP,
       maxDimSteps: config.maxDimSteps,
+      fadeMs: config.fadeMs,
+      motionTimeoutSecs: config.motionTimeoutSecs,
+      curve: RhythmSuperGaussianCurve(
+        widthLeftBri: config.widthLeftBri,
+        widthRightBri: config.widthRightBri,
+        widthLeftCct: config.widthLeftCct,
+        widthRightCct: config.widthRightCct,
+        shapeP: config.shapeP,
+      ),
     );
   }
 }

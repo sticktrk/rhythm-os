@@ -11,18 +11,23 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
+import 'package:logging/logging.dart';
 
 import '../api/rhythm_server_api.dart';
+import '../json_parsing.dart';
 import '../models/rhythm_connection_state.dart';
 import '../models/rhythm_hello.dart';
 import '../models/rhythm_room.dart';
+import '../rhythm_log_interceptor.dart';
 
 /// Cached room state for diff detection.
 class _CachedRoomState {
   final bool rhythmEnabled;
   final double timeOffset;
   final double brightnessOffset;
-  final bool softOff;
+  final RoomModeState state;
+  final bool transitioning;
+  final RhythmMode? mode;
   final bool? lightsOn;
   final int? brightness;
   final int? kelvin;
@@ -36,7 +41,9 @@ class _CachedRoomState {
     required this.rhythmEnabled,
     required this.timeOffset,
     required this.brightnessOffset,
-    required this.softOff,
+    required this.state,
+    this.transitioning = false,
+    this.mode,
     this.lightsOn,
     this.brightness,
     this.kelvin,
@@ -53,11 +60,13 @@ class _CachedRoomState {
 /// Call [connect] to establish a connection. The manager automatically
 /// polls for state changes and attempts SSE for real-time updates.
 class RhythmConnection {
+  static final _log = Logger('rhythm_sdk.connection');
+
   // Stream controllers (broadcast so multiple listeners work).
   final _helloController = StreamController<RhythmHello>.broadcast();
-  final _rhythmStateController =
-      StreamController<RhythmRoomState>.broadcast();
-  final _hubEventController = StreamController<String>.broadcast();
+  final _rhythmStateController = StreamController<RhythmRoomState>.broadcast();
+  final _hubEventController =
+      StreamController<({String event, String? hubType})>.broadcast();
   final _motionTimerController =
       StreamController<RhythmMotionTimer>.broadcast();
   final _newRoomsController = StreamController<void>.broadcast();
@@ -108,7 +117,7 @@ class RhythmConnection {
 
   // Cached room states for diff detection.
   final Map<String, _CachedRoomState> _cachedRoomStates = {};
-  bool? _cachedHubConnected;
+  final Map<String, bool> _cachedHubConnected = {};
   final Set<String> _reHelloSuppressedRoomIds = {};
 
   // Optional web base URL (consumer passes Uri.base.toString() on web).
@@ -124,7 +133,8 @@ class RhythmConnection {
   Stream<RhythmHello> get helloEvents => _helloController.stream;
   Stream<RhythmRoomState> get rhythmStateEvents =>
       _rhythmStateController.stream;
-  Stream<String> get hubEvents => _hubEventController.stream;
+  Stream<({String event, String? hubType})> get hubEvents =>
+      _hubEventController.stream;
   Stream<RhythmMotionTimer> get motionTimerEvents =>
       _motionTimerController.stream;
   Stream<void> get newRoomsDetected => _newRoomsController.stream;
@@ -175,7 +185,7 @@ class RhythmConnection {
       _reconnectTimer = null;
       _reconnectAttempts = 0;
       _cachedRoomStates.clear();
-      _cachedHubConnected = null;
+      _cachedHubConnected.clear();
       _reHelloSuppressedRoomIds.clear();
       _sseSupported = true;
       _sseDirectAttempted = false;
@@ -190,8 +200,10 @@ class RhythmConnection {
       connectTimeout: const Duration(seconds: 5),
       receiveTimeout: const Duration(seconds: 10),
     ));
+    _dio!.interceptors.add(RhythmLogInterceptor(_log));
     _api = RhythmServerApi(_dio!, onStatesReceived: _updateCacheFromStates);
 
+    _log.config('Connecting to $host:$port');
     await _connectInternal();
   }
 
@@ -206,7 +218,10 @@ class RhythmConnection {
     _reconnectAttempts = 0;
     _consecutivePollFailures = 0;
     _cachedRoomStates.clear();
-    _cachedHubConnected = null;
+    // Keep _cachedHubConnected across reconnects — the hello will update it
+    // authoritatively, but preserving it prevents the re-established SSE
+    // stream's initial hub_status event from looking like a new change
+    // (which would trigger another reconnect → infinite loop).
     _sseDirectAttempted = false;
     await _connectInternal();
   }
@@ -228,7 +243,7 @@ class RhythmConnection {
     _api = null;
 
     _cachedRoomStates.clear();
-    _cachedHubConnected = null;
+    _cachedHubConnected.clear();
     _reHelloSuppressedRoomIds.clear();
     _sseSupported = true;
     _sseDirectAttempted = false;
@@ -305,9 +320,9 @@ class RhythmConnection {
         : RhythmConnectionState.connecting);
 
     try {
-      final response = await _dio!.get('api/state');
-      final data = response.data as Map<String, dynamic>;
+      final data = await _getHelloPayload();
       final hello = RhythmHello.fromJson(data);
+      _log.fine('hello last_tick_epoch_ms=${hello.lastTickEpochMs}');
       _serverPlatformContext = hello.platformContext;
       _listenPort = hello.listenPort;
       _sseDirectAttempted = false;
@@ -318,7 +333,8 @@ class RhythmConnection {
           rhythmEnabled: room.rhythmEnabled,
           timeOffset: room.timeOffset,
           brightnessOffset: room.brightnessOffset,
-          softOff: room.softOff,
+          state: room.state,
+          transitioning: room.transitioning,
           lightsOn: room.lightsOn,
           brightness: room.brightness,
           kelvin: room.kelvin,
@@ -327,11 +343,21 @@ class RhythmConnection {
       }
 
       _reHelloSuppressedRoomIds.removeAll(_cachedRoomStates.keys);
-      _cachedHubConnected = hello.hub['connected'] as bool?;
+      // Cache per-hub connected state from hello for diff detection.
+      _cachedHubConnected.clear();
+      for (final hub in hello.hubs) {
+        final hubType = hub['type'] as String?;
+        if (hubType != null && hubType != 'none') {
+          _cachedHubConnected[hubType] = hub['connected'] as bool? ?? false;
+        }
+      }
 
       _setConnectionState(RhythmConnectionState.connected);
       _reconnectAttempts = 0;
       _consecutivePollFailures = 0;
+
+      _log.config('Connected, platform=${hello.platformType}, '
+          '${hello.rooms.length} rooms');
 
       _helloController.add(hello);
       _startPolling();
@@ -342,8 +368,14 @@ class RhythmConnection {
         _connectSse();
       }
     } catch (e) {
+      _log.severe('Connection failed', e);
       _scheduleReconnect();
     }
+  }
+
+  Future<Map<String, dynamic>> _getHelloPayload() async {
+    final response = await _dio!.get('api/state');
+    return Map<String, dynamic>.from(response.data as Map<String, dynamic>);
   }
 
   // --------------------------------------------------------------------------
@@ -370,12 +402,8 @@ class RhythmConnection {
       final data = response.data as Map<String, dynamic>;
       _consecutivePollFailures = 0;
 
-      // Hub connected changes.
-      final hubConnected = data['hub_connected'] as bool?;
-      if (hubConnected != null && hubConnected != _cachedHubConnected) {
-        _cachedHubConnected = hubConnected;
-        _hubEventController.add(hubConnected ? 'connected' : 'disconnected');
-      }
+      // Poll doesn't carry per-hub status — skip hub event emission.
+      // The hello (which runs on reconnect) provides authoritative per-hub state.
 
       final previousRoomIds = _cachedRoomStates.keys.toSet();
       final rooms = data['rooms'] as List<dynamic>? ?? [];
@@ -387,36 +415,35 @@ class RhythmConnection {
         if (roomId.isEmpty) continue;
         seenRoomIds.add(roomId);
 
-        final rhythmEnabled = roomJson['rhythm_enabled'] as bool? ?? false;
-        final timeOffset =
-            (roomJson['time_offset'] as num?)?.toDouble() ?? 0.0;
-        final brightnessOffset =
-            (roomJson['brightness_offset'] as num?)?.toDouble() ?? 0.0;
-        final softOff = roomJson['soft_off'] as bool? ?? false;
-        final lightsOn = roomJson['lights_on'] as bool?;
-        final brightness = (roomJson['brightness'] as num?)?.toInt();
-        final kelvin = (roomJson['kelvin'] as num?)?.toInt();
+        final roomState = RhythmRoomState.fromJson(roomJson);
 
         final motionActive = roomJson['motion_active'] as bool?;
         final motionOwned = roomJson['motion_owned'] as bool?;
-        final motionRemaining =
-            (roomJson['remaining_secs'] as num?)?.toInt() ??
-                (roomJson['motion_remaining'] as num?)?.toInt();
-        final motionTimeout =
-            (roomJson['timeout_secs'] as num?)?.toInt() ??
-                (roomJson['motion_timeout'] as num?)?.toInt();
+        final motionRemaining = jsonInt(roomJson['remaining_secs'],
+                preferredKeys: const ['remaining_secs']) ??
+            jsonInt(
+              roomJson['motion_remaining'],
+              preferredKeys: const ['motion_remaining', 'remaining_secs'],
+            );
+        final motionTimeout = jsonInt(roomJson['timeout_secs'],
+                preferredKeys: const ['timeout_secs']) ??
+            jsonInt(
+              roomJson['motion_timeout'],
+              preferredKeys: const ['motion_timeout', 'timeout_secs'],
+            );
 
         final cached = _cachedRoomStates[roomId];
         final hasMotionSensor = motionActive != null;
 
         final rhythmChanged = cached == null ||
-            cached.rhythmEnabled != rhythmEnabled ||
-            cached.timeOffset != timeOffset ||
-            cached.brightnessOffset != brightnessOffset ||
-            cached.softOff != softOff ||
-            cached.lightsOn != lightsOn ||
-            cached.brightness != brightness ||
-            cached.kelvin != kelvin;
+            cached.rhythmEnabled != roomState.rhythmEnabled ||
+            cached.timeOffset != roomState.timeOffset ||
+            cached.brightnessOffset != roomState.brightnessOffset ||
+            cached.state != roomState.state ||
+            cached.transitioning != roomState.transitioning ||
+            cached.lightsOn != roomState.lightsOn ||
+            cached.brightness != roomState.brightness ||
+            cached.kelvin != roomState.kelvin;
 
         final motionChanged = cached == null ||
             cached.motionActive != motionActive ||
@@ -426,13 +453,15 @@ class RhythmConnection {
 
         if (rhythmChanged || motionChanged) {
           _cachedRoomStates[roomId] = _CachedRoomState(
-            rhythmEnabled: rhythmEnabled,
-            timeOffset: timeOffset,
-            brightnessOffset: brightnessOffset,
-            softOff: softOff,
-            lightsOn: lightsOn,
-            brightness: brightness,
-            kelvin: kelvin,
+            rhythmEnabled: roomState.rhythmEnabled,
+            timeOffset: roomState.timeOffset,
+            brightnessOffset: roomState.brightnessOffset,
+            state: roomState.state,
+            transitioning: roomState.transitioning,
+            mode: roomState.mode,
+            lightsOn: roomState.lightsOn,
+            brightness: roomState.brightness,
+            kelvin: roomState.kelvin,
             motionActive: motionActive,
             motionOwned: motionOwned,
             motionRemaining: motionRemaining,
@@ -441,16 +470,7 @@ class RhythmConnection {
           );
 
           if (rhythmChanged) {
-            _rhythmStateController.add(RhythmRoomState(
-              roomId: roomId,
-              rhythmEnabled: rhythmEnabled,
-              timeOffset: timeOffset,
-              brightnessOffset: brightnessOffset,
-              softOff: softOff,
-              lightsOn: lightsOn,
-              brightness: brightness,
-              kelvin: kelvin,
-            ));
+            _rhythmStateController.add(roomState);
           }
 
           if (motionChanged) {
@@ -486,13 +506,16 @@ class RhythmConnection {
             rhythmEnabled: entry.value.rhythmEnabled,
             timeOffset: entry.value.timeOffset,
             brightnessOffset: entry.value.brightnessOffset,
-            softOff: entry.value.softOff,
+            state: entry.value.state,
+            mode: entry.value.mode,
             hasMotionSensor: entry.value.hasMotionSensor,
           );
         }
       }
     } catch (e) {
       _consecutivePollFailures++;
+      _log.warning(
+          'Poll failed ($_consecutivePollFailures/$_maxPollFailures)', e);
       if (_consecutivePollFailures >= _maxPollFailures) {
         _stopPolling();
         _setConnectionState(RhythmConnectionState.reconnecting);
@@ -515,6 +538,7 @@ class RhythmConnection {
     _sseCancelToken = cancelToken;
 
     String sseBaseUrl = _dio!.options.baseUrl;
+    _log.config('SSE connecting to $sseBaseUrl');
     final useDirectSse = _webBaseUrl != null &&
         _serverPlatformContext == 'ha_addon' &&
         _listenPort != null &&
@@ -549,6 +573,7 @@ class RhythmConnection {
       _sseConnected = true;
       _sseConnecting = false;
       _sseReconnectAttempts = 0;
+      _log.config('SSE connected');
       _lastSseActivity = DateTime.now();
       _stopPolling();
       _startSseWatchdog();
@@ -592,23 +617,29 @@ class RhythmConnection {
       _sseConnecting = false;
       if (e.type == DioExceptionType.cancel) return;
       if (e.response?.statusCode == 404) {
+        _log.config('SSE not supported (404)');
         _sseSupported = false;
       } else if (useDirectSse) {
+        _log.warning('SSE direct connect failed, retrying via proxy', e);
         _connectSse();
       } else {
+        _log.warning('SSE connection failed', e);
         _handleSseDisconnect();
       }
     } catch (e) {
       _sseConnecting = false;
       if (useDirectSse) {
+        _log.warning('SSE direct connect error, retrying via proxy', e);
         _connectSse();
       } else {
+        _log.warning('SSE connection error', e);
         _handleSseDisconnect();
       }
     }
   }
 
   void _handleSseEvent(String eventType, String data) {
+    _log.fine('SSE event: $eventType');
     _lastSseEvents[eventType] = (
       type: eventType,
       summary: data.length > 100 ? '${data.substring(0, 100)}...' : data,
@@ -618,8 +649,7 @@ class RhythmConnection {
       switch (eventType) {
         case 'room_state':
           final json = jsonDecode(data) as Map<String, dynamic>;
-          final rooms =
-              (json['data'] as Map<String, dynamic>?)?['rooms']
+          final rooms = (json['data'] as Map<String, dynamic>?)?['rooms']
                   as List<dynamic>? ??
               [];
           for (final raw in rooms) {
@@ -627,25 +657,18 @@ class RhythmConnection {
             final roomId = room['id'] as String? ?? '';
             if (roomId.isEmpty) continue;
 
-            final rhythmEnabled = room['rhythm_enabled'] as bool? ?? false;
-            final timeOffset =
-                (room['time_offset'] as num?)?.toDouble() ?? 0.0;
-            final brightnessOffset =
-                (room['brightness_offset'] as num?)?.toDouble() ?? 0.0;
-            final softOff = room['soft_off'] as bool? ?? false;
-            final lightsOn = room['lights_on'] as bool?;
-            final brightness = (room['brightness'] as num?)?.toInt();
-            final kelvin = (room['kelvin'] as num?)?.toInt();
-
+            final roomState = RhythmRoomState.fromJson(room);
             final existing = _cachedRoomStates[roomId];
             _cachedRoomStates[roomId] = _CachedRoomState(
-              rhythmEnabled: rhythmEnabled,
-              timeOffset: timeOffset,
-              brightnessOffset: brightnessOffset,
-              softOff: softOff,
-              lightsOn: lightsOn,
-              brightness: brightness,
-              kelvin: kelvin,
+              rhythmEnabled: roomState.rhythmEnabled,
+              timeOffset: roomState.timeOffset,
+              brightnessOffset: roomState.brightnessOffset,
+              state: roomState.state,
+              transitioning: roomState.transitioning,
+              mode: roomState.mode,
+              lightsOn: roomState.lightsOn,
+              brightness: roomState.brightness,
+              kelvin: roomState.kelvin,
               motionActive: existing?.motionActive,
               motionOwned: existing?.motionOwned,
               motionRemaining: existing?.motionRemaining,
@@ -653,22 +676,12 @@ class RhythmConnection {
               hasMotionSensor: existing?.hasMotionSensor ?? false,
             );
 
-            _rhythmStateController.add(RhythmRoomState(
-              roomId: roomId,
-              rhythmEnabled: rhythmEnabled,
-              timeOffset: timeOffset,
-              brightnessOffset: brightnessOffset,
-              softOff: softOff,
-              lightsOn: lightsOn,
-              brightness: brightness,
-              kelvin: kelvin,
-            ));
+            _rhythmStateController.add(roomState);
           }
 
         case 'motion_timer':
           final json = jsonDecode(data) as Map<String, dynamic>;
-          final timers =
-              (json['data'] as Map<String, dynamic>?)?['timers']
+          final timers = (json['data'] as Map<String, dynamic>?)?['timers']
                   as List<dynamic>? ??
               [];
 
@@ -681,10 +694,13 @@ class RhythmConnection {
 
             final motionActive = timer['motion_active'] as bool? ?? false;
             final motionOwned = timer['motion_owned'] as bool? ?? false;
-            final remainingSecs =
-                (timer['remaining_secs'] as num?)?.toInt();
-            final timeoutSecs =
-                (timer['timeout_secs'] as num?)?.toInt() ?? 0;
+            final remainingSecs = jsonInt(
+              timer['remaining_secs'],
+              preferredKeys: const ['remaining_secs'],
+            );
+            final timeoutSecs = jsonInt(timer['timeout_secs'],
+                    preferredKeys: const ['timeout_secs']) ??
+                0;
 
             final cached = _cachedRoomStates[roomId];
             if (cached != null) {
@@ -692,7 +708,9 @@ class RhythmConnection {
                 rhythmEnabled: cached.rhythmEnabled,
                 timeOffset: cached.timeOffset,
                 brightnessOffset: cached.brightnessOffset,
-                softOff: cached.softOff,
+                state: cached.state,
+                transitioning: cached.transitioning,
+                mode: cached.mode,
                 motionActive: motionActive,
                 motionOwned: motionOwned,
                 motionRemaining: remainingSecs,
@@ -713,13 +731,14 @@ class RhythmConnection {
           for (final entry in _cachedRoomStates.entries.toList()) {
             if (entry.value.motionActive != null &&
                 !seenRoomIds.contains(entry.key)) {
-              _motionTimerController
-                  .add(RhythmMotionTimer.cleared(entry.key));
+              _motionTimerController.add(RhythmMotionTimer.cleared(entry.key));
               _cachedRoomStates[entry.key] = _CachedRoomState(
                 rhythmEnabled: entry.value.rhythmEnabled,
                 timeOffset: entry.value.timeOffset,
                 brightnessOffset: entry.value.brightnessOffset,
-                softOff: entry.value.softOff,
+                state: entry.value.state,
+                transitioning: entry.value.transitioning,
+                mode: entry.value.mode,
                 hasMotionSensor: entry.value.hasMotionSensor,
               );
             }
@@ -727,14 +746,16 @@ class RhythmConnection {
 
         case 'hub_status':
           final json = jsonDecode(data) as Map<String, dynamic>;
-          final hubConnected =
-              (json['data'] as Map<String, dynamic>?)?['connected']
-                  as bool? ??
-              false;
-          if (hubConnected != _cachedHubConnected) {
-            _cachedHubConnected = hubConnected;
-            _hubEventController
-                .add(hubConnected ? 'connected' : 'disconnected');
+          final payload = json['data'] as Map<String, dynamic>? ?? json;
+          final hubConnected = payload['connected'] as bool? ?? false;
+          final hubType = payload['hub_type'] as String?;
+          if (hubType == null) break; // No hub type → ignore
+          if (_cachedHubConnected[hubType] != hubConnected) {
+            _cachedHubConnected[hubType] = hubConnected;
+            _hubEventController.add((
+              event: hubConnected ? 'connected' : 'disconnected',
+              hubType: hubType,
+            ));
           }
 
         case 'settings_changed':
@@ -751,7 +772,9 @@ class RhythmConnection {
         case 'lagged':
           reconnect();
       }
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('SSE event parse error for $eventType', e);
+    }
   }
 
   void _disconnectSse() {
@@ -778,6 +801,8 @@ class RhythmConnection {
       _ => 30,
     };
     _sseReconnectAttempts++;
+    _log.config('SSE disconnected, reconnecting in ${delaySecs}s '
+        '(attempt $_sseReconnectAttempts)');
 
     _sseReconnectTimer?.cancel();
     _sseReconnectTimer = Timer(Duration(seconds: delaySecs), () {
@@ -814,6 +839,7 @@ class RhythmConnection {
     _reconnectTimer?.cancel();
     final delaySecs = (1 << _reconnectAttempts).clamp(1, 30);
     _reconnectAttempts++;
+    _log.config('Reconnecting in ${delaySecs}s (attempt $_reconnectAttempts)');
 
     _reconnectTimer = Timer(Duration(seconds: delaySecs), () {
       if (_host != null) {
@@ -828,6 +854,7 @@ class RhythmConnection {
 
   void _setConnectionState(RhythmConnectionState state) {
     if (_connectionState != state) {
+      _log.config('State: ${state.name}');
       _connectionState = state;
       _connectionStateController.add(state);
     }
@@ -841,7 +868,9 @@ class RhythmConnection {
         rhythmEnabled: state.rhythmEnabled,
         timeOffset: state.timeOffset,
         brightnessOffset: state.brightnessOffset,
-        softOff: state.softOff,
+        state: state.state,
+        transitioning: state.transitioning,
+        mode: state.mode ?? existing?.mode,
         lightsOn: state.lightsOn ?? existing?.lightsOn,
         brightness: state.brightness ?? existing?.brightness,
         kelvin: state.kelvin ?? existing?.kelvin,

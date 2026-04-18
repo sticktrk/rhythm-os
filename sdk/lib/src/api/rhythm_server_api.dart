@@ -1,8 +1,11 @@
 import 'package:dio/dio.dart';
+import 'package:logging/logging.dart';
 
 import '../models/rhythm_curve_config.dart';
+import '../models/rhythm_curve_data.dart';
 import '../models/rhythm_room.dart';
 import '../models/rhythm_settings.dart';
+import '../models/rhythm_time_info.dart';
 
 /// Callback to update the connection manager's internal cache after action
 /// responses. This keeps SSE/poll diffs from re-emitting state that was
@@ -15,6 +18,8 @@ typedef RhythmCacheUpdater = void Function(List<RhythmRoomState> states);
 /// expected failures). Methods that return data throw [DioException]
 /// on network errors.
 class RhythmServerApi {
+  static final _log = Logger('rhythm_sdk.api');
+
   final Dio _dio;
   final RhythmCacheUpdater? _onStatesReceived;
 
@@ -48,7 +53,9 @@ class RhythmServerApi {
         _onStatesReceived?.call([state]);
         return state;
       }
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('roomAction failed', e);
+    }
     return null;
   }
 
@@ -61,13 +68,14 @@ class RhythmServerApi {
       final response = await _dio.put(
         'api/rooms/action',
         data: [
-          for (final a in actions)
-            {'room_id': a.roomId, 'action': a.action}
+          for (final a in actions) {'room_id': a.roomId, 'action': a.action}
         ],
         options: Options(receiveTimeout: const Duration(seconds: 30)),
       );
       return _parseAndCacheRoomsResponse(response.data);
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('roomActionBatch failed', e);
+    }
     return [];
   }
 
@@ -97,7 +105,9 @@ class RhythmServerApi {
         options: Options(receiveTimeout: const Duration(seconds: 30)),
       );
       return _parseAndCacheRoomsResponse(response.data);
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('roomBrightnessBatch failed', e);
+    }
     return [];
   }
 
@@ -127,7 +137,9 @@ class RhythmServerApi {
         options: Options(receiveTimeout: const Duration(seconds: 30)),
       );
       return _parseAndCacheRoomsResponse(response.data);
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('roomOffsetBatch failed', e);
+    }
     return [];
   }
 
@@ -136,19 +148,23 @@ class RhythmServerApi {
     required String roomId,
     bool? rhythmEnabled,
     bool? disabled,
+    RoomModeState? state,
     bool? softOff,
   }) async {
+    final effectiveState = state ??
+        (softOff == null
+            ? null
+            : (softOff ? RoomModeState.idle : RoomModeState.active));
     await _safePut('api/rooms/preferences', data: {
       'room_id': roomId,
       if (rhythmEnabled != null) 'rhythm_enabled': rhythmEnabled,
       if (disabled != null) 'disabled': disabled,
-      if (softOff != null) 'soft_off': softOff,
+      if (effectiveState != null) 'state': effectiveState.wireValue,
     });
   }
 
   /// Push room preferences for multiple rooms.
-  Future<void> roomPreferencesBatchSet(
-      List<Map<String, dynamic>> items) async {
+  Future<void> roomPreferencesBatchSet(List<Map<String, dynamic>> items) async {
     if (items.isEmpty) return;
     await _safePut('api/rooms/preferences', data: items);
   }
@@ -165,46 +181,150 @@ class RhythmServerApi {
           data?['room_states'] as List<dynamic>?;
       if (roomStates == null) return [];
       return _parseAndCacheRoomsList(roomStates);
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('fixMyLights failed', e);
+    }
     return [];
   }
 
-  // =========================================================================
-  // Config
-  // =========================================================================
+// =========================================================================
+// Config
+// =========================================================================
 
-  /// Absorb a time offset into the curve config by adjusting ramp widths.
-  Future<RhythmCurveConfig?> absorbTimeOffset(double offsetMinutes) async {
+  /// Fetch a stored profile config by ID.
+  Future<RhythmCurveConfig?> getConfig({required String id}) async {
+    try {
+      final response = await _dio.get(
+        'api/config',
+        queryParameters: {'id': id},
+      );
+      final data = response.data;
+      if (data is Map<String, dynamic>) {
+        return _parseCurveConfig(data);
+      }
+    } catch (e) {
+      _log.warning('getConfig failed', e);
+    }
+    return null;
+  }
+
+  /// Fetch a stored or draft curve preview for a profile.
+  Future<RhythmCurveData?> getCurveData({
+    required String id,
+    RhythmCurveConfig? overrides,
+    DateTime? date,
+    int samplesPerHour = 4,
+    double startHour = 12,
+    int? maxSteps,
+  }) async {
+    try {
+      final queryParameters = _curveQueryParameters(
+        id: id,
+        date: date ?? DateTime.now(),
+        samplesPerHour: samplesPerHour,
+        startHour: startHour,
+        maxSteps: maxSteps ?? overrides?.maxDimSteps,
+      );
+      final response = overrides == null
+          ? await _dio.get('api/curve', queryParameters: queryParameters)
+          : await _dio.post(
+              'api/curve',
+              queryParameters: queryParameters,
+              data: overrides.toJson(),
+            );
+      return RhythmCurveData.fromJson(response.data as Map<String, dynamic>);
+    } catch (e) {
+      _log.warning('getCurveData failed', e);
+    }
+    return null;
+  }
+
+  /// Fetch the current sampled value for a profile.
+  Future<RhythmTimeInfo?> getCurveNow({
+    required String id,
+    double? hour,
+  }) async {
+    try {
+      final response = await _dio.get(
+        'api/curve/now',
+        queryParameters: {
+          'id': id,
+          if (hour != null) 'hour': hour,
+        },
+      );
+      return RhythmTimeInfo.fromJson(response.data as Map<String, dynamic>);
+    } catch (e) {
+      _log.warning('getCurveNow failed', e);
+    }
+    return null;
+  }
+
+  /// Absorb a time offset into the profile config by adjusting the curve.
+  Future<RhythmCurveConfig?> absorbTimeOffset(
+    double offsetMinutes, {
+    String? id,
+  }) async {
     try {
       final response = await _dio.post(
         'api/config/absorb-offset',
+        queryParameters: {
+          if (id != null) 'id': id,
+        },
         data: {'offset_minutes': offsetMinutes},
       );
       final data = response.data;
       if (data is Map<String, dynamic>) {
         return _parseCurveConfig(data);
       }
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('absorbTimeOffset failed', e);
+    }
     return null;
   }
 
-  /// Reset the curve config to factory defaults.
-  Future<RhythmCurveConfig?> resetConfig() async {
+  /// Reset a stored profile config to built-in defaults.
+  Future<RhythmCurveConfig?> resetConfig({String? id}) async {
     try {
-      final response = await _dio.post('api/config/reset');
+      final response = await _dio.post(
+        'api/config/reset',
+        queryParameters: {
+          if (id != null) 'id': id,
+        },
+      );
       final data = response.data;
       if (data is Map<String, dynamic>) {
         return _parseCurveConfig(data);
       }
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('resetConfig failed', e);
+    }
     return null;
   }
 
-  /// Push global curve configuration to the server.
-  Future<void> configSet(RhythmCurveConfig config) async {
-    await _safePut('api/config', data: config.toJson());
+  /// Push a full profile configuration to the server.
+  ///
+  /// Returns `true` when the server accepts the update and `false` on failure.
+  Future<bool> configSet(
+    RhythmCurveConfig config, {
+    String? id,
+  }) async {
+    final profileId = id ?? config.id;
+    if (profileId.isEmpty) {
+      _log.warning('configSet skipped: missing profile id');
+      return false;
+    }
+    try {
+      await _dio.put(
+        'api/config',
+        queryParameters: {'id': profileId},
+        data: config.toJson(),
+      );
+      return true;
+    } catch (e) {
+      _log.warning('configSet failed', e);
+      return false;
+    }
   }
-
   // =========================================================================
   // Location
   // =========================================================================
@@ -245,7 +365,9 @@ class RhythmServerApi {
   Future<void> hubDisconnect() async {
     try {
       await _dio.delete('api/hub/credentials');
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('hubDisconnect failed', e);
+    }
   }
 
   /// Disconnect a single hub by type + address.
@@ -258,7 +380,9 @@ class RhythmServerApi {
         'hub_type': hubType,
         'address': address,
       });
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('hubDisconnectOne failed', e);
+    }
   }
 
   // =========================================================================
@@ -276,40 +400,79 @@ class RhythmServerApi {
     });
   }
 
-  // =========================================================================
-  // Settings
-  // =========================================================================
+// =========================================================================
+// Settings
+// =========================================================================
 
-  /// Fetch global device settings from the server.
+  /// Fetch app-level settings from the server.
   Future<RhythmSettings?> getSettings() async {
     try {
       final response = await _dio.get('api/settings');
       return RhythmSettings.fromJson(response.data as Map<String, dynamic>);
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('getSettings failed', e);
+    }
     return null;
   }
 
+  /// Activate the sleep profile.
+  Future<void> sleep() async {
+    await setActiveMode(RhythmMode.sleep);
+  }
+
+  /// Activate the rhythm profile.
+  Future<void> wake() async {
+    await setActiveMode(RhythmMode.day);
+  }
+
+  /// Fetch mode state, profile routing, and transition config.
+  Future<RhythmModeResource?> getMode() async {
+    try {
+      final response = await _dio.get('api/mode');
+      return RhythmModeResource.fromJson(
+        response.data as Map<String, dynamic>,
+      );
+    } catch (e) {
+      _log.warning('getMode failed', e);
+    }
+    return null;
+  }
+
+  /// Fetch the list of available profile configs.
+  Future<List<RhythmCurveConfig>> getProfiles() async {
+    try {
+      final response = await _dio.get('api/profiles');
+      return RhythmProfiles.fromJson(
+        response.data as Map<String, dynamic>,
+      ).profiles;
+    } catch (e) {
+      _log.warning('getProfiles failed', e);
+    }
+    return const [];
+  }
+
+  /// Set the active global mode on the server.
+  Future<void> setActiveMode(RhythmMode mode) async {
+    await modeSet(active: mode);
+  }
+
   /// Push a partial settings update to the server.
-  Future<void> settingsSet({
-    int? bulbFadeMs,
-    int? rhythmIntervalSecs,
-    int? defaultMotionTimeoutSecs,
+  ///
+  /// Returns `true` when the server accepts the update and `false` on failure.
+  Future<bool> settingsSet({
     bool? powerSave,
-    int? softOffBrightness,
-    double? timeOffsetMinutes,
   }) async {
     final data = <String, dynamic>{
-      if (bulbFadeMs != null) 'bulb_fade_ms': bulbFadeMs,
-      if (rhythmIntervalSecs != null)
-        'rhythm_interval_secs': rhythmIntervalSecs,
-      if (defaultMotionTimeoutSecs != null)
-        'default_motion_timeout_secs': defaultMotionTimeoutSecs,
       if (powerSave != null) 'power_save': powerSave,
-      if (softOffBrightness != null) 'soft_off_brightness': softOffBrightness,
-      if (timeOffsetMinutes != null) 'time_offset_minutes': timeOffsetMinutes,
     };
-    if (data.isEmpty) return;
-    await _safePut('api/settings', data: data);
+    if (data.isEmpty) return true;
+    try {
+      await _dio.put('api/settings', data: data);
+      return true;
+    } catch (e) {
+      _log.warning('settingsSet failed', e);
+      return false;
+    }
   }
 
   // =========================================================================
@@ -321,7 +484,9 @@ class RhythmServerApi {
     try {
       final response = await _dio.get('api/devices/canonical/$id');
       return response.data as Map<String, dynamic>?;
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('getCanonicalDevice failed', e);
+    }
     return null;
   }
 
@@ -330,7 +495,9 @@ class RhythmServerApi {
     try {
       final response = await _dio.get('api/devices/canonical');
       return (response.data as List<dynamic>?)?.cast<Map<String, dynamic>>();
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('getCanonicalDevices failed', e);
+    }
     return null;
   }
 
@@ -343,7 +510,9 @@ class RhythmServerApi {
     try {
       final response = await _dio.get('api/triage');
       return (response.data as List<dynamic>?)?.cast<Map<String, dynamic>>();
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('getTriageEntries failed', e);
+    }
     return null;
   }
 
@@ -352,7 +521,9 @@ class RhythmServerApi {
     try {
       final response = await _dio.get('api/triage/count');
       return response.data as Map<String, dynamic>?;
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('getTriageCount failed', e);
+    }
     return null;
   }
 
@@ -363,18 +534,97 @@ class RhythmServerApi {
         'canonical_id': canonicalId,
       });
       return true;
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('resolveTriageMerge failed', e);
+    }
+    return false;
+  }
+
+  /// Push a partial mode update to the server.
+  ///
+  /// Returns `true` when the server accepts the update and `false` on failure.
+  Future<bool> modeSet({
+    RhythmMode? active,
+    List<RhythmModeConfig>? configs,
+  }) async {
+    final data = <String, dynamic>{
+      if (active != null) 'active': active.wireValue,
+      if (configs != null)
+        'configs': configs.map((config) => config.toJson()).toList(),
+    };
+    if (data.isEmpty) return true;
+    try {
+      await _dio.put('api/mode', data: data);
+      return true;
+    } catch (e) {
+      _log.warning('modeSet failed', e);
+    }
+    return false;
+  }
+
+  /// Fetch transition configs from the server.
+  Future<List<RhythmModeTransitionConfig>> getTransitions() async {
+    try {
+      final response = await _dio.get('api/transitions');
+      final data = response.data as Map<String, dynamic>;
+      return ((data['transitions'] as List<dynamic>?) ?? const <dynamic>[])
+          .map((e) => RhythmModeTransitionConfig.fromJson(
+                e as Map<String, dynamic>,
+              ))
+          .toList();
+    } catch (e) {
+      _log.warning('getTransitions failed', e);
+    }
+    return const [];
+  }
+
+  /// Push transition configs to the server.
+  Future<bool> setTransitions(
+      List<RhythmModeTransitionConfig> transitions) async {
+    try {
+      await _dio.put('api/transitions', data: {
+        'transitions':
+            transitions.map((transition) => transition.toJson()).toList(),
+      });
+      return true;
+    } catch (e) {
+      _log.warning('setTransitions failed', e);
+    }
+    return false;
+  }
+
+  /// Run a saved transition manually by ID.
+  Future<bool> triggerTransition(String id) async {
+    try {
+      await _dio.post(
+        'api/transitions/${Uri.encodeComponent(id)}/trigger',
+        data: const <String, dynamic>{},
+      );
+      return true;
+    } catch (e) {
+      _log.warning('triggerTransition failed', e);
+    }
     return false;
   }
 
   /// Resolve a triage entry by creating a new canonical device.
-  Future<String?> resolveTriageNew(String entryId) async {
+  ///
+  /// For `device_merge`, the response contains `canonical_id`.
+  /// For `room_binding`, the response contains `status: kept_separate`.
+  Future<Map<String, dynamic>?> resolveTriageNewResult(String entryId) async {
     try {
       final response = await _dio.put('api/triage/$entryId/new');
-      return (response.data as Map<String, dynamic>?)
-          ?['canonical_id'] as String?;
-    } catch (_) {}
+      return response.data as Map<String, dynamic>?;
+    } catch (e) {
+      _log.warning('resolveTriageNewResult failed', e);
+    }
     return null;
+  }
+
+  /// Resolve a triage entry by creating a new canonical device.
+  Future<String?> resolveTriageNew(String entryId) async {
+    final result = await resolveTriageNewResult(entryId);
+    return result?['canonical_id'] as String?;
   }
 
   /// Dismiss a triage entry.
@@ -382,19 +632,35 @@ class RhythmServerApi {
     try {
       await _dio.put('api/triage/$entryId/dismiss');
       return true;
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('resolveTriageDismiss failed', e);
+    }
     return false;
   }
 
   /// Approve a room binding (merge two rooms from different hubs).
-  Future<bool> resolveTriageBind(String entryId,
-      {String? targetRoomId}) async {
+  Future<bool> resolveTriageBind(String entryId, {String? targetRoomId}) async {
     try {
       await _dio.put('api/triage/$entryId/bind', data: {
         if (targetRoomId != null) 'target_room_id': targetRoomId,
       });
       return true;
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('resolveTriageBind failed', e);
+    }
+    return false;
+  }
+
+  /// Assign an unassigned-device triage entry to a room.
+  Future<bool> resolveTriageRoom(String entryId, String roomId) async {
+    try {
+      await _dio.put('api/triage/$entryId/room', data: {
+        'room_id': roomId,
+      });
+      return true;
+    } catch (e) {
+      _log.warning('resolveTriageRoom failed', e);
+    }
     return false;
   }
 
@@ -407,7 +673,9 @@ class RhythmServerApi {
     try {
       await _dio.put('api/topology/rooms/$roomId', data: {'name': name});
       return true;
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('topologyRenameRoom failed', e);
+    }
     return false;
   }
 
@@ -418,7 +686,9 @@ class RhythmServerApi {
         'source_id': sourceId,
       });
       return true;
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('topologyMergeRooms failed', e);
+    }
     return false;
   }
 
@@ -434,7 +704,9 @@ class RhythmServerApi {
         'from_room': fromRoomId,
       });
       return true;
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('topologyMoveDevice failed', e);
+    }
     return false;
   }
 
@@ -448,14 +720,89 @@ class RhythmServerApi {
   Future<Map<String, dynamic>?> pairDevice({
     required String hubType,
     Map<String, dynamic> params = const {},
+    Duration receiveTimeout = const Duration(seconds: 45),
   }) async {
     try {
-      final response = await _dio.post('api/devices/pair', data: {
+      final response = await _dio.post(
+        'api/devices/pair',
+        data: {
+          'hub_type': hubType,
+          'params': params,
+        },
+        options: Options(
+          receiveTimeout: receiveTimeout,
+          sendTimeout: receiveTimeout,
+          validateStatus: (_) => true,
+        ),
+      );
+
+      final statusCode = response.statusCode;
+      final responseData = response.data;
+      if (responseData is Map<String, dynamic>) {
+        return {
+          ...responseData,
+          if (statusCode != null && statusCode != 200)
+            'http_status': statusCode,
+        };
+      }
+
+      if (statusCode != null && statusCode != 200) {
+        return {
+          'http_status': statusCode,
+          'error': 'Pairing request failed with HTTP $statusCode.',
+        };
+      }
+    } catch (e) {
+      _log.warning('pairDevice failed', e);
+      if (e is DioException) {
+        final responseData = e.response?.data;
+        if (responseData is Map<String, dynamic>) {
+          return {
+            ...responseData,
+            if (e.response?.statusCode != null)
+              'http_status': e.response!.statusCode,
+          };
+        }
+
+        final statusCode = e.response?.statusCode;
+        final message = switch (e.type) {
+          DioExceptionType.connectionTimeout ||
+          DioExceptionType.receiveTimeout ||
+          DioExceptionType.sendTimeout =>
+            'Pairing timed out. Please keep the device powered on and try again.',
+          DioExceptionType.connectionError => 'Could not reach the server.',
+          _ => e.message ?? 'Pairing request failed.',
+        };
+
+        return {
+          if (statusCode != null) 'http_status': statusCode,
+          'error': message,
+        };
+      }
+    }
+    return null;
+  }
+
+  /// Unpair / decommission a device (Matter, Zigbee, etc.).
+  ///
+  /// Returns the unpair result JSON, or `null` on error.
+  Future<Map<String, dynamic>?> unpairDevice({
+    required String hubType,
+    required String deviceId,
+    bool force = false,
+  }) async {
+    try {
+      final response = await _dio.post('api/devices/unpair', data: {
         'hub_type': hubType,
-        'params': params,
+        'params': {
+          'device_id': deviceId,
+          'force': force,
+        },
       });
       return response.data as Map<String, dynamic>?;
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('unpairDevice failed', e);
+    }
     return null;
   }
 
@@ -466,7 +813,9 @@ class RhythmServerApi {
         if (roomId != null) 'room_id': roomId,
       });
       return true;
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('assignDeviceRoom failed', e);
+    }
     return false;
   }
 
@@ -476,7 +825,9 @@ class RhythmServerApi {
       final response =
           await _dio.post('api/topology/rooms', data: {'name': name});
       return response.data as Map<String, dynamic>?;
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('createTopologyRoom failed', e);
+    }
     return null;
   }
 
@@ -489,7 +840,9 @@ class RhythmServerApi {
     try {
       final response = await _dio.post('api/sync');
       return response.data as Map<String, dynamic>?;
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('triggerSync failed', e);
+    }
     return null;
   }
 
@@ -502,7 +855,9 @@ class RhythmServerApi {
     try {
       final response = await _dio.get('health');
       return response.statusCode == 200;
-    } catch (_) {}
+    } catch (e) {
+      _log.warning('ping failed', e);
+    }
     return false;
   }
 
@@ -510,47 +865,42 @@ class RhythmServerApi {
   // Internal helpers
   // =========================================================================
 
-  Future<void> _safePut(String path, {required Object data}) async {
+  Future<void> _safePut(
+    String path, {
+    required Object data,
+    Map<String, dynamic>? queryParameters,
+  }) async {
     try {
-      await _dio.put(path, data: data);
-    } catch (_) {}
+      await _dio.put(path, data: data, queryParameters: queryParameters);
+    } catch (e) {
+      _log.warning('PUT $path failed', e);
+    }
   }
 
-  RhythmCurveConfig? _parseCurveConfig(Map<String, dynamic> json) {
-    final minBri = json['min_brightness'] as int?;
-    final maxBri = json['max_brightness'] as int?;
-    final minCct = json['min_color_temp'] as int?;
-    final maxCct = json['max_color_temp'] as int?;
-    final wlBri = (json['width_left_bri'] as num?)?.toDouble();
-    final wrBri = (json['width_right_bri'] as num?)?.toDouble();
-    final wlCct = (json['width_left_cct'] as num?)?.toDouble();
-    final wrCct = (json['width_right_cct'] as num?)?.toDouble();
-    final shapeP = (json['shape_p'] as num?)?.toDouble();
-    final maxDim = json['max_dim_steps'] as int?;
-    if (minBri == null ||
-        maxBri == null ||
-        minCct == null ||
-        maxCct == null ||
-        wlBri == null ||
-        wrBri == null ||
-        wlCct == null ||
-        wrCct == null ||
-        shapeP == null ||
-        maxDim == null) {
-      return null;
-    }
-    return RhythmCurveConfig(
-      minBrightness: minBri,
-      maxBrightness: maxBri,
-      minColorTemp: minCct,
-      maxColorTemp: maxCct,
-      widthLeftBri: wlBri,
-      widthRightBri: wrBri,
-      widthLeftCct: wlCct,
-      widthRightCct: wrCct,
-      shapeP: shapeP,
-      maxDimSteps: maxDim,
-    );
+  String _formatDate(DateTime date) {
+    final month = date.month.toString().padLeft(2, '0');
+    final day = date.day.toString().padLeft(2, '0');
+    return '${date.year}-$month-$day';
+  }
+
+  Map<String, dynamic> _curveQueryParameters({
+    required String id,
+    required DateTime date,
+    int samplesPerHour = 4,
+    double startHour = 12.0,
+    int? maxSteps,
+  }) {
+    return {
+      'id': id,
+      'date': _formatDate(date),
+      'samples_per_hour': samplesPerHour,
+      'start_hour': startHour,
+      if (maxSteps != null) 'max_steps': maxSteps,
+    };
+  }
+
+  RhythmCurveConfig _parseCurveConfig(Map<String, dynamic> json) {
+    return RhythmCurveConfig.fromJson(json);
   }
 
   List<RhythmRoomState> _parseAndCacheRoomsResponse(dynamic responseData) {

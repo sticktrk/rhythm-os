@@ -108,6 +108,23 @@ void main() {
         expect(info.currentHour, closeTo(15.758333, 0.000001));
         expect(info.solarPosition, closeTo(0.623456, 0.000001));
       });
+
+      test('accepts current_local_time from /api/state payloads', () {
+        final info = RhythmTimeInfo.fromJson({
+          'location': {
+            'current_local_time': '2026-04-06T17:51:13-04:00',
+          },
+          'current_hour': 17.85,
+          'lighting': {
+            'brightness': 61,
+            'kelvin': 3900,
+            'solar_position': 0.42,
+          },
+        });
+
+        expect(info.currentTime, '2026-04-06T17:51:13-04:00');
+        expect(info.currentHour, 17.85);
+      });
     });
   });
 }

@@ -18,8 +18,7 @@ void main() {
 
       test('falls back to button for unknown strings', () {
         expect(RhythmDeviceType.fromString('switch'), RhythmDeviceType.button);
-        expect(
-            RhythmDeviceType.fromString('unknown'), RhythmDeviceType.button);
+        expect(RhythmDeviceType.fromString('unknown'), RhythmDeviceType.button);
         expect(RhythmDeviceType.fromString(''), RhythmDeviceType.button);
       });
     });
@@ -209,6 +208,22 @@ void main() {
         expect(room.devices.first.id, 'x');
         expect(room.devices.first.type, RhythmDeviceType.light);
       });
+
+      test('accepts wrapped numeric fields', () {
+        final room = RhythmRoom.fromJson({
+          'id': 'room-1',
+          'grouped_light_id': 'gl-1',
+          'time_offset': {'value': 2.25},
+          'brightness_offset': {'value': -4.5},
+          'brightness': {'brightness_pct': 81},
+          'kelvin': {'color_temp': 4200},
+        });
+
+        expect(room.timeOffset, 2.25);
+        expect(room.brightnessOffset, -4.5);
+        expect(room.brightness, 81);
+        expect(room.kelvin, 4200);
+      });
     });
 
     group('device type getters', () {
@@ -230,8 +245,8 @@ void main() {
 
       test('lights returns only light devices', () {
         expect(room.lights.length, 2);
-        expect(room.lights.every((d) => d.type == RhythmDeviceType.light),
-            isTrue);
+        expect(
+            room.lights.every((d) => d.type == RhythmDeviceType.light), isTrue);
       });
 
       test('buttons returns only button devices', () {
@@ -428,8 +443,7 @@ void main() {
         expect(state.roomId, 'room-fallback');
       });
 
-      test('defaults to empty string when both room_id and id are missing',
-          () {
+      test('defaults to empty string when both room_id and id are missing', () {
         final state = RhythmRoomState.fromJson({});
         expect(state.roomId, '');
       });
@@ -452,6 +466,21 @@ void main() {
           'id': 'fallback',
         });
         expect(state.roomId, 'preferred');
+      });
+
+      test('accepts wrapped numeric state fields', () {
+        final state = RhythmRoomState.fromJson({
+          'room_id': 'room-42',
+          'time_offset': {'value': 1.0},
+          'brightness_offset': {'value': -5.0},
+          'brightness': {'current': 75},
+          'kelvin': {'value': 3500},
+        });
+
+        expect(state.timeOffset, 1.0);
+        expect(state.brightnessOffset, -5.0);
+        expect(state.brightness, 75);
+        expect(state.kelvin, 3500);
       });
     });
   });

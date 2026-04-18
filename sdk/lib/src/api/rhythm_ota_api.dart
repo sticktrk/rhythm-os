@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
+import 'package:logging/logging.dart';
 
 import '../models/rhythm_firmware.dart';
 
@@ -9,6 +10,8 @@ import '../models/rhythm_firmware.dart';
 ///
 /// Stream-based alternative to the ChangeNotifier-based OtaService.
 class RhythmOtaApi {
+  static final _log = Logger('rhythm_sdk.ota');
+
   static const _manifestUrl =
       'https://dl.rhythm.lighting/esp32/manifest.json';
 
@@ -42,6 +45,7 @@ class RhythmOtaApi {
         port != 80 ? 'http://$deviceHost:$port' : 'http://$deviceHost';
 
     // 1. Download firmware binary from CDN
+    _log.config('OTA: downloading firmware from ${release.url}');
     yield const RhythmOtaProgress(state: RhythmOtaState.downloading);
 
     final Uint8List firmware;
@@ -74,6 +78,7 @@ class RhythmOtaApi {
     }
 
     // 2. Upload firmware to device
+    _log.config('OTA: uploading to $deviceHost');
     yield const RhythmOtaProgress(state: RhythmOtaState.uploading);
 
     final uploadDio = Dio(BaseOptions(
@@ -123,6 +128,7 @@ class RhythmOtaApi {
     }
 
     // 3. Wait for reboot and verify version
+    _log.config('OTA: rebooting, waiting for version verification');
     await Future.delayed(const Duration(seconds: 8));
 
     final deadline = DateTime.now().add(const Duration(seconds: 30));
@@ -140,7 +146,9 @@ class RhythmOtaApi {
                 state: RhythmOtaState.complete, progressPercent: 100);
             return;
           }
-        } catch (_) {}
+        } catch (e) {
+          _log.fine('OTA version check pending', e);
+        }
         await Future.delayed(const Duration(seconds: 2));
       }
       yield const RhythmOtaProgress(

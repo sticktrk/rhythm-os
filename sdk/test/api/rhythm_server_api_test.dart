@@ -47,8 +47,7 @@ void main() {
                 },
               ));
 
-      final result =
-          await api.roomAction(roomId: 'r1', action: 'enable');
+      final result = await api.roomAction(roomId: 'r1', action: 'enable');
 
       expect(result, isNotNull);
       expect(result!.roomId, 'r1');
@@ -82,8 +81,7 @@ void main() {
                 },
               ));
 
-      final result =
-          await api.roomAction(roomId: 'r2', action: 'disable');
+      final result = await api.roomAction(roomId: 'r2', action: 'disable');
 
       expect(result, isNotNull);
       expect(result!.roomId, 'r2');
@@ -99,8 +97,7 @@ void main() {
         type: DioExceptionType.connectionTimeout,
       ));
 
-      final result =
-          await api.roomAction(roomId: 'r1', action: 'enable');
+      final result = await api.roomAction(roomId: 'r1', action: 'enable');
       expect(result, isNull);
       expect(cacheUpdates, isEmpty);
     });
@@ -113,8 +110,7 @@ void main() {
                 data: {'ok': true},
               ));
 
-      final result =
-          await api.roomAction(roomId: 'r1', action: 'enable');
+      final result = await api.roomAction(roomId: 'r1', action: 'enable');
       expect(result, isNull);
       expect(cacheUpdates, isEmpty);
     });
@@ -172,8 +168,8 @@ void main() {
 
     test('returns empty list on DioException', () async {
       when(() => dio.put(any(),
-              data: any(named: 'data'), options: any(named: 'options')))
-          .thenThrow(DioException(
+          data: any(named: 'data'),
+          options: any(named: 'options'))).thenThrow(DioException(
         requestOptions: RequestOptions(path: 'api/rooms/action'),
       ));
 
@@ -253,25 +249,29 @@ void main() {
   // absorbTimeOffset
   // ---------------------------------------------------------------------------
   group('absorbTimeOffset', () {
-    test('returns RhythmCurveConfig when all 10 fields present', () async {
-      when(() => dio.post(any(), data: any(named: 'data')))
-          .thenAnswer((_) async => Response(
-                requestOptions:
-                    RequestOptions(path: 'api/config/absorb-offset'),
-                statusCode: 200,
-                data: {
-                  'min_brightness': 2,
-                  'max_brightness': 100,
-                  'min_color_temp': 1800,
-                  'max_color_temp': 5500,
-                  'width_left_bri': 0.95,
-                  'width_right_bri': 0.85,
-                  'width_left_cct': 0.95,
-                  'width_right_cct': 1.15,
-                  'shape_p': 6.0,
-                  'max_dim_steps': 6,
-                },
-              ));
+    test('returns RhythmCurveConfig on success', () async {
+      when(() => dio.post(
+            any(),
+            queryParameters: any(named: 'queryParameters'),
+            data: any(named: 'data'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/config/absorb-offset'),
+            statusCode: 200,
+            data: {
+              'id': 'rhythm',
+              'name': 'Rhythm Profile',
+              'curve': {
+                'type': 'super-gaussian',
+                'shape_p': 6.0,
+              },
+              'min_brightness': 2,
+              'max_brightness': 100,
+              'min_color_temp': 1800,
+              'max_color_temp': 5500,
+              'max_dim_steps': 6,
+              'rhythm_interval_secs': 60,
+            },
+          ));
 
       final result = await api.absorbTimeOffset(30.0);
 
@@ -283,29 +283,45 @@ void main() {
       expect(result.shapeP, 6.0);
       expect(result.maxDimSteps, 6);
 
-      verify(() => dio.post('api/config/absorb-offset',
-          data: {'offset_minutes': 30.0})).called(1);
+      final captured = verify(() => dio.post(
+            'api/config/absorb-offset',
+            queryParameters: captureAny(named: 'queryParameters'),
+            data: captureAny(named: 'data'),
+          )).captured;
+      expect(captured[0], isEmpty);
+      expect(captured[1], {'offset_minutes': 30.0});
     });
 
-    test('returns null when a required field is missing', () async {
-      when(() => dio.post(any(), data: any(named: 'data')))
-          .thenAnswer((_) async => Response(
-                requestOptions:
-                    RequestOptions(path: 'api/config/absorb-offset'),
-                statusCode: 200,
-                data: {
-                  'min_brightness': 2,
-                  // missing max_brightness and others
-                },
-              ));
+    test('passes the profile id when provided', () async {
+      when(() => dio.post(
+            any(),
+            queryParameters: any(named: 'queryParameters'),
+            data: any(named: 'data'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/config/absorb-offset'),
+            statusCode: 200,
+            data: {
+              'curve': {'type': 'super-gaussian'}
+            },
+          ));
 
-      final result = await api.absorbTimeOffset(15.0);
-      expect(result, isNull);
+      await api.absorbTimeOffset(15.0, id: 'sleep');
+
+      final captured = verify(() => dio.post(
+            'api/config/absorb-offset',
+            queryParameters: captureAny(named: 'queryParameters'),
+            data: captureAny(named: 'data'),
+          )).captured;
+      expect(captured[0], {'id': 'sleep'});
+      expect(captured[1], {'offset_minutes': 15.0});
     });
 
     test('returns null on DioException', () async {
-      when(() => dio.post(any(), data: any(named: 'data')))
-          .thenThrow(DioException(
+      when(() => dio.post(
+            any(),
+            queryParameters: any(named: 'queryParameters'),
+            data: any(named: 'data'),
+          )).thenThrow(DioException(
         requestOptions: RequestOptions(path: 'api/config/absorb-offset'),
       ));
 
@@ -319,31 +335,57 @@ void main() {
   // ---------------------------------------------------------------------------
   group('resetConfig', () {
     test('returns RhythmCurveConfig on success', () async {
-      when(() => dio.post(any())).thenAnswer((_) async => Response(
-            requestOptions: RequestOptions(path: 'api/config/reset'),
-            statusCode: 200,
-            data: {
-              'min_brightness': 2,
-              'max_brightness': 100,
-              'min_color_temp': 1800,
-              'max_color_temp': 5500,
-              'width_left_bri': 0.95,
-              'width_right_bri': 0.85,
-              'width_left_cct': 0.95,
-              'width_right_cct': 1.15,
-              'shape_p': 6.0,
-              'max_dim_steps': 6,
-            },
-          ));
+      when(() =>
+              dio.post(any(), queryParameters: any(named: 'queryParameters')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(path: 'api/config/reset'),
+                statusCode: 200,
+                data: {
+                  'id': 'rhythm',
+                  'name': 'Rhythm Profile',
+                  'curve': {'type': 'super-gaussian'},
+                  'min_brightness': 2,
+                  'max_brightness': 100,
+                  'min_color_temp': 1800,
+                  'max_color_temp': 5500,
+                  'max_dim_steps': 6,
+                },
+              ));
 
       final result = await api.resetConfig();
       expect(result, isNotNull);
       expect(result!.minColorTemp, 1800);
-      verify(() => dio.post('api/config/reset')).called(1);
+      final captured = verify(() => dio.post(
+            'api/config/reset',
+            queryParameters: captureAny(named: 'queryParameters'),
+          )).captured.single as Map<String, dynamic>;
+      expect(captured, isEmpty);
+    });
+
+    test('passes the profile id when provided', () async {
+      when(() =>
+              dio.post(any(), queryParameters: any(named: 'queryParameters')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(path: 'api/config/reset'),
+                statusCode: 200,
+                data: {
+                  'curve': {'type': 'super-gaussian'}
+                },
+              ));
+
+      await api.resetConfig(id: 'day_idle');
+
+      final captured = verify(() => dio.post(
+            'api/config/reset',
+            queryParameters: captureAny(named: 'queryParameters'),
+          )).captured.single as Map<String, dynamic>;
+      expect(captured, {'id': 'day_idle'});
     });
 
     test('returns null on DioException', () async {
-      when(() => dio.post(any())).thenThrow(DioException(
+      when(() =>
+              dio.post(any(), queryParameters: any(named: 'queryParameters')))
+          .thenThrow(DioException(
         requestOptions: RequestOptions(path: 'api/config/reset'),
       ));
 
@@ -357,37 +399,89 @@ void main() {
   // ---------------------------------------------------------------------------
   group('settingsSet', () {
     test('skips PUT when all params are null (data map empty)', () async {
-      await api.settingsSet();
+      final saved = await api.settingsSet();
 
-      verifyNever(() => dio.put(any(), data: any(named: 'data')));
+      expect(saved, isTrue);
+
+      verifyNever(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          ));
     });
 
-    test('sends only provided fields', () async {
-      when(() => dio.put(any(), data: any(named: 'data')))
-          .thenAnswer((_) async => Response(
-                requestOptions: RequestOptions(path: 'api/settings'),
-                statusCode: 200,
-              ));
+    test('sends only power_save to /api/settings', () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/settings'),
+            statusCode: 200,
+          ));
 
-      await api.settingsSet(bulbFadeMs: 300, powerSave: true);
+      final saved = await api.settingsSet(powerSave: true);
 
-      final captured = verify(
-              () => dio.put('api/settings', data: captureAny(named: 'data')))
-          .captured
-          .single as Map<String, dynamic>;
-      expect(captured['bulb_fade_ms'], 300);
-      expect(captured['power_save'], true);
-      expect(captured.containsKey('rhythm_interval_secs'), isFalse);
+      expect(saved, isTrue);
+      final captured = verify(() => dio.put(
+            'api/settings',
+            data: captureAny(named: 'data'),
+            queryParameters: captureAny(named: 'queryParameters'),
+          )).captured;
+      expect(captured[0], {'power_save': true});
+      expect(captured[1], isNull);
     });
 
-    test('does not throw on DioException', () async {
-      when(() => dio.put(any(), data: any(named: 'data')))
-          .thenThrow(DioException(
+    test('returns false on DioException', () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenThrow(DioException(
         requestOptions: RequestOptions(path: 'api/settings'),
       ));
 
-      // Should complete without throwing.
-      await api.settingsSet(bulbFadeMs: 500);
+      final saved = await api.settingsSet(powerSave: true);
+
+      expect(saved, isFalse);
+    });
+
+    test('includes null idle_profile_id when clearing custom idle', () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/mode'),
+            statusCode: 200,
+          ));
+
+      await api.modeSet(
+        configs: const [
+          RhythmModeConfig(
+            mode: RhythmMode.day,
+            activeProfileId: 'rhythm',
+            idleProfileId: null,
+          ),
+        ],
+      );
+
+      final captured = verify(() => dio.put(
+            'api/mode',
+            data: captureAny(named: 'data'),
+            queryParameters: captureAny(named: 'queryParameters'),
+          )).captured;
+      expect(captured[0], {
+        'configs': [
+          {
+            'mode': 'day',
+            'active_profile_id': 'rhythm',
+            'idle_profile_id': null,
+            'wake_profile_id': null,
+            'warning_profile_id': null,
+          },
+        ],
+      });
     });
   });
 
@@ -430,8 +524,11 @@ void main() {
   // ---------------------------------------------------------------------------
   group('fire-and-forget methods', () {
     test('roomBrightness does not throw on DioException', () async {
-      when(() => dio.put(any(), data: any(named: 'data')))
-          .thenThrow(DioException(
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenThrow(DioException(
         requestOptions: RequestOptions(path: 'api/rooms/brightness'),
       ));
 
@@ -440,8 +537,11 @@ void main() {
     });
 
     test('roomOffset does not throw on DioException', () async {
-      when(() => dio.put(any(), data: any(named: 'data')))
-          .thenThrow(DioException(
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenThrow(DioException(
         requestOptions: RequestOptions(path: 'api/rooms/offset'),
       ));
 
@@ -449,26 +549,40 @@ void main() {
     });
 
     test('roomPreferencesSet does not throw on DioException', () async {
-      when(() => dio.put(any(), data: any(named: 'data')))
-          .thenThrow(DioException(
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenThrow(DioException(
         requestOptions: RequestOptions(path: 'api/rooms/preferences'),
       ));
 
       await api.roomPreferencesSet(roomId: 'r1', rhythmEnabled: true);
     });
 
-    test('configSet does not throw on DioException', () async {
-      when(() => dio.put(any(), data: any(named: 'data')))
-          .thenThrow(DioException(
+    test('configSet returns false on DioException', () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenThrow(DioException(
         requestOptions: RequestOptions(path: 'api/config'),
       ));
 
-      await api.configSet(const RhythmCurveConfig());
+      final saved = await api.configSet(
+        const RhythmCurveConfig(),
+        id: 'day_idle',
+      );
+
+      expect(saved, isFalse);
     });
 
     test('locationSet does not throw on DioException', () async {
-      when(() => dio.put(any(), data: any(named: 'data')))
-          .thenThrow(DioException(
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenThrow(DioException(
         requestOptions: RequestOptions(path: 'api/location'),
       ));
 

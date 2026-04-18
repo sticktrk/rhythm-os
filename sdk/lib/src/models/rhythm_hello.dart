@@ -1,3 +1,6 @@
+import '../json_parsing.dart';
+import 'rhythm_capabilities.dart';
+import 'rhythm_curve_config.dart';
 import 'rhythm_room.dart';
 import 'rhythm_settings.dart';
 
@@ -10,9 +13,20 @@ class RhythmHello {
   final List<RhythmRoom> rooms;
   final Map<String, dynamic> hub;
   final List<Map<String, dynamic>> hubs;
-  final Map<String, dynamic> config;
+  final RhythmCapabilities? capabilities;
+  final Map<String, dynamic> activeProfile;
+  final RhythmModeResource? mode;
+  final List<RhythmModeTransitionConfig> transitions;
+  final List<RhythmCurveConfig> profiles;
   final Map<String, dynamic> location;
   final RhythmSettings? settings;
+  final int? lastTickEpochMs;
+
+  /// Always-present computed fade duration (accounts for auto mode).
+  final int? effectiveFadeMs;
+
+  /// Always-present computed motion timeout (accounts for auto mode).
+  final int? effectiveMotionTimeoutSecs;
 
   const RhythmHello({
     required this.version,
@@ -22,37 +36,107 @@ class RhythmHello {
     required this.rooms,
     required this.hub,
     required this.hubs,
-    required this.config,
+    this.capabilities,
+    required this.activeProfile,
+    this.mode,
+    this.transitions = const [],
+    this.profiles = const [],
     required this.location,
     this.settings,
+    this.lastTickEpochMs,
+    this.effectiveFadeMs,
+    this.effectiveMotionTimeoutSecs,
   });
 
   factory RhythmHello.fromJson(Map<String, dynamic> json) {
-    final settingsJson = json['settings'] as Map<String, dynamic>?;
-    final hub = json['hub'] as Map<String, dynamic>? ?? {};
-    final hubsList = (json['hubs'] as List<dynamic>?)
-        ?.map((h) => h as Map<String, dynamic>)
-        .toList();
+    final settingsJson = jsonMap(json['settings']);
+    final rawHub = jsonMap(json['hub']) ?? const <String, dynamic>{};
+    final hubsList =
+        (json['hubs'] as List<dynamic>?)?.map(jsonMap).nonNulls.toList();
     final hubs = hubsList ??
-        (hub.isNotEmpty && hub['type'] != 'none'
-            ? [hub]
+        (rawHub.isNotEmpty && rawHub['type'] != 'none'
+            ? [rawHub]
             : <Map<String, dynamic>>[]);
+    final hub = rawHub.isNotEmpty
+        ? rawHub
+        : (hubs.isNotEmpty ? hubs.first : const <String, dynamic>{});
+    final location = _normalizeLocation(json);
+    final activeProfile = normalizeActiveProfile(json);
+    final modeJson = jsonMap(json['mode']);
+    final capabilitiesJson = jsonMap(json['capabilities']);
+    final profiles = ((json['profiles'] as List<dynamic>?) ?? const <dynamic>[])
+        .map(jsonMap)
+        .nonNulls
+        .map(RhythmCurveConfig.fromJson)
+        .toList();
+    final activeProfileMap = jsonMap(json['active_profile']);
+    final effectiveProfile =
+        jsonMap(activeProfileMap?['effective']) ?? const <String, dynamic>{};
     return RhythmHello(
       version: json['version'] as String? ?? '0.0.0',
       platformType: json['platform'] as String? ?? 'desktop',
       platformContext: json['context'] as String? ?? 'server',
-      listenPort: (json['listen_port'] as num?)?.toInt(),
+      listenPort:
+          jsonInt(json['listen_port'], preferredKeys: const ['listen_port']),
       rooms: (json['rooms'] as List<dynamic>?)
-              ?.map((r) => RhythmRoom.fromJson(r as Map<String, dynamic>))
+              ?.map(jsonMap)
+              .nonNulls
+              .map(RhythmRoom.fromJson)
               .where((r) => r.id.isNotEmpty)
               .toList() ??
           [],
       hub: hub,
       hubs: hubs,
-      config: json['config'] as Map<String, dynamic>? ?? {},
-      location: json['location'] as Map<String, dynamic>? ?? {},
+      capabilities: capabilitiesJson == null
+          ? null
+          : RhythmCapabilities.fromJson(capabilitiesJson),
+      activeProfile: activeProfile,
+      mode: modeJson != null ? RhythmModeResource.fromJson(modeJson) : null,
+      transitions:
+          ((json['transitions'] as List<dynamic>?) ?? const <dynamic>[])
+              .map(jsonMap)
+              .nonNulls
+              .map(RhythmModeTransitionConfig.fromJson)
+              .toList(),
+      profiles: profiles,
+      location: location,
       settings:
           settingsJson != null ? RhythmSettings.fromJson(settingsJson) : null,
+      lastTickEpochMs: jsonInt(
+        json['last_tick_epoch_ms'],
+        preferredKeys: const ['last_tick_epoch_ms'],
+      ),
+      effectiveFadeMs: jsonInt(
+            json['effective_fade_ms'],
+            preferredKeys: const ['effective_fade_ms', 'fade_ms'],
+          ) ??
+          jsonInt(
+            effectiveProfile['fade_ms'],
+            preferredKeys: const ['fade_ms'],
+          ),
+      effectiveMotionTimeoutSecs: jsonInt(
+            json['effective_motion_timeout_secs'],
+            preferredKeys: const [
+              'effective_motion_timeout_secs',
+              'motion_timeout_secs',
+            ],
+          ) ??
+          jsonInt(
+            effectiveProfile['motion_timeout_secs'],
+            preferredKeys: const ['motion_timeout_secs'],
+          ),
     );
   }
+}
+
+Map<String, dynamic> _normalizeLocation(Map<String, dynamic> json) {
+  final location = Map<String, dynamic>.from(
+    jsonMap(json['location']) ?? const <String, dynamic>{},
+  );
+  final currentLocalTime =
+      location['current_local_time'] ?? json['current_time'];
+  if (currentLocalTime != null) {
+    location['current_local_time'] = currentLocalTime;
+  }
+  return location;
 }

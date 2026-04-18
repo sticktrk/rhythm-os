@@ -1,10 +1,15 @@
 import 'package:dio/dio.dart';
+import 'package:logging/logging.dart';
+
+import '../rhythm_log_interceptor.dart';
 
 /// Lightweight HTTP client for device diagnostic endpoints.
 ///
 /// Can be instantiated directly with a host for one-off operations
 /// like health checks and diagnostics.
 class RhythmDiagnosticsApi {
+  static final _log = Logger('rhythm_sdk.api');
+
   final Dio _dio;
 
   RhythmDiagnosticsApi({required String host, int port = 80})
@@ -12,14 +17,17 @@ class RhythmDiagnosticsApi {
           baseUrl: 'http://$host:$port/',
           connectTimeout: const Duration(seconds: 5),
           receiveTimeout: const Duration(seconds: 5),
-        ));
+        )) {
+    _dio.interceptors.add(RhythmLogInterceptor(_log));
+  }
 
   /// Check if the device is reachable.
   Future<bool> healthCheck() async {
     try {
       final response = await _dio.get('health');
       return response.data['status'] == 'healthy';
-    } catch (_) {
+    } catch (e) {
+      _log.warning('healthCheck failed', e);
       return false;
     }
   }
@@ -29,7 +37,8 @@ class RhythmDiagnosticsApi {
     try {
       final response = await _dio.get('api/diag/vitals');
       return Map<String, dynamic>.from(response.data);
-    } catch (_) {
+    } catch (e) {
+      _log.warning('getDiagVitals failed', e);
       return null;
     }
   }
@@ -47,7 +56,8 @@ class RhythmDiagnosticsApi {
       final data = response.data as Map<String, dynamic>;
       final logs = data['logs'] as List<dynamic>? ?? [];
       return logs.cast<Map<String, dynamic>>();
-    } catch (_) {
+    } catch (e) {
+      _log.warning('getDiagLogs failed', e);
       return null;
     }
   }
@@ -57,7 +67,8 @@ class RhythmDiagnosticsApi {
     try {
       await _dio.delete('api/diag/crash');
       return true;
-    } catch (_) {
+    } catch (e) {
+      _log.warning('clearCrashInfo failed', e);
       return false;
     }
   }
@@ -67,7 +78,8 @@ class RhythmDiagnosticsApi {
     try {
       await _dio.delete('api/wifi');
       return true;
-    } catch (_) {
+    } catch (e) {
+      _log.warning('resetWifi failed', e);
       return false;
     }
   }
@@ -77,7 +89,8 @@ class RhythmDiagnosticsApi {
     try {
       await _dio.post('api/system/reboot');
       return true;
-    } catch (_) {
+    } catch (e) {
+      _log.warning('reboot failed', e);
       return false;
     }
   }

@@ -1,6 +1,9 @@
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 void main() async {
+  // Enable SDK debug logging (optional).
+  RhythmSdk.enableLogging(); // or: RhythmSdk.enableLogging(level: Level.WARNING)
+
   // --- Config API (stateless) ---
   final configApi = RhythmConfigApi(baseUrl: 'http://192.168.1.100/');
 

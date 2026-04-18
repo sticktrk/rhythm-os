@@ -67,8 +67,7 @@ void main() {
           'solar_midnight': 0.85,
           'day_length': 11.3,
         });
-        final roundTripped =
-            RhythmSolarContext.fromJson(original.toJson());
+        final roundTripped = RhythmSolarContext.fromJson(original.toJson());
         expect(roundTripped.sunrise, original.sunrise);
         expect(roundTripped.sunset, original.sunset);
         expect(roundTripped.solarNoon, original.solarNoon);
@@ -162,6 +161,8 @@ void main() {
           'width_right_cct': RhythmCurveConfig.defaultWidthRightCct,
           'shape_p': RhythmCurveConfig.defaultShapeP,
           'max_dim_steps': RhythmCurveConfig.defaultMaxDimSteps,
+          'fade_ms': RhythmCurveConfig.defaultFadeMs,
+          'motion_timeout_secs': RhythmCurveConfig.defaultMotionTimeoutSecs,
         });
       });
 
@@ -389,8 +390,7 @@ void main() {
         expect(curve.maxDimSteps, raw.maxDimSteps);
       });
 
-      test('converts default RhythmRawConfig to default RhythmCurveConfig',
-          () {
+      test('converts default RhythmRawConfig to default RhythmCurveConfig', () {
         final raw = RhythmRawConfig.defaults();
         final curve = RhythmConfigState.rawConfigToCurveConfig(raw);
         expect(curve, const RhythmCurveConfig());

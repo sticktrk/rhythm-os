@@ -13,14 +13,18 @@ class RhythmCurveData {
   });
 
   factory RhythmCurveData.fromJson(Map<String, dynamic> json) {
+    final curve = _asMap(json['curve']) ?? json;
+    final hours = _doubleList(curve['hours']);
+    final brightness = _intList(curve['brightness'] ?? curve['bris']);
+    final kelvin = _intList(curve['kelvin'] ?? curve['ccts']);
+    final solarJson = _asMap(json['solar']) ??
+        _asMap(curve['solar']) ??
+        const <String, dynamic>{};
     return RhythmCurveData(
-      hours:
-          (json['hours'] as List).map((e) => (e as num).toDouble()).toList(),
-      brightness:
-          (json['bris'] as List).map((e) => (e as num).toInt()).toList(),
-      kelvin:
-          (json['ccts'] as List).map((e) => (e as num).toInt()).toList(),
-      solar: RhythmSolarInfo.fromJson(json['solar']),
+      hours: hours,
+      brightness: brightness,
+      kelvin: kelvin,
+      solar: RhythmSolarInfo.fromJson(solarJson),
     );
   }
 }
@@ -49,9 +53,14 @@ class RhythmSolarInfo {
     return RhythmSolarInfo(
       sunrise: (json['sunrise'] as num?)?.toDouble(),
       sunset: (json['sunset'] as num?)?.toDouble(),
-      solarNoon: (json['solarNoon'] as num).toDouble(),
-      solarMidnight: (json['solarMidnight'] as num).toDouble(),
-      dayLength: (json['dayLength'] as num?)?.toDouble(),
+      solarNoon: (json['solarNoon'] as num?)?.toDouble() ??
+          (json['solar_noon'] as num?)?.toDouble() ??
+          12.0,
+      solarMidnight: (json['solarMidnight'] as num?)?.toDouble() ??
+          (json['solar_midnight'] as num?)?.toDouble() ??
+          0.0,
+      dayLength: (json['dayLength'] as num?)?.toDouble() ??
+          (json['day_length'] as num?)?.toDouble(),
       dawn: json['dawn'] == null
           ? null
           : TwilightPhase.fromJson(json['dawn'] as Map<String, dynamic>),
@@ -80,4 +89,20 @@ class TwilightPhase {
       astronomical: (json['astronomical'] as num?)?.toDouble(),
     );
   }
+}
+
+Map<String, dynamic>? _asMap(dynamic value) {
+  if (value is Map<String, dynamic>) return value;
+  if (value is Map) return value.cast<String, dynamic>();
+  return null;
+}
+
+List<double> _doubleList(dynamic value) {
+  if (value is! List) return const [];
+  return value.map((e) => (e as num).toDouble()).toList();
+}
+
+List<int> _intList(dynamic value) {
+  if (value is! List) return const [];
+  return value.map((e) => (e as num).toInt()).toList();
 }
