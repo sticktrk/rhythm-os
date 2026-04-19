@@ -12,6 +12,61 @@ enum RoomSourceDto {
   esp32,
 }
 
+enum RoomNodeKind {
+  room,
+  lightDevice,
+  switchDevice,
+  motionSensor,
+  sensor,
+  button,
+  otherDevice;
+
+  String get wireValue => switch (this) {
+        RoomNodeKind.room => 'room',
+        RoomNodeKind.lightDevice => 'light_device',
+        RoomNodeKind.switchDevice => 'switch_device',
+        RoomNodeKind.motionSensor => 'motion_sensor',
+        RoomNodeKind.sensor => 'sensor',
+        RoomNodeKind.button => 'button',
+        RoomNodeKind.otherDevice => 'other_device',
+      };
+
+  static RoomNodeKind fromWireValue(String? value) => switch (value) {
+        'light_device' => RoomNodeKind.lightDevice,
+        'switch_device' => RoomNodeKind.switchDevice,
+        'motion_sensor' => RoomNodeKind.motionSensor,
+        'sensor' => RoomNodeKind.sensor,
+        'button' => RoomNodeKind.button,
+        'other_device' => RoomNodeKind.otherDevice,
+        _ => RoomNodeKind.room,
+      };
+
+  bool get isRoom => this == RoomNodeKind.room;
+
+  bool get isLightDevice => this == RoomNodeKind.lightDevice;
+
+  bool get isLightAddressable => isRoom || isLightDevice;
+}
+
+enum RoomNodePlacement {
+  hubDefault,
+  userOverride,
+  standalone;
+
+  String get wireValue => switch (this) {
+        RoomNodePlacement.hubDefault => 'hub_default',
+        RoomNodePlacement.userOverride => 'user_override',
+        RoomNodePlacement.standalone => 'standalone',
+      };
+
+  static RoomNodePlacement? fromWireValue(String? value) => switch (value) {
+        'hub_default' => RoomNodePlacement.hubDefault,
+        'user_override' => RoomNodePlacement.userOverride,
+        'standalone' => RoomNodePlacement.standalone,
+        _ => null,
+      };
+}
+
 class RoomDto {
   final String id;
   final String name;
@@ -23,6 +78,9 @@ class RoomDto {
   final double timeOffsetMinutes;
   final double brightnessOffset;
   final CurveConfigDto? curveConfig;
+  final RoomNodeKind kind;
+  final String? parentId;
+  final RoomNodePlacement? placement;
 
   const RoomDto({
     required this.id,
@@ -35,6 +93,9 @@ class RoomDto {
     required this.timeOffsetMinutes,
     required this.brightnessOffset,
     this.curveConfig,
+    this.kind = RoomNodeKind.room,
+    this.parentId,
+    this.placement,
   });
 
   @override
@@ -49,6 +110,9 @@ class RoomDto {
         timeOffsetMinutes,
         brightnessOffset,
         curveConfig,
+        kind,
+        parentId,
+        placement,
       );
 
   @override
@@ -65,7 +129,10 @@ class RoomDto {
           lightsOn == other.lightsOn &&
           timeOffsetMinutes == other.timeOffsetMinutes &&
           brightnessOffset == other.brightnessOffset &&
-          curveConfig == other.curveConfig;
+          curveConfig == other.curveConfig &&
+          kind == other.kind &&
+          parentId == other.parentId &&
+          placement == other.placement;
 }
 
 enum LightCommandType {

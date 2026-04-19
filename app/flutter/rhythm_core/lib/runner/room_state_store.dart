@@ -441,6 +441,9 @@ RoomDto _copyRoom(
   bool? lightsOn,
   double? timeOffsetMinutes,
   double? brightnessOffset,
+  RoomNodeKind? kind,
+  String? parentId,
+  Object? placement = _noChange,
   Object? curveConfig = _noChange,
 }) {
   return RoomDto(
@@ -453,6 +456,11 @@ RoomDto _copyRoom(
     lightsOn: lightsOn ?? room.lightsOn,
     timeOffsetMinutes: timeOffsetMinutes ?? room.timeOffsetMinutes,
     brightnessOffset: brightnessOffset ?? room.brightnessOffset,
+    kind: kind ?? room.kind,
+    parentId: parentId ?? room.parentId,
+    placement: identical(placement, _noChange)
+        ? room.placement
+        : placement as RoomNodePlacement?,
     curveConfig: identical(curveConfig, _noChange)
         ? room.curveConfig
         : curveConfig as CurveConfigDto?,

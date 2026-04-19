@@ -27,10 +27,23 @@ class CloudBackedServerApi {
     return _delegate.roomAction(roomId: roomId, action: action);
   }
 
+  Future<RhythmRoomState?> nodeAction({
+    required String nodeId,
+    required String action,
+  }) {
+    return _delegate.nodeAction(nodeId: nodeId, action: action);
+  }
+
   Future<List<RhythmRoomState>> roomActionBatch(
     List<({String roomId, String action})> actions,
   ) {
     return _delegate.roomActionBatch(actions);
+  }
+
+  Future<List<RhythmRoomState>> nodeActionBatch(
+    List<({String nodeId, String action})> actions,
+  ) {
+    return _delegate.nodeActionBatch(actions);
   }
 
   Future<void> roomBrightness({
@@ -40,10 +53,23 @@ class CloudBackedServerApi {
     return _delegate.roomBrightness(roomId: roomId, brightness: brightness);
   }
 
+  Future<void> nodeBrightness({
+    required String nodeId,
+    required int brightness,
+  }) {
+    return _delegate.nodeBrightness(nodeId: nodeId, brightness: brightness);
+  }
+
   Future<List<RhythmRoomState>> roomBrightnessBatch(
     List<({String roomId, int brightness})> items,
   ) {
     return _delegate.roomBrightnessBatch(items);
+  }
+
+  Future<List<RhythmRoomState>> nodeBrightnessBatch(
+    List<({String nodeId, int brightness})> items,
+  ) {
+    return _delegate.nodeBrightnessBatch(items);
   }
 
   Future<void> roomOffset({
@@ -54,11 +80,27 @@ class CloudBackedServerApi {
     _scheduleCloudCapture(reason: 'room_offset', delay: _defaultDelay);
   }
 
+  Future<void> nodeOffset({
+    required String nodeId,
+    required double timeOffset,
+  }) async {
+    await _delegate.nodeOffset(nodeId: nodeId, timeOffset: timeOffset);
+    _scheduleCloudCapture(reason: 'node_offset', delay: _defaultDelay);
+  }
+
   Future<List<RhythmRoomState>> roomOffsetBatch(
     List<({String roomId, double timeOffset})> items,
   ) async {
     final states = await _delegate.roomOffsetBatch(items);
     _scheduleCloudCapture(reason: 'room_offset_batch', delay: _defaultDelay);
+    return states;
+  }
+
+  Future<List<RhythmRoomState>> nodeOffsetBatch(
+    List<({String nodeId, double timeOffset})> items,
+  ) async {
+    final states = await _delegate.nodeOffsetBatch(items);
+    _scheduleCloudCapture(reason: 'node_offset_batch', delay: _defaultDelay);
     return states;
   }
 
@@ -68,6 +110,7 @@ class CloudBackedServerApi {
     bool? disabled,
     RoomModeState? state,
     bool? softOff,
+    Map<String, dynamic>? profileSettings,
   }) async {
     await _delegate.roomPreferencesSet(
       roomId: roomId,
@@ -75,8 +118,28 @@ class CloudBackedServerApi {
       disabled: disabled,
       state: state,
       softOff: softOff,
+      profileSettings: profileSettings,
     );
     _scheduleCloudCapture(reason: 'room_preferences_set', delay: _defaultDelay);
+  }
+
+  Future<void> nodePreferencesSet({
+    required String nodeId,
+    bool? rhythmEnabled,
+    bool? disabled,
+    RoomModeState? state,
+    bool? softOff,
+    Map<String, dynamic>? profileSettings,
+  }) async {
+    await _delegate.nodePreferencesSet(
+      nodeId: nodeId,
+      rhythmEnabled: rhythmEnabled,
+      disabled: disabled,
+      state: state,
+      softOff: softOff,
+      profileSettings: profileSettings,
+    );
+    _scheduleCloudCapture(reason: 'node_preferences_set', delay: _defaultDelay);
   }
 
   Future<void> roomPreferencesBatchSet(List<Map<String, dynamic>> items) async {
@@ -87,8 +150,18 @@ class CloudBackedServerApi {
     );
   }
 
-  Future<List<RhythmRoomState>> fixMyLights() {
-    return _delegate.fixMyLights();
+  Future<void> nodePreferencesBatchSet(List<Map<String, dynamic>> items) async {
+    await _delegate.nodePreferencesBatchSet(items);
+    _scheduleCloudCapture(
+      reason: 'node_preferences_batch_set',
+      delay: _defaultDelay,
+    );
+  }
+
+  Future<List<RhythmRoomState>> fixMyLights({
+    required Iterable<String> nodeIds,
+  }) {
+    return _delegate.fixMyLights(nodeIds: nodeIds);
   }
 
   Future<RhythmCurveConfig?> getConfig({required String id}) {
@@ -192,10 +265,15 @@ class CloudBackedServerApi {
   }
 
   Future<void> motionTimeoutSet({
-    required String roomId,
-    required int timeoutSecs,
+    String? nodeId,
+    String? roomId,
+    required int? timeoutSecs,
   }) async {
-    await _delegate.motionTimeoutSet(roomId: roomId, timeoutSecs: timeoutSecs);
+    await _delegate.motionTimeoutSet(
+      nodeId: nodeId,
+      roomId: roomId,
+      timeoutSecs: timeoutSecs,
+    );
     _scheduleCloudCapture(reason: 'motion_timeout_set', delay: _defaultDelay);
   }
 
@@ -250,6 +328,29 @@ class CloudBackedServerApi {
 
   Future<Map<String, dynamic>?> getTriageCount() {
     return _delegate.getTriageCount();
+  }
+
+  Future<List<RhythmTopologyNode>> getTopologyNodes() {
+    return _delegate.getTopologyNodes();
+  }
+
+  Future<bool> setTopologyNodeControlTarget({
+    required String nodeId,
+    required String controlKind,
+    required String? targetId,
+  }) async {
+    final success = await _delegate.setTopologyNodeControlTarget(
+      nodeId: nodeId,
+      controlKind: controlKind,
+      targetId: targetId,
+    );
+    if (success) {
+      _scheduleCloudCapture(
+        reason: 'topology_node_control_target',
+        delay: _defaultDelay,
+      );
+    }
+    return success;
   }
 
   Future<bool> resolveTriageMerge(String entryId, String canonicalId) async {
@@ -407,6 +508,17 @@ class CloudBackedServerApi {
     final success = await _delegate.assignDeviceRoom(deviceId, roomId);
     if (success) {
       _scheduleCloudCapture(reason: 'assign_device_room', delay: _defaultDelay);
+    }
+    return success;
+  }
+
+  Future<bool> assignDeviceParent(String deviceId, String? parentId) async {
+    final success = await _delegate.assignDeviceParent(deviceId, parentId);
+    if (success) {
+      _scheduleCloudCapture(
+        reason: 'assign_device_parent',
+        delay: _defaultDelay,
+      );
     }
     return success;
   }

@@ -185,25 +185,29 @@ class AppStateRefresh {
       final api = sdk.RhythmConfigApi(baseUrl: baseUrl);
       final hello = await api.getState();
       debugPrint(
-          'AppStateRefresh: Addon /api/state returned ${hello.rooms.length} rooms');
+          'AppStateRefresh: Addon /api/state returned ${hello.nodes.length} nodes');
 
-      if (hello.rooms.isEmpty) return 0;
-
-      final rooms = hello.rooms
-          .where((r) => r.id.isNotEmpty && r.name.isNotEmpty)
+      final rooms = hello.nodes
+          .where((r) =>
+              r.id.isNotEmpty && r.name.isNotEmpty && r.kind.isLightAddressable)
           .map((r) => RoomDto(
                 id: r.id,
                 name: r.name,
                 source: RoomSourceDto.homeAssistant,
-                deviceIds: const [],
-                rhythmEnabled: false,
-                disabled: false,
-                lightsOn: false,
-                timeOffsetMinutes: 0,
-                brightnessOffset: 0,
+                kind: _roomNodeKindFromSdk(r.kind),
+                parentId: r.parentId,
+                placement: _roomNodePlacementFromSdk(r.placement),
+                deviceIds: r.kind.isLightDevice ? [r.id] : r.deviceIds,
+                rhythmEnabled: r.rhythmEnabled,
+                disabled: r.disabled,
+                lightsOn: r.lightsOn ?? false,
+                timeOffsetMinutes: r.timeOffset,
+                brightnessOffset: r.brightnessOffset,
                 curveConfig: null,
               ))
           .toList();
+
+      if (rooms.isEmpty) return 0;
 
       if (rooms.isNotEmpty) {
         await roomProvider.addRoomsFromSource(
@@ -246,7 +250,7 @@ class AppStateRefresh {
 
     // Apply initial "on" state so rooms appear alive
     for (final room in rooms) {
-      await roomProvider.applyServerRoomState(
+      await roomProvider.applyServerNodeState(
         room.id,
         rhythmEnabled: true,
         timeOffset: 0,
@@ -270,3 +274,22 @@ class AppStateRefresh {
     return offsetHours > 0 ? 'Etc/GMT-$offsetHours' : 'Etc/GMT+${-offsetHours}';
   }
 }
+
+RoomNodeKind _roomNodeKindFromSdk(sdk.RhythmNodeKind kind) => switch (kind) {
+      sdk.RhythmNodeKind.lightDevice => RoomNodeKind.lightDevice,
+      sdk.RhythmNodeKind.switchDevice => RoomNodeKind.switchDevice,
+      sdk.RhythmNodeKind.motionSensor => RoomNodeKind.motionSensor,
+      sdk.RhythmNodeKind.sensor => RoomNodeKind.sensor,
+      sdk.RhythmNodeKind.button => RoomNodeKind.button,
+      sdk.RhythmNodeKind.otherDevice => RoomNodeKind.otherDevice,
+      sdk.RhythmNodeKind.room => RoomNodeKind.room,
+    };
+
+RoomNodePlacement? _roomNodePlacementFromSdk(
+        sdk.RhythmNodePlacement? placement) =>
+    switch (placement) {
+      sdk.RhythmNodePlacement.hubDefault => RoomNodePlacement.hubDefault,
+      sdk.RhythmNodePlacement.userOverride => RoomNodePlacement.userOverride,
+      sdk.RhythmNodePlacement.standalone => RoomNodePlacement.standalone,
+      null => null,
+    };

@@ -8,6 +8,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart' show RoomModeState;
 import '../providers/server_sync_provider.dart';
 import '../providers/room_provider.dart';
 import '../services/analytics_service.dart';
+import 'device_detail_sheet.dart';
 import 'room_settings_sheet.dart';
 import 'solar_orbit.dart'; // For CelestialColors
 
@@ -86,19 +87,19 @@ class _RoomCardState extends State<RoomCard> {
 
     switch (newMode) {
       case RoomMode.on:
-        serverSync.pushRoomPreferences(
+        serverSync.pushNodePreferences(
           widget.roomId,
           rhythmEnabled: true,
           state: RoomModeState.active,
         );
       case RoomMode.idle:
-        serverSync.pushRoomPreferences(
+        serverSync.pushNodePreferences(
           widget.roomId,
           rhythmEnabled: true,
           state: RoomModeState.idle,
         );
       case RoomMode.off:
-        serverSync.pushRoomPreferences(
+        serverSync.pushNodePreferences(
           widget.roomId,
           state: RoomModeState.hardOff,
         );
@@ -117,18 +118,18 @@ class _RoomCardState extends State<RoomCard> {
   void _onBrightnessSliderEnd() {
     if (_sliderBrightness == null) return;
     final serverSync = context.read<ServerSyncProvider>();
-    serverSync.dispatchBrightness(widget.roomId, _sliderBrightness!);
+    serverSync.dispatchNodeBrightness(widget.roomId, _sliderBrightness!);
     AnalyticsService().logRoomBrightnessAdjusted(
       roomId: widget.roomId,
       brightness: _sliderBrightness!,
     );
   }
 
-  /// Reset this room to its adaptive curve position (per-room fix-my-lights).
+  /// Reset this node to its adaptive curve position.
   void _resetRoom() {
     HapticFeedback.mediumImpact();
     final serverSync = context.read<ServerSyncProvider>();
-    serverSync.dispatchResetRoom(widget.roomId);
+    serverSync.dispatchResetNode(widget.roomId);
     AnalyticsService().logRoomResetToCurve(roomId: widget.roomId);
     setState(() {
       _sliderBrightness = null;
@@ -269,7 +270,21 @@ class _RoomCardState extends State<RoomCard> {
             opacity: hubConnected ? 1.0 : 0.35,
             duration: const Duration(milliseconds: 400),
             child: GestureDetector(
-              onTap: () => RoomSettingsSheet.show(context, room),
+              onTap: () {
+                if (room.kind == RoomNodeKind.lightDevice) {
+                  final device =
+                      context.read<ServerSyncProvider>().deviceForNode(room.id);
+                  if (device != null) {
+                    DeviceDetailSheet.show(
+                      context,
+                      device,
+                      room.parentId ?? '',
+                    );
+                    return;
+                  }
+                }
+                RoomSettingsSheet.show(context, room);
+              },
               // Only register double-tap when off-curve to avoid tap delay on normal cards
               onDoubleTap: offCurve ? _resetRoom : null,
               child: AnimatedContainer(
@@ -335,6 +350,17 @@ class _RoomCardState extends State<RoomCard> {
                                           size: 18,
                                           color:
                                               iconColor.withValues(alpha: 0.45),
+                                        ),
+                                      ),
+                                    if (room.kind == RoomNodeKind.lightDevice)
+                                      Padding(
+                                        padding:
+                                            const EdgeInsets.only(right: 8),
+                                        child: Icon(
+                                          Icons.lightbulb_outline_rounded,
+                                          size: 18,
+                                          color:
+                                              iconColor.withValues(alpha: 0.55),
                                         ),
                                       ),
                                     Flexible(

@@ -32,6 +32,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   String? lastHubType;
   String? lastAddress;
   Map<String, dynamic>? lastCredentials;
+  List<RhythmTopologyNode> topologyNodes = const [];
 
   @override
   Future<void> hubCredentials({
@@ -47,6 +48,9 @@ class _FakeRhythmServerApi extends RhythmServerApi {
 
   @override
   Future<Map<String, dynamic>?> getTriageCount() async => null;
+
+  @override
+  Future<List<RhythmTopologyNode>> getTopologyNodes() async => topologyNodes;
 }
 
 class _FakeRhythmConnection extends RhythmConnection {
@@ -91,7 +95,7 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
       const Stream<RhythmMotionTimer>.empty();
 
   @override
-  Stream<void> get newRoomsDetected => const Stream<void>.empty();
+  Stream<void> get newNodesDetected => const Stream<void>.empty();
 
   @override
   Stream<Map<String, dynamic>> get triageChangedEvents =>
@@ -300,6 +304,85 @@ void main() {
       expect(provider.canAddMatterDevice, isFalse);
       expect(provider.canAddMatterOnNetworkDevice, isFalse);
       expect(provider.canCommissionMatterBleWifi, isFalse);
+    });
+  });
+
+  group('ServerSyncProvider topology wiring', () {
+    late RoomProvider roomProvider;
+    late _FakeRhythmServerApi api;
+    late _HelloRhythmConnection connection;
+
+    setUp(() {
+      roomProvider = RoomProvider();
+      api = _FakeRhythmServerApi();
+      connection = _HelloRhythmConnection(api);
+    });
+
+    tearDown(() {
+      roomProvider.dispose();
+      connection.dispose();
+    });
+
+    test('marks motion-target nodes from topology controls', () async {
+      api.topologyNodes = [
+        RhythmTopologyNode.fromJson({
+          'id': 'room-1',
+          'name': 'Kitchen',
+          'kind': 'room',
+        }),
+        RhythmTopologyNode.fromJson({
+          'id': 'sensor-1',
+          'name': 'Kitchen Motion',
+          'kind': 'motion_sensor',
+          'controls': [
+            {
+              'kind': 'motion',
+              'target_id': 'room-1',
+              'inherited': false,
+            },
+          ],
+        }),
+      ];
+
+      final homeProvider = _TestHomeProvider(const []);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: homeProvider,
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': [
+            {
+              'id': 'room-1',
+              'name': 'Kitchen',
+              'kind': 'room',
+              'hub_types': ['hue'],
+              'state': 'active',
+              'rhythm_enabled': true,
+              'disabled': false,
+              'time_offset': 0.0,
+              'brightness_offset': 0.0,
+              'lights_on': true,
+            },
+          ],
+          'location': const <String, dynamic>{},
+        }),
+      );
+
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(roomProvider.hasMotionSensor('room-1'), isTrue);
+      expect(provider.nodeHasMotionControlTarget('room-1'), isTrue);
+      expect(
+        provider.controlTargetNodeId(
+          sourceNodeId: 'sensor-1',
+          controlKind: 'motion',
+        ),
+        'room-1',
+      );
     });
   });
 }

@@ -391,8 +391,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                       _buildHubPairingSuggestions(),
                       const SizedBox(height: 16),
                       _buildVersionSection(),
-                      const SizedBox(height: 16),
-                      _buildConnectionStatusSection(http),
                       const SizedBox(height: 24),
                       if (_isEmbedded) ...[
                         _buildDiagnosticsButton(),
@@ -1090,51 +1088,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
           ],
         ),
       ),
-    );
-  }
-
-  Widget _buildConnectionStatusSection(RhythmConnection http) {
-    return _buildSection(
-      title: 'CONNECTION',
-      children: [
-        Container(
-          decoration: BoxDecoration(
-            color: CelestialColors.backgroundCard,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: CelestialColors.orbitRing.withValues(alpha: 0.5),
-            ),
-          ),
-          child: Column(
-            children: [
-              _buildConnectionRow(
-                label: 'Connection',
-                statusText: _connectionStatusText(http.connectionState),
-                statusColor: _connectionStatusColor(http.connectionState),
-                isPulsing: http.connectionState ==
-                        RhythmConnectionState.connecting ||
-                    http.connectionState == RhythmConnectionState.reconnecting,
-              ),
-              Divider(
-                height: 1,
-                color: CelestialColors.orbitRing.withValues(alpha: 0.3),
-              ),
-              _buildConnectionRow(
-                label: 'HTTP',
-                statusText: _checkingHealth
-                    ? 'Checking'
-                    : (_isOnline ? 'Reachable' : 'Unreachable'),
-                statusColor: _checkingHealth
-                    ? CelestialColors.textSecondary
-                    : (_isOnline
-                        ? const Color(0xFF22C55E)
-                        : Colors.red.shade400),
-                isSpinning: _checkingHealth,
-              ),
-            ],
-          ),
-        ),
-      ],
     );
   }
 
@@ -1871,7 +1824,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     AnalyticsService().logRhythmServerReset(wasOnline: _isOnline);
     setState(() => _isFactoryResetting = true);
 
-    final success = await _client.resetWifi();
+    final success = await _client.factoryReset();
     if (!mounted) return;
 
     if (!success) {
@@ -3675,18 +3628,30 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
       });
     }).toList();
 
-    // Build room_id → room_name lookup from hello rooms.
+    // Build room-node-id -> room-name lookup from topology-derived room summaries.
     final syncProvider = context.read<ServerSyncProvider>();
     final roomNames = <String, String>{};
     for (final r in syncProvider.helloRooms) {
       if (r.id.isNotEmpty) roomNames[r.id] = r.name;
     }
 
-    // Group by room_id → build RhythmRoom objects.
+    final parentNodeIdByDeviceId = <String, String?>{
+      for (final node
+          in syncProvider.topologyNodes.where((node) => node.isDevice))
+        node.id: node.parentId,
+    };
+
+    // Group by parent node id -> build room/device summaries without relying
+    // on legacy canonical `room_id` fields.
     final byRoom = <String?, List<Map<String, dynamic>>>{};
     for (final d in hubDevices) {
-      final roomId = d['room_id'] as String?;
-      (byRoom[roomId] ??= []).add(d);
+      final deviceId = d['id'] as String?;
+      final parentNodeId = deviceId == null || deviceId.isEmpty
+          ? d['parent_id'] as String? ?? d['room_id'] as String?
+          : parentNodeIdByDeviceId[deviceId] ??
+              d['parent_id'] as String? ??
+              d['room_id'] as String?;
+      (byRoom[parentNodeId] ??= []).add(d);
     }
 
     final parsedRooms = <RhythmRoom>[];

@@ -55,18 +55,20 @@ Future<void> startMatterPairingFlow(
     return;
   }
 
-  await showDeviceRoomAssignmentFlow(
+  await showDeviceNodeAssignmentFlow(
     context,
     device: resolved.device,
-    currentRoomId: resolved.roomId,
+    currentParentNodeId: resolved.parentNodeId,
   );
 }
 
-Future<({RhythmDevice device, String roomId})?> _resolvePairedMatterDevice(
+Future<({RhythmDevice device, String parentNodeId})?>
+    _resolvePairedMatterDevice(
   BuildContext context,
   MatterDevicePairingResult pairingResult,
 ) async {
   final connection = context.read<RhythmConnection>();
+  final syncProvider = context.read<ServerSyncProvider>();
 
   for (int attempt = 0; attempt < 5; attempt++) {
     final devices = await connection.api.getCanonicalDevices();
@@ -96,7 +98,8 @@ Future<({RhythmDevice device, String roomId})?> _resolvePairedMatterDevice(
                 device['manufacturer'] as String? ?? pairingResult.manufacturer,
             model: device['model'] as String? ?? pairingResult.model,
           ),
-          roomId: device['room_id'] as String? ?? '',
+          parentNodeId:
+              syncProvider.topologyNodeById(canonicalId)?.parentId ?? '',
         );
       }
     }

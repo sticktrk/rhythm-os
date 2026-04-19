@@ -6,14 +6,15 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
 import '../providers/server_sync_provider.dart';
 import 'solar_orbit.dart'; // For CelestialColors
 
-Future<bool> showDeviceRoomAssignmentFlow(
+Future<bool> showDeviceNodeAssignmentFlow(
   BuildContext context, {
   required RhythmDevice device,
-  required String currentRoomId,
+  required String currentParentNodeId,
 }) async {
   final syncProvider = context.read<ServerSyncProvider>();
-  final rooms =
-      syncProvider.helloRooms.where((r) => r.id != currentRoomId).toList();
+  final rooms = syncProvider.helloRooms
+      .where((r) => r.id != currentParentNodeId)
+      .toList();
 
   if (rooms.isEmpty) {
     ScaffoldMessenger.of(context).showSnackBar(
@@ -22,7 +23,7 @@ Future<bool> showDeviceRoomAssignmentFlow(
     return false;
   }
 
-  final isUnassigned = currentRoomId.isEmpty;
+  final isUnassigned = currentParentNodeId.isEmpty;
   final title = isUnassigned ? 'Assign to Room' : 'Move to Room';
 
   final targetRoom = await showModalBottomSheet<RhythmRoom>(
@@ -74,13 +75,8 @@ Future<bool> showDeviceRoomAssignmentFlow(
 
   if (targetRoom == null || !context.mounted) return false;
 
-  final success = isUnassigned
-      ? await syncProvider.api.assignDeviceRoom(device.id, targetRoom.id)
-      : await syncProvider.api.topologyMoveDevice(
-          deviceId: device.id,
-          fromRoomId: currentRoomId,
-          toRoomId: targetRoom.id,
-        );
+  final success =
+      await syncProvider.api.assignDeviceParent(device.id, targetRoom.id);
 
   if (!context.mounted) return false;
 
@@ -110,6 +106,18 @@ Future<bool> showDeviceRoomAssignmentFlow(
     ),
   );
   return true;
+}
+
+Future<bool> showDeviceRoomAssignmentFlow(
+  BuildContext context, {
+  required RhythmDevice device,
+  required String currentRoomId,
+}) {
+  return showDeviceNodeAssignmentFlow(
+    context,
+    device: device,
+    currentParentNodeId: currentRoomId,
+  );
 }
 
 /// Bottom sheet showing canonical device details + connections.
@@ -545,10 +553,10 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   }
 
   Future<void> _showMoveDialog(BuildContext context) async {
-    final success = await showDeviceRoomAssignmentFlow(
+    final success = await showDeviceNodeAssignmentFlow(
       context,
       device: widget.device,
-      currentRoomId: widget.roomId,
+      currentParentNodeId: widget.roomId,
     );
 
     if (success && context.mounted) {

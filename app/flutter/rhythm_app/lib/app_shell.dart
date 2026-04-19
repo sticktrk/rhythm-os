@@ -140,9 +140,16 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     SunPositionScreen.show(context);
   }
 
+  bool _showsInAllRooms(RoomDto room) {
+    if (room.kind.isRoom) return true;
+    if (!room.kind.isLightDevice) return false;
+    final parentId = room.parentId;
+    return parentId == null || parentId.isEmpty;
+  }
+
   /// Reset all on-lights to current adaptive values and enable rhythm tracking.
   ///
-  /// Delegates room filtering to the server via `POST /api/rooms/fix`.
+  /// Dispatches node resets for every currently-on light-addressable node.
   Future<void> _fixMyLights() async {
     HapticFeedback.mediumImpact();
     setState(() => _isFixing = true);
@@ -276,6 +283,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     final serverSync = context.watch<ServerSyncProvider>();
     final roomPageProvider = context.watch<RoomPageProvider>();
     final enabledRooms = roomProvider.enabledRooms;
+    final visibleRooms =
+        enabledRooms.where(_showsInAllRooms).toList(growable: false);
     final pageCount = roomPageProvider.pageCount;
     // Clamp current page if page count decreased
     if (_currentRoomPage >= pageCount) {
@@ -286,7 +295,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       context.read<RoomPageProvider>().reconcileRooms(
-            enabledRooms,
+            visibleRooms,
           );
     });
 
@@ -298,7 +307,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           Consumer<ConfigModel>(
             builder: (context, configModel, _) {
               return AllRoomsScreen(
-                rooms: enabledRooms,
+                rooms: visibleRooms,
                 globalConfig: configModel.config,
                 curveData: _curveData,
                 pageController: _roomPageController,

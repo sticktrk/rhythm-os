@@ -104,7 +104,7 @@ class _CompactRoomOrbState extends State<CompactRoomOrb> {
     // Push time offset to server — it will apply the values to lights
     // Server treats this as a reset action at the new offset
     final serverSync = context.read<ServerSyncProvider>();
-    serverSync.dispatchAction(widget.roomId, 'reset');
+    serverSync.dispatchNodeAction(widget.roomId, 'reset');
   }
 
   Future<void> _toggleLight() async {
@@ -123,7 +123,7 @@ class _CompactRoomOrbState extends State<CompactRoomOrb> {
     }
 
     final serverSync = context.read<ServerSyncProvider>();
-    serverSync.dispatchAction(widget.roomId, newOn ? 'on' : 'off');
+    serverSync.dispatchNodeAction(widget.roomId, newOn ? 'on' : 'off');
   }
 
   void _onPlayPauseTap(RoomDto room) {
@@ -134,7 +134,7 @@ class _CompactRoomOrbState extends State<CompactRoomOrb> {
     roomProvider.setRoomRhythmEnabled(widget.roomId, newEnabled);
 
     final serverSync = context.read<ServerSyncProvider>();
-    serverSync.pushRoomPreferences(widget.roomId, rhythmEnabled: newEnabled);
+    serverSync.pushNodePreferences(widget.roomId, rhythmEnabled: newEnabled);
   }
 
   Future<void> _resetToNow() async {
@@ -149,7 +149,7 @@ class _CompactRoomOrbState extends State<CompactRoomOrb> {
     });
 
     final serverSync = context.read<ServerSyncProvider>();
-    serverSync.dispatchAction(widget.roomId, 'reset');
+    serverSync.dispatchNodeAction(widget.roomId, 'reset');
   }
 
   void _onBrightnessChanged(int brightness) {
@@ -161,7 +161,7 @@ class _CompactRoomOrbState extends State<CompactRoomOrb> {
   void _onBrightnessChangeEnd() {
     if (_manualBrightness == null) return;
     final serverSync = context.read<ServerSyncProvider>();
-    serverSync.dispatchBrightness(widget.roomId, _manualBrightness!);
+    serverSync.dispatchNodeBrightness(widget.roomId, _manualBrightness!);
   }
 
   int _getBrightnessAtHour(double hour, CurveData? curveData) {
@@ -205,311 +205,333 @@ class _CompactRoomOrbState extends State<CompactRoomOrb> {
         final isLightOn = room.lightsOn;
 
         // Use server-provided brightness, fallback to curve data interpolation
-        final curveBrightness = serverBrightness ?? _getBrightnessAtHour(selectedHour, widget.curveData);
+        final curveBrightness = serverBrightness ??
+            _getBrightnessAtHour(selectedHour, widget.curveData);
 
         final brightness = _manualBrightness ?? curveBrightness;
 
         return LayoutBuilder(
           builder: (context, outerConstraints) {
-            final labelFontSize = (outerConstraints.maxHeight * 0.07).clamp(10.0, 13.0);
+            final labelFontSize =
+                (outerConstraints.maxHeight * 0.07).clamp(10.0, 13.0);
 
             return Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Room name label — constellation designation style
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: Text(
-                room.name.toUpperCase(),
-                textAlign: TextAlign.center,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: isLightOn
-                      ? CelestialColors.textPrimary.withValues(alpha: 0.9)
-                      : CelestialColors.textSecondary.withValues(alpha: 0.6),
-                  fontSize: labelFontSize,
-                  fontWeight: FontWeight.w500,
-                  letterSpacing: 1.8,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Room name label — constellation designation style
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Text(
+                    room.name.toUpperCase(),
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: isLightOn
+                          ? CelestialColors.textPrimary.withValues(alpha: 0.9)
+                          : CelestialColors.textSecondary
+                              .withValues(alpha: 0.6),
+                      fontSize: labelFontSize,
+                      fontWeight: FontWeight.w500,
+                      letterSpacing: 1.8,
+                    ),
+                  ),
                 ),
-              ),
-            ),
-            Expanded(
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  final orbSize = math.min(
-                      constraints.maxWidth, constraints.maxHeight);
-                  final moreButtonSize = (orbSize * 0.22).clamp(26.0, 38.0);
-                  final hitSize = math.max(moreButtonSize + 10, 44.0);
-                  final ringMidRadius = orbSize * 0.38;
-                  const moreAngle = math.pi / 4;
-                  final cx = constraints.maxWidth / 2 +
-                      ringMidRadius * math.cos(moreAngle);
-                  final cy = constraints.maxHeight / 2 +
-                      ringMidRadius * math.sin(moreAngle);
-                  const targetAngle = -math.pi / 4; // top-right
-                  final cxTarget = constraints.maxWidth / 2 +
-                      ringMidRadius * math.cos(targetAngle);
-                  final cyTarget = constraints.maxHeight / 2 +
-                      ringMidRadius * math.sin(targetAngle);
-                  const settingsAngle = 3 * math.pi / 4; // bottom-left
-                  final cxSettings = constraints.maxWidth / 2 +
-                      ringMidRadius * math.cos(settingsAngle);
-                  final cySettings = constraints.maxHeight / 2 +
-                      ringMidRadius * math.sin(settingsAngle);
-                  const motionAngle = -3 * math.pi / 4; // top-left
-                  final cxMotion = constraints.maxWidth / 2 +
-                      ringMidRadius * math.cos(motionAngle);
-                  final cyMotion = constraints.maxHeight / 2 +
-                      ringMidRadius * math.sin(motionAngle);
-                  return Stack(
-                    clipBehavior: Clip.none,
-                    children: [
-                      Container(
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          boxShadow: isLightOn
-                              ? [
-                                  BoxShadow(
-                                    color: CelestialColors.sunWarm
-                                        .withValues(alpha: 0.15),
-                                    blurRadius: 30,
-                                    spreadRadius: 5,
-                                  ),
-                                ]
-                              : [],
-                        ),
-                        child: SolarOrbit(
-                          curveData: widget.curveData,
-                          selectedHour: selectedHour,
-                          isTuneMode: false,
-                          isLightOn: isLightOn,
-                          isRhythmMode: room.rhythmEnabled,
-                          brightness: brightness,
-                          showTimeLabels: false,
-                          eagerGestures: true,
-                          onHourChanged: _onHourChanged,
-                          onHourChangeEnd: _onHourChangeEnd,
-                          onSunTap: _toggleLight,
-                          onBrightnessChanged: _onBrightnessChanged,
-                          onBrightnessChangeEnd: _onBrightnessChangeEnd,
-                        ),
-                      ),
-                      // Rhythm pause/play satellite — visible when light is on and RhythmServer paired
-                      if (isLightOn &&
-                          context.read<HomeProvider>().getFirstHubOfType(HubType.server) != null)
-                        Positioned(
-                          left: cx - hitSize / 2,
-                          top: cy - hitSize / 2,
-                          child: SizedBox(
-                            width: hitSize,
-                            height: hitSize,
-                            child: GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onTap: () => _onPlayPauseTap(room),
-                              child: Center(
-                                child: Container(
-                                  width: moreButtonSize,
-                                  height: moreButtonSize,
-                                  decoration: BoxDecoration(
-                                    shape: BoxShape.circle,
-                                    color: const Color(0xFF2A2F38),
-                                    boxShadow: [
-                                      BoxShadow(
-                                        color: Colors.black.withValues(alpha: 0.5),
-                                        blurRadius: 4,
-                                        offset: const Offset(1.5, 2),
-                                      ),
-                                      BoxShadow(
-                                        color: const Color(0xFF444D5A)
-                                            .withValues(alpha: 0.4),
-                                        blurRadius: 3,
-                                        offset: const Offset(-1, -1),
-                                      ),
+                Expanded(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final orbSize =
+                          math.min(constraints.maxWidth, constraints.maxHeight);
+                      final moreButtonSize = (orbSize * 0.22).clamp(26.0, 38.0);
+                      final hitSize = math.max(moreButtonSize + 10, 44.0);
+                      final ringMidRadius = orbSize * 0.38;
+                      const moreAngle = math.pi / 4;
+                      final cx = constraints.maxWidth / 2 +
+                          ringMidRadius * math.cos(moreAngle);
+                      final cy = constraints.maxHeight / 2 +
+                          ringMidRadius * math.sin(moreAngle);
+                      const targetAngle = -math.pi / 4; // top-right
+                      final cxTarget = constraints.maxWidth / 2 +
+                          ringMidRadius * math.cos(targetAngle);
+                      final cyTarget = constraints.maxHeight / 2 +
+                          ringMidRadius * math.sin(targetAngle);
+                      const settingsAngle = 3 * math.pi / 4; // bottom-left
+                      final cxSettings = constraints.maxWidth / 2 +
+                          ringMidRadius * math.cos(settingsAngle);
+                      final cySettings = constraints.maxHeight / 2 +
+                          ringMidRadius * math.sin(settingsAngle);
+                      const motionAngle = -3 * math.pi / 4; // top-left
+                      final cxMotion = constraints.maxWidth / 2 +
+                          ringMidRadius * math.cos(motionAngle);
+                      final cyMotion = constraints.maxHeight / 2 +
+                          ringMidRadius * math.sin(motionAngle);
+                      return Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          Container(
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              boxShadow: isLightOn
+                                  ? [
                                       BoxShadow(
                                         color: CelestialColors.sunWarm
-                                            .withValues(alpha: 0.1),
-                                        blurRadius: 6,
-                                        spreadRadius: 1,
+                                            .withValues(alpha: 0.15),
+                                        blurRadius: 30,
+                                        spreadRadius: 5,
                                       ),
-                                    ],
-                                  ),
-                                  child: AnimatedSwitcher(
-                                    duration: const Duration(milliseconds: 150),
-                                    switchInCurve: Curves.easeOut,
-                                    switchOutCurve: Curves.easeIn,
-                                    child: room.rhythmEnabled
-                                        // Rhythm active: pause icon
-                                        ? Row(
-                                            key: const ValueKey('pause'),
-                                            mainAxisAlignment:
-                                                MainAxisAlignment.center,
-                                            children: [
-                                              Container(
-                                                width: moreButtonSize * 0.14,
-                                                height: moreButtonSize * 0.42,
-                                                decoration: BoxDecoration(
-                                                  borderRadius:
-                                                      BorderRadius.circular(1.5),
-                                                  color: CelestialColors.sunWarm
-                                                      .withValues(alpha: 0.9),
-                                                ),
-                                              ),
-                                              SizedBox(
-                                                  width: moreButtonSize * 0.14),
-                                              Container(
-                                                width: moreButtonSize * 0.14,
-                                                height: moreButtonSize * 0.42,
-                                                decoration: BoxDecoration(
-                                                  borderRadius:
-                                                      BorderRadius.circular(1.5),
-                                                  color: CelestialColors.sunWarm
-                                                      .withValues(alpha: 0.9),
-                                                ),
-                                              ),
-                                            ],
-                                          )
-                                        // Rhythm paused: play icon
-                                        : Icon(
-                                            Icons.play_arrow_rounded,
-                                            key: const ValueKey('play'),
-                                            size: moreButtonSize * 0.55,
-                                            color: CelestialColors.sunWarm
-                                                .withValues(alpha: 0.9),
+                                    ]
+                                  : [],
+                            ),
+                            child: SolarOrbit(
+                              curveData: widget.curveData,
+                              selectedHour: selectedHour,
+                              isTuneMode: false,
+                              isLightOn: isLightOn,
+                              isRhythmMode: room.rhythmEnabled,
+                              brightness: brightness,
+                              showTimeLabels: false,
+                              eagerGestures: true,
+                              onHourChanged: _onHourChanged,
+                              onHourChangeEnd: _onHourChangeEnd,
+                              onSunTap: _toggleLight,
+                              onBrightnessChanged: _onBrightnessChanged,
+                              onBrightnessChangeEnd: _onBrightnessChangeEnd,
+                            ),
+                          ),
+                          // Rhythm pause/play satellite — visible when light is on and RhythmServer paired
+                          if (isLightOn &&
+                              context
+                                      .read<HomeProvider>()
+                                      .getFirstHubOfType(HubType.server) !=
+                                  null)
+                            Positioned(
+                              left: cx - hitSize / 2,
+                              top: cy - hitSize / 2,
+                              child: SizedBox(
+                                width: hitSize,
+                                height: hitSize,
+                                child: GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onTap: () => _onPlayPauseTap(room),
+                                  child: Center(
+                                    child: Container(
+                                      width: moreButtonSize,
+                                      height: moreButtonSize,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: const Color(0xFF2A2F38),
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: Colors.black
+                                                .withValues(alpha: 0.5),
+                                            blurRadius: 4,
+                                            offset: const Offset(1.5, 2),
                                           ),
+                                          BoxShadow(
+                                            color: const Color(0xFF444D5A)
+                                                .withValues(alpha: 0.4),
+                                            blurRadius: 3,
+                                            offset: const Offset(-1, -1),
+                                          ),
+                                          BoxShadow(
+                                            color: CelestialColors.sunWarm
+                                                .withValues(alpha: 0.1),
+                                            blurRadius: 6,
+                                            spreadRadius: 1,
+                                          ),
+                                        ],
+                                      ),
+                                      child: AnimatedSwitcher(
+                                        duration:
+                                            const Duration(milliseconds: 150),
+                                        switchInCurve: Curves.easeOut,
+                                        switchOutCurve: Curves.easeIn,
+                                        child: room.rhythmEnabled
+                                            // Rhythm active: pause icon
+                                            ? Row(
+                                                key: const ValueKey('pause'),
+                                                mainAxisAlignment:
+                                                    MainAxisAlignment.center,
+                                                children: [
+                                                  Container(
+                                                    width:
+                                                        moreButtonSize * 0.14,
+                                                    height:
+                                                        moreButtonSize * 0.42,
+                                                    decoration: BoxDecoration(
+                                                      borderRadius:
+                                                          BorderRadius.circular(
+                                                              1.5),
+                                                      color: CelestialColors
+                                                          .sunWarm
+                                                          .withValues(
+                                                              alpha: 0.9),
+                                                    ),
+                                                  ),
+                                                  SizedBox(
+                                                      width: moreButtonSize *
+                                                          0.14),
+                                                  Container(
+                                                    width:
+                                                        moreButtonSize * 0.14,
+                                                    height:
+                                                        moreButtonSize * 0.42,
+                                                    decoration: BoxDecoration(
+                                                      borderRadius:
+                                                          BorderRadius.circular(
+                                                              1.5),
+                                                      color: CelestialColors
+                                                          .sunWarm
+                                                          .withValues(
+                                                              alpha: 0.9),
+                                                    ),
+                                                  ),
+                                                ],
+                                              )
+                                            // Rhythm paused: play icon
+                                            : Icon(
+                                                Icons.play_arrow_rounded,
+                                                key: const ValueKey('play'),
+                                                size: moreButtonSize * 0.55,
+                                                color: CelestialColors.sunWarm
+                                                    .withValues(alpha: 0.9),
+                                              ),
+                                      ),
+                                    ),
                                   ),
                                 ),
                               ),
                             ),
-                          ),
-                        ),
-                      // Target satellite — visible when dragged away from "now"
-                      if (isLightOn && (_manualBrightness != null || room.timeOffsetMinutes != 0.0))
-                        Positioned(
-                          left: cxTarget - hitSize / 2,
-                          top: cyTarget - hitSize / 2,
-                          child: SizedBox(
-                            width: hitSize,
-                            height: hitSize,
-                            child: GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onTap: _resetToNow,
-                              child: Center(
-                                child: Container(
-                                  width: moreButtonSize,
-                                  height: moreButtonSize,
-                                  decoration: BoxDecoration(
-                                    shape: BoxShape.circle,
-                                    color: const Color(0xFF2A2F38),
-                                    boxShadow: [
-                                      BoxShadow(
-                                        color: Colors.black.withValues(alpha: 0.5),
-                                        blurRadius: 4,
-                                        offset: const Offset(1.5, 2),
+                          // Target satellite — visible when dragged away from "now"
+                          if (isLightOn &&
+                              (_manualBrightness != null ||
+                                  room.timeOffsetMinutes != 0.0))
+                            Positioned(
+                              left: cxTarget - hitSize / 2,
+                              top: cyTarget - hitSize / 2,
+                              child: SizedBox(
+                                width: hitSize,
+                                height: hitSize,
+                                child: GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onTap: _resetToNow,
+                                  child: Center(
+                                    child: Container(
+                                      width: moreButtonSize,
+                                      height: moreButtonSize,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: const Color(0xFF2A2F38),
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: Colors.black
+                                                .withValues(alpha: 0.5),
+                                            blurRadius: 4,
+                                            offset: const Offset(1.5, 2),
+                                          ),
+                                          BoxShadow(
+                                            color: const Color(0xFF444D5A)
+                                                .withValues(alpha: 0.4),
+                                            blurRadius: 3,
+                                            offset: const Offset(-1, -1),
+                                          ),
+                                          BoxShadow(
+                                            color: CelestialColors.accentBlue
+                                                .withValues(alpha: 0.1),
+                                            blurRadius: 6,
+                                            spreadRadius: 1,
+                                          ),
+                                        ],
                                       ),
-                                      BoxShadow(
-                                        color: const Color(0xFF444D5A)
-                                            .withValues(alpha: 0.4),
-                                        blurRadius: 3,
-                                        offset: const Offset(-1, -1),
-                                      ),
-                                      BoxShadow(
+                                      child: Icon(
+                                        Icons.my_location_rounded,
+                                        size: moreButtonSize * 0.5,
                                         color: CelestialColors.accentBlue
-                                            .withValues(alpha: 0.1),
-                                        blurRadius: 6,
-                                        spreadRadius: 1,
+                                            .withValues(alpha: 0.9),
                                       ),
-                                    ],
-                                  ),
-                                  child: Icon(
-                                    Icons.my_location_rounded,
-                                    size: moreButtonSize * 0.5,
-                                    color: CelestialColors.accentBlue
-                                        .withValues(alpha: 0.9),
+                                    ),
                                   ),
                                 ),
                               ),
                             ),
-                          ),
-                        ),
-                      // Settings ellipsis satellite — visible in settings mode
-                      Positioned(
-                        left: cxSettings - hitSize / 2,
-                        top: cySettings - hitSize / 2,
-                        child: AnimatedScale(
-                          scale: widget.isSettingsMode ? 1.0 : 0.0,
-                          duration: const Duration(milliseconds: 300),
-                          curve: widget.isSettingsMode
-                              ? Curves.elasticOut
-                              : Curves.easeIn,
-                          child: AnimatedOpacity(
-                            opacity: widget.isSettingsMode ? 1.0 : 0.0,
-                            duration: const Duration(milliseconds: 200),
-                            child: SizedBox(
-                              width: hitSize,
-                              height: hitSize,
-                              child: GestureDetector(
-                                behavior: HitTestBehavior.opaque,
-                                onTap: () =>
-                                    RoomSettingsSheet.show(context, room),
-                                child: Center(
-                                  child: Container(
-                                    width: moreButtonSize,
-                                    height: moreButtonSize,
-                                    decoration: BoxDecoration(
-                                      shape: BoxShape.circle,
-                                      color: CelestialColors.sunWarm
-                                          .withValues(alpha: 0.15),
-                                      border: Border.all(
-                                        color: CelestialColors.sunWarm
-                                            .withValues(alpha: 0.5),
-                                        width: 1,
-                                      ),
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: Colors.black
-                                              .withValues(alpha: 0.5),
-                                          blurRadius: 4,
-                                          offset: const Offset(1.5, 2),
-                                        ),
-                                        BoxShadow(
+                          // Settings ellipsis satellite — visible in settings mode
+                          Positioned(
+                            left: cxSettings - hitSize / 2,
+                            top: cySettings - hitSize / 2,
+                            child: AnimatedScale(
+                              scale: widget.isSettingsMode ? 1.0 : 0.0,
+                              duration: const Duration(milliseconds: 300),
+                              curve: widget.isSettingsMode
+                                  ? Curves.elasticOut
+                                  : Curves.easeIn,
+                              child: AnimatedOpacity(
+                                opacity: widget.isSettingsMode ? 1.0 : 0.0,
+                                duration: const Duration(milliseconds: 200),
+                                child: SizedBox(
+                                  width: hitSize,
+                                  height: hitSize,
+                                  child: GestureDetector(
+                                    behavior: HitTestBehavior.opaque,
+                                    onTap: () =>
+                                        RoomSettingsSheet.show(context, room),
+                                    child: Center(
+                                      child: Container(
+                                        width: moreButtonSize,
+                                        height: moreButtonSize,
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
                                           color: CelestialColors.sunWarm
                                               .withValues(alpha: 0.15),
-                                          blurRadius: 6,
-                                          spreadRadius: 1,
+                                          border: Border.all(
+                                            color: CelestialColors.sunWarm
+                                                .withValues(alpha: 0.5),
+                                            width: 1,
+                                          ),
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: Colors.black
+                                                  .withValues(alpha: 0.5),
+                                              blurRadius: 4,
+                                              offset: const Offset(1.5, 2),
+                                            ),
+                                            BoxShadow(
+                                              color: CelestialColors.sunWarm
+                                                  .withValues(alpha: 0.15),
+                                              blurRadius: 6,
+                                              spreadRadius: 1,
+                                            ),
+                                          ],
                                         ),
-                                      ],
-                                    ),
-                                    child: Icon(
-                                      Icons.more_horiz,
-                                      size: moreButtonSize * 0.55,
-                                      color: CelestialColors.sunWarm
-                                          .withValues(alpha: 0.9),
+                                        child: Icon(
+                                          Icons.more_horiz,
+                                          size: moreButtonSize * 0.55,
+                                          color: CelestialColors.sunWarm
+                                              .withValues(alpha: 0.9),
+                                        ),
+                                      ),
                                     ),
                                   ),
                                 ),
                               ),
                             ),
                           ),
-                        ),
-                      ),
-                      // Motion timer satellite — visible when motion tracking active
-                      if (motionTimer != null)
-                        Positioned(
-                          left: cxMotion - hitSize / 2,
-                          top: cyMotion - hitSize / 2,
-                          child: _MotionTimerSatellite(
-                            info: motionTimer,
-                            size: moreButtonSize,
-                          ),
-                        ),
-                    ],
-                  );
-                },
-              ),
-            ),
-          ],
-        );
+                          // Motion timer satellite — visible when motion tracking active
+                          if (motionTimer != null)
+                            Positioned(
+                              left: cxMotion - hitSize / 2,
+                              top: cyMotion - hitSize / 2,
+                              child: _MotionTimerSatellite(
+                                info: motionTimer,
+                                size: moreButtonSize,
+                              ),
+                            ),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+              ],
+            );
           },
         );
       },
@@ -586,8 +608,7 @@ class _MotionTimerSatelliteState extends State<_MotionTimerSatellite>
       if (!mounted) return;
       final elapsed =
           DateTime.now().difference(widget.info.receivedAt).inSeconds;
-      final remaining =
-          (widget.info.remainingSecs ?? 0) - elapsed;
+      final remaining = (widget.info.remainingSecs ?? 0) - elapsed;
       setState(() {
         _interpolatedRemaining = remaining.clamp(0, widget.info.timeoutSecs);
       });

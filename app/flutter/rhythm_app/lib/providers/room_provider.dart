@@ -45,6 +45,9 @@ RunnerStateDto replaceRoomsPreservingUserState(
             id: room.id,
             name: room.name,
             source: room.source,
+            kind: room.kind,
+            parentId: room.parentId,
+            placement: room.placement,
             deviceIds: room.deviceIds,
             // Preserve runtime state from previous
             rhythmEnabled: prev.rhythmEnabled,
@@ -246,6 +249,8 @@ class RoomProvider extends ChangeNotifier {
     }
   }
 
+  void markNodeHasSensor(String nodeId) => markRoomHasSensor(nodeId);
+
   /// Remove rooms from [_roomsWithSensors] that are no longer reported by
   /// the server. Also clears stale motion timers for those rooms.
   void reconcileMotionSensors(Set<String> serverRoomsWithSensors) {
@@ -258,6 +263,23 @@ class RoomProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Replace the known motion-target node set with a fresh authoritative set.
+  ///
+  /// This is used during hello/topology refresh when the backend graph is the
+  /// source of truth for automation wiring.
+  void setMotionSensorNodes(Set<String> nodeIds) {
+    final stale = _roomsWithSensors.difference(nodeIds);
+    final added = nodeIds.difference(_roomsWithSensors);
+    if (stale.isEmpty && added.isEmpty) return;
+
+    for (final nodeId in stale) {
+      _roomsWithSensors.remove(nodeId);
+      _motionTimers.remove(nodeId);
+    }
+    _roomsWithSensors.addAll(added);
+    notifyListeners();
+  }
+
   /// Update motion timer info for a room. Only notifies if values changed.
   void updateMotionTimer(String roomId, MotionTimerInfo info) {
     final existing = _motionTimers[roomId];
@@ -266,12 +288,17 @@ class RoomProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  void updateNodeMotionTimer(String nodeId, MotionTimerInfo info) =>
+      updateMotionTimer(nodeId, info);
+
   /// Clear motion timer for a room. Only notifies if it was present.
   void clearMotionTimer(String roomId) {
     if (_motionTimers.remove(roomId) != null) {
       notifyListeners();
     }
   }
+
+  void clearNodeMotionTimer(String nodeId) => clearMotionTimer(nodeId);
 
   // Getters
   List<RoomDto> get rooms => _state.rooms;
@@ -547,6 +574,36 @@ class RoomProvider extends ChangeNotifier {
     }
   }
 
+  Future<void> applyServerNodeState(
+    String nodeId, {
+    required bool rhythmEnabled,
+    required double timeOffset,
+    required double brightnessOffset,
+    required RoomModeState state,
+    bool transitioning = false,
+    RhythmMode? mode,
+    bool? lightsOn,
+    int? brightness,
+    int? kelvin,
+    (int r, int g, int b)? color,
+    bool tick = false,
+  }) {
+    return applyServerRoomState(
+      nodeId,
+      rhythmEnabled: rhythmEnabled,
+      timeOffset: timeOffset,
+      brightnessOffset: brightnessOffset,
+      state: state,
+      transitioning: transitioning,
+      mode: mode,
+      lightsOn: lightsOn,
+      brightness: brightness,
+      kelvin: kelvin,
+      color: color,
+      tick: tick,
+    );
+  }
+
   /// Set rhythm enabled/disabled for a room.
   Future<void> setRoomRhythmEnabled(String roomId, bool enabled) async {
     _state = room_state.setRoomRhythmEnabled(
@@ -692,6 +749,8 @@ class RoomProvider extends ChangeNotifier {
   RoomDto? getRoom(String roomId) {
     return room_state.roomById(state: _state, roomId: roomId);
   }
+
+  RoomDto? getNode(String nodeId) => getRoom(nodeId);
 
   /// Check if there are any rooms.
   bool get hasRooms => rooms.isNotEmpty;

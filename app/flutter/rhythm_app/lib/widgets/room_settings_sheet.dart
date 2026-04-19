@@ -262,6 +262,10 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
   }
 
   Widget _buildSettingsContent(BuildContext context) {
+    final renameLabel = room.kind.isRoom ? 'Name' : 'Node Name';
+    final hideLabel = room.kind == RoomNodeKind.lightDevice
+        ? 'Hide this light'
+        : 'Hide this room';
     return ListView(
       key: const ValueKey('settings'),
       padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -269,7 +273,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
         _buildSettingsGroup('General', [
           _SettingsRow(
             icon: Icons.label_outline,
-            label: 'Name',
+            label: renameLabel,
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -280,15 +284,17 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
                     fontSize: 14,
                   ),
                 ),
-                const SizedBox(width: 4),
-                Icon(
-                  Icons.edit_outlined,
-                  color: CelestialColors.textSecondary.withValues(alpha: 0.5),
-                  size: 14,
-                ),
+                if (room.kind.isRoom) ...[
+                  const SizedBox(width: 4),
+                  Icon(
+                    Icons.edit_outlined,
+                    color: CelestialColors.textSecondary.withValues(alpha: 0.5),
+                    size: 14,
+                  ),
+                ],
               ],
             ),
-            onTap: () => _showRenameDialog(context),
+            onTap: room.kind.isRoom ? () => _showRenameDialog(context) : null,
           ),
           _SettingsRow(
             icon: Icons.hub_outlined,
@@ -306,7 +312,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
             builder: (context, isHidden, _) {
               return _SettingsRow(
                 icon: Icons.visibility_off_outlined,
-                label: 'Hide this room',
+                label: hideLabel,
                 trailing: _ToggleSwitch(
                   value: isHidden,
                   onChanged: (val) {
@@ -811,7 +817,7 @@ class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb>
     final roomProvider = context.read<RoomProvider>();
     roomProvider.setRoomRhythmEnabled(widget.roomId, newEnabled);
     final serverSync = context.read<ServerSyncProvider>();
-    serverSync.pushRoomPreferences(widget.roomId, rhythmEnabled: newEnabled);
+    serverSync.pushNodePreferences(widget.roomId, rhythmEnabled: newEnabled);
   }
 
   @override

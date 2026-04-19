@@ -51,7 +51,7 @@ class ServerSyncProvider extends ChangeNotifier {
   StreamSubscription<({String event, String? hubType})>? _hubEventSub;
   StreamSubscription<RoomSourceDto>? _sourceChangedSub;
   StreamSubscription<RhythmMotionTimer>? _motionTimerSub;
-  StreamSubscription<void>? _newRoomsSub;
+  StreamSubscription<void>? _newNodesSub;
   StreamSubscription<Map<String, dynamic>>? _triageChangedSub;
   StreamSubscription<RhythmConnectionState>? _connectionStateSub;
   StreamSubscription<AuthUser?>? _authStateSub;
@@ -82,8 +82,14 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Cooldown: last time a hub-connected event triggered a re-hello.
   DateTime? _lastHubReconnectTime;
 
-  /// Cached rooms from the last RhythmHello (includes typed devices from registry).
+  /// Full node-state snapshot from the last server hello.
+  List<RhythmRoom> _helloNodes = [];
+
+  /// Cached room summaries derived from hello/topology for room-centric UI.
   List<RhythmRoom> _helloRooms = [];
+
+  /// Raw topology graph from `/api/topology/nodes`.
+  List<RhythmTopologyNode> _topologyNodes = [];
 
   /// Previous connection state for detecting transitions.
   RhythmConnectionState _previousConnectionState =
@@ -295,8 +301,80 @@ class ServerSyncProvider extends ChangeNotifier {
     return _serverPlatformContext == 'ha_addon';
   }
 
-  /// Rooms from the last server hello (with typed devices from the registry).
+  /// Light-addressable nodes from the last server hello.
+  List<RhythmRoom> get helloNodes => _helloNodes;
+
+  /// Room summaries derived from the last hello/topology refresh.
   List<RhythmRoom> get helloRooms => _helloRooms;
+
+  /// Raw node topology graph for topology/editor plumbing.
+  List<RhythmTopologyNode> get topologyNodes => _topologyNodes;
+
+  RhythmRoom? nodeById(String nodeId) =>
+      _helloNodes.where((node) => node.id == nodeId).firstOrNull;
+
+  RhythmTopologyNode? topologyNodeById(String nodeId) =>
+      _topologyNodes.where((node) => node.id == nodeId).firstOrNull;
+
+  Iterable<RhythmTopologyControlLink> controlsForSourceNode(String nodeId) =>
+      topologyNodeById(nodeId)?.controls ?? const [];
+
+  RhythmTopologyControlLink? controlForSourceNode(
+    String nodeId,
+    String controlKind,
+  ) {
+    for (final control in controlsForSourceNode(nodeId)) {
+      if (control.kind == controlKind) return control;
+    }
+    return null;
+  }
+
+  String? controlTargetNodeId({
+    required String sourceNodeId,
+    required String controlKind,
+  }) {
+    return controlForSourceNode(sourceNodeId, controlKind)?.targetId;
+  }
+
+  List<RhythmTopologyNode> controlSourceNodesForTarget({
+    required String targetNodeId,
+    String? controlKind,
+  }) {
+    return _topologyNodes.where((node) {
+      for (final control in node.controls) {
+        if (control.targetId != targetNodeId) continue;
+        if (controlKind == null || control.kind == controlKind) return true;
+      }
+      return false;
+    }).toList();
+  }
+
+  bool nodeHasIncomingControl({
+    required String targetNodeId,
+    String? controlKind,
+  }) {
+    return controlSourceNodesForTarget(
+      targetNodeId: targetNodeId,
+      controlKind: controlKind,
+    ).isNotEmpty;
+  }
+
+  bool nodeHasMotionControlTarget(String targetNodeId) =>
+      nodeHasIncomingControl(
+        targetNodeId: targetNodeId,
+        controlKind: 'motion',
+      );
+
+  bool isNodeLightDevice(String nodeId) =>
+      nodeById(nodeId)?.kind == RhythmNodeKind.lightDevice;
+
+  bool isNodeRoom(String nodeId) => nodeById(nodeId)?.kind.isRoom ?? true;
+
+  RhythmDevice? deviceForNode(String nodeId) {
+    final topologyNode = topologyNodeById(nodeId);
+    if (topologyNode == null || !topologyNode.isDevice) return null;
+    return RhythmDevice.fromTopologyNode(topologyNode);
+  }
 
   /// Number of typed lights for a room (0 until lights are typed in the backend).
   int lightCountForRoom(String roomId) {
@@ -311,6 +389,10 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Human-readable device summary for a room (e.g. "4 lights, 2 buttons").
   String deviceSummaryForRoom(String roomId) {
+    final roomSummary = _helloRooms.where((r) => r.id == roomId).firstOrNull;
+    if (roomSummary != null) return roomSummary.deviceSummary;
+    final node = nodeById(roomId);
+    if (node?.kind == RhythmNodeKind.lightDevice) return '1 light';
     return _helloRooms
             .where((r) => r.id == roomId)
             .firstOrNull
@@ -395,7 +477,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _rhythmStateSub = _connection.rhythmStateEvents.listen(_onRhythmState);
     _hubEventSub = _connection.hubEvents.listen(_onHubEvent);
     _motionTimerSub = _connection.motionTimerEvents.listen(_onMotionTimer);
-    _newRoomsSub = _connection.newRoomsDetected.listen(_onNewRoomsDetected);
+    _newNodesSub = _connection.newNodesDetected.listen(_onNewNodesDetected);
     _triageChangedSub =
         _connection.triageChangedEvents.listen(_onTriageChanged);
 
@@ -489,12 +571,12 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Handle hello from server — accept rooms and reconcile config.
   void _onHello(RhythmHello hello) {
     debugPrint(
-        'ServerSync: Hello received with ${hello.rooms.length} rooms, version=${hello.version}');
+        'ServerSync: Hello received with ${hello.nodes.length} nodes, version=${hello.version}');
     debugPrint('ServerSync: Server active profile: ${hello.activeProfile}');
     debugPrint('ServerSync: Server location: ${hello.location}');
-    for (final r in hello.rooms) {
+    for (final r in hello.nodes) {
       debugPrint(
-          'ServerSync: Server room "${r.name}" rhythm=${r.rhythmEnabled} offset=${r.timeOffset} state=${r.state.wireValue} transitioning=${r.transitioning}');
+          'ServerSync: Server node "${r.name}" kind=${r.kind.name} rhythm=${r.rhythmEnabled} offset=${r.timeOffset} state=${r.state.wireValue} transitioning=${r.transitioning}');
     }
     _firmwareVersion = hello.version;
     _serverPlatformType = hello.platformType;
@@ -518,7 +600,8 @@ class ServerSyncProvider extends ChangeNotifier {
     _effectiveFadeMs = activeProfileConfig?.fadeMs ?? hello.effectiveFadeMs;
     _effectiveMotionTimeoutSecs = activeProfileConfig?.motionTimeoutSecs ??
         hello.effectiveMotionTimeoutSecs;
-    _helloRooms = hello.rooms;
+    _helloNodes = hello.nodes;
+    _helloRooms = _buildRoomSummaries();
     _lastHubInfos = hello.hubs;
     _capabilities = hello.capabilities;
 
@@ -526,7 +609,7 @@ class ServerSyncProvider extends ChangeNotifier {
     if (hello.lastTickEpochMs != null) {
       final lastTick =
           DateTime.fromMillisecondsSinceEpoch(hello.lastTickEpochMs!);
-      for (final room in hello.rooms) {
+      for (final room in hello.nodes) {
         if (room.id.isNotEmpty && room.rhythmEnabled) {
           _roomProvider.setLastTickTime(room.id, lastTick);
         }
@@ -538,21 +621,14 @@ class ServerSyncProvider extends ChangeNotifier {
     // add rooms (which triggers addRoomsFromSource → onSourceRoomsChanged).
     // If the server has 0 rooms, no event fires, and a stale suppress flag
     // would eat the next real event (e.g. Hue pairing).
-    _suppressNextSourceSync = hello.rooms.isNotEmpty;
+    _suppressNextSourceSync = hello.nodes.isNotEmpty;
     try {
-      // 1. Accept server rooms as authoritative.
-      _acceptServerRooms(hello.rooms);
+      // 1. Accept server nodes as authoritative.
+      _acceptServerNodes(hello.nodes);
 
       // 2. Reconcile motion sensors — mark rooms that have sensors,
       //    unmark rooms that lost their sensors since last hello
-      final serverSensorRooms = <String>{};
-      for (final room in hello.rooms) {
-        if (room.id.isNotEmpty && room.hasMotionSensor) {
-          _roomProvider.markRoomHasSensor(room.id);
-          serverSensorRooms.add(room.id);
-        }
-      }
-      _roomProvider.reconcileMotionSensors(serverSensorRooms);
+      _roomProvider.setMotionSensorNodes(_sensorTargetNodeIds());
 
       // 3. Accept server config as authoritative, push location if different
       _acceptServerConfig(hello.activeProfile);
@@ -561,10 +637,15 @@ class ServerSyncProvider extends ChangeNotifier {
       _isProcessingHello = false;
     }
 
-    // Fetch initial triage count (non-blocking).
-    api.getTriageCount().then((data) {
-      if (data != null) _onTriageChanged(data);
-    });
+    // Fetch initial triage count (non-blocking). The hello stream can deliver
+    // a buffered event after the connection has been torn down (e.g. right
+    // after a factory reset), so skip if the underlying api is gone.
+    if (_connection.connected) {
+      api.getTriageCount().then((data) {
+        if (data != null) _onTriageChanged(data);
+      });
+    }
+    _refreshTopologyNodes();
 
     _scheduleCloudBackupCapture(
       delay: const Duration(seconds: 3),
@@ -573,32 +654,32 @@ class ServerSyncProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Accept rooms from the server as the authoritative source.
+  /// Accept light-addressable nodes from the server as the authoritative source.
   ///
-  /// The server discovers rooms from connected hubs. Each room carries its
-  /// own `hub_types`, so we group by source and add each group atomically.
-  void _acceptServerRooms(List<RhythmRoom> serverRooms) {
-    // Filter out empty rooms (e.g. from stale server-side rooms.json)
-    final validRooms = serverRooms.where((r) => r.id.isNotEmpty).toList();
-    if (validRooms.isEmpty) {
-      debugPrint('ServerSync: Server has no rooms — clearing local rooms');
+  /// The backend now exposes both rooms and individual bulbs as nodes. The UI
+  /// only materializes light-addressable nodes into cards, so buttons and
+  /// sensors remain in topology metadata but do not become room cards.
+  void _acceptServerNodes(List<RhythmRoom> serverNodes) {
+    final validNodes = serverNodes
+        .where((node) => node.id.isNotEmpty && node.kind.isLightAddressable)
+        .toList();
+    if (validNodes.isEmpty) {
+      debugPrint(
+          'ServerSync: Server has no light-addressable nodes — clearing local rooms');
       _roomProvider.clearAllRooms();
       return;
     }
 
-    // Group rooms by a canonical source derived from the room's own hub types.
-    // This no longer relies on a singular "primary hub" from the hello payload.
+    // Group nodes by a canonical source derived from their own hub types.
     final grouped = <RoomSourceDto, List<RhythmRoom>>{};
-    for (final sr in validRooms) {
-      final source = _canonicalSourceForRoom(sr);
+    for (final sr in validNodes) {
+      final source = _canonicalSourceForNode(sr);
       (grouped[source] ??= []).add(sr);
     }
     debugPrint(
-        'ServerSync: Accepting ${validRooms.length} rooms across ${grouped.length} source(s): ${grouped.entries.map((e) => '${e.key}=${e.value.length}').join(', ')}');
+        'ServerSync: Accepting ${validNodes.length} light nodes across ${grouped.length} source(s): ${grouped.entries.map((e) => '${e.key}=${e.value.length}').join(', ')}');
 
-    // The server is authoritative for ALL rooms. Remove any local rooms
-    // from sources not present in the server's list.
-    final serverRoomIds = validRooms.map((r) => r.id).toSet();
+    final serverRoomIds = validNodes.map((r) => r.id).toSet();
     for (final otherSource in RoomSourceDto.values) {
       if (grouped.containsKey(otherSource)) continue;
       final stale = _roomProvider
@@ -614,8 +695,7 @@ class ServerSyncProvider extends ChangeNotifier {
       }
     }
 
-    // Add each source group atomically (preserves user state like
-    // rhythmEnabled, timeOffset, curveConfig for rooms that already exist).
+    // Add each source group atomically while preserving user-owned runtime state.
     for (final entry in grouped.entries) {
       final source = entry.key;
       final rooms = <RoomDto>[];
@@ -624,10 +704,15 @@ class ServerSyncProvider extends ChangeNotifier {
           id: sr.id,
           name: sr.name,
           source: source,
-          deviceIds: sr.devices
-              .where((d) => d.type == RhythmDeviceType.light)
-              .map((d) => d.id)
-              .toList(),
+          kind: _roomNodeKindFromSdk(sr.kind),
+          parentId: sr.parentId,
+          placement: _roomNodePlacementFromSdk(sr.placement),
+          deviceIds: sr.kind == RhythmNodeKind.lightDevice
+              ? [sr.id]
+              : sr.devices
+                  .where((d) => d.type == RhythmDeviceType.light)
+                  .map((d) => d.id)
+                  .toList(),
           rhythmEnabled: sr.rhythmEnabled,
           disabled: sr.disabled,
           lightsOn: sr.lightsOn ?? false,
@@ -638,13 +723,12 @@ class ServerSyncProvider extends ChangeNotifier {
       _roomProvider.addRoomsFromSource(source, rooms);
     }
 
-    // Apply runtime state from server atomically (rhythmEnabled, timeOffset,
-    // brightnessOffset, room state) — single save + notify per room.
+    // Apply runtime state from server atomically — single save + notify per node.
     _receivingFromServer = true;
     try {
-      for (final sr in validRooms) {
-        if (_roomProvider.getRoom(sr.id) != null) {
-          _roomProvider.applyServerRoomState(
+      for (final sr in validNodes) {
+        if (_roomProvider.getNode(sr.id) != null) {
+          _roomProvider.applyServerNodeState(
             sr.id,
             rhythmEnabled: sr.rhythmEnabled,
             timeOffset: sr.timeOffset,
@@ -682,9 +766,9 @@ class ServerSyncProvider extends ChangeNotifier {
   void _onRhythmState(RhythmRoomState state) {
     _receivingFromServer = true;
     try {
-      if (_roomProvider.getRoom(state.roomId) == null) return;
-      _roomProvider.applyServerRoomState(
-        state.roomId,
+      if (_roomProvider.getNode(state.nodeId) == null) return;
+      _roomProvider.applyServerNodeState(
+        state.nodeId,
         rhythmEnabled: state.rhythmEnabled,
         timeOffset: state.timeOffset,
         brightnessOffset: state.brightnessOffset,
@@ -706,16 +790,16 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Handle motion timer updates from server.
   void _onMotionTimer(RhythmMotionTimer event) {
-    // Any motion event (even clearing) means this room has a sensor.
-    _roomProvider.markRoomHasSensor(event.roomId);
+    // Any motion event (even clearing) means this node has a sensor.
+    _roomProvider.markNodeHasSensor(event.nodeId);
 
     // Idle sensor (no active motion, no countdown) — just mark presence.
     final isIdle = !event.motionActive && event.remainingSecs == null;
     if (event.isCleared || isIdle) {
-      _roomProvider.clearMotionTimer(event.roomId);
+      _roomProvider.clearNodeMotionTimer(event.nodeId);
     } else {
-      _roomProvider.updateMotionTimer(
-        event.roomId,
+      _roomProvider.updateNodeMotionTimer(
+        event.nodeId,
         MotionTimerInfo(
           motionActive: event.motionActive,
           motionOwned: event.motionOwned,
@@ -727,9 +811,9 @@ class ServerSyncProvider extends ChangeNotifier {
     }
   }
 
-  /// Handle new rooms detected in poll — trigger a full re-hello.
-  void _onNewRoomsDetected(void _) {
-    debugPrint('ServerSync: New rooms detected in poll — triggering re-hello');
+  /// Handle new nodes detected in poll — trigger a full re-hello.
+  void _onNewNodesDetected(void _) {
+    debugPrint('ServerSync: New nodes detected in poll — triggering re-hello');
     _connection.reconnect();
   }
 
@@ -819,7 +903,9 @@ class ServerSyncProvider extends ChangeNotifier {
       _powerSave = false;
       _activeMode = null;
       _activeProfileId = null;
+      _helloNodes = [];
       _helloRooms = [];
+      _topologyNodes = [];
       _lastHubInfos = [];
       _capabilities = null;
       _rhythmIntervalSecs = 60;
@@ -837,119 +923,157 @@ class ServerSyncProvider extends ChangeNotifier {
   // Push triggers (App → Server)
   // ============================================================================
 
-  /// Dispatch a room action through the server (server controls lights).
+  /// Dispatch a node action through the server.
   ///
   /// Returns true if dispatched to server, false if not connected.
   /// On success, applies the server's response immediately for fast convergence.
-  bool dispatchAction(String roomId, String action) {
+  bool dispatchNodeAction(String nodeId, String action) {
     if (HueServiceLocator.isDemoMode) {
       return true; // optimistic UI already applied
     }
     if (!_connection.connected) return false;
     _connection.api
-        .roomAction(roomId: roomId, action: action)
+        .nodeAction(nodeId: nodeId, action: action)
         .then((serverState) {
       if (serverState != null) _onRhythmState(serverState);
     });
     return true;
   }
 
-  /// Dispatch multiple room actions in a single batch request.
+  bool dispatchAction(String roomId, String action) =>
+      dispatchNodeAction(roomId, action);
+
+  /// Dispatch multiple node actions in a single batch request.
   ///
   /// Returns true if dispatched to server, false if not connected.
   /// On success, applies each returned state for fast convergence.
-  Future<bool> dispatchBatchActions(
-      List<({String roomId, String action})> actions) async {
+  Future<bool> dispatchBatchNodeActions(
+      List<({String nodeId, String action})> actions) async {
     if (!_connection.connected || actions.isEmpty) return false;
-    final states = await _connection.api.roomActionBatch(actions);
+    final states = await _connection.api.nodeActionBatch(actions);
     for (final state in states) {
       _onRhythmState(state);
     }
     return true;
   }
 
-  /// Set room brightness through the server.
+  Future<bool> dispatchBatchActions(
+      List<({String roomId, String action})> actions) async {
+    return dispatchBatchNodeActions([
+      for (final action in actions)
+        (nodeId: action.roomId, action: action.action),
+    ]);
+  }
+
+  /// Set node brightness through the server.
   ///
   /// Returns true if dispatched to server, false if not connected.
-  bool dispatchBrightness(String roomId, int brightness) {
+  bool dispatchNodeBrightness(String nodeId, int brightness) {
     if (HueServiceLocator.isDemoMode) {
-      _roomProvider.applyServerRoomState(
-        roomId,
-        rhythmEnabled: _roomProvider.getRoom(roomId)?.rhythmEnabled ?? true,
+      _roomProvider.applyServerNodeState(
+        nodeId,
+        rhythmEnabled: _roomProvider.getNode(nodeId)?.rhythmEnabled ?? true,
         timeOffset: 0,
         brightnessOffset: 0,
         state: RoomModeState.active,
         lightsOn: true,
         brightness: brightness,
-        kelvin: _roomProvider.getKelvin(roomId),
+        kelvin: _roomProvider.getKelvin(nodeId),
       );
       return true;
     }
     if (!_connection.connected) return false;
-    _connection.api.roomBrightness(roomId: roomId, brightness: brightness);
+    _connection.api.nodeBrightness(nodeId: nodeId, brightness: brightness);
     return true;
   }
 
-  /// Push room preferences to the server (user-state only, no topology).
-  void pushRoomPreferences(String roomId,
-      {bool? rhythmEnabled, bool? disabled, RoomModeState? state}) {
+  bool dispatchBrightness(String roomId, int brightness) =>
+      dispatchNodeBrightness(roomId, brightness);
+
+  /// Push node preferences to the server (user-state only, no topology).
+  void pushNodePreferences(String nodeId,
+      {bool? rhythmEnabled,
+      bool? disabled,
+      RoomModeState? state,
+      Map<String, dynamic>? profileSettings}) {
     if (HueServiceLocator.isDemoMode) return; // optimistic UI already applied
     if (!_connection.connected || _receivingFromServer) return;
     debugPrint(
-        'ServerSync: pushRoomPreferences $roomId rhythmEnabled=$rhythmEnabled disabled=$disabled state=${state?.wireValue}');
-    api.roomPreferencesSet(
-      roomId: roomId,
+        'ServerSync: pushNodePreferences $nodeId rhythmEnabled=$rhythmEnabled disabled=$disabled state=${state?.wireValue}');
+    api.nodePreferencesSet(
+      nodeId: nodeId,
       rhythmEnabled: rhythmEnabled,
       disabled: disabled,
       state: state,
+      profileSettings: profileSettings,
     );
   }
 
-  /// Push room preferences for multiple rooms in a single batch request.
-  ///
-  /// Avoids per-room socket overhead on constrained servers (ESP32).
-  void pushBatchRoomPreferences(List<Map<String, dynamic>> items) {
-    if (!_connection.connected || _receivingFromServer || items.isEmpty) return;
-    debugPrint('ServerSync: pushBatchRoomPreferences (${items.length} rooms)');
-    api.roomPreferencesBatchSet(items);
+  void pushRoomPreferences(String roomId,
+      {bool? rhythmEnabled,
+      bool? disabled,
+      RoomModeState? state,
+      Map<String, dynamic>? profileSettings}) {
+    pushNodePreferences(
+      roomId,
+      rhythmEnabled: rhythmEnabled,
+      disabled: disabled,
+      state: state,
+      profileSettings: profileSettings,
+    );
   }
 
-  /// Reset a single room to its current adaptive curve position.
+  /// Push node preferences for multiple nodes in a single batch request.
   ///
-  /// Per-room equivalent of [dispatchFixMyLights].
-  void dispatchResetRoom(String roomId) {
+  /// Avoids per-node socket overhead on constrained servers (ESP32).
+  void pushBatchNodePreferences(List<Map<String, dynamic>> items) {
+    if (!_connection.connected || _receivingFromServer || items.isEmpty) return;
+    debugPrint('ServerSync: pushBatchNodePreferences (${items.length} nodes)');
+    api.nodePreferencesBatchSet(items);
+  }
+
+  void pushBatchRoomPreferences(List<Map<String, dynamic>> items) {
+    pushBatchNodePreferences(items);
+  }
+
+  /// Reset a single node to its current adaptive curve position.
+  ///
+  /// Per-node equivalent of [dispatchFixMyLights].
+  void dispatchResetNode(String nodeId) {
     if (HueServiceLocator.isDemoMode) {
-      _roomProvider.applyServerRoomState(
-        roomId,
-        rhythmEnabled: _roomProvider.getRoom(roomId)?.rhythmEnabled ?? true,
+      _roomProvider.applyServerNodeState(
+        nodeId,
+        rhythmEnabled: _roomProvider.getNode(nodeId)?.rhythmEnabled ?? true,
         timeOffset: 0,
         brightnessOffset: 0,
         state: RoomModeState.active,
         lightsOn: true,
         brightness: 75,
-        kelvin: _roomProvider.getKelvin(roomId) ?? 3200,
+        kelvin: _roomProvider.getKelvin(nodeId) ?? 3200,
       );
       _roomProvider.bumpResetGeneration();
       return;
     }
     if (!_connection.connected) return;
     _connection.api
-        .roomAction(roomId: roomId, action: 'reset')
+        .nodeAction(nodeId: nodeId, action: 'reset')
         .then((serverState) {
       if (serverState != null) _onRhythmState(serverState);
       _roomProvider.bumpResetGeneration();
     });
   }
 
-  /// Reset all on-rooms to their current adaptive curve position via server.
+  void dispatchResetRoom(String roomId) => dispatchResetNode(roomId);
+
+  /// Reset all currently-on light-addressable nodes to their curve position.
   ///
-  /// Returns room states for immediate UI convergence.
+  /// Returns node states for immediate UI convergence.
   Future<List<RhythmRoomState>> dispatchFixMyLights() async {
     if (HueServiceLocator.isDemoMode) {
       // Reset all on-rooms locally
       for (final room in _roomProvider.rooms) {
         if (room.lightsOn) {
-          await _roomProvider.applyServerRoomState(
+          await _roomProvider.applyServerNodeState(
             room.id,
             rhythmEnabled: true,
             timeOffset: 0,
@@ -965,7 +1089,19 @@ class ServerSyncProvider extends ChangeNotifier {
       return [];
     }
     if (!_connection.connected) return [];
-    final states = await _connection.api.fixMyLights();
+    final nodeIds = _helloNodes
+        .where((node) => node.isLightAddressable && (node.lightsOn ?? false))
+        .map((node) => node.id)
+        .toSet();
+    if (nodeIds.isEmpty) {
+      nodeIds.addAll(
+        _roomProvider.rooms
+            .where((node) => node.lightsOn)
+            .map((node) => node.id)
+            .where((id) => id.isNotEmpty),
+      );
+    }
+    final states = await _connection.api.fixMyLights(nodeIds: nodeIds);
     for (final state in states) {
       _onRhythmState(state);
     }
@@ -1051,10 +1187,14 @@ class ServerSyncProvider extends ChangeNotifier {
     );
   }
 
-  /// Push per-room motion timeout to the server.
-  void pushMotionTimeout(String roomId, int timeoutSecs) {
+  /// Push per-node motion timeout to the server.
+  void pushNodeMotionTimeout(String nodeId, int? timeoutSecs) {
     if (!_connection.connected) return;
-    api.motionTimeoutSet(roomId: roomId, timeoutSecs: timeoutSecs);
+    api.motionTimeoutSet(nodeId: nodeId, timeoutSecs: timeoutSecs);
+  }
+
+  void pushMotionTimeout(String roomId, int? timeoutSecs) {
+    pushNodeMotionTimeout(roomId, timeoutSecs);
   }
 
   // ============================================================================
@@ -1256,6 +1396,128 @@ class ServerSyncProvider extends ChangeNotifier {
     }
   }
 
+  void _refreshTopologyNodes() {
+    if (!_connection.connected) return;
+    unawaited(() async {
+      final topologyNodes = await api.getTopologyNodes();
+      if (topologyNodes.isEmpty && _topologyNodes.isNotEmpty) return;
+      _topologyNodes = topologyNodes;
+      _helloRooms = _buildRoomSummaries();
+      _roomProvider.setMotionSensorNodes(_sensorTargetNodeIds());
+      if (hasListeners) notifyListeners();
+    }());
+  }
+
+  Future<bool> setNodeControlTarget({
+    required String sourceNodeId,
+    required String controlKind,
+    required String? targetNodeId,
+  }) async {
+    if (!_connection.connected) return false;
+    final success = await api.setTopologyNodeControlTarget(
+      nodeId: sourceNodeId,
+      controlKind: controlKind,
+      targetId: targetNodeId,
+    );
+    if (success) {
+      _refreshTopologyNodes();
+    }
+    return success;
+  }
+
+  List<RhythmRoom> _buildRoomSummaries() {
+    if (_helloNodes.isEmpty) return const [];
+
+    final nodeStateById = <String, RhythmRoom>{
+      for (final node in _helloNodes) node.id: node,
+    };
+
+    if (_topologyNodes.isEmpty) {
+      return _helloNodes.where((node) => node.kind.isRoom).toList();
+    }
+
+    final roomChildren = <String, List<RhythmTopologyNode>>{};
+    for (final node in _topologyNodes.where((node) => node.isDevice)) {
+      final parentId = node.parentId;
+      if (parentId == null || parentId.isEmpty) continue;
+      (roomChildren[parentId] ??= []).add(node);
+    }
+
+    final rooms = <RhythmRoom>[];
+    for (final topologyRoom in _topologyNodes.where((node) => node.isRoom)) {
+      final state = nodeStateById[topologyRoom.id];
+      final devices = (roomChildren[topologyRoom.id] ?? const [])
+          .map(RhythmDevice.fromTopologyNode)
+          .toList()
+        ..sort((left, right) {
+          const order = {
+            RhythmDeviceType.light: 0,
+            RhythmDeviceType.button: 1,
+            RhythmDeviceType.motion: 2,
+          };
+          return (order[left.type] ?? 3).compareTo(order[right.type] ?? 3);
+        });
+      rooms.add(RhythmRoom(
+        id: topologyRoom.id,
+        name: topologyRoom.name,
+        kind: topologyRoom.kind,
+        parentId: topologyRoom.parentId,
+        placement: topologyRoom.placement,
+        groupedLightId: state?.groupedLightId ?? '',
+        state: state?.state ?? RoomModeState.active,
+        transitioning: state?.transitioning ?? false,
+        rhythmEnabled: state?.rhythmEnabled ?? false,
+        disabled: state?.disabled ?? false,
+        timeOffset: state?.timeOffset ?? 0,
+        brightnessOffset: state?.brightnessOffset ?? 0,
+        hubTypes: state?.hubTypes ??
+            topologyRoom.hubRoomBindings
+                .map((binding) => binding.hubKey?['hub_type']?.toString())
+                .whereType<String>()
+                .toSet()
+                .toList(),
+        manufacturer: state?.manufacturer,
+        model: state?.model,
+        deviceIds: devices
+            .where((device) => device.type == RhythmDeviceType.light)
+            .map((device) => device.id)
+            .toList(),
+        devices: devices,
+        profileSettings: state?.profileSettings,
+        lightsOn: state?.lightsOn,
+        brightness: state?.brightness,
+        kelvin: state?.kelvin,
+        motionActive: state?.motionActive,
+        motionOwned: state?.motionOwned,
+        remainingSecs: state?.remainingSecs,
+        timeoutSecs: state?.timeoutSecs,
+        warningActive: state?.warningActive,
+      ));
+    }
+
+    rooms.sort((left, right) => left.name.compareTo(right.name));
+    return rooms;
+  }
+
+  Set<String> _sensorTargetNodeIds() {
+    final sensorTargetIds = <String>{
+      for (final node in _helloNodes)
+        if (node.id.isNotEmpty && node.hasMotionSensor) node.id,
+    };
+
+    for (final node in _topologyNodes) {
+      for (final control in node.controls) {
+        final targetId = control.targetId;
+        if (!control.isMotion || targetId == null || targetId.isEmpty) {
+          continue;
+        }
+        sensorTargetIds.add(targetId);
+      }
+    }
+
+    return sensorTargetIds;
+  }
+
   void _scheduleCloudBackupCapture({
     Duration delay = const Duration(seconds: 2),
     String reason = 'unspecified',
@@ -1296,15 +1558,15 @@ class ServerSyncProvider extends ChangeNotifier {
     }
   }
 
-  RoomSourceDto _canonicalSourceForRoom(RhythmRoom room) {
+  RoomSourceDto _canonicalSourceForNode(RhythmRoom node) {
     final sources =
-        room.hubTypes.map(_sourceForHubType).whereType<RoomSourceDto>().toSet();
+        node.hubTypes.map(_sourceForHubType).whereType<RoomSourceDto>().toSet();
 
     if (sources.isEmpty) {
-      return _roomProvider.getRoom(room.id)?.source ?? RoomSourceDto.unknown;
+      return _roomProvider.getNode(node.id)?.source ?? RoomSourceDto.unknown;
     }
 
-    final existingSource = _roomProvider.getRoom(room.id)?.source;
+    final existingSource = _roomProvider.getNode(node.id)?.source;
     if (existingSource != null && sources.contains(existingSource)) {
       return existingSource;
     }
@@ -1335,6 +1597,25 @@ class ServerSyncProvider extends ChangeNotifier {
     };
   }
 
+  RoomNodeKind _roomNodeKindFromSdk(RhythmNodeKind kind) => switch (kind) {
+        RhythmNodeKind.lightDevice => RoomNodeKind.lightDevice,
+        RhythmNodeKind.switchDevice => RoomNodeKind.switchDevice,
+        RhythmNodeKind.motionSensor => RoomNodeKind.motionSensor,
+        RhythmNodeKind.sensor => RoomNodeKind.sensor,
+        RhythmNodeKind.button => RoomNodeKind.button,
+        RhythmNodeKind.otherDevice => RoomNodeKind.otherDevice,
+        RhythmNodeKind.room => RoomNodeKind.room,
+      };
+
+  RoomNodePlacement? _roomNodePlacementFromSdk(
+          RhythmNodePlacement? placement) =>
+      switch (placement) {
+        RhythmNodePlacement.hubDefault => RoomNodePlacement.hubDefault,
+        RhythmNodePlacement.userOverride => RoomNodePlacement.userOverride,
+        RhythmNodePlacement.standalone => RoomNodePlacement.standalone,
+        null => null,
+      };
+
   /// Map Dart HubType to the Rust wire string.
   ///
   /// Dart enum names are camelCase (`homeAssistant`) but the Rust server
@@ -1357,7 +1638,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _hubEventSub?.cancel();
     _sourceChangedSub?.cancel();
     _motionTimerSub?.cancel();
-    _newRoomsSub?.cancel();
+    _newNodesSub?.cancel();
     _triageChangedSub?.cancel();
     _connectionStateSub?.cancel();
     _authStateSub?.cancel();

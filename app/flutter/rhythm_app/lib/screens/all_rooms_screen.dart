@@ -406,6 +406,32 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     );
   }
 
+  bool _isCompactCard(RoomDto room) => room.kind == RoomNodeKind.lightDevice;
+
+  List<List<RoomDto>> _buildRows(List<RoomDto> rooms) {
+    final rows = <List<RoomDto>>[];
+    var index = 0;
+    while (index < rooms.length) {
+      final room = rooms[index];
+      if (!_isCompactCard(room)) {
+        rows.add([room]);
+        index++;
+        continue;
+      }
+
+      final nextIndex = index + 1;
+      if (nextIndex < rooms.length && _isCompactCard(rooms[nextIndex])) {
+        rows.add([room, rooms[nextIndex]]);
+        index += 2;
+        continue;
+      }
+
+      rows.add([room]);
+      index++;
+    }
+    return rows;
+  }
+
   Widget _buildPageContent({
     required int pageIndex,
     required List<RoomDto> rooms,
@@ -433,30 +459,72 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
         onRefresh: _onRefresh,
         color: CelestialColors.accentBlue,
         backgroundColor: const Color(0xFF1A2E45),
-        child: ListView.builder(
-          padding: EdgeInsets.fromLTRB(16, 4, 16, bottomPad),
-          itemCount: rooms.length,
-          itemBuilder: (context, index) {
-            final room = rooms[index];
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: EditableRoomCard(
-                key: ValueKey(room.id),
-                roomId: room.id,
-                globalConfig: widget.globalConfig,
-                curveData: widget.curveData,
-                powerSave: powerSave,
-                editMode: false,
-                onEnterEditMode: () {
-                  final pageProvider = context.read<RoomPageProvider>();
-                  pageProvider.reconcileRooms(widget.rooms);
-                  AnalyticsService().logRoomLayoutEditStarted(
-                    roomCount: widget.rooms.length,
-                    pageCount: pageProvider.pageCount,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final rows = _buildRows(rooms);
+            return ListView.builder(
+              padding: EdgeInsets.fromLTRB(16, 4, 16, bottomPad),
+              itemCount: rows.length,
+              itemBuilder: (context, index) {
+                final row = rows[index];
+                if (row.length == 1 && !_isCompactCard(row.first)) {
+                  final room = row.first;
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: EditableRoomCard(
+                      key: ValueKey(room.id),
+                      roomId: room.id,
+                      globalConfig: widget.globalConfig,
+                      curveData: widget.curveData,
+                      powerSave: powerSave,
+                      editMode: false,
+                      onEnterEditMode: () {
+                        final pageProvider = context.read<RoomPageProvider>();
+                        pageProvider.reconcileRooms(widget.rooms);
+                        AnalyticsService().logRoomLayoutEditStarted(
+                          roomCount: widget.rooms.length,
+                          pageCount: pageProvider.pageCount,
+                        );
+                        pageProvider.enterEditMode();
+                      },
+                    ),
                   );
-                  pageProvider.enterEditMode();
-                },
-              ),
+                }
+
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      for (var i = 0; i < 2; i++) ...[
+                        if (i > 0) const SizedBox(width: 12),
+                        Expanded(
+                          child: i < row.length
+                              ? EditableRoomCard(
+                                  key: ValueKey(row[i].id),
+                                  roomId: row[i].id,
+                                  globalConfig: widget.globalConfig,
+                                  curveData: widget.curveData,
+                                  powerSave: powerSave,
+                                  editMode: false,
+                                  onEnterEditMode: () {
+                                    final pageProvider =
+                                        context.read<RoomPageProvider>();
+                                    pageProvider.reconcileRooms(widget.rooms);
+                                    AnalyticsService().logRoomLayoutEditStarted(
+                                      roomCount: widget.rooms.length,
+                                      pageCount: pageProvider.pageCount,
+                                    );
+                                    pageProvider.enterEditMode();
+                                  },
+                                )
+                              : const SizedBox.shrink(),
+                        ),
+                      ],
+                    ],
+                  ),
+                );
+              },
             );
           },
         ),
