@@ -57,6 +57,16 @@ struct PeriodicDispatchNode {
     emit_node_id: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PeriodicDispatchSummary {
+    eligible_node_count: usize,
+    eligible_room_count: usize,
+    eligible_device_count: usize,
+    dispatch_node_count: usize,
+    dispatched_settings_node_count: usize,
+    no_dispatch_node_count: usize,
+}
+
 fn last_periodic_node_index_by_emit_target(
     nodes: &[PeriodicDispatchNode],
 ) -> HashMap<String, usize> {
@@ -132,6 +142,37 @@ fn periodic_dispatch_nodes_from_state(
     dispatch_nodes
 }
 
+fn summarize_periodic_dispatch(
+    node_snapshots: &[rhythm_core::NodeSnapshot],
+    dispatch_nodes: &[PeriodicDispatchNode],
+) -> PeriodicDispatchSummary {
+    let eligible_node_count = node_snapshots.len();
+    let eligible_room_count = node_snapshots
+        .iter()
+        .filter(|node| node.kind.is_room())
+        .count();
+    let eligible_device_count = eligible_node_count.saturating_sub(eligible_room_count);
+
+    let dispatched_settings_node_ids: HashSet<&str> = dispatch_nodes
+        .iter()
+        .map(|node| node.settings_node_id.as_str())
+        .collect();
+    let dispatched_settings_node_count = dispatched_settings_node_ids.len();
+    let no_dispatch_node_count = node_snapshots
+        .iter()
+        .filter(|node| !dispatched_settings_node_ids.contains(node.id.as_str()))
+        .count();
+
+    PeriodicDispatchSummary {
+        eligible_node_count,
+        eligible_room_count,
+        eligible_device_count,
+        dispatch_node_count: dispatch_nodes.len(),
+        dispatched_settings_node_count,
+        no_dispatch_node_count,
+    }
+}
+
 fn periodic_room_state(
     room: &rhythm_core::NodeSnapshot,
     power_save: bool,
@@ -193,7 +234,7 @@ pub(crate) fn effective_cycle_duration(
     let chosen_secs = suggested_secs.max(update_interval.as_secs());
 
     if log::log_enabled!(log::Level::Debug) {
-        let rooms = if room_suggestions.is_empty() {
+        let nodes = if room_suggestions.is_empty() {
             "none".to_string()
         } else {
             room_suggestions
@@ -218,14 +259,14 @@ pub(crate) fn effective_cycle_duration(
 
         debug!(
             target: "curve",
-            "effective cycle math mode={:?} base_hour={:.3} fallback={}s update_interval={}s room_count={} chosen={}s rooms=[{}]",
+            "effective cycle math mode={:?} base_hour={:.3} fallback={}s update_interval={}s node_count={} chosen={}s nodes=[{}]",
             profile_registry.active_mode(),
             ctx.current_hour,
             fallback_secs,
             update_interval.as_secs(),
             room_snapshots.len(),
             chosen_secs,
-            rooms
+            nodes
         );
     }
 
@@ -316,7 +357,7 @@ fn enqueue_periodic_tick(
 /// Sleeps `update_interval_secs` between iterations. Each iteration:
 /// 1. Calculates current hour via `BlockingTimeProvider`
 /// 2. Logs curve values for the current time
-/// 3. Gets rhythm-enabled room IDs, skipping rooms in warning-dim state
+/// 3. Gets rhythm-enabled runtime nodes, skipping warning-dimmed nodes
 /// 4. Dispatches `PeriodicNodeTick` via `work_tx` if `Some`, or calls
 ///    `periodic_tick_room` inline if `None`
 /// 5. Calls `check_solar_midnight()`
@@ -397,7 +438,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
         let module = profile_registry.active_profile();
         let values = module.calculate(&ctx);
 
-        // Get rhythm-enabled room IDs, skipping rooms in warning-dim state
+        // Get rhythm-enabled runtime nodes, skipping warning-dimmed nodes
         let (
             mut room_snapshots,
             mut periodic_nodes,
@@ -471,6 +512,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
 
         room_snapshots.sort_by_key(|room| stable_room_phase_key(&room.id));
         periodic_nodes.sort_by_key(|node| stable_room_phase_key(&node.node_id));
+        let dispatch_summary = summarize_periodic_dispatch(&room_snapshots, &periodic_nodes);
         let last_node_index_by_emit_target =
             last_periodic_node_index_by_emit_target(&periodic_nodes);
 
@@ -478,11 +520,17 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             || rhythm_disabled_skipped > 0
             || hard_off_rooms > 0
             || expired_transitions > 0
+            || dispatch_summary.no_dispatch_node_count > 0
         {
             debug!(
                 target: "sys",
-                "Periodic tick detail: dispatch={} warning_skipped={} transition_skipped={} rhythm_disabled={} hard_off={} expired_transitions={}",
-                periodic_nodes.len(),
+                "Periodic tick detail: dispatch={} eligible_nodes={} eligible_rooms={} eligible_devices={} dispatched_settings={} no_dispatch={} warning_skipped={} transition_skipped={} rhythm_disabled={} hard_off={} expired_transitions={}",
+                dispatch_summary.dispatch_node_count,
+                dispatch_summary.eligible_node_count,
+                dispatch_summary.eligible_room_count,
+                dispatch_summary.eligible_device_count,
+                dispatch_summary.dispatched_settings_node_count,
+                dispatch_summary.no_dispatch_node_count,
                 warning_skipped,
                 transition_skipped,
                 rhythm_disabled_skipped,
@@ -493,24 +541,30 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
 
         if warning_skipped > 0 {
             info!(
-                "Periodic tick at local_hour {:.2} (solar_time {:.2}) - bri={}% kelvin={} ({} nodes across {} rooms in rhythm, {} skipped: warning-dim)",
+                "Periodic tick at local_hour {:.2} (solar_time {:.2}) - bri={}% kelvin={} (dispatch={} eligible_nodes={} eligible_rooms={} eligible_devices={} no_dispatch={} warning_skipped={})",
                 current_hour,
                 values.solar_time,
                 values.brightness,
                 values.kelvin,
-                periodic_nodes.len(),
-                room_snapshots.len(),
-                warning_skipped
+                dispatch_summary.dispatch_node_count,
+                dispatch_summary.eligible_node_count,
+                dispatch_summary.eligible_room_count,
+                dispatch_summary.eligible_device_count,
+                dispatch_summary.no_dispatch_node_count,
+                warning_skipped,
             );
         } else {
             info!(
-                "Periodic tick at local_hour {:.2} (solar_time {:.2}) - bri={}% kelvin={} ({} nodes across {} rooms in rhythm)",
+                "Periodic tick at local_hour {:.2} (solar_time {:.2}) - bri={}% kelvin={} (dispatch={} eligible_nodes={} eligible_rooms={} eligible_devices={} no_dispatch={})",
                 current_hour,
                 values.solar_time,
                 values.brightness,
                 values.kelvin,
-                periodic_nodes.len(),
-                room_snapshots.len()
+                dispatch_summary.dispatch_node_count,
+                dispatch_summary.eligible_node_count,
+                dispatch_summary.eligible_room_count,
+                dispatch_summary.eligible_device_count,
+                dispatch_summary.no_dispatch_node_count,
             );
         }
 
@@ -1253,6 +1307,26 @@ mod tests {
         }
     }
 
+    fn make_node(
+        id: &str,
+        kind: rhythm_core::LightNodeKind,
+        parent_id: Option<&str>,
+    ) -> rhythm_core::NodeSnapshot {
+        rhythm_core::NodeSnapshot {
+            id: id.to_string(),
+            name: id.to_string(),
+            kind,
+            parent_id: parent_id.map(str::to_string),
+            rhythm_enabled: true,
+            disabled: false,
+            time_offset_minutes: 0.0,
+            brightness_offset: 0.0,
+            soft_off: false,
+            hard_off: false,
+            profile_settings: RoomProfileSettings::default(),
+        }
+    }
+
     #[test]
     fn stable_room_phase_key_is_deterministic() {
         assert_eq!(
@@ -1434,6 +1508,43 @@ mod tests {
                 settings_node_id: room_id,
                 emit_node_id: expected[0].emit_node_id.clone(),
             }]
+        );
+    }
+
+    #[test]
+    fn summarize_periodic_dispatch_counts_rooms_devices_and_missing_routes() {
+        let node_snapshots = vec![
+            make_node("room-a", rhythm_core::LightNodeKind::Room, None),
+            make_node(
+                "light-a",
+                rhythm_core::LightNodeKind::LightDevice,
+                Some("room-a"),
+            ),
+            make_node("room-b", rhythm_core::LightNodeKind::Room, None),
+        ];
+        let dispatch_nodes = vec![
+            PeriodicDispatchNode {
+                node_id: "dispatch-room-a".to_string(),
+                settings_node_id: "room-a".to_string(),
+                emit_node_id: "room-a".to_string(),
+            },
+            PeriodicDispatchNode {
+                node_id: "dispatch-light-a".to_string(),
+                settings_node_id: "light-a".to_string(),
+                emit_node_id: "room-a".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            summarize_periodic_dispatch(&node_snapshots, &dispatch_nodes),
+            PeriodicDispatchSummary {
+                eligible_node_count: 3,
+                eligible_room_count: 2,
+                eligible_device_count: 1,
+                dispatch_node_count: 2,
+                dispatched_settings_node_count: 2,
+                no_dispatch_node_count: 1,
+            }
         );
     }
 

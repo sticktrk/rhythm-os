@@ -283,6 +283,18 @@ impl TopologyRoom {
         by_hub
     }
 
+    fn grouped_dispatch_target_for_hub(&self, hub_key: &HubKey) -> Option<HubDispatchTarget> {
+        let binding = self
+            .hub_room_bindings
+            .iter()
+            .filter(|binding| binding.hub_key == *hub_key && !binding.light_device_ids.is_empty())
+            .min_by(|left, right| left.hub_room_id.cmp(&right.hub_room_id))?;
+        Some(HubDispatchTarget::Group {
+            room_id: binding.hub_room_id.clone(),
+            control_id: binding.control_id.clone(),
+        })
+    }
+
     fn dispatch_plan(
         &self,
         canonical_registry: &crate::canonical::registry::CanonicalRegistry,
@@ -1472,6 +1484,34 @@ impl RoomTopologyStore {
         ))
     }
 
+    fn attached_light_dispatch_route(
+        &self,
+        node: &TopologyDeviceNode,
+        canonical_registry: &crate::canonical::registry::CanonicalRegistry,
+    ) -> Option<(HubKey, HubDispatchTarget)> {
+        let parent_id = node.parent_id.as_deref()?;
+        let (hub_key, device_target) = self.device_dispatch_route(node, canonical_registry)?;
+        let target = self
+            .rooms
+            .get(parent_id)
+            .and_then(|room| room.grouped_dispatch_target_for_hub(&hub_key))
+            .unwrap_or(device_target);
+        Some((hub_key, target))
+    }
+
+    pub fn attached_light_uses_parent_dispatch(
+        &self,
+        node_id: &str,
+        canonical_registry: &crate::canonical::registry::CanonicalRegistry,
+    ) -> bool {
+        matches!(
+            self.device_nodes
+                .get(node_id)
+                .and_then(|node| self.attached_light_dispatch_route(node, canonical_registry)),
+            Some((_, HubDispatchTarget::Group { .. }))
+        )
+    }
+
     /// Build a routing table for the composite controller.
     ///
     /// Maps each Rhythm room ID to the typed dispatch routes required by the
@@ -1512,17 +1552,16 @@ impl RoomTopologyStore {
         attached_light_node_ids.sort();
         for node_id in attached_light_node_ids {
             let node = self.device_nodes.get(&node_id).unwrap();
-            let Some(parent_id) = node.parent_id.as_ref() else {
-                continue;
-            };
             let Some(device) = canonical_registry.get(&node.canonical_device_id) else {
                 continue;
             };
             if device.device_type != DeviceType::Light {
                 continue;
             }
-            if let Some(parent_targets) = table.get(parent_id).cloned() {
-                table.insert(node.id.clone(), parent_targets);
+            if let Some((hub_key, target)) =
+                self.attached_light_dispatch_route(node, canonical_registry)
+            {
+                table.insert(node.id.clone(), vec![(hub_key.to_string(), target)]);
             }
         }
         let mut standalone_node_ids: Vec<_> = self
@@ -1631,6 +1670,10 @@ mod tests {
 
     fn ha_key() -> HubKey {
         HubKey::new(HubType::new("ha"), "192.168.1.200")
+    }
+
+    fn matter_key() -> HubKey {
+        HubKey::new(HubType::new("matter"), "local")
     }
 
     fn make_discovered(hub_room_id: &str, name: &str, control_id: &str) -> DiscoveredTopologyRoom {
@@ -2158,7 +2201,7 @@ mod tests {
     }
 
     #[test]
-    fn attached_light_nodes_inherit_parent_room_dispatch_target() {
+    fn attached_light_nodes_use_parent_group_dispatch_when_available() {
         let mut store = RoomTopologyStore::new();
         let room_id = store.translate_or_create(
             &hue_key(),
@@ -2184,7 +2227,59 @@ mod tests {
         assert!(store.attach_device_user_override(&room_id, &light_id));
 
         let routing = store.composite_routing(&registry);
-        assert_eq!(routing.get(&light_id), routing.get(&room_id));
+        assert_eq!(
+            routing.get(&light_id),
+            Some(&vec![(
+                hue_key().to_string(),
+                HubDispatchTarget::Group {
+                    room_id: "hue-room-1".to_string(),
+                    control_id: "gl-kitchen".to_string(),
+                },
+            )])
+        );
+        assert!(store.attached_light_uses_parent_dispatch(&light_id, &registry));
+    }
+
+    #[test]
+    fn attached_light_nodes_fall_back_to_device_dispatch_without_group_target() {
+        let mut store = RoomTopologyStore::new();
+        let room_id = store.create_room("Office");
+
+        let mut registry = CanonicalRegistry::new();
+        let light_one_id = register_identity(
+            &mut registry,
+            &matter_key(),
+            make_identity("matter-light-1", "", "", "Desk Lamp", DeviceType::Light),
+        );
+        let light_two_id = register_identity(
+            &mut registry,
+            &matter_key(),
+            make_identity("matter-light-2", "", "", "Floor Lamp", DeviceType::Light),
+        );
+
+        assert!(store.attach_device_user_override(&room_id, &light_one_id));
+        assert!(store.attach_device_user_override(&room_id, &light_two_id));
+
+        let routing = store.composite_routing(&registry);
+        assert_eq!(
+            routing.get(&room_id),
+            Some(&vec![(
+                matter_key().to_string(),
+                HubDispatchTarget::Devices {
+                    native_ids: vec!["matter-light-1".to_string(), "matter-light-2".to_string(),],
+                },
+            )])
+        );
+        assert_eq!(
+            routing.get(&light_one_id),
+            Some(&vec![(
+                matter_key().to_string(),
+                HubDispatchTarget::Devices {
+                    native_ids: vec!["matter-light-1".to_string()],
+                },
+            )])
+        );
+        assert!(!store.attached_light_uses_parent_dispatch(&light_one_id, &registry));
     }
 
     #[test]

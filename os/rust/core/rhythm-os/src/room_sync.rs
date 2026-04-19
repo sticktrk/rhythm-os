@@ -878,10 +878,9 @@ pub fn poll_initial_light_state(state: &SharedState) {
             continue;
         }
 
-        let query_id = if snap.kind == rhythm_core::LightNodeKind::LightDevice {
-            snap.parent_id.as_deref().unwrap_or(&snap.id)
-        } else {
-            &snap.id
+        let query_id = {
+            let Ok(s) = state.lock() else { continue };
+            commands::light_state_query_id(&s, &snap.id, snap.kind, snap.parent_id.as_deref())
         };
 
         let on = if let Some(on) = query_results.get(query_id).copied() {

@@ -580,12 +580,19 @@ fn room_hub_types_from_topology(s: &AppState, room_id: &str) -> Vec<String> {
     node_hub_types_from_topology(s, room_id)
 }
 
+fn light_node_uses_parent_dispatch(s: &AppState, node_id: &str, kind: LightNodeKind) -> bool {
+    kind == LightNodeKind::LightDevice
+        && s.topology
+            .attached_light_uses_parent_dispatch(node_id, &s.canonical_registry)
+}
+
 pub(crate) fn effective_lights_on_cache_key<'a>(
+    s: &AppState,
     node_id: &'a str,
     kind: LightNodeKind,
     parent_id: Option<&'a str>,
 ) -> &'a str {
-    if kind == LightNodeKind::LightDevice {
+    if light_node_uses_parent_dispatch(s, node_id, kind) {
         parent_id.unwrap_or(node_id)
     } else {
         node_id
@@ -593,15 +600,25 @@ pub(crate) fn effective_lights_on_cache_key<'a>(
 }
 
 fn lights_on_from_cache(
+    s: &AppState,
     room_lights_on: &HashMap<String, bool>,
     node_id: &str,
     kind: LightNodeKind,
     parent_id: Option<&str>,
 ) -> bool {
     room_lights_on
-        .get(effective_lights_on_cache_key(node_id, kind, parent_id))
+        .get(effective_lights_on_cache_key(s, node_id, kind, parent_id))
         .copied()
         .unwrap_or(false)
+}
+
+pub(crate) fn light_state_query_id<'a>(
+    s: &AppState,
+    node_id: &'a str,
+    kind: LightNodeKind,
+    parent_id: Option<&'a str>,
+) -> &'a str {
+    effective_lights_on_cache_key(s, node_id, kind, parent_id)
 }
 
 pub(crate) fn update_lights_on_cache_for_node(
@@ -612,10 +629,8 @@ pub(crate) fn update_lights_on_cache_for_node(
     lights_on: bool,
 ) {
     if let Ok(mut s) = state.lock() {
-        s.room_lights_on.insert(
-            effective_lights_on_cache_key(node_id, kind, parent_id).to_string(),
-            lights_on,
-        );
+        let cache_key = effective_lights_on_cache_key(&s, node_id, kind, parent_id).to_string();
+        s.room_lights_on.insert(cache_key, lights_on);
     }
 }
 
@@ -658,6 +673,7 @@ fn node_metadata_from_topology(
 }
 
 fn build_node_state_dto_from_snapshot_parts(
+    s: &AppState,
     snap: &rhythm_core::NodeSnapshot,
     light_profile_configs: &BTreeMap<String, LightProfileConfig>,
     mode_configs: &[ModeConfig],
@@ -737,6 +753,7 @@ fn build_node_state_dto_from_snapshot_parts(
         time_offset: snap.time_offset_minutes,
         brightness_offset: snap.brightness_offset,
         lights_on: lights_on_from_cache(
+            s,
             room_lights_on,
             &snap.id,
             snap.kind,
@@ -777,6 +794,7 @@ pub fn build_node_state_event(
                 .is_some_and(|motion| motion.warning_active),
         );
         let lights_on = lights_on_from_cache(
+            &s,
             &s.room_lights_on,
             &snap.id,
             snap.kind,
@@ -1309,6 +1327,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             let hub_types = node_hub_types_from_topology(&s, &snap.id);
             let (placement, manufacturer, model) = node_metadata_from_topology(&s, &snap.id);
             nodes.push(build_node_state_dto_from_snapshot_parts(
+                &s,
                 snap,
                 &light_profile_configs,
                 &mode_configs,
@@ -1378,6 +1397,7 @@ pub fn build_node_state(state: &SharedState, node_id: &str) -> Result<NodeStateD
     let hub_types = node_hub_types_from_topology(&s, node_id);
     let (placement, manufacturer, model) = node_metadata_from_topology(&s, node_id);
     Ok(build_node_state_dto_from_snapshot_parts(
+        &s,
         &snap,
         &s.light_profile_configs,
         &s.mode_configs(),
@@ -1462,6 +1482,7 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
         let hub_types = node_hub_types_from_topology(&s, &snap.id);
         let (placement, manufacturer, model) = node_metadata_from_topology(&s, &snap.id);
         nodes.push(build_node_state_dto_from_snapshot_parts(
+            &s,
             snap,
             &light_profile_configs,
             &mode_configs,
@@ -1548,8 +1569,10 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
     let mut rooms = Vec::new();
 
     if !snapshots.is_empty() {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         for snap in &snapshots {
             let lights_on = lights_on_from_cache(
+                &s,
                 &room_lights_on,
                 &snap.id,
                 snap.kind,
@@ -2498,7 +2521,11 @@ fn node_state_events_after_apply(
     };
 
     let mut events = vec![build_node_state_event(state, &snap)];
-    if snap.kind == LightNodeKind::LightDevice {
+    let emit_parent = state
+        .lock()
+        .ok()
+        .is_some_and(|s| light_node_uses_parent_dispatch(&s, &snap.id, snap.kind));
+    if emit_parent {
         if let Some(parent_id) = snap
             .parent_id
             .as_deref()
@@ -3038,7 +3065,15 @@ fn apply_active_mode_outputs(
             RoomModeState::Idle => true,
             RoomModeState::HardOff => false,
             RoomModeState::Active | RoomModeState::Wake | RoomModeState::Warning => {
-                room_lights_on.get(&snap.id).copied().unwrap_or(false)
+                state.lock().ok().is_some_and(|s| {
+                    lights_on_from_cache(
+                        &s,
+                        &room_lights_on,
+                        &snap.id,
+                        snap.kind,
+                        snap.parent_id.as_deref(),
+                    )
+                })
             }
         };
         if !is_visible {
@@ -4119,13 +4154,20 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
 
     let snapshots = runtime.engine_all_room_snapshots();
 
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     // Category 1: on-rooms without motion sensors → reset to adaptive curve
     let qualifying: Vec<_> = snapshots
         .iter()
         .filter(|snap| {
             !snap.disabled
                 && !snap.soft_off
-                && room_lights_on.get(&snap.id).copied().unwrap_or(false)
+                && lights_on_from_cache(
+                    &s,
+                    &room_lights_on,
+                    &snap.id,
+                    snap.kind,
+                    snap.parent_id.as_deref(),
+                )
                 && !motion_room_ids.contains(&snap.id)
         })
         .collect();
@@ -4136,9 +4178,16 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
         .filter(|snap| {
             !snap.disabled
                 && motion_room_ids.contains(&snap.id)
-                && room_lights_on.get(&snap.id).copied().unwrap_or(false)
+                && lights_on_from_cache(
+                    &s,
+                    &room_lights_on,
+                    &snap.id,
+                    snap.kind,
+                    snap.parent_id.as_deref(),
+                )
         })
         .collect();
+    drop(s);
 
     info!(target: "cmd", "fix_my_lights: {} on-rooms to reset, {} motion rooms to turn off (of {} total)",
         qualifying.len(), motion_rooms.len(), snapshots.len());
@@ -4149,9 +4198,13 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
         match runtime.handle_event(&event) {
             Ok(turned_on) => {
                 sync_active_mode_from_runtime(state, &runtime);
-                if let Ok(mut s) = state.lock() {
-                    s.room_lights_on.insert(snap.id.clone(), turned_on);
-                }
+                update_lights_on_cache_for_node(
+                    state,
+                    &snap.id,
+                    snap.kind,
+                    snap.parent_id.as_deref(),
+                    turned_on,
+                );
                 reset_ids.push(snap.id.clone());
             }
             Err(e) => {
@@ -4183,9 +4236,13 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
         match runtime.handle_event(&event) {
             Ok(turned_on) => {
                 sync_active_mode_from_runtime(state, &runtime);
-                if let Ok(mut s) = state.lock() {
-                    s.room_lights_on.insert(snap.id.clone(), turned_on);
-                }
+                update_lights_on_cache_for_node(
+                    state,
+                    &snap.id,
+                    snap.kind,
+                    snap.parent_id.as_deref(),
+                    turned_on,
+                );
                 motion_off_ids.push(snap.id.clone());
             }
             Err(e) => {
@@ -5155,6 +5212,7 @@ pub fn do_node_preferences_set(
     let lights_on = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         lights_on_from_cache(
+            &s,
             &s.room_lights_on,
             &snap.id,
             snap.kind,
@@ -7086,6 +7144,31 @@ mod tests {
         }
     }
 
+    fn setup_attached_matter_light_without_group_dispatch(
+    ) -> (SharedState, Arc<MockRuntime>, String) {
+        let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let device_id = insert_canonical_device(
+            &state,
+            HubKey::new(HubType::new("matter"), "local"),
+            "matter-light-1",
+            "Desk Lamp",
+            "",
+            "",
+        );
+        add_topology_room(&state, "room1", &[]);
+        {
+            let mut s = state.lock().unwrap();
+            assert!(s.topology.attach_device_user_override("room1", &device_id));
+        }
+        runtime
+            .snapshots
+            .lock()
+            .unwrap()
+            .push(make_light_child_snapshot(&device_id, "room1"));
+
+        (state, runtime, device_id)
+    }
+
     #[derive(Clone, Default)]
     struct TestStorage {
         inner: Arc<Mutex<TestStorageInner>>,
@@ -7561,6 +7644,26 @@ mod tests {
     }
 
     #[test]
+    fn room_action_updates_child_lights_on_without_parent_group_dispatch() {
+        let (state, runtime, device_id) = setup_attached_matter_light_without_group_dispatch();
+        {
+            let mut s = state.lock().unwrap();
+            s.room_lights_on.insert("room1".into(), false);
+        }
+
+        let result = do_node_action(&state, &device_id, "on", false);
+
+        assert!(result.is_ok());
+        assert_eq!(
+            runtime.events(),
+            vec![(device_id.clone(), ButtonAction::OnPress)]
+        );
+        let s = state.lock().unwrap();
+        assert_eq!(s.room_lights_on.get(&device_id), Some(&true));
+        assert_eq!(s.room_lights_on.get("room1"), Some(&false));
+    }
+
+    #[test]
     fn room_action_off() {
         let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
         let result = do_node_action(&state, "room1", "off", false);
@@ -7933,6 +8036,24 @@ mod tests {
 
         let snap = rhythm_core::NodeSnapshot::from_room_snapshot(
             rt.engine_room_snapshot("light1").unwrap(),
+        );
+        let event = build_node_state_event(&state, &snap);
+
+        assert!(event.lights_on);
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn build_node_state_event_uses_child_lights_on_without_parent_group_dispatch() {
+        let (state, rt, device_id) = setup_attached_matter_light_without_group_dispatch();
+        {
+            let mut s = state.lock().unwrap();
+            s.room_lights_on.insert("room1".into(), false);
+            s.room_lights_on.insert(device_id.clone(), true);
+        }
+
+        let snap = rhythm_core::NodeSnapshot::from_room_snapshot(
+            rt.engine_room_snapshot(&device_id).unwrap(),
         );
         let event = build_node_state_event(&state, &snap);
 
