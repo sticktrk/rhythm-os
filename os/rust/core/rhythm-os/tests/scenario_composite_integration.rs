@@ -15,6 +15,7 @@ use rhythm_core::runtime::scheduler::NoOpScheduler;
 use rhythm_core::runtime::time::MockTimeProvider;
 use rhythm_core::runtime::RuntimeConfig;
 use rhythm_core::InputEvent;
+use rhythm_core::{HubDispatchTarget, HubLightController};
 
 use rhythm_hue::controller::HueLightController;
 use rhythm_hue::test_support::{HueTransportCall, SpyHueTransport};
@@ -51,13 +52,13 @@ fn make_composite_pipeline() -> (
         .upsert_room("ha-kitchen", "Kitchen", "ha-kitchen", &[]);
 
     // Build controllers
-    let hue_controller: Arc<dyn rhythm_core::LightController> = Arc::new(HueLightController::new(
+    let hue_controller: Arc<dyn HubLightController> = Arc::new(HueLightController::new(
         hue_spy.clone(),
         "testuser".to_string(),
         hue_registry,
     ));
 
-    let ha_controller: Arc<dyn rhythm_core::LightController> =
+    let ha_controller: Arc<dyn HubLightController> =
         Arc::new(HaLightController::new(ha_spy.clone(), ha_registry));
 
     // Composite controller with routing
@@ -70,8 +71,20 @@ fn make_composite_pipeline() -> (
     routing.insert(
         "kitchen".to_string(),
         vec![
-            ("hue@192.168.1.5".to_string(), "hue-kitchen".to_string()),
-            ("ha@supervisor".to_string(), "ha-kitchen".to_string()),
+            (
+                "hue@192.168.1.5".to_string(),
+                HubDispatchTarget::Group {
+                    room_id: "hue-kitchen".to_string(),
+                    control_id: "gl-kitchen".to_string(),
+                },
+            ),
+            (
+                "ha@supervisor".to_string(),
+                HubDispatchTarget::Group {
+                    room_id: "ha-kitchen".to_string(),
+                    control_id: "ha-kitchen".to_string(),
+                },
+            ),
         ],
     );
     composite.update_routing(routing);
@@ -214,13 +227,31 @@ fn composite_single_hub_room_only_targets_that_hub() {
     routing.insert(
         "kitchen".to_string(),
         vec![
-            ("hue@192.168.1.5".to_string(), "hue-kitchen".to_string()),
-            ("ha@supervisor".to_string(), "ha-kitchen".to_string()),
+            (
+                "hue@192.168.1.5".to_string(),
+                HubDispatchTarget::Group {
+                    room_id: "hue-kitchen".to_string(),
+                    control_id: "gl-kitchen".to_string(),
+                },
+            ),
+            (
+                "ha@supervisor".to_string(),
+                HubDispatchTarget::Group {
+                    room_id: "ha-kitchen".to_string(),
+                    control_id: "ha-kitchen".to_string(),
+                },
+            ),
         ],
     );
     routing.insert(
         "bedroom".to_string(),
-        vec![("hue@192.168.1.5".to_string(), "hue-bedroom".to_string())],
+        vec![(
+            "hue@192.168.1.5".to_string(),
+            HubDispatchTarget::Group {
+                room_id: "hue-bedroom".to_string(),
+                control_id: "hue-bedroom".to_string(),
+            },
+        )],
     );
     composite.update_routing(routing);
 

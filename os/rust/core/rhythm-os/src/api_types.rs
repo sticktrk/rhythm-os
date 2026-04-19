@@ -5,10 +5,12 @@
 //! in `server_event.rs` — one canonical naming convention.
 
 use rhythm_core::{
-    runtime::hub_registry::DeviceType, LightProfileConfig, ModeChangeCause, ModeConfig,
-    ModeTransitionConfig, RhythmMode, RoomModeState, RoomProfileSettings,
+    runtime::hub_registry::DeviceType, LightNodeKind, LightProfileConfig, ModeChangeCause,
+    ModeConfig, ModeTransitionConfig, RhythmMode, RoomModeState, RoomProfileSettings,
 };
 use serde::Serialize;
+
+use crate::topology::{DevicePlacement, HubRoomBinding, NodeControlKind};
 
 // ---------------------------------------------------------------------------
 // Room state structs
@@ -38,7 +40,7 @@ pub struct RoomRhythmState {
     pub room_profile: RoomProfileSettings,
 }
 
-/// Room state for poll endpoint (`GET /api/rooms/state`).
+/// Room state for legacy poll payloads.
 ///
 /// Extends `RoomRhythmState` with optional motion fields (using SSE names).
 #[derive(Clone, Debug, Serialize)]
@@ -106,7 +108,7 @@ pub struct StateSnapshot {
     pub mode: ModeSettingsDto,
     pub transitions: Vec<ModeTransitionConfig>,
     pub profiles: Vec<LightProfileConfig>,
-    pub rooms: Vec<RoomFullState>,
+    pub nodes: Vec<NodeStateDto>,
 }
 
 // ---------------------------------------------------------------------------
@@ -268,11 +270,100 @@ impl TypedDeviceDto {
     }
 }
 
+/// Public node state for any addressable topology/runtime node.
+///
+/// This is the node-first contract used by `/api/state` and `/api/nodes/*`.
+/// Root rooms and standalone/child devices share one shape; hierarchy is
+/// expressed by `kind` and optional `parent_id`.
+#[derive(Clone, Debug, Serialize)]
+pub struct NodeStateDto {
+    pub id: String,
+    pub name: String,
+    pub kind: LightNodeKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement: Option<DevicePlacement>,
+    /// Which hub types can address this node (e.g. ["hue"], ["matter"]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hub_types: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manufacturer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub state: RoomModeState,
+    pub rhythm_enabled: bool,
+    pub disabled: bool,
+    pub time_offset: f32,
+    pub brightness_offset: f32,
+    pub lights_on: bool,
+    pub transitioning: bool,
+    pub brightness: u8,
+    pub kelvin: u16,
+    #[serde(default, skip_serializing_if = "RoomProfileSettings::is_empty")]
+    pub profile_settings: RoomProfileSettings,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub motion_active: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub motion_owned: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning_active: Option<bool>,
+}
+
+/// Batch node response — `{"nodes": [...]}`.
+#[derive(Debug, Serialize)]
+pub struct NodesResponse {
+    pub nodes: Vec<NodeStateDto>,
+}
+
+/// Poll response — `{"hub_connected": bool, "nodes": [...]}`.
+#[derive(Debug, Serialize)]
+pub struct NodesPollResponse {
+    pub hub_connected: bool,
+    pub nodes: Vec<NodeStateDto>,
+}
+
+/// Public topology graph node for `/api/topology/nodes`.
+#[derive(Clone, Debug, Serialize)]
+pub struct TopologyNodeDto {
+    pub id: String,
+    pub name: String,
+    pub kind: LightNodeKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement: Option<DevicePlacement>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub controls: Vec<TopologyNodeControlDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hub_room_bindings: Vec<HubRoomBinding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manufacturer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_customized: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bootstrap_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TopologyNodeControlDto {
+    pub kind: NodeControlKind,
+    pub target_id: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub inherited: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Mutation responses
 // ---------------------------------------------------------------------------
 
-/// Response for `POST /api/rooms/fix`.
+/// Response for `POST /api/nodes/fix`.
 #[derive(Debug, Serialize)]
 pub struct FixResponse {
     pub rooms_reset: usize,
@@ -404,6 +495,43 @@ mod tests {
             kelvin: 4000,
             room_profile: rhythm_core::RoomProfileSettings::default(),
         }
+    }
+
+    fn sample_node_state() -> NodeStateDto {
+        NodeStateDto {
+            id: "room1".into(),
+            name: "Office".into(),
+            kind: rhythm_core::LightNodeKind::Room,
+            parent_id: None,
+            placement: None,
+            hub_types: vec!["hue".into()],
+            manufacturer: None,
+            model: None,
+            state: rhythm_core::RoomModeState::Active,
+            rhythm_enabled: true,
+            disabled: false,
+            time_offset: 5.0,
+            brightness_offset: -10.0,
+            lights_on: true,
+            transitioning: true,
+            brightness: 80,
+            kelvin: 4000,
+            profile_settings: rhythm_core::RoomProfileSettings::default(),
+            motion_active: None,
+            motion_owned: None,
+            remaining_secs: None,
+            timeout_secs: None,
+            warning_active: None,
+        }
+    }
+
+    #[test]
+    fn node_state_uses_profile_settings_key() {
+        let mut node = sample_node_state();
+        node.profile_settings.profile_id = Some("sleep".into());
+        let json: Value = serde_json::to_value(node).unwrap();
+        assert!(json.get("profile_settings").is_some());
+        assert!(json.get("room_profile").is_none());
     }
 
     // ---- RoomRhythmState ----
@@ -839,7 +967,7 @@ mod tests {
                 rhythm_core::default_rhythm_profile(),
                 rhythm_core::default_sleep_profile(),
             ],
-            rooms: vec![],
+            nodes: vec![],
             last_tick_epoch_ms: 1700000000000,
         };
         let json: Value = serde_json::to_value(&snap).unwrap();
@@ -853,7 +981,7 @@ mod tests {
             json["active_profile"]["effective"]["motion_timeout_secs"],
             1200
         );
-        assert!(json["rooms"].as_array().unwrap().is_empty());
+        assert!(json["nodes"].as_array().unwrap().is_empty());
         assert!(json["location"]["current_local_time"].is_string());
         assert_eq!(json["location"]["current_local_hour"], 0.0);
         assert_eq!(json["location"]["solar_noon"], 12.0);
@@ -939,20 +1067,13 @@ mod tests {
                 rhythm_core::default_rhythm_profile(),
                 rhythm_core::default_sleep_profile(),
             ],
-            rooms: vec![RoomFullState {
-                rhythm: sample_rhythm_state(),
-                name: "Office".into(),
-                grouped_light_id: "gl1".into(),
-                disabled: false,
-                device_ids: vec![],
-                devices: vec![],
-            }],
+            nodes: vec![sample_node_state()],
             last_tick_epoch_ms: 1700000000000,
         };
         let json: Value = serde_json::to_value(&snap).unwrap();
         assert_eq!(json["listen_port"], 8099);
-        assert_eq!(json["rooms"].as_array().unwrap().len(), 1);
-        assert_eq!(json["rooms"][0]["name"], "Office");
+        assert_eq!(json["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(json["nodes"][0]["name"], "Office");
         assert_eq!(json["hubs"][0]["type"], "hue");
         assert_eq!(json["capabilities"]["hubs"][0]["type"], "matter");
         assert_eq!(

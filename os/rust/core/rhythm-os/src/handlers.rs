@@ -20,9 +20,10 @@ use serde_json::Value;
 
 use rhythm_core::runtime::hub_registry::DeviceType;
 
-use crate::api_types::{HubCredentialsResponse, SyncResponse};
+use crate::api_types::{HubCredentialsResponse, NodesResponse, SyncResponse};
 use crate::commands::{self, RoomParams};
 use crate::state::SharedState;
+use crate::topology::NodeControlKind;
 
 /// Framework-agnostic HTTP response.
 pub struct ApiResponse {
@@ -142,6 +143,13 @@ pub fn handle_get_rooms_state(state: &SharedState) -> ApiResponse {
     }
 }
 
+pub fn handle_get_nodes_state(state: &SharedState) -> ApiResponse {
+    match commands::build_nodes_state(state) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
 /// Upsert room(s). Accepts single object or array.
 ///
 /// Always returns `{"rooms":[...]}` regardless of count.
@@ -176,7 +184,7 @@ pub fn handle_put_rooms(state: &SharedState, body: &Value, persist: bool) -> Api
 }
 
 pub fn handle_delete_room(state: &SharedState, id: &str) -> ApiResponse {
-    let id = commands::resolve_room_id(state, id);
+    let id = commands::resolve_node_id(state, id);
     match commands::do_room_remove(state, &id) {
         Ok(()) => ApiResponse::no_content(),
         Err(e) => ApiResponse::server_error(e),
@@ -328,11 +336,11 @@ pub fn handle_delete_device(state: &SharedState, id: &str) -> ApiResponse {
 }
 
 pub fn handle_put_motion_timeout(state: &SharedState, body: &Value) -> ApiResponse {
-    let raw_room_id = match body.get("room_id").and_then(|v| v.as_str()) {
+    let raw_room_id = match body.get("node_id").and_then(|v| v.as_str()) {
         Some(id) => id,
-        None => return ApiResponse::bad_request("Missing room_id"),
+        None => return ApiResponse::bad_request("Missing node_id"),
     };
-    let room_id = commands::resolve_room_id(state, raw_room_id);
+    let room_id = commands::resolve_node_id(state, raw_room_id);
 
     // null timeout_secs → remove per-room override (use profile default)
     let timeout_val = body.get("timeout_secs");
@@ -366,8 +374,9 @@ fn parse_timer_patch_value(
     }
 }
 
-fn parse_room_profile_patch(
+fn parse_profile_settings_patch(
     value: Option<&Value>,
+    field_name: &str,
 ) -> Result<Option<commands::RoomProfileSettingsPatch>, String> {
     let Some(value) = value else {
         return Ok(None);
@@ -381,14 +390,14 @@ fn parse_room_profile_patch(
 
     let body = value
         .as_object()
-        .ok_or_else(|| "room_profile must be an object or null".to_string())?;
+        .ok_or_else(|| format!("{field_name} must be an object or null"))?;
 
     let profile_id = match body.get("profile_id") {
         None => None,
         Some(v) if v.is_null() => Some(None),
         Some(v) => Some(Some(
             v.as_str()
-                .ok_or_else(|| "room_profile.profile_id must be a string or null".to_string())?
+                .ok_or_else(|| format!("{field_name}.profile_id must be a string or null"))?
                 .to_string(),
         )),
     };
@@ -410,6 +419,11 @@ fn default_profile_config_for(
     let id = requested_id.unwrap_or(active_profile_id.as_str());
     crate::factory_default_config::factory_default_light_profile_config(id)
         .ok_or_else(|| format!("Unknown light profile: {}", id))
+}
+
+fn parse_node_control_kind(kind: &str) -> Result<NodeControlKind, String> {
+    serde_json::from_value(serde_json::Value::String(kind.to_string()))
+        .map_err(|_| format!("Invalid control kind: {}", kind))
 }
 
 pub fn handle_get_config(state: &SharedState, profile_id: Option<&str>) -> ApiResponse {
@@ -805,14 +819,14 @@ pub fn handle_room_action(state: &SharedState, body: &Value, persist: bool) -> A
             Some(id) => id,
             None => return ApiResponse::bad_request("Missing room_id"),
         };
-        let room_id = commands::resolve_room_id(state, raw_room_id);
+        let room_id = commands::resolve_node_id(state, raw_room_id);
         let action = match item.get("action").and_then(|v| v.as_str()) {
             Some(a) => a,
             None => return ApiResponse::bad_request("Missing action"),
         };
 
         let per_item_persist = persist && !batch;
-        match commands::do_room_action(state, &room_id, action, per_item_persist) {
+        match commands::do_node_action(state, &room_id, action, per_item_persist) {
             Ok(json) => results.push(json),
             Err(e) => return ApiResponse::server_error(e),
         }
@@ -823,6 +837,48 @@ pub fn handle_room_action(state: &SharedState, body: &Value, persist: bool) -> A
     }
 
     ApiResponse::json_ok(format!(r#"{{"rooms":[{}]}}"#, results.join(",")))
+}
+
+/// Dispatch node action(s). Accepts single object or array.
+pub fn handle_node_action(state: &SharedState, body: &Value, persist: bool) -> ApiResponse {
+    let items: Vec<Value> = if body.is_array() {
+        body.as_array().cloned().unwrap_or_default()
+    } else {
+        vec![body.clone()]
+    };
+
+    let mut results = Vec::new();
+    let batch = items.len() > 1;
+
+    for item in &items {
+        let raw_node_id = match item.get("node_id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => return ApiResponse::bad_request("Missing node_id"),
+        };
+        let node_id = commands::resolve_node_id(state, raw_node_id);
+        let action = match item.get("action").and_then(|v| v.as_str()) {
+            Some(a) => a,
+            None => return ApiResponse::bad_request("Missing action"),
+        };
+
+        let per_item_persist = persist && !batch;
+        if let Err(e) = commands::do_node_action(state, &node_id, action, per_item_persist) {
+            return ApiResponse::server_error(e);
+        }
+        match commands::build_node_state(state, &node_id) {
+            Ok(node) => results.push(node),
+            Err(e) => return ApiResponse::server_error(e),
+        }
+    }
+
+    if batch && persist {
+        commands::persist_rooms(state);
+    }
+
+    match serde_json::to_string(&NodesResponse { nodes: results }) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
 }
 
 /// Set room brightness. Accepts single object or array.
@@ -843,14 +899,14 @@ pub fn handle_set_brightness(state: &SharedState, body: &Value, persist: bool) -
             Some(id) => id,
             None => return ApiResponse::bad_request("Missing room_id"),
         };
-        let room_id = commands::resolve_room_id(state, raw_room_id);
+        let room_id = commands::resolve_node_id(state, raw_room_id);
         let brightness = match item.get("brightness").and_then(|v| v.as_u64()) {
             Some(b) => b as u8,
             None => return ApiResponse::bad_request("Missing brightness"),
         };
 
         let per_item_persist = persist && !batch;
-        match commands::do_set_brightness(state, &room_id, brightness, per_item_persist) {
+        match commands::do_set_node_brightness(state, &room_id, brightness, per_item_persist) {
             Ok(json) => results.push(json),
             Err(e) => return ApiResponse::server_error(e),
         }
@@ -861,6 +917,50 @@ pub fn handle_set_brightness(state: &SharedState, body: &Value, persist: bool) -
     }
 
     ApiResponse::json_ok(format!(r#"{{"rooms":[{}]}}"#, results.join(",")))
+}
+
+/// Set node brightness. Accepts single object or array.
+pub fn handle_set_node_brightness(state: &SharedState, body: &Value, persist: bool) -> ApiResponse {
+    let items: Vec<Value> = if body.is_array() {
+        body.as_array().cloned().unwrap_or_default()
+    } else {
+        vec![body.clone()]
+    };
+
+    let mut results = Vec::new();
+    let batch = items.len() > 1;
+
+    for item in &items {
+        let raw_node_id = match item.get("node_id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => return ApiResponse::bad_request("Missing node_id"),
+        };
+        let node_id = commands::resolve_node_id(state, raw_node_id);
+        let brightness = match item.get("brightness").and_then(|v| v.as_u64()) {
+            Some(b) => b as u8,
+            None => return ApiResponse::bad_request("Missing brightness"),
+        };
+
+        let per_item_persist = persist && !batch;
+        if let Err(e) =
+            commands::do_set_node_brightness(state, &node_id, brightness, per_item_persist)
+        {
+            return ApiResponse::server_error(e);
+        }
+        match commands::build_node_state(state, &node_id) {
+            Ok(node) => results.push(node),
+            Err(e) => return ApiResponse::server_error(e),
+        }
+    }
+
+    if batch && persist {
+        commands::persist_rooms(state);
+    }
+
+    match serde_json::to_string(&NodesResponse { nodes: results }) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
 }
 
 /// Set room time offset. Accepts single object or array.
@@ -881,14 +981,14 @@ pub fn handle_set_time_offset(state: &SharedState, body: &Value, persist: bool) 
             Some(id) => id,
             None => return ApiResponse::bad_request("Missing room_id"),
         };
-        let room_id = commands::resolve_room_id(state, raw_room_id);
+        let room_id = commands::resolve_node_id(state, raw_room_id);
         let time_offset = match item.get("time_offset").and_then(|v| v.as_f64()) {
             Some(t) => t as f32,
             None => return ApiResponse::bad_request("Missing time_offset"),
         };
 
         let per_item_persist = persist && !batch;
-        match commands::do_set_time_offset(state, &room_id, time_offset, per_item_persist) {
+        match commands::do_set_node_time_offset(state, &room_id, time_offset, per_item_persist) {
             Ok(json) => results.push(json),
             Err(e) => return ApiResponse::server_error(e),
         }
@@ -899,6 +999,54 @@ pub fn handle_set_time_offset(state: &SharedState, body: &Value, persist: bool) 
     }
 
     ApiResponse::json_ok(format!(r#"{{"rooms":[{}]}}"#, results.join(",")))
+}
+
+/// Set node time offset. Accepts single object or array.
+pub fn handle_set_node_time_offset(
+    state: &SharedState,
+    body: &Value,
+    persist: bool,
+) -> ApiResponse {
+    let items: Vec<Value> = if body.is_array() {
+        body.as_array().cloned().unwrap_or_default()
+    } else {
+        vec![body.clone()]
+    };
+
+    let mut results = Vec::new();
+    let batch = items.len() > 1;
+
+    for item in &items {
+        let raw_node_id = match item.get("node_id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => return ApiResponse::bad_request("Missing node_id"),
+        };
+        let node_id = commands::resolve_node_id(state, raw_node_id);
+        let time_offset = match item.get("time_offset").and_then(|v| v.as_f64()) {
+            Some(t) => t as f32,
+            None => return ApiResponse::bad_request("Missing time_offset"),
+        };
+
+        let per_item_persist = persist && !batch;
+        if let Err(e) =
+            commands::do_set_node_time_offset(state, &node_id, time_offset, per_item_persist)
+        {
+            return ApiResponse::server_error(e);
+        }
+        match commands::build_node_state(state, &node_id) {
+            Ok(node) => results.push(node),
+            Err(e) => return ApiResponse::server_error(e),
+        }
+    }
+
+    if batch && persist {
+        commands::persist_rooms(state);
+    }
+
+    match serde_json::to_string(&NodesResponse { nodes: results }) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
 }
 
 /// Update room preferences. Accepts single object or array.
@@ -923,7 +1071,7 @@ pub fn handle_put_room_preferences(
             Some(id) => id,
             None => return ApiResponse::bad_request("Missing room_id"),
         };
-        let room_id = commands::resolve_room_id(state, raw_room_id);
+        let room_id = commands::resolve_node_id(state, raw_room_id);
         let rhythm_enabled = item.get("rhythm_enabled").and_then(|v| v.as_bool());
         let disabled = item.get("disabled").and_then(|v| v.as_bool());
         let room_state = match item.get("state").cloned() {
@@ -933,13 +1081,14 @@ pub fn handle_put_room_preferences(
             },
             None => None,
         };
-        let room_profile = match parse_room_profile_patch(item.get("room_profile")) {
-            Ok(patch) => patch,
-            Err(e) => return ApiResponse::bad_request(&e),
-        };
+        let room_profile =
+            match parse_profile_settings_patch(item.get("room_profile"), "room_profile") {
+                Ok(patch) => patch,
+                Err(e) => return ApiResponse::bad_request(&e),
+            };
 
         let per_item_persist = persist && !batch;
-        match commands::do_room_preferences_set(
+        match commands::do_node_preferences_set(
             state,
             &room_id,
             rhythm_enabled,
@@ -958,6 +1107,70 @@ pub fn handle_put_room_preferences(
     }
 
     ApiResponse::json_ok(format!(r#"{{"rooms":[{}]}}"#, results.join(",")))
+}
+
+/// Update node preferences. Accepts single object or array.
+pub fn handle_put_node_preferences(
+    state: &SharedState,
+    body: &Value,
+    persist: bool,
+) -> ApiResponse {
+    let items: Vec<Value> = if body.is_array() {
+        body.as_array().cloned().unwrap_or_default()
+    } else {
+        vec![body.clone()]
+    };
+
+    let mut results = Vec::new();
+    let batch = items.len() > 1;
+
+    for item in &items {
+        let raw_node_id = match item.get("node_id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => return ApiResponse::bad_request("Missing node_id"),
+        };
+        let node_id = commands::resolve_node_id(state, raw_node_id);
+        let rhythm_enabled = item.get("rhythm_enabled").and_then(|v| v.as_bool());
+        let disabled = item.get("disabled").and_then(|v| v.as_bool());
+        let room_state = match item.get("state").cloned() {
+            Some(value) => match serde_json::from_value::<rhythm_core::RoomModeState>(value) {
+                Ok(state) => Some(state),
+                Err(_) => return ApiResponse::bad_request("Invalid node state"),
+            },
+            None => None,
+        };
+        let room_profile =
+            match parse_profile_settings_patch(item.get("profile_settings"), "profile_settings") {
+                Ok(patch) => patch,
+                Err(e) => return ApiResponse::bad_request(&e),
+            };
+
+        let per_item_persist = persist && !batch;
+        if let Err(e) = commands::do_node_preferences_set(
+            state,
+            &node_id,
+            rhythm_enabled,
+            disabled,
+            room_state,
+            room_profile.as_ref(),
+            per_item_persist,
+        ) {
+            return ApiResponse::server_error(e);
+        }
+        match commands::build_node_state(state, &node_id) {
+            Ok(node) => results.push(node),
+            Err(e) => return ApiResponse::server_error(e),
+        }
+    }
+
+    if batch && persist {
+        commands::persist_rooms(state);
+    }
+
+    match serde_json::to_string(&NodesResponse { nodes: results }) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
 }
 
 /// Reset all on-rooms back to their current adaptive curve position.
@@ -1030,7 +1243,7 @@ pub fn handle_pair_device(
                     commands::emit_triage_changed(state);
                     crate::state::emit_server_event(
                         state,
-                        crate::server_event::ServerEvent::RoomsChanged,
+                        crate::server_event::ServerEvent::NodesChanged,
                     );
                 }
             }
@@ -1088,8 +1301,19 @@ pub fn handle_put_device_room(state: &SharedState, device_id: &str, body: &Value
     let room_id = body
         .get("room_id")
         .and_then(|v| v.as_str())
-        .map(|raw_room_id| commands::resolve_room_id(state, raw_room_id));
+        .map(|raw_room_id| commands::resolve_node_id(state, raw_room_id));
     match commands::do_canonical_assign_room(state, device_id, room_id.as_deref()) {
+        Ok(()) => ApiResponse::no_content(),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_put_device_parent(state: &SharedState, device_id: &str, body: &Value) -> ApiResponse {
+    let parent_id = body
+        .get("parent_id")
+        .and_then(|v| v.as_str())
+        .map(|raw_parent_id| commands::resolve_node_id(state, raw_parent_id));
+    match commands::do_canonical_assign_room(state, device_id, parent_id.as_deref()) {
         Ok(()) => ApiResponse::no_content(),
         Err(e) => ApiResponse::server_error(e),
     }
@@ -1192,6 +1416,13 @@ pub fn handle_get_topology_rooms(state: &SharedState) -> ApiResponse {
     }
 }
 
+pub fn handle_get_topology_nodes(state: &SharedState) -> ApiResponse {
+    match commands::build_topology_nodes(state) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
 pub fn handle_post_topology_room(state: &SharedState, body: &Value) -> ApiResponse {
     let name = match body.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
@@ -1254,6 +1485,31 @@ pub fn handle_put_topology_move_device(
     }
 }
 
+pub fn handle_put_topology_node_control(
+    state: &SharedState,
+    source_id: &str,
+    kind: &str,
+    body: &Value,
+) -> ApiResponse {
+    let kind = match parse_node_control_kind(kind) {
+        Ok(kind) => kind,
+        Err(e) => return ApiResponse::bad_request(&e),
+    };
+    let target_id = if body.get("target_id").is_some_and(|value| value.is_null()) {
+        None
+    } else {
+        match body.get("target_id").and_then(|value| value.as_str()) {
+            Some(target_id) => Some(target_id),
+            None => return ApiResponse::bad_request("Missing target_id"),
+        }
+    };
+
+    match commands::do_topology_set_control_target(state, source_id, kind, target_id) {
+        Ok(()) => ApiResponse::no_content(),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1266,7 +1522,7 @@ mod tests {
     use crate::pairing::{PairingStatus, UnpairingRequest, UnpairingResult};
     use crate::registry::HubDeviceRegistry;
     use crate::state::AppState;
-    use crate::topology::HubControlTarget;
+    use crate::topology::HubRoomBinding;
     use rhythm_core::runtime::hub_registry::DeviceType;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
@@ -1324,17 +1580,19 @@ mod tests {
     }
 
     #[test]
-    fn put_motion_timeout_missing_room_id() {
+    fn put_motion_timeout_missing_node_id() {
         let state = test_state();
         let r = handle_put_motion_timeout(&state, &json!({"timeout_secs": 60}));
         assert_eq!(r.status, 400);
+        assert!(r.body.contains("node_id"));
     }
 
     #[test]
     fn put_motion_timeout_missing_timeout() {
         let state = test_state();
-        let r = handle_put_motion_timeout(&state, &json!({"room_id": "r"}));
+        let r = handle_put_motion_timeout(&state, &json!({"node_id": "r"}));
         assert_eq!(r.status, 400);
+        assert!(r.body.contains("timeout_secs"));
     }
 
     #[test]
@@ -1520,6 +1778,8 @@ mod tests {
                 RoomSnapshot {
                     id: "room1".into(),
                     name: "Room 1".into(),
+                    kind: rhythm_core::LightNodeKind::Room,
+                    parent_id: None,
                     rhythm_enabled: true,
                     disabled: false,
                     time_offset_minutes: 0.0,
@@ -1531,6 +1791,8 @@ mod tests {
                 RoomSnapshot {
                     id: "room2".into(),
                     name: "Room 2".into(),
+                    kind: rhythm_core::LightNodeKind::Room,
+                    parent_id: None,
                     rhythm_enabled: false,
                     disabled: false,
                     time_offset_minutes: 0.0,
@@ -1605,19 +1867,17 @@ mod tests {
         };
         app.canonical_registry
             .assign_room(&canonical_id, Some(&room_id));
+        let _ = app
+            .topology
+            .attach_device_hub_default(&room_id, &canonical_id);
         app.topology
             .get_mut(&room_id)
             .unwrap()
-            .add_device_hub_default(&canonical_id);
-        app.topology
-            .get_mut(&room_id)
-            .unwrap()
-            .upsert_hub_target(HubControlTarget {
+            .upsert_hub_room_binding(HubRoomBinding {
                 hub_key: hub_key.clone(),
                 hub_room_id: native_id.to_string(),
                 control_id: native_id.to_string(),
                 light_device_ids: vec![native_id.to_string()],
-                topology_aligned: false,
             });
 
         registry.lock().unwrap().upsert_room(
@@ -1986,9 +2246,103 @@ mod tests {
     #[test]
     fn put_motion_timeout_returns_204() {
         let state = handler_state_with_runtime();
-        let r = handle_put_motion_timeout(&state, &json!({"room_id": "room1", "timeout_secs": 60}));
+        let r = handle_put_motion_timeout(&state, &json!({"node_id": "room1", "timeout_secs": 60}));
         assert_eq!(r.status, 204);
         assert!(r.body.is_empty());
+    }
+
+    #[test]
+    fn put_device_parent_returns_204() {
+        let state = handler_state_with_runtime();
+        let (canonical_id, target_room_id) = {
+            let mut state = state.lock().unwrap();
+            let hub_key = state.hubs.keys().next().cloned().unwrap();
+            let room_id = state.topology.create_room("Office");
+            let identity = DiscoveredIdentity {
+                native_id: "device-1".to_string(),
+                room_id: "device-1".to_string(),
+                room_name: "Office Lamp".to_string(),
+                name: "Office Lamp".to_string(),
+                device_type: DeviceType::Light,
+                hardware_ids: vec![HardwareId::matter("100")],
+                manufacturer: None,
+                model: None,
+            };
+            let canonical_id = match state.canonical_registry.resolve(&identity, &hub_key, 1) {
+                ResolveResult::AlreadyKnown { canonical_id }
+                | ResolveResult::ReApproved { canonical_id }
+                | ResolveResult::Created { canonical_id } => canonical_id,
+                ResolveResult::Queued { .. } => panic!("unexpected triage result"),
+            };
+            state
+                .canonical_registry
+                .assign_room(&canonical_id, Some(&room_id));
+            assert!(state
+                .topology
+                .attach_device_user_override(&room_id, &canonical_id));
+            let target_room_id = state.topology.create_room("Desk");
+            (canonical_id, target_room_id)
+        };
+
+        let r = handle_put_device_parent(
+            &state,
+            &canonical_id,
+            &json!({"parent_id": target_room_id.clone()}),
+        );
+        assert_eq!(r.status, 204);
+        assert!(r.body.is_empty());
+
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.topology.device_parent_room_id(&canonical_id),
+            Some(target_room_id.as_str())
+        );
+    }
+
+    #[test]
+    fn put_topology_node_control_returns_204() {
+        let state = test_state();
+        let (source_id, target_id) = {
+            let mut state = state.lock().unwrap();
+            let source_id = state.topology.create_room("Source");
+            let target_id = state.topology.create_room("Target");
+            (source_id, target_id)
+        };
+
+        let r = handle_put_topology_node_control(
+            &state,
+            &source_id,
+            "motion",
+            &json!({"target_id": target_id.clone()}),
+        );
+        assert_eq!(r.status, 204);
+        assert!(r.body.is_empty());
+
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state
+                .topology
+                .explicit_control_target(&source_id, &crate::topology::NodeControlKind::Motion),
+            Some(target_id.as_str())
+        );
+    }
+
+    #[test]
+    fn put_topology_node_control_invalid_kind_returns_400() {
+        let state = test_state();
+        let source_id = {
+            let mut state = state.lock().unwrap();
+            state.topology.create_room("Source")
+        };
+
+        let r = handle_put_topology_node_control(
+            &state,
+            &source_id,
+            "unknown",
+            &json!({"target_id": null}),
+        );
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("Invalid control kind"));
     }
 
     #[test]
@@ -2018,7 +2372,7 @@ mod tests {
         let room = s.topology.get(&room_id).unwrap();
         assert!(!room.devices.iter().any(|d| d.device_id == canonical_id));
         assert!(!room
-            .hub_targets
+            .hub_room_bindings
             .iter()
             .any(|t| t.hub_key == hub_key && t.hub_room_id == "device-1"));
         drop(s);
@@ -2066,7 +2420,7 @@ mod tests {
         let room = s.topology.get(&room_id).unwrap();
         assert!(!room.devices.iter().any(|d| d.device_id == canonical_id));
         assert!(!room
-            .hub_targets
+            .hub_room_bindings
             .iter()
             .any(|t| t.hub_key == hub_key && t.hub_room_id == "matter-100"));
         drop(s);
@@ -2106,7 +2460,7 @@ mod tests {
         let room = s.topology.get(&room_id).unwrap();
         assert!(!room.devices.iter().any(|d| d.device_id == canonical_id));
         assert!(!room
-            .hub_targets
+            .hub_room_bindings
             .iter()
             .any(|t| t.hub_key == hub_key && t.hub_room_id == "device-1"));
         drop(s);

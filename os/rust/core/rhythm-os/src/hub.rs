@@ -316,10 +316,10 @@ pub trait ExternalLightHubIntegration: Send + Sync {
     /// does NOT take a `HubKey` because the runtime is shared, not per-hub.
     fn ensure_runtime(&self, state: &SharedState) -> Result<()>;
 
-    /// Create a type-erased light controller for a specific hub instance.
+    /// Create a type-erased hub dispatch controller for a specific hub instance.
     ///
     /// Used by the composite controller to collect per-hub controllers.
-    /// Returns `Arc<dyn LightController>` so the composite can store them
+    /// Returns `Arc<dyn HubLightController>` so the composite can store them
     /// without knowing the concrete type.
     ///
     /// Default returns an error — embedded integrations that don't support
@@ -328,7 +328,7 @@ pub trait ExternalLightHubIntegration: Send + Sync {
         &self,
         _state: &SharedState,
         _key: &HubKey,
-    ) -> Result<std::sync::Arc<dyn rhythm_core::LightController>> {
+    ) -> Result<std::sync::Arc<dyn rhythm_core::HubLightController>> {
         Err(anyhow::anyhow!(
             "create_controller not implemented for {}",
             self.hub_type()

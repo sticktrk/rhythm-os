@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use log::debug;
-use rhythm_core::controller::{LightControlError, LightControlResult, LightController};
+use rhythm_core::controller::{
+    HubDispatchTarget, HubLightController, LightControlError, LightControlResult, LightController,
+};
 use rhythm_core::lighting::LightingCommand;
 use rhythm_core::room::Room;
 use rhythm_devices::ColorPreference;
@@ -62,15 +64,17 @@ impl<H: HueTransport> HueLightController<H> {
     pub fn warmup_tls(&self) -> anyhow::Result<()> {
         self.client.warmup_tls()
     }
-}
 
-#[async_trait]
-impl<H: HueTransport + 'static> LightController for HueLightController<H> {
-    async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
+    fn room_context(
+        &self,
+        room_id: &str,
+        command: &LightingCommand,
+    ) -> (
+        String,
+        rhythm_devices::LightCapabilities,
+        rhythm_devices::AdaptedCommand,
+    ) {
         let room_label = rhythm_os::controller_helpers::format_room_label(&self.registry, room_id);
-        let grouped_light_id =
-            rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
-
         let caps = rhythm_os::controller_helpers::resolve_room_capabilities(
             &self.registry,
             self.capability_state.as_ref(),
@@ -79,15 +83,32 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
         );
         let adapted = rhythm_os::controller_helpers::adapt_lighting_command(
             &caps,
-            &command,
+            command,
             ColorPreference::PreferColorTemperature,
         );
+        (room_label, caps, adapted)
+    }
+
+    fn unsupported_device_dispatch(&self, target: &HubDispatchTarget) -> LightControlError {
+        LightControlError::CommandFailed(format!(
+            "Hue device-addressed dispatch is not implemented for target {}",
+            target.label()
+        ))
+    }
+
+    fn send_group_turn_on(
+        &self,
+        room_id: &str,
+        grouped_light_id: &str,
+        command: LightingCommand,
+    ) -> LightControlResult<()> {
+        let (room_label, _caps, adapted) = self.room_context(room_id, &command);
         let dynamics = adapted.transition_ms.map(|ms| ms as u16);
 
         self.client
             .set_grouped_light(
                 &self.username,
-                &grouped_light_id,
+                grouped_light_id,
                 true,
                 adapted.brightness,
                 adapted.kelvin,
@@ -125,10 +146,13 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
         Ok(())
     }
 
-    async fn turn_off(&self, room_id: &str, transition_ms: Option<u32>) -> LightControlResult<()> {
+    fn send_group_turn_off(
+        &self,
+        room_id: &str,
+        grouped_light_id: &str,
+        transition_ms: Option<u32>,
+    ) -> LightControlResult<()> {
         let room_label = rhythm_os::controller_helpers::format_room_label(&self.registry, room_id);
-        let grouped_light_id =
-            rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
         let fade_ms = transition_ms
             .map(|ms| u16::try_from(ms).unwrap_or(u16::MAX))
             .filter(|ms| *ms > 0);
@@ -136,7 +160,7 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
         self.client
             .set_grouped_light(
                 &self.username,
-                &grouped_light_id,
+                grouped_light_id,
                 false,
                 None,
                 None,
@@ -151,7 +175,6 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
                 ))
             })?;
 
-        let _ = grouped_light_id;
         debug!(
             target: "cmd",
             "Hue turn_off: room={} transition_ms={:?}",
@@ -160,6 +183,109 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
         );
 
         Ok(())
+    }
+
+    fn group_any_lights_on(
+        &self,
+        room_id: &str,
+        grouped_light_id: &str,
+    ) -> LightControlResult<bool> {
+        self.client
+            .is_grouped_light_on(&self.username, grouped_light_id)
+            .map_err(|e| {
+                LightControlError::CommandFailed(format!(
+                    "Failed to check lights for room {}: {}",
+                    room_id, e
+                ))
+            })
+    }
+
+    fn group_target_for_devices(&self, native_ids: &[String]) -> Option<(String, String)> {
+        let registry = self.registry.lock().ok()?;
+        let room_id = registry.find_room_for_exact_light_entities(native_ids)?;
+        let grouped_light_id = registry.get_grouped_light_id(&room_id)?;
+        Some((room_id, grouped_light_id))
+    }
+
+    fn device_any_lights_on(&self, native_ids: &[String]) -> LightControlResult<bool> {
+        if let Some((room_id, grouped_light_id)) = self.group_target_for_devices(native_ids) {
+            return self.group_any_lights_on(&room_id, &grouped_light_id);
+        }
+
+        debug!(
+            target: "cmd",
+            "Hue any_lights_on skipped for device target [{}]: no exact grouped_light match",
+            native_ids.join(",")
+        );
+        Ok(false)
+    }
+}
+
+#[async_trait]
+impl<H: HueTransport + 'static> HubLightController for HueLightController<H> {
+    async fn turn_on_target(
+        &self,
+        target: &HubDispatchTarget,
+        command: LightingCommand,
+    ) -> LightControlResult<()> {
+        match target {
+            HubDispatchTarget::Group {
+                room_id,
+                control_id,
+            } => self.send_group_turn_on(room_id, control_id, command),
+            HubDispatchTarget::Devices { .. } => Err(self.unsupported_device_dispatch(target)),
+        }
+    }
+
+    async fn turn_off_target(
+        &self,
+        target: &HubDispatchTarget,
+        transition_ms: Option<u32>,
+    ) -> LightControlResult<()> {
+        match target {
+            HubDispatchTarget::Group {
+                room_id,
+                control_id,
+            } => self.send_group_turn_off(room_id, control_id, transition_ms),
+            HubDispatchTarget::Devices { .. } => Err(self.unsupported_device_dispatch(target)),
+        }
+    }
+
+    async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
+        rhythm_os::controller_helpers::rooms_from_registry(&self.registry)
+    }
+
+    async fn is_connected(&self) -> bool {
+        self.client.test_connection(&self.username).unwrap_or(false)
+    }
+
+    async fn any_lights_on_target(&self, target: &HubDispatchTarget) -> LightControlResult<bool> {
+        match target {
+            HubDispatchTarget::Group {
+                room_id,
+                control_id,
+            } => self.group_any_lights_on(room_id, control_id),
+            HubDispatchTarget::Devices { native_ids } => self.device_any_lights_on(native_ids),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "HueV2"
+    }
+}
+
+#[async_trait]
+impl<H: HueTransport + 'static> LightController for HueLightController<H> {
+    async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
+        let grouped_light_id =
+            rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
+        self.send_group_turn_on(room_id, &grouped_light_id, command)
+    }
+
+    async fn turn_off(&self, room_id: &str, transition_ms: Option<u32>) -> LightControlResult<()> {
+        let grouped_light_id =
+            rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
+        self.send_group_turn_off(room_id, &grouped_light_id, transition_ms)
     }
 
     async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
@@ -173,15 +299,7 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
     async fn any_lights_on(&self, room_id: &str) -> LightControlResult<bool> {
         let grouped_light_id =
             rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
-
-        self.client
-            .is_grouped_light_on(&self.username, &grouped_light_id)
-            .map_err(|e| {
-                LightControlError::CommandFailed(format!(
-                    "Failed to check lights for room {}: {}",
-                    room_id, e
-                ))
-            })
+        self.group_any_lights_on(room_id, &grouped_light_id)
     }
 
     fn name(&self) -> &str {
@@ -323,7 +441,7 @@ mod tests {
             .unwrap()
             .upsert_room("room2", "Bedroom", "gl2", &[]);
 
-        let rooms = block_on(controller.get_rooms()).unwrap();
+        let rooms = block_on(LightController::get_rooms(&controller)).unwrap();
         assert_eq!(rooms.len(), 2);
 
         let names: Vec<&str> = rooms.iter().map(|r| r.name.as_str()).collect();
@@ -345,6 +463,50 @@ mod tests {
         controller.client.set_is_on(false);
         let result = block_on(controller.any_lights_on("room1")).unwrap();
         assert!(!result);
+    }
+
+    #[test]
+    fn any_lights_on_device_target_uses_matching_grouped_light() {
+        let (controller, registry) = make_spy_controller();
+        registry.lock().unwrap().upsert_room(
+            "room_devices",
+            "Device-backed room",
+            "gl-devices",
+            &["dev1".to_string(), "dev2".to_string()],
+        );
+
+        controller.client.set_is_on(true);
+        let result = block_on(
+            controller.any_lights_on_target(&HubDispatchTarget::Devices {
+                native_ids: vec!["dev2".to_string(), "dev1".to_string()],
+            }),
+        )
+        .unwrap();
+
+        assert!(result);
+        let calls = controller.client.calls();
+        assert!(calls.iter().any(|call| matches!(
+            call,
+            HueTransportCall::IsGroupedLightOn { grouped_light_id } if grouped_light_id == "gl-devices"
+        )));
+    }
+
+    #[test]
+    fn any_lights_on_device_target_without_match_returns_false_quietly() {
+        let (controller, _) = make_spy_controller();
+
+        let result = block_on(
+            controller.any_lights_on_target(&HubDispatchTarget::Devices {
+                native_ids: vec!["orphan".to_string()],
+            }),
+        )
+        .unwrap();
+
+        assert!(!result);
+        let calls = controller.client.calls();
+        assert!(!calls
+            .iter()
+            .any(|call| matches!(call, HueTransportCall::IsGroupedLightOn { .. })));
     }
 
     #[test]
@@ -396,6 +558,6 @@ mod tests {
     #[test]
     fn name_returns_hue_v2() {
         let (controller, _) = make_spy_controller();
-        assert_eq!(controller.name(), "HueV2");
+        assert_eq!(LightController::name(&controller), "HueV2");
     }
 }

@@ -183,7 +183,7 @@ impl ExternalLightHubIntegration for HaIntegration {
         &self,
         state: &SharedState,
         key: &HubKey,
-    ) -> Result<std::sync::Arc<dyn rhythm_core::LightController>> {
+    ) -> Result<std::sync::Arc<dyn rhythm_core::HubLightController>> {
         create_ha_controller(state, key)
     }
 
@@ -288,11 +288,11 @@ impl ExternalLightHubIntegration for HaIntegration {
 /// Create a type-erased HA light controller for a specific hub key.
 ///
 /// Extracts credentials and registry from state, builds a reqwest transport,
-/// and returns the controller as `Arc<dyn LightController>`.
+/// and returns the controller as `Arc<dyn HubLightController>`.
 pub fn create_ha_controller(
     state: &SharedState,
     key: &HubKey,
-) -> Result<std::sync::Arc<dyn rhythm_core::LightController>> {
+) -> Result<std::sync::Arc<dyn rhythm_core::HubLightController>> {
     use crate::controller::HaLightController;
     use crate::hub_state::HaHubData;
 

@@ -5,7 +5,7 @@
 
 use serde::Serialize;
 
-use rhythm_core::{RhythmMode, RoomModeState, RoomProfileSettings, RoomSnapshot};
+use rhythm_core::{NodeSnapshot, RhythmMode, RoomModeState, RoomProfileSettings};
 
 use crate::state::MotionSnapshot;
 
@@ -13,8 +13,8 @@ use crate::state::MotionSnapshot;
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ServerEvent {
-    /// Room rhythm state changed (after button, periodic tick, etc.).
-    RoomState { rooms: Vec<RoomStateEvent> },
+    /// Addressable node state changed (after button, periodic tick, etc.).
+    NodeState { nodes: Vec<NodeStateEvent> },
     /// Motion timer state changed.
     MotionTimer { timers: Vec<MotionTimerEvent> },
     /// Hub connected/disconnected (per-hub status).
@@ -31,8 +31,8 @@ pub enum ServerEvent {
     SettingsChanged,
     /// Curve config changed (client should refetch).
     ConfigChanged,
-    /// Room topology changed (client should re-hello).
-    RoomsChanged,
+    /// Topology graph changed (client should re-hello).
+    NodesChanged,
     /// Triage queue changed (new entries or resolutions).
     TriageChanged {
         /// Total pending entries.
@@ -48,11 +48,11 @@ pub enum ServerEvent {
     },
 }
 
-/// Room rhythm state in an SSE event.
+/// Addressable node rhythm state in an SSE event.
 #[derive(Clone, Debug, Serialize)]
-pub struct RoomStateEvent {
+pub struct NodeStateEvent {
     pub id: String,
-    /// Which hub types have lights in this room (e.g. ["hue"], ["hue", "matter"]).
+    /// Which hub types can address this node (e.g. ["hue"], ["hue", "matter"]).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hub_types: Vec<String>,
     pub mode: RhythmMode,
@@ -72,16 +72,12 @@ pub struct RoomStateEvent {
     /// Absent (or `false`) for user actions, polls, and other state changes.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub tick: bool,
-    #[serde(
-        rename = "room_profile",
-        default,
-        skip_serializing_if = "RoomProfileSettings::is_empty"
-    )]
-    pub room_profile: RoomProfileSettings,
+    #[serde(default, skip_serializing_if = "RoomProfileSettings::is_empty")]
+    pub profile_settings: RoomProfileSettings,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct RoomStateEventParams {
+pub(crate) struct NodeStateEventParams {
     pub hub_types: Vec<String>,
     pub mode: RhythmMode,
     pub state: RoomModeState,
@@ -91,10 +87,10 @@ pub(crate) struct RoomStateEventParams {
     pub kelvin: u16,
 }
 
-impl RoomStateEvent {
-    /// Build from an engine room snapshot with display values.
-    pub(crate) fn from_snapshot(snap: &RoomSnapshot, params: RoomStateEventParams) -> Self {
-        let RoomStateEventParams {
+impl NodeStateEvent {
+    /// Build from an engine node snapshot with display values.
+    pub(crate) fn from_snapshot(snap: &NodeSnapshot, params: NodeStateEventParams) -> Self {
+        let NodeStateEventParams {
             hub_types,
             mode,
             state,
@@ -116,7 +112,7 @@ impl RoomStateEvent {
             brightness,
             kelvin,
             tick: false,
-            room_profile: snap.profile_settings.clone(),
+            profile_settings: snap.profile_settings.clone(),
         }
     }
 }
@@ -124,7 +120,7 @@ impl RoomStateEvent {
 /// Motion timer state in an SSE event.
 #[derive(Clone, Debug, Serialize)]
 pub struct MotionTimerEvent {
-    pub room_id: String,
+    pub node_id: String,
     pub motion_active: bool,
     pub motion_owned: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -135,9 +131,9 @@ pub struct MotionTimerEvent {
 
 impl MotionTimerEvent {
     /// Build from a motion snapshot.
-    pub fn from_snapshot(room_id: &str, snap: &MotionSnapshot) -> Self {
+    pub fn from_snapshot(node_id: &str, snap: &MotionSnapshot) -> Self {
         Self {
-            room_id: room_id.to_string(),
+            node_id: node_id.to_string(),
             motion_active: snap.motion_active,
             motion_owned: snap.motion_owned,
             remaining_secs: snap.remaining_secs,

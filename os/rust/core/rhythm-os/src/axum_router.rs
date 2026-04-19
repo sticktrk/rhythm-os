@@ -47,10 +47,10 @@ impl IntoResponse for ApiResponse {
 /// Standard API routes (PUT-only for mutation endpoints).
 pub fn api_routes() -> Router<SharedState> {
     shared_routes()
-        .route("/api/rooms/action", put(room_action))
-        .route("/api/rooms/brightness", put(set_brightness))
-        .route("/api/rooms/offset", put(set_time_offset))
-        .route("/api/rooms/fix", post(fix_my_lights))
+        .route("/api/nodes/action", put(node_action))
+        .route("/api/nodes/brightness", put(set_node_brightness))
+        .route("/api/nodes/offset", put(set_node_time_offset))
+        .route("/api/nodes/fix", post(fix_my_lights))
         .route("/api/sync", post(post_sync))
 }
 
@@ -69,11 +69,10 @@ fn shared_routes() -> Router<SharedState> {
         )
         .route("/api/configuration/reset", post(post_configuration_reset))
         .route("/api/backup", get(get_backup).put(put_backup))
-        .route("/api/rooms/state", get(get_rooms_state))
+        .route("/api/nodes/state", get(get_nodes_state))
         .route("/api/events", get(sse_events))
-        .route("/api/rooms", put(put_rooms).delete(delete_room))
         .route("/api/devices", put(put_devices).delete(delete_device))
-        .route("/api/motion-timeout", put(put_motion_timeout))
+        .route("/api/nodes/motion-timeout", put(put_motion_timeout))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/config/absorb-offset", post(absorb_time_offset))
         .route("/api/config/reset", post(reset_config))
@@ -93,12 +92,13 @@ fn shared_routes() -> Router<SharedState> {
             "/api/hub/credentials",
             put(put_hub_credentials).delete(delete_hub),
         )
-        .route("/api/rooms/preferences", put(put_room_preferences))
+        .route("/api/nodes/preferences", put(put_node_preferences))
         .route("/api/ota/version", get(get_version))
         // Canonical device management
         .route("/api/devices/canonical", get(get_canonical_devices))
         .route("/api/devices/canonical/:id", get(get_canonical_device))
         .route("/api/devices/canonical/:id/room", put(put_device_room))
+        .route("/api/devices/canonical/:id/parent", put(put_device_parent))
         .route(
             "/api/devices/canonical/:id/preferred",
             put(put_device_preferred),
@@ -122,11 +122,16 @@ fn shared_routes() -> Router<SharedState> {
             "/api/topology/rooms",
             get(get_topology_rooms).post(post_topology_room),
         )
+        .route("/api/topology/nodes", get(get_topology_nodes))
         .route("/api/topology/rooms/:id", put(put_topology_rename))
         .route("/api/topology/rooms/:id/merge", put(put_topology_merge))
         .route(
             "/api/topology/rooms/:id/devices/move",
             put(put_topology_move_device),
+        )
+        .route(
+            "/api/topology/nodes/:id/controls/:kind",
+            put(put_topology_node_control),
         )
         // Device pairing / unpairing (Matter commissioning, Zigbee permit join)
         .route("/api/devices/pair", post(post_pair_device))
@@ -185,22 +190,8 @@ async fn put_backup(State(state): State<SharedState>, Json(body): Json<Value>) -
     run_blocking(move || handlers::handle_put_backup(&state, &body)).await
 }
 
-async fn get_rooms_state(State(state): State<SharedState>) -> ApiResponse {
-    handlers::handle_get_rooms_state(&state)
-}
-
-async fn put_rooms(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {
-    handlers::handle_put_rooms(&state, &body, true)
-}
-
-async fn delete_room(
-    State(state): State<SharedState>,
-    Query(params): Query<HashMap<String, String>>,
-) -> ApiResponse {
-    match params.get("id") {
-        Some(id) => handlers::handle_delete_room(&state, id),
-        None => ApiResponse::bad_request("Missing ?id="),
-    }
+async fn get_nodes_state(State(state): State<SharedState>) -> ApiResponse {
+    handlers::handle_get_nodes_state(&state)
 }
 
 async fn put_devices(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {
@@ -222,6 +213,24 @@ async fn put_motion_timeout(
     Json(body): Json<Value>,
 ) -> ApiResponse {
     handlers::handle_put_motion_timeout(&state, &body)
+}
+
+async fn node_action(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {
+    run_blocking(move || handlers::handle_node_action(&state, &body, true)).await
+}
+
+async fn set_node_brightness(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_set_node_brightness(&state, &body, true)).await
+}
+
+async fn set_node_time_offset(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_set_node_time_offset(&state, &body, true)).await
 }
 
 async fn get_config(
@@ -295,11 +304,11 @@ async fn get_profiles(State(state): State<SharedState>) -> ApiResponse {
     handlers::handle_get_profiles(&state)
 }
 
-async fn put_room_preferences(
+async fn put_node_preferences(
     State(state): State<SharedState>,
     Json(body): Json<Value>,
 ) -> ApiResponse {
-    run_blocking(move || handlers::handle_put_room_preferences(&state, &body, true)).await
+    run_blocking(move || handlers::handle_put_node_preferences(&state, &body, true)).await
 }
 
 async fn get_version(State(state): State<SharedState>) -> ApiResponse {
@@ -328,6 +337,14 @@ async fn put_device_room(
     Json(body): Json<Value>,
 ) -> ApiResponse {
     handlers::handle_put_device_room(&state, &id, &body)
+}
+
+async fn put_device_parent(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    handlers::handle_put_device_parent(&state, &id, &body)
 }
 
 async fn put_device_preferred(
@@ -393,6 +410,10 @@ async fn get_topology_rooms(State(state): State<SharedState>) -> ApiResponse {
     handlers::handle_get_topology_rooms(&state)
 }
 
+async fn get_topology_nodes(State(state): State<SharedState>) -> ApiResponse {
+    handlers::handle_get_topology_nodes(&state)
+}
+
 async fn post_topology_room(
     State(state): State<SharedState>,
     Json(body): Json<Value>,
@@ -422,6 +443,14 @@ async fn put_topology_move_device(
     Json(body): Json<Value>,
 ) -> ApiResponse {
     handlers::handle_put_topology_move_device(&state, &id, &body)
+}
+
+async fn put_topology_node_control(
+    State(state): State<SharedState>,
+    Path((id, kind)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    handlers::handle_put_topology_node_control(&state, &id, &kind, &body)
 }
 
 // ---------------------------------------------------------------------------
@@ -582,12 +611,12 @@ async fn sse_events(
         match rx.recv().await {
             Ok(event) => {
                 let event_type = match &event {
-                    ServerEvent::RoomState { .. } => "room_state",
+                    ServerEvent::NodeState { .. } => "node_state",
                     ServerEvent::MotionTimer { .. } => "motion_timer",
                     ServerEvent::HubStatus { .. } => "hub_status",
                     ServerEvent::SettingsChanged => "settings_changed",
                     ServerEvent::ConfigChanged => "config_changed",
-                    ServerEvent::RoomsChanged => "rooms_changed",
+                    ServerEvent::NodesChanged => "nodes_changed",
                     ServerEvent::TriageChanged { .. } => "triage_changed",
                 };
                 let data = serde_json::to_string(&event).unwrap_or_default();
@@ -857,6 +886,8 @@ mod tests {
             snapshots: vec![RoomSnapshot {
                 id: "room1".into(),
                 name: "Room 1".into(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
                 rhythm_enabled: true,
                 disabled: false,
                 time_offset_minutes: 15.0,
@@ -941,6 +972,8 @@ mod tests {
             snapshots: vec![RoomSnapshot {
                 id: "room1".into(),
                 name: "Room 1".into(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
                 rhythm_enabled: true,
                 disabled: false,
                 time_offset_minutes: 15.0,
@@ -1004,6 +1037,8 @@ mod tests {
             snapshots: vec![RoomSnapshot {
                 id: "room1".into(),
                 name: "Room 1".into(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
                 rhythm_enabled: true,
                 disabled: false,
                 time_offset_minutes: 0.0,
@@ -1041,6 +1076,8 @@ mod tests {
             snapshots: vec![RoomSnapshot {
                 id: "room1".into(),
                 name: "Room 1".into(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
                 rhythm_enabled: true,
                 disabled: false,
                 time_offset_minutes: 0.0,

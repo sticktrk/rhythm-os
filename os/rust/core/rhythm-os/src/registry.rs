@@ -7,7 +7,7 @@
 //! Replaces the per-hub registries (`HueDeviceRegistry`, `HaDeviceRegistry`)
 //! with a single concrete struct.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use log::info;
 use rhythm_core::room::Room;
@@ -122,6 +122,29 @@ impl HubDeviceRegistry {
     /// Get light entity IDs for a room/area.
     pub fn get_light_entities(&self, room_id: &str) -> Vec<String> {
         self.area_lights.get(room_id).cloned().unwrap_or_default()
+    }
+
+    /// Find the room whose light membership exactly matches the provided IDs.
+    ///
+    /// This is used by integrations like Hue where some live-state queries are
+    /// only available at the native room/group level. Returns the lexicographically
+    /// first match to keep the result deterministic if duplicate memberships exist.
+    pub fn find_room_for_exact_light_entities(&self, device_ids: &[String]) -> Option<String> {
+        if device_ids.is_empty() {
+            return None;
+        }
+
+        let wanted: HashSet<&str> = device_ids.iter().map(String::as_str).collect();
+        let mut matches: Vec<String> = self
+            .area_lights
+            .iter()
+            .filter_map(|(room_id, lights)| {
+                let existing: HashSet<&str> = lights.iter().map(String::as_str).collect();
+                (existing == wanted).then(|| room_id.clone())
+            })
+            .collect();
+        matches.sort();
+        matches.into_iter().next()
     }
 
     // =========================================================================
@@ -781,6 +804,39 @@ mod tests {
         assert_eq!(entities.len(), 2);
         assert!(entities.contains(&"light1".to_string()));
         assert!(entities.contains(&"light2".to_string()));
+    }
+
+    #[test]
+    fn find_room_for_exact_light_entities_matches_ignoring_order() {
+        let mut reg = HubDeviceRegistry::new();
+        reg.upsert_room(
+            "r1",
+            "Room",
+            "gl1",
+            &["light1".to_string(), "light2".to_string()],
+        );
+        reg.upsert_room("r2", "Other", "gl2", &["light3".to_string()]);
+
+        let room_id =
+            reg.find_room_for_exact_light_entities(&["light2".to_string(), "light1".to_string()]);
+
+        assert_eq!(room_id.as_deref(), Some("r1"));
+    }
+
+    #[test]
+    fn find_room_for_exact_light_entities_requires_exact_set() {
+        let mut reg = HubDeviceRegistry::new();
+        reg.upsert_room(
+            "r1",
+            "Room",
+            "gl1",
+            &["light1".to_string(), "light2".to_string()],
+        );
+
+        assert_eq!(
+            reg.find_room_for_exact_light_entities(&["light1".to_string()]),
+            None
+        );
     }
 
     // =========================================================================

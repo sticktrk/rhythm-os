@@ -45,6 +45,45 @@ pub enum LightControlError {
 /// Result type for light controller operations.
 pub type LightControlResult<T> = Result<T, LightControlError>;
 
+/// Concrete dispatch target for a single hub controller.
+///
+/// Rhythm's runtime always addresses topology room IDs. The composite
+/// controller translates those into hub-native dispatch targets:
+/// grouped room commands when a hub-native room still matches topology,
+/// or explicit device lists when the user has customized membership.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HubDispatchTarget {
+    /// Dispatch through a hub-native group/area/room control.
+    Group {
+        /// Hub-native room identifier used for registry lookups/log labels.
+        room_id: String,
+        /// Hub-native control resource used for the actual command.
+        control_id: String,
+    },
+    /// Dispatch directly to one or more hub-native devices.
+    Devices {
+        /// Hub-native device identifiers.
+        native_ids: Vec<String>,
+    },
+}
+
+impl HubDispatchTarget {
+    /// Human-readable description for logs and errors.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Group {
+                room_id,
+                control_id,
+            } if room_id == control_id => room_id.clone(),
+            Self::Group {
+                room_id,
+                control_id,
+            } => format!("{} ({})", room_id, control_id),
+            Self::Devices { native_ids } => native_ids.join(","),
+        }
+    }
+}
+
 /// Trait for controlling lights.
 ///
 /// This trait provides a platform-agnostic interface for turning lights
@@ -104,6 +143,40 @@ pub trait LightController: Send + Sync {
     fn name(&self) -> &str;
 }
 
+/// Trait for dispatching hub-native light commands.
+///
+/// Per-hub integrations implement this trait. The engine-facing
+/// [`LightController`] remains topology-based and is implemented by the
+/// composite controller.
+#[async_trait]
+pub trait HubLightController: Send + Sync {
+    /// Turn on the target lights with the specified settings.
+    async fn turn_on_target(
+        &self,
+        target: &HubDispatchTarget,
+        command: LightingCommand,
+    ) -> LightControlResult<()>;
+
+    /// Turn off the target lights.
+    async fn turn_off_target(
+        &self,
+        target: &HubDispatchTarget,
+        transition_ms: Option<u32>,
+    ) -> LightControlResult<()>;
+
+    /// Get all available rooms from the backend.
+    async fn get_rooms(&self) -> LightControlResult<Vec<Room>>;
+
+    /// Check if connected to the backend.
+    async fn is_connected(&self) -> bool;
+
+    /// Check if any lights are on for the given target.
+    async fn any_lights_on_target(&self, target: &HubDispatchTarget) -> LightControlResult<bool>;
+
+    /// Get the name of this controller (for logging/debugging).
+    fn name(&self) -> &str;
+}
+
 /// A no-op light controller for testing.
 ///
 /// This controller does nothing but can be used for testing the
@@ -149,6 +222,41 @@ impl LightController for NoOpController {
     }
 }
 
+#[async_trait]
+impl HubLightController for NoOpController {
+    async fn turn_on_target(
+        &self,
+        _target: &HubDispatchTarget,
+        _command: LightingCommand,
+    ) -> LightControlResult<()> {
+        Ok(())
+    }
+
+    async fn turn_off_target(
+        &self,
+        _target: &HubDispatchTarget,
+        _transition_ms: Option<u32>,
+    ) -> LightControlResult<()> {
+        Ok(())
+    }
+
+    async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
+        Ok(vec![])
+    }
+
+    async fn is_connected(&self) -> bool {
+        true
+    }
+
+    async fn any_lights_on_target(&self, _target: &HubDispatchTarget) -> LightControlResult<bool> {
+        Ok(false)
+    }
+
+    fn name(&self) -> &str {
+        "NoOp"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,14 +265,18 @@ mod tests {
     async fn test_noop_controller() {
         let controller = NoOpController::new();
 
-        assert!(controller.is_connected().await);
-        assert_eq!(controller.name(), "NoOp");
+        assert!(LightController::is_connected(&controller).await);
+        assert_eq!(LightController::name(&controller), "NoOp");
 
         let cmd = LightingCommand::new(80, 4000);
-        assert!(controller.turn_on("test", cmd).await.is_ok());
-        assert!(controller.turn_off("test", None).await.is_ok());
+        assert!(LightController::turn_on(&controller, "test", cmd)
+            .await
+            .is_ok());
+        assert!(LightController::turn_off(&controller, "test", None)
+            .await
+            .is_ok());
 
-        let rooms = controller.get_rooms().await.unwrap();
+        let rooms = LightController::get_rooms(&controller).await.unwrap();
         assert!(rooms.is_empty());
     }
 }

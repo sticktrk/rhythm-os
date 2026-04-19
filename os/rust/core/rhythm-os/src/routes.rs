@@ -46,27 +46,23 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["GET", "PUT"],
     },
     SharedRoute {
-        path: "/api/rooms/state",
+        path: "/api/nodes/state",
         methods: &["GET"],
     },
     SharedRoute {
-        path: "/api/rooms",
-        methods: &["PUT", "DELETE"],
-    },
-    SharedRoute {
-        path: "/api/rooms/action",
+        path: "/api/nodes/action",
         methods: &["PUT"],
     },
     SharedRoute {
-        path: "/api/rooms/brightness",
+        path: "/api/nodes/brightness",
         methods: &["PUT"],
     },
     SharedRoute {
-        path: "/api/rooms/offset",
+        path: "/api/nodes/offset",
         methods: &["PUT"],
     },
     SharedRoute {
-        path: "/api/rooms/preferences",
+        path: "/api/nodes/preferences",
         methods: &["PUT"],
     },
     SharedRoute {
@@ -74,7 +70,7 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["PUT", "DELETE"],
     },
     SharedRoute {
-        path: "/api/motion-timeout",
+        path: "/api/nodes/motion-timeout",
         methods: &["PUT"],
     },
     SharedRoute {
@@ -118,7 +114,7 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["PUT", "DELETE"],
     },
     SharedRoute {
-        path: "/api/rooms/fix",
+        path: "/api/nodes/fix",
         methods: &["POST"],
     },
     SharedRoute {
@@ -211,6 +207,10 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["GET", "POST"],
     },
     SharedRoute {
+        path: "/api/topology/nodes",
+        methods: &["GET"],
+    },
+    SharedRoute {
         path: "/api/topology/rooms/:id",
         methods: &["PUT"],
     },
@@ -220,6 +220,10 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
     },
     SharedRoute {
         path: "/api/topology/rooms/:id/devices/move",
+        methods: &["PUT"],
+    },
+    SharedRoute {
+        path: "/api/topology/nodes/:id/controls/:kind",
         methods: &["PUT"],
     },
     // Curve visualization

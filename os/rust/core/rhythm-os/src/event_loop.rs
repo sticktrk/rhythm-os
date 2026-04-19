@@ -15,6 +15,7 @@ use rhythm_core::{ButtonAction, InputEvent};
 use crate::commands;
 use crate::hub::HubEvent;
 use crate::state::{MotionSnapshot, SharedState, WorkItem};
+use crate::topology::NodeControlKind;
 
 /// How many seconds before timeout to start the warning dim.
 pub const WARNING_BEFORE_SECS: u64 = 60;
@@ -25,19 +26,29 @@ pub const WARNING_DIM_FACTOR: f32 = 0.5;
 /// Rate-limit reconnect-triggered full hub resyncs during SSE flapping.
 const RECONNECT_RESYNC_COOLDOWN: Duration = Duration::from_secs(120);
 
-/// Per-room motion timer state managed by the main loop.
+#[derive(Clone, Debug)]
+pub struct MotionSourceState {
+    /// Public source node ID when known, otherwise a hub-scoped synthetic key.
+    pub source_node_id: String,
+    /// Public target node ID currently controlled by this source.
+    pub target_node_id: String,
+    /// `None` while motion is active, `Some(stopped_at)` once the source clears.
+    pub stopped_at: Option<Instant>,
+}
+
+/// Per-target motion timer state managed by the main loop.
 ///
 /// Hub-agnostic: any hub can emit `HubEvent::Motion` and this struct
 /// handles the timeout logic generically. Tracks individual sensors so
-/// that multi-sensor rooms don't start countdown until ALL sensors clear.
+/// that multi-source targets don't start countdown until ALL sources clear.
 pub struct MotionTimerState {
-    /// sensor_id -> (room_id, None=active | Some(stopped_at))
-    pub sensors: HashMap<String, (String, Option<Instant>)>,
-    /// Rooms where motion originally activated the lights.
-    /// Manual button press removes a room from here so the
+    /// source tracking key -> motion source state
+    pub sensors: HashMap<String, MotionSourceState>,
+    /// Targets where motion originally activated the lights.
+    /// Manual button press removes a target from here so the
     /// timeout won't turn lights off.
     pub motion_owned: HashSet<String>,
-    /// Rooms currently in warning dim state (dimmed to 50% before timeout).
+    /// Targets currently in warning dim state (dimmed to 50% before timeout).
     pub warning_active: HashSet<String>,
 }
 
@@ -56,12 +67,14 @@ impl MotionTimerState {
         }
     }
 
-    /// Check if any sensor for this room is currently tracked.
-    pub fn has_sensors_for_room(&self, room_id: &str) -> bool {
-        self.sensors.values().any(|(rid, _)| rid == room_id)
+    /// Check if any motion source for this target is currently tracked.
+    pub fn has_sources_for_target(&self, target_node_id: &str) -> bool {
+        self.sensors
+            .values()
+            .any(|source| source.target_node_id == target_node_id)
     }
 
-    /// Compute per-room motion snapshots from current sensor state.
+    /// Compute per-target motion snapshots from current source state.
     pub fn snapshots(
         &self,
         timeouts: &HashMap<String, u64>,
@@ -69,25 +82,29 @@ impl MotionTimerState {
     ) -> HashMap<String, MotionSnapshot> {
         let now = Instant::now();
 
-        // Group sensors by room
-        let mut rooms: HashMap<&str, Vec<&Option<Instant>>> = HashMap::new();
-        for (room_id, stopped_at) in self.sensors.values() {
-            rooms.entry(room_id.as_str()).or_default().push(stopped_at);
+        let mut targets: HashMap<&str, Vec<&MotionSourceState>> = HashMap::new();
+        for source in self.sensors.values() {
+            targets
+                .entry(source.target_node_id.as_str())
+                .or_default()
+                .push(source);
         }
 
         let mut result = HashMap::new();
-        for (room_id, sensors) in &rooms {
-            let any_active = sensors.iter().any(|s| s.is_none());
-            let timeout_secs = timeouts.get(*room_id).copied().unwrap_or(default_timeout);
-            let owned = self.motion_owned.contains(*room_id);
+        for (target_node_id, sources) in &targets {
+            let any_active = sources.iter().any(|source| source.stopped_at.is_none());
+            let timeout_secs = timeouts
+                .get(*target_node_id)
+                .copied()
+                .unwrap_or(default_timeout);
+            let owned = self.motion_owned.contains(*target_node_id);
 
             let remaining_secs = if any_active {
                 None
             } else {
-                // All sensors cleared - find elapsed since latest stop
-                let elapsed = sensors
+                let elapsed = sources
                     .iter()
-                    .filter_map(|s| s.as_ref())
+                    .filter_map(|source| source.stopped_at.as_ref())
                     .map(|t| now.duration_since(*t))
                     .min()
                     .unwrap_or(Duration::ZERO);
@@ -95,13 +112,13 @@ impl MotionTimerState {
             };
 
             result.insert(
-                room_id.to_string(),
+                target_node_id.to_string(),
                 MotionSnapshot {
                     motion_active: any_active,
                     motion_owned: owned,
                     remaining_secs,
                     timeout_secs,
-                    warning_active: self.warning_active.contains(*room_id),
+                    warning_active: self.warning_active.contains(*target_node_id),
                 },
             );
         }
@@ -115,7 +132,7 @@ impl MotionTimerState {
 /// persist should be enqueued.
 pub fn process_button_inline(
     state: &SharedState,
-    room_id: &str,
+    node_id: &str,
     action: ButtonAction,
     device_id: Option<&str>,
 ) -> bool {
@@ -127,49 +144,65 @@ pub fn process_button_inline(
         (s.hub_runtime(), s.has_any_hub())
     };
     let Some(runtime) = runtime else {
-        warn!(target: "evt", "Inline: no runtime (hub={}) - dropping {:?} for room '{}'",
-            has_hub, action, room_id);
+        warn!(
+            target: "evt",
+            "Inline: no runtime (hub={}) - dropping {:?} for node '{}'",
+            has_hub,
+            action,
+            node_id
+        );
         return false;
     };
 
     let event = if let Some(dev_id) = device_id {
-        InputEvent::with_device(room_id, action, dev_id)
+        InputEvent::with_device(node_id, action, dev_id)
     } else {
-        InputEvent::new(room_id, action)
+        InputEvent::new(node_id, action)
     };
 
     match runtime.handle_event(&event) {
         Ok(turned_on) => {
-            info!(target: "evt", "Inline: {:?} room '{}' -> on={}", action, room_id, turned_on);
+            info!(
+                target: "evt",
+                "Inline: {:?} node '{}' -> on={}",
+                action,
+                node_id,
+                turned_on
+            );
             crate::commands::sync_active_mode_from_runtime(state, &runtime);
-            // Track lights_on state
             if let Ok(mut s) = state.lock() {
-                if s.room_mode_transitions.remove(room_id).is_some() {
+                if s.room_mode_transitions.remove(node_id).is_some() {
                     debug!(
                         target: "evt",
-                        "Inline: cleared mode transition for room '{}'",
-                        room_id
+                        "Inline: cleared mode transition for node '{}'",
+                        node_id
                     );
                 }
-                s.room_lights_on.insert(room_id.to_string(), turned_on);
+                s.room_lights_on.insert(node_id.to_string(), turned_on);
             }
             true
         }
         Err(e) => {
-            warn!(target: "evt", "Inline: {:?} room '{}' failed: {}", action, room_id, e);
+            warn!(
+                target: "evt",
+                "Inline: {:?} node '{}' failed: {}",
+                action,
+                node_id,
+                e
+            );
             false
         }
     }
 }
 
-/// Dim a room's lights to a factor of adaptive brightness inline on the calling thread.
+/// Dim a node's lights to a factor of adaptive brightness inline on the calling thread.
 ///
 /// Same pattern as `process_button_inline`: gets runtime from state, calls
 /// `runtime.dim_room()`. Returns true on success.
-pub fn dim_room_inline(state: &SharedState, room_id: &str, factor: f32) -> bool {
+pub fn dim_node_inline(state: &SharedState, node_id: &str, factor: f32) -> bool {
     let runtime = {
         let Ok(s) = state.lock() else {
-            warn!(target: "evt", "dim_room_inline: state lock poisoned");
+            warn!(target: "evt", "dim_node_inline: state lock poisoned");
             return false;
         };
         s.hub_runtime()
@@ -177,25 +210,35 @@ pub fn dim_room_inline(state: &SharedState, room_id: &str, factor: f32) -> bool 
     let Some(runtime) = runtime else {
         return false;
     };
-    match runtime.dim_room(room_id, factor) {
+    match runtime.dim_room(node_id, factor) {
         Ok(()) => {
-            info!(target: "evt", "dim_room_inline: room '{}' factor={:.1}", room_id, factor);
+            info!(
+                target: "evt",
+                "dim_node_inline: node '{}' factor={:.1}",
+                node_id,
+                factor
+            );
             true
         }
         Err(e) => {
-            warn!(target: "evt", "dim_room_inline: room '{}' failed: {}", room_id, e);
+            warn!(
+                target: "evt",
+                "dim_node_inline: node '{}' failed: {}",
+                node_id,
+                e
+            );
             false
         }
     }
 }
 
-/// Turn on a room with adaptive lighting inline on the calling thread.
+/// Turn on a node with adaptive lighting inline on the calling thread.
 /// Used by motion - always turns ON (never toggles), skipping the
 /// `any_lights_on` HTTP round-trip that `toggle` would perform.
-pub fn turn_on_room_inline(state: &SharedState, room_id: &str) -> bool {
+pub fn turn_on_node_inline(state: &SharedState, node_id: &str) -> bool {
     let runtime = {
         let Ok(s) = state.lock() else {
-            warn!(target: "evt", "turn_on_room_inline: state lock poisoned");
+            warn!(target: "evt", "turn_on_node_inline: state lock poisoned");
             return false;
         };
         s.hub_runtime()
@@ -203,56 +246,48 @@ pub fn turn_on_room_inline(state: &SharedState, room_id: &str) -> bool {
     let Some(runtime) = runtime else {
         return false;
     };
-    match runtime.turn_on_room(room_id) {
+    match runtime.turn_on_room(node_id) {
         Ok(()) => {
-            info!(target: "evt", "Motion: turn_on room '{}'", room_id);
+            info!(target: "evt", "Motion: turn_on node '{}'", node_id);
             if let Ok(mut s) = state.lock() {
-                if s.room_mode_transitions.remove(room_id).is_some() {
+                if s.room_mode_transitions.remove(node_id).is_some() {
                     debug!(
                         target: "evt",
-                        "Motion: cleared mode transition for room '{}'",
-                        room_id
+                        "Motion: cleared mode transition for node '{}'",
+                        node_id
                     );
                 }
-                s.room_lights_on.insert(room_id.to_string(), true);
+                s.room_lights_on.insert(node_id.to_string(), true);
             }
             true
         }
         Err(e) => {
-            warn!(target: "evt", "Motion: turn_on room '{}' failed: {}", room_id, e);
+            warn!(target: "evt", "Motion: turn_on node '{}' failed: {}", node_id, e);
             false
         }
     }
 }
 
-/// Translate a hub-native room ID to the topology room ID if available.
+/// Translate a hub-native room/device ID to the public topology node ID if available.
 ///
-/// Used at the event boundary so all downstream processing (engine, motion
-/// timers, SSE) uses topology room IDs consistently.
+/// Used at the event boundary so all downstream processing uses public node
+/// IDs consistently.
 ///
 /// Tries hub-key-specific lookup first, then falls back to searching all
 /// hubs (for events where hub_key is None, e.g., button_resolve).
-fn translate_room_id(
+fn resolve_public_node_id(
     state: &SharedState,
     hub_key: Option<&crate::canonical::identity::HubKey>,
-    room_id: &str,
+    node_id: &str,
 ) -> String {
     state
         .lock()
         .ok()
         .and_then(|s| {
-            // Try key-specific lookup first
-            if let Some(k) = hub_key {
-                if let Some(id) = s.topology.translate_room_id(k, room_id) {
-                    return Some(id.to_string());
-                }
-            }
-            // Fallback: search all hubs (hub-native IDs are globally unique)
             s.topology
-                .translate_room_id_any_hub(room_id)
-                .map(|s| s.to_string())
+                .resolve_room_alias(&s.canonical_registry, hub_key, node_id)
         })
-        .unwrap_or_else(|| room_id.to_string())
+        .unwrap_or_else(|| node_id.to_string())
 }
 
 fn spawn_reconnect_sync(state: &SharedState, hub_key: &crate::canonical::identity::HubKey) {
@@ -398,15 +433,14 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             action,
             ref device_id,
         } => {
-            let room_id = translate_room_id(state, hub_key.as_ref(), room_id);
-            // Manual button press clears motion state - user has taken control
-            motion.motion_owned.remove(&room_id);
-            motion.warning_active.remove(&room_id);
-            motion.sensors.retain(|_, (rid, _)| *rid != room_id);
+            let node_id = resolve_public_node_id(state, hub_key.as_ref(), room_id);
+            motion.motion_owned.remove(&node_id);
+            motion.warning_active.remove(&node_id);
+            motion
+                .sensors
+                .retain(|_, source| source.target_node_id != node_id);
 
-            // Process inline (zero queue delay)
-            if process_button_inline(state, &room_id, action, device_id.as_deref()) {
-                // Emit SSE event for the affected room
+            if process_button_inline(state, &node_id, action, device_id.as_deref()) {
                 #[cfg(feature = "desktop")]
                 {
                     let runtime = {
@@ -414,11 +448,11 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                         s.hub_runtime()
                     };
                     if let Some(runtime) = runtime {
-                        if let Some(snap) = runtime.engine_room_snapshot(&room_id) {
+                        if let Some(snap) = runtime.engine_effective_node_snapshot(&node_id) {
                             crate::state::emit_server_event(
                                 state,
-                                crate::server_event::ServerEvent::RoomState {
-                                    rooms: vec![crate::commands::build_room_state_event(
+                                crate::server_event::ServerEvent::NodeState {
+                                    nodes: vec![crate::commands::build_node_state_event(
                                         state, &snap,
                                     )],
                                 },
@@ -433,10 +467,9 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 };
                 if let Some(tx) = work_tx {
                     let _ = tx.try_send(WorkItem::DeferredPersist {
-                        room_id: room_id.clone(),
+                        node_id: node_id.clone(),
                     });
                 } else {
-                    // No work queue (e.g. rhythm-server) - persist inline
                     commands::persist_rooms(state);
                 }
             }
@@ -448,50 +481,83 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             ref sensor_id,
             detected,
         } => {
-            let room_id = translate_room_id(state, hub_key.as_ref(), room_id);
-            let sensor_id = sensor_id.clone();
+            let Some((source_node_id, target_node_id)) = commands::resolve_node_control_target(
+                state,
+                hub_key.as_ref(),
+                sensor_id,
+                room_id,
+                &NodeControlKind::Motion,
+            ) else {
+                info!(
+                    target: "evt",
+                    "Motion: sensor {} has no control target, ignoring",
+                    sensor_id
+                );
+                return;
+            };
             if detected {
-                // If warning dim was active, restore full brightness immediately
-                if motion.warning_active.remove(&room_id) {
-                    info!(target: "evt", "Motion: restoring full brightness in room {} (was warning-dimmed)", room_id);
-                    dim_room_inline(state, &room_id, 1.0);
+                if motion.warning_active.remove(&target_node_id) {
+                    info!(
+                        target: "evt",
+                        "Motion: restoring full brightness in node {} (was warning-dimmed)",
+                        target_node_id
+                    );
+                    dim_node_inline(state, &target_node_id, 1.0);
                 }
 
-                let is_new_room = !motion.has_sensors_for_room(&room_id);
-                // None = motion ongoing, don't countdown
-                motion
-                    .sensors
-                    .insert(sensor_id.clone(), (room_id.clone(), None));
+                let is_new_target = !motion.has_sources_for_target(&target_node_id);
+                motion.sensors.insert(
+                    source_node_id.clone(),
+                    MotionSourceState {
+                        source_node_id: source_node_id.clone(),
+                        target_node_id: target_node_id.clone(),
+                        stopped_at: None,
+                    },
+                );
 
-                if is_new_room {
-                    // Motion always takes ownership - timeout will turn lights off
-                    // (manual button press clears ownership via HubEvent::Button handler)
-                    motion.motion_owned.insert(room_id.clone());
+                if is_new_target {
+                    motion.motion_owned.insert(target_node_id.clone());
 
-                    info!(target: "evt", "Motion: new activation in room {} sensor {} (owned=true)",
-                        room_id, sensor_id);
+                    info!(
+                        target: "evt",
+                        "Motion: new activation source {} -> target {} (owned=true)",
+                        source_node_id,
+                        target_node_id
+                    );
 
-                    // Always turn ON with adaptive values - never toggle.
-                    turn_on_room_inline(state, &room_id);
+                    turn_on_node_inline(state, &target_node_id);
                 } else {
-                    info!(target: "evt", "Motion: continued/refreshed in room {} sensor {}", room_id, sensor_id);
+                    info!(
+                        target: "evt",
+                        "Motion: continued/refreshed source {} -> target {}",
+                        source_node_id,
+                        target_node_id
+                    );
                 }
             } else {
-                // Motion stopped for this sensor - mark with timestamp
-                if motion.sensors.contains_key(&sensor_id) {
-                    motion
-                        .sensors
-                        .insert(sensor_id.clone(), (room_id.clone(), Some(Instant::now())));
+                if let Some(source) = motion.sensors.get_mut(&source_node_id) {
+                    source.target_node_id = target_node_id.clone();
+                    source.stopped_at = Some(Instant::now());
 
-                    // Log whether all sensors for this room are now cleared
                     let all_cleared = motion
                         .sensors
                         .values()
-                        .filter(|(rid, _)| rid == &room_id)
-                        .all(|(_, stopped)| stopped.is_some());
-                    info!(target: "evt", "Motion: sensor {} stopped in room {} - all_cleared={}", sensor_id, room_id, all_cleared);
+                        .filter(|source| source.target_node_id == target_node_id)
+                        .all(|source| source.stopped_at.is_some());
+                    info!(
+                        target: "evt",
+                        "Motion: source {} stopped on target {} - all_cleared={}",
+                        source_node_id,
+                        target_node_id,
+                        all_cleared
+                    );
                 } else {
-                    info!(target: "evt", "Motion: detected=false for sensor {} room {} but not tracked, ignoring", sensor_id, room_id);
+                    info!(
+                        target: "evt",
+                        "Motion: detected=false for source {} target {} but not tracked, ignoring",
+                        source_node_id,
+                        target_node_id
+                    );
                 }
             }
         }
@@ -581,131 +647,141 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
     }
 }
 
-/// Check motion timers and turn off lights in expired motion-owned rooms.
+/// Check motion timers and turn off lights in expired motion-owned targets.
 ///
-/// Groups sensors by room. For each room, countdown only starts when ALL
-/// sensors have cleared. Uses the latest sensor stop time as the countdown
-/// start. Per-room timeout is resolved from the room's selected base profile
-/// plus any persisted `room_profile.motion_timeout_secs` override. Timeout=0
-/// disables auto-off.
+/// Groups sources by target node. For each target, countdown only starts when
+/// ALL sources have cleared. Uses the latest source stop time as the countdown
+/// start. Per-target timeout is resolved from the target node's effective
+/// profile settings. Timeout=0 disables auto-off.
 pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
     let now = Instant::now();
 
-    let (timeouts, _) = commands::resolved_room_motion_timeout_map(state);
+    let (timeouts, _) = commands::resolved_motion_timeout_map(state);
     let default_timeout_secs = state
         .lock()
         .ok()
         .map(|s| s.default_motion_timeout_secs)
         .unwrap_or(0);
 
-    // Group sensors by room_id
-    let mut rooms: HashMap<String, Vec<(&String, &Option<Instant>)>> = HashMap::new();
-    for (sensor_id, (room_id, stopped_at)) in &motion.sensors {
-        rooms
-            .entry(room_id.clone())
+    let mut targets: HashMap<String, Vec<(&String, &MotionSourceState)>> = HashMap::new();
+    for (source_key, source) in &motion.sensors {
+        targets
+            .entry(source.target_node_id.clone())
             .or_default()
-            .push((sensor_id, stopped_at));
+            .push((source_key, source));
     }
 
-    // Log timer status
-    let status: Vec<String> = rooms
+    let status: Vec<String> = targets
         .iter()
-        .map(|(room_id, sensors)| {
-            let room_timeout = timeouts
-                .get(room_id)
+        .map(|(target_node_id, sources)| {
+            let timeout_secs = timeouts
+                .get(target_node_id)
                 .copied()
                 .unwrap_or(default_timeout_secs);
-            let sensor_status: Vec<String> = sensors
+            let source_status: Vec<String> = sources
                 .iter()
-                .map(|(sid, stopped)| match stopped {
-                    None => format!("{}=active", sid),
+                .map(|(_, source)| match source.stopped_at {
+                    None => format!("{}=active", source.source_node_id),
                     Some(t) => format!(
                         "{}={}s/{}s",
-                        sid,
-                        now.duration_since(*t).as_secs(),
-                        room_timeout
+                        source.source_node_id,
+                        now.duration_since(t).as_secs(),
+                        timeout_secs
                     ),
                 })
                 .collect();
-            format!("{}:[{}]", room_id, sensor_status.join(","))
+            format!("{}:[{}]", target_node_id, source_status.join(","))
         })
         .collect();
-    info!(target: "evt", "Motion: checking timers - {} rooms: {}", rooms.len(), status.join(" "));
+    info!(
+        target: "evt",
+        "Motion: checking timers - {} targets: {}",
+        targets.len(),
+        status.join(" ")
+    );
 
-    let mut expired_rooms: Vec<String> = Vec::new();
+    let mut expired_targets: Vec<String> = Vec::new();
 
-    for (room_id, sensors) in &rooms {
-        // If ANY sensor is still active (None), skip this room
-        if sensors.iter().any(|(_, stopped)| stopped.is_none()) {
+    for (target_node_id, sources) in &targets {
+        if sources
+            .iter()
+            .any(|(_, source)| source.stopped_at.is_none())
+        {
             continue;
         }
 
-        // All sensors cleared - find elapsed time since the LATEST stop
-        // (minimum elapsed = most recent stop time)
-        let Some(elapsed) = sensors
+        let Some(elapsed) = sources
             .iter()
-            .filter_map(|(_, stopped)| stopped.as_ref())
+            .filter_map(|(_, source)| source.stopped_at.as_ref())
             .map(|t| now.duration_since(*t))
             .min()
         else {
             continue;
         };
 
-        // Get per-room timeout (fallback to default)
         let timeout_secs = timeouts
-            .get(room_id)
+            .get(target_node_id)
             .copied()
             .unwrap_or(default_timeout_secs);
 
-        // Timeout=0 means auto-off disabled for this room
         if timeout_secs == 0 {
             continue;
         }
 
         let timeout = Duration::from_secs(timeout_secs);
         if elapsed > timeout {
-            expired_rooms.push(room_id.clone());
+            expired_targets.push(target_node_id.clone());
         } else {
-            // Warning dim: if within WARNING_BEFORE_SECS of timeout, timeout is long
-            // enough, room is motion-owned, and not already warned -> dim to 50%
             let remaining = timeout_secs.saturating_sub(elapsed.as_secs());
             if remaining <= WARNING_BEFORE_SECS
                 && timeout_secs > WARNING_BEFORE_SECS
-                && motion.motion_owned.contains(room_id.as_str())
-                && !motion.warning_active.contains(room_id.as_str())
+                && motion.motion_owned.contains(target_node_id.as_str())
+                && !motion.warning_active.contains(target_node_id.as_str())
             {
-                info!(target: "evt", "Motion: warning dim for room {} ({}s remaining)", room_id, remaining);
-                dim_room_inline(state, room_id, WARNING_DIM_FACTOR);
-                motion.warning_active.insert(room_id.clone());
+                info!(
+                    target: "evt",
+                    "Motion: warning dim for node {} ({}s remaining)",
+                    target_node_id,
+                    remaining
+                );
+                dim_node_inline(state, target_node_id, WARNING_DIM_FACTOR);
+                motion.warning_active.insert(target_node_id.clone());
             }
         }
     }
 
-    for room_id in &expired_rooms {
-        // Remove all sensors for this room
-        motion.sensors.retain(|_, (rid, _)| rid != room_id);
-        motion.warning_active.remove(room_id);
+    for target_node_id in &expired_targets {
+        motion
+            .sensors
+            .retain(|_, source| &source.target_node_id != target_node_id);
+        motion.warning_active.remove(target_node_id);
 
-        if motion.motion_owned.remove(room_id) {
-            info!(target: "evt", "Motion: timeout expired for room {} - sending OffPress", room_id);
+        if motion.motion_owned.remove(target_node_id) {
+            info!(
+                target: "evt",
+                "Motion: timeout expired for node {} - sending OffPress",
+                target_node_id
+            );
 
-            // Dispatch via work queue if available, otherwise execute inline
             let work_tx = {
                 let Ok(s) = state.lock() else { continue };
                 s.work_tx.clone()
             };
             if let Some(tx) = work_tx {
                 let _ = tx.try_send(WorkItem::ButtonAction {
-                    room_id: room_id.clone(),
+                    node_id: target_node_id.clone(),
                     action: ButtonAction::OffPress,
                     device_id: None,
                 });
             } else {
-                // No work queue - execute inline
-                process_button_inline(state, room_id, ButtonAction::OffPress, None);
+                process_button_inline(state, target_node_id, ButtonAction::OffPress, None);
             }
         } else {
-            info!(target: "evt", "Motion: timeout expired for room {} - not owned, skipping off", room_id);
+            info!(
+                target: "evt",
+                "Motion: timeout expired for node {} - not owned, skipping off",
+                target_node_id
+            );
         }
     }
 }
@@ -728,22 +804,23 @@ pub fn run_event_loop(
     if let Ok(mut s) = state.lock() {
         if !s.pending_motion_seed.is_empty() {
             let seeds = std::mem::take(&mut s.pending_motion_seed);
-            for (sensor_id, room_id) in seeds {
-                // Translate hub-native room ID to topology ID (consistent with
-                // live HubEvent::Motion handling which calls translate_room_id).
-                let room_id = s
-                    .topology
-                    .translate_room_id_any_hub(&room_id)
-                    .map(|s| s.to_string())
-                    .unwrap_or(room_id);
-                motion_state
-                    .sensors
-                    .insert(sensor_id, (room_id.clone(), None));
-                motion_state.motion_owned.insert(room_id);
+            for (source_node_id, target_node_id) in seeds {
+                motion_state.sensors.insert(
+                    source_node_id.clone(),
+                    MotionSourceState {
+                        source_node_id,
+                        target_node_id: target_node_id.clone(),
+                        stopped_at: None,
+                    },
+                );
+                motion_state.motion_owned.insert(target_node_id);
             }
             motion_dirty = true;
-            info!(target: "evt", "Motion: seeded {} active sensors from startup prefetch",
-                motion_state.sensors.len());
+            info!(
+                target: "evt",
+                "Motion: seeded {} active sources from startup prefetch",
+                motion_state.sensors.len()
+            );
         }
     }
 
@@ -753,21 +830,25 @@ pub fn run_event_loop(
             if !s.pending_hub_event_rxs.is_empty() {
                 let new_rxs = std::mem::take(&mut s.pending_hub_event_rxs);
                 hub_event_rxs.extend(new_rxs);
-                // Reset motion state when hub topology changes
                 motion_state = MotionTimerState::new();
             }
 
-            // Clear motion timers requested by commands that force a room off.
             if !s.pending_motion_clear.is_empty() {
-                let room_ids = std::mem::take(&mut s.pending_motion_clear);
-                drop(s); // release lock before logging
-                for room_id in &room_ids {
-                    motion_state.sensors.retain(|_, (rid, _)| rid != room_id);
-                    motion_state.motion_owned.remove(room_id);
-                    motion_state.warning_active.remove(room_id);
+                let target_node_ids = std::mem::take(&mut s.pending_motion_clear);
+                drop(s);
+                for target_node_id in &target_node_ids {
+                    motion_state
+                        .sensors
+                        .retain(|_, source| &source.target_node_id != target_node_id);
+                    motion_state.motion_owned.remove(target_node_id);
+                    motion_state.warning_active.remove(target_node_id);
                 }
-                if !room_ids.is_empty() {
-                    info!(target: "evt", "Motion: cleared timers for {} rooms", room_ids.len());
+                if !target_node_ids.is_empty() {
+                    info!(
+                        target: "evt",
+                        "Motion: cleared timers for {} targets",
+                        target_node_ids.len()
+                    );
                     motion_dirty = true;
                 }
             }
@@ -831,7 +912,7 @@ fn check_registry_dirty(state: &SharedState) {
 
 /// Sync motion timer snapshots into AppState for API visibility.
 pub fn sync_motion_snapshots(state: &SharedState, motion: &MotionTimerState) {
-    let (timeouts, _) = commands::resolved_room_motion_timeout_map(state);
+    let (timeouts, _) = commands::resolved_motion_timeout_map(state);
     let default_timeout_secs = state
         .lock()
         .ok()
@@ -852,8 +933,8 @@ pub fn sync_motion_snapshots(state: &SharedState, motion: &MotionTimerState) {
                 let timers: Vec<_> = s
                     .motion_snapshots
                     .iter()
-                    .map(|(room_id, snap)| {
-                        crate::server_event::MotionTimerEvent::from_snapshot(room_id, snap)
+                    .map(|(node_id, snap)| {
+                        crate::server_event::MotionTimerEvent::from_snapshot(node_id, snap)
                     })
                     .collect();
                 s.emit_event(crate::server_event::ServerEvent::MotionTimer { timers });
@@ -869,7 +950,7 @@ pub fn sync_motion_snapshots(state: &SharedState, motion: &MotionTimerState) {
 pub fn process_work_item(state: &SharedState, item: WorkItem) {
     match item {
         WorkItem::ButtonAction {
-            room_id,
+            node_id,
             action,
             device_id,
         } => {
@@ -881,73 +962,75 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                 (s.hub_runtime(), s.has_any_hub())
             };
             let Some(runtime) = runtime else {
-                warn!(target: "evt", "Worker: no runtime (hub={}) - dropping {:?} for room '{}'",
-                    has_hub, action, room_id);
+                warn!(target: "evt", "Worker: no runtime (hub={}) - dropping {:?} for node '{}'",
+                    has_hub, action, node_id);
                 return;
             };
 
             let event = if let Some(ref dev_id) = device_id {
-                InputEvent::with_device(&room_id, action, dev_id)
+                InputEvent::with_device(&node_id, action, dev_id)
             } else {
-                InputEvent::new(&room_id, action)
+                InputEvent::new(&node_id, action)
             };
 
             match runtime.handle_event(&event) {
                 Ok(turned_on) => {
-                    info!(target: "evt", "Worker: {:?} room '{}' -> on={}", action, room_id, turned_on);
+                    info!(target: "evt", "Worker: {:?} node '{}' -> on={}", action, node_id, turned_on);
                     crate::commands::sync_active_mode_from_runtime(state, &runtime);
                     if let Ok(mut s) = state.lock() {
-                        if s.room_mode_transitions.remove(&room_id).is_some() {
+                        if s.room_mode_transitions.remove(&node_id).is_some() {
                             debug!(
                                 target: "evt",
-                                "Worker: cleared mode transition for room '{}'",
-                                room_id
+                                "Worker: cleared mode transition for node '{}'",
+                                node_id
                             );
                         }
-                        s.room_lights_on.insert(room_id.clone(), turned_on);
+                        s.room_lights_on.insert(node_id.clone(), turned_on);
                     }
                 }
                 Err(e) => {
-                    warn!(target: "evt", "Worker: {:?} room '{}' failed: {}", action, room_id, e);
+                    warn!(target: "evt", "Worker: {:?} node '{}' failed: {}", action, node_id, e);
                 }
             }
         }
-        WorkItem::ApplyRoomCommand { room_id, command } => {
+        WorkItem::ApplyNodeCommand { node_id, command } => {
             let runtime = {
                 let Ok(s) = state.lock() else { return };
                 s.hub_runtime()
             };
             let Some(runtime) = runtime else { return };
 
-            crate::commands::log_room_command_dispatch(runtime.as_ref(), &room_id, &command);
-            if let Err(e) = runtime.apply_room_command(&room_id, command) {
+            crate::commands::log_room_command_dispatch(runtime.as_ref(), &node_id, &command);
+            if let Err(e) = runtime.apply_room_command(&node_id, command) {
                 warn!(
                     target: "cmd",
-                    "Worker: apply_room_command for '{}' failed: {}",
-                    room_id,
+                    "Worker: apply_node_command for '{}' failed: {}",
+                    node_id,
                     e
                 );
                 return;
             }
 
             #[cfg(feature = "desktop")]
-            if let Some(snap) = runtime.engine_room_snapshot(&room_id) {
+            if let Some(snap) = runtime.engine_effective_node_snapshot(&node_id) {
                 crate::state::emit_server_event(
                     state,
-                    crate::server_event::ServerEvent::RoomState {
-                        rooms: vec![crate::commands::build_room_state_event(state, &snap)],
+                    crate::server_event::ServerEvent::NodeState {
+                        nodes: vec![crate::commands::build_node_state_event(state, &snap)],
                     },
                 );
             }
         }
-        WorkItem::PeriodicRoomTick {
-            room_id,
+        WorkItem::PeriodicNodeTick {
+            node_id,
+            settings_node_id,
             current_hour,
+            emit_parent_node_id,
         } => {
             let current_hour = state
                 .lock()
                 .ok()
-                .and_then(|mut s| s.pending_periodic_ticks.remove(&room_id))
+                .and_then(|mut s| s.pending_periodic_ticks.remove(&node_id))
                 .unwrap_or(current_hour);
 
             let runtime = {
@@ -956,13 +1039,18 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             };
             let Some(runtime) = runtime else { return };
 
-            if let Err(e) = runtime.periodic_tick_room(&room_id, current_hour) {
-                warn!(target: "sys", "Periodic room tick '{}' failed: {}", room_id, e);
+            if let Err(e) = runtime.periodic_tick_node(&node_id, &settings_node_id, current_hour) {
+                warn!(target: "sys", "Periodic node tick '{}' failed: {}", node_id, e);
             }
 
-            crate::periodic::post_tick_room(state, &runtime, &room_id);
+            crate::periodic::post_tick_node(state, &runtime, &settings_node_id);
+            if let Some(parent_node_id) = emit_parent_node_id {
+                if parent_node_id != settings_node_id {
+                    crate::periodic::post_tick_node(state, &runtime, &parent_node_id);
+                }
+            }
         }
-        WorkItem::DeferredPersist { room_id: _ } => {
+        WorkItem::DeferredPersist { node_id: _ } => {
             commands::persist_rooms(state);
         }
         WorkItem::DeferredPersistState => {
@@ -986,6 +1074,18 @@ mod tests {
     use crate::hub::{ActiveHub, HubType};
     use crate::registry::{RegistrySnapshot, SnapshotRoom};
 
+    fn motion_source(
+        source_node_id: &str,
+        target_node_id: &str,
+        stopped_at: Option<Instant>,
+    ) -> MotionSourceState {
+        MotionSourceState {
+            source_node_id: source_node_id.to_string(),
+            target_node_id: target_node_id.to_string(),
+            stopped_at,
+        }
+    }
+
     #[test]
     fn new_is_empty() {
         let state = MotionTimerState::new();
@@ -995,24 +1095,24 @@ mod tests {
     }
 
     #[test]
-    fn has_sensors_for_room_true() {
+    fn has_sources_for_target_true() {
         let mut state = MotionTimerState::new();
         state
             .sensors
-            .insert("sensor_1".into(), ("room_a".into(), None));
-        assert!(state.has_sensors_for_room("room_a"));
+            .insert("sensor_1".into(), motion_source("sensor_1", "room_a", None));
+        assert!(state.has_sources_for_target("room_a"));
     }
 
     #[test]
-    fn has_sensors_for_room_false() {
+    fn has_sources_for_target_false() {
         let state = MotionTimerState::new();
-        assert!(!state.has_sensors_for_room("room_a"));
+        assert!(!state.has_sources_for_target("room_a"));
 
         let mut state2 = MotionTimerState::new();
         state2
             .sensors
-            .insert("sensor_1".into(), ("room_b".into(), None));
-        assert!(!state2.has_sensors_for_room("room_a"));
+            .insert("sensor_1".into(), motion_source("sensor_1", "room_b", None));
+        assert!(!state2.has_sources_for_target("room_a"));
     }
 
     #[test]
@@ -1020,7 +1120,7 @@ mod tests {
         let mut state = MotionTimerState::new();
         state
             .sensors
-            .insert("sensor_1".into(), ("room_a".into(), None));
+            .insert("sensor_1".into(), motion_source("sensor_1", "room_a", None));
 
         let timeouts = HashMap::new();
         let snaps = state.snapshots(&timeouts, 300);
@@ -1035,9 +1135,10 @@ mod tests {
     fn snapshot_stopped_sensor() {
         let mut state = MotionTimerState::new();
         let stopped_at = Instant::now() - Duration::from_secs(10);
-        state
-            .sensors
-            .insert("sensor_1".into(), ("room_a".into(), Some(stopped_at)));
+        state.sensors.insert(
+            "sensor_1".into(),
+            motion_source("sensor_1", "room_a", Some(stopped_at)),
+        );
 
         let timeouts = HashMap::new();
         let snaps = state.snapshots(&timeouts, 300);
@@ -1060,10 +1161,11 @@ mod tests {
         let stopped_at = Instant::now() - Duration::from_secs(5);
         state
             .sensors
-            .insert("sensor_1".into(), ("room_a".into(), None));
-        state
-            .sensors
-            .insert("sensor_2".into(), ("room_a".into(), Some(stopped_at)));
+            .insert("sensor_1".into(), motion_source("sensor_1", "room_a", None));
+        state.sensors.insert(
+            "sensor_2".into(),
+            motion_source("sensor_2", "room_a", Some(stopped_at)),
+        );
 
         let timeouts = HashMap::new();
         let snaps = state.snapshots(&timeouts, 300);
@@ -1081,7 +1183,7 @@ mod tests {
         let mut state = MotionTimerState::new();
         state
             .sensors
-            .insert("sensor_1".into(), ("room_a".into(), None));
+            .insert("sensor_1".into(), motion_source("sensor_1", "room_a", None));
 
         let mut timeouts = HashMap::new();
         timeouts.insert("room_a".to_string(), 600u64);
@@ -1097,7 +1199,7 @@ mod tests {
         let mut state = MotionTimerState::new();
         state
             .sensors
-            .insert("sensor_1".into(), ("room_a".into(), None));
+            .insert("sensor_1".into(), motion_source("sensor_1", "room_a", None));
 
         let timeouts = HashMap::new();
         let snaps = state.snapshots(&timeouts, 120);
@@ -1111,7 +1213,7 @@ mod tests {
         let mut state = MotionTimerState::new();
         state
             .sensors
-            .insert("sensor_1".into(), ("room_a".into(), None));
+            .insert("sensor_1".into(), motion_source("sensor_1", "room_a", None));
         state.motion_owned.insert("room_a".into());
 
         let timeouts = HashMap::new();
@@ -1124,7 +1226,7 @@ mod tests {
         let mut state2 = MotionTimerState::new();
         state2
             .sensors
-            .insert("sensor_2".into(), ("room_b".into(), None));
+            .insert("sensor_2".into(), motion_source("sensor_2", "room_b", None));
 
         let snaps2 = state2.snapshots(&timeouts, 300);
         let snap2 = snaps2.get("room_b").expect("room_b should have a snapshot");
@@ -1136,7 +1238,7 @@ mod tests {
         let mut state = MotionTimerState::new();
         state
             .sensors
-            .insert("sensor_1".into(), ("room_a".into(), None));
+            .insert("sensor_1".into(), motion_source("sensor_1", "room_a", None));
         state.warning_active.insert("room_a".into());
 
         let timeouts = HashMap::new();
@@ -1149,7 +1251,7 @@ mod tests {
         let mut state2 = MotionTimerState::new();
         state2
             .sensors
-            .insert("sensor_2".into(), ("room_b".into(), None));
+            .insert("sensor_2".into(), motion_source("sensor_2", "room_b", None));
 
         let snaps2 = state2.snapshots(&timeouts, 300);
         let snap2 = snaps2.get("room_b").expect("room_b should have a snapshot");
@@ -1161,11 +1263,12 @@ mod tests {
         let mut state = MotionTimerState::new();
         state
             .sensors
-            .insert("sensor_1".into(), ("room_a".into(), None));
+            .insert("sensor_1".into(), motion_source("sensor_1", "room_a", None));
         let stopped_at = Instant::now() - Duration::from_secs(20);
-        state
-            .sensors
-            .insert("sensor_2".into(), ("room_b".into(), Some(stopped_at)));
+        state.sensors.insert(
+            "sensor_2".into(),
+            motion_source("sensor_2", "room_b", Some(stopped_at)),
+        );
         state.motion_owned.insert("room_b".into());
 
         let mut timeouts = HashMap::new();
@@ -1314,6 +1417,8 @@ mod tests {
             snapshots: vec![RoomSnapshot {
                 id: "room_a".into(),
                 name: "Room A".into(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
                 rhythm_enabled: true,
                 disabled: false,
                 time_offset_minutes: 0.0,
@@ -1422,13 +1527,13 @@ mod tests {
 
         let before: serde_json::Value =
             serde_json::from_str(&crate::commands::build_state_snapshot(&state).unwrap()).unwrap();
-        let before_room = before["rooms"]
+        let before_room = before["nodes"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|room| room["name"] == "Room A")
+            .find(|node| node["name"] == "Room A" && node["kind"] == "room")
             .unwrap();
-        assert_eq!(before_room["device_ids"], serde_json::json!([]));
+        let before_room_id = before_room["id"].as_str().unwrap().to_string();
 
         handle_hub_event(
             &state,
@@ -1444,29 +1549,27 @@ mod tests {
             let parsed: serde_json::Value =
                 serde_json::from_str(&crate::commands::build_state_snapshot(&state).unwrap())
                     .unwrap();
-            let room = parsed["rooms"]
+            let room = parsed["nodes"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|candidate| candidate["name"] == "Room A")
+                .find(|candidate| candidate["name"] == "Room A" && candidate["kind"] == "room")
                 .cloned()
-                .unwrap();
-            if room["device_ids"] == serde_json::json!(["light-1"]) {
+                .unwrap_or(serde_json::Value::Null);
+            if room["id"] != before_room_id {
                 after = Some(parsed);
                 break;
             }
         }
 
-        let after = after.expect("connected event should repopulate room device_ids");
-        let after_room = after["rooms"]
+        let after = after.expect("connected event should remap the room to a topology node id");
+        let after_room = after["nodes"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|room| room["name"] == "Room A")
+            .find(|node| node["name"] == "Room A" && node["kind"] == "room")
             .unwrap();
-        assert_eq!(after_room["device_ids"], serde_json::json!(["light-1"]));
-        assert_eq!(after_room["devices"][0]["id"], "light-1");
-        assert_eq!(after_room["devices"][0]["type"], "light");
+        assert_ne!(after_room["id"], before_room_id);
     }
 
     #[test]
@@ -1494,6 +1597,8 @@ mod tests {
             snapshots: vec![RoomSnapshot {
                 id: "room_a".into(),
                 name: "Room A".into(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
                 rhythm_enabled: true,
                 disabled: false,
                 time_offset_minutes: 0.0,
@@ -1587,8 +1692,12 @@ mod tests {
     fn check_motion_timers_all_active_no_expiry() {
         let state = make_state();
         let mut motion = MotionTimerState::new();
-        motion.sensors.insert("s1".into(), ("room_a".into(), None));
-        motion.sensors.insert("s2".into(), ("room_a".into(), None));
+        motion
+            .sensors
+            .insert("s1".into(), motion_source("s1", "room_a", None));
+        motion
+            .sensors
+            .insert("s2".into(), motion_source("s2", "room_a", None));
         motion.motion_owned.insert("room_a".into());
 
         check_motion_timers(&state, &mut motion);
@@ -1608,7 +1717,7 @@ mod tests {
         let stopped_at = Instant::now() - Duration::from_secs(200);
         motion
             .sensors
-            .insert("s1".into(), ("room_a".into(), Some(stopped_at)));
+            .insert("s1".into(), motion_source("s1", "room_a", Some(stopped_at)));
         motion.motion_owned.insert("room_a".into());
 
         check_motion_timers(&state, &mut motion);
@@ -1627,7 +1736,7 @@ mod tests {
         let stopped_at = Instant::now() - Duration::from_secs(200);
         motion
             .sensors
-            .insert("s1".into(), ("room_a".into(), Some(stopped_at)));
+            .insert("s1".into(), motion_source("s1", "room_a", Some(stopped_at)));
         // NOT motion_owned — manual button took control
 
         check_motion_timers(&state, &mut motion);
@@ -1644,7 +1753,7 @@ mod tests {
         let stopped_at = Instant::now() - Duration::from_secs(9999);
         motion
             .sensors
-            .insert("s1".into(), ("room_a".into(), Some(stopped_at)));
+            .insert("s1".into(), motion_source("s1", "room_a", Some(stopped_at)));
         motion.motion_owned.insert("room_a".into());
 
         check_motion_timers(&state, &mut motion);
@@ -1663,7 +1772,7 @@ mod tests {
         let stopped_at = Instant::now() - Duration::from_secs(100);
         motion
             .sensors
-            .insert("s1".into(), ("room_a".into(), Some(stopped_at)));
+            .insert("s1".into(), motion_source("s1", "room_a", Some(stopped_at)));
         motion.motion_owned.insert("room_a".into());
 
         check_motion_timers(&state, &mut motion);
@@ -1682,7 +1791,7 @@ mod tests {
         let stopped_at = Instant::now() - Duration::from_secs(250);
         motion
             .sensors
-            .insert("s1".into(), ("room_a".into(), Some(stopped_at)));
+            .insert("s1".into(), motion_source("s1", "room_a", Some(stopped_at)));
         motion.motion_owned.insert("room_a".into());
 
         check_motion_timers(&state, &mut motion);
@@ -1700,8 +1809,10 @@ mod tests {
         let stopped_at = Instant::now() - Duration::from_secs(200);
         motion
             .sensors
-            .insert("s1".into(), ("room_a".into(), Some(stopped_at)));
-        motion.sensors.insert("s2".into(), ("room_a".into(), None)); // still active
+            .insert("s1".into(), motion_source("s1", "room_a", Some(stopped_at)));
+        motion
+            .sensors
+            .insert("s2".into(), motion_source("s2", "room_a", None)); // still active
         motion.motion_owned.insert("room_a".into());
 
         check_motion_timers(&state, &mut motion);
@@ -1720,12 +1831,14 @@ mod tests {
         // s1 stopped 200s ago, s2 stopped 50s ago → countdown from latest (50s, not expired)
         let stopped_early = Instant::now() - Duration::from_secs(200);
         let stopped_late = Instant::now() - Duration::from_secs(50);
-        motion
-            .sensors
-            .insert("s1".into(), ("room_a".into(), Some(stopped_early)));
-        motion
-            .sensors
-            .insert("s2".into(), ("room_a".into(), Some(stopped_late)));
+        motion.sensors.insert(
+            "s1".into(),
+            motion_source("s1", "room_a", Some(stopped_early)),
+        );
+        motion.sensors.insert(
+            "s2".into(),
+            motion_source("s2", "room_a", Some(stopped_late)),
+        );
         motion.motion_owned.insert("room_a".into());
 
         check_motion_timers(&state, &mut motion);

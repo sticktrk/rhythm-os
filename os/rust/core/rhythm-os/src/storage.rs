@@ -113,6 +113,15 @@ pub trait Storage: Send + Sync {
     fn clear_commissioning_wifi_credentials(&self) -> Result<()> {
         Ok(())
     }
+
+    /// Clear all persisted state that should not survive a full factory reset.
+    ///
+    /// Active desktop/server platforms use this to remove stale keyed hub
+    /// registries and any other persisted artifacts that would otherwise be
+    /// resurrected after a reset.
+    fn clear_factory_reset_state(&self) -> Result<()> {
+        self.clear_commissioning_wifi_credentials()
+    }
 }
 
 /// Stored light profile configurations for persistence.
@@ -309,6 +318,17 @@ impl FileStorage {
         let data = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
         serde_json::from_str(&data).with_context(|| format!("Failed to parse {}", path.display()))
+    }
+
+    fn remove_if_exists(&self, name: &str) -> Result<()> {
+        let path = self.file_path(name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => {
+                Err(anyhow::anyhow!(e)).with_context(|| format!("removing {}", path.display()))
+            }
+        }
     }
 }
 
@@ -542,6 +562,43 @@ impl Storage for FileStorage {
                 Err(anyhow::anyhow!(e)).with_context(|| format!("removing {}", path.display()))
             }
         }
+    }
+
+    fn clear_factory_reset_state(&self) -> Result<()> {
+        for name in [
+            "rooms.json",
+            "light_profiles.json",
+            "location.json",
+            "settings.json",
+            "hub_credentials.json",
+            "hub_registry.json",
+            "canonical_registry.json",
+            "topology.json",
+            "commissioning_wifi.json",
+        ] {
+            self.remove_if_exists(name)?;
+        }
+
+        for entry in std::fs::read_dir(&self.dir)
+            .with_context(|| format!("reading {}", self.dir.display()))?
+        {
+            let entry = entry?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if name.starts_with("hub_registry_") && name.ends_with(".json") {
+                match std::fs::remove_file(entry.path()) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(e))
+                            .with_context(|| format!("removing {}", entry.path().display()));
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -1528,6 +1585,91 @@ mod tests {
             storage.clear_commissioning_wifi_credentials().unwrap();
             let cleared = storage.load_commissioning_wifi_credentials().unwrap();
             assert!(cleared.is_none());
+            cleanup(&path);
+        }
+
+        #[test]
+        fn clear_factory_reset_state_removes_persisted_files() {
+            let (storage, path) = temp_storage();
+            storage
+                .save_rooms(&rhythm_core::room::RoomManager::new())
+                .unwrap();
+            storage
+                .save_light_profiles(&StoredLightProfiles {
+                    solar_noon_hour: 12.5,
+                    profiles: vec![rhythm_core::default_rhythm_profile()],
+                })
+                .unwrap();
+            storage
+                .save_location(&StoredLocation {
+                    latitude: Some(1.0),
+                    longitude: Some(2.0),
+                    utc_offset_hours: 3.0,
+                    timezone_name: Some("Etc/UTC".into()),
+                })
+                .unwrap();
+            storage
+                .save_settings(&StoredSettings {
+                    power_save: true,
+                    active_mode: RhythmMode::Sleep,
+                    last_active_mode_cause: ModeChangeCause::Manual,
+                    last_active_mode_transition_id: None,
+                    last_active_mode_change_utc_ms: Some(123),
+                    modes: rhythm_core::default_mode_configs(),
+                    mode_transitions: rhythm_core::default_mode_transition_configs(),
+                })
+                .unwrap();
+            storage
+                .save_all_hub_credentials(&[HubCredentials::new(
+                    "hue",
+                    "192.168.1.2",
+                    serde_json::json!({"username": "abc"}),
+                )])
+                .unwrap();
+            storage
+                .save_hub_registry(&serde_json::json!({"rooms": []}))
+                .unwrap();
+            storage
+                .save_hub_registry_for(
+                    &crate::canonical::identity::HubKey::new(
+                        crate::hub::HubType::new("hue"),
+                        "192.168.1.2",
+                    ),
+                    &serde_json::json!({"devices": []}),
+                )
+                .unwrap();
+            storage
+                .save_canonical_registry(
+                    &serde_json::json!({"devices": {}, "triage": {"entries": []}}),
+                )
+                .unwrap();
+            storage
+                .save_topology(&serde_json::json!({"rooms": {}}))
+                .unwrap();
+            storage
+                .save_commissioning_wifi_credentials(&crate::provisioning::WifiCredentials {
+                    ssid: "RhythmNet".into(),
+                    password: "secret".into(),
+                })
+                .unwrap();
+
+            storage.clear_factory_reset_state().unwrap();
+
+            for name in [
+                "rooms.json",
+                "light_profiles.json",
+                "location.json",
+                "settings.json",
+                "hub_credentials.json",
+                "hub_registry.json",
+                "canonical_registry.json",
+                "topology.json",
+                "commissioning_wifi.json",
+                "hub_registry_hue_192_168_1_2.json",
+            ] {
+                assert!(!path.join(name).exists(), "{} should be removed", name);
+            }
+
             cleanup(&path);
         }
 

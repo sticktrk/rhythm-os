@@ -7,7 +7,7 @@
 use crate::controller::LightController;
 use crate::light_profile::LightProfileConfig;
 use crate::lighting::LightingCommand;
-use crate::room::{ModeConfig, RoomModeState, RoomProfileSettings};
+use crate::room::{LightNodeKind, ModeConfig, RoomModeState, RoomProfileSettings};
 use crate::solar::SolarTime;
 use anyhow::Result;
 
@@ -45,20 +45,80 @@ pub trait RuntimeHandle: Send + Sync {
     /// for this one room (~200-500ms) instead of all rooms at once.
     fn periodic_tick_room(&self, room_id: &str, current_hour: f32) -> Result<()>;
 
+    /// Run a periodic update for a derived dispatch node that inherits a
+    /// topology room's settings.
+    ///
+    /// The default implementation falls back to room-level ticking so
+    /// non-composite test runtimes keep working.
+    fn periodic_tick_node(
+        &self,
+        _node_id: &str,
+        source_room_id: &str,
+        current_hour: f32,
+    ) -> Result<()> {
+        self.periodic_tick_room(source_room_id, current_hour)
+    }
+
     /// Get a read-only snapshot of a single room's state.
     fn engine_room_snapshot(&self, room_id: &str) -> Option<RoomSnapshot>;
 
     /// Get read-only snapshots of all rooms.
     fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot>;
 
+    /// Get a read-only snapshot of any addressable runtime node.
+    fn engine_node_snapshot(&self, node_id: &str) -> Option<NodeSnapshot> {
+        self.engine_room_snapshot(node_id)
+            .map(NodeSnapshot::from_room_snapshot)
+    }
+
+    /// Get read-only snapshots of all runtime nodes.
+    fn engine_all_node_snapshots(&self) -> Vec<NodeSnapshot> {
+        self.engine_all_room_snapshots()
+            .into_iter()
+            .map(NodeSnapshot::from_room_snapshot)
+            .collect()
+    }
+
+    /// Get an effective inherited snapshot for a runtime node.
+    fn engine_effective_node_snapshot(&self, node_id: &str) -> Option<NodeSnapshot> {
+        self.engine_node_snapshot(node_id)
+    }
+
+    /// Get effective inherited snapshots for all runtime nodes.
+    fn engine_all_effective_node_snapshots(&self) -> Vec<NodeSnapshot> {
+        self.engine_all_node_snapshots()
+    }
+
     /// Restore persisted room state into the engine.
     fn restore_room_state(&self, room_id: &str, state: RestoredRoomState);
+
+    /// Restore persisted node state into the engine.
+    fn restore_node_state(&self, node_id: &str, state: RestoredNodeState) {
+        self.restore_room_state(node_id, RestoredRoomState::from(&state));
+    }
 
     /// Add a room to the engine's room manager.
     fn add_room(&self, room_id: &str, room_name: &str);
 
+    /// Add an addressable node to the engine's room manager.
+    fn add_node(
+        &self,
+        node_id: &str,
+        node_name: &str,
+        kind: LightNodeKind,
+        parent_id: Option<String>,
+    ) {
+        let _ = (kind, parent_id);
+        self.add_room(node_id, node_name);
+    }
+
     /// Remove a room from the engine's room manager.
     fn remove_room(&self, room_id: &str);
+
+    /// Remove any addressable node from the engine's room manager.
+    fn remove_node(&self, node_id: &str) {
+        self.remove_room(node_id);
+    }
 
     /// Dim a room's lights to a fraction of current adaptive brightness.
     /// No-op if room doesn't exist in the engine.
@@ -123,6 +183,8 @@ pub trait RuntimeHandle: Send + Sync {
 pub struct RoomSnapshot {
     pub id: String,
     pub name: String,
+    pub kind: LightNodeKind,
+    pub parent_id: Option<String>,
     pub rhythm_enabled: bool,
     pub disabled: bool,
     pub time_offset_minutes: f32,
@@ -144,6 +206,52 @@ pub struct RestoredRoomState {
     pub profile_settings: RoomProfileSettings,
 }
 
+/// Read-only snapshot of any addressable runtime node.
+#[derive(Debug, Clone)]
+pub struct NodeSnapshot {
+    pub id: String,
+    pub name: String,
+    pub kind: LightNodeKind,
+    pub parent_id: Option<String>,
+    pub rhythm_enabled: bool,
+    pub disabled: bool,
+    pub time_offset_minutes: f32,
+    pub brightness_offset: f32,
+    pub soft_off: bool,
+    pub hard_off: bool,
+    pub profile_settings: RoomProfileSettings,
+}
+
+impl NodeSnapshot {
+    pub fn from_room_snapshot(snapshot: RoomSnapshot) -> Self {
+        Self {
+            id: snapshot.id,
+            name: snapshot.name,
+            kind: snapshot.kind,
+            parent_id: snapshot.parent_id,
+            rhythm_enabled: snapshot.rhythm_enabled,
+            disabled: snapshot.disabled,
+            time_offset_minutes: snapshot.time_offset_minutes,
+            brightness_offset: snapshot.brightness_offset,
+            soft_off: snapshot.soft_off,
+            hard_off: snapshot.hard_off,
+            profile_settings: snapshot.profile_settings,
+        }
+    }
+}
+
+/// Persisted node state restored into the runtime.
+#[derive(Debug, Clone)]
+pub struct RestoredNodeState {
+    pub rhythm_enabled: bool,
+    pub disabled: bool,
+    pub time_offset_minutes: f32,
+    pub brightness_offset: f32,
+    pub soft_off: bool,
+    pub hard_off: bool,
+    pub profile_settings: RoomProfileSettings,
+}
+
 impl From<&RoomSnapshot> for RestoredRoomState {
     fn from(snapshot: &RoomSnapshot) -> Self {
         Self {
@@ -154,6 +262,34 @@ impl From<&RoomSnapshot> for RestoredRoomState {
             soft_off: snapshot.soft_off,
             hard_off: snapshot.hard_off,
             profile_settings: snapshot.profile_settings.clone(),
+        }
+    }
+}
+
+impl From<&NodeSnapshot> for RestoredNodeState {
+    fn from(snapshot: &NodeSnapshot) -> Self {
+        Self {
+            rhythm_enabled: snapshot.rhythm_enabled,
+            disabled: snapshot.disabled,
+            time_offset_minutes: snapshot.time_offset_minutes,
+            brightness_offset: snapshot.brightness_offset,
+            soft_off: snapshot.soft_off,
+            hard_off: snapshot.hard_off,
+            profile_settings: snapshot.profile_settings.clone(),
+        }
+    }
+}
+
+impl From<&RestoredNodeState> for RestoredRoomState {
+    fn from(state: &RestoredNodeState) -> Self {
+        Self {
+            rhythm_enabled: state.rhythm_enabled,
+            disabled: state.disabled,
+            time_offset_minutes: state.time_offset_minutes,
+            brightness_offset: state.brightness_offset,
+            soft_off: state.soft_off,
+            hard_off: state.hard_off,
+            profile_settings: state.profile_settings.clone(),
         }
     }
 }
@@ -194,18 +330,29 @@ where
     }
 
     fn periodic_tick_room(&self, room_id: &str, current_hour: f32) -> Result<()> {
+        self.periodic_tick_node(room_id, room_id, current_hour)
+    }
+
+    fn periodic_tick_node(
+        &self,
+        node_id: &str,
+        source_room_id: &str,
+        current_hour: f32,
+    ) -> Result<()> {
         let mut engine = self
             .engine()
             .write()
             .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
 
-        let result = crate::runtime::executor::block_on(
-            engine.periodic_tick_single_room(room_id, current_hour),
-        );
+        let result = crate::runtime::executor::block_on(engine.periodic_tick_node(
+            node_id,
+            source_room_id,
+            current_hour,
+        ));
 
         match result {
             crate::primitives::PeriodicTickResult::Updated => {
-                if let Some(room) = engine.rooms().get(room_id) {
+                if let Some(room) = engine.rooms().get(source_room_id) {
                     let room_state = RoomModeState::from_flags(room.hard_off, room.soft_off, false);
                     let room_state_label = match room_state {
                         RoomModeState::Active => "active",
@@ -219,6 +366,11 @@ where
                     } else {
                         room.id.clone()
                     };
+                    let node_label = if node_id == source_room_id {
+                        room_label.clone()
+                    } else {
+                        format!("{room_label} via {node_id}")
+                    };
                     let mode = engine.profile_registry().active_mode();
                     let profile_id = engine
                         .profile_registry()
@@ -230,14 +382,14 @@ where
                         log::debug!(
                             target: "sys",
                             "Periodic tick: room={} state=active profile={}",
-                            room_label,
+                            node_label,
                             profile_id
                         );
                     } else {
                         log::info!(
                             target: "sys",
                             "Periodic tick: room={} state={} profile={}",
-                            room_label,
+                            node_label,
                             room_state_label,
                             profile_id
                         );
@@ -258,6 +410,8 @@ where
         Some(RoomSnapshot {
             id: room.id.clone(),
             name: room.name.clone(),
+            kind: room.kind,
+            parent_id: room.parent_id.clone(),
             rhythm_enabled: room.rhythm_enabled,
             disabled: room.disabled,
             time_offset_minutes: room.time_offset_minutes,
@@ -274,10 +428,12 @@ where
         };
         engine
             .rooms()
-            .iter()
+            .room_iter()
             .map(|room| RoomSnapshot {
                 id: room.id.clone(),
                 name: room.name.clone(),
+                kind: room.kind,
+                parent_id: room.parent_id.clone(),
                 rhythm_enabled: room.rhythm_enabled,
                 disabled: room.disabled,
                 time_offset_minutes: room.time_offset_minutes,
@@ -285,6 +441,92 @@ where
                 soft_off: room.soft_off,
                 hard_off: room.hard_off,
                 profile_settings: room.profile_settings.clone(),
+            })
+            .collect()
+    }
+
+    fn engine_node_snapshot(&self, node_id: &str) -> Option<NodeSnapshot> {
+        let engine = self.engine().read().ok()?;
+        let node = engine.rooms().get(node_id)?;
+        Some(NodeSnapshot {
+            id: node.id.clone(),
+            name: node.name.clone(),
+            kind: node.kind,
+            parent_id: node.parent_id.clone(),
+            rhythm_enabled: node.rhythm_enabled,
+            disabled: node.disabled,
+            time_offset_minutes: node.time_offset_minutes,
+            brightness_offset: node.brightness_offset,
+            soft_off: node.soft_off,
+            hard_off: node.hard_off,
+            profile_settings: node.profile_settings.clone(),
+        })
+    }
+
+    fn engine_all_node_snapshots(&self) -> Vec<NodeSnapshot> {
+        let Ok(engine) = self.engine().read() else {
+            return Vec::new();
+        };
+        engine
+            .rooms()
+            .iter()
+            .map(|node| NodeSnapshot {
+                id: node.id.clone(),
+                name: node.name.clone(),
+                kind: node.kind,
+                parent_id: node.parent_id.clone(),
+                rhythm_enabled: node.rhythm_enabled,
+                disabled: node.disabled,
+                time_offset_minutes: node.time_offset_minutes,
+                brightness_offset: node.brightness_offset,
+                soft_off: node.soft_off,
+                hard_off: node.hard_off,
+                profile_settings: node.profile_settings.clone(),
+            })
+            .collect()
+    }
+
+    fn engine_effective_node_snapshot(&self, node_id: &str) -> Option<NodeSnapshot> {
+        let engine = self.engine().read().ok()?;
+        let node = engine.rooms().get(node_id)?;
+        let effective = engine.rooms().effective_state(node_id)?;
+        Some(NodeSnapshot {
+            id: node.id.clone(),
+            name: node.name.clone(),
+            kind: node.kind,
+            parent_id: node.parent_id.clone(),
+            rhythm_enabled: effective.rhythm_enabled,
+            disabled: effective.disabled,
+            time_offset_minutes: effective.time_offset_minutes,
+            brightness_offset: effective.brightness_offset,
+            soft_off: effective.soft_off,
+            hard_off: effective.hard_off,
+            profile_settings: effective.profile_settings,
+        })
+    }
+
+    fn engine_all_effective_node_snapshots(&self) -> Vec<NodeSnapshot> {
+        let Ok(engine) = self.engine().read() else {
+            return Vec::new();
+        };
+        engine
+            .rooms()
+            .iter()
+            .filter_map(|node| {
+                let effective = engine.rooms().effective_state(&node.id)?;
+                Some(NodeSnapshot {
+                    id: node.id.clone(),
+                    name: node.name.clone(),
+                    kind: node.kind,
+                    parent_id: node.parent_id.clone(),
+                    rhythm_enabled: effective.rhythm_enabled,
+                    disabled: effective.disabled,
+                    time_offset_minutes: effective.time_offset_minutes,
+                    brightness_offset: effective.brightness_offset,
+                    soft_off: effective.soft_off,
+                    hard_off: effective.hard_off,
+                    profile_settings: effective.profile_settings,
+                })
             })
             .collect()
     }
@@ -321,15 +563,39 @@ where
         }
     }
 
+    fn restore_node_state(&self, node_id: &str, state: RestoredNodeState) {
+        self.restore_room_state(node_id, RestoredRoomState::from(&state));
+    }
+
     fn add_room(&self, room_id: &str, room_name: &str) {
+        self.add_node(room_id, room_name, LightNodeKind::Room, None);
+    }
+
+    fn add_node(
+        &self,
+        node_id: &str,
+        node_name: &str,
+        kind: LightNodeKind,
+        parent_id: Option<String>,
+    ) {
         if let Ok(mut engine) = self.engine().write() {
-            engine.rooms_mut().get_or_create(room_id, room_name);
+            let node =
+                engine
+                    .rooms_mut()
+                    .get_or_create_node(node_id, node_name, kind, parent_id.clone());
+            node.name = node_name.to_string();
+            node.kind = kind;
+            node.parent_id = parent_id;
         }
     }
 
     fn remove_room(&self, room_id: &str) {
+        self.remove_node(room_id);
+    }
+
+    fn remove_node(&self, node_id: &str) {
         if let Ok(mut engine) = self.engine().write() {
-            engine.remove_room_state(room_id);
+            engine.remove_room_state(node_id);
         }
     }
 

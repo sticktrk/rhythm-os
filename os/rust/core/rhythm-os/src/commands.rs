@@ -14,17 +14,18 @@ use chrono::{Datelike, Timelike};
 use log::{debug, info, warn};
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::{
-    ButtonAction, HubRegistry, InputEvent, LightProfileConfig, LightProfileRegistry,
+    ButtonAction, HubRegistry, InputEvent, LightNodeKind, LightProfileConfig, LightProfileRegistry,
     LightingCommand, ModeChangeCause, ModeConfig, ModeTransitionConfig, ModeTransitionTrigger,
-    RestoredRoomState, RhythmMode, RoomModeState, RoomProfileSettings, RuntimeHandle, TimerSetting,
+    RestoredNodeState, RestoredRoomState, RhythmMode, RoomModeState, RoomProfileSettings,
+    RuntimeHandle, TimerSetting,
 };
 use serde_json::Value;
 
 use crate::api_types::{
     ActiveProfileDto, ActiveProfileEffectiveDto, ApiCapabilitiesDto, FixResponse, HubCapabilityDto,
-    HubDto, LocationDto, ModeLastChangeDto, ModeSettingsDto, ModeTransitionsDto, ProfilesDto,
-    RoomFullState, RoomPollState, RoomRhythmState, RoomsPollResponse, SettingsDto, StateSnapshot,
-    TypedDeviceDto,
+    HubDto, LocationDto, ModeLastChangeDto, ModeSettingsDto, ModeTransitionsDto, NodeStateDto,
+    NodesPollResponse, ProfilesDto, RoomPollState, RoomRhythmState, RoomsPollResponse, SettingsDto,
+    StateSnapshot, TopologyNodeControlDto, TopologyNodeDto,
 };
 use crate::bundle::{
     BackupBundle, BackupHubCredentials, BackupHubRegistry, BackupInstallation, BackupRuntimeState,
@@ -38,6 +39,7 @@ use crate::factory_default_config::{
 };
 use crate::state::{rooms_from_engine, AppState, SharedState};
 use crate::storage::StoredLocation;
+use crate::topology::NodeControlKind;
 
 // ============================================================================
 // Display value computation
@@ -499,15 +501,37 @@ impl RoomProfileSettingsPatch {
 }
 
 fn collect_room_hub_types<'a>(
-    targets: impl IntoIterator<Item = &'a crate::topology::HubControlTarget>,
+    bindings: impl IntoIterator<Item = &'a crate::topology::HubRoomBinding>,
 ) -> Vec<String> {
     let mut hub_types = Vec::new();
     let mut seen = HashSet::new();
 
-    for target in targets {
-        let hub_type = target.hub_key.hub_type.as_str();
+    for binding in bindings {
+        let hub_type = binding.hub_key.hub_type.as_str();
         if seen.insert(hub_type) {
             hub_types.push(hub_type.to_string());
+        }
+    }
+
+    hub_types
+}
+
+fn collect_room_hub_types_from_topology_room(
+    s: &AppState,
+    room: &crate::topology::TopologyRoom,
+) -> Vec<String> {
+    let mut hub_types = collect_room_hub_types(room.hub_room_bindings.iter());
+    let mut seen: HashSet<String> = hub_types.iter().cloned().collect();
+
+    for room_device in &room.devices {
+        let Some(device) = s.canonical_registry.get(&room_device.device_id) else {
+            continue;
+        };
+        for endpoint in &device.endpoints {
+            let hub_type = endpoint.hub_key.hub_type.as_str().to_string();
+            if seen.insert(hub_type.clone()) {
+                hub_types.push(hub_type);
+            }
         }
     }
 
@@ -520,33 +544,163 @@ fn topology_hub_types_map(s: &AppState) -> HashMap<String, Vec<String>> {
         .map(|room| {
             (
                 room.id.clone(),
-                collect_room_hub_types(room.hub_targets.iter()),
+                collect_room_hub_types_from_topology_room(s, room),
             )
         })
         .collect()
 }
 
-fn room_hub_types_from_topology(s: &AppState, room_id: &str) -> Vec<String> {
-    if let Some(room) = s.topology.get(room_id) {
-        return collect_room_hub_types(room.hub_targets.iter());
+fn node_hub_types_from_topology(s: &AppState, node_id: &str) -> Vec<String> {
+    if let Some(room) = s.topology.get(node_id) {
+        return collect_room_hub_types_from_topology_room(s, room);
+    }
+
+    if let Some(node) = s.topology.get_device_node(node_id) {
+        if let Some(device) = s.canonical_registry.get(&node.canonical_device_id) {
+            let mut hub_types = Vec::new();
+            let mut seen = HashSet::new();
+            for endpoint in &device.endpoints {
+                let hub_type = endpoint.hub_key.hub_type.as_str().to_string();
+                if seen.insert(hub_type.clone()) {
+                    hub_types.push(hub_type);
+                }
+            }
+            return hub_types;
+        }
     }
 
     s.topology
-        .translate_room_id_any_hub(room_id)
-        .and_then(|topo_id| s.topology.get(topo_id))
-        .map(|room| collect_room_hub_types(room.hub_targets.iter()))
+        .resolve_room_alias(&s.canonical_registry, None, node_id)
+        .as_deref()
+        .map(|topo_id| node_hub_types_from_topology(s, topo_id))
         .unwrap_or_default()
 }
 
-/// Build a RoomStateEvent for a room, computing display values from AppState.
+fn room_hub_types_from_topology(s: &AppState, room_id: &str) -> Vec<String> {
+    node_hub_types_from_topology(s, room_id)
+}
+
+fn node_metadata_from_topology(
+    s: &AppState,
+    node_id: &str,
+) -> (
+    Option<crate::topology::DevicePlacement>,
+    Option<String>,
+    Option<String>,
+) {
+    let Some(node) = s.topology.get_device_node(node_id) else {
+        return (None, None, None);
+    };
+    let device = s.canonical_registry.get(&node.canonical_device_id);
+    (
+        Some(node.placement.clone()),
+        device.and_then(|d| d.manufacturer.clone()),
+        device.and_then(|d| d.model.clone()),
+    )
+}
+
+fn build_node_state_dto_from_snapshot_parts(
+    snap: &rhythm_core::NodeSnapshot,
+    light_profile_configs: &BTreeMap<String, LightProfileConfig>,
+    mode_configs: &[ModeConfig],
+    active_mode: RhythmMode,
+    solar_noon: f32,
+    latitude: f32,
+    utc_offset: f32,
+    room_lights_on: &HashMap<String, bool>,
+    motion_snapshots: &HashMap<String, crate::state::MotionSnapshot>,
+    nodes_with_sensors: &HashSet<String>,
+    transitioning_nodes: &HashSet<String>,
+    hub_types: Vec<String>,
+    placement: Option<crate::topology::DevicePlacement>,
+    manufacturer: Option<String>,
+    model: Option<String>,
+) -> NodeStateDto {
+    let warning_active = motion_snapshots
+        .get(&snap.id)
+        .is_some_and(|motion| motion.warning_active);
+    let state = room_mode_state_from_flags(snap.hard_off, snap.soft_off, warning_active);
+    let (brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
+        RoomLightingContext {
+            light_profile_configs,
+            mode_configs,
+            mode: active_mode,
+            solar_noon,
+            latitude,
+            utc_offset,
+        },
+        RoomLightingInput {
+            settings: &snap.profile_settings,
+            room_state: state,
+            time_offset_minutes: snap.time_offset_minutes,
+            brightness_offset: snap.brightness_offset,
+        },
+    );
+
+    let (motion_active, motion_owned, remaining_secs, timeout_secs, warning_active) =
+        if let Some(ms) = motion_snapshots.get(&snap.id) {
+            (
+                Some(ms.motion_active),
+                Some(ms.motion_owned),
+                ms.remaining_secs,
+                Some(ms.timeout_secs),
+                Some(ms.warning_active),
+            )
+        } else if nodes_with_sensors.contains(&snap.id) {
+            let timeout = resolved_room_motion_timeout_secs_from_parts(
+                RoomLightingContext {
+                    light_profile_configs,
+                    mode_configs,
+                    mode: active_mode,
+                    solar_noon,
+                    latitude,
+                    utc_offset,
+                },
+                &snap.profile_settings,
+                current_local_hour(utc_offset),
+            );
+            (Some(false), Some(false), None, Some(timeout), Some(false))
+        } else {
+            (None, None, None, None, None)
+        };
+
+    NodeStateDto {
+        id: snap.id.clone(),
+        name: snap.name.clone(),
+        kind: snap.kind,
+        parent_id: snap.parent_id.clone(),
+        placement,
+        hub_types,
+        manufacturer,
+        model,
+        state,
+        rhythm_enabled: snap.rhythm_enabled,
+        disabled: snap.disabled,
+        time_offset: snap.time_offset_minutes,
+        brightness_offset: snap.brightness_offset,
+        lights_on: room_lights_on.get(&snap.id).copied().unwrap_or(false),
+        transitioning: transitioning_nodes.contains(&snap.id),
+        brightness,
+        kelvin,
+        profile_settings: snap.profile_settings.clone(),
+        motion_active,
+        motion_owned,
+        remaining_secs,
+        timeout_secs,
+        warning_active,
+    }
+}
+
+/// Build a NodeStateEvent for an addressable node, computing display values
+/// from AppState.
 ///
-/// For soft-off rooms, brightness is the soft-off percentage (not curve value).
+/// For soft-off nodes, brightness is the soft-off percentage (not curve value).
 /// Kelvin is always from the curve (soft-off tracks color temp).
 #[cfg(feature = "desktop")]
-pub fn build_room_state_event(
+pub fn build_node_state_event(
     state: &SharedState,
-    snap: &rhythm_core::RoomSnapshot,
-) -> crate::server_event::RoomStateEvent {
+    snap: &rhythm_core::NodeSnapshot,
+) -> crate::server_event::NodeStateEvent {
     let now = std::time::Instant::now();
     let (mode, room_state, lights_on, transitioning, brightness, kelvin, hub_types) = {
         let s = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -561,7 +715,7 @@ pub fn build_room_state_event(
         );
         let lights_on = s.room_lights_on.get(&snap.id).copied().unwrap_or(false);
         let transitioning = room_mode_transition_active(&s.room_mode_transitions, &snap.id, now);
-        let hub_types = room_hub_types_from_topology(&s, &snap.id);
+        let hub_types = node_hub_types_from_topology(&s, &snap.id);
         let (curve_brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
             RoomLightingContext {
                 light_profile_configs: &s.light_profile_configs,
@@ -571,7 +725,12 @@ pub fn build_room_state_event(
                 latitude: s.latitude.unwrap_or(35.0),
                 utc_offset: s.utc_offset_hours,
             },
-            RoomLightingInput::from_snapshot(snap, room_state),
+            RoomLightingInput {
+                settings: &snap.profile_settings,
+                room_state,
+                time_offset_minutes: snap.time_offset_minutes,
+                brightness_offset: snap.brightness_offset,
+            },
         );
         (
             mode,
@@ -583,9 +742,9 @@ pub fn build_room_state_event(
             hub_types,
         )
     };
-    crate::server_event::RoomStateEvent::from_snapshot(
+    crate::server_event::NodeStateEvent::from_snapshot(
         snap,
-        crate::server_event::RoomStateEventParams {
+        crate::server_event::NodeStateEventParams {
             hub_types,
             mode,
             state: room_state,
@@ -778,26 +937,59 @@ pub(crate) fn sync_active_mode_from_runtime(
 // Room ID translation helpers
 // ============================================================================
 
-/// Resolve a room ID from an HTTP request to the canonical engine room ID.
+/// Resolve a public node ID from an API request or hub-facing alias.
 ///
-/// If the ID is already a topology room ID, returns it unchanged.
-/// If it's a hub-native ID, translates it via the topology store.
-/// Falls through unchanged on ESP32 (empty topology) or unknown IDs.
-pub fn resolve_room_id(state: &SharedState, room_id: &str) -> String {
+/// If the ID is already a topology node ID, returns it unchanged. If it's a
+/// hub-native room/device ID, translates it via the topology store. Falls
+/// through unchanged when no topology alias exists.
+pub fn resolve_node_id(state: &SharedState, node_id: &str) -> String {
     let s = match state.lock() {
         Ok(s) => s,
-        Err(_) => return room_id.to_string(),
+        Err(_) => return node_id.to_string(),
     };
-    // Already a topology room ID?
-    if s.topology.get(room_id).is_some() {
-        return room_id.to_string();
+    s.topology
+        .resolve_room_alias(&s.canonical_registry, None, node_id)
+        .unwrap_or_else(|| node_id.to_string())
+}
+
+fn fallback_source_node_id(hub_key: Option<&HubKey>, source_native_id: &str) -> String {
+    match hub_key {
+        Some(hub_key) => format!("{hub_key}::{source_native_id}"),
+        None => source_native_id.to_string(),
     }
-    // Try translating as hub-native ID
-    if let Some(topo_id) = s.topology.translate_room_id_any_hub(room_id) {
-        return topo_id.to_string();
-    }
-    // Fallback: use as-is (ESP32 or pre-topology state)
-    room_id.to_string()
+}
+
+/// Resolve a topology control target for a source device/native ID.
+///
+/// The returned tuple is `(source_node_id, target_node_id)`. Explicit topology
+/// control links win. If no explicit link exists, device nodes inherit their
+/// parent room as the default target. As a final fallback, the caller-provided
+/// hub event hint is translated into a public node ID.
+pub(crate) fn resolve_node_control_target(
+    state: &SharedState,
+    hub_key: Option<&HubKey>,
+    source_native_id: &str,
+    fallback_target_hint: &str,
+    kind: &NodeControlKind,
+) -> Option<(String, String)> {
+    let fallback_target_id = resolve_node_id(state, fallback_target_hint);
+
+    let s = state.lock().ok()?;
+    let source_node_id = hub_key
+        .and_then(|hub_key| {
+            s.canonical_registry
+                .find_by_native_id(hub_key, source_native_id)
+        })
+        .map(|device| device.id.clone());
+    let target_node_id = source_node_id
+        .as_deref()
+        .and_then(|source_id| s.topology.effective_control_target(source_id, kind))
+        .or_else(|| (!fallback_target_id.is_empty()).then_some(fallback_target_id.clone()))?;
+
+    Some((
+        source_node_id.unwrap_or_else(|| fallback_source_node_id(hub_key, source_native_id)),
+        target_node_id,
+    ))
 }
 
 /// Reverse-lookup: topology room ID → hub-native room IDs for registry operations.
@@ -808,13 +1000,33 @@ fn hub_room_ids_for_topology(state: &SharedState, topo_id: &str) -> Vec<String> 
     state
         .lock()
         .ok()
-        .and_then(|s| {
-            s.topology.get(topo_id).map(|room| {
-                room.hub_targets
-                    .iter()
-                    .map(|t| t.hub_room_id.clone())
-                    .collect()
-            })
+        .map(|s| {
+            s.topology
+                .get(topo_id)
+                .map(|room| {
+                    let mut ids = Vec::new();
+                    let mut seen = HashSet::new();
+
+                    for binding in &room.hub_room_bindings {
+                        if seen.insert(binding.hub_room_id.clone()) {
+                            ids.push(binding.hub_room_id.clone());
+                        }
+                    }
+
+                    for room_device in &room.devices {
+                        let Some(device) = s.canonical_registry.get(&room_device.device_id) else {
+                            continue;
+                        };
+                        for endpoint in &device.endpoints {
+                            if seen.insert(endpoint.native_id.clone()) {
+                                ids.push(endpoint.native_id.clone());
+                            }
+                        }
+                    }
+
+                    ids
+                })
+                .unwrap_or_else(|| vec![topo_id.to_string()])
         })
         .unwrap_or_else(|| vec![topo_id.to_string()])
 }
@@ -828,20 +1040,8 @@ fn hub_room_ids_for_topology(state: &SharedState, topo_id: &str) -> Vec<String> 
 /// Two-phase lock: collects metadata from state (brief lock), then queries
 /// engine snapshots (engine read lock) to prevent cascading lock contention.
 pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
-    struct RoomInfo {
-        topology_id: String, // stable Rhythm room ID (for engine + external API)
-        name: String,
-        hub_types: Vec<String>,
-        grouped_light_id: String,
-        device_ids: Vec<String>,
-        typed_devices: Vec<(String, DeviceType)>,
-    }
-
-    // Phase 1: Brief AppState lock — extract registry Arcs + scalar data + canonical lookup
     let (
-        all_registries,
         runtime,
-        storage_rooms,
         hubs_dto,
         capabilities_dto,
         active_profile_cfg,
@@ -855,28 +1055,25 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         platform_type,
         platform_ctx,
         listen_port,
-        canonical_lookup,
-        topo_map,
-        topo_hub_types,
+        room_lights_on,
+        motion_snapshots,
+        nodes_with_sensors,
+        transitioning_nodes,
+        light_profile_configs,
+        mode_configs,
+        active_mode,
+        solar_noon,
+        latitude,
+        utc_offset,
         last_tick_epoch_ms,
         profile_registry,
         periodic_ctx,
         update_interval,
         power_save,
-        skipped_periodic_room_ids,
     ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
         let runtime = s.hub_runtime();
-
-        let storage_rooms = if runtime.is_none() {
-            s.storage.as_ref().and_then(|st| st.load_rooms().ok())
-        } else {
-            None
-        };
-
-        let all_registries = s.all_hub_registries();
-
         let hubs_dto: Vec<HubDto> = s
             .hub_credentials
             .iter()
@@ -890,7 +1087,6 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
                 connected: s.hub_is_connected(key),
             })
             .collect();
-
         let capabilities_dto = ApiCapabilitiesDto {
             hubs: s
                 .hub_capabilities
@@ -914,9 +1110,9 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             &active_profile_id,
         );
         profile_registry.set_mode_configs(s.mode_configs());
+
         let active_profile_cfg = active_profile_config(&s);
         let utc_now = chrono::Utc::now();
-
         let current_local_time = {
             let offset_secs = (s.utc_offset_hours * 3600.0) as i32;
             let tz = chrono::FixedOffset::east_opt(offset_secs)
@@ -925,7 +1121,6 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
                 .with_timezone(&tz)
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         };
-
         let local_now =
             utc_now.naive_utc() + chrono::Duration::seconds((s.utc_offset_hours * 3600.0) as i64);
         let local_time = local_now.time();
@@ -950,7 +1145,6 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             resolved_solar.sun_times,
         );
         let current_solar_time = periodic_ctx.solar_time();
-
         let location_dto = LocationDto {
             current_local_time,
             current_local_hour: current_hour,
@@ -970,378 +1164,110 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             twilight: build_twilight_response(resolved_solar.twilight.as_ref()),
         };
 
-        let settings_dto = build_settings_dto_inner(&s);
-        let mode_dto = build_mode_dto_inner(&s);
-        let transitions_dto = build_transitions_dto_inner(&s);
-        let profiles_dto = build_profiles_dto_inner(&s);
-
-        let fw_version = s.firmware_version;
-        let platform_type = s.platform_type;
-        let platform_ctx = s.platform_context;
-        let listen_port = s.listen_port;
-
-        // Build canonical device lookup: native_id → (name, manufacturer, model, device_type)
-        // Aggregate across all configured hubs
-        let active_hub_keys: std::collections::HashSet<String> =
-            s.hub_credentials.keys().map(|k| k.to_string()).collect();
-        let canonical_lookup: std::collections::HashMap<
-            String,
-            (String, Option<String>, Option<String>, DeviceType),
-        > = s
-            .canonical_registry
-            .devices()
-            .flat_map(|d| {
-                d.endpoints
-                    .iter()
-                    .filter(|ep| active_hub_keys.contains(&ep.hub_key.to_string()))
-                    .map(move |ep| {
-                        (
-                            ep.native_id.clone(),
-                            (
-                                d.name.clone(),
-                                d.manufacturer.clone(),
-                                d.model.clone(),
-                                d.device_type.clone(),
-                            ),
-                        )
-                    })
-            })
-            .collect();
-
-        // Build hub-native → (topology_id, topology_name) lookup so Phase 1b
-        // can translate registry room IDs to stable Rhythm room IDs.
-        let topo_map: std::collections::HashMap<String, (String, String)> = s
-            .topology
-            .rooms()
-            .flat_map(|room| {
-                room.hub_targets
-                    .iter()
-                    .map(move |t| (t.hub_room_id.clone(), (room.id.clone(), room.name.clone())))
-            })
-            .collect();
-
-        // Build topology_room_id → Vec<hub_type_string> for API responses.
-        let topo_hub_types = topology_hub_types_map(&s);
-
-        let last_tick_epoch_ms = s.last_tick_epoch_ms;
-        let update_interval = std::time::Duration::from_secs(s.runtime_config.update_interval_secs);
-        let power_save = s.power_save;
         let now = std::time::Instant::now();
-        let skipped_periodic_room_ids: HashSet<String> = s
-            .room_mode_transitions
-            .iter()
-            .filter(|(_, transition)| transition.periodic_resume_at > now)
-            .map(|(room_id, _)| room_id.clone())
-            .chain(
-                s.motion_snapshots
-                    .iter()
-                    .filter(|(_, snapshot)| snapshot.warning_active)
-                    .map(|(room_id, _)| room_id.clone()),
-            )
-            .collect();
-
         (
-            all_registries,
             runtime,
-            storage_rooms,
             hubs_dto,
             capabilities_dto,
             active_profile_cfg,
             active_profile_effective,
             location_dto,
-            settings_dto,
-            mode_dto,
-            transitions_dto,
-            profiles_dto,
-            fw_version,
-            platform_type,
-            platform_ctx,
-            listen_port,
-            canonical_lookup,
-            topo_map,
-            topo_hub_types,
-            last_tick_epoch_ms,
-            profile_registry,
-            periodic_ctx,
-            update_interval,
-            power_save,
-            skipped_periodic_room_ids,
-        )
-    };
-    // AppState lock released
-
-    let periodic_room_snapshots = runtime
-        .as_ref()
-        .map(|rt| {
-            rt.engine_all_room_snapshots()
-                .into_iter()
-                .filter(|room| room.rhythm_enabled && !skipped_periodic_room_ids.contains(&room.id))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    active_profile_effective.rhythm_interval_secs = crate::periodic::effective_cycle_duration(
-        &profile_registry,
-        &periodic_ctx,
-        &periodic_room_snapshots,
-        update_interval,
-        power_save,
-    )
-    .as_secs();
-
-    // Phase 1b: Lock registries without holding AppState — aggregate rooms from ALL hubs
-    let mut room_infos = Vec::new();
-    for reg_arc in &all_registries {
-        if let Ok(reg) = reg_arc.lock() {
-            for room in reg.rooms() {
-                // Translate hub-native room ID to topology ID for external API.
-                // Registry lookups above already used the hub-native ID.
-                let (topo_id, topo_name) = topo_map
-                    .get(&room.id)
-                    .map(|(id, name)| (id.clone(), name.clone()))
-                    .unwrap_or_else(|| (room.id.clone(), room.name.clone()));
-                let hub_types = topo_hub_types.get(&topo_id).cloned().unwrap_or_default();
-                room_infos.push(RoomInfo {
-                    topology_id: topo_id,
-                    name: topo_name,
-                    hub_types,
-                    grouped_light_id: reg.get_grouped_light_id(&room.id).unwrap_or_default(),
-                    device_ids: reg.devices_for_room(&room.id),
-                    typed_devices: reg.devices_for_room_typed(&room.id),
-                });
-            }
-        }
-    }
-
-    // Fallback: if registry had no rooms (e.g. boot before hub connects),
-    // populate from storage so /api/state agrees with /api/rooms/state.
-    // Storage rooms already have topology IDs (persisted from engine after Phase 4d).
-    if room_infos.is_empty() {
-        if let Some(ref mgr) = storage_rooms {
-            for room in mgr.iter() {
-                room_infos.push(RoomInfo {
-                    topology_id: room.id.clone(),
-                    name: room.name.clone(),
-                    hub_types: topo_hub_types.get(&room.id).cloned().unwrap_or_default(),
-                    grouped_light_id: String::new(),
-                    device_ids: Vec::new(),
-                    typed_devices: Vec::new(),
-                });
-            }
-        }
-    }
-
-    // Dedup: cross-hub rooms may have multiple registry entries that map to the
-    // same topology ID. Merge device lists, keep first occurrence's metadata.
-    {
-        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        let mut deduped: Vec<RoomInfo> = Vec::new();
-        for info in room_infos {
-            if let Some(&idx) = seen.get(&info.topology_id) {
-                deduped[idx].device_ids.extend(info.device_ids);
-                deduped[idx].typed_devices.extend(info.typed_devices);
-            } else {
-                seen.insert(info.topology_id.clone(), deduped.len());
-                deduped.push(info);
-            }
-        }
-        room_infos = deduped;
-    }
-
-    // Phase 2: query engine snapshots without state lock
-    // Grab display context for computing brightness/kelvin
-    let (
-        disp_profiles,
-        disp_mode_configs,
-        disp_active_mode,
-        disp_solar,
-        disp_lat,
-        disp_utc,
-        disp_lights,
-        disp_motion,
-        disp_transitioning,
-    ) = {
-        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        let now = std::time::Instant::now();
-        (
+            build_settings_dto_inner(&s),
+            build_mode_dto_inner(&s),
+            build_transitions_dto_inner(&s),
+            build_profiles_dto_inner(&s),
+            s.firmware_version,
+            s.platform_type,
+            s.platform_context,
+            s.listen_port,
+            s.room_lights_on.clone(),
+            s.motion_snapshots.clone(),
+            s.motion_control_target_ids(),
+            active_transition_room_ids(&s.room_mode_transitions, now),
             s.light_profile_configs.clone(),
             s.mode_configs(),
             s.active_mode,
             s.solar_noon_hour(),
             s.latitude.unwrap_or(35.0),
             s.utc_offset_hours,
-            s.room_lights_on.clone(),
-            s.motion_snapshots.clone(),
-            active_transition_room_ids(&s.room_mode_transitions, now),
+            s.last_tick_epoch_ms,
+            profile_registry,
+            periodic_ctx,
+            Duration::from_secs(s.runtime_config.update_interval_secs),
+            s.power_save,
         )
     };
 
-    let mut rooms = Vec::with_capacity(room_infos.len());
-    for info in &room_infos {
-        let (rhythm_enabled, disabled, time_offset, bri_offset, soft_off, hard_off, room_profile) =
-            if let Some(ref rt) = runtime {
-                rt.engine_room_snapshot(&info.topology_id)
-                    .map(|snap| {
-                        (
-                            snap.rhythm_enabled,
-                            snap.disabled,
-                            snap.time_offset_minutes,
-                            snap.brightness_offset,
-                            snap.soft_off,
-                            snap.hard_off,
-                            snap.profile_settings,
-                        )
-                    })
-                    .unwrap_or((
-                        false,
-                        false,
-                        0.0,
-                        0.0,
-                        false,
-                        false,
-                        RoomProfileSettings::default(),
-                    ))
-            } else if let Some(ref mgr) = storage_rooms {
-                mgr.get(&info.topology_id)
-                    .map(|r| {
-                        (
-                            r.rhythm_enabled,
-                            r.disabled,
-                            r.time_offset_minutes,
-                            r.brightness_offset,
-                            r.soft_off,
-                            r.hard_off,
-                            r.profile_settings.clone(),
-                        )
-                    })
-                    .unwrap_or((
-                        false,
-                        false,
-                        0.0,
-                        0.0,
-                        false,
-                        false,
-                        RoomProfileSettings::default(),
-                    ))
-            } else {
-                (
-                    false,
-                    false,
-                    0.0,
-                    0.0,
-                    false,
-                    false,
-                    RoomProfileSettings::default(),
-                )
-            };
-
-        let lights_on = disp_lights.get(&info.topology_id).copied().unwrap_or(false);
-        let room_state = room_mode_state_from_flags(
-            hard_off,
-            soft_off,
-            disp_motion
-                .get(&info.topology_id)
-                .is_some_and(|motion| motion.warning_active),
-        );
-        let (curve_brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
-            RoomLightingContext {
-                light_profile_configs: &disp_profiles,
-                mode_configs: &disp_mode_configs,
-                mode: disp_active_mode,
-                solar_noon: disp_solar,
-                latitude: disp_lat,
-                utc_offset: disp_utc,
-            },
-            RoomLightingInput {
-                settings: &room_profile,
-                room_state,
-                time_offset_minutes: time_offset,
-                brightness_offset: bri_offset,
-            },
-        );
-
-        // Build enriched device list: all devices from device_ids (with canonical
-        // data) plus any typed_devices not already covered (e.g. motion service IDs)
-        let typed_lookup: std::collections::HashMap<&str, &DeviceType> = info
-            .typed_devices
+    let mut node_snapshots: Vec<rhythm_core::NodeSnapshot> = if let Some(ref runtime) = runtime {
+        runtime.engine_all_effective_node_snapshots()
+    } else {
+        let exported = room_manager_for_export(state);
+        let mut snapshots: Vec<_> = exported
             .iter()
-            .map(|(id, dt)| (id.as_str(), dt))
+            .map(|room| rhythm_core::NodeSnapshot {
+                id: room.id.clone(),
+                name: room.name.clone(),
+                kind: room.kind,
+                parent_id: room.parent_id.clone(),
+                rhythm_enabled: room.rhythm_enabled,
+                disabled: room.disabled,
+                time_offset_minutes: room.time_offset_minutes,
+                brightness_offset: room.brightness_offset,
+                soft_off: room.soft_off,
+                hard_off: room.hard_off,
+                profile_settings: room.profile_settings.clone(),
+            })
             .collect();
-        let mut devices: Vec<TypedDeviceDto> = Vec::new();
-        let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-        // All device UUIDs from room children — includes lights, buttons, etc.
-        for id in &info.device_ids {
-            if !seen_ids.insert(id.clone()) {
-                continue;
-            }
-            if let Some((name, mfr, model, dt)) = canonical_lookup.get(id) {
-                let name_opt = if name.is_empty() {
-                    None
-                } else {
-                    Some(name.clone())
-                };
-                devices.push(TypedDeviceDto::enriched(
-                    id.clone(),
-                    dt,
-                    name_opt,
-                    mfr.clone(),
-                    model.clone(),
-                ));
-            } else {
-                let dt = typed_lookup
-                    .get(id.as_str())
-                    .copied()
-                    .unwrap_or(&DeviceType::Light);
-                devices.push(TypedDeviceDto::new(id.clone(), dt));
-            }
+        if snapshots.is_empty() {
+            snapshots = registry_node_snapshots_from_state(state);
         }
+        snapshots
+    };
+    node_snapshots.sort_by(|left, right| left.id.cmp(&right.id));
 
-        // Add typed devices not in device_ids (motion sensors use service UUIDs)
-        for (id, dt) in &info.typed_devices {
-            if seen_ids.contains(id) {
-                continue;
-            }
-            if let Some((name, mfr, model, _)) = canonical_lookup.get(id) {
-                let name_opt = if name.is_empty() {
-                    None
-                } else {
-                    Some(name.clone())
-                };
-                devices.push(TypedDeviceDto::enriched(
-                    id.clone(),
-                    dt,
-                    name_opt,
-                    mfr.clone(),
-                    model.clone(),
-                ));
-            } else {
-                devices.push(TypedDeviceDto::new(id.clone(), dt));
-            }
+    active_profile_effective.rhythm_interval_secs = crate::periodic::effective_cycle_duration(
+        &profile_registry,
+        &periodic_ctx,
+        &node_snapshots,
+        update_interval,
+        power_save,
+    )
+    .as_secs();
+
+    let nodes = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let mut nodes = Vec::with_capacity(node_snapshots.len());
+        for snap in &node_snapshots {
+            let hub_types = node_hub_types_from_topology(&s, &snap.id);
+            let (placement, manufacturer, model) = node_metadata_from_topology(&s, &snap.id);
+            nodes.push(build_node_state_dto_from_snapshot_parts(
+                snap,
+                &light_profile_configs,
+                &mode_configs,
+                active_mode,
+                solar_noon,
+                latitude,
+                utc_offset,
+                &room_lights_on,
+                &motion_snapshots,
+                &nodes_with_sensors,
+                &transitioning_nodes,
+                hub_types,
+                placement,
+                manufacturer,
+                model,
+            ));
         }
-
-        rooms.push(RoomFullState {
-            rhythm: RoomRhythmState {
-                id: info.topology_id.clone(),
-                hub_types: info.hub_types.clone(),
-                state: room_state,
-                rhythm_enabled,
-                time_offset,
-                brightness_offset: bri_offset,
-                lights_on,
-                transitioning: runtime.is_some() && disp_transitioning.contains(&info.topology_id),
-                brightness: curve_brightness,
-                kelvin,
-                room_profile,
-            },
-            name: info.name.clone(),
-            grouped_light_id: info.grouped_light_id.clone(),
-            disabled,
-            device_ids: info.device_ids.clone(),
-            devices,
+        nodes.sort_by(|left, right| {
+            left.parent_id
+                .cmp(&right.parent_id)
+                .then_with(|| left.id.cmp(&right.id))
         });
-    }
+        nodes
+    };
 
     let snapshot = StateSnapshot {
+        last_tick_epoch_ms,
         version: firmware_version.to_string(),
         platform: platform_type.to_string(),
         context: platform_ctx.to_string(),
@@ -1357,10 +1283,145 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         mode: mode_dto,
         transitions: transitions_dto.transitions,
         profiles: profiles_dto.profiles,
-        rooms,
-        last_tick_epoch_ms,
+        nodes,
     };
     serde_json::to_string(&snapshot).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+}
+
+/// Build a full node state for a single addressable node.
+pub fn build_node_state(state: &SharedState, node_id: &str) -> Result<NodeStateDto> {
+    let (runtime, room_lights_on, motion_snapshots, nodes_with_sensors, transitioning_nodes) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        (
+            s.hub_runtime(),
+            s.room_lights_on.clone(),
+            s.motion_snapshots.clone(),
+            s.motion_control_target_ids(),
+            active_transition_room_ids(&s.room_mode_transitions, std::time::Instant::now()),
+        )
+    };
+
+    let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    let snap = runtime
+        .engine_effective_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let hub_types = node_hub_types_from_topology(&s, node_id);
+    let (placement, manufacturer, model) = node_metadata_from_topology(&s, node_id);
+    Ok(build_node_state_dto_from_snapshot_parts(
+        &snap,
+        &s.light_profile_configs,
+        &s.mode_configs(),
+        s.active_mode,
+        s.solar_noon_hour(),
+        s.latitude.unwrap_or(35.0),
+        s.utc_offset_hours,
+        &room_lights_on,
+        &motion_snapshots,
+        &nodes_with_sensors,
+        &transitioning_nodes,
+        hub_types,
+        placement,
+        manufacturer,
+        model,
+    ))
+}
+
+/// Build a lightweight node-state snapshot for polling.
+pub fn build_nodes_state(state: &SharedState) -> Result<String> {
+    let (
+        hub_connected,
+        runtime,
+        room_lights_on,
+        motion_snapshots,
+        nodes_with_sensors,
+        transitioning_nodes,
+        light_profile_configs,
+        mode_configs,
+        active_mode,
+        solar_noon,
+        latitude,
+        utc_offset,
+    ) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        (
+            s.has_any_connected_hub(),
+            s.hub_runtime(),
+            s.room_lights_on.clone(),
+            s.motion_snapshots.clone(),
+            s.motion_control_target_ids(),
+            active_transition_room_ids(&s.room_mode_transitions, std::time::Instant::now()),
+            s.light_profile_configs.clone(),
+            s.mode_configs(),
+            s.active_mode,
+            s.solar_noon_hour(),
+            s.latitude.unwrap_or(35.0),
+            s.utc_offset_hours,
+        )
+    };
+
+    let mut node_snapshots: Vec<rhythm_core::NodeSnapshot> = if let Some(ref runtime) = runtime {
+        runtime.engine_all_effective_node_snapshots()
+    } else {
+        let exported = room_manager_for_export(state);
+        let mut snapshots: Vec<_> = exported
+            .iter()
+            .map(|room| rhythm_core::NodeSnapshot {
+                id: room.id.clone(),
+                name: room.name.clone(),
+                kind: room.kind,
+                parent_id: room.parent_id.clone(),
+                rhythm_enabled: room.rhythm_enabled,
+                disabled: room.disabled,
+                time_offset_minutes: room.time_offset_minutes,
+                brightness_offset: room.brightness_offset,
+                soft_off: room.soft_off,
+                hard_off: room.hard_off,
+                profile_settings: room.profile_settings.clone(),
+            })
+            .collect();
+        if snapshots.is_empty() {
+            snapshots = registry_node_snapshots_from_state(state);
+        }
+        snapshots
+    };
+    node_snapshots.sort_by(|left, right| left.id.cmp(&right.id));
+
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let mut nodes = Vec::with_capacity(node_snapshots.len());
+    for snap in &node_snapshots {
+        let hub_types = node_hub_types_from_topology(&s, &snap.id);
+        let (placement, manufacturer, model) = node_metadata_from_topology(&s, &snap.id);
+        nodes.push(build_node_state_dto_from_snapshot_parts(
+            snap,
+            &light_profile_configs,
+            &mode_configs,
+            active_mode,
+            solar_noon,
+            latitude,
+            utc_offset,
+            &room_lights_on,
+            &motion_snapshots,
+            &nodes_with_sensors,
+            &transitioning_nodes,
+            hub_types,
+            placement,
+            manufacturer,
+            model,
+        ));
+    }
+    nodes.sort_by(|left, right| {
+        left.parent_id
+            .cmp(&right.parent_id)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let response = NodesPollResponse {
+        hub_connected,
+        nodes,
+    };
+    serde_json::to_string(&response).map_err(|e| anyhow::anyhow!("serialize: {}", e))
 }
 
 /// Build a lightweight rooms-state snapshot for polling.
@@ -1391,7 +1452,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
         };
         let motion = s.motion_snapshots.clone();
         let lights = s.room_lights_on.clone();
-        let sensor_rooms = s.motion_sensor_room_ids();
+        let sensor_rooms = s.motion_control_target_ids();
         (
             s.has_any_connected_hub(),
             runtime,
@@ -1688,27 +1749,155 @@ pub fn build_profiles(state: &SharedState) -> Result<String> {
     serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize profiles: {}", e))
 }
 
-fn room_manager_for_export(state: &SharedState) -> rhythm_core::RoomManager {
+fn source_room_manager_for_export(state: &SharedState) -> rhythm_core::RoomManager {
     let runtime = state.lock().ok().and_then(|s| s.hub_runtime());
-    if let Some(runtime) = runtime {
-        return rooms_from_engine(runtime.as_ref());
-    }
+    let source = if let Some(runtime) = runtime {
+        rooms_from_engine(runtime.as_ref())
+    } else {
+        let Ok(s) = state.lock() else {
+            return rhythm_core::RoomManager::default();
+        };
 
-    let Ok(s) = state.lock() else {
-        return rhythm_core::RoomManager::default();
+        s.storage
+            .as_ref()
+            .and_then(|storage| storage.load_rooms().ok())
+            .unwrap_or_default()
     };
 
-    s.storage
-        .as_ref()
-        .and_then(|storage| storage.load_rooms().ok())
-        .unwrap_or_default()
+    source
+}
+
+fn registry_node_snapshots_from_state(state: &SharedState) -> Vec<rhythm_core::NodeSnapshot> {
+    let (registries, topo_map) = {
+        let Ok(s) = state.lock() else {
+            return Vec::new();
+        };
+        let topo_map: HashMap<String, (String, String)> = s
+            .topology
+            .rooms()
+            .flat_map(|room| {
+                room.hub_room_bindings.iter().map(move |binding| {
+                    (
+                        binding.hub_room_id.clone(),
+                        (room.id.clone(), room.name.clone()),
+                    )
+                })
+            })
+            .collect();
+        (s.all_hub_registries(), topo_map)
+    };
+
+    let mut seen = HashSet::new();
+    let mut nodes = Vec::new();
+    for reg in registries {
+        let Ok(reg) = reg.lock() else {
+            continue;
+        };
+        for room in reg.rooms() {
+            let (id, name) = topo_map
+                .get(&room.id)
+                .cloned()
+                .unwrap_or_else(|| (room.id.clone(), room.name.clone()));
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            nodes.push(rhythm_core::NodeSnapshot {
+                id,
+                name,
+                kind: LightNodeKind::Room,
+                parent_id: None,
+                rhythm_enabled: false,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                hard_off: false,
+                profile_settings: RoomProfileSettings::default(),
+            });
+        }
+    }
+    nodes.sort_by(|left, right| left.id.cmp(&right.id));
+    nodes
+}
+
+fn room_manager_for_export(state: &SharedState) -> rhythm_core::RoomManager {
+    let source = source_room_manager_for_export(state);
+    let Ok(s) = state.lock() else {
+        return source;
+    };
+    if s.topology.room_count() == 0 && s.topology.device_nodes().next().is_none() {
+        return source;
+    }
+
+    let mut merged = rhythm_core::RoomManager::default();
+
+    let mut topology_room_ids: Vec<_> = s.topology.rooms().map(|room| room.id.clone()).collect();
+    topology_room_ids.sort();
+    for room_id in topology_room_ids {
+        let topology_room = s.topology.get(&room_id).unwrap();
+        let mut room = source
+            .get(&room_id)
+            .cloned()
+            .unwrap_or_else(|| rhythm_core::Room::new(&topology_room.id, &topology_room.name));
+        room.name = topology_room.name.clone();
+        room.kind = LightNodeKind::Room;
+        room.parent_id = None;
+        merged.add_room(room);
+    }
+
+    let mut device_node_ids: Vec<_> = s
+        .topology
+        .device_nodes()
+        .map(|node| node.id.clone())
+        .collect();
+    device_node_ids.sort();
+    for node_id in device_node_ids {
+        let topology_node = s.topology.get_device_node(&node_id).unwrap();
+        let mut room = source.get(&node_id).cloned().unwrap_or_else(|| {
+            let (name, kind) = s
+                .canonical_registry
+                .get(&topology_node.canonical_device_id)
+                .map(|device| {
+                    (
+                        device.name.clone(),
+                        runtime_node_kind_for_device_type(device.device_type.clone()),
+                    )
+                })
+                .unwrap_or_else(|| (topology_node.id.clone(), LightNodeKind::OtherDevice));
+            let mut node = rhythm_core::Room::new_node(
+                &topology_node.id,
+                name,
+                kind,
+                topology_node.parent_id.clone(),
+            );
+            if !node.kind.is_room() {
+                node.rhythm_enabled = true;
+            }
+            node
+        });
+        room.parent_id = topology_node.parent_id.clone();
+        if let Some(device) = s.canonical_registry.get(&topology_node.canonical_device_id) {
+            room.name = device.name.clone();
+            room.kind = runtime_node_kind_for_device_type(device.device_type.clone());
+        } else {
+            room.name = topology_node.id.clone();
+            room.kind = LightNodeKind::OtherDevice;
+        }
+        merged.add_room(room);
+    }
+
+    merged
 }
 
 fn portable_configuration_from_parts(
     s: &AppState,
     room_manager: &rhythm_core::RoomManager,
 ) -> PortableConfiguration {
-    let mut rooms: Vec<_> = room_manager.iter().map(ConfigurationRoom::from).collect();
+    let mut rooms: Vec<_> = room_manager
+        .iter()
+        .filter(|room| room.kind.is_room())
+        .map(ConfigurationRoom::from)
+        .collect();
     rooms.sort_by(|left, right| left.id.cmp(&right.id).then(left.name.cmp(&right.name)));
 
     PortableConfiguration {
@@ -1746,7 +1935,7 @@ fn backup_hub_credentials_from_state(
 }
 
 pub fn build_configuration_bundle_dto(state: &SharedState) -> Result<ConfigurationBundle> {
-    let room_manager = room_manager_for_export(state);
+    let room_manager = source_room_manager_for_export(state);
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
     Ok(ConfigurationBundle {
@@ -1776,7 +1965,51 @@ pub fn build_factory_default_configuration_bundle() -> Result<String> {
     serialize_configuration_bundle(&build_factory_default_configuration_bundle_dto())
 }
 
+fn clear_factory_reset_storage(state: &SharedState) -> Result<()> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    if let Some(storage) = s.storage.as_ref() {
+        storage.clear_factory_reset_state()?;
+    }
+    Ok(())
+}
+
+fn clear_factory_reset_ephemeral_state(state: &SharedState) -> Result<()> {
+    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    s.hub_connection_status.clear();
+    s.hub_sync_in_progress.clear();
+    s.hub_reconnect_sync_at.clear();
+    s.room_lights_on.clear();
+    s.motion_snapshots.clear();
+    s.room_mode_transitions.clear();
+    s.last_check_hour = None;
+    s.pending_periodic_ticks.clear();
+    s.pending_hub_event_rxs.clear();
+    s.pending_motion_clear.clear();
+    s.pending_motion_seed.clear();
+    s.last_tick_epoch_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    Ok(())
+}
+
 pub fn do_configuration_reset(state: &SharedState) -> Result<String> {
+    do_hub_disconnect(state)?;
+    clear_factory_reset_storage(state)?;
+    clear_factory_reset_ephemeral_state(state)?;
+
+    let installation = BackupInstallation {
+        location: None,
+        rooms: rhythm_core::RoomManager::new(),
+        topology: crate::topology::RoomTopologyStore::new(),
+        canonical_registry: crate::canonical::registry::CanonicalRegistry::new(),
+        hub_credentials: Vec::new(),
+        hub_registries: Vec::new(),
+    };
+    restore_backup_installation_metadata(state, &installation)?;
+    restore_backup_room_manager(state, &installation.rooms)?;
+    restore_backup_location(state, None)?;
+
     do_configuration_import(
         state,
         ConfigurationImportPayload::Bundle(factory_default_configuration_bundle()),
@@ -1976,7 +2209,7 @@ fn restore_backup_room_manager(
         !has_runtime && s.has_any_hub()
     };
     if needs_runtime {
-        ensure_runtime(state);
+        try_ensure_runtime(state)?;
     }
 
     let runtime = state.lock().ok().and_then(|s| s.hub_runtime());
@@ -1995,17 +2228,17 @@ fn restore_backup_room_manager(
     }
 
     if let Some(runtime) = runtime {
-        for snapshot in runtime.engine_all_room_snapshots() {
+        for snapshot in runtime.engine_all_node_snapshots() {
             if !desired_ids.contains(&snapshot.id) {
-                runtime.remove_room(&snapshot.id);
+                runtime.remove_node(&snapshot.id);
             }
         }
 
         for room in rooms.iter() {
-            runtime.add_room(&room.id, &room.name);
-            runtime.restore_room_state(
+            runtime.add_node(&room.id, &room.name, room.kind, room.parent_id.clone());
+            runtime.restore_node_state(
                 &room.id,
-                RestoredRoomState {
+                RestoredNodeState {
                     rhythm_enabled: room.rhythm_enabled,
                     disabled: room.disabled,
                     time_offset_minutes: room.time_offset_minutes,
@@ -2028,7 +2261,7 @@ fn restore_backup_room_manager(
     }
 
     #[cfg(feature = "desktop")]
-    crate::state::emit_server_event(state, crate::server_event::ServerEvent::RoomsChanged);
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
 
     Ok(())
 }
@@ -2147,10 +2380,15 @@ fn mode_apply_cycle_duration(
         lighting.mode,
     );
 
+    let room_node_snapshots: Vec<rhythm_core::NodeSnapshot> = room_snapshots
+        .iter()
+        .cloned()
+        .map(rhythm_core::NodeSnapshot::from_room_snapshot)
+        .collect();
     let periodic_cycle = crate::periodic::effective_cycle_duration(
         &registry,
         &ctx,
-        room_snapshots,
+        &room_node_snapshots,
         update_interval,
         power_save,
     );
@@ -2165,22 +2403,31 @@ fn mode_apply_cycle_duration(
     periodic_cycle.min(Duration::from_millis(u64::from(fade_window_ms)))
 }
 
-fn emit_room_state_event_after_apply(
+#[cfg(feature = "desktop")]
+fn node_state_event_from_runtime(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
-    room_id: &str,
+    node_id: &str,
+) -> Option<crate::server_event::NodeStateEvent> {
+    runtime
+        .engine_effective_node_snapshot(node_id)
+        .map(|snap| build_node_state_event(state, &snap))
+}
+
+fn emit_node_state_event_after_apply(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
 ) {
     #[cfg(feature = "desktop")]
-    if let Some(snap) = runtime.engine_room_snapshot(room_id) {
+    if let Some(event) = node_state_event_from_runtime(state, runtime, node_id) {
         crate::state::emit_server_event(
             state,
-            crate::server_event::ServerEvent::RoomState {
-                rooms: vec![build_room_state_event(state, &snap)],
-            },
+            crate::server_event::ServerEvent::NodeState { nodes: vec![event] },
         );
     }
 
-    let _ = (state, runtime, room_id);
+    let _ = (state, runtime, node_id);
 }
 
 fn apply_room_mode_defaults(
@@ -2280,7 +2527,7 @@ fn apply_room_mode_defaults(
                 e
             );
         }
-        emit_room_state_event_after_apply(state, runtime, room_id);
+        emit_node_state_event_after_apply(state, runtime, room_id);
     }
 
     if !changed_room_ids.is_empty() || missing_rooms > 0 {
@@ -2310,7 +2557,7 @@ fn apply_room_commands_inline(
             warn!(target: "cmd", "active_mode_apply: room '{}' failed: {}", room_id, e);
             continue;
         }
-        emit_room_state_event_after_apply(state, runtime, &room_id);
+        emit_node_state_event_after_apply(state, runtime, &room_id);
         if idx + 1 < room_count && !phase_gap.is_zero() {
             std::thread::sleep(phase_gap);
         }
@@ -2398,9 +2645,9 @@ fn dispatch_room_commands(
     if let Err(e) = std::thread::Builder::new()
         .name("room-dispatch".to_string())
         .spawn(move || {
-            for (idx, (room_id, command)) in room_commands.into_iter().enumerate() {
+            for (idx, (node_id, command)) in room_commands.into_iter().enumerate() {
                 if tx
-                    .send(crate::state::WorkItem::ApplyRoomCommand { room_id, command })
+                    .send(crate::state::WorkItem::ApplyNodeCommand { node_id, command })
                     .is_err()
                 {
                     warn!(target: "cmd", "active_mode_apply: room dispatcher disconnected");
@@ -3120,7 +3367,7 @@ fn configuration_room_target_id(
     runtime: &Arc<dyn RuntimeHandle>,
     imported: &ConfigurationRoom,
 ) -> Option<String> {
-    let resolved_id = resolve_room_id(state, &imported.id);
+    let resolved_id = resolve_node_id(state, &imported.id);
     if runtime.engine_room_snapshot(&resolved_id).is_some() {
         return Some(resolved_id);
     }
@@ -3157,7 +3404,7 @@ fn apply_configuration_room_preferences(
             };
 
             let patch = imported_room_profile_patch(imported_room);
-            if let Err(e) = do_room_preferences_set(
+            if let Err(e) = do_node_preferences_set(
                 state,
                 &room_id,
                 Some(imported_room.rhythm_enabled),
@@ -3508,17 +3755,6 @@ pub fn do_room_set(
         }
     }
 
-    // Ensure runtime exists (first room triggers runtime creation)
-    let needs_runtime = {
-        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        let has_runtime = s.hubs.values().any(|h| h.runtime.is_some());
-        !has_runtime && s.has_any_hub()
-    };
-
-    if needs_runtime {
-        ensure_runtime(state);
-    }
-
     // Determine engine room ID: always use topology room IDs for the engine.
     // When hub_key is provided (room_sync path), translate_or_create ensures a
     // topology entry exists. When hub_key is None (HTTP handler path), params.id
@@ -3537,11 +3773,34 @@ pub fn do_room_set(
         params.id.clone()
     };
 
+    // Ensure runtime exists after topology translation so bootstrap sees the
+    // latest topology-first room graph, not only hub registry state.
+    let needs_runtime = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let has_runtime = s.hubs.values().any(|h| h.runtime.is_some());
+        !has_runtime && s.has_any_hub()
+    };
+
+    if needs_runtime {
+        try_ensure_runtime(state)?;
+    }
+
     // Always apply params (whether runtime was just created or pre-existing)
     let runtime = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.hub_runtime()
     };
+    if runtime.is_none() {
+        let has_any_hub = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .has_any_hub();
+        if has_any_hub {
+            return Err(anyhow::anyhow!(
+                "Runtime initialization completed without installing a runtime"
+            ));
+        }
+    }
     if let Some(runtime) = runtime {
         let existing = runtime.engine_room_snapshot(&engine_room_id);
         let had_existing = existing.is_some();
@@ -3601,7 +3860,7 @@ pub fn do_room_set(
     }
 
     #[cfg(feature = "desktop")]
-    crate::state::emit_server_event(state, crate::server_event::ServerEvent::RoomsChanged);
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
 
     let room_state = build_room_rhythm_state(state, &engine_room_id)?;
     serde_json::to_string(&room_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
@@ -3653,24 +3912,24 @@ pub fn do_room_remove(state: &SharedState, room_id: &str) -> Result<()> {
     persist_state(state);
 
     #[cfg(feature = "desktop")]
-    crate::state::emit_server_event(state, crate::server_event::ServerEvent::RoomsChanged);
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
 
     Ok(())
 }
 
 // ============================================================================
-// Room action commands
+// Node action commands
 // ============================================================================
 
-/// Dispatch a button action to a room via the runtime engine.
+/// Dispatch a button action to an addressable node via the runtime engine.
 ///
 /// Actions: on, off, toggle, rhythm_on, rhythm_off, rhythm_toggle,
 /// step_up, step_down, dim_up, dim_down, reset, lights_off.
 ///
-/// Returns the updated room rhythm state JSON, or an error.
-pub fn do_room_action(
+/// Returns the updated node state JSON, or an error.
+pub fn do_node_action(
     state: &SharedState,
-    room_id: &str,
+    node_id: &str,
     action_str: &str,
     persist: bool,
 ) -> Result<String> {
@@ -3682,45 +3941,53 @@ pub fn do_room_action(
             .ok_or_else(|| anyhow::anyhow!("Unknown action: {}", other))?,
     };
 
-    info!(target: "cmd", "room_action: {} -> {:?}", room_id, action);
+    info!(target: "cmd", "node_action: {} -> {:?}", node_id, action);
 
     let runtime = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.hub_runtime()
     };
 
-    let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    let runtime = match runtime {
+        Some(runtime) => runtime,
+        None => {
+            try_ensure_runtime(state)?;
+            state
+                .lock()
+                .ok()
+                .and_then(|s| s.hub_runtime())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Runtime initialization reported success but no runtime is available"
+                    )
+                })?
+        }
+    };
 
-    let event = InputEvent::new(room_id, action);
+    let event = InputEvent::new(node_id, action);
     let turned_on = runtime.handle_event(&event)?;
     sync_active_mode_from_runtime(state, &runtime);
-    clear_room_mode_transition(state, room_id);
+    clear_room_mode_transition(state, node_id);
 
     // Track lights_on state from action result
     {
         if let Ok(mut s) = state.lock() {
-            s.room_lights_on.insert(room_id.to_string(), turned_on);
+            s.room_lights_on.insert(node_id.to_string(), turned_on);
         }
     }
 
     #[cfg(feature = "desktop")]
     {
-        if let Some(snap) = runtime.engine_room_snapshot(room_id) {
-            crate::state::emit_server_event(
-                state,
-                crate::server_event::ServerEvent::RoomState {
-                    rooms: vec![build_room_state_event(state, &snap)],
-                },
-            );
-        }
+        emit_node_state_event_after_apply(state, &runtime, node_id);
     }
 
     if persist {
         persist_rooms(state);
     }
 
-    let room_state = build_room_rhythm_state(state, room_id)?;
-    serde_json::to_string(&room_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+    build_node_state(state, node_id).and_then(|node_state| {
+        serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+    })
 }
 
 /// Reset all qualifying rooms back to their current adaptive curve position,
@@ -3740,11 +4007,11 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         // Rooms with active motion timers
         let mut motion_ids: HashSet<String> = s.motion_snapshots.keys().cloned().collect();
-        // Also include rooms that have motion sensors registered in any hub's
-        // registry, even if no timer is active. This covers the case where the
-        // addon restarted and lost timer state, but lights were still on from
-        // prior motion activation.
-        motion_ids.extend(s.motion_sensor_room_ids());
+        // Also include nodes that are effective motion targets, even if no
+        // timer is active. This covers the case where the addon restarted and
+        // lost timer state, but lights were still on from prior motion
+        // activation.
+        motion_ids.extend(s.motion_control_target_ids());
         (s.hub_runtime(), s.room_lights_on.clone(), motion_ids)
     };
 
@@ -3846,13 +4113,12 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
     {
         let events: Vec<_> = all_affected
             .iter()
-            .filter_map(|id| runtime.engine_room_snapshot(id))
-            .map(|snap| build_room_state_event(state, &snap))
+            .filter_map(|id| node_state_event_from_runtime(state, &runtime, id))
             .collect();
         if !events.is_empty() {
             crate::state::emit_server_event(
                 state,
-                crate::server_event::ServerEvent::RoomState { rooms: events },
+                crate::server_event::ServerEvent::NodeState { nodes: events },
             );
         }
     }
@@ -3875,18 +4141,18 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
     serde_json::to_string(&response).map_err(|e| anyhow::anyhow!("serialize: {}", e))
 }
 
-/// Set absolute brightness for a room (1-100).
+/// Set absolute brightness for a node (1-100).
 ///
 /// Computes the offset so effective brightness equals the target.
 /// Rhythm stays enabled — only brightness is overridden.
-pub fn do_set_brightness(
+pub fn do_set_node_brightness(
     state: &SharedState,
-    room_id: &str,
+    node_id: &str,
     brightness: u8,
     persist: bool,
 ) -> Result<String> {
     let brightness = brightness.clamp(1, 100);
-    info!(target: "cmd", "set_brightness: {} -> {}", room_id, brightness);
+    info!(target: "cmd", "set_node_brightness: {} -> {}", node_id, brightness);
 
     let runtime = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -3895,46 +4161,45 @@ pub fn do_set_brightness(
 
     let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
 
-    runtime.set_room_brightness(room_id, brightness)?;
-    clear_room_mode_transition(state, room_id);
+    runtime.set_room_brightness(node_id, brightness)?;
+    clear_room_mode_transition(state, node_id);
 
     // Setting brightness implies lights are on
     {
         if let Ok(mut s) = state.lock() {
-            s.room_lights_on.insert(room_id.to_string(), true);
+            s.room_lights_on.insert(node_id.to_string(), true);
         }
     }
 
     #[cfg(feature = "desktop")]
     {
-        if let Some(snap) = runtime.engine_room_snapshot(room_id) {
-            crate::state::emit_server_event(
-                state,
-                crate::server_event::ServerEvent::RoomState {
-                    rooms: vec![build_room_state_event(state, &snap)],
-                },
-            );
-        }
+        emit_node_state_event_after_apply(state, &runtime, node_id);
     }
 
     if persist {
         persist_rooms(state);
     }
 
-    let room_state = build_room_rhythm_state(state, room_id)?;
-    serde_json::to_string(&room_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+    build_node_state(state, node_id).and_then(|node_state| {
+        serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+    })
 }
 
-/// Set the time offset for a room directly (not additive).
+/// Set the time offset for a node directly (not additive).
 ///
 /// Does NOT change `room_lights_on` tracking — offset doesn't imply lights-on state change.
-pub fn do_set_time_offset(
+pub fn do_set_node_time_offset(
     state: &SharedState,
-    room_id: &str,
+    node_id: &str,
     offset_minutes: f32,
     persist: bool,
 ) -> Result<String> {
-    info!(target: "cmd", "set_time_offset: {} -> {}", room_id, offset_minutes);
+    info!(
+        target: "cmd",
+        "set_node_time_offset: {} -> {}",
+        node_id,
+        offset_minutes
+    );
 
     let runtime = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -3943,27 +4208,21 @@ pub fn do_set_time_offset(
 
     let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
 
-    runtime.set_room_time_offset(room_id, offset_minutes)?;
-    clear_room_mode_transition(state, room_id);
+    runtime.set_room_time_offset(node_id, offset_minutes)?;
+    clear_room_mode_transition(state, node_id);
 
     #[cfg(feature = "desktop")]
     {
-        if let Some(snap) = runtime.engine_room_snapshot(room_id) {
-            crate::state::emit_server_event(
-                state,
-                crate::server_event::ServerEvent::RoomState {
-                    rooms: vec![build_room_state_event(state, &snap)],
-                },
-            );
-        }
+        emit_node_state_event_after_apply(state, &runtime, node_id);
     }
 
     if persist {
         persist_rooms(state);
     }
 
-    let room_state = build_room_rhythm_state(state, room_id)?;
-    serde_json::to_string(&room_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+    build_node_state(state, node_id).and_then(|node_state| {
+        serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+    })
 }
 
 // ============================================================================
@@ -4079,7 +4338,7 @@ pub fn do_device_hard_remove(
         for endpoint in &device.endpoints {
             topology_changed |= !s
                 .topology
-                .remove_hub_target_everywhere(&endpoint.hub_key, &endpoint.native_id)
+                .remove_hub_room_binding_everywhere(&endpoint.hub_key, &endpoint.native_id)
                 .is_empty();
             registry_removals.insert((endpoint.hub_key.clone(), endpoint.native_id.clone()));
         }
@@ -4120,7 +4379,7 @@ pub fn do_device_hard_remove(
     {
         rebuild_composite_routing(state);
         emit_triage_changed(state);
-        crate::state::emit_server_event(state, crate::server_event::ServerEvent::RoomsChanged);
+        crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
     }
 
     Ok(())
@@ -4155,14 +4414,14 @@ pub fn do_canonical_soft_remove(state: &SharedState, device_id: &str, hub_key: &
     }
 }
 
-/// Set a per-room motion timeout override in the room profile settings layer.
+/// Set a per-node motion timeout override in the profile-settings layer.
 pub fn do_motion_timeout_set(
     state: &SharedState,
-    room_id: &str,
+    node_id: &str,
     timeout_secs: u64,
     _hub_key: Option<&HubKey>,
 ) -> Result<()> {
-    info!(target: "cmd", "motion_timeout_set: room {} -> {}s", room_id, timeout_secs);
+    info!(target: "cmd", "motion_timeout_set: node {} -> {}s", node_id, timeout_secs);
 
     let value = u32::try_from(timeout_secs)
         .map_err(|_| anyhow::anyhow!("motion timeout {} exceeds supported range", timeout_secs))?;
@@ -4170,28 +4429,28 @@ pub fn do_motion_timeout_set(
         motion_timeout_secs: Some(Some(TimerSetting::Fixed { value })),
         ..Default::default()
     };
-    do_room_preferences_set(state, room_id, None, None, None, Some(&patch), true)?;
+    do_node_preferences_set(state, node_id, None, None, None, Some(&patch), true)?;
     Ok(())
 }
 
-/// Remove a per-room motion timeout override so it falls back to the profile default.
+/// Remove a per-node motion timeout override so it falls back to the profile default.
 pub fn do_motion_timeout_clear(
     state: &SharedState,
-    room_id: &str,
+    node_id: &str,
     _hub_key: Option<&HubKey>,
 ) -> Result<()> {
-    info!(target: "cmd", "motion_timeout_clear: room {}", room_id);
+    info!(target: "cmd", "motion_timeout_clear: node {}", node_id);
 
     let patch = RoomProfileSettingsPatch {
         motion_timeout_secs: Some(None),
         ..Default::default()
     };
-    do_room_preferences_set(state, room_id, None, None, None, Some(&patch), true)?;
+    do_node_preferences_set(state, node_id, None, None, None, Some(&patch), true)?;
     Ok(())
 }
 
-/// Resolve room motion timeout defaults from persisted room profile settings.
-pub(crate) fn resolved_room_motion_timeout_map(
+/// Resolve motion timeout defaults for controlled target nodes.
+pub(crate) fn resolved_motion_timeout_map(
     state: &SharedState,
 ) -> (HashMap<String, u64>, HashSet<String>) {
     let (
@@ -4202,7 +4461,7 @@ pub(crate) fn resolved_room_motion_timeout_map(
         solar_noon,
         latitude,
         utc_offset,
-        sensor_rooms,
+        control_targets,
     ) = {
         let Ok(s) = state.lock() else {
             return (HashMap::new(), HashSet::new());
@@ -4215,14 +4474,14 @@ pub(crate) fn resolved_room_motion_timeout_map(
             s.solar_noon_hour(),
             s.latitude.unwrap_or(35.0),
             s.utc_offset_hours,
-            s.motion_sensor_room_ids(),
+            s.motion_control_target_ids(),
         )
     };
 
     let current_hour = runtime.as_ref().map(|rt| rt.current_hour()).unwrap_or(12.0);
     let snapshots = runtime
         .as_ref()
-        .map(|rt| rt.engine_all_room_snapshots())
+        .map(|rt| rt.engine_all_effective_node_snapshots())
         .unwrap_or_default();
 
     let mut timeouts = HashMap::new();
@@ -4243,7 +4502,7 @@ pub(crate) fn resolved_room_motion_timeout_map(
             ),
         );
     }
-    (timeouts, sensor_rooms)
+    (timeouts, control_targets)
 }
 
 // ============================================================================
@@ -4431,7 +4690,7 @@ pub fn do_absorb_time_offset(
     #[cfg(feature = "desktop")]
     {
         crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
-        crate::state::emit_server_event(state, crate::server_event::ServerEvent::RoomsChanged);
+        crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
     }
 
     Ok(())
@@ -4600,7 +4859,7 @@ pub fn do_hub_credentials(
                 connected: hub_connected,
             },
         );
-        crate::state::emit_server_event(state, crate::server_event::ServerEvent::RoomsChanged);
+        crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
     }
 
     Ok(())
@@ -4685,7 +4944,7 @@ pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
                 },
             );
         }
-        crate::state::emit_server_event(state, crate::server_event::ServerEvent::RoomsChanged);
+        crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
     }
 
     Ok(())
@@ -4753,19 +5012,19 @@ pub fn do_hub_disconnect_one(state: &SharedState, hub_type_str: &str, address: &
                 connected: false,
             },
         );
-        crate::state::emit_server_event(state, crate::server_event::ServerEvent::RoomsChanged);
+        crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
     }
 
     Ok(())
 }
 
-/// Update user preferences for a room (rhythm_enabled, disabled, state).
+/// Update user preferences for an addressable node.
 ///
 /// Only modifies user state, not topology. Safe for app to call without
 /// overwriting server-discovered rooms/devices.
-pub fn do_room_preferences_set(
+pub fn do_node_preferences_set(
     state: &SharedState,
-    room_id: &str,
+    node_id: &str,
     rhythm_enabled: Option<bool>,
     disabled: Option<bool>,
     target_state: Option<RoomModeState>,
@@ -4774,8 +5033,8 @@ pub fn do_room_preferences_set(
 ) -> Result<String> {
     info!(
         target: "cmd",
-        "room_preferences_set: {} rhythm={:?} disabled={:?} state={:?} room_profile={}",
-        room_id,
+        "node_preferences_set: {} rhythm={:?} disabled={:?} state={:?} profile_settings={}",
+        node_id,
         rhythm_enabled,
         disabled,
         target_state,
@@ -4786,7 +5045,7 @@ pub fn do_room_preferences_set(
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             s.hub_runtime(),
-            s.room_lights_on.get(room_id).copied().unwrap_or(false),
+            s.room_lights_on.get(node_id).copied().unwrap_or(false),
             s.light_profile_configs
                 .keys()
                 .cloned()
@@ -4797,8 +5056,8 @@ pub fn do_room_preferences_set(
     let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
 
     let snap = runtime
-        .engine_room_snapshot(room_id)
-        .ok_or_else(|| anyhow::anyhow!("Room '{}' not found in engine", room_id))?;
+        .engine_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
 
     let prev_soft_off = snap.soft_off;
     let prev_hard_off = snap.hard_off;
@@ -4815,7 +5074,7 @@ pub fn do_room_preferences_set(
     if let Some(profile_id) = profile_settings.profile_id.as_deref() {
         if rhythm_core::is_builtin_state_profile_id(profile_id) {
             return Err(anyhow::anyhow!(
-                "State profiles cannot be selected per-room"
+                "State profiles cannot be selected per-node"
             ));
         }
         if !valid_profile_ids.contains(profile_id) {
@@ -4826,9 +5085,9 @@ pub fn do_room_preferences_set(
     // Soft-off rooms need rhythm enabled for periodic soft-off ticks
     let rhythm_enabled = if soft_off { true } else { rhythm_enabled };
 
-    runtime.restore_room_state(
-        room_id,
-        RestoredRoomState {
+    runtime.restore_node_state(
+        node_id,
+        RestoredNodeState {
             rhythm_enabled,
             disabled,
             time_offset_minutes: snap.time_offset_minutes,
@@ -4838,40 +5097,40 @@ pub fn do_room_preferences_set(
             profile_settings: profile_settings.clone(),
         },
     );
-    clear_room_mode_transition(state, room_id);
+    clear_room_mode_transition(state, node_id);
 
     let entered_hard_off = hard_off && !prev_hard_off;
     let left_hard_off = !hard_off && prev_hard_off;
 
     if entered_hard_off {
-        info!(target: "cmd", "room_preferences_set: {} entering hard_off", room_id);
-        queue_motion_timer_clear(state, room_id);
-        let event = InputEvent::new(room_id, ButtonAction::LightsOff);
+        info!(target: "cmd", "node_preferences_set: {} entering hard_off", node_id);
+        queue_motion_timer_clear(state, node_id);
+        let event = InputEvent::new(node_id, ButtonAction::LightsOff);
         if let Err(e) = runtime.handle_event(&event) {
-            warn!(target: "cmd", "lights_off for '{}' failed: {}", room_id, e);
+            warn!(target: "cmd", "lights_off for '{}' failed: {}", node_id, e);
         }
     } else if soft_off && !prev_soft_off {
-        info!(target: "cmd", "room_preferences_set: {} entering idle", room_id);
-        if let Err(e) = runtime.soft_off_tick_room(room_id) {
-            warn!(target: "cmd", "soft_off_tick for '{}' failed: {}", room_id, e);
+        info!(target: "cmd", "node_preferences_set: {} entering idle", node_id);
+        if let Err(e) = runtime.soft_off_tick_room(node_id) {
+            warn!(target: "cmd", "soft_off_tick for '{}' failed: {}", node_id, e);
         }
     } else if !soft_off && prev_soft_off {
-        info!(target: "cmd", "room_preferences_set: {} leaving idle, turning on", room_id);
-        if let Err(e) = runtime.turn_on_room(room_id) {
-            warn!(target: "cmd", "turn_on for '{}' failed: {}", room_id, e);
+        info!(target: "cmd", "node_preferences_set: {} leaving idle, turning on", node_id);
+        if let Err(e) = runtime.turn_on_room(node_id) {
+            warn!(target: "cmd", "turn_on for '{}' failed: {}", node_id, e);
         }
     } else if left_hard_off {
         match persistent_state {
             RoomModeState::Active => {
-                info!(target: "cmd", "room_preferences_set: {} leaving hard_off to active", room_id);
-                if let Err(e) = runtime.turn_on_room(room_id) {
-                    warn!(target: "cmd", "turn_on for '{}' failed: {}", room_id, e);
+                info!(target: "cmd", "node_preferences_set: {} leaving hard_off to active", node_id);
+                if let Err(e) = runtime.turn_on_room(node_id) {
+                    warn!(target: "cmd", "turn_on for '{}' failed: {}", node_id, e);
                 }
             }
             RoomModeState::Idle => {
-                info!(target: "cmd", "room_preferences_set: {} leaving hard_off to idle", room_id);
-                if let Err(e) = runtime.soft_off_tick_room(room_id) {
-                    warn!(target: "cmd", "soft_off_tick for '{}' failed: {}", room_id, e);
+                info!(target: "cmd", "node_preferences_set: {} leaving hard_off to idle", node_id);
+                if let Err(e) = runtime.soft_off_tick_room(node_id) {
+                    warn!(target: "cmd", "soft_off_tick for '{}' failed: {}", node_id, e);
                 }
             }
             RoomModeState::HardOff | RoomModeState::Wake | RoomModeState::Warning => {}
@@ -4879,15 +5138,15 @@ pub fn do_room_preferences_set(
     } else if room_profile.is_some_and(|patch| patch.touches_profile_settings()) {
         match persistent_state {
             RoomModeState::Idle => {
-                info!(target: "cmd", "room_preferences_set: {} applying room profile to idle state", room_id);
-                if let Err(e) = runtime.soft_off_tick_room(room_id) {
-                    warn!(target: "cmd", "soft_off_tick for '{}' failed: {}", room_id, e);
+                info!(target: "cmd", "node_preferences_set: {} applying profile settings to idle state", node_id);
+                if let Err(e) = runtime.soft_off_tick_room(node_id) {
+                    warn!(target: "cmd", "soft_off_tick for '{}' failed: {}", node_id, e);
                 }
             }
             RoomModeState::Active if lights_on => {
-                info!(target: "cmd", "room_preferences_set: {} applying room profile to active lights", room_id);
-                if let Err(e) = runtime.turn_on_room(room_id) {
-                    warn!(target: "cmd", "turn_on for '{}' failed: {}", room_id, e);
+                info!(target: "cmd", "node_preferences_set: {} applying profile settings to active lights", node_id);
+                if let Err(e) = runtime.turn_on_room(node_id) {
+                    warn!(target: "cmd", "turn_on for '{}' failed: {}", node_id, e);
                 }
             }
             RoomModeState::HardOff
@@ -4899,32 +5158,26 @@ pub fn do_room_preferences_set(
 
     if hard_off {
         if let Ok(mut s) = state.lock() {
-            s.room_lights_on.insert(room_id.to_string(), false);
+            s.room_lights_on.insert(node_id.to_string(), false);
         }
     } else if soft_off {
         if let Ok(mut s) = state.lock() {
-            s.room_lights_on.insert(room_id.to_string(), true);
+            s.room_lights_on.insert(node_id.to_string(), true);
         }
     }
 
     #[cfg(feature = "desktop")]
     {
-        if let Some(snap) = runtime.engine_room_snapshot(room_id) {
-            crate::state::emit_server_event(
-                state,
-                crate::server_event::ServerEvent::RoomState {
-                    rooms: vec![build_room_state_event(state, &snap)],
-                },
-            );
-        }
+        emit_node_state_event_after_apply(state, &runtime, node_id);
     }
 
     if persist {
         persist_rooms(state);
     }
 
-    let room_state = build_room_rhythm_state(state, room_id)?;
-    serde_json::to_string(&room_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+    build_node_state(state, node_id).and_then(|node_state| {
+        serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+    })
 }
 
 // ============================================================================
@@ -4936,13 +5189,22 @@ pub fn do_room_preferences_set(
 /// The callback is stored on AppState (as an `Arc`) and set by the platform
 /// crate at startup. It handles creating the RhythmRuntime with platform-specific types.
 pub fn ensure_runtime(state: &SharedState) {
+    if let Err(e) = try_ensure_runtime(state) {
+        warn!(target: "cmd", "Failed to start runtime: {}", e);
+    }
+}
+
+/// Call the platform's ensure_runtime callback and surface bootstrap failures.
+pub fn try_ensure_runtime(state: &SharedState) -> Result<()> {
     // Clone the Arc + platform config out of the lock so we can call without holding it
     let (ensure_fn, stack_size) = {
-        let Ok(s) = state.lock() else { return };
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (s.ensure_runtime_fn.clone(), s.platform.runtime_init_stack)
     };
 
-    let Some(ensure_fn) = ensure_fn else { return };
+    let Some(ensure_fn) = ensure_fn else {
+        return Err(anyhow::anyhow!("No runtime initializer configured"));
+    };
 
     let rt_state = state.clone();
     let rt_result = std::thread::Builder::new()
@@ -4952,9 +5214,9 @@ pub fn ensure_runtime(state: &SharedState) {
         .and_then(|handle| handle.join().map_err(|_| std::io::Error::other("panicked")));
 
     match rt_result {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => warn!(target: "cmd", "Failed to start runtime: {}", e),
-        Err(e) => warn!(target: "cmd", "Runtime init thread error: {}", e),
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(anyhow::anyhow!("Runtime init thread error: {}", e)),
     }
 }
 
@@ -4962,15 +5224,15 @@ pub fn ensure_runtime(state: &SharedState) {
 ///
 /// Matter can route directly by device endpoint and discover zero hub rooms, so
 /// runtime creation cannot rely solely on `do_room_set()` during room sync.
-fn ensure_runtime_room_exists(state: &SharedState, room_id: &str, room_name: &str) {
+fn ensure_runtime_room_exists(state: &SharedState, room_id: &str, room_name: &str) -> Result<()> {
     let needs_runtime = {
-        let Ok(s) = state.lock() else { return };
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let has_runtime = s.hubs.values().any(|h| h.runtime.is_some());
         !has_runtime && s.has_any_hub()
     };
 
     if needs_runtime {
-        ensure_runtime(state);
+        try_ensure_runtime(state)?;
     }
 
     if let Some(runtime) = state.lock().ok().and_then(|s| s.hub_runtime()) {
@@ -4996,6 +5258,70 @@ fn ensure_runtime_room_exists(state: &SharedState, room_id: &str, room_name: &st
             );
         }
     }
+
+    let has_any_hub = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .has_any_hub();
+    if has_any_hub && state.lock().ok().and_then(|s| s.hub_runtime()).is_none() {
+        return Err(anyhow::anyhow!(
+            "Runtime initialization completed without installing a runtime"
+        ));
+    }
+
+    Ok(())
+}
+
+pub(crate) fn runtime_node_kind_for_device_type(device_type: DeviceType) -> LightNodeKind {
+    match device_type {
+        DeviceType::Light => LightNodeKind::LightDevice,
+        DeviceType::Motion => LightNodeKind::MotionSensor,
+        DeviceType::Button => LightNodeKind::Button,
+    }
+}
+
+fn ensure_runtime_device_node_exists(
+    state: &SharedState,
+    node_id: &str,
+    node_name: &str,
+    device_type: DeviceType,
+    parent_id: Option<String>,
+) -> Result<()> {
+    let needs_runtime = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let has_runtime = s.hubs.values().any(|h| h.runtime.is_some());
+        !has_runtime && s.has_any_hub()
+    };
+
+    if needs_runtime {
+        try_ensure_runtime(state)?;
+    }
+
+    if let Some(runtime) = state.lock().ok().and_then(|s| s.hub_runtime()) {
+        if runtime.engine_node_snapshot(node_id).is_none() {
+            runtime.add_node(
+                node_id,
+                node_name,
+                runtime_node_kind_for_device_type(device_type),
+                parent_id,
+            );
+            runtime.restore_node_state(
+                node_id,
+                RestoredNodeState {
+                    rhythm_enabled: true,
+                    disabled: false,
+                    time_offset_minutes: 0.0,
+                    brightness_offset: 0.0,
+                    soft_off: false,
+                    hard_off: false,
+                    profile_settings: RoomProfileSettings::default(),
+                },
+            );
+            debug!(target: "cmd", "Ensured runtime device node '{}' exists", node_id);
+        }
+    }
+
+    Ok(())
 }
 
 // ============================================================================
@@ -5014,7 +5340,7 @@ pub fn rebuild_composite_routing(state: &SharedState) {
             Some(c) => c,
             None => return, // No composite yet — nothing to rebuild
         };
-        let routing = s.topology.composite_routing();
+        let routing = s.topology.composite_routing(&s.canonical_registry);
         let rooms = s.topology.room_count();
         (composite, routing, rooms)
     };
@@ -5192,8 +5518,6 @@ pub fn do_canonical_assign_room(
     device_id: &str,
     room_id: Option<&str>,
 ) -> Result<()> {
-    use crate::topology::HubControlTarget;
-
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
     // Snapshot endpoints, name, and old room before mutating.
@@ -5203,7 +5527,12 @@ pub fn do_canonical_assign_room(
         .ok_or_else(|| anyhow::anyhow!("Device not found: {}", device_id))?;
     let endpoints: Vec<_> = device.endpoints.clone();
     let device_name = device.name.clone();
-    let old_room_id = device.room_id.clone();
+    let device_type = device.device_type.clone();
+    let old_room_id = s
+        .topology
+        .device_parent_room_id(device_id)
+        .map(|id| id.to_string())
+        .or_else(|| device.room_id.clone());
     let target_room = room_id.and_then(|target_room_id| {
         s.topology
             .get(target_room_id)
@@ -5220,41 +5549,64 @@ pub fn do_canonical_assign_room(
         return Err(anyhow::anyhow!("Device not found: {}", device_id));
     }
 
-    // Remove hub targets from the old room (if any).
-    if let Some(old_id) = &old_room_id {
-        for ep in &endpoints {
+    if let Some(target_room_id) = room_id {
+        if !s.topology.assign_device(
+            device_id,
+            Some(target_room_id),
+            crate::topology::DevicePlacement::UserOverride,
+        ) {
+            s.topology.ensure_standalone_device(device_id);
+            s.topology.assign_device(
+                device_id,
+                Some(target_room_id),
+                crate::topology::DevicePlacement::UserOverride,
+            );
+        }
+        if let Some(old_id) = &old_room_id {
             if let Some(room) = s.topology.get_mut(old_id) {
-                room.remove_hub_target(&ep.hub_key, &ep.native_id);
+                room.user_customized = true;
             }
         }
-    }
+        if let Some(room) = s.topology.get_mut(target_room_id) {
+            room.user_customized = true;
+        }
 
-    // Add hub targets to the new room and update hub device registries.
-    if let Some(target_room_id) = room_id {
         for ep in &endpoints {
-            if let Some(room) = s.topology.get_mut(target_room_id) {
-                let target = HubControlTarget {
-                    hub_key: ep.hub_key.clone(),
-                    hub_room_id: ep.native_id.clone(),
-                    control_id: ep.native_id.clone(),
-                    light_device_ids: vec![ep.native_id.clone()],
-                    topology_aligned: false, // per-device addressing
-                };
-                room.upsert_hub_target(target);
-            }
-
-            // Update the hub's device registry so the device appears in /api/state.
-            // The state builder maps hub-native room IDs to topology IDs via hub_targets,
-            // so putting the device in a room named after its native_id works correctly.
+            // Keep a synthetic per-device registry room so device-addressed
+            // endpoints still appear in hub snapshots. Topology/state mapping
+            // now derives the owning topology room from canonical assignments,
+            // so this registry room is transport-local only.
             if let Some(hub) = s.hubs.get(&ep.hub_key) {
                 if let Some(reg) = &hub.registry {
                     if let Ok(mut r) = reg.lock() {
+                        r.remove_room(&ep.native_id);
                         r.upsert_room(
                             &ep.native_id,
                             &device_name,
                             &ep.native_id,
                             std::slice::from_ref(&ep.native_id),
                         );
+                    }
+                }
+            }
+        }
+    } else {
+        s.topology.ensure_standalone_device(device_id);
+        s.topology.assign_device(
+            device_id,
+            None,
+            crate::topology::DevicePlacement::Standalone,
+        );
+        if let Some(old_id) = &old_room_id {
+            if let Some(room) = s.topology.get_mut(old_id) {
+                room.user_customized = true;
+            }
+        }
+        for ep in &endpoints {
+            if let Some(hub) = s.hubs.get(&ep.hub_key) {
+                if let Some(reg) = &hub.registry {
+                    if let Ok(mut r) = reg.lock() {
+                        r.remove_room(&ep.native_id);
                     }
                 }
             }
@@ -5268,14 +5620,23 @@ pub fn do_canonical_assign_room(
     persist_registry(state);
 
     if let Some((target_room_id, target_room_name)) = target_room {
-        ensure_runtime_room_exists(state, &target_room_id, &target_room_name);
+        ensure_runtime_room_exists(state, &target_room_id, &target_room_name)?;
+        ensure_runtime_device_node_exists(
+            state,
+            device_id,
+            &device_name,
+            device_type,
+            Some(target_room_id),
+        )?;
+    } else {
+        ensure_runtime_device_node_exists(state, device_id, &device_name, device_type, None)?;
     }
 
     #[cfg(feature = "desktop")]
     {
         rebuild_composite_routing(state);
         emit_triage_changed(state);
-        crate::state::emit_server_event(state, crate::server_event::ServerEvent::RoomsChanged);
+        crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
     }
     Ok(())
 }
@@ -5363,12 +5724,17 @@ pub fn do_triage_merge(state: &SharedState, entry_id: &str, canonical_id: &str) 
                 .translate_room_id(&hub_key, &hub_room_id)
                 .map(|s| s.to_string())
             {
-                if let Some(room) = s.topology.get_mut(&rhythm_room_id) {
-                    room.add_device_hub_default(canonical_id);
-                }
+                s.topology.ensure_standalone_device(canonical_id);
+                let _ = s.topology.assign_device(
+                    canonical_id,
+                    Some(&rhythm_room_id),
+                    crate::topology::DevicePlacement::HubDefault,
+                );
                 s.canonical_registry
                     .assign_room(canonical_id, Some(&rhythm_room_id));
             }
+        } else {
+            s.topology.ensure_standalone_device(canonical_id);
         }
         persist_canonical(&s);
         persist_topology(&s);
@@ -5409,12 +5775,17 @@ pub fn do_triage_new_device(state: &SharedState, entry_id: &str) -> Result<Strin
                             .translate_room_id(&hub_key, &hub_room_id)
                             .map(|s| s.to_string())
                         {
-                            if let Some(room) = s.topology.get_mut(&rhythm_room_id) {
-                                room.add_device_hub_default(&canonical_id);
-                            }
+                            s.topology.ensure_standalone_device(&canonical_id);
+                            let _ = s.topology.assign_device(
+                                &canonical_id,
+                                Some(&rhythm_room_id),
+                                crate::topology::DevicePlacement::HubDefault,
+                            );
                             s.canonical_registry
                                 .assign_room(&canonical_id, Some(&rhythm_room_id));
                         }
+                    } else {
+                        s.topology.ensure_standalone_device(&canonical_id);
                     }
                     persist_canonical(&s);
                     persist_topology(&s);
@@ -5451,7 +5822,7 @@ pub fn do_triage_new_device(state: &SharedState, entry_id: &str) -> Result<Strin
 pub fn do_triage_assign_room(state: &SharedState, entry_id: &str, room_id: &str) -> Result<()> {
     use crate::canonical::triage::TriageKind;
 
-    let resolved_room_id = resolve_room_id(state, room_id);
+    let resolved_room_id = resolve_node_id(state, room_id);
     let canonical_id = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let entry = s
@@ -5510,7 +5881,7 @@ pub fn do_triage_bind_room_to(
 ) -> Result<()> {
     use crate::canonical::triage::TriageKind;
 
-    let resolved_target_override = target_override.map(|id| resolve_room_id(state, id));
+    let resolved_target_override = target_override.map(|id| resolve_node_id(state, id));
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -5604,7 +5975,7 @@ pub fn do_triage_bind_room_to(
     #[cfg(feature = "desktop")]
     {
         emit_triage_changed(state);
-        crate::state::emit_server_event(state, crate::server_event::ServerEvent::RoomsChanged);
+        crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
     }
 
     Ok(())
@@ -5664,13 +6035,140 @@ pub fn build_topology_rooms(state: &SharedState) -> Result<String> {
     serde_json::to_string(&rooms).map_err(|e| anyhow::anyhow!(e))
 }
 
+/// Build JSON for the full public topology graph.
+pub fn build_topology_nodes(state: &SharedState) -> Result<String> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let mut nodes = Vec::new();
+
+    let mut room_ids: Vec<_> = s.topology.rooms().map(|room| room.id.clone()).collect();
+    room_ids.sort();
+    for room_id in room_ids {
+        let room = s.topology.get(&room_id).unwrap();
+        nodes.push(TopologyNodeDto {
+            id: room.id.clone(),
+            name: room.name.clone(),
+            kind: LightNodeKind::Room,
+            parent_id: None,
+            placement: None,
+            controls: s
+                .topology
+                .effective_node_controls(&room.id, &s.canonical_registry)
+                .into_iter()
+                .map(|(kind, target_id, inherited)| TopologyNodeControlDto {
+                    kind,
+                    target_id,
+                    inherited,
+                })
+                .collect(),
+            hub_room_bindings: room.hub_room_bindings.clone(),
+            manufacturer: None,
+            model: None,
+            user_customized: Some(room.user_customized),
+            bootstrap_name: room.bootstrap_name.clone(),
+        });
+    }
+
+    let mut device_ids: Vec<_> = s
+        .topology
+        .device_nodes()
+        .map(|node| node.id.clone())
+        .collect();
+    device_ids.sort();
+    for device_id in device_ids {
+        let node = s.topology.get_device_node(&device_id).unwrap();
+        let canonical = s.canonical_registry.get(&node.canonical_device_id);
+        nodes.push(TopologyNodeDto {
+            id: node.id.clone(),
+            name: canonical
+                .map(|device| device.name.clone())
+                .unwrap_or_else(|| node.id.clone()),
+            kind: canonical
+                .map(|device| runtime_node_kind_for_device_type(device.device_type.clone()))
+                .unwrap_or(LightNodeKind::OtherDevice),
+            parent_id: node.parent_id.clone(),
+            placement: Some(node.placement.clone()),
+            controls: s
+                .topology
+                .effective_node_controls(&node.id, &s.canonical_registry)
+                .into_iter()
+                .map(|(kind, target_id, inherited)| TopologyNodeControlDto {
+                    kind,
+                    target_id,
+                    inherited,
+                })
+                .collect(),
+            hub_room_bindings: Vec::new(),
+            manufacturer: canonical.and_then(|device| device.manufacturer.clone()),
+            model: canonical.and_then(|device| device.model.clone()),
+            user_customized: None,
+            bootstrap_name: None,
+        });
+    }
+
+    serde_json::to_string(&nodes).map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Set or clear an explicit topology control target for a source node.
+pub fn do_topology_set_control_target(
+    state: &SharedState,
+    source_id: &str,
+    kind: NodeControlKind,
+    target_id: Option<&str>,
+) -> Result<()> {
+    let resolved_source_id = resolve_node_id(state, source_id);
+    let resolved_target_id = target_id.map(|id| resolve_node_id(state, id));
+
+    let (old_target, new_target) = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if !s.topology.has_public_node(&resolved_source_id) {
+            return Err(anyhow::anyhow!(
+                "Source node '{}' not found",
+                resolved_source_id
+            ));
+        }
+        if let Some(ref target_id) = resolved_target_id {
+            if !s.topology.has_public_node(target_id) {
+                return Err(anyhow::anyhow!("Target node '{}' not found", target_id));
+            }
+        }
+
+        let old_target = s
+            .topology
+            .effective_control_target(&resolved_source_id, &kind);
+        s.topology.set_control_target(
+            &resolved_source_id,
+            kind.clone(),
+            resolved_target_id.as_deref(),
+        );
+        let new_target = s
+            .topology
+            .effective_control_target(&resolved_source_id, &kind);
+        persist_topology(&s);
+        (old_target, new_target)
+    };
+
+    if kind == NodeControlKind::Motion {
+        if let Some(old_target) = old_target.as_deref() {
+            queue_motion_timer_clear(state, old_target);
+        }
+        if let Some(new_target) = new_target.as_deref() {
+            queue_motion_timer_clear(state, new_target);
+        }
+    }
+
+    #[cfg(feature = "desktop")]
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
+
+    Ok(())
+}
+
 /// Create a new empty Rhythm room.
 pub fn do_topology_create_room(state: &SharedState, name: &str) -> Result<String> {
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let id = s.topology.create_room(name);
     persist_topology(&s);
     drop(s);
-    ensure_runtime_room_exists(state, &id, name);
+    ensure_runtime_room_exists(state, &id, name)?;
     Ok(format!(r#"{{"id":"{}","name":"{}"}}"#, id, name))
 }
 
@@ -5681,8 +6179,31 @@ pub fn do_topology_merge_rooms(
     source_id: &str,
 ) -> Result<()> {
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let target_name = s
+        .topology
+        .get(target_id)
+        .map(|room| room.name.clone())
+        .ok_or_else(|| anyhow::anyhow!("Target room not found"))?;
     if s.topology.merge_rooms(target_id, source_id) {
         persist_topology(&s);
+        drop(s);
+
+        if let Some(runtime) = state.lock().ok().and_then(|s| s.hub_runtime()) {
+            if let Some(snap) = runtime.engine_room_snapshot(source_id) {
+                if runtime.engine_room_snapshot(target_id).is_none() {
+                    runtime.add_room(target_id, &target_name);
+                    runtime.restore_room_state(target_id, RestoredRoomState::from(&snap));
+                }
+                runtime.remove_room(source_id);
+            }
+        }
+
+        #[cfg(feature = "desktop")]
+        {
+            rebuild_composite_routing(state);
+            crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
+        }
+
         Ok(())
     } else {
         Err(anyhow::anyhow!("Failed to merge rooms"))
@@ -5699,6 +6220,14 @@ pub fn do_topology_move_device(
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     if s.topology.move_device(device_id, from_room, to_room) {
         persist_topology(&s);
+        drop(s);
+
+        #[cfg(feature = "desktop")]
+        {
+            rebuild_composite_routing(state);
+            crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
+        }
+
         Ok(())
     } else {
         Err(anyhow::anyhow!("Failed to move device"))
@@ -6201,6 +6730,8 @@ mod tests {
             snapshots.push(RoomSnapshot {
                 id: room_id.to_string(),
                 name: name.to_string(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
                 rhythm_enabled: false,
                 disabled: false,
                 time_offset_minutes: 0.0,
@@ -6304,6 +6835,8 @@ mod tests {
         RoomSnapshot {
             id: id.to_string(),
             name: id.to_string(),
+            kind: rhythm_core::LightNodeKind::Room,
+            parent_id: None,
             rhythm_enabled: true,
             disabled,
             time_offset_minutes: 0.0,
@@ -6363,8 +6896,9 @@ mod tests {
         let mut app = AppState::default();
         let hub_type = HubType::new("matter");
         let hub_key = HubKey::new(hub_type.clone(), "local");
-        let registry: Arc<Mutex<dyn HubRegistry>> =
-            Arc::new(Mutex::new(crate::registry::HubDeviceRegistry::with_options(true)));
+        let registry: Arc<Mutex<dyn HubRegistry>> = Arc::new(Mutex::new(
+            crate::registry::HubDeviceRegistry::with_options(true),
+        ));
 
         app.hubs.insert(
             hub_key.clone(),
@@ -6395,12 +6929,11 @@ mod tests {
     fn add_topology_room(state: &SharedState, room_id: &str, hub_types: &[&str]) {
         let mut room = crate::topology::TopologyRoom::new(room_id, room_id);
         for (index, hub_type) in hub_types.iter().enumerate() {
-            room.upsert_hub_target(crate::topology::HubControlTarget {
+            room.upsert_hub_room_binding(crate::topology::HubRoomBinding {
                 hub_key: HubKey::new(HubType::new(*hub_type), format!("{hub_type}-{index}")),
                 hub_room_id: format!("{room_id}-{index}"),
                 control_id: format!("control-{index}"),
                 light_device_ids: Vec::new(),
-                topology_aligned: true,
             });
         }
         state.lock().unwrap().topology.insert_room(room);
@@ -6450,6 +6983,7 @@ mod tests {
         hub_registries: HashMap<String, Value>,
         canonical_registry: Option<Value>,
         topology: Option<Value>,
+        commissioning_wifi: Option<crate::provisioning::WifiCredentials>,
     }
 
     impl Storage for TestStorage {
@@ -6588,6 +7122,39 @@ mod tests {
 
         fn save_topology(&self, data: &Value) -> Result<()> {
             self.inner.lock().unwrap().topology = Some(data.clone());
+            Ok(())
+        }
+
+        fn load_commissioning_wifi_credentials(
+            &self,
+        ) -> Result<Option<crate::provisioning::WifiCredentials>> {
+            Ok(self.inner.lock().unwrap().commissioning_wifi.clone())
+        }
+
+        fn save_commissioning_wifi_credentials(
+            &self,
+            creds: &crate::provisioning::WifiCredentials,
+        ) -> Result<()> {
+            self.inner.lock().unwrap().commissioning_wifi = Some(creds.clone());
+            Ok(())
+        }
+
+        fn clear_commissioning_wifi_credentials(&self) -> Result<()> {
+            self.inner.lock().unwrap().commissioning_wifi = None;
+            Ok(())
+        }
+
+        fn clear_factory_reset_state(&self) -> Result<()> {
+            let mut inner = self.inner.lock().unwrap();
+            inner.rooms = rhythm_core::RoomManager::new();
+            inner.light_profiles = None;
+            inner.location = None;
+            inner.settings = None;
+            inner.hub_credentials.clear();
+            inner.hub_registries.clear();
+            inner.canonical_registry = None;
+            inner.topology = None;
+            inner.commissioning_wifi = None;
             Ok(())
         }
     }
@@ -6849,7 +7416,7 @@ mod tests {
     #[test]
     fn room_action_on() {
         let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
-        let result = do_room_action(&state, "room1", "on", false);
+        let result = do_node_action(&state, "room1", "on", false);
         assert!(result.is_ok());
         let events = runtime.events();
         assert_eq!(events.len(), 1);
@@ -6859,7 +7426,7 @@ mod tests {
     #[test]
     fn room_action_off() {
         let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
-        let result = do_room_action(&state, "room1", "off", false);
+        let result = do_node_action(&state, "room1", "off", false);
         assert!(result.is_ok());
         let events = runtime.events();
         assert_eq!(events.len(), 1);
@@ -6869,7 +7436,7 @@ mod tests {
     #[test]
     fn room_action_toggle() {
         let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
-        let result = do_room_action(&state, "room1", "toggle", false);
+        let result = do_node_action(&state, "room1", "toggle", false);
         assert!(result.is_ok());
         let events = runtime.events();
         assert_eq!(events.len(), 1);
@@ -6879,7 +7446,7 @@ mod tests {
     #[test]
     fn room_action_reset() {
         let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
-        let result = do_room_action(&state, "room1", "reset", false);
+        let result = do_node_action(&state, "room1", "reset", false);
         assert!(result.is_ok());
         let events = runtime.events();
         assert_eq!(events.len(), 1);
@@ -6889,7 +7456,7 @@ mod tests {
     #[test]
     fn room_action_rhythm_on() {
         let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
-        let result = do_room_action(&state, "room1", "rhythm_on", false);
+        let result = do_node_action(&state, "room1", "rhythm_on", false);
         assert!(result.is_ok());
         let events = runtime.events();
         assert_eq!(events.len(), 1);
@@ -6899,7 +7466,7 @@ mod tests {
     #[test]
     fn room_action_rhythm_off() {
         let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
-        let result = do_room_action(&state, "room1", "rhythm_off", false);
+        let result = do_node_action(&state, "room1", "rhythm_off", false);
         assert!(result.is_ok());
         let events = runtime.events();
         assert_eq!(events.len(), 1);
@@ -6909,7 +7476,7 @@ mod tests {
     #[test]
     fn room_action_unknown() {
         let (state, _runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
-        let result = do_room_action(&state, "room1", "nonsense", false);
+        let result = do_node_action(&state, "room1", "nonsense", false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unknown action"));
     }
@@ -6917,7 +7484,7 @@ mod tests {
     #[test]
     fn room_action_no_runtime() {
         let state: SharedState = Arc::new(Mutex::new(AppState::default()));
-        let result = do_room_action(&state, "room1", "on", false);
+        let result = do_node_action(&state, "room1", "on", false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No runtime"));
     }
@@ -7175,7 +7742,7 @@ mod tests {
 
     #[cfg(feature = "desktop")]
     #[test]
-    fn build_room_state_event_marks_active_mode_transition() {
+    fn build_node_state_event_marks_active_mode_transition() {
         let (state, rt) = setup_state(vec![make_snapshot("r1", false, false)]);
         state
             .lock()
@@ -7189,9 +7756,10 @@ mod tests {
                 periodic_resume_at: std::time::Instant::now() + std::time::Duration::from_secs(5),
             },
         );
-        let snap = rt.engine_room_snapshot("r1").unwrap();
+        let snap =
+            rhythm_core::NodeSnapshot::from_room_snapshot(rt.engine_room_snapshot("r1").unwrap());
 
-        let event = build_room_state_event(&state, &snap);
+        let event = build_node_state_event(&state, &snap);
         let json = serde_json::to_value(&event).unwrap();
 
         assert!(event.transitioning);
@@ -7200,12 +7768,13 @@ mod tests {
 
     #[cfg(feature = "desktop")]
     #[test]
-    fn build_room_state_event_includes_hub_types_from_topology() {
+    fn build_node_state_event_includes_hub_types_from_topology() {
         let (state, rt) = setup_state(vec![make_snapshot("r1", false, false)]);
         add_topology_room(&state, "r1", &["matter", "mock"]);
-        let snap = rt.engine_room_snapshot("r1").unwrap();
+        let snap =
+            rhythm_core::NodeSnapshot::from_room_snapshot(rt.engine_room_snapshot("r1").unwrap());
 
-        let event = build_room_state_event(&state, &snap);
+        let event = build_node_state_event(&state, &snap);
         let json = serde_json::to_value(&event).unwrap();
 
         assert_eq!(event.hub_types, vec!["matter", "mock"]);
@@ -7228,7 +7797,7 @@ mod tests {
     #[test]
     fn room_action_response_is_valid_room_state_json() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
-        let result = do_room_action(&state, "r1", "on", false).unwrap();
+        let result = do_node_action(&state, "r1", "on", false).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         // Must be a room state object — has id, rhythm_enabled, etc.
         assert_eq!(parsed["id"], "r1");
@@ -7859,6 +8428,123 @@ mod tests {
     }
 
     #[test]
+    fn configuration_reset_clears_installation_state_and_stale_storage() {
+        let (state, _rt) = setup_state_with_registry(vec![make_snapshot("r1", false, false)]);
+        let storage = TestStorage::default();
+        let hub_key = state.lock().unwrap().hubs.keys().next().cloned().unwrap();
+
+        state.lock().unwrap().storage = Some(Box::new(storage.clone()));
+
+        let canonical_id = insert_canonical_device(
+            &state,
+            hub_key.clone(),
+            "native-light-1",
+            "Desk",
+            "r1",
+            "R1",
+        );
+        add_topology_room(&state, "r1", &["mock"]);
+        {
+            let mut s = state.lock().unwrap();
+            s.hub_credentials.insert(
+                hub_key.clone(),
+                HubCredentials::new("mock", "mock", serde_json::json!({"token": "abc"})),
+            );
+            s.hub_connection_status.insert(hub_key.clone(), true);
+            s.hub_sync_in_progress.insert(hub_key.clone());
+            s.hub_reconnect_sync_at
+                .insert(hub_key.clone(), std::time::Instant::now());
+            s.latitude = Some(40.7128);
+            s.longitude = Some(-74.0060);
+            s.utc_offset_hours = -5.0;
+            s.timezone_name = Some("America/New_York".into());
+            s.room_lights_on.insert("r1".into(), true);
+            s.pending_periodic_ticks.insert("r1".into(), 12.0);
+            s.pending_motion_clear.push("r1".into());
+            s.pending_motion_seed.push(("sensor-1".into(), "r1".into()));
+            s.canonical_registry.queue_unassigned(&canonical_id, 1000);
+        }
+
+        storage
+            .save_hub_registry_for(&hub_key, &serde_json::json!({"rooms": [{"id": "r1"}]}))
+            .unwrap();
+        storage
+            .save_commissioning_wifi_credentials(&crate::provisioning::WifiCredentials {
+                ssid: "RhythmNet".into(),
+                password: "secret".into(),
+            })
+            .unwrap();
+        {
+            let s = state.lock().unwrap();
+            storage
+                .save_location(&StoredLocation {
+                    latitude: s.latitude,
+                    longitude: s.longitude,
+                    utc_offset_hours: s.utc_offset_hours,
+                    timezone_name: s.timezone_name.clone(),
+                })
+                .unwrap();
+            persist_canonical(&s);
+            persist_topology(&s);
+        }
+
+        let json = do_configuration_reset(&state).unwrap();
+        let reset_bundle: ConfigurationBundle = serde_json::from_str(&json).unwrap();
+        assert!(reset_bundle.configuration.rooms.is_empty());
+
+        let s = state.lock().unwrap();
+        assert!(s.hubs.is_empty());
+        assert!(s.hub_credentials.is_empty());
+        assert!(s.canonical_registry.device_count() == 0);
+        assert_eq!(s.canonical_registry.triage().pending_count(), 0);
+        assert_eq!(s.topology.room_count(), 0);
+        assert!(s.room_lights_on.is_empty());
+        assert!(s.pending_periodic_ticks.is_empty());
+        assert!(s.pending_hub_event_rxs.is_empty());
+        assert!(s.pending_motion_clear.is_empty());
+        assert!(s.pending_motion_seed.is_empty());
+        assert!(s.latitude.is_none());
+        assert!(s.longitude.is_none());
+        assert!(s.timezone_name.is_none());
+        assert_eq!(s.utc_offset_hours, 0.0);
+        drop(s);
+
+        let inner = storage.inner.lock().unwrap();
+        assert!(inner.hub_registries.is_empty());
+        assert!(inner.commissioning_wifi.is_none());
+        assert!(inner.hub_credentials.is_empty());
+        assert_eq!(inner.rooms.len(), 0);
+
+        let stored_location = inner
+            .location
+            .clone()
+            .expect("cleared location should persist");
+        assert!(stored_location.latitude.is_none());
+        assert!(stored_location.longitude.is_none());
+        assert!(stored_location.timezone_name.is_none());
+        assert_eq!(stored_location.utc_offset_hours, 0.0);
+
+        let stored_registry: crate::canonical::registry::CanonicalRegistry =
+            serde_json::from_value(
+                inner
+                    .canonical_registry
+                    .clone()
+                    .expect("empty canonical registry should be persisted"),
+            )
+            .unwrap();
+        assert_eq!(stored_registry.device_count(), 0);
+
+        let stored_topology: crate::topology::RoomTopologyStore = serde_json::from_value(
+            inner
+                .topology
+                .clone()
+                .expect("empty topology should be persisted"),
+        )
+        .unwrap();
+        assert_eq!(stored_topology.room_count(), 0);
+    }
+
+    #[test]
     fn build_rooms_state_uses_sse_motion_field_names() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
         state
@@ -8047,8 +8733,8 @@ mod tests {
         assert!(parsed["mode"].is_object());
         assert!(parsed["transitions"].is_array());
         assert!(parsed["profiles"].is_array());
-        assert!(parsed["rooms"].is_array());
-        assert!(parsed["rooms"][0]["transitioning"].is_boolean());
+        assert!(parsed["nodes"].is_array());
+        assert!(parsed["nodes"][0]["transitioning"].is_boolean());
         // No status wrapper
         assert!(parsed.get("status").is_none());
     }
@@ -8071,7 +8757,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
 
         assert_eq!(
-            parsed["rooms"][0]["hub_types"],
+            parsed["nodes"][0]["hub_types"],
             serde_json::json!(["matter", "mock"])
         );
     }
@@ -8090,7 +8776,7 @@ mod tests {
         let result = build_state_snapshot(&state).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
 
-        assert_eq!(parsed["rooms"][0]["transitioning"], true);
+        assert_eq!(parsed["nodes"][0]["transitioning"], true);
     }
 
     #[test]
@@ -8157,10 +8843,15 @@ mod tests {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            let periodic_node_snapshots: Vec<rhythm_core::NodeSnapshot> = periodic_room_snapshots
+                .iter()
+                .cloned()
+                .map(rhythm_core::NodeSnapshot::from_room_snapshot)
+                .collect();
             let effective_rhythm_interval_secs = crate::periodic::effective_cycle_duration(
                 &profile_registry,
                 &periodic_ctx,
-                &periodic_room_snapshots,
+                &periodic_node_snapshots,
                 std::time::Duration::from_secs(s.runtime_config.update_interval_secs),
                 s.power_save,
             )
@@ -8334,7 +9025,7 @@ mod tests {
     #[test]
     fn set_brightness_succeeds() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
-        let result = do_set_brightness(&state, "r1", 75, false);
+        let result = do_set_node_brightness(&state, "r1", 75, false);
         assert!(result.is_ok());
         // Setting brightness marks room as lights_on
         assert_eq!(state.lock().unwrap().room_lights_on.get("r1"), Some(&true));
@@ -8344,7 +9035,7 @@ mod tests {
     fn set_brightness_clamps_high() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
         // 200 should be clamped to 100
-        let result = do_set_brightness(&state, "r1", 200, false);
+        let result = do_set_node_brightness(&state, "r1", 200, false);
         assert!(result.is_ok());
     }
 
@@ -8352,14 +9043,14 @@ mod tests {
     fn set_brightness_clamps_low() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
         // 0 should be clamped to 1
-        let result = do_set_brightness(&state, "r1", 0, false);
+        let result = do_set_node_brightness(&state, "r1", 0, false);
         assert!(result.is_ok());
     }
 
     #[test]
     fn set_brightness_no_runtime_errors() {
         let state: SharedState = Arc::new(Mutex::new(AppState::default()));
-        let result = do_set_brightness(&state, "r1", 50, false);
+        let result = do_set_node_brightness(&state, "r1", 50, false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No runtime"));
     }
@@ -8371,21 +9062,21 @@ mod tests {
     #[test]
     fn set_time_offset_succeeds() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
-        let result = do_set_time_offset(&state, "r1", 30.0, false);
+        let result = do_set_node_time_offset(&state, "r1", 30.0, false);
         assert!(result.is_ok());
     }
 
     #[test]
     fn set_time_offset_negative() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
-        let result = do_set_time_offset(&state, "r1", -60.0, false);
+        let result = do_set_node_time_offset(&state, "r1", -60.0, false);
         assert!(result.is_ok());
     }
 
     #[test]
     fn set_time_offset_no_runtime_errors() {
         let state: SharedState = Arc::new(Mutex::new(AppState::default()));
-        let result = do_set_time_offset(&state, "r1", 15.0, false);
+        let result = do_set_node_time_offset(&state, "r1", 15.0, false);
         assert!(result.is_err());
     }
 
@@ -8397,7 +9088,7 @@ mod tests {
     fn room_preferences_rhythm_enabled() {
         let snap = make_snapshot("r1", false, false);
         let (state, _rt) = setup_state(vec![snap]);
-        let result = do_room_preferences_set(&state, "r1", Some(true), None, None, None, false);
+        let result = do_node_preferences_set(&state, "r1", Some(true), None, None, None, false);
         assert!(result.is_ok());
     }
 
@@ -8407,7 +9098,7 @@ mod tests {
         let mut snap = make_snapshot("r1", false, false);
         snap.rhythm_enabled = false;
         let (state, _rt) = setup_state(vec![snap]);
-        let result = do_room_preferences_set(
+        let result = do_node_preferences_set(
             &state,
             "r1",
             Some(false),
@@ -8425,7 +9116,7 @@ mod tests {
     fn room_preferences_missing_room_errors() {
         let (state, _rt) = setup_state(vec![]);
         let result =
-            do_room_preferences_set(&state, "nonexistent", Some(true), None, None, None, false);
+            do_node_preferences_set(&state, "nonexistent", Some(true), None, None, None, false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
@@ -8445,7 +9136,7 @@ mod tests {
             },
         );
 
-        let result = do_room_preferences_set(
+        let result = do_node_preferences_set(
             &state,
             "r1",
             None,
@@ -9252,11 +9943,83 @@ mod tests {
     }
 
     #[test]
+    fn triage_new_device_without_room_creates_standalone_topology_node() {
+        let (state, _runtime) = setup_state(vec![]);
+        {
+            let mut s = state.lock().unwrap();
+            s.canonical_registry
+                .triage_mut()
+                .add(crate::canonical::triage::TriageEntry {
+                    id: "td1".to_string(),
+                    kind: crate::canonical::triage::TriageKind::DeviceMerge,
+                    discovered: crate::canonical::triage::TriageDiscoveredDevice {
+                        native_id: "matter-standalone-1".to_string(),
+                        name: "Desk Lamp".to_string(),
+                        device_type: DeviceType::Light,
+                        room_id: String::new(),
+                        room_name: String::new(),
+                        manufacturer: None,
+                        model: None,
+                    },
+                    hub_key: HubKey::new(HubType::new("matter"), "local"),
+                    candidate_matches: vec![],
+                    room_binding: None,
+                    confidence: 80,
+                    status: crate::canonical::triage::TriageStatus::Pending,
+                    resolved_by: None,
+                    created_at: 1000,
+                    resolved_at: None,
+                    canonical_id: None,
+                });
+        }
+
+        let result = do_triage_new_device(&state, "td1").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let canonical_id = parsed["canonical_id"].as_str().unwrap();
+
+        let s = state.lock().unwrap();
+        let node = s
+            .topology
+            .get_device_node(canonical_id)
+            .expect("standalone topology device node should exist");
+        assert_eq!(node.parent_id, None);
+        assert_eq!(node.placement, crate::topology::DevicePlacement::Standalone);
+        assert_eq!(
+            s.canonical_registry.get(canonical_id).unwrap().room_id,
+            None
+        );
+    }
+
+    #[test]
+    fn topology_set_motion_control_target_clears_old_and_new_targets() {
+        let (state, _runtime) = setup_state(vec![]);
+        add_topology_room(&state, "room1", &[]);
+        add_topology_room(&state, "room2", &[]);
+        {
+            let mut s = state.lock().unwrap();
+            assert!(s.topology.attach_device_user_override("room1", "sensor-1"));
+        }
+
+        do_topology_set_control_target(&state, "sensor-1", NodeControlKind::Motion, Some("room2"))
+            .unwrap();
+
+        let s = state.lock().unwrap();
+        assert_eq!(
+            s.topology
+                .explicit_control_target("sensor-1", &NodeControlKind::Motion),
+            Some("room2")
+        );
+        assert_eq!(
+            s.pending_motion_clear,
+            vec!["room1".to_string(), "room2".to_string()]
+        );
+    }
+
+    #[test]
     fn canonical_assign_room_initializes_runtime_for_roomless_matter() {
         let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
         let room_id = state.lock().unwrap().topology.create_room("Office");
-        let device_id =
-            insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+        let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
 
         do_canonical_assign_room(&state, &device_id, Some(&room_id)).unwrap();
 
@@ -9316,12 +10079,10 @@ mod tests {
         assert_eq!(device.room_id.as_deref(), Some("room-1"));
         assert_eq!(s.canonical_registry.triage().pending_unassigned_count(), 0);
         assert!(
-            room.hub_targets.iter().any(|target| {
-                target.hub_key == hub_key
-                    && target.hub_room_id == "matter-device-1"
-                    && target.light_device_ids == vec!["matter-device-1".to_string()]
-            }),
-            "assigned device should become a hub target in the target room"
+            room.devices
+                .iter()
+                .any(|room_device| room_device.device_id == device_id),
+            "assigned device should be tracked in topology room membership"
         );
     }
 }

@@ -13,17 +13,17 @@
 //! - ONE `RhythmEngine` runtime with a `CompositeController` implementing
 //!   `LightController` (in rhythm-core)
 //! - `CompositeController` holds per-hub controllers keyed by `HubKey`
-//! - `turn_on(room_id, cmd)` → look up `TopologyRoom::hub_targets` → fan out
-//!   to each hub's controller via `HubControlTarget`
+//! - `turn_on(room_id, cmd)` → look up topology-derived dispatch routes
+//!   rebuilt from source room bindings + canonical room membership
 //! - `any_lights_on(room_id)` → OR across all hub controllers
-//! - `HubControlTarget::topology_aligned` determines whether the controller
-//!   can use efficient grouped commands or must fall back to per-device
-//!   addressing
+//! - Source room bindings remain authoritative for sync/triage/translation
+//! - Dispatch targets are explicit: grouped hub control or direct device lists
 //! - Room IDs are server-assigned (topology room IDs), not hub-native
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use log::{debug, info};
+use rhythm_core::{runtime::hub_registry::DeviceType, HubDispatchTarget};
 use serde::{Deserialize, Serialize};
 
 use crate::canonical::identity::HubKey;
@@ -36,6 +36,38 @@ pub enum DevicePlacement {
     HubDefault,
     /// User explicitly placed this device here — survives re-sync.
     UserOverride,
+    /// Device exists first-class without a parent room.
+    Standalone,
+}
+
+/// Generic node-to-node control relationships.
+///
+/// This is the topology-level control graph used to resolve automation and
+/// input behavior without assuming that every target is a room.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeControlKind {
+    Motion,
+    Button,
+    Switch,
+}
+
+impl NodeControlKind {
+    pub const fn default_for_device_type(device_type: &DeviceType) -> Option<Self> {
+        match device_type {
+            DeviceType::Motion => Some(Self::Motion),
+            DeviceType::Button => Some(Self::Button),
+            DeviceType::Light => None,
+        }
+    }
+}
+
+/// Persisted explicit control override from one topology node to another.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeControlLink {
+    pub source_id: String,
+    pub target_id: String,
+    pub kind: NodeControlKind,
 }
 
 /// A device assigned to a Rhythm room.
@@ -47,32 +79,35 @@ pub struct RoomDevice {
     pub placement: DevicePlacement,
 }
 
-/// A hub-specific control target for a Rhythm room.
-///
-/// Each hub that has lights in a Rhythm room gets a control target. The
-/// composite controller uses these to fan out commands to multiple hubs.
+/// A first-class device node in the topology graph.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HubControlTarget {
-    /// Which hub instance this target routes to.
+pub struct TopologyDeviceNode {
+    /// Stable topology node ID. Uses the canonical device ID.
+    pub id: String,
+    /// Canonical device ID.
+    pub canonical_device_id: String,
+    /// Optional parent room ID when attached into a room.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// How this device ended up where it is.
+    pub placement: DevicePlacement,
+}
+
+/// A discovered source room bound into a topology room.
+///
+/// This is the authoritative source-side mapping used for room sync, triage,
+/// reverse lookups, and topology persistence. It is not itself the dispatch
+/// model; dispatch targets are rebuilt from canonical room membership.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HubRoomBinding {
+    /// Which hub instance this source room belongs to.
     pub hub_key: HubKey,
     /// Hub-native room ID (Hue room UUID, HA area_id).
     pub hub_room_id: String,
-    /// Hub-native control ID (Hue `grouped_light` resource, HA area_id).
+    /// Hub-native grouped control target (Hue grouped_light, HA area_id).
     pub control_id: String,
-    /// Light device IDs on this hub for `any_lights_on` checks.
+    /// Hub-native light device IDs currently reported in this source room.
     pub light_device_ids: Vec<String>,
-    /// Whether this target's device membership still matches the canonical room.
-    ///
-    /// `true` means the hub-native room grouping matches the Rhythm room — the
-    /// composite controller can use efficient grouped commands. `false` means a
-    /// user moved devices, so the controller must fall back to per-device
-    /// addressing via `DeviceAddressable`.
-    #[serde(default = "default_true")]
-    pub topology_aligned: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// A Rhythm room — independent of any hub's room hierarchy.
@@ -82,9 +117,9 @@ pub struct TopologyRoom {
     pub id: String,
     /// User-overridable display name.
     pub name: String,
-    /// Hub control targets — one per hub that has lights in this room.
-    pub hub_targets: Vec<HubControlTarget>,
-    /// Devices assigned to this room.
+    /// Bound source rooms from connected hubs.
+    pub hub_room_bindings: Vec<HubRoomBinding>,
+    /// Canonical devices assigned to this room.
     pub devices: Vec<RoomDevice>,
     /// Whether the user has customized this room (rename, merge, split, move devices).
     #[serde(default)]
@@ -94,6 +129,41 @@ pub struct TopologyRoom {
     pub bootstrap_name: Option<String>,
 }
 
+/// A schedulable light-control node derived from topology membership.
+///
+/// Public APIs and persistence remain room-centric. These nodes are internal
+/// runtime addresses used for periodic scheduling and typed composite routing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TopologyLightNode {
+    /// Stable internal routing/scheduler identifier.
+    pub id: String,
+    /// Owning settings node ID whose state this target inherits.
+    pub source_node_id: String,
+    /// Public node ID whose state updates should be emitted after the tick.
+    pub emit_node_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TopologyLightNodeRoute {
+    node: TopologyLightNode,
+    hub_key: HubKey,
+    target: HubDispatchTarget,
+}
+
+#[derive(Clone, Debug, Default)]
+struct DispatchPlan {
+    room_targets: Vec<(HubKey, HubDispatchTarget)>,
+    node_routes: Vec<TopologyLightNodeRoute>,
+}
+
+const INTERNAL_LIGHT_NODE_PREFIX: &str = "__rhythm_light_node__";
+
+fn group_light_node_id(room_id: &str, hub_key: &HubKey, hub_room_id: &str) -> String {
+    format!(
+        "{INTERNAL_LIGHT_NODE_PREFIX}|room={room_id}|kind=group|hub={hub_key}|source={hub_room_id}"
+    )
+}
+
 impl TopologyRoom {
     /// Create a new empty room.
     pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
@@ -101,46 +171,48 @@ impl TopologyRoom {
         Self {
             id: id.into(),
             name: name.clone(),
-            hub_targets: Vec::new(),
+            hub_room_bindings: Vec::new(),
             devices: Vec::new(),
             user_customized: false,
             bootstrap_name: Some(name),
         }
     }
 
-    /// Find a hub target by hub key.
-    pub fn target_for_hub(&self, hub_key: &HubKey) -> Option<&HubControlTarget> {
-        self.hub_targets.iter().find(|t| &t.hub_key == hub_key)
+    /// Find a source room binding by hub key.
+    pub fn binding_for_hub(&self, hub_key: &HubKey) -> Option<&HubRoomBinding> {
+        self.hub_room_bindings
+            .iter()
+            .find(|t| &t.hub_key == hub_key)
     }
 
-    /// Find a hub target by hub room ID.
-    pub fn target_for_hub_room(
+    /// Find a source room binding by hub room ID.
+    pub fn binding_for_hub_room(
         &self,
         hub_key: &HubKey,
         hub_room_id: &str,
-    ) -> Option<&HubControlTarget> {
-        self.hub_targets
+    ) -> Option<&HubRoomBinding> {
+        self.hub_room_bindings
             .iter()
             .find(|t| &t.hub_key == hub_key && t.hub_room_id == hub_room_id)
     }
 
-    /// Add or update a hub control target.
-    pub fn upsert_hub_target(&mut self, target: HubControlTarget) {
+    /// Add or update a source room binding.
+    pub fn upsert_hub_room_binding(&mut self, binding: HubRoomBinding) {
         if let Some(existing) = self
-            .hub_targets
+            .hub_room_bindings
             .iter_mut()
-            .find(|t| t.hub_key == target.hub_key && t.hub_room_id == target.hub_room_id)
+            .find(|t| t.hub_key == binding.hub_key && t.hub_room_id == binding.hub_room_id)
         {
-            existing.control_id = target.control_id;
-            existing.light_device_ids = target.light_device_ids;
+            existing.control_id = binding.control_id;
+            existing.light_device_ids = binding.light_device_ids;
         } else {
-            self.hub_targets.push(target);
+            self.hub_room_bindings.push(binding);
         }
     }
 
-    /// Remove a hub target.
-    pub fn remove_hub_target(&mut self, hub_key: &HubKey, hub_room_id: &str) {
-        self.hub_targets
+    /// Remove a source room binding.
+    pub fn remove_hub_room_binding(&mut self, hub_key: &HubKey, hub_room_id: &str) {
+        self.hub_room_bindings
             .retain(|t| !(&t.hub_key == hub_key && t.hub_room_id == hub_room_id));
     }
 
@@ -178,14 +250,151 @@ impl TopologyRoom {
             .retain(|d| d.placement == DevicePlacement::UserOverride);
     }
 
-    /// Check if this room has any hub targets.
-    pub fn has_targets(&self) -> bool {
-        !self.hub_targets.is_empty()
+    /// Check if this room has any source room bindings.
+    pub fn has_bindings(&self) -> bool {
+        !self.hub_room_bindings.is_empty()
     }
 
     /// Check if this room has devices.
     pub fn has_devices(&self) -> bool {
         !self.devices.is_empty()
+    }
+
+    fn preferred_light_endpoints_by_hub(
+        &self,
+        canonical_registry: &crate::canonical::registry::CanonicalRegistry,
+    ) -> HashMap<HubKey, HashMap<String, String>> {
+        let mut by_hub: HashMap<HubKey, HashMap<String, String>> = HashMap::new();
+        for room_device in &self.devices {
+            let Some(device) = canonical_registry.get(&room_device.device_id) else {
+                continue;
+            };
+            if device.device_type != DeviceType::Light {
+                continue;
+            }
+            let Some(endpoint) = device.preferred_endpoint() else {
+                continue;
+            };
+            by_hub
+                .entry(endpoint.hub_key.clone())
+                .or_default()
+                .insert(endpoint.native_id.clone(), room_device.device_id.clone());
+        }
+        by_hub
+    }
+
+    fn dispatch_plan(
+        &self,
+        canonical_registry: &crate::canonical::registry::CanonicalRegistry,
+    ) -> DispatchPlan {
+        let mut plan = DispatchPlan::default();
+        let preferred_light_endpoints = self.preferred_light_endpoints_by_hub(canonical_registry);
+
+        if preferred_light_endpoints.is_empty() {
+            let mut bindings = self.hub_room_bindings.clone();
+            bindings.sort_by(|left, right| {
+                left.hub_key
+                    .to_string()
+                    .cmp(&right.hub_key.to_string())
+                    .then_with(|| left.hub_room_id.cmp(&right.hub_room_id))
+            });
+            for binding in bindings {
+                if binding.light_device_ids.is_empty() {
+                    continue;
+                }
+                let target = HubDispatchTarget::Group {
+                    room_id: binding.hub_room_id.clone(),
+                    control_id: binding.control_id.clone(),
+                };
+                plan.room_targets
+                    .push((binding.hub_key.clone(), target.clone()));
+                plan.node_routes.push(TopologyLightNodeRoute {
+                    node: TopologyLightNode {
+                        id: group_light_node_id(&self.id, &binding.hub_key, &binding.hub_room_id),
+                        source_node_id: self.id.clone(),
+                        emit_node_id: self.id.clone(),
+                    },
+                    hub_key: binding.hub_key,
+                    target,
+                });
+            }
+            return plan;
+        }
+
+        let mut assigned_by_hub: Vec<_> = preferred_light_endpoints.into_iter().collect();
+        assigned_by_hub.sort_by(|left, right| left.0.to_string().cmp(&right.0.to_string()));
+
+        for (hub_key, mut remaining_ids) in assigned_by_hub {
+            let mut bindings: Vec<_> = self
+                .hub_room_bindings
+                .iter()
+                .filter(|binding| binding.hub_key == hub_key)
+                .collect();
+            bindings.sort_by(|left, right| left.hub_room_id.cmp(&right.hub_room_id));
+
+            for binding in bindings {
+                if binding.light_device_ids.is_empty() {
+                    continue;
+                }
+                if binding
+                    .light_device_ids
+                    .iter()
+                    .all(|native_id| remaining_ids.contains_key(native_id))
+                {
+                    let target = HubDispatchTarget::Group {
+                        room_id: binding.hub_room_id.clone(),
+                        control_id: binding.control_id.clone(),
+                    };
+                    plan.room_targets.push((hub_key.clone(), target.clone()));
+                    plan.node_routes.push(TopologyLightNodeRoute {
+                        node: TopologyLightNode {
+                            id: group_light_node_id(&self.id, &hub_key, &binding.hub_room_id),
+                            source_node_id: self.id.clone(),
+                            emit_node_id: self.id.clone(),
+                        },
+                        hub_key: hub_key.clone(),
+                        target,
+                    });
+                    for native_id in &binding.light_device_ids {
+                        remaining_ids.remove(native_id);
+                    }
+                }
+            }
+
+            if !remaining_ids.is_empty() {
+                let mut device_targets: Vec<_> = remaining_ids.into_iter().collect();
+                device_targets
+                    .sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
+
+                let mut native_ids: Vec<_> = device_targets
+                    .iter()
+                    .map(|(native_id, _)| native_id.clone())
+                    .collect();
+                native_ids.sort();
+                plan.room_targets.push((
+                    hub_key.clone(),
+                    HubDispatchTarget::Devices {
+                        native_ids: native_ids.clone(),
+                    },
+                ));
+
+                for (native_id, device_id) in device_targets {
+                    plan.node_routes.push(TopologyLightNodeRoute {
+                        node: TopologyLightNode {
+                            id: device_id.clone(),
+                            source_node_id: device_id.clone(),
+                            emit_node_id: self.id.clone(),
+                        },
+                        hub_key: hub_key.clone(),
+                        target: HubDispatchTarget::Devices {
+                            native_ids: vec![native_id],
+                        },
+                    });
+                }
+            }
+        }
+
+        plan
     }
 }
 
@@ -224,6 +433,12 @@ pub struct RoomBindingRecord {
 pub struct RoomTopologyStore {
     /// All Rhythm rooms, keyed by Rhythm room UUID.
     rooms: HashMap<String, TopologyRoom>,
+    /// First-class device nodes keyed by canonical/topology device ID.
+    #[serde(default)]
+    device_nodes: HashMap<String, TopologyDeviceNode>,
+    /// Explicit node-to-node control overrides.
+    #[serde(default)]
+    control_links: Vec<NodeControlLink>,
     /// Approved cross-hub room bindings (survives re-sync).
     #[serde(default)]
     approved_bindings: Vec<RoomBindingRecord>,
@@ -236,6 +451,8 @@ impl RoomTopologyStore {
     pub fn new() -> Self {
         Self {
             rooms: HashMap::new(),
+            device_nodes: HashMap::new(),
+            control_links: Vec::new(),
             approved_bindings: Vec::new(),
             hub_room_index: HashMap::new(),
         }
@@ -245,12 +462,171 @@ impl RoomTopologyStore {
     pub fn rebuild_indices(&mut self) {
         self.hub_room_index.clear();
         for (room_id, room) in &self.rooms {
-            for target in &room.hub_targets {
+            for binding in &room.hub_room_bindings {
                 self.hub_room_index.insert(
-                    (target.hub_key.to_string(), target.hub_room_id.clone()),
+                    (binding.hub_key.to_string(), binding.hub_room_id.clone()),
                     room_id.clone(),
                 );
             }
+        }
+        self.rebuild_room_device_projections();
+    }
+
+    fn rebuild_room_device_projections(&mut self) {
+        for room in self.rooms.values_mut() {
+            room.devices.clear();
+        }
+
+        let mut device_ids: Vec<_> = self.device_nodes.keys().cloned().collect();
+        device_ids.sort();
+        for device_id in device_ids {
+            let Some(node) = self.device_nodes.get(&device_id) else {
+                continue;
+            };
+            let Some(parent_id) = node.parent_id.as_deref() else {
+                continue;
+            };
+            let Some(room) = self.rooms.get_mut(parent_id) else {
+                continue;
+            };
+            room.devices.push(RoomDevice {
+                device_id: node.canonical_device_id.clone(),
+                placement: node.placement.clone(),
+            });
+        }
+
+        let valid_public_nodes: std::collections::HashSet<String> = self
+            .rooms
+            .keys()
+            .cloned()
+            .chain(self.device_nodes.keys().cloned())
+            .collect();
+        self.control_links.retain(|link| {
+            valid_public_nodes.contains(&link.source_id)
+                && valid_public_nodes.contains(&link.target_id)
+        });
+    }
+
+    pub fn has_public_node(&self, node_id: &str) -> bool {
+        self.rooms.contains_key(node_id) || self.device_nodes.contains_key(node_id)
+    }
+
+    fn upsert_device_node(
+        &mut self,
+        canonical_device_id: &str,
+        parent_id: Option<String>,
+        placement: DevicePlacement,
+    ) {
+        self.device_nodes.insert(
+            canonical_device_id.to_string(),
+            TopologyDeviceNode {
+                id: canonical_device_id.to_string(),
+                canonical_device_id: canonical_device_id.to_string(),
+                parent_id,
+                placement,
+            },
+        );
+    }
+
+    fn set_device_node_placement(
+        &mut self,
+        canonical_device_id: &str,
+        parent_id: Option<&str>,
+        placement: DevicePlacement,
+        create_if_missing: bool,
+    ) -> bool {
+        if let Some(room_id) = parent_id {
+            if self.rooms.get(room_id).is_none() {
+                return false;
+            }
+        }
+
+        let existing_parent_id = match self.device_nodes.get(canonical_device_id) {
+            Some(node) => node.parent_id.clone(),
+            None if create_if_missing => {
+                self.upsert_device_node(
+                    canonical_device_id,
+                    parent_id.map(str::to_string),
+                    if parent_id.is_some() {
+                        placement.clone()
+                    } else {
+                        DevicePlacement::Standalone
+                    },
+                );
+                if placement == DevicePlacement::UserOverride {
+                    if let Some(room_id) = parent_id {
+                        if let Some(room) = self.rooms.get_mut(room_id) {
+                            room.user_customized = true;
+                        }
+                    }
+                }
+                self.rebuild_room_device_projections();
+                return true;
+            }
+            None => return false,
+        };
+
+        let effective_placement = if parent_id.is_some() {
+            placement.clone()
+        } else {
+            DevicePlacement::Standalone
+        };
+        if let Some(node) = self.device_nodes.get_mut(canonical_device_id) {
+            node.parent_id = parent_id.map(str::to_string);
+            node.placement = effective_placement;
+        }
+
+        if placement == DevicePlacement::UserOverride {
+            if let Some(room_id) = existing_parent_id.as_deref() {
+                if let Some(room) = self.rooms.get_mut(room_id) {
+                    room.user_customized = true;
+                }
+            }
+            if let Some(room_id) = parent_id {
+                if let Some(room) = self.rooms.get_mut(room_id) {
+                    room.user_customized = true;
+                }
+            }
+        }
+
+        self.rebuild_room_device_projections();
+        true
+    }
+
+    fn sync_hub_default_device_for_room(&mut self, room_id: &str, canonical_device_id: &str) {
+        match self.device_nodes.get_mut(canonical_device_id) {
+            Some(node) if node.placement != DevicePlacement::HubDefault => {}
+            Some(node) => {
+                node.parent_id = Some(room_id.to_string());
+                node.placement = DevicePlacement::HubDefault;
+            }
+            None => {
+                self.upsert_device_node(
+                    canonical_device_id,
+                    Some(room_id.to_string()),
+                    DevicePlacement::HubDefault,
+                );
+            }
+        }
+    }
+
+    fn detach_hub_default_devices_for_room(
+        &mut self,
+        room_id: &str,
+        keep_device_ids: &HashSet<String>,
+    ) {
+        for node in self.device_nodes.values_mut() {
+            if node.parent_id.as_deref() != Some(room_id) {
+                continue;
+            }
+            if node.placement != DevicePlacement::HubDefault {
+                continue;
+            }
+            if keep_device_ids.contains(&node.canonical_device_id) {
+                continue;
+            }
+            node.parent_id = None;
+            node.placement = DevicePlacement::Standalone;
         }
     }
 
@@ -262,7 +638,7 @@ impl RoomTopologyStore {
     ///    a. Previously-approved binding → re-bind silently
     ///    b. No approval → create separate room + return `CreatedWithProposal`
     /// 3. No match → create new Rhythm room
-    /// 4. (Stale removal done separately via `remove_stale_targets`)
+    /// 4. (Stale removal done separately via `remove_stale_bindings`)
     pub fn sync_hub_room(
         &mut self,
         hub_key: &HubKey,
@@ -280,7 +656,7 @@ impl RoomTopologyStore {
             let freshly_created = self
                 .rooms
                 .get(&rhythm_room_id)
-                .map(|room| room.hub_targets.len() == 1 && room.devices.is_empty())
+                .map(|room| room.hub_room_bindings.len() == 1 && room.devices.is_empty())
                 .unwrap_or(false);
 
             if freshly_created {
@@ -296,7 +672,7 @@ impl RoomTopologyStore {
                                     .as_ref()
                                     .map(|n| n.to_lowercase() == name_lower)
                                     .unwrap_or(false))
-                            && room.target_for_hub(hub_key).is_none()
+                            && room.binding_for_hub(hub_key).is_none()
                     })
                     .map(|(id, room)| (id.clone(), room.name.clone()))
                     .collect();
@@ -312,19 +688,22 @@ impl RoomTopologyStore {
                     if let Some(binding) = approved {
                         let target_id = binding.rhythm_room_id.clone();
                         if let Some(target_room) = self.rooms.get_mut(&target_id) {
-                            target_room.upsert_hub_target(HubControlTarget {
+                            target_room.upsert_hub_room_binding(HubRoomBinding {
                                 hub_key: hub_key.clone(),
                                 hub_room_id: discovered.hub_room_id.clone(),
                                 control_id: discovered.control_id.clone(),
                                 light_device_ids: discovered.light_device_ids.clone(),
-                                topology_aligned: true,
                             });
+                            let keep_device_ids: HashSet<String> =
+                                discovered.canonical_device_ids.iter().cloned().collect();
+                            self.detach_hub_default_devices_for_room(&target_id, &keep_device_ids);
                             for dev_id in &discovered.canonical_device_ids {
-                                target_room.add_device_hub_default(dev_id);
+                                self.sync_hub_default_device_for_room(&target_id, dev_id);
                             }
                             // Remove the duplicate room created by translate_or_create
                             self.rooms.remove(&rhythm_room_id);
                             self.hub_room_index.insert(index_key, target_id.clone());
+                            self.rebuild_room_device_projections();
                             info!(target: "topology",
                                 "Re-applied approved binding (freshly created): hub room '{}' → Rhythm room '{}' ({})",
                                 discovered.name, binding.rhythm_room_id, target_id
@@ -337,24 +716,23 @@ impl RoomTopologyStore {
 
                     // Rule 2b path: update the freshly-created room, return proposal
                     if let Some(room) = self.rooms.get_mut(&rhythm_room_id) {
-                        room.upsert_hub_target(HubControlTarget {
+                        room.upsert_hub_room_binding(HubRoomBinding {
                             hub_key: hub_key.clone(),
                             hub_room_id: discovered.hub_room_id.clone(),
                             control_id: discovered.control_id.clone(),
                             light_device_ids: discovered.light_device_ids.clone(),
-                            topology_aligned: true,
                         });
-                        room.devices.retain(|d| {
-                            d.placement == DevicePlacement::UserOverride
-                                || discovered.canonical_device_ids.contains(&d.device_id)
-                        });
-                        for dev_id in &discovered.canonical_device_ids {
-                            room.add_device_hub_default(dev_id);
-                        }
                         if !room.user_customized {
                             room.name = discovered.name.clone();
                         }
                     }
+                    let keep_device_ids: HashSet<String> =
+                        discovered.canonical_device_ids.iter().cloned().collect();
+                    self.detach_hub_default_devices_for_room(&rhythm_room_id, &keep_device_ids);
+                    for dev_id in &discovered.canonical_device_ids {
+                        self.sync_hub_default_device_for_room(&rhythm_room_id, dev_id);
+                    }
+                    self.rebuild_room_device_projections();
 
                     let (proposed_id, proposed_name) = name_matches[0].clone();
                     info!(target: "topology",
@@ -373,30 +751,28 @@ impl RoomTopologyStore {
             // Normal Rule 1 update (established room from previous sync)
             if let Some(room) = self.rooms.get_mut(&rhythm_room_id) {
                 // Update the target
-                room.upsert_hub_target(HubControlTarget {
+                room.upsert_hub_room_binding(HubRoomBinding {
                     hub_key: hub_key.clone(),
                     hub_room_id: discovered.hub_room_id.clone(),
                     control_id: discovered.control_id.clone(),
                     light_device_ids: discovered.light_device_ids.clone(),
-                    topology_aligned: true,
                 });
-
-                // Update HubDefault devices (don't touch UserOverride)
-                room.devices.retain(|d| {
-                    d.placement == DevicePlacement::UserOverride
-                        || discovered.canonical_device_ids.contains(&d.device_id)
-                });
-                for dev_id in &discovered.canonical_device_ids {
-                    room.add_device_hub_default(dev_id);
-                }
 
                 if !room.user_customized {
                     room.name = discovered.name.clone();
                 }
-
-                debug!(target: "topology", "Updated room '{}' ({})", room.name, rhythm_room_id);
-                return SyncAction::Updated { rhythm_room_id };
             }
+            let keep_device_ids: HashSet<String> =
+                discovered.canonical_device_ids.iter().cloned().collect();
+            self.detach_hub_default_devices_for_room(&rhythm_room_id, &keep_device_ids);
+            for dev_id in &discovered.canonical_device_ids {
+                self.sync_hub_default_device_for_room(&rhythm_room_id, dev_id);
+            }
+            self.rebuild_room_device_projections();
+            if let Some(room) = self.rooms.get(&rhythm_room_id) {
+                debug!(target: "topology", "Updated room '{}' ({})", room.name, rhythm_room_id);
+            }
+            return SyncAction::Updated { rhythm_room_id };
         }
 
         // Rule 2: Name match against existing rooms (room not yet in hub_room_index)
@@ -411,7 +787,7 @@ impl RoomTopologyStore {
                     .map(|n| n.to_lowercase() == name_lower)
                     .unwrap_or(false);
                 let matches_name = room.name.to_lowercase() == name_lower;
-                (matches_bootstrap || matches_name) && room.target_for_hub(hub_key).is_none()
+                (matches_bootstrap || matches_name) && room.binding_for_hub(hub_key).is_none()
             })
             .map(|(id, room)| (id.clone(), room.name.clone()))
             .collect();
@@ -426,23 +802,26 @@ impl RoomTopologyStore {
             if let Some(binding) = approved {
                 let target_id = binding.rhythm_room_id.clone();
                 if let Some(room) = self.rooms.get_mut(&target_id) {
-                    room.upsert_hub_target(HubControlTarget {
+                    let room_name = room.name.clone();
+                    room.upsert_hub_room_binding(HubRoomBinding {
                         hub_key: hub_key.clone(),
                         hub_room_id: discovered.hub_room_id.clone(),
                         control_id: discovered.control_id.clone(),
                         light_device_ids: discovered.light_device_ids.clone(),
-                        topology_aligned: true,
                     });
-
+                    let _ = room;
+                    let keep_device_ids: HashSet<String> =
+                        discovered.canonical_device_ids.iter().cloned().collect();
+                    self.detach_hub_default_devices_for_room(&target_id, &keep_device_ids);
                     for dev_id in &discovered.canonical_device_ids {
-                        room.add_device_hub_default(dev_id);
+                        self.sync_hub_default_device_for_room(&target_id, dev_id);
                     }
-
                     self.hub_room_index.insert(index_key, target_id.clone());
+                    self.rebuild_room_device_projections();
 
                     info!(target: "topology",
                         "Re-applied approved binding: hub room '{}' → Rhythm room '{}' ({})",
-                        discovered.name, room.name, target_id
+                        discovered.name, room_name, target_id
                     );
                     return SyncAction::Bound {
                         rhythm_room_id: target_id,
@@ -463,21 +842,20 @@ impl RoomTopologyStore {
 
             let rhythm_room_id = super::canonical::identity::generate_uuid_public();
             let mut room = TopologyRoom::new(rhythm_room_id.clone(), &discovered.name);
-            room.upsert_hub_target(HubControlTarget {
+            room.upsert_hub_room_binding(HubRoomBinding {
                 hub_key: hub_key.clone(),
                 hub_room_id: discovered.hub_room_id.clone(),
                 control_id: discovered.control_id.clone(),
                 light_device_ids: discovered.light_device_ids.clone(),
-                topology_aligned: true,
             });
-
-            for dev_id in &discovered.canonical_device_ids {
-                room.add_device_hub_default(dev_id);
-            }
 
             self.hub_room_index
                 .insert(index_key, rhythm_room_id.clone());
             self.rooms.insert(rhythm_room_id.clone(), room);
+            for dev_id in &discovered.canonical_device_ids {
+                self.sync_hub_default_device_for_room(&rhythm_room_id, dev_id);
+            }
+            self.rebuild_room_device_projections();
 
             info!(target: "topology",
                 "Created separate room '{}' ({}) — name matches '{}', queuing binding proposal",
@@ -494,43 +872,42 @@ impl RoomTopologyStore {
         // Rule 3: Create new Rhythm room
         let rhythm_room_id = super::canonical::identity::generate_uuid_public();
         let mut room = TopologyRoom::new(rhythm_room_id.clone(), &discovered.name);
-        room.upsert_hub_target(HubControlTarget {
+        room.upsert_hub_room_binding(HubRoomBinding {
             hub_key: hub_key.clone(),
             hub_room_id: discovered.hub_room_id.clone(),
             control_id: discovered.control_id.clone(),
             light_device_ids: discovered.light_device_ids.clone(),
-            topology_aligned: true,
         });
-
-        for dev_id in &discovered.canonical_device_ids {
-            room.add_device_hub_default(dev_id);
-        }
 
         self.hub_room_index
             .insert(index_key, rhythm_room_id.clone());
         self.rooms.insert(rhythm_room_id.clone(), room);
+        for dev_id in &discovered.canonical_device_ids {
+            self.sync_hub_default_device_for_room(&rhythm_room_id, dev_id);
+        }
+        self.rebuild_room_device_projections();
 
         info!(target: "topology", "Created Rhythm room '{}' ({})", discovered.name, rhythm_room_id);
         SyncAction::Created { rhythm_room_id }
     }
 
-    /// Remove stale hub targets for a hub that no longer reports certain rooms.
+    /// Remove stale source room bindings for a hub that no longer reports certain rooms.
     ///
-    /// Rule 4: Never delete Rhythm rooms — only remove hub targets.
-    pub fn remove_stale_targets(
+    /// Rule 4: Never delete Rhythm rooms — only remove source bindings.
+    pub fn remove_stale_bindings(
         &mut self,
         hub_key: &HubKey,
         current_hub_room_ids: &[String],
     ) -> Vec<String> {
-        let current_set: std::collections::HashSet<&String> = current_hub_room_ids.iter().collect();
+        let current_set: HashSet<&String> = current_hub_room_ids.iter().collect();
         let mut affected = Vec::new();
 
         for (room_id, room) in &mut self.rooms {
-            let had_target = room.hub_targets.len();
-            room.hub_targets
+            let had_target = room.hub_room_bindings.len();
+            room.hub_room_bindings
                 .retain(|t| &t.hub_key != hub_key || current_set.contains(&t.hub_room_id));
 
-            if room.hub_targets.len() < had_target {
+            if room.hub_room_bindings.len() < had_target {
                 affected.push(room_id.clone());
             }
         }
@@ -549,20 +926,17 @@ impl RoomTopologyStore {
     /// Remove a canonical device from every topology room.
     pub fn remove_device_everywhere(&mut self, device_id: &str) -> Vec<String> {
         let mut affected = Vec::new();
-
-        for (room_id, room) in &mut self.rooms {
-            let had_devices = room.devices.len();
-            room.remove_device(device_id);
-            if room.devices.len() < had_devices {
-                affected.push(room_id.clone());
+        if let Some(node) = self.device_nodes.remove(device_id) {
+            if let Some(parent_id) = node.parent_id {
+                affected.push(parent_id);
             }
         }
-
+        self.rebuild_room_device_projections();
         affected
     }
 
-    /// Remove a hub target from every topology room and clear the room index.
-    pub fn remove_hub_target_everywhere(
+    /// Remove a source room binding from every topology room and clear the room index.
+    pub fn remove_hub_room_binding_everywhere(
         &mut self,
         hub_key: &HubKey,
         hub_room_id: &str,
@@ -570,9 +944,9 @@ impl RoomTopologyStore {
         let mut affected = Vec::new();
 
         for (room_id, room) in &mut self.rooms {
-            let had_targets = room.hub_targets.len();
-            room.remove_hub_target(hub_key, hub_room_id);
-            if room.hub_targets.len() < had_targets {
+            let had_targets = room.hub_room_bindings.len();
+            room.remove_hub_room_binding(hub_key, hub_room_id);
+            if room.hub_room_bindings.len() < had_targets {
                 affected.push(room_id.clone());
             }
         }
@@ -590,6 +964,11 @@ impl RoomTopologyStore {
         self.rooms.values()
     }
 
+    /// Get all first-class device nodes.
+    pub fn device_nodes(&self) -> impl Iterator<Item = &TopologyDeviceNode> {
+        self.device_nodes.values()
+    }
+
     /// Get a room by Rhythm room ID.
     pub fn get(&self, room_id: &str) -> Option<&TopologyRoom> {
         self.rooms.get(room_id)
@@ -598,6 +977,79 @@ impl RoomTopologyStore {
     /// Get a room by Rhythm room ID (mutable).
     pub fn get_mut(&mut self, room_id: &str) -> Option<&mut TopologyRoom> {
         self.rooms.get_mut(room_id)
+    }
+
+    /// Get a device node by topology/canonical device ID.
+    pub fn get_device_node(&self, node_id: &str) -> Option<&TopologyDeviceNode> {
+        self.device_nodes.get(node_id)
+    }
+
+    /// Get the parent room ID for a device node, if attached.
+    pub fn device_parent_room_id(&self, device_id: &str) -> Option<&str> {
+        self.device_nodes
+            .get(device_id)
+            .and_then(|node| node.parent_id.as_deref())
+    }
+
+    /// Get all persisted explicit control links.
+    pub fn control_links(&self) -> &[NodeControlLink] {
+        &self.control_links
+    }
+
+    /// Find an explicit control target for a source node and control kind.
+    pub fn explicit_control_target(&self, source_id: &str, kind: &NodeControlKind) -> Option<&str> {
+        self.control_links
+            .iter()
+            .find(|link| link.source_id == source_id && &link.kind == kind)
+            .map(|link| link.target_id.as_str())
+    }
+
+    /// Resolve the effective target for a source node and control kind.
+    ///
+    /// Explicit topology links win. If no override exists, device nodes inherit
+    /// their parent room as the default control target.
+    pub fn effective_control_target(
+        &self,
+        source_id: &str,
+        kind: &NodeControlKind,
+    ) -> Option<String> {
+        if let Some(target_id) = self.explicit_control_target(source_id, kind) {
+            return Some(target_id.to_string());
+        }
+
+        self.device_nodes
+            .get(source_id)
+            .and_then(|node| node.parent_id.clone())
+    }
+
+    /// Set or clear an explicit control target override.
+    pub fn set_control_target(
+        &mut self,
+        source_id: &str,
+        kind: NodeControlKind,
+        target_id: Option<&str>,
+    ) -> bool {
+        if !self.has_public_node(source_id) {
+            return false;
+        }
+        if let Some(target_id) = target_id {
+            if !self.has_public_node(target_id) {
+                return false;
+            }
+        }
+
+        self.control_links
+            .retain(|link| !(link.source_id == source_id && link.kind == kind));
+
+        if let Some(target_id) = target_id {
+            self.control_links.push(NodeControlLink {
+                source_id: source_id.to_string(),
+                target_id: target_id.to_string(),
+                kind,
+            });
+        }
+
+        true
     }
 
     /// Find the Rhythm room that contains a specific hub room.
@@ -626,12 +1078,120 @@ impl RoomTopologyStore {
             .map(|(_, rhythm_id)| rhythm_id.as_str())
     }
 
-    /// Get the routing table: rhythm_room_id → Vec<(hub_key, control_id)>.
+    /// Resolve any room-like identifier to the owning topology room ID.
+    ///
+    /// Accepts:
+    /// - topology room IDs
+    /// - bound hub-native room IDs
+    /// - direct hub-native device IDs assigned into a topology room
+    pub fn resolve_room_alias(
+        &self,
+        canonical_registry: &crate::canonical::registry::CanonicalRegistry,
+        hub_key: Option<&HubKey>,
+        room_id: &str,
+    ) -> Option<String> {
+        if self.rooms.contains_key(room_id) {
+            return Some(room_id.to_string());
+        }
+
+        if self.device_nodes.contains_key(room_id) {
+            return Some(room_id.to_string());
+        }
+
+        if let Some(hub_key) = hub_key {
+            if let Some(topology_id) = self.translate_room_id(hub_key, room_id) {
+                return Some(topology_id.to_string());
+            }
+        }
+
+        if let Some(topology_id) = self.translate_room_id_any_hub(room_id) {
+            return Some(topology_id.to_string());
+        }
+
+        self.device_nodes.values().find_map(|node| {
+            canonical_registry
+                .get(&node.canonical_device_id)
+                .is_some_and(|device| {
+                    device.endpoints.iter().any(|endpoint| {
+                        endpoint.native_id == room_id
+                            && hub_key.is_none_or(|expected| &endpoint.hub_key == expected)
+                    })
+                })
+                .then(|| node.id.clone())
+        })
+    }
+
+    /// Derive the effective control relationships exposed by a public source node.
+    pub fn effective_node_controls(
+        &self,
+        source_id: &str,
+        canonical_registry: &crate::canonical::registry::CanonicalRegistry,
+    ) -> Vec<(NodeControlKind, String, bool)> {
+        let mut kinds = Vec::new();
+
+        if let Some(node) = self.device_nodes.get(source_id) {
+            if let Some(device) = canonical_registry.get(&node.canonical_device_id) {
+                if let Some(kind) = NodeControlKind::default_for_device_type(&device.device_type) {
+                    kinds.push(kind);
+                }
+            }
+        }
+
+        for link in &self.control_links {
+            if link.source_id == source_id && !kinds.contains(&link.kind) {
+                kinds.push(link.kind.clone());
+            }
+        }
+
+        let mut controls = Vec::new();
+        for kind in kinds {
+            let explicit = self.explicit_control_target(source_id, &kind).is_some();
+            if let Some(target_id) = self.effective_control_target(source_id, &kind) {
+                controls.push((kind, target_id, !explicit));
+            }
+        }
+
+        controls.sort_by(|left, right| {
+            format!("{:?}", left.0)
+                .cmp(&format!("{:?}", right.0))
+                .then_with(|| left.1.cmp(&right.1))
+        });
+        controls
+    }
+
+    /// Collect effective control targets for all source nodes of a given kind.
+    pub fn effective_control_targets_for_kind(
+        &self,
+        kind: &NodeControlKind,
+        canonical_registry: &crate::canonical::registry::CanonicalRegistry,
+    ) -> HashSet<String> {
+        let mut targets = HashSet::new();
+        for node in self.device_nodes.values() {
+            let Some(device) = canonical_registry.get(&node.canonical_device_id) else {
+                continue;
+            };
+            if NodeControlKind::default_for_device_type(&device.device_type).as_ref() != Some(kind)
+                && self.explicit_control_target(&node.id, kind).is_none()
+            {
+                continue;
+            }
+
+            if let Some(target_id) = self.effective_control_target(&node.id, kind) {
+                targets.insert(target_id);
+            }
+        }
+        targets
+    }
+
+    /// Get the grouped-binding routing table: rhythm_room_id → Vec<(hub_key, control_id)>.
+    ///
+    /// This only reflects persisted source room bindings. Composite dispatch
+    /// should use [`Self::composite_routing`] to include direct-device routes.
     pub fn routing_table(&self) -> HashMap<String, Vec<(HubKey, String)>> {
         let mut table = HashMap::new();
         for (room_id, room) in &self.rooms {
             let targets: Vec<_> = room
-                .hub_targets
+                .hub_room_bindings
                 .iter()
                 .map(|t| (t.hub_key.clone(), t.control_id.clone()))
                 .collect();
@@ -655,6 +1215,7 @@ impl RoomTopologyStore {
         let mut room = TopologyRoom::new(id.clone(), name);
         room.user_customized = true;
         self.rooms.insert(id.clone(), room);
+        self.rebuild_room_device_projections();
         id
     }
 
@@ -677,78 +1238,112 @@ impl RoomTopologyStore {
             None => return false,
         };
 
-        let target = match self.rooms.get_mut(target_id) {
-            Some(t) => t,
-            None => {
-                // Put source back
-                self.rooms.insert(source_id.to_string(), source);
-                return false;
-            }
-        };
+        {
+            let target = match self.rooms.get_mut(target_id) {
+                Some(t) => t,
+                None => {
+                    // Put source back
+                    self.rooms.insert(source_id.to_string(), source);
+                    return false;
+                }
+            };
 
-        // Move hub targets
-        for source_target in source.hub_targets {
-            // Update index
-            let key = (
-                source_target.hub_key.to_string(),
-                source_target.hub_room_id.clone(),
-            );
-            self.hub_room_index.insert(key, target_id.to_string());
-            target.upsert_hub_target(source_target);
+            // Move hub targets
+            for source_target in source.hub_room_bindings {
+                // Update index
+                let key = (
+                    source_target.hub_key.to_string(),
+                    source_target.hub_room_id.clone(),
+                );
+                self.hub_room_index.insert(key, target_id.to_string());
+                target.upsert_hub_room_binding(source_target);
+            }
+
+            target.user_customized = true;
         }
 
         // Move devices (preserving placement)
-        for device in source.devices {
-            if !target
-                .devices
-                .iter()
-                .any(|d| d.device_id == device.device_id)
-            {
-                target.devices.push(device);
+        for node in self.device_nodes.values_mut() {
+            if node.parent_id.as_deref() == Some(source_id) {
+                node.parent_id = Some(target_id.to_string());
             }
         }
 
-        target.user_customized = true;
+        self.rebuild_room_device_projections();
         true
     }
 
     /// Move a device from one room to another.
-    ///
-    /// Sets `UserOverride` placement on the device and marks all hub targets
-    /// in both rooms as `topology_aligned: false` since the canonical room
-    /// membership now diverges from hub-native grouping.
     pub fn move_device(&mut self, device_id: &str, from_room: &str, to_room: &str) -> bool {
-        // Remove from source and mark its targets as misaligned
-        if let Some(room) = self.rooms.get_mut(from_room) {
-            room.remove_device(device_id);
-            for target in &mut room.hub_targets {
-                target.topology_aligned = false;
-            }
-        } else {
+        if self.rooms.get(from_room).is_none() {
             return false;
         }
-
-        // Add to target with UserOverride and mark its targets as misaligned
-        if let Some(room) = self.rooms.get_mut(to_room) {
-            room.set_device_user_override(device_id);
-            for target in &mut room.hub_targets {
-                target.topology_aligned = false;
-            }
-            true
-        } else {
+        if self.device_parent_room_id(device_id) != Some(from_room) {
             false
+        } else {
+            self.set_device_node_placement(
+                device_id,
+                Some(to_room),
+                DevicePlacement::UserOverride,
+                false,
+            )
         }
     }
 
+    /// Place a device into a room or detach it as a standalone first-class node.
+    pub fn assign_device(
+        &mut self,
+        device_id: &str,
+        room_id: Option<&str>,
+        placement: DevicePlacement,
+    ) -> bool {
+        self.set_device_node_placement(device_id, room_id, placement, false)
+    }
+
+    /// Attach a device to a room as a hub-default member, creating the device
+    /// node if needed.
+    pub fn attach_device_hub_default(&mut self, room_id: &str, device_id: &str) -> bool {
+        self.set_device_node_placement(device_id, Some(room_id), DevicePlacement::HubDefault, true)
+    }
+
+    /// Attach a device to a room as a user override, creating the device node
+    /// if needed.
+    pub fn attach_device_user_override(&mut self, room_id: &str, device_id: &str) -> bool {
+        self.set_device_node_placement(
+            device_id,
+            Some(room_id),
+            DevicePlacement::UserOverride,
+            true,
+        )
+    }
+
+    /// Insert or refresh a standalone device node.
+    pub fn ensure_standalone_device(&mut self, device_id: &str) {
+        let _ = self.set_device_node_placement(device_id, None, DevicePlacement::Standalone, true);
+    }
+
     /// Insert a room directly (used for deserialization / testing).
-    pub fn insert_room(&mut self, room: TopologyRoom) {
-        for target in &room.hub_targets {
+    pub fn insert_room(&mut self, mut room: TopologyRoom) {
+        for target in &room.hub_room_bindings {
             self.hub_room_index.insert(
                 (target.hub_key.to_string(), target.hub_room_id.clone()),
                 room.id.clone(),
             );
         }
+        for device in &room.devices {
+            self.device_nodes.insert(
+                device.device_id.clone(),
+                TopologyDeviceNode {
+                    id: device.device_id.clone(),
+                    canonical_device_id: device.device_id.clone(),
+                    parent_id: Some(room.id.clone()),
+                    placement: device.placement.clone(),
+                },
+            );
+        }
+        room.devices.clear();
         self.rooms.insert(room.id.clone(), room);
+        self.rebuild_room_device_projections();
     }
 
     // ---- Approved binding management ----
@@ -829,12 +1424,11 @@ impl RoomTopologyStore {
 
         if let Some(target_id) = approved_target {
             if let Some(room) = self.rooms.get_mut(&target_id) {
-                room.upsert_hub_target(HubControlTarget {
+                room.upsert_hub_room_binding(HubRoomBinding {
                     hub_key: hub_key.clone(),
                     hub_room_id: hub_room_id.to_string(),
                     control_id: control_id.to_string(),
                     light_device_ids: light_device_ids.to_vec(),
-                    topology_aligned: true,
                 });
                 self.hub_room_index.insert(index_key, target_id.clone());
                 debug!(target: "topology",
@@ -849,12 +1443,11 @@ impl RoomTopologyStore {
         // Rule 3: Create new topology room.
         let rhythm_room_id = super::canonical::identity::generate_uuid_public();
         let mut room = TopologyRoom::new(rhythm_room_id.clone(), room_name);
-        room.upsert_hub_target(HubControlTarget {
+        room.upsert_hub_room_binding(HubRoomBinding {
             hub_key: hub_key.clone(),
             hub_room_id: hub_room_id.to_string(),
             control_id: control_id.to_string(),
             light_device_ids: light_device_ids.to_vec(),
-            topology_aligned: true,
         });
 
         self.hub_room_index
@@ -868,24 +1461,113 @@ impl RoomTopologyStore {
         rhythm_room_id
     }
 
+    fn device_dispatch_route(
+        &self,
+        node: &TopologyDeviceNode,
+        canonical_registry: &crate::canonical::registry::CanonicalRegistry,
+    ) -> Option<(HubKey, HubDispatchTarget)> {
+        let device = canonical_registry.get(&node.canonical_device_id)?;
+        if device.device_type != DeviceType::Light {
+            return None;
+        }
+        let endpoint = device.preferred_endpoint()?;
+        Some((
+            endpoint.hub_key.clone(),
+            HubDispatchTarget::Devices {
+                native_ids: vec![endpoint.native_id.clone()],
+            },
+        ))
+    }
+
     /// Build a routing table for the composite controller.
     ///
-    /// Maps each Rhythm room ID (topology) to the list of (hub_key, hub_room_id)
-    /// pairs. All callers should use topology room IDs — hub-native IDs are
-    /// translated at the event/handler boundary before reaching the composite.
-    pub fn composite_routing(&self) -> HashMap<String, Vec<(String, String)>> {
-        let mut table: HashMap<String, Vec<(String, String)>> = HashMap::new();
-        for (room_id, room) in &self.rooms {
-            let targets: Vec<_> = room
-                .hub_targets
-                .iter()
-                .map(|t| (t.hub_key.to_string(), t.hub_room_id.clone()))
+    /// Maps each Rhythm room ID to the typed dispatch routes required by the
+    /// composite controller. All callers should use topology room IDs —
+    /// hub-native IDs are translated at the event/handler boundary before
+    /// reaching the composite.
+    pub fn composite_routing(
+        &self,
+        canonical_registry: &crate::canonical::registry::CanonicalRegistry,
+    ) -> HashMap<String, Vec<(String, HubDispatchTarget)>> {
+        let mut table: HashMap<String, Vec<(String, HubDispatchTarget)>> = HashMap::new();
+        let mut room_ids: Vec<_> = self.rooms.keys().cloned().collect();
+        room_ids.sort();
+        for room_id in room_ids {
+            let room = self.rooms.get(&room_id).unwrap();
+            let plan = room.dispatch_plan(canonical_registry);
+            let targets: Vec<_> = plan
+                .room_targets
+                .into_iter()
+                .map(|(hub_key, target)| (hub_key.to_string(), target))
                 .collect();
             if !targets.is_empty() {
                 table.insert(room_id.clone(), targets);
             }
+            for node_route in plan.node_routes {
+                table.insert(
+                    node_route.node.id,
+                    vec![(node_route.hub_key.to_string(), node_route.target)],
+                );
+            }
+        }
+        let mut standalone_node_ids: Vec<_> = self
+            .device_nodes
+            .values()
+            .filter(|node| node.parent_id.is_none())
+            .map(|node| node.id.clone())
+            .collect();
+        standalone_node_ids.sort();
+        for node_id in standalone_node_ids {
+            let node = self.device_nodes.get(&node_id).unwrap();
+            if let Some((hub_key, target)) = self.device_dispatch_route(node, canonical_registry) {
+                table.insert(node.id.clone(), vec![(hub_key.to_string(), target)]);
+            }
         }
         table
+    }
+
+    /// Build the derived schedulable light nodes for periodic scheduling.
+    pub fn periodic_light_nodes(
+        &self,
+        canonical_registry: &crate::canonical::registry::CanonicalRegistry,
+    ) -> Vec<TopologyLightNode> {
+        let mut nodes = Vec::new();
+        let mut room_ids: Vec<_> = self.rooms.keys().cloned().collect();
+        room_ids.sort();
+        for room_id in room_ids {
+            let room = self.rooms.get(&room_id).unwrap();
+            let mut room_nodes: Vec<_> = room
+                .dispatch_plan(canonical_registry)
+                .node_routes
+                .into_iter()
+                .map(|route| route.node)
+                .collect();
+            room_nodes.sort_by(|left, right| left.id.cmp(&right.id));
+            nodes.extend(room_nodes);
+        }
+
+        let mut standalone_node_ids: Vec<_> = self
+            .device_nodes
+            .values()
+            .filter(|node| node.parent_id.is_none())
+            .map(|node| node.id.clone())
+            .collect();
+        standalone_node_ids.sort();
+        for node_id in standalone_node_ids {
+            let node = self.device_nodes.get(&node_id).unwrap();
+            if self
+                .device_dispatch_route(node, canonical_registry)
+                .is_some()
+            {
+                nodes.push(TopologyLightNode {
+                    id: node.id.clone(),
+                    source_node_id: node.id.clone(),
+                    emit_node_id: node.id.clone(),
+                });
+            }
+        }
+
+        nodes
     }
 }
 
@@ -924,6 +1606,8 @@ impl SyncAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canonical::identity::DiscoveredIdentity;
+    use crate::canonical::registry::{CanonicalRegistry, ResolveResult};
     use crate::hub::HubType;
 
     fn hue_key() -> HubKey {
@@ -944,6 +1628,38 @@ mod tests {
         }
     }
 
+    fn make_identity(
+        native_id: &str,
+        room_id: &str,
+        room_name: &str,
+        name: &str,
+        device_type: DeviceType,
+    ) -> DiscoveredIdentity {
+        DiscoveredIdentity {
+            native_id: native_id.to_string(),
+            room_id: room_id.to_string(),
+            room_name: room_name.to_string(),
+            name: name.to_string(),
+            device_type,
+            hardware_ids: vec![],
+            manufacturer: None,
+            model: None,
+        }
+    }
+
+    fn register_identity(
+        registry: &mut CanonicalRegistry,
+        hub_key: &HubKey,
+        identity: DiscoveredIdentity,
+    ) -> String {
+        match registry.resolve(&identity, hub_key, 1000) {
+            ResolveResult::Created { canonical_id }
+            | ResolveResult::AlreadyKnown { canonical_id }
+            | ResolveResult::ReApproved { canonical_id } => canonical_id,
+            ResolveResult::Queued { .. } => panic!("unexpected triage for test identity"),
+        }
+    }
+
     #[test]
     fn sync_creates_new_room() {
         let mut store = RoomTopologyStore::new();
@@ -955,8 +1671,8 @@ mod tests {
 
         let room = store.rooms().next().unwrap();
         assert_eq!(room.name, "Kitchen");
-        assert_eq!(room.hub_targets.len(), 1);
-        assert_eq!(room.hub_targets[0].control_id, "gl-1");
+        assert_eq!(room.hub_room_bindings.len(), 1);
+        assert_eq!(room.hub_room_bindings[0].control_id, "gl-1");
     }
 
     #[test]
@@ -973,7 +1689,7 @@ mod tests {
         assert_eq!(store.room_count(), 1);
 
         let room = store.rooms().next().unwrap();
-        assert_eq!(room.hub_targets[0].control_id, "gl-2");
+        assert_eq!(room.hub_room_bindings[0].control_id, "gl-2");
     }
 
     #[test]
@@ -1036,7 +1752,7 @@ mod tests {
         assert!(matches!(action, SyncAction::Bound { .. }));
         assert_eq!(store.room_count(), 1); // Still one room
         let room = store.rooms().next().unwrap();
-        assert_eq!(room.hub_targets.len(), 2);
+        assert_eq!(room.hub_room_bindings.len(), 2);
     }
 
     #[test]
@@ -1079,10 +1795,7 @@ mod tests {
         let room_id = action.rhythm_room_id().to_string();
 
         // User moves dev-3 here
-        store
-            .get_mut(&room_id)
-            .unwrap()
-            .set_device_user_override("dev-3");
+        assert!(store.attach_device_user_override(&room_id, "dev-3"));
 
         // Re-sync removes dev-2, adds dev-4
         let mut rediscovered = make_discovered("hue-room-1", "Kitchen", "gl-1");
@@ -1169,7 +1882,7 @@ mod tests {
 
         assert_eq!(store.room_count(), 1);
         let merged = store.get(&target_id).unwrap();
-        assert_eq!(merged.hub_targets.len(), 2);
+        assert_eq!(merged.hub_room_bindings.len(), 2);
         assert!(merged.user_customized);
     }
 
@@ -1179,7 +1892,7 @@ mod tests {
         let id1 = store.create_room("Room A");
         let id2 = store.create_room("Room B");
 
-        store.get_mut(&id1).unwrap().add_device_hub_default("dev-1");
+        assert!(store.attach_device_hub_default(&id1, "dev-1"));
         assert!(store.move_device("dev-1", &id1, &id2));
 
         assert!(!store
@@ -1228,9 +1941,9 @@ mod tests {
         // Can look up by topology ID
         let room = store.get(&id).unwrap();
         assert_eq!(room.name, "Kitchen");
-        assert_eq!(room.hub_targets.len(), 1);
-        assert_eq!(room.hub_targets[0].hub_room_id, "hue-room-1");
-        assert_eq!(room.hub_targets[0].control_id, "gl-1");
+        assert_eq!(room.hub_room_bindings.len(), 1);
+        assert_eq!(room.hub_room_bindings[0].hub_room_id, "hue-room-1");
+        assert_eq!(room.hub_room_bindings[0].control_id, "gl-1");
     }
 
     #[test]
@@ -1266,8 +1979,8 @@ mod tests {
 
         // The existing room should now have the hub target
         let room = store.get(&existing_id).unwrap();
-        assert_eq!(room.hub_targets.len(), 1);
-        assert_eq!(room.hub_targets[0].hub_room_id, "hue-room-1");
+        assert_eq!(room.hub_room_bindings.len(), 1);
+        assert_eq!(room.hub_room_bindings[0].hub_room_id, "hue-room-1");
     }
 
     #[test]
@@ -1293,7 +2006,7 @@ mod tests {
 
         // Room should have the enriched data
         let room = store.get(&topo_id).unwrap();
-        assert_eq!(room.hub_targets[0].light_device_ids, vec!["light-1"]);
+        assert_eq!(room.hub_room_bindings[0].light_device_ids, vec!["light-1"]);
         assert_eq!(room.devices.len(), 1);
         assert_eq!(room.devices[0].device_id, "canonical-1");
     }
@@ -1301,14 +2014,199 @@ mod tests {
     #[test]
     fn composite_routing_no_hub_native_aliases() {
         let mut store = RoomTopologyStore::new();
-        let topo_id = store.translate_or_create(&hue_key(), "hue-room-1", "Kitchen", "gl-1", &[]);
+        let light_ids = vec!["light-1".to_string()];
+        let topo_id =
+            store.translate_or_create(&hue_key(), "hue-room-1", "Kitchen", "gl-1", &light_ids);
 
-        let routing = store.composite_routing();
+        let canonical_registry = crate::canonical::registry::CanonicalRegistry::new();
+        let routing = store.composite_routing(&canonical_registry);
 
         // Should have entry for topology ID
         assert!(routing.contains_key(&topo_id));
         // Should NOT have alias for hub-native ID
         assert!(!routing.contains_key("hue-room-1"));
+    }
+
+    #[test]
+    fn composite_routing_uses_preferred_light_endpoints_only() {
+        let mut store = RoomTopologyStore::new();
+        let room_id = store.create_room("Studio");
+
+        let mut registry = CanonicalRegistry::new();
+        let light_id = register_identity(
+            &mut registry,
+            &hue_key(),
+            make_identity(
+                "hue-light-1",
+                "hue-room-1",
+                "Studio",
+                "Lamp",
+                DeviceType::Light,
+            ),
+        );
+        registry.get_mut(&light_id).unwrap().upsert_endpoint(
+            ha_key(),
+            "light.studio_lamp".to_string(),
+            2000,
+            None,
+        );
+        registry.set_preferred_endpoint(&light_id, &ha_key(), "light.studio_lamp");
+
+        let button_id = register_identity(
+            &mut registry,
+            &ha_key(),
+            make_identity(
+                "switch.remote_1",
+                "studio",
+                "Studio",
+                "Remote",
+                DeviceType::Button,
+            ),
+        );
+
+        assert!(store.attach_device_user_override(&room_id, &light_id));
+        assert!(store.attach_device_user_override(&room_id, &button_id));
+
+        let routing = store.composite_routing(&registry);
+        assert_eq!(
+            routing.get(&room_id),
+            Some(&vec![(
+                ha_key().to_string(),
+                HubDispatchTarget::Devices {
+                    native_ids: vec!["light.studio_lamp".to_string()],
+                },
+            )])
+        );
+        assert!(routing
+            .values()
+            .flatten()
+            .all(|(_, target)| target.label() != "switch.remote_1"));
+
+        let nodes = store.periodic_light_nodes(&registry);
+        assert_eq!(
+            nodes,
+            vec![TopologyLightNode {
+                id: light_id.clone(),
+                source_node_id: light_id.clone(),
+                emit_node_id: room_id.clone(),
+            }]
+        );
+    }
+
+    #[test]
+    fn non_light_devices_do_not_block_group_dispatch_nodes() {
+        let mut store = RoomTopologyStore::new();
+        let room_id =
+            store.translate_or_create(&hue_key(), "hue-room-1", "Kitchen", "gl-kitchen", &[]);
+
+        let mut registry = CanonicalRegistry::new();
+        let button_id = register_identity(
+            &mut registry,
+            &hue_key(),
+            make_identity(
+                "button-1",
+                "hue-room-1",
+                "Kitchen",
+                "Wall Button",
+                DeviceType::Button,
+            ),
+        );
+
+        let room = store.get_mut(&room_id).unwrap();
+        room.hub_room_bindings[0].light_device_ids = vec!["hue-light-1".to_string()];
+        let _ = room;
+        assert!(store.attach_device_user_override(&room_id, &button_id));
+
+        let routing = store.composite_routing(&registry);
+        assert_eq!(
+            routing.get(&room_id),
+            Some(&vec![(
+                hue_key().to_string(),
+                HubDispatchTarget::Group {
+                    room_id: "hue-room-1".to_string(),
+                    control_id: "gl-kitchen".to_string(),
+                },
+            )])
+        );
+
+        let nodes = store.periodic_light_nodes(&registry);
+        assert_eq!(
+            nodes,
+            vec![TopologyLightNode {
+                id: group_light_node_id(&room_id, &hue_key(), "hue-room-1"),
+                source_node_id: room_id.clone(),
+                emit_node_id: room_id.clone(),
+            }]
+        );
+    }
+
+    #[test]
+    fn non_light_only_rooms_do_not_emit_dispatch_or_periodic_nodes() {
+        let mut store = RoomTopologyStore::new();
+        let room_id = store.create_room("Sensors");
+        let mut registry = CanonicalRegistry::new();
+
+        let button_id = register_identity(
+            &mut registry,
+            &hue_key(),
+            make_identity(
+                "button-2",
+                "sensor-room",
+                "Sensors",
+                "Scene Button",
+                DeviceType::Button,
+            ),
+        );
+
+        let room = store.get_mut(&room_id).unwrap();
+        room.upsert_hub_room_binding(HubRoomBinding {
+            hub_key: hue_key(),
+            hub_room_id: "sensor-room".to_string(),
+            control_id: "sensor-room".to_string(),
+            light_device_ids: vec![],
+        });
+        let _ = room;
+        assert!(store.attach_device_user_override(&room_id, &button_id));
+
+        let routing = store.composite_routing(&registry);
+        assert!(!routing.contains_key(&room_id));
+        assert!(store.periodic_light_nodes(&registry).is_empty());
+    }
+
+    #[test]
+    fn motion_device_controls_inherit_parent_until_overridden() {
+        let mut store = RoomTopologyStore::new();
+        let source_room_id = store.create_room("Office");
+        let target_room_id = store.create_room("Hall");
+        let mut registry = CanonicalRegistry::new();
+
+        let sensor_id = register_identity(
+            &mut registry,
+            &hue_key(),
+            make_identity(
+                "motion-1",
+                "office-native",
+                "Office",
+                "Office Motion",
+                DeviceType::Motion,
+            ),
+        );
+
+        assert!(store.attach_device_user_override(&source_room_id, &sensor_id));
+        assert_eq!(
+            store.effective_node_controls(&sensor_id, &registry),
+            vec![(NodeControlKind::Motion, source_room_id.clone(), true)]
+        );
+
+        assert!(store.set_control_target(
+            &sensor_id,
+            NodeControlKind::Motion,
+            Some(&target_room_id),
+        ));
+        assert_eq!(
+            store.effective_node_controls(&sensor_id, &registry),
+            vec![(NodeControlKind::Motion, target_room_id.clone(), false)]
+        );
     }
 
     // ---- cross-hub triage detection tests ----
@@ -1320,10 +2218,7 @@ mod tests {
         // HA creates "Office" room first (via translate_or_create in do_room_set)
         let ha_office_id = store.translate_or_create(&ha_key(), "office", "Office", "office", &[]);
         // Simulate Phase 4c completing for HA: add canonical devices
-        store
-            .get_mut(&ha_office_id)
-            .unwrap()
-            .add_device_hub_default("canonical-ha-1");
+        store.attach_device_hub_default(&ha_office_id, "canonical-ha-1");
 
         // Hue connects: translate_or_create creates a separate room for Hue's "Office"
         let hue_office_id =
@@ -1359,19 +2254,13 @@ mod tests {
 
         // HA creates "Office" room
         let ha_office_id = store.translate_or_create(&ha_key(), "office", "Office", "office", &[]);
-        store
-            .get_mut(&ha_office_id)
-            .unwrap()
-            .add_device_hub_default("canonical-ha-1");
+        store.attach_device_hub_default(&ha_office_id, "canonical-ha-1");
 
         // Hue creates "Office" room and fully syncs (has devices)
         let hue_office_id =
             store.translate_or_create(&hue_key(), "hue-office-uuid", "Office", "gl-office", &[]);
         // Simulate a completed Phase 4c for the Hue room (adds devices)
-        store
-            .get_mut(&hue_office_id)
-            .unwrap()
-            .add_device_hub_default("canonical-hue-1");
+        store.attach_device_hub_default(&hue_office_id, "canonical-hue-1");
 
         // On the NEXT sync, sync_hub_room should treat it as a normal update
         // (not generate a duplicate proposal) because the room is established
@@ -1393,10 +2282,7 @@ mod tests {
 
         // HA creates "Office" room
         let ha_office_id = store.translate_or_create(&ha_key(), "office", "Office", "office", &[]);
-        store
-            .get_mut(&ha_office_id)
-            .unwrap()
-            .add_device_hub_default("canonical-ha-1");
+        store.attach_device_hub_default(&ha_office_id, "canonical-ha-1");
 
         // Approve the binding (simulates user accepting triage proposal)
         store.approve_binding(

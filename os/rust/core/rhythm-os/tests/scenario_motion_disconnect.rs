@@ -10,7 +10,7 @@ mod harness;
 use std::time::Instant;
 
 use harness::{motion_sensor, room, TestHarness};
-use rhythm_os::event_loop::{handle_hub_event, MotionTimerState};
+use rhythm_os::event_loop::{handle_hub_event, MotionSourceState, MotionTimerState};
 use rhythm_os::hub::HubEvent;
 
 // ============================================================================
@@ -32,9 +32,14 @@ fn motion_timers_survive_hub_disconnect() {
 
     // -- Setup: populate motion timer state as if motion was detected --
     let mut motion = MotionTimerState::new();
-    motion
-        .sensors
-        .insert("sensor_01".to_string(), (resolved.clone(), None)); // active
+    motion.sensors.insert(
+        "sensor_01".to_string(),
+        MotionSourceState {
+            source_node_id: "sensor_01".to_string(),
+            target_node_id: resolved.clone(),
+            stopped_at: None,
+        },
+    ); // active
     motion.motion_owned.insert(resolved.clone());
 
     assert!(!motion.sensors.is_empty(), "precondition: sensor tracked");
@@ -79,7 +84,11 @@ fn warning_active_survives_hub_disconnect() {
     let mut motion = MotionTimerState::new();
     motion.sensors.insert(
         "sensor_01".to_string(),
-        (resolved.clone(), Some(Instant::now())),
+        MotionSourceState {
+            source_node_id: "sensor_01".to_string(),
+            target_node_id: resolved.clone(),
+            stopped_at: Some(Instant::now()),
+        },
     );
     motion.motion_owned.insert(resolved.clone());
     motion.warning_active.insert(resolved.clone());

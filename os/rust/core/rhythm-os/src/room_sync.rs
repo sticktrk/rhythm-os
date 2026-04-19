@@ -445,6 +445,34 @@ fn sync_with_discovery(
                                 .unwrap_or(false);
                             if still_unassigned {
                                 s.canonical_registry.assign_room(&canonical_id, None);
+                                s.topology.ensure_standalone_device(&canonical_id);
+                                if let Some(device) = s.canonical_registry.get(&canonical_id) {
+                                    if let Some(runtime) = s.hub_runtime() {
+                                        if runtime.engine_node_snapshot(&canonical_id).is_none() {
+                                            runtime.add_node(
+                                                &canonical_id,
+                                                &device.name,
+                                                commands::runtime_node_kind_for_device_type(
+                                                    device.device_type.clone(),
+                                                ),
+                                                None,
+                                            );
+                                            runtime.restore_node_state(
+                                                &canonical_id,
+                                                rhythm_core::RestoredNodeState {
+                                                    rhythm_enabled: true,
+                                                    disabled: false,
+                                                    time_offset_minutes: 0.0,
+                                                    brightness_offset: 0.0,
+                                                    soft_off: false,
+                                                    hard_off: false,
+                                                    profile_settings:
+                                                        rhythm_core::RoomProfileSettings::default(),
+                                                },
+                                            );
+                                        }
+                                    }
+                                }
                             }
                             continue;
                         }
@@ -472,6 +500,60 @@ fn sync_with_discovery(
                             canonical_device_ids: canonical_device_ids.clone(),
                         };
                         let action = s.topology.sync_hub_room(&canonical_hub_key, &topo_room);
+                        let rhythm_room_id = action.rhythm_room_id().to_string();
+
+                        if let Some(runtime) = s.hub_runtime() {
+                            if runtime.engine_room_snapshot(&rhythm_room_id).is_none() {
+                                let room_name = s
+                                    .topology
+                                    .get(&rhythm_room_id)
+                                    .map(|room| room.name.clone())
+                                    .unwrap_or_else(|| topo_room.name.clone());
+                                runtime.add_room(&rhythm_room_id, &room_name);
+                                runtime.restore_room_state(
+                                    &rhythm_room_id,
+                                    rhythm_core::RestoredRoomState {
+                                        rhythm_enabled: true,
+                                        disabled: false,
+                                        time_offset_minutes: 0.0,
+                                        brightness_offset: 0.0,
+                                        soft_off: false,
+                                        hard_off: false,
+                                        profile_settings: rhythm_core::RoomProfileSettings::default(
+                                        ),
+                                    },
+                                );
+                            }
+
+                            for canonical_id in &canonical_device_ids {
+                                let Some(device) = s.canonical_registry.get(canonical_id) else {
+                                    continue;
+                                };
+                                if runtime.engine_node_snapshot(canonical_id).is_none() {
+                                    runtime.add_node(
+                                        canonical_id,
+                                        &device.name,
+                                        commands::runtime_node_kind_for_device_type(
+                                            device.device_type.clone(),
+                                        ),
+                                        Some(rhythm_room_id.clone()),
+                                    );
+                                    runtime.restore_node_state(
+                                        canonical_id,
+                                        rhythm_core::RestoredNodeState {
+                                            rhythm_enabled: true,
+                                            disabled: false,
+                                            time_offset_minutes: 0.0,
+                                            brightness_offset: 0.0,
+                                            soft_off: false,
+                                            hard_off: false,
+                                            profile_settings:
+                                                rhythm_core::RoomProfileSettings::default(),
+                                        },
+                                    );
+                                }
+                            }
+                        }
 
                         // Queue room binding proposals for cross-hub name matches
                         if let SyncAction::CreatedWithProposal {
@@ -521,7 +603,7 @@ fn sync_with_discovery(
                     let current_room_ids: Vec<String> =
                         discovered_rooms.iter().map(|r| r.id.clone()).collect();
                     s.topology
-                        .remove_stale_targets(&canonical_hub_key, &current_room_ids);
+                        .remove_stale_bindings(&canonical_hub_key, &current_room_ids);
 
                     // Persist canonical registry and topology
                     commands::persist_canonical(&s);
@@ -661,14 +743,19 @@ fn sync_with_discovery(
                 discovered_device_ids.insert(ms.sensor_id.clone());
             }
             // Seed active sensors into AppState for the event loop to pick up.
-            // Translate hub-native room IDs to topology IDs so motion timers
-            // use the same ID space as the engine and AppState maps.
+            // Resolve to public source/target node IDs up front so startup
+            // motion state follows the same node-control graph as live events.
             let active: Vec<(String, String)> = motion_states
                 .iter()
                 .filter(|ms| ms.is_active)
-                .map(|ms| {
-                    let topo_room_id = commands::resolve_room_id(state, &ms.room_id);
-                    (ms.sensor_id.clone(), topo_room_id)
+                .filter_map(|ms| {
+                    commands::resolve_node_control_target(
+                        state,
+                        hub_key,
+                        &ms.sensor_id,
+                        &ms.room_id,
+                        &crate::topology::NodeControlKind::Motion,
+                    )
                 })
                 .collect();
             if !active.is_empty() {
@@ -811,12 +898,17 @@ pub fn poll_initial_light_state(state: &SharedState) {
     {
         let events: Vec<_> = snapshots
             .iter()
-            .map(|s| crate::commands::build_room_state_event(state, s))
+            .map(|s| {
+                crate::commands::build_node_state_event(
+                    state,
+                    &rhythm_core::NodeSnapshot::from_room_snapshot(s.clone()),
+                )
+            })
             .collect();
         if !events.is_empty() {
             crate::state::emit_server_event(
                 state,
-                crate::server_event::ServerEvent::RoomState { rooms: events },
+                crate::server_event::ServerEvent::NodeState { nodes: events },
             );
         }
     }

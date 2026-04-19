@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use log::debug;
-use rhythm_core::controller::{LightControlError, LightControlResult, LightController};
+use rhythm_core::controller::{
+    HubDispatchTarget, HubLightController, LightControlError, LightControlResult, LightController,
+};
 use rhythm_core::lighting::LightingCommand;
 use rhythm_core::room::Room;
 use rhythm_devices::ColorPreference;
@@ -47,14 +49,13 @@ impl<H: HaTransport> HaLightController<H> {
         self.capability_hub_key = Some(hub_key);
         self
     }
-}
 
-#[async_trait]
-impl<H: HaTransport + 'static> LightController for HaLightController<H> {
-    async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
+    fn adapt_group_command(
+        &self,
+        room_id: &str,
+        command: &LightingCommand,
+    ) -> (String, rhythm_devices::AdaptedCommand) {
         let room_label = rhythm_os::controller_helpers::format_room_label(&self.registry, room_id);
-        // Verify room exists in registry (for HA, target == room_id == area_id)
-        let area_id = rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
         let caps = rhythm_os::controller_helpers::resolve_room_capabilities(
             &self.registry,
             self.capability_state.as_ref(),
@@ -63,13 +64,38 @@ impl<H: HaTransport + 'static> LightController for HaLightController<H> {
         );
         let adapted = rhythm_os::controller_helpers::adapt_lighting_command(
             &caps,
-            &command,
+            command,
             ColorPreference::PreferColorTemperature,
         );
+        (room_label, adapted)
+    }
 
+    fn adapt_device_command(
+        &self,
+        native_ids: &[String],
+        command: &LightingCommand,
+    ) -> rhythm_devices::AdaptedCommand {
+        let caps = rhythm_os::controller_helpers::resolve_device_capabilities(
+            self.capability_state.as_ref(),
+            self.capability_hub_key.as_ref(),
+            native_ids,
+        );
+        rhythm_os::controller_helpers::adapt_lighting_command(
+            &caps,
+            command,
+            ColorPreference::PreferColorTemperature,
+        )
+    }
+
+    fn turn_on_area(
+        &self,
+        room_id: &str,
+        area_id: &str,
+        command: LightingCommand,
+    ) -> LightControlResult<()> {
+        let (room_label, adapted) = self.adapt_group_command(room_id, &command);
         let fade_ms = adapted.transition_ms.unwrap_or(0) as u16;
 
-        // Build service data targeting area_id
         let mut data = serde_json::json!({
             "area_id": area_id,
             "brightness_pct": adapted.brightness.unwrap_or(0),
@@ -81,7 +107,6 @@ impl<H: HaTransport + 'static> LightController for HaLightController<H> {
             data["color_temp_kelvin"] = serde_json::json!(kelvin);
         }
 
-        // Add transition if fade is set (HA uses seconds)
         if fade_ms > 0 {
             let transition_secs = (fade_ms as f32 / 1000.0).max(0.1);
             data["transition"] = serde_json::json!(transition_secs);
@@ -116,13 +141,59 @@ impl<H: HaTransport + 'static> LightController for HaLightController<H> {
         Ok(())
     }
 
-    async fn turn_off(&self, room_id: &str, transition_ms: Option<u32>) -> LightControlResult<()> {
+    fn turn_on_devices(
+        &self,
+        native_ids: &[String],
+        command: LightingCommand,
+    ) -> LightControlResult<()> {
+        let adapted = self.adapt_device_command(native_ids, &command);
+        let fade_ms = adapted.transition_ms.unwrap_or(0) as u16;
+
+        let mut data = serde_json::json!({
+            "entity_id": native_ids,
+            "brightness_pct": adapted.brightness.unwrap_or(0),
+        });
+
+        if let Some((x, y)) = adapted.xy {
+            data["xy_color"] = serde_json::json!([x, y]);
+        } else if let Some(kelvin) = adapted.kelvin {
+            data["color_temp_kelvin"] = serde_json::json!(kelvin);
+        }
+
+        if fade_ms > 0 {
+            let transition_secs = (fade_ms as f32 / 1000.0).max(0.1);
+            data["transition"] = serde_json::json!(transition_secs);
+        }
+
+        self.client
+            .call_service("light", "turn_on", &data)
+            .map_err(|e| {
+                LightControlError::CommandFailed(format!(
+                    "Failed to turn on devices [{}]: {}",
+                    native_ids.join(","),
+                    e
+                ))
+            })?;
+
+        debug!(
+            target: "cmd",
+            "HA turn_on direct: devices={} bri={}",
+            native_ids.join(","),
+            adapted.brightness.unwrap_or(0)
+        );
+        Ok(())
+    }
+
+    fn turn_off_area(
+        &self,
+        room_id: &str,
+        area_id: &str,
+        transition_ms: Option<u32>,
+    ) -> LightControlResult<()> {
         let room_label = rhythm_os::controller_helpers::format_room_label(&self.registry, room_id);
-        let area_id = rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
-        let data = serde_json::json!({
+        let mut data = serde_json::json!({
             "area_id": area_id,
         });
-        let mut data = data;
 
         if let Some(transition_ms) = transition_ms.filter(|ms| *ms > 0) {
             let transition_secs = (transition_ms as f32 / 1000.0).max(0.1);
@@ -149,6 +220,130 @@ impl<H: HaTransport + 'static> LightController for HaLightController<H> {
         Ok(())
     }
 
+    fn turn_off_devices(
+        &self,
+        native_ids: &[String],
+        transition_ms: Option<u32>,
+    ) -> LightControlResult<()> {
+        let mut data = serde_json::json!({
+            "entity_id": native_ids,
+        });
+
+        if let Some(transition_ms) = transition_ms.filter(|ms| *ms > 0) {
+            let transition_secs = (transition_ms as f32 / 1000.0).max(0.1);
+            data["transition"] = serde_json::json!(transition_secs);
+        }
+
+        self.client
+            .call_service("light", "turn_off", &data)
+            .map_err(|e| {
+                LightControlError::CommandFailed(format!(
+                    "Failed to turn off devices [{}]: {}",
+                    native_ids.join(","),
+                    e
+                ))
+            })?;
+
+        debug!(
+            target: "cmd",
+            "HA turn_off direct: devices={} transition_ms={:?}",
+            native_ids.join(","),
+            transition_ms
+        );
+        Ok(())
+    }
+
+    fn any_devices_on(&self, native_ids: &[String]) -> LightControlResult<bool> {
+        for entity_id in native_ids {
+            match self.client.get_state(entity_id) {
+                Ok(state) if state.state == "on" => return Ok(true),
+                Ok(_) => {}
+                Err(e) => {
+                    log::warn!(target: "cmd", "Failed to get state for {}: {}", entity_id, e);
+                }
+            }
+        }
+        Ok(false)
+    }
+}
+
+#[async_trait]
+impl<H: HaTransport + 'static> HubLightController for HaLightController<H> {
+    async fn turn_on_target(
+        &self,
+        target: &HubDispatchTarget,
+        command: LightingCommand,
+    ) -> LightControlResult<()> {
+        match target {
+            HubDispatchTarget::Group {
+                room_id,
+                control_id,
+            } => self.turn_on_area(room_id, control_id, command),
+            HubDispatchTarget::Devices { native_ids } => self.turn_on_devices(native_ids, command),
+        }
+    }
+
+    async fn turn_off_target(
+        &self,
+        target: &HubDispatchTarget,
+        transition_ms: Option<u32>,
+    ) -> LightControlResult<()> {
+        match target {
+            HubDispatchTarget::Group {
+                room_id,
+                control_id,
+            } => self.turn_off_area(room_id, control_id, transition_ms),
+            HubDispatchTarget::Devices { native_ids } => {
+                self.turn_off_devices(native_ids, transition_ms)
+            }
+        }
+    }
+
+    async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
+        rhythm_os::controller_helpers::rooms_from_registry(&self.registry)
+    }
+
+    async fn is_connected(&self) -> bool {
+        self.client.test_connection().unwrap_or(false)
+    }
+
+    async fn any_lights_on_target(&self, target: &HubDispatchTarget) -> LightControlResult<bool> {
+        match target {
+            HubDispatchTarget::Group { room_id, .. } => {
+                let light_entities = {
+                    let registry = self.registry.lock().map_err(|e| {
+                        LightControlError::Internal(format!("Failed to lock registry: {}", e))
+                    })?;
+                    registry.get_light_entities(room_id)
+                };
+
+                if light_entities.is_empty() {
+                    return Ok(false);
+                }
+
+                self.any_devices_on(&light_entities)
+            }
+            HubDispatchTarget::Devices { native_ids } => self.any_devices_on(native_ids),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "HomeAssistant"
+    }
+}
+
+#[async_trait]
+impl<H: HaTransport + 'static> LightController for HaLightController<H> {
+    async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
+        let area_id = rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
+        self.turn_on_area(room_id, &area_id, command)
+    }
+
+    async fn turn_off(&self, room_id: &str, transition_ms: Option<u32>) -> LightControlResult<()> {
+        let area_id = rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
+        self.turn_off_area(room_id, &area_id, transition_ms)
+    }
+
     async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
         rhythm_os::controller_helpers::rooms_from_registry(&self.registry)
     }
@@ -170,21 +365,7 @@ impl<H: HaTransport + 'static> LightController for HaLightController<H> {
             return Ok(false);
         }
 
-        // Check each light entity state
-        for entity_id in &light_entities {
-            match self.client.get_state(entity_id) {
-                Ok(state) => {
-                    if state.state == "on" {
-                        return Ok(true);
-                    }
-                }
-                Err(e) => {
-                    log::warn!(target: "cmd", "Failed to get state for {}: {}", entity_id, e);
-                }
-            }
-        }
-
-        Ok(false)
+        self.any_devices_on(&light_entities)
     }
 
     fn name(&self) -> &str {
@@ -352,6 +533,6 @@ mod tests {
     #[test]
     fn name_returns_home_assistant() {
         let (controller, _) = make_controller();
-        assert_eq!(controller.name(), "HomeAssistant");
+        assert_eq!(LightController::name(&controller), "HomeAssistant");
     }
 }

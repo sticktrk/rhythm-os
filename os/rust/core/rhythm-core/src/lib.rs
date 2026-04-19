@@ -53,7 +53,10 @@ pub use color::{
     kelvin_to_mireds, kelvin_to_rgb, kelvin_to_xy, mireds_to_kelvin, rgb_to_xy, Rgb, XyColor,
 };
 pub use config::SolarContext;
-pub use controller::{LightControlError, LightControlResult, LightController, NoOpController};
+pub use controller::{
+    HubDispatchTarget, HubLightController, LightControlError, LightControlResult, LightController,
+    NoOpController,
+};
 pub use curves::{inverse_super_gaussian, map_super_gaussian};
 pub use groups::{
     group_name_for_area, is_light_entity, is_rhythm_group, GroupController, GroupError,
@@ -77,9 +80,9 @@ pub use persistence::{
 pub use primitives::{crossed_solar_midnight, PeriodicTickResult, RhythmEngine};
 pub use room::{
     default_mode_configs, default_mode_transition_configs, normalize_mode_transition_configs,
-    ModeChangeCause, ModeConfig, ModeTransitionConfig, ModeTransitionTime, ModeTransitionTrigger,
-    RhythmMode, Room, RoomManager, RoomModeDefault, RoomModeState, RoomProfileSettings,
-    DEFAULT_MODE_TRANSITION_DURATION_MS,
+    EffectiveRoomState, LightNodeKind, ModeChangeCause, ModeConfig, ModeTransitionConfig,
+    ModeTransitionTime, ModeTransitionTrigger, RhythmMode, Room, RoomManager, RoomModeDefault,
+    RoomModeState, RoomProfileSettings, DEFAULT_MODE_TRANSITION_DURATION_MS,
 };
 pub use solar::{
     calculate_solar_noon, calculate_solar_noon_from_offset, calculate_sun_times, calculate_sunrise,
@@ -92,9 +95,9 @@ pub use timezone::{default_timezone, lookup_timezone, Timezone, DEFAULT_TIMEZONE
 // Runtime re-exports
 pub use runtime::{
     ButtonAction, DeviceRegistry, InputEvent, MockTimeProvider, NoOpRoomStateStore, NoOpScheduler,
-    RestoredRoomState, RhythmRuntime, RoomConfig, RoomSnapshot, RoomStateStore, RuntimeConfig,
-    RuntimeError, RuntimeHandle, RuntimeResult, ScheduleHandle, Scheduler, SimpleDeviceRegistry,
-    StorageError, StorageResult, TimeProvider, ZhaEventArgs,
+    NodeSnapshot, RestoredNodeState, RestoredRoomState, RhythmRuntime, RoomConfig, RoomSnapshot,
+    RoomStateStore, RuntimeConfig, RuntimeError, RuntimeHandle, RuntimeResult, ScheduleHandle,
+    Scheduler, SimpleDeviceRegistry, StorageError, StorageResult, TimeProvider, ZhaEventArgs,
 };
 
 #[cfg(feature = "serde")]

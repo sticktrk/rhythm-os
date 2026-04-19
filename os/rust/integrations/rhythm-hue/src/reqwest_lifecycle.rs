@@ -100,11 +100,11 @@ pub fn ensure_runtime(state: &SharedState) -> Result<()> {
 /// Create a type-erased Hue light controller for a specific hub key.
 ///
 /// Extracts credentials and registry from state, builds a reqwest transport,
-/// and returns the controller as `Arc<dyn LightController>`.
+/// and returns the controller as `Arc<dyn HubLightController>`.
 pub fn create_hue_controller(
     state: &SharedState,
     key: &HubKey,
-) -> Result<std::sync::Arc<dyn rhythm_core::LightController>> {
+) -> Result<std::sync::Arc<dyn rhythm_core::HubLightController>> {
     use crate::controller::HueLightController;
     use crate::hub_state::HueHubData;
 
@@ -208,7 +208,7 @@ impl ExternalLightHubIntegration for HueIntegration {
         &self,
         state: &SharedState,
         key: &HubKey,
-    ) -> Result<std::sync::Arc<dyn rhythm_core::LightController>> {
+    ) -> Result<std::sync::Arc<dyn rhythm_core::HubLightController>> {
         create_hue_controller(state, key)
     }
 }

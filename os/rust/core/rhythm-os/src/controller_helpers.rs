@@ -91,16 +91,27 @@ pub fn resolve_room_capabilities(
     hub_key: Option<&HubKey>,
     room_id: &str,
 ) -> LightCapabilities {
+    let device_ids = match registry.lock() {
+        Ok(registry) => registry.get_light_entities(room_id),
+        Err(_) => return LightCapabilities::defaults_for(LightType::ExtendedColor),
+    };
+
+    resolve_device_capabilities(state, hub_key, &device_ids)
+}
+
+/// Resolve common capabilities from a concrete list of hub-native device IDs.
+///
+/// Used by device-addressed dispatch when there is no hub-native room grouping.
+pub fn resolve_device_capabilities(
+    state: Option<&SharedState>,
+    hub_key: Option<&HubKey>,
+    native_ids: &[String],
+) -> LightCapabilities {
     let default_caps = LightCapabilities::defaults_for(LightType::ExtendedColor);
     let (Some(state), Some(hub_key)) = (state, hub_key) else {
         return default_caps;
     };
-
-    let device_ids = match registry.lock() {
-        Ok(registry) => registry.get_light_entities(room_id),
-        Err(_) => return default_caps,
-    };
-    if device_ids.is_empty() {
+    if native_ids.is_empty() {
         return default_caps;
     }
 
@@ -110,12 +121,12 @@ pub fn resolve_room_capabilities(
         Err(_) => return default_caps,
     };
 
-    let device_caps: Vec<LightCapabilities> = device_ids
+    let device_caps: Vec<LightCapabilities> = native_ids
         .iter()
-        .map(|device_id| {
+        .map(|native_id| {
             state
                 .canonical_registry
-                .find_by_native_id(hub_key, device_id)
+                .find_by_native_id(hub_key, native_id)
                 .and_then(|device| {
                     let manufacturer = device.manufacturer.as_deref()?;
                     let model = device.model.as_deref()?;

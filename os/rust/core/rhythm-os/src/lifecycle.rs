@@ -474,7 +474,7 @@ pub fn ensure_composite_runtime(
     use rhythm_core::solar::SolarTime;
     use rhythm_core::{
         BlockingScheduler, BlockingTimeProvider, CompositeController, DeviceRegistry, HubRegistry,
-        RhythmRuntime, RuntimeConfig, RuntimeHandle, TimeProvider,
+        RhythmRuntime, RuntimeConfig, RuntimeHandle, SimpleDeviceRegistry, TimeProvider,
     };
 
     let (
@@ -545,16 +545,24 @@ pub fn ensure_composite_runtime(
         ));
     }
 
-    // Build a merged registry from all hubs for the runtime's DeviceRegistry
+    // Build a merged device-to-topology-room registry for the runtime.
+    //
+    // Runtime event routing must be topology-first. Hub registries still own
+    // discovery and native button/motion mappings, but the runtime only
+    // should ever see topology room IDs.
     let merged_registry = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        let mut rt_reg = crate::registry::HubDeviceRegistry::default();
-        for hub in s.hubs.values() {
+        let mut rt_reg = SimpleDeviceRegistry::new();
+        for (hub_key, hub) in &s.hubs {
             if let Some(ref reg) = hub.registry {
                 if let Ok(reg) = reg.lock() {
                     for room in reg.rooms() {
+                        let topology_room_id = s
+                            .topology
+                            .resolve_room_alias(&s.canonical_registry, Some(hub_key), &room.id)
+                            .unwrap_or_else(|| room.id.clone());
                         for device_id in HubRegistry::devices_for_room(&*reg, &room.id) {
-                            rt_reg.register_device(&device_id, &room.id);
+                            rt_reg.register_device(&device_id, &topology_room_id);
                         }
                     }
                 }
@@ -642,22 +650,22 @@ pub fn ensure_composite_runtime(
         ));
     }
 
-    // Add rooms from all hubs' registries (using topology IDs to avoid
-    // duplicates when do_room_set later adds the same room under its
-    // proper topology ID).
+    // Seed runtime rooms from persisted topology, not hub registries.
+    // A topology room may dispatch through grouped hub bindings, direct device
+    // targets, or a future mix of both. The engine should not care.
     {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        for (key, hub) in &s.hubs {
-            if let Some(ref reg) = hub.registry {
-                if let Ok(reg) = reg.lock() {
-                    for room in reg.rooms() {
-                        // Use topology ID if mapped, otherwise skip — do_room_set
-                        // will add it with a proper topology ID during sync.
-                        if let Some(topo_id) = s.topology.translate_room_id(key, &room.id) {
-                            runtime.add_room(topo_id, &room.name);
-                        }
-                    }
-                }
+        for room in s.topology.rooms() {
+            runtime.add_room(&room.id, &room.name);
+        }
+        for node in s.topology.device_nodes() {
+            if let Some(device) = s.canonical_registry.get(&node.canonical_device_id) {
+                runtime.add_node(
+                    &node.id,
+                    &device.name,
+                    crate::commands::runtime_node_kind_for_device_type(device.device_type.clone()),
+                    node.parent_id.clone(),
+                );
             }
         }
     }
@@ -679,10 +687,10 @@ pub fn ensure_composite_runtime(
 
                     if all_defaults {
                         warn!(target: "sys", "All {} rooms at default state — defaulting to rhythm_enabled=true", persisted.len());
-                        for snap in runtime.engine_all_room_snapshots() {
-                            runtime.restore_room_state(
+                        for snap in runtime.engine_all_node_snapshots() {
+                            runtime.restore_node_state(
                                 &snap.id,
-                                rhythm_core::RestoredRoomState {
+                                rhythm_core::RestoredNodeState {
                                     rhythm_enabled: true,
                                     disabled: false,
                                     time_offset_minutes: 0.0,
@@ -694,40 +702,40 @@ pub fn ensure_composite_runtime(
                             );
                         }
                     } else {
-                        for room in persisted.iter() {
-                            runtime.restore_room_state(
-                                &room.id,
-                                rhythm_core::RestoredRoomState {
-                                    rhythm_enabled: room.rhythm_enabled,
-                                    disabled: room.disabled,
-                                    time_offset_minutes: room.time_offset_minutes,
-                                    brightness_offset: room.brightness_offset,
-                                    soft_off: room.soft_off,
-                                    hard_off: room.hard_off,
-                                    profile_settings: room.profile_settings.clone(),
+                        for node in persisted.iter() {
+                            runtime.restore_node_state(
+                                &node.id,
+                                rhythm_core::RestoredNodeState {
+                                    rhythm_enabled: node.rhythm_enabled,
+                                    disabled: node.disabled,
+                                    time_offset_minutes: node.time_offset_minutes,
+                                    brightness_offset: node.brightness_offset,
+                                    soft_off: node.soft_off,
+                                    hard_off: node.hard_off,
+                                    profile_settings: node.profile_settings.clone(),
                                 },
                             );
                             debug!(
                                 target: "sys",
-                                "Restored room '{}': rhythm={} disabled={} time_offset={} bri_offset={} soft_off={} hard_off={} room_profile={}",
-                                room.id,
-                                room.rhythm_enabled,
-                                room.disabled,
-                                room.time_offset_minutes,
-                                room.brightness_offset,
-                                room.soft_off,
-                                room.hard_off,
-                                !room.profile_settings.is_empty()
+                                "Restored node '{}': rhythm={} disabled={} time_offset={} bri_offset={} soft_off={} hard_off={} room_profile={}",
+                                node.id,
+                                node.rhythm_enabled,
+                                node.disabled,
+                                node.time_offset_minutes,
+                                node.brightness_offset,
+                                node.soft_off,
+                                node.hard_off,
+                                !node.profile_settings.is_empty()
                             );
                         }
                     }
                 }
                 Err(e) => {
                     warn!(target: "sys", "No persisted rooms (first boot?): {}", e);
-                    for snap in runtime.engine_all_room_snapshots() {
-                        runtime.restore_room_state(
+                    for snap in runtime.engine_all_node_snapshots() {
+                        runtime.restore_node_state(
                             &snap.id,
-                            rhythm_core::RestoredRoomState {
+                            rhythm_core::RestoredNodeState {
                                 rhythm_enabled: true,
                                 disabled: false,
                                 time_offset_minutes: 0.0,

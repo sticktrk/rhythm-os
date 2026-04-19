@@ -244,13 +244,13 @@ impl TestHarness {
             .expect("sync_from_hub_for_key failed")
     }
 
-    /// Resolve a hub-native room ID to the topology room ID used by the engine.
+    /// Resolve a hub-native room or node alias to the topology node ID used by the engine.
     ///
     /// Tests use short hub-native IDs like `"kitchen"` for readability, but
     /// the engine uses topology UUIDs. This mirrors what HTTP handlers do
-    /// via `commands::resolve_room_id`.
+    /// via `commands::resolve_node_id`.
     pub fn resolve(&self, room_id: &str) -> String {
-        commands::resolve_room_id(&self.state, room_id)
+        commands::resolve_node_id(&self.state, room_id)
     }
 
     /// Mark a room's lights as on or off.
@@ -293,7 +293,7 @@ impl TestHarness {
     /// Translates hub-native IDs to topology IDs automatically.
     pub fn action(&self, room_id: &str, action: &str) -> Result<String> {
         let resolved = self.resolve(room_id);
-        commands::do_room_action(&self.state, &resolved, action, false)
+        commands::do_node_action(&self.state, &resolved, action, false)
     }
 
     /// Call Fix My Lights and return the parsed JSON response.
@@ -524,7 +524,7 @@ impl TestHarness {
         let s = self.state.lock().unwrap();
         s.topology
             .get(&resolved)
-            .map(|r| r.hub_targets.len())
+            .map(|r| r.hub_room_bindings.len())
             .unwrap_or(0)
     }
 
@@ -544,7 +544,7 @@ impl TestHarness {
                 rhythm_core::RoomModeState::Active
             }
         });
-        commands::do_room_preferences_set(
+        commands::do_node_preferences_set(
             &self.state,
             &resolved,
             rhythm_enabled,
@@ -553,14 +553,14 @@ impl TestHarness {
             None,
             false,
         )
-        .expect("do_room_preferences_set failed");
+        .expect("do_node_preferences_set failed");
     }
 
     /// Set brightness on a room (0-100).
     pub fn set_brightness(&self, room_id: &str, brightness: u8) {
         let resolved = self.resolve(room_id);
-        commands::do_set_brightness(&self.state, &resolved, brightness, false)
-            .expect("do_set_brightness failed");
+        commands::do_set_node_brightness(&self.state, &resolved, brightness, false)
+            .expect("do_set_node_brightness failed");
     }
 
     // ========================================================================
@@ -610,8 +610,8 @@ impl TestHarness {
     /// Set a room's time offset directly.
     pub fn set_room_offset(&self, room_id: &str, offset: f32) {
         let resolved = self.resolve(room_id);
-        commands::do_set_time_offset(&self.state, &resolved, offset, false)
-            .expect("do_set_time_offset failed");
+        commands::do_set_node_time_offset(&self.state, &resolved, offset, false)
+            .expect("do_set_node_time_offset failed");
     }
 
     /// Read the current active light profile config from state.

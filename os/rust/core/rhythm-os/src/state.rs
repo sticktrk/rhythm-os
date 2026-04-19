@@ -21,7 +21,7 @@ use crate::factory_default_config::{
 };
 use crate::hub::{ActiveHub, HubCredentials, HubEvent};
 use crate::storage::Storage;
-use crate::topology::RoomTopologyStore;
+use crate::topology::{NodeControlKind, RoomTopologyStore};
 
 /// Work items for background processing.
 ///
@@ -30,23 +30,28 @@ use crate::topology::RoomTopologyStore;
 pub enum WorkItem {
     /// Execute a button action (involves TLS to hub).
     ButtonAction {
-        room_id: String,
+        node_id: String,
         action: ButtonAction,
         device_id: Option<String>,
     },
-    /// Apply a rendered lighting command to a single room.
+    /// Apply a rendered lighting command to a single addressable node.
     ///
-    /// Used by batch room-output updates so HTTP-triggered changes can be
-    /// dispatched room-by-room on the background worker instead of blocking
+    /// Used by batch node-output updates so HTTP-triggered changes can be
+    /// dispatched node-by-node on the background worker instead of blocking
     /// the caller while talking to hubs.
-    ApplyRoomCommand {
-        room_id: String,
+    ApplyNodeCommand {
+        node_id: String,
         command: rhythm_core::LightingCommand,
     },
-    /// Periodic update for a single room (holds engine lock only briefly).
-    PeriodicRoomTick { room_id: String, current_hour: f32 },
+    /// Periodic update for a single schedulable light node.
+    PeriodicNodeTick {
+        node_id: String,
+        settings_node_id: String,
+        current_hour: f32,
+        emit_parent_node_id: Option<String>,
+    },
     /// Deferred persist after inline button processing.
-    DeferredPersist { room_id: String },
+    DeferredPersist { node_id: String },
     /// Full state persist (registry + rooms) after batch HTTP operations.
     ///
     /// Unlike `DeferredPersist` (rooms-only), batch room updates modify the
@@ -55,18 +60,18 @@ pub enum WorkItem {
     DeferredPersistState,
 }
 
-/// Snapshot of motion timer state for a single room, exposed via API.
+/// Snapshot of motion timer state for a single controlled target node, exposed via API.
 #[derive(Clone)]
 pub struct MotionSnapshot {
-    /// Any sensor in this room still detecting motion.
+    /// Any sensor currently controlling this target node.
     pub motion_active: bool,
-    /// Motion controls the lights (vs. manual button press took over).
+    /// Motion still owns this target node (vs. manual control took over).
     pub motion_owned: bool,
     /// None if any sensor still active, Some(secs) if all cleared and counting down.
     pub remaining_secs: Option<u64>,
-    /// Configured timeout for this room.
+    /// Configured timeout for this target node.
     pub timeout_secs: u64,
-    /// Room is currently in warning dim state (dimmed before timeout).
+    /// Target node is currently in warning dim state (dimmed before timeout).
     pub warning_active: bool,
 }
 
@@ -211,8 +216,8 @@ pub struct AppState {
     /// to poll the hub directly.
     pub room_lights_on: HashMap<String, bool>,
 
-    /// Per-room motion timer snapshots, updated by the main loop.
-    /// Keyed by **topology room IDs** (not hub-native IDs).
+    /// Per-target motion timer snapshots, updated by the main loop.
+    /// Keyed by **topology node IDs** (not hub-native IDs).
     pub motion_snapshots: HashMap<String, MotionSnapshot>,
     /// Rooms currently transitioning between global modes.
     pub room_mode_transitions: HashMap<String, RoomModeTransition>,
@@ -241,18 +246,19 @@ pub struct AppState {
     /// When present, periodic updates no longer compete with button actions
     /// and deferred persists on the main worker queue.
     pub periodic_work_tx: Option<std::sync::mpsc::SyncSender<WorkItem>>,
-    /// Latest pending periodic tick hour per room.
+    /// Latest pending periodic tick hour per schedulable light node.
     ///
     /// Used for latest-only coalescing so repeated scheduler passes update the
-    /// most recent hour for a room without queueing duplicate work items.
+    /// most recent hour for a node without queueing duplicate work items.
     pub pending_periodic_ticks: HashMap<String, f32>,
     /// Pending hub event receivers from hub reconfiguration (picked up by main loop).
     /// Multiple hubs produce multiple receivers — the event loop drains this Vec.
     pub pending_hub_event_rxs: Vec<std::sync::mpsc::Receiver<HubEvent>>,
-    /// Room IDs whose motion timers should be cleared (picked up by event loop).
+    /// Target node IDs whose motion timers should be cleared (picked up by event loop).
     pub pending_motion_clear: Vec<String>,
-    /// Active motion sensors from startup prefetch (picked up by event loop).
-    /// Vec of (sensor_entity_id, room_id) for sensors with state="on" at boot.
+    /// Active motion sources from startup prefetch (picked up by event loop).
+    /// Vec of `(source_node_id, target_node_id)` for sources with state="on"
+    /// at boot.
     pub pending_motion_seed: Vec<(String, String)>,
 
     // ---- Composite controller ----
@@ -613,20 +619,31 @@ impl AppState {
     /// Translates hub-native room IDs to topology IDs.
     pub fn motion_sensor_room_ids(&self) -> std::collections::HashSet<String> {
         let mut ids = std::collections::HashSet::new();
-        for hub in self.hubs.values() {
+        for (hub_key, hub) in &self.hubs {
             if let Some(ref reg_arc) = hub.registry {
                 if let Ok(reg) = reg_arc.lock() {
                     for room_id in reg.rooms_with_motion_sensors() {
                         let translated = self
                             .topology
-                            .translate_room_id_any_hub(&room_id)
-                            .map(|s| s.to_string())
+                            .resolve_room_alias(&self.canonical_registry, Some(hub_key), &room_id)
                             .unwrap_or(room_id);
                         ids.insert(translated);
                     }
                 }
             }
         }
+        ids
+    }
+
+    /// Get controlled target node IDs for motion sources across the topology.
+    ///
+    /// Falls back to room-based registry mappings when a motion source has not
+    /// been promoted into the topology graph yet.
+    pub fn motion_control_target_ids(&self) -> std::collections::HashSet<String> {
+        let mut ids = self
+            .topology
+            .effective_control_targets_for_kind(&NodeControlKind::Motion, &self.canonical_registry);
+        ids.extend(self.motion_sensor_room_ids());
         ids
     }
 
@@ -733,8 +750,9 @@ pub fn emit_server_event(state: &SharedState, event: crate::server_event::Server
 /// into a serializable RoomManager without needing AppState.rooms.
 pub fn rooms_from_engine(runtime: &dyn RuntimeHandle) -> rhythm_core::room::RoomManager {
     let mut rooms = rhythm_core::room::RoomManager::new();
-    for snap in runtime.engine_all_room_snapshots() {
-        let room = rooms.get_or_create(&snap.id, &snap.name);
+    for snap in runtime.engine_all_node_snapshots() {
+        let room =
+            rooms.get_or_create_node(&snap.id, &snap.name, snap.kind, snap.parent_id.clone());
         room.rhythm_enabled = snap.rhythm_enabled;
         room.disabled = snap.disabled;
         room.time_offset_minutes = snap.time_offset_minutes;
@@ -919,6 +937,8 @@ mod tests {
                 RoomSnapshot {
                     id: "kitchen".into(),
                     name: "Kitchen".into(),
+                    kind: rhythm_core::LightNodeKind::Room,
+                    parent_id: None,
                     rhythm_enabled: true,
                     disabled: false,
                     time_offset_minutes: 15.0,
@@ -930,6 +950,8 @@ mod tests {
                 RoomSnapshot {
                     id: "bedroom".into(),
                     name: "Bedroom".into(),
+                    kind: rhythm_core::LightNodeKind::Room,
+                    parent_id: None,
                     rhythm_enabled: false,
                     disabled: true,
                     time_offset_minutes: 0.0,

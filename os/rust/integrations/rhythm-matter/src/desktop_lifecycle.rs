@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use log::info;
-use rhythm_core::controller::LightController;
+use rhythm_core::controller::HubLightController;
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::hub::{HubEvent, HubProvider, HubType};
 use rhythm_os::pairing::PairingSession;
@@ -108,7 +108,10 @@ pub fn connect_and_start(state: SharedState, _key: &HubKey) -> Result<Receiver<H
 }
 
 /// Create a `MatterLightController` for the composite controller.
-pub fn create_controller(state: &SharedState, _key: &HubKey) -> Result<Arc<dyn LightController>> {
+pub fn create_controller(
+    state: &SharedState,
+    _key: &HubKey,
+) -> Result<Arc<dyn HubLightController>> {
     let transport = get_transport(state)?;
     let hub_data = get_hub_data(state)?;
     Ok(Arc::new(MatterLightController::new(transport, hub_data)))
@@ -179,7 +182,7 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
         &self,
         state: &SharedState,
         key: &HubKey,
-    ) -> Result<Arc<dyn LightController>> {
+    ) -> Result<Arc<dyn HubLightController>> {
         create_controller(state, key)
     }
 

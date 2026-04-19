@@ -10,6 +10,7 @@
 //! `std::thread::sleep` and `BlockingTimeProvider`. On rhythm-server,
 //! this runs inside `tokio::task::spawn_blocking()`.
 
+use std::collections::{HashMap, HashSet};
 #[cfg(feature = "blocking")]
 use std::thread;
 use std::time::Duration;
@@ -22,11 +23,11 @@ use rhythm_core::{BlockingTimeProvider, TimeProvider};
 
 use std::sync::Arc;
 
-use rhythm_core::{runtime::RuntimeHandle, RestoredRoomState};
+use rhythm_core::{runtime::RuntimeHandle, RestoredNodeState};
 
-use crate::state::SharedState;
 #[cfg(feature = "blocking")]
 use crate::state::WorkItem;
+use crate::state::{AppState, SharedState};
 #[cfg(feature = "blocking")]
 use crate::storage::StoredLocation;
 
@@ -49,8 +50,90 @@ pub(crate) fn dispatch_spacing(cycle_duration: Duration, room_count: usize) -> D
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PeriodicDispatchNode {
+    node_id: String,
+    settings_node_id: String,
+    emit_node_id: String,
+}
+
+fn last_periodic_node_index_by_emit_target(
+    nodes: &[PeriodicDispatchNode],
+) -> HashMap<String, usize> {
+    let mut indices = HashMap::new();
+    for (idx, node) in nodes.iter().enumerate() {
+        indices.insert(node.emit_node_id.clone(), idx);
+    }
+    indices
+}
+
+fn periodic_dispatch_nodes_from_state(
+    state: &AppState,
+    room_snapshots: &[rhythm_core::NodeSnapshot],
+) -> Vec<PeriodicDispatchNode> {
+    let mut eligible_room_ids: Vec<String> =
+        room_snapshots.iter().map(|room| room.id.clone()).collect();
+    eligible_room_ids.sort();
+    eligible_room_ids.dedup();
+
+    #[cfg(feature = "desktop")]
+    let has_composite_controller = state.composite_controller.is_some();
+    #[cfg(not(feature = "desktop"))]
+    let has_composite_controller = false;
+
+    if !has_composite_controller {
+        return eligible_room_ids
+            .into_iter()
+            .map(|room_id| PeriodicDispatchNode {
+                node_id: room_id.clone(),
+                settings_node_id: room_id.clone(),
+                emit_node_id: room_id,
+            })
+            .collect();
+    }
+
+    let eligible_lookup: HashSet<String> = eligible_room_ids.iter().cloned().collect();
+    let mut derived_by_room: HashMap<String, Vec<crate::topology::TopologyLightNode>> =
+        HashMap::new();
+    for node in state
+        .topology
+        .periodic_light_nodes(&state.canonical_registry)
+    {
+        if eligible_lookup.contains(&node.source_node_id) {
+            derived_by_room
+                .entry(node.source_node_id.clone())
+                .or_default()
+                .push(node);
+        }
+    }
+
+    let mut dispatch_nodes = Vec::new();
+    for room_id in eligible_room_ids {
+        match derived_by_room.remove(&room_id) {
+            Some(mut nodes) => {
+                nodes.sort_by(|left, right| left.id.cmp(&right.id));
+                dispatch_nodes.extend(nodes.into_iter().map(|node| PeriodicDispatchNode {
+                    node_id: node.id,
+                    settings_node_id: room_id.clone(),
+                    emit_node_id: node.emit_node_id,
+                }));
+            }
+            None if state.topology.get(&room_id).is_none() => {
+                dispatch_nodes.push(PeriodicDispatchNode {
+                    node_id: room_id.clone(),
+                    settings_node_id: room_id.clone(),
+                    emit_node_id: room_id.clone(),
+                });
+            }
+            None => {}
+        }
+    }
+
+    dispatch_nodes
+}
+
 fn periodic_room_state(
-    room: &rhythm_core::RoomSnapshot,
+    room: &rhythm_core::NodeSnapshot,
     power_save: bool,
 ) -> Option<rhythm_core::RoomModeState> {
     if !room.rhythm_enabled || room.hard_off {
@@ -67,7 +150,7 @@ fn periodic_room_state(
 pub(crate) fn effective_cycle_duration(
     profile_registry: &rhythm_core::LightProfileRegistry,
     ctx: &rhythm_core::CurveContext,
-    room_snapshots: &[rhythm_core::RoomSnapshot],
+    room_snapshots: &[rhythm_core::NodeSnapshot],
     update_interval: Duration,
     power_save: bool,
 ) -> Duration {
@@ -178,21 +261,23 @@ fn resolve_periodic_sun_times(
 fn enqueue_periodic_tick(
     state: &SharedState,
     tx: &std::sync::mpsc::SyncSender<WorkItem>,
-    room_id: &str,
+    node_id: &str,
+    settings_node_id: &str,
     current_hour: f32,
+    emit_parent_node_id: Option<&str>,
 ) -> bool {
     let should_enqueue = {
         let Ok(mut s) = state.lock() else {
             return false;
         };
-        match s.pending_periodic_ticks.entry(room_id.to_string()) {
+        match s.pending_periodic_ticks.entry(node_id.to_string()) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 let previous_hour = *entry.get();
                 entry.insert(current_hour);
                 debug!(
                     target: "sys",
                     "Periodic tick already pending for '{}', coalescing {:.2} -> {:.2}",
-                    room_id,
+                    node_id,
                     previous_hour,
                     current_hour
                 );
@@ -209,14 +294,16 @@ fn enqueue_periodic_tick(
         return true;
     }
 
-    match tx.try_send(WorkItem::PeriodicRoomTick {
-        room_id: room_id.to_string(),
+    match tx.try_send(WorkItem::PeriodicNodeTick {
+        node_id: node_id.to_string(),
+        settings_node_id: settings_node_id.to_string(),
         current_hour,
+        emit_parent_node_id: emit_parent_node_id.map(str::to_string),
     }) {
         Ok(()) => true,
         Err(_) => {
             if let Ok(mut s) = state.lock() {
-                s.pending_periodic_ticks.remove(room_id);
+                s.pending_periodic_ticks.remove(node_id);
             }
             false
         }
@@ -230,7 +317,7 @@ fn enqueue_periodic_tick(
 /// 1. Calculates current hour via `BlockingTimeProvider`
 /// 2. Logs curve values for the current time
 /// 3. Gets rhythm-enabled room IDs, skipping rooms in warning-dim state
-/// 4. Dispatches `PeriodicRoomTick` via `work_tx` if `Some`, or calls
+/// 4. Dispatches `PeriodicNodeTick` via `work_tx` if `Some`, or calls
 ///    `periodic_tick_room` inline if `None`
 /// 5. Calls `check_solar_midnight()`
 ///
@@ -313,6 +400,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
         // Get rhythm-enabled room IDs, skipping rooms in warning-dim state
         let (
             mut room_snapshots,
+            mut periodic_nodes,
             warning_skipped,
             transition_skipped,
             rhythm_disabled_skipped,
@@ -330,17 +418,18 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             s.room_mode_transitions
                 .retain(|_, transition| transition.periodic_resume_at > now);
             let expired_transitions = transitions_before - s.room_mode_transitions.len();
-            let all_rooms: Vec<rhythm_core::RoomSnapshot> = s
+            let all_rooms: Vec<rhythm_core::NodeSnapshot> = s
                 .hub_runtime()
-                .map(|rt| rt.engine_all_room_snapshots())
+                .map(|rt| rt.engine_all_effective_node_snapshots())
                 .unwrap_or_default();
             let mut warning_skipped = 0usize;
             let mut transition_skipped = 0usize;
             let mut rhythm_disabled_skipped = 0usize;
             let mut hard_off_rooms = 0usize;
-            let rooms: Vec<rhythm_core::RoomSnapshot> = all_rooms
+            let rooms: Vec<rhythm_core::NodeSnapshot> = all_rooms
                 .into_iter()
                 .filter(|room| {
+                    let event_room_id = room.parent_id.as_deref().unwrap_or(&room.id);
                     if !room.rhythm_enabled {
                         rhythm_disabled_skipped += 1;
                         return false;
@@ -349,14 +438,14 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                         hard_off_rooms += 1;
                     }
                     if s.room_mode_transitions
-                        .get(&room.id)
+                        .get(event_room_id)
                         .is_some_and(|transition| transition.periodic_resume_at > now)
                     {
                         transition_skipped += 1;
                         return false;
                     }
                     if s.motion_snapshots
-                        .get(&room.id)
+                        .get(event_room_id)
                         .is_some_and(|ms| ms.warning_active)
                     {
                         warning_skipped += 1;
@@ -366,8 +455,10 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                     }
                 })
                 .collect();
+            let periodic_nodes = periodic_dispatch_nodes_from_state(&s, &rooms);
             (
                 rooms,
+                periodic_nodes,
                 warning_skipped,
                 transition_skipped,
                 rhythm_disabled_skipped,
@@ -379,7 +470,9 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
         };
 
         room_snapshots.sort_by_key(|room| stable_room_phase_key(&room.id));
-        let room_ids: Vec<String> = room_snapshots.iter().map(|room| room.id.clone()).collect();
+        periodic_nodes.sort_by_key(|node| stable_room_phase_key(&node.node_id));
+        let last_node_index_by_emit_target =
+            last_periodic_node_index_by_emit_target(&periodic_nodes);
 
         if transition_skipped > 0
             || rhythm_disabled_skipped > 0
@@ -389,7 +482,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             debug!(
                 target: "sys",
                 "Periodic tick detail: dispatch={} warning_skipped={} transition_skipped={} rhythm_disabled={} hard_off={} expired_transitions={}",
-                room_ids.len(),
+                periodic_nodes.len(),
                 warning_skipped,
                 transition_skipped,
                 rhythm_disabled_skipped,
@@ -400,22 +493,24 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
 
         if warning_skipped > 0 {
             info!(
-                "Periodic tick at local_hour {:.2} (solar_time {:.2}) - bri={}% kelvin={} ({} rooms in rhythm, {} skipped: warning-dim)",
+                "Periodic tick at local_hour {:.2} (solar_time {:.2}) - bri={}% kelvin={} ({} nodes across {} rooms in rhythm, {} skipped: warning-dim)",
                 current_hour,
                 values.solar_time,
                 values.brightness,
                 values.kelvin,
-                room_ids.len(),
+                periodic_nodes.len(),
+                room_snapshots.len(),
                 warning_skipped
             );
         } else {
             info!(
-                "Periodic tick at local_hour {:.2} (solar_time {:.2}) - bri={}% kelvin={} ({} rooms in rhythm)",
+                "Periodic tick at local_hour {:.2} (solar_time {:.2}) - bri={}% kelvin={} ({} nodes across {} rooms in rhythm)",
                 current_hour,
                 values.solar_time,
                 values.brightness,
                 values.kelvin,
-                room_ids.len()
+                periodic_nodes.len(),
+                room_snapshots.len()
             );
         }
 
@@ -440,27 +535,59 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             update_interval,
             power_save,
         );
-        let phase_gap = dispatch_spacing(cycle_duration, room_ids.len());
+        let phase_gap = dispatch_spacing(cycle_duration, periodic_nodes.len());
         let cycle_started = Instant::now();
 
-        // Dispatch per-room ticks with stable staggering across the cycle.
+        // Dispatch per-node ticks with stable staggering across the cycle.
         if let Some(ref tx) = periodic_work_tx {
-            for (idx, room_id) in room_ids.iter().enumerate() {
+            for (idx, node) in periodic_nodes.iter().enumerate() {
                 let room_hour = BlockingTimeProvider::new(utc_offset).current_hour();
-                if !enqueue_periodic_tick(&state, tx, room_id, room_hour) {
-                    warn!(target: "sys", "Periodic queue full, dropping periodic tick for '{}'", room_id);
+                let emit_parent_node_id = last_node_index_by_emit_target
+                    .get(&node.emit_node_id)
+                    .is_some_and(|last_idx| *last_idx == idx)
+                    .then_some(node.emit_node_id.as_str())
+                    .filter(|emit_id| *emit_id != node.settings_node_id);
+                if !enqueue_periodic_tick(
+                    &state,
+                    tx,
+                    &node.node_id,
+                    &node.settings_node_id,
+                    room_hour,
+                    emit_parent_node_id,
+                ) {
+                    warn!(
+                        target: "sys",
+                        "Periodic queue full, dropping periodic tick for '{}'",
+                        node.node_id
+                    );
                 }
-                if idx + 1 < room_ids.len() && !phase_gap.is_zero() {
+                if idx + 1 < periodic_nodes.len() && !phase_gap.is_zero() {
                     thread::sleep(phase_gap);
                 }
             }
         } else if let Some(ref tx) = work_tx {
-            for (idx, room_id) in room_ids.iter().enumerate() {
+            for (idx, node) in periodic_nodes.iter().enumerate() {
                 let room_hour = BlockingTimeProvider::new(utc_offset).current_hour();
-                if !enqueue_periodic_tick(&state, tx, room_id, room_hour) {
-                    warn!(target: "sys", "Work queue full, dropping periodic tick for '{}'", room_id);
+                let emit_parent_node_id = last_node_index_by_emit_target
+                    .get(&node.emit_node_id)
+                    .is_some_and(|last_idx| *last_idx == idx)
+                    .then_some(node.emit_node_id.as_str())
+                    .filter(|emit_id| *emit_id != node.settings_node_id);
+                if !enqueue_periodic_tick(
+                    &state,
+                    tx,
+                    &node.node_id,
+                    &node.settings_node_id,
+                    room_hour,
+                    emit_parent_node_id,
+                ) {
+                    warn!(
+                        target: "sys",
+                        "Work queue full, dropping periodic tick for '{}'",
+                        node.node_id
+                    );
                 }
-                if idx + 1 < room_ids.len() && !phase_gap.is_zero() {
+                if idx + 1 < periodic_nodes.len() && !phase_gap.is_zero() {
                     thread::sleep(phase_gap);
                 }
             }
@@ -474,21 +601,35 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                 s.hub_runtime()
             };
             if let Some(runtime) = runtime {
-                for (idx, room_id) in room_ids.iter().enumerate() {
+                for (idx, node) in periodic_nodes.iter().enumerate() {
                     let room_hour = BlockingTimeProvider::new(utc_offset).current_hour();
-                    if let Err(e) = runtime.periodic_tick_room(room_id, room_hour) {
-                        warn!(target: "sys", "Periodic room tick '{}' failed: {}", room_id, e);
+                    if let Err(e) =
+                        runtime.periodic_tick_node(&node.node_id, &node.settings_node_id, room_hour)
+                    {
+                        warn!(
+                            target: "sys",
+                            "Periodic node tick '{}' failed: {}",
+                            node.node_id,
+                            e
+                        );
                     }
-                    post_tick_room(&state, &runtime, room_id);
-                    if idx + 1 < room_ids.len() && !phase_gap.is_zero() {
+                    post_tick_node(&state, &runtime, &node.settings_node_id);
+                    if last_node_index_by_emit_target
+                        .get(&node.emit_node_id)
+                        .is_some_and(|last_idx| *last_idx == idx)
+                        && node.emit_node_id != node.settings_node_id
+                    {
+                        post_tick_node(&state, &runtime, &node.emit_node_id);
+                    }
+                    if idx + 1 < periodic_nodes.len() && !phase_gap.is_zero() {
                         thread::sleep(phase_gap);
                     }
                 }
-            } else if !room_ids.is_empty() {
+            } else if !periodic_nodes.is_empty() {
                 debug!(
                     target: "sys",
-                    "Periodic tick skipped {} queued room(s): no runtime available",
-                    room_ids.len()
+                    "Periodic tick skipped {} queued node(s): no runtime available",
+                    periodic_nodes.len()
                 );
             }
         }
@@ -510,21 +651,21 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
     }
 }
 
-/// Process post-tick side effects for a single room.
+/// Process post-tick side effects for a single public node.
 ///
-/// Emits an SSE event with the room's current state on desktop.
-pub fn post_tick_room(state: &SharedState, runtime: &Arc<dyn RuntimeHandle>, room_id: &str) {
-    let Some(snap) = runtime.engine_room_snapshot(room_id) else {
+/// Emits an SSE event with the node's current state on desktop.
+pub fn post_tick_node(state: &SharedState, runtime: &Arc<dyn RuntimeHandle>, node_id: &str) {
+    let Some(snap) = runtime.engine_effective_node_snapshot(node_id) else {
         return;
     };
 
     #[cfg(feature = "desktop")]
     {
-        let mut event = crate::commands::build_room_state_event(state, &snap);
+        let mut event = crate::commands::build_node_state_event(state, &snap);
         event.tick = true;
         crate::state::emit_server_event(
             state,
-            crate::server_event::ServerEvent::RoomState { rooms: vec![event] },
+            crate::server_event::ServerEvent::NodeState { nodes: vec![event] },
         );
     }
 
@@ -568,13 +709,13 @@ pub fn check_solar_midnight(state: &SharedState, current_hour: f32) {
 
     if crossed {
         if let Some(runtime) = runtime {
-            for snap in runtime.engine_all_room_snapshots() {
-                runtime.restore_room_state(
+            for snap in runtime.engine_all_node_snapshots() {
+                runtime.restore_node_state(
                     &snap.id,
-                    RestoredRoomState {
+                    RestoredNodeState {
                         time_offset_minutes: 0.0,
                         brightness_offset: 0.0,
-                        ..RestoredRoomState::from(&snap)
+                        ..RestoredNodeState::from(&snap)
                     },
                 );
             }
@@ -584,12 +725,17 @@ pub fn check_solar_midnight(state: &SharedState, current_hour: f32) {
                 let events: Vec<_> = runtime
                     .engine_all_room_snapshots()
                     .iter()
-                    .map(|s| crate::commands::build_room_state_event(state, s))
+                    .map(|s| {
+                        crate::commands::build_node_state_event(
+                            state,
+                            &rhythm_core::NodeSnapshot::from_room_snapshot(s.clone()),
+                        )
+                    })
                     .collect();
                 if !events.is_empty() {
                     crate::state::emit_server_event(
                         state,
-                        crate::server_event::ServerEvent::RoomState { rooms: events },
+                        crate::server_event::ServerEvent::NodeState { nodes: events },
                     );
                 }
             }
@@ -1081,6 +1227,7 @@ pub fn refresh_dst_offset(
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+    use rhythm_core::CompositeController;
     use rhythm_core::{
         default_rhythm_profile, CurveContext, LightProfileRegistry, RoomProfileSettings,
     };
@@ -1090,10 +1237,12 @@ mod tests {
         Arc::new(Mutex::new(crate::state::AppState::default()))
     }
 
-    fn make_room(id: &str, time_offset_minutes: f32) -> rhythm_core::RoomSnapshot {
-        rhythm_core::RoomSnapshot {
+    fn make_room(id: &str, time_offset_minutes: f32) -> rhythm_core::NodeSnapshot {
+        rhythm_core::NodeSnapshot {
             id: id.to_string(),
             name: id.to_string(),
+            kind: rhythm_core::LightNodeKind::Room,
+            parent_id: None,
             rhythm_enabled: true,
             disabled: false,
             time_offset_minutes,
@@ -1165,17 +1314,35 @@ mod tests {
         let state = make_state();
         let (tx, rx) = std::sync::mpsc::sync_channel::<WorkItem>(4);
 
-        assert!(enqueue_periodic_tick(&state, &tx, "room1", 10.0));
-        assert!(enqueue_periodic_tick(&state, &tx, "room1", 10.5));
+        assert!(enqueue_periodic_tick(
+            &state,
+            &tx,
+            "node-1",
+            "room1",
+            10.0,
+            Some("room-parent")
+        ));
+        assert!(enqueue_periodic_tick(
+            &state,
+            &tx,
+            "node-1",
+            "room1",
+            10.5,
+            Some("room-parent")
+        ));
 
         let item = rx.try_recv().expect("first periodic item should be queued");
         match item {
-            WorkItem::PeriodicRoomTick {
-                room_id,
+            WorkItem::PeriodicNodeTick {
+                node_id,
+                settings_node_id,
                 current_hour,
+                emit_parent_node_id,
             } => {
-                assert_eq!(room_id, "room1");
+                assert_eq!(node_id, "node-1");
+                assert_eq!(settings_node_id, "room1");
                 assert!((current_hour - 10.0).abs() < f32::EPSILON);
+                assert_eq!(emit_parent_node_id.as_deref(), Some("room-parent"));
             }
             _ => panic!("unexpected work item"),
         }
@@ -1188,10 +1355,86 @@ mod tests {
         let pending = state.lock().unwrap();
         let latest = pending
             .pending_periodic_ticks
-            .get("room1")
+            .get("node-1")
             .copied()
             .expect("latest hour should be retained");
         assert!((latest - 10.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn periodic_dispatch_nodes_fall_back_to_room_ids_without_composite() {
+        let state = crate::state::AppState::default();
+        let snapshots = vec![make_room("room-a", 0.0)];
+
+        assert_eq!(
+            periodic_dispatch_nodes_from_state(&state, &snapshots),
+            vec![PeriodicDispatchNode {
+                node_id: "room-a".to_string(),
+                settings_node_id: "room-a".to_string(),
+                emit_node_id: "room-a".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn last_periodic_node_index_tracks_last_node_per_emit_target_when_interleaved() {
+        let nodes = vec![
+            PeriodicDispatchNode {
+                node_id: "node-a1".to_string(),
+                settings_node_id: "room-a".to_string(),
+                emit_node_id: "room-a".to_string(),
+            },
+            PeriodicDispatchNode {
+                node_id: "node-b1".to_string(),
+                settings_node_id: "room-b".to_string(),
+                emit_node_id: "room-b".to_string(),
+            },
+            PeriodicDispatchNode {
+                node_id: "node-a2".to_string(),
+                settings_node_id: "room-a".to_string(),
+                emit_node_id: "room-a".to_string(),
+            },
+        ];
+
+        let indices = last_periodic_node_index_by_emit_target(&nodes);
+        assert_eq!(indices.get("room-a"), Some(&2));
+        assert_eq!(indices.get("room-b"), Some(&1));
+    }
+
+    #[test]
+    fn periodic_dispatch_nodes_follow_topology_light_nodes_with_composite() {
+        let mut state = crate::state::AppState::default();
+        state.composite_controller = Some(Arc::new(CompositeController::new()));
+
+        let room_id = state.topology.create_room("Kitchen");
+        state
+            .topology
+            .get_mut(&room_id)
+            .unwrap()
+            .upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                hub_key: crate::canonical::identity::HubKey::new(
+                    crate::hub::HubType::new("hue"),
+                    "192.168.1.10",
+                ),
+                hub_room_id: "hue-room-1".to_string(),
+                control_id: "gl-1".to_string(),
+                light_device_ids: vec!["hue-light-1".to_string()],
+            });
+
+        let snapshots = vec![make_room(&room_id, 0.0)];
+        let expected = state
+            .topology
+            .periodic_light_nodes(&state.canonical_registry);
+        assert_eq!(expected.len(), 1);
+
+        assert_eq!(
+            periodic_dispatch_nodes_from_state(&state, &snapshots),
+            vec![PeriodicDispatchNode {
+                node_id: expected[0].id.clone(),
+                settings_node_id: room_id,
+                emit_node_id: expected[0].emit_node_id.clone(),
+            }]
+        );
     }
 
     /// When no timezone is set, refresh_dst_offset is a no-op.
@@ -1333,7 +1576,10 @@ mod tests {
     #[test]
     fn solar_midnight_crossing_resets_offsets() {
         // We need a runtime to verify offset reset
-        use rhythm_core::{InputEvent, LightProfileConfig, RoomSnapshot, RuntimeHandle};
+        use rhythm_core::{
+            InputEvent, LightNodeKind, LightProfileConfig, RestoredRoomState, RoomSnapshot,
+            RuntimeHandle,
+        };
         use std::sync::Mutex as StdMutex;
 
         struct MockRuntime {
@@ -1438,6 +1684,8 @@ mod tests {
             snapshots: StdMutex::new(vec![RoomSnapshot {
                 id: "room1".into(),
                 name: "Room 1".into(),
+                kind: LightNodeKind::Room,
+                parent_id: None,
                 rhythm_enabled: true,
                 disabled: false,
                 time_offset_minutes: 30.0,

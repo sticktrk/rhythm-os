@@ -1,8 +1,9 @@
-//! Room/Area abstraction for adaptive lighting.
+//! Addressable node abstraction for adaptive lighting.
 //!
-//! This module provides the `Room` struct which represents a room or area
-//! that can have Rhythm lighting enabled, along with `RoomManager` for
-//! tracking multiple rooms.
+//! This module provides the `Room` struct which represents any addressable
+//! topology node the runtime can target: root rooms and first-class device
+//! leaves. `RoomManager` tracks that node graph and computes inherited
+//! behavior for child nodes.
 
 use std::collections::{HashMap, HashSet};
 
@@ -831,12 +832,65 @@ impl RoomProfileSettings {
             config.motion_timeout_secs = motion_timeout_secs.clone();
         }
     }
+
+    /// Merge this node-local override on top of a parent's effective settings.
+    pub fn merged_with_parent(&self, parent: &Self) -> Self {
+        Self {
+            profile_id: self
+                .profile_id
+                .clone()
+                .or_else(|| parent.profile_id.clone()),
+            fade_ms: self.fade_ms.clone().or_else(|| parent.fade_ms.clone()),
+            motion_timeout_secs: self
+                .motion_timeout_secs
+                .clone()
+                .or_else(|| parent.motion_timeout_secs.clone()),
+        }
+    }
+}
+
+/// Addressable runtime node kind.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum LightNodeKind {
+    #[default]
+    Room,
+    LightDevice,
+    SwitchDevice,
+    MotionSensor,
+    Sensor,
+    Button,
+    OtherDevice,
+}
+
+impl LightNodeKind {
+    pub const fn is_room(self) -> bool {
+        matches!(self, Self::Room)
+    }
+
+    pub const fn is_light_addressable(self) -> bool {
+        matches!(self, Self::Room | Self::LightDevice)
+    }
+}
+
+/// Effective node behavior after walking parent inheritance.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectiveRoomState {
+    pub rhythm_enabled: bool,
+    pub disabled: bool,
+    pub time_offset_minutes: f32,
+    pub brightness_offset: f32,
+    pub soft_off: bool,
+    pub hard_off: bool,
+    pub profile_settings: RoomProfileSettings,
 }
 
 /// A room or area that can have Rhythm lighting enabled.
 ///
-/// Each room tracks its Rhythm state and any time/brightness offsets
-/// from manual adjustments (step up/down).
+/// Each node tracks its local Rhythm state and any time/brightness offsets
+/// from manual adjustments (step up/down). Child nodes inherit effective
+/// settings from their parent at runtime.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Room {
@@ -845,6 +899,17 @@ pub struct Room {
 
     /// Human-readable name
     pub name: String,
+
+    /// Runtime node kind.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub kind: LightNodeKind,
+
+    /// Optional parent node that this node inherits from.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub parent_id: Option<String>,
 
     /// Whether Rhythm mode is enabled for this room
     pub rhythm_enabled: bool,
@@ -892,6 +957,8 @@ impl Room {
         Self {
             id: id.into(),
             name: name.into(),
+            kind: LightNodeKind::Room,
+            parent_id: None,
             rhythm_enabled: false,
             disabled: false,
             time_offset_minutes: 0.0,
@@ -900,6 +967,23 @@ impl Room {
             hard_off: false,
             profile_settings: RoomProfileSettings::default(),
         }
+    }
+
+    /// Create a new addressable node with explicit kind and optional parent.
+    pub fn new_node(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        kind: LightNodeKind,
+        parent_id: Option<String>,
+    ) -> Self {
+        let mut node = Self::new(id, name);
+        node.kind = kind;
+        node.parent_id = parent_id;
+        if node.parent_id.is_some() {
+            // Child nodes should inherit unless they explicitly opt out later.
+            node.rhythm_enabled = true;
+        }
+        node
     }
 
     /// Enable Rhythm mode for this room.
@@ -965,6 +1049,8 @@ impl Default for Room {
         Self {
             id: "default".to_string(),
             name: "Default Room".to_string(),
+            kind: LightNodeKind::Room,
+            parent_id: None,
             rhythm_enabled: false,
             disabled: false,
             time_offset_minutes: 0.0,
@@ -1007,6 +1093,18 @@ impl RoomManager {
         self.rooms.insert(room.id.clone(), room);
     }
 
+    /// Add a node by ID, name, kind, and optional parent.
+    pub fn add_node(
+        &mut self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        kind: LightNodeKind,
+        parent_id: Option<String>,
+    ) {
+        let node = Room::new_node(id, name, kind, parent_id);
+        self.rooms.insert(node.id.clone(), node);
+    }
+
     /// Remove a room by ID.
     pub fn remove(&mut self, id: &str) -> Option<Room> {
         self.rooms.remove(id)
@@ -1030,6 +1128,25 @@ impl RoomManager {
         if !self.rooms.contains_key(&id) {
             let name = name.into();
             self.rooms.insert(id.clone(), Room::new(id.clone(), name));
+        }
+        self.rooms.get_mut(&id).unwrap()
+    }
+
+    /// Get or create an addressable node.
+    pub fn get_or_create_node(
+        &mut self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        kind: LightNodeKind,
+        parent_id: Option<String>,
+    ) -> &mut Room {
+        let id = id.into();
+        if !self.rooms.contains_key(&id) {
+            let name = name.into();
+            self.rooms.insert(
+                id.clone(),
+                Room::new_node(id.clone(), name, kind, parent_id),
+            );
         }
         self.rooms.get_mut(&id).unwrap()
     }
@@ -1079,7 +1196,10 @@ impl RoomManager {
 
     /// Get all rooms with Rhythm enabled.
     pub fn rhythm_enabled_rooms(&self) -> Vec<&Room> {
-        self.rooms.values().filter(|r| r.rhythm_enabled).collect()
+        self.rooms
+            .values()
+            .filter(|r| r.kind.is_room() && r.rhythm_enabled)
+            .collect()
     }
 
     /// Get the number of rooms.
@@ -1111,7 +1231,63 @@ impl RoomManager {
     ///
     /// Useful for kiosk mode which should skip disabled rooms.
     pub fn enabled_rooms(&self) -> Vec<&Room> {
-        self.rooms.values().filter(|r| !r.disabled).collect()
+        self.rooms
+            .values()
+            .filter(|r| r.kind.is_room() && !r.disabled)
+            .collect()
+    }
+
+    /// Iterate only root room nodes.
+    pub fn room_iter(&self) -> impl Iterator<Item = &Room> {
+        self.rooms.values().filter(|room| room.kind.is_room())
+    }
+
+    /// Iterate child nodes for a parent.
+    pub fn child_iter<'a>(&'a self, parent_id: &'a str) -> impl Iterator<Item = &'a Room> {
+        self.rooms
+            .values()
+            .filter(move |room| room.parent_id.as_deref() == Some(parent_id))
+    }
+
+    /// Resolve a node's effective inherited state.
+    pub fn effective_state(&self, id: &str) -> Option<EffectiveRoomState> {
+        let room = self.rooms.get(id)?;
+        let mut state = EffectiveRoomState {
+            rhythm_enabled: room.rhythm_enabled,
+            disabled: room.disabled,
+            time_offset_minutes: room.time_offset_minutes,
+            brightness_offset: room.brightness_offset,
+            soft_off: room.soft_off,
+            hard_off: room.hard_off,
+            profile_settings: room.profile_settings.clone(),
+        };
+
+        let mut seen = HashSet::from([room.id.as_str()]);
+        let mut current_parent = room.parent_id.as_deref();
+        while let Some(parent_id) = current_parent {
+            if !seen.insert(parent_id) {
+                break;
+            }
+            let Some(parent) = self.rooms.get(parent_id) else {
+                break;
+            };
+            state.rhythm_enabled &= parent.rhythm_enabled;
+            state.disabled |= parent.disabled;
+            state.time_offset_minutes += parent.time_offset_minutes;
+            state.brightness_offset += parent.brightness_offset;
+            state.soft_off |= parent.soft_off;
+            state.hard_off |= parent.hard_off;
+            state.profile_settings = state
+                .profile_settings
+                .merged_with_parent(&parent.profile_settings);
+            current_parent = parent.parent_id.as_deref();
+        }
+
+        if state.hard_off {
+            state.soft_off = false;
+        }
+
+        Some(state)
     }
 }
 
@@ -1425,6 +1601,42 @@ mod tests {
         let enabled = manager.enabled_rooms();
         assert_eq!(enabled.len(), 2);
         assert!(enabled.iter().all(|r| r.id != "room2"));
+    }
+
+    #[test]
+    fn test_room_manager_effective_state_merges_parent_and_child() {
+        let mut manager = RoomManager::new();
+
+        let mut parent = Room::new("room1", "Room 1");
+        parent.rhythm_enabled = true;
+        parent.time_offset_minutes = 30.0;
+        parent.brightness_offset = 12.0;
+        parent.profile_settings.profile_id = Some("sleep".into());
+        manager.add_room(parent);
+
+        let mut child = Room::new_node(
+            "device1",
+            "Device 1",
+            LightNodeKind::LightDevice,
+            Some("room1".into()),
+        );
+        child.time_offset_minutes = -5.0;
+        child.brightness_offset = -2.0;
+        child.profile_settings.fade_ms = Some(TimerSetting::Fixed { value: 1234 });
+        manager.add_room(child);
+
+        let effective = manager.effective_state("device1").unwrap();
+        assert!(effective.rhythm_enabled);
+        assert_eq!(effective.time_offset_minutes, 25.0);
+        assert_eq!(effective.brightness_offset, 10.0);
+        assert_eq!(
+            effective.profile_settings.profile_id.as_deref(),
+            Some("sleep")
+        );
+        assert_eq!(
+            effective.profile_settings.fade_ms,
+            Some(TimerSetting::Fixed { value: 1234 })
+        );
     }
 
     // =========================================================================

@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use log::{debug, warn};
-use rhythm_core::controller::{LightControlError, LightControlResult, LightController};
+use rhythm_core::controller::{
+    HubDispatchTarget, HubLightController, LightControlError, LightControlResult, LightController,
+};
 use rhythm_core::lighting::LightingCommand;
 use rhythm_core::room::Room;
 use rhythm_devices::{ColorPreference, LightCapabilities, LightType};
@@ -51,9 +53,10 @@ impl MatterLightController {
     /// raw `matter-{node}` identifier through the composite controller's
     /// single-hub fallback routing. Accept both forms.
     fn target_device_ids(&self, room_id: &str) -> LightControlResult<Vec<String>> {
-        let registry = self.hub_data.registry.lock().map_err(|e| {
-            LightControlError::Internal(format!("Failed to lock registry: {}", e))
-        })?;
+        let registry =
+            self.hub_data.registry.lock().map_err(|e| {
+                LightControlError::Internal(format!("Failed to lock registry: {}", e))
+            })?;
 
         let device_ids = registry.get_light_entities(room_id);
         if !device_ids.is_empty() || registry.get_grouped_light_id(room_id).is_some() {
@@ -69,15 +72,23 @@ impl MatterLightController {
             room_id
         )))
     }
-}
 
-#[async_trait]
-impl LightController for MatterLightController {
-    async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
-        let room_label =
-            rhythm_os::controller_helpers::format_room_label(&self.hub_data.registry, room_id);
-        let device_ids = self.target_device_ids(room_id)?;
+    fn target_device_ids_for_target(
+        &self,
+        target: &HubDispatchTarget,
+    ) -> LightControlResult<Vec<String>> {
+        match target {
+            HubDispatchTarget::Group { room_id, .. } => self.target_device_ids(room_id),
+            HubDispatchTarget::Devices { native_ids } => Ok(native_ids.clone()),
+        }
+    }
 
+    fn turn_on_devices(
+        &self,
+        target_label: &str,
+        device_ids: &[String],
+        command: LightingCommand,
+    ) -> LightControlResult<()> {
         let default_caps = LightCapabilities::defaults_for(LightType::ExtendedColor);
         let device_caps = self.hub_data.device_caps.lock().map_err(|e| {
             LightControlError::Internal(format!("Failed to lock device capabilities: {}", e))
@@ -86,7 +97,7 @@ impl LightController for MatterLightController {
         let mut successful_devices = 0usize;
         let mut failed_devices = 0usize;
 
-        for device_id in &device_ids {
+        for device_id in device_ids {
             let Some((node_id, endpoint)) = Self::parse_device_id(device_id) else {
                 warn!(target: "cmd", "Matter: invalid device ID format: {}", device_id);
                 failed_devices += 1;
@@ -171,24 +182,24 @@ impl LightController for MatterLightController {
 
         if successful_devices == 0 && !device_ids.is_empty() {
             return Err(LightControlError::CommandFailed(format!(
-                "Matter turn_on failed for room {} ({} target devices)",
-                room_label, failed_devices,
+                "Matter turn_on failed for target {} ({} target devices)",
+                target_label, failed_devices,
             )));
         }
 
         if failed_devices > 0 {
             warn!(
                 target: "cmd",
-                "Matter turn_on partial: room={} ok={} failed={}",
-                room_label,
+                "Matter turn_on partial: target={} ok={} failed={}",
+                target_label,
                 successful_devices,
                 failed_devices,
             );
         } else if command.is_direct_color || command.kelvin == 0 {
             debug!(
                 target: "cmd",
-                "Matter turn_on: room={} bri={} xy=({:.3},{:.3}) rgb=({},{},{}) devices={}",
-                room_label,
+                "Matter turn_on: target={} bri={} xy=({:.3},{:.3}) rgb=({},{},{}) devices={}",
+                target_label,
                 command.brightness,
                 command.xy.x,
                 command.xy.y,
@@ -200,8 +211,8 @@ impl LightController for MatterLightController {
         } else {
             debug!(
                 target: "cmd",
-                "Matter turn_on: room={} bri={} kelvin={} devices={}",
-                room_label,
+                "Matter turn_on: target={} bri={} kelvin={} devices={}",
+                target_label,
                 command.brightness,
                 command.kelvin,
                 device_ids.len()
@@ -211,15 +222,15 @@ impl LightController for MatterLightController {
         Ok(())
     }
 
-    async fn turn_off(&self, room_id: &str, _transition_ms: Option<u32>) -> LightControlResult<()> {
-        let room_label =
-            rhythm_os::controller_helpers::format_room_label(&self.hub_data.registry, room_id);
-        let device_ids = self.target_device_ids(room_id)?;
-
+    fn turn_off_devices(
+        &self,
+        target_label: &str,
+        device_ids: &[String],
+    ) -> LightControlResult<()> {
         let mut successful_devices = 0usize;
         let mut failed_devices = 0usize;
 
-        for device_id in &device_ids {
+        for device_id in device_ids {
             let Some((node_id, endpoint)) = Self::parse_device_id(device_id) else {
                 failed_devices += 1;
                 continue;
@@ -235,23 +246,46 @@ impl LightController for MatterLightController {
 
         if successful_devices == 0 && !device_ids.is_empty() {
             return Err(LightControlError::CommandFailed(format!(
-                "Matter turn_off failed for room {} ({} target devices)",
-                room_label, failed_devices,
+                "Matter turn_off failed for target {} ({} target devices)",
+                target_label, failed_devices,
             )));
         }
 
         if failed_devices > 0 {
             warn!(
                 target: "cmd",
-                "Matter turn_off partial: room={} ok={} failed={}",
-                room_label,
+                "Matter turn_off partial: target={} ok={} failed={}",
+                target_label,
                 successful_devices,
                 failed_devices,
             );
         }
 
-        debug!(target: "cmd", "Matter turn_off: room={} devices={}", room_label, device_ids.len());
+        debug!(target: "cmd", "Matter turn_off: target={} devices={}", target_label, device_ids.len());
         Ok(())
+    }
+}
+
+#[async_trait]
+impl HubLightController for MatterLightController {
+    async fn turn_on_target(
+        &self,
+        target: &HubDispatchTarget,
+        command: LightingCommand,
+    ) -> LightControlResult<()> {
+        let target_label = target.label();
+        let device_ids = self.target_device_ids_for_target(target)?;
+        self.turn_on_devices(&target_label, &device_ids, command)
+    }
+
+    async fn turn_off_target(
+        &self,
+        target: &HubDispatchTarget,
+        _transition_ms: Option<u32>,
+    ) -> LightControlResult<()> {
+        let target_label = target.label();
+        let device_ids = self.target_device_ids_for_target(target)?;
+        self.turn_off_devices(&target_label, &device_ids)
     }
 
     async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
@@ -262,8 +296,8 @@ impl LightController for MatterLightController {
         self.transport.list_devices().is_ok()
     }
 
-    async fn any_lights_on(&self, room_id: &str) -> LightControlResult<bool> {
-        let device_ids = self.target_device_ids(room_id)?;
+    async fn any_lights_on_target(&self, target: &HubDispatchTarget) -> LightControlResult<bool> {
+        let device_ids = self.target_device_ids_for_target(target)?;
 
         if device_ids.is_empty() {
             return Ok(false);
@@ -288,6 +322,43 @@ impl LightController for MatterLightController {
         }
 
         Ok(false)
+    }
+
+    fn name(&self) -> &str {
+        "Matter"
+    }
+}
+
+#[async_trait]
+impl LightController for MatterLightController {
+    async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
+        let room_label =
+            rhythm_os::controller_helpers::format_room_label(&self.hub_data.registry, room_id);
+        let device_ids = self.target_device_ids(room_id)?;
+        self.turn_on_devices(&room_label, &device_ids, command)
+    }
+
+    async fn turn_off(&self, room_id: &str, _transition_ms: Option<u32>) -> LightControlResult<()> {
+        let room_label =
+            rhythm_os::controller_helpers::format_room_label(&self.hub_data.registry, room_id);
+        let device_ids = self.target_device_ids(room_id)?;
+        self.turn_off_devices(&room_label, &device_ids)
+    }
+
+    async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
+        rhythm_os::controller_helpers::rooms_from_registry(&self.hub_data.registry)
+    }
+
+    async fn is_connected(&self) -> bool {
+        self.transport.list_devices().is_ok()
+    }
+
+    async fn any_lights_on(&self, room_id: &str) -> LightControlResult<bool> {
+        let device_ids = self.target_device_ids(room_id)?;
+        self.any_lights_on_target(&HubDispatchTarget::Devices {
+            native_ids: device_ids,
+        })
+        .await
     }
 
     fn name(&self) -> &str {
@@ -540,7 +611,7 @@ mod tests {
     #[test]
     fn name_returns_matter() {
         let (controller, _, _) = make_controller();
-        assert_eq!(controller.name(), "Matter");
+        assert_eq!(LightController::name(&controller), "Matter");
     }
 
     #[test]

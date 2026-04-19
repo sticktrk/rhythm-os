@@ -1,6 +1,6 @@
 //! Composite light controller for multi-hub fan-out.
 //!
-//! Wraps multiple per-hub [`LightController`] implementations and routes
+//! Wraps multiple per-hub [`HubLightController`] implementations and routes
 //! commands to the correct hub(s) based on a room routing table. Supports
 //! dynamic registration — controllers can be added/removed while the
 //! `RhythmEngine` is running.
@@ -12,9 +12,20 @@
 //! composite.register_controller("hue@192.168.1.5", hue_controller);
 //! composite.register_controller("hue@192.168.1.6", hue_controller_2);
 //! composite.update_routing(hashmap! {
-//!     "living-room" => vec!["hue@192.168.1.5"],
-//!     "kitchen"     => vec!["hue@192.168.1.6"],
-//!     "hallway"     => vec!["hue@192.168.1.5", "hue@192.168.1.6"],
+//!     "living-room" => vec![(
+//!         "hue@192.168.1.5".to_string(),
+//!         HubDispatchTarget::Group {
+//!             room_id: "living-room".to_string(),
+//!             control_id: "gl-living-room".to_string(),
+//!         },
+//!     )],
+//!     "kitchen"     => vec![(
+//!         "hue@192.168.1.6".to_string(),
+//!         HubDispatchTarget::Group {
+//!             room_id: "kitchen".to_string(),
+//!             control_id: "gl-kitchen".to_string(),
+//!         },
+//!     )],
 //! });
 //! // Now turn_on("hallway", cmd) fans out to both bridges.
 //! ```
@@ -25,7 +36,9 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use log::warn;
 
-use crate::controller::{LightControlError, LightControlResult, LightController};
+use crate::controller::{
+    HubDispatchTarget, HubLightController, LightControlError, LightControlResult, LightController,
+};
 use crate::lighting::LightingCommand;
 use crate::room::Room;
 
@@ -56,14 +69,17 @@ fn sync_block_on<F: std::future::Future>(f: F) -> F::Output {
 /// Works from any context (tokio runtime, std::thread, etc.).
 ///
 /// For single targets, runs inline without spawning a thread.
-fn dispatch_parallel<F>(targets: &[(String, Arc<dyn LightController>, String)], op: F) -> bool
+fn dispatch_parallel<F>(
+    targets: &[(String, Arc<dyn HubLightController>, HubDispatchTarget)],
+    op: F,
+) -> bool
 where
-    F: Fn(Arc<dyn LightController>, &str) -> LightControlResult<()> + Sync + Send,
+    F: Fn(Arc<dyn HubLightController>, &HubDispatchTarget) -> LightControlResult<()> + Sync + Send,
 {
     if targets.len() <= 1 {
         // Single target — no thread overhead needed
-        if let Some((key, controller, hub_room_id)) = targets.first() {
-            match op(controller.clone(), hub_room_id) {
+        if let Some((key, controller, target)) = targets.first() {
+            match op(controller.clone(), target) {
                 Ok(()) => return true,
                 Err(e) => {
                     warn!(target: "composite", "hub {} failed: {}", key, e);
@@ -78,11 +94,11 @@ where
         let op = &op;
         let handles: Vec<_> = targets
             .iter()
-            .map(|(key, controller, hub_room_id)| {
+            .map(|(key, controller, target)| {
                 let controller = controller.clone();
+                let target = target.clone();
                 let key = key.as_str();
-                let hub_room_id = hub_room_id.as_str();
-                s.spawn(move || (key, op(controller, hub_room_id)))
+                s.spawn(move || (key, op(controller, &target)))
             })
             .collect();
 
@@ -108,10 +124,9 @@ where
 /// and updating the routing table while the engine is running.
 pub struct CompositeController {
     /// Per-hub controllers keyed by hub identifier (e.g., "hue@192.168.1.5").
-    controllers: RwLock<HashMap<String, Arc<dyn LightController>>>,
-    /// Room routing: topology_room_id → list of (hub_key, hub_room_id) pairs.
-    /// The composite uses hub_room_id when calling per-hub controllers.
-    routing: RwLock<HashMap<String, Vec<(String, String)>>>,
+    controllers: RwLock<HashMap<String, Arc<dyn HubLightController>>>,
+    /// Room routing: topology_room_id → list of (hub_key, dispatch target) pairs.
+    routing: RwLock<HashMap<String, Vec<(String, HubDispatchTarget)>>>,
 }
 
 impl CompositeController {
@@ -124,7 +139,7 @@ impl CompositeController {
     }
 
     /// Register a per-hub controller. Replaces any existing controller for this key.
-    pub fn register_controller(&self, key: &str, controller: Arc<dyn LightController>) {
+    pub fn register_controller(&self, key: &str, controller: Arc<dyn HubLightController>) {
         if let Ok(mut controllers) = self.controllers.write() {
             controllers.insert(key.to_string(), controller);
         }
@@ -139,11 +154,11 @@ impl CompositeController {
 
     /// Replace the full routing table.
     ///
-    /// Each entry maps a topology room ID to a list of (hub_key, hub_room_id)
+    /// Each entry maps a topology room ID to a list of (hub_key, target)
     /// pairs. For single-hub rooms, the Vec has one entry. For cross-hub rooms,
     /// it has multiple. The composite calls each hub's controller with its
-    /// hub-native room ID.
-    pub fn update_routing(&self, table: HashMap<String, Vec<(String, String)>>) {
+    /// typed hub-native dispatch target.
+    pub fn update_routing(&self, table: HashMap<String, Vec<(String, HubDispatchTarget)>>) {
         if let Ok(mut routing) = self.routing.write() {
             *routing = table;
         }
@@ -156,13 +171,11 @@ impl CompositeController {
 
     /// Get controller targets for a room from the routing table.
     ///
-    /// Returns (hub_key, controller, hub_room_id) triples. Falls back to ALL
-    /// controllers with `room_id` as the hub_room_id if no routing entry exists
-    /// (single-hub compat before topology sync).
+    /// Returns (hub_key, controller, target) triples.
     fn controllers_for_room(
         &self,
         room_id: &str,
-    ) -> Vec<(String, Arc<dyn LightController>, String)> {
+    ) -> Vec<(String, Arc<dyn HubLightController>, HubDispatchTarget)> {
         let targets = self
             .routing
             .read()
@@ -177,21 +190,19 @@ impl CompositeController {
         if let Some(targets) = targets {
             targets
                 .iter()
-                .filter_map(|(hub_key, hub_room_id)| {
+                .filter_map(|(hub_key, target)| {
                     controllers
                         .get(hub_key)
-                        .map(|c| (hub_key.clone(), c.clone(), hub_room_id.clone()))
+                        .map(|c| (hub_key.clone(), c.clone(), target.clone()))
                 })
                 .collect()
         } else {
-            // Fallback: try all controllers with room_id as-is (single-hub compat)
-            warn!(target: "composite",
-                "No routing entry for room '{}' — falling back to all {} controllers",
-                room_id, controllers.len());
-            controllers
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone(), room_id.to_string()))
-                .collect()
+            warn!(
+                target: "composite",
+                "No routing entry for room '{}'",
+                room_id
+            );
+            Vec::new()
         }
     }
 }
@@ -217,16 +228,19 @@ impl LightController for CompositeController {
         // periodic/event-loop std::threads where the outer executor::block_on
         // already created a LocalPool.
         if targets.len() == 1 {
-            let (key, controller, hub_room_id) = &targets[0];
-            return controller.turn_on(hub_room_id, command).await.map_err(|e| {
-                warn!(target: "composite", "hub {} failed: {}", key, e);
-                e
-            });
+            let (key, controller, target) = &targets[0];
+            return controller
+                .turn_on_target(target, command)
+                .await
+                .map_err(|e| {
+                    warn!(target: "composite", "hub {} failed: {}", key, e);
+                    e
+                });
         }
 
         // Multi-target: fan out to OS threads (thread::scope = fresh thread-locals, safe)
-        let any_ok = dispatch_parallel(&targets, |controller, hub_room_id| {
-            sync_block_on(controller.turn_on(hub_room_id, command.clone()))
+        let any_ok = dispatch_parallel(&targets, |controller, target| {
+            sync_block_on(controller.turn_on_target(target, command.clone()))
         });
 
         if any_ok {
@@ -250,9 +264,9 @@ impl LightController for CompositeController {
 
         // Single target: await directly (same reasoning as turn_on)
         if targets.len() == 1 {
-            let (key, controller, hub_room_id) = &targets[0];
+            let (key, controller, target) = &targets[0];
             return controller
-                .turn_off(hub_room_id, transition_ms)
+                .turn_off_target(target, transition_ms)
                 .await
                 .map_err(|e| {
                     warn!(target: "composite", "hub {} failed: {}", key, e);
@@ -261,8 +275,8 @@ impl LightController for CompositeController {
         }
 
         // Multi-target: fan out to OS threads
-        let any_ok = dispatch_parallel(&targets, |controller, hub_room_id| {
-            sync_block_on(controller.turn_off(hub_room_id, transition_ms))
+        let any_ok = dispatch_parallel(&targets, |controller, target| {
+            sync_block_on(controller.turn_off_target(target, transition_ms))
         });
 
         if any_ok {
@@ -276,7 +290,7 @@ impl LightController for CompositeController {
     }
 
     async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
-        let all_controllers: Vec<Arc<dyn LightController>> = self
+        let all_controllers: Vec<Arc<dyn HubLightController>> = self
             .controllers
             .read()
             .map(|c| c.values().cloned().collect())
@@ -297,7 +311,7 @@ impl LightController for CompositeController {
     }
 
     async fn is_connected(&self) -> bool {
-        let all_controllers: Vec<Arc<dyn LightController>> = self
+        let all_controllers: Vec<Arc<dyn HubLightController>> = self
             .controllers
             .read()
             .map(|c| c.values().cloned().collect())
@@ -320,12 +334,18 @@ impl LightController for CompositeController {
             )));
         }
 
-        for (key, controller, hub_room_id) in &targets {
-            match controller.any_lights_on(hub_room_id).await {
+        for (key, controller, target) in &targets {
+            match controller.any_lights_on_target(target).await {
                 Ok(true) => return Ok(true),
                 Ok(false) => {}
                 Err(e) => {
-                    warn!(target: "composite", "any_lights_on '{}' via {}: {}", hub_room_id, key, e);
+                    warn!(
+                        target: "composite",
+                        "any_lights_on '{}' via {}: {}",
+                        target.label(),
+                        key,
+                        e
+                    );
                 }
             }
         }
@@ -413,21 +433,25 @@ mod tests {
     }
 
     #[async_trait]
-    impl LightController for MockController {
-        async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
+    impl HubLightController for MockController {
+        async fn turn_on_target(
+            &self,
+            target: &HubDispatchTarget,
+            command: LightingCommand,
+        ) -> LightControlResult<()> {
             if self.should_fail.load(Ordering::Relaxed) {
                 return Err(LightControlError::CommandFailed("mock failure".into()));
             }
             self.turn_on_calls
                 .lock()
                 .unwrap()
-                .push((room_id.to_string(), command));
+                .push((target.label(), command));
             Ok(())
         }
 
-        async fn turn_off(
+        async fn turn_off_target(
             &self,
-            room_id: &str,
+            target: &HubDispatchTarget,
             transition_ms: Option<u32>,
         ) -> LightControlResult<()> {
             if self.should_fail.load(Ordering::Relaxed) {
@@ -436,7 +460,7 @@ mod tests {
             self.turn_off_calls
                 .lock()
                 .unwrap()
-                .push((room_id.to_string(), transition_ms));
+                .push((target.label(), transition_ms));
             Ok(())
         }
 
@@ -448,7 +472,10 @@ mod tests {
             !self.should_fail.load(Ordering::Relaxed)
         }
 
-        async fn any_lights_on(&self, _room_id: &str) -> LightControlResult<bool> {
+        async fn any_lights_on_target(
+            &self,
+            _target: &HubDispatchTarget,
+        ) -> LightControlResult<bool> {
             if self.should_fail.load(Ordering::Relaxed) {
                 return Err(LightControlError::CommandFailed("mock failure".into()));
             }
@@ -512,7 +539,13 @@ mod tests {
         composite.register_controller("hub_a", mock.clone());
         composite.update_routing(HashMap::from([(
             "room1".to_string(),
-            vec![("hub_a".to_string(), "room1".to_string())],
+            vec![(
+                "hub_a".to_string(),
+                HubDispatchTarget::Group {
+                    room_id: "room1".to_string(),
+                    control_id: "room1".to_string(),
+                },
+            )],
         )]));
 
         let cmd = LightingCommand::new(80, 4000);
@@ -527,7 +560,13 @@ mod tests {
         composite.register_controller("hub_a", mock.clone());
         composite.update_routing(HashMap::from([(
             "room1".to_string(),
-            vec![("hub_a".to_string(), "room1".to_string())],
+            vec![(
+                "hub_a".to_string(),
+                HubDispatchTarget::Group {
+                    room_id: "room1".to_string(),
+                    control_id: "room1".to_string(),
+                },
+            )],
         )]));
 
         composite.turn_off("room1", None).await.unwrap();
@@ -547,8 +586,20 @@ mod tests {
         composite.update_routing(HashMap::from([(
             "hallway".to_string(),
             vec![
-                ("hub_a".to_string(), "hallway".to_string()),
-                ("hub_b".to_string(), "hallway".to_string()),
+                (
+                    "hub_a".to_string(),
+                    HubDispatchTarget::Group {
+                        room_id: "hallway".to_string(),
+                        control_id: "hallway".to_string(),
+                    },
+                ),
+                (
+                    "hub_b".to_string(),
+                    HubDispatchTarget::Group {
+                        room_id: "hallway".to_string(),
+                        control_id: "hallway".to_string(),
+                    },
+                ),
             ],
         )]));
 
@@ -573,8 +624,20 @@ mod tests {
         composite.update_routing(HashMap::from([(
             "room1".to_string(),
             vec![
-                ("hub_a".to_string(), "room1".to_string()),
-                ("hub_b".to_string(), "room1".to_string()),
+                (
+                    "hub_a".to_string(),
+                    HubDispatchTarget::Group {
+                        room_id: "room1".to_string(),
+                        control_id: "room1".to_string(),
+                    },
+                ),
+                (
+                    "hub_b".to_string(),
+                    HubDispatchTarget::Group {
+                        room_id: "room1".to_string(),
+                        control_id: "room1".to_string(),
+                    },
+                ),
             ],
         )]));
 
@@ -590,7 +653,13 @@ mod tests {
         composite.register_controller("hub_a", mock);
         composite.update_routing(HashMap::from([(
             "room1".to_string(),
-            vec![("hub_a".to_string(), "room1".to_string())],
+            vec![(
+                "hub_a".to_string(),
+                HubDispatchTarget::Group {
+                    room_id: "room1".to_string(),
+                    control_id: "room1".to_string(),
+                },
+            )],
         )]));
 
         assert!(!block_on(composite.any_lights_on("room1")).unwrap());
@@ -620,8 +689,20 @@ mod tests {
         composite.update_routing(HashMap::from([(
             "room1".to_string(),
             vec![
-                ("hub_a".to_string(), "room1".to_string()),
-                ("hub_b".to_string(), "room1".to_string()),
+                (
+                    "hub_a".to_string(),
+                    HubDispatchTarget::Group {
+                        room_id: "room1".to_string(),
+                        control_id: "room1".to_string(),
+                    },
+                ),
+                (
+                    "hub_b".to_string(),
+                    HubDispatchTarget::Group {
+                        room_id: "room1".to_string(),
+                        control_id: "room1".to_string(),
+                    },
+                ),
             ],
         )]));
 
@@ -641,27 +722,19 @@ mod tests {
         composite.register_controller("hub_a", mock_a);
         composite.update_routing(HashMap::from([(
             "room1".to_string(),
-            vec![("hub_a".to_string(), "room1".to_string())],
+            vec![(
+                "hub_a".to_string(),
+                HubDispatchTarget::Group {
+                    room_id: "room1".to_string(),
+                    control_id: "room1".to_string(),
+                },
+            )],
         )]));
 
         let result = composite
             .turn_on("room1", LightingCommand::new(50, 3000))
             .await;
         assert!(result.is_err());
-    }
-
-    // ── Fallback: no routing entry → all controllers ─────────────────
-
-    #[tokio::test]
-    async fn no_routing_entry_falls_back_to_all_controllers() {
-        let mock = Arc::new(MockController::new("hub_a"));
-        let composite = CompositeController::new();
-        composite.register_controller("hub_a", mock.clone());
-        // No routing set — should fall back to all controllers
-
-        let cmd = LightingCommand::new(80, 4000);
-        composite.turn_on("room1", cmd).await.unwrap();
-        assert_eq!(mock.turn_on_count(), 1);
     }
 
     // ── get_rooms deduplicates ───────────────────────────────────────
