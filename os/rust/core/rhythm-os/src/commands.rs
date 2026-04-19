@@ -586,14 +586,6 @@ fn light_node_uses_parent_dispatch(s: &AppState, node_id: &str, kind: LightNodeK
             .attached_light_uses_parent_dispatch(node_id, &s.canonical_registry)
 }
 
-fn room_has_group_light_dispatch(s: &AppState, room_id: &str) -> bool {
-    s.topology.get(room_id).is_some_and(|room| {
-        room.hub_room_bindings
-            .iter()
-            .any(|binding| !binding.light_device_ids.is_empty())
-    })
-}
-
 pub(crate) fn effective_lights_on_cache_key<'a>(
     s: &AppState,
     node_id: &'a str,
@@ -657,31 +649,29 @@ pub(crate) fn update_lights_on_cache_for_runtime_node(
             lights_on,
         );
 
-        if let Some(parent_id) = snap.parent_id.as_deref() {
-            let should_refresh_parent = state
-                .lock()
-                .ok()
-                .is_some_and(|s| room_has_group_light_dispatch(&s, parent_id));
-            if should_refresh_parent {
-                match runtime.any_lights_on(parent_id) {
-                    Ok(parent_lights_on) => {
-                        update_lights_on_cache_for_node(
-                            state,
-                            parent_id,
-                            LightNodeKind::Room,
-                            None,
-                            parent_lights_on,
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            target: "cmd",
-                            "Failed to refresh parent lights_on for '{}' after node '{}': {}",
-                            parent_id,
-                            node_id,
-                            e
-                        );
-                    }
+        if let Some(parent_id) = snap
+            .parent_id
+            .as_deref()
+            .filter(|parent_id| *parent_id != snap.id)
+        {
+            match runtime.any_lights_on(parent_id) {
+                Ok(parent_lights_on) => {
+                    update_lights_on_cache_for_node(
+                        state,
+                        parent_id,
+                        LightNodeKind::Room,
+                        None,
+                        parent_lights_on,
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        target: "cmd",
+                        "Failed to refresh parent lights_on for '{}' after node '{}': {}",
+                        parent_id,
+                        node_id,
+                        e
+                    );
                 }
             }
         }
@@ -729,27 +719,21 @@ pub(crate) fn refresh_lights_on_cache_for_runtime_node(
         .as_deref()
         .filter(|parent_id| *parent_id != query_id)
     {
-        let should_refresh_parent = state
-            .lock()
-            .ok()
-            .is_some_and(|s| room_has_group_light_dispatch(&s, parent_id));
-        if should_refresh_parent {
-            match runtime.any_lights_on(parent_id) {
-                Ok(parent_lights_on) => update_lights_on_cache_for_node(
-                    state,
-                    parent_id,
-                    LightNodeKind::Room,
-                    None,
-                    parent_lights_on,
-                ),
-                Err(e) => warn!(
-                    target: "cmd",
-                    "Failed to refresh parent lights_on for '{}' after node '{}': {}",
-                    parent_id,
-                    node_id,
-                    e
-                ),
-            }
+        match runtime.any_lights_on(parent_id) {
+            Ok(parent_lights_on) => update_lights_on_cache_for_node(
+                state,
+                parent_id,
+                LightNodeKind::Room,
+                None,
+                parent_lights_on,
+            ),
+            Err(e) => warn!(
+                target: "cmd",
+                "Failed to refresh parent lights_on for '{}' after node '{}': {}",
+                parent_id,
+                node_id,
+                e
+            ),
         }
     }
 }
@@ -5583,7 +5567,11 @@ fn composite_node_labels(s: &AppState) -> HashMap<String, String> {
         labels.insert(room.id.clone(), room.name.clone());
     }
 
-    let mut device_ids: Vec<_> = s.topology.device_nodes().map(|node| node.id.clone()).collect();
+    let mut device_ids: Vec<_> = s
+        .topology
+        .device_nodes()
+        .map(|node| node.id.clone())
+        .collect();
     device_ids.sort();
     for device_id in device_ids {
         let Some(node) = s.topology.get_device_node(&device_id) else {
@@ -8013,7 +8001,7 @@ mod tests {
     }
 
     #[test]
-    fn room_action_updates_child_lights_on_without_parent_group_dispatch() {
+    fn room_action_updates_parent_lights_on_without_parent_group_dispatch() {
         let (state, runtime, device_id) = setup_attached_matter_light_without_group_dispatch();
         {
             let mut s = state.lock().unwrap();
@@ -8029,7 +8017,7 @@ mod tests {
         );
         let s = state.lock().unwrap();
         assert_eq!(s.room_lights_on.get(&device_id), Some(&true));
-        assert_eq!(s.room_lights_on.get("room1"), Some(&false));
+        assert_eq!(s.room_lights_on.get("room1"), Some(&true));
     }
 
     #[test]
@@ -9825,6 +9813,35 @@ mod tests {
         let s = state.lock().unwrap();
         assert_eq!(s.room_lights_on.get("room1"), Some(&true));
         assert_eq!(s.room_lights_on.len(), 1);
+    }
+
+    #[test]
+    fn room_preferences_idle_updates_parent_lights_on_without_group_dispatch() {
+        let (state, rt, device_id) = setup_attached_matter_light_without_group_dispatch();
+        if let Some(child) = rt
+            .snapshots
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|snap| snap.id == device_id)
+        {
+            child.rhythm_enabled = false;
+        }
+
+        let result = do_node_preferences_set(
+            &state,
+            &device_id,
+            Some(false),
+            None,
+            Some(RoomModeState::Idle),
+            None,
+            false,
+        );
+
+        assert!(result.is_ok());
+        let s = state.lock().unwrap();
+        assert_eq!(s.room_lights_on.get(&device_id), Some(&true));
+        assert_eq!(s.room_lights_on.get("room1"), Some(&true));
     }
 
     #[test]
