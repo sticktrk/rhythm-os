@@ -39,7 +39,7 @@ tokio = { version = "1.0", features = ["full"] }
 # HTTP server (for addon)
 axum = "0.7"
 tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "request-id"] }
 
 # WebSocket (for addon)
 tokio-tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
@@ -66,7 +66,7 @@ reqwest-eventsource = "0.6"
 anyhow = "1.0"
 
 # Logging
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # mDNS (for server)
 mdns-sd = "0.11"

@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use clap::Parser;
 use log::{info, warn};
+use rhythm_os::logging;
 use rhythm_os::state::{AppState, SharedState, WorkItem};
 use rhythm_os::storage::FileStorage;
 use rhythm_server::hub;
@@ -21,18 +22,6 @@ const VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
 };
-
-/// Format tracing timestamps in local time instead of UTC.
-struct LocalTimer;
-impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
-    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
-        write!(
-            w,
-            "{}",
-            chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.6f")
-        )
-    }
-}
 
 /// Rhythm OS Linux embedded appliance.
 #[derive(Parser, Debug)]
@@ -58,15 +47,7 @@ fn main() -> Result<()> {
     let platform_context =
         std::env::var("RHYTHM_PLATFORM_CONTEXT").unwrap_or_else(|_| "linux-embedded".to_string());
 
-    // Init logging — always suppress noisy mdns-sd AAAA errors
-    let base_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| args.log_level.clone());
-    tracing_subscriber::fmt()
-        .with_timer(LocalTimer)
-        .with_env_filter(tracing_subscriber::EnvFilter::new(format!(
-            "{},mdns_sd=off",
-            base_filter
-        )))
-        .init();
+    logging::init_native_logging(&args.log_level)?;
 
     info!(target: "sys", "Rhythm Linux Embedded v{} starting...", VERSION);
 

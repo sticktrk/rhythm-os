@@ -32,6 +32,14 @@ fn scenario_restart_persistence() {
         });
     harness::store_commissioning_wifi(&restarted.state, "RhythmNet", "secret");
 
+    let cached_caps = restarted.hub_data.device_caps.lock().unwrap();
+    let restored_caps = cached_caps
+        .get("matter-100")
+        .expect("restarted Matter hub should warm capability cache");
+    assert!(restored_caps.supports_color_temp());
+    assert!(!restored_caps.supports_xy_color());
+    drop(cached_caps);
+
     let second_session = rhythm_matter::desktop_lifecycle::INTEGRATION
         .start_pairing(
             &restarted.state,

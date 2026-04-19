@@ -5,7 +5,8 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use log::info;
+use log::{info, warn};
+use rhythm_devices::LightCapabilities;
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::hub::{ActiveHub, HubEvent, HubType};
 use rhythm_os::registry::HubDeviceRegistry;
@@ -21,6 +22,7 @@ pub fn connect_matter(
 ) -> Result<(ActiveHub, Receiver<HubEvent>)> {
     let hub_key = HubKey::new(HubType::new("matter"), "local");
     let commissioned = transport.list_devices().unwrap_or_default();
+    let initial_device_caps = load_initial_device_caps(&transport, &commissioned);
     let next_node_id = next_node_id_seed(&commissioned);
     let fabric_id = configured_fabric_id(state, &hub_key);
 
@@ -69,7 +71,7 @@ pub fn connect_matter(
                 fabric_id: fabric_id_for_closure.clone(),
                 commissioned: std::sync::Mutex::new(commissioned_for_closure.clone()),
                 next_node_id: std::sync::atomic::AtomicU64::new(next_node_id),
-                device_caps: std::sync::Mutex::new(HashMap::new()),
+                device_caps: std::sync::Mutex::new(initial_device_caps.clone()),
                 event_tx,
             }))
         },
@@ -93,6 +95,35 @@ fn next_node_id_seed(commissioned: &[MatterDeviceInfo]) -> u64 {
         .max()
         .unwrap_or(99)
         .saturating_add(1)
+}
+
+fn load_initial_device_caps(
+    transport: &Arc<dyn MatterTransport>,
+    commissioned: &[MatterDeviceInfo],
+) -> HashMap<String, LightCapabilities> {
+    let mut caps = HashMap::new();
+
+    for info in commissioned {
+        match transport.probe_light(info.node_id) {
+            Ok(device) => {
+                let device_id = format_device_id(device.node_id, device.light_endpoint);
+                caps.insert(
+                    device_id,
+                    crate::commissioning::build_device_capabilities(&device),
+                );
+            }
+            Err(error) => {
+                warn!(
+                    target: "sys",
+                    "Matter: failed to probe node {} during connect: {}",
+                    info.node_id,
+                    error
+                );
+            }
+        }
+    }
+
+    caps
 }
 
 /// Format a Matter node ID as a device ID string.

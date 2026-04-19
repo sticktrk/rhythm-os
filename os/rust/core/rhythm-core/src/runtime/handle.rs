@@ -354,10 +354,7 @@ where
             .rooms()
             .get(source_room_id)
             .map(|room| {
-                crate::composite_controller::format_node_log_label(
-                    source_room_id,
-                    Some(&room.name),
-                )
+                crate::composite_controller::format_node_log_label(source_room_id, Some(&room.name))
             })
             .unwrap_or_else(|| source_room_id.to_string());
         let node_label = if node_id == source_room_id {

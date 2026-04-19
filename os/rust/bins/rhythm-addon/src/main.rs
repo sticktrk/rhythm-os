@@ -10,20 +10,9 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use log::{info, warn};
+use rhythm_os::logging;
 use rhythm_os::state::{AppState, SharedState, WorkItem};
 use rhythm_os::storage::FileStorage;
-
-/// Format tracing timestamps in local time instead of UTC.
-struct LocalTimer;
-impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
-    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
-        write!(
-            w,
-            "{}",
-            chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.6f")
-        )
-    }
-}
 
 const VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
     Some(version) => version,
@@ -39,15 +28,7 @@ fn main() -> Result<()> {
 
     let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
 
-    // Init logging
-    let base_filter = std::env::var("RUST_LOG").unwrap_or(log_level);
-    tracing_subscriber::fmt()
-        .with_timer(LocalTimer)
-        .with_env_filter(tracing_subscriber::EnvFilter::new(format!(
-            "{},mdns_sd=off",
-            base_filter
-        )))
-        .init();
+    logging::init_native_logging(&log_level)?;
 
     info!(target: "sys", "Rhythm Addon v{} starting...", VERSION);
 

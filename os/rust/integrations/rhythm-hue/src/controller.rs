@@ -5,6 +5,7 @@
 //! resources with color_temperature.mirek (no xy conversion needed).
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use log::debug;
@@ -19,6 +20,9 @@ use rhythm_os::state::SharedState;
 
 use crate::registry::HueDeviceRegistry;
 use crate::transport::HueTransport;
+
+const DISPATCH_INFO_MS: u128 = 250;
+const DISPATCH_WARN_MS: u128 = 1000;
 
 /// Light controller implementation using Hue V2 API.
 ///
@@ -104,42 +108,74 @@ impl<H: HueTransport> HueLightController<H> {
     ) -> LightControlResult<()> {
         let (room_label, _caps, adapted) = self.room_context(room_id, &command);
         let dynamics = adapted.transition_ms.map(|ms| ms as u16);
+        let started = Instant::now();
 
-        self.client
-            .set_grouped_light(
-                &self.username,
-                grouped_light_id,
-                true,
-                adapted.brightness,
-                adapted.kelvin,
-                adapted.xy,
-                dynamics.filter(|ms| *ms > 0),
-            )
-            .map_err(|e| {
-                log::warn!(target: "cmd", "Hue turn_on failed: room={} err={}", room_label, e);
-                LightControlError::CommandFailed(format!(
-                    "Failed to turn on room {}: {}",
-                    room_id, e
-                ))
-            })?;
-
-        if let Some((x, y)) = adapted.xy {
-            debug!(target: "cmd",
-                "Hue turn_on: room={} bri={} transition_ms={:?} xy=({:.3},{:.3}) rgb=({},{},{})",
-                room_label, adapted.brightness.unwrap_or(0),
-                adapted.transition_ms,
-                x, y,
-                command.rgb.r, command.rgb.g, command.rgb.b,
+        if let Err(e) = self.client.set_grouped_light(
+            &self.username,
+            grouped_light_id,
+            true,
+            adapted.brightness,
+            adapted.kelvin,
+            adapted.xy,
+            dynamics.filter(|ms| *ms > 0),
+        ) {
+            tracing::warn!(
+                target: "cmd",
+                event = "hue_turn_on_failed",
+                room_id = %room_id,
+                room = %room_label,
+                control_id = %grouped_light_id,
+                latency_ms = started.elapsed().as_millis(),
+                error = %e,
+                "Hue turn_on failed"
             );
-        } else if let Some(kelvin) = adapted.kelvin {
-            debug!(target: "cmd",
-                "Hue turn_on: room={} bri={} kelvin={} transition_ms={:?}",
-                room_label, adapted.brightness.unwrap_or(0), kelvin, adapted.transition_ms
+            return Err(LightControlError::CommandFailed(format!(
+                "Failed to turn on room {}: {}",
+                room_id, e
+            )));
+        }
+
+        let latency_ms = started.elapsed().as_millis();
+        if latency_ms >= DISPATCH_WARN_MS {
+            tracing::warn!(
+                target: "cmd",
+                event = "hue_turn_on",
+                room_id = %room_id,
+                room = %room_label,
+                control_id = %grouped_light_id,
+                latency_ms,
+                brightness = adapted.brightness.unwrap_or(0),
+                kelvin = ?adapted.kelvin,
+                xy = ?adapted.xy,
+                transition_ms = ?adapted.transition_ms,
+                direct_color = command.is_direct_color,
+                "Hue turn_on slow"
+            );
+        } else if latency_ms >= DISPATCH_INFO_MS {
+            tracing::info!(
+                target: "cmd",
+                event = "hue_turn_on",
+                room_id = %room_id,
+                room = %room_label,
+                control_id = %grouped_light_id,
+                latency_ms,
+                brightness = adapted.brightness.unwrap_or(0),
+                kelvin = ?adapted.kelvin,
+                xy = ?adapted.xy,
+                transition_ms = ?adapted.transition_ms,
+                direct_color = command.is_direct_color,
+                "Hue turn_on"
             );
         } else {
-            debug!(target: "cmd",
-                "Hue turn_on: room={} bri={} transition_ms={:?}",
-                room_label, adapted.brightness.unwrap_or(0), adapted.transition_ms
+            debug!(
+                target: "cmd",
+                "Hue turn_on: room={} bri={} kelvin={:?} xy={:?} transition_ms={:?} latency_ms={}",
+                room_label,
+                adapted.brightness.unwrap_or(0),
+                adapted.kelvin,
+                adapted.xy,
+                adapted.transition_ms,
+                latency_ms
             );
         }
 
@@ -156,31 +192,65 @@ impl<H: HueTransport> HueLightController<H> {
         let fade_ms = transition_ms
             .map(|ms| u16::try_from(ms).unwrap_or(u16::MAX))
             .filter(|ms| *ms > 0);
+        let started = Instant::now();
 
-        self.client
-            .set_grouped_light(
-                &self.username,
-                grouped_light_id,
-                false,
-                None,
-                None,
-                None,
-                fade_ms,
-            )
-            .map_err(|e| {
-                log::warn!(target: "cmd", "Hue turn_off failed: room={} err={}", room_label, e);
-                LightControlError::CommandFailed(format!(
-                    "Failed to turn off room {}: {}",
-                    room_id, e
-                ))
-            })?;
+        if let Err(e) = self.client.set_grouped_light(
+            &self.username,
+            grouped_light_id,
+            false,
+            None,
+            None,
+            None,
+            fade_ms,
+        ) {
+            tracing::warn!(
+                target: "cmd",
+                event = "hue_turn_off_failed",
+                room_id = %room_id,
+                room = %room_label,
+                control_id = %grouped_light_id,
+                latency_ms = started.elapsed().as_millis(),
+                error = %e,
+                "Hue turn_off failed"
+            );
+            return Err(LightControlError::CommandFailed(format!(
+                "Failed to turn off room {}: {}",
+                room_id, e
+            )));
+        }
 
-        debug!(
-            target: "cmd",
-            "Hue turn_off: room={} transition_ms={:?}",
-            room_label,
-            transition_ms
-        );
+        let latency_ms = started.elapsed().as_millis();
+        if latency_ms >= DISPATCH_WARN_MS {
+            tracing::warn!(
+                target: "cmd",
+                event = "hue_turn_off",
+                room_id = %room_id,
+                room = %room_label,
+                control_id = %grouped_light_id,
+                latency_ms,
+                transition_ms = ?transition_ms,
+                "Hue turn_off slow"
+            );
+        } else if latency_ms >= DISPATCH_INFO_MS {
+            tracing::info!(
+                target: "cmd",
+                event = "hue_turn_off",
+                room_id = %room_id,
+                room = %room_label,
+                control_id = %grouped_light_id,
+                latency_ms,
+                transition_ms = ?transition_ms,
+                "Hue turn_off"
+            );
+        } else {
+            debug!(
+                target: "cmd",
+                "Hue turn_off: room={} transition_ms={:?} latency_ms={}",
+                room_label,
+                transition_ms,
+                latency_ms
+            );
+        }
 
         Ok(())
     }

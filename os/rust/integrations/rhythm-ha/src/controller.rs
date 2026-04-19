@@ -4,6 +4,7 @@
 //! via any `HaTransport` implementation. Controls rooms through area_id targeting.
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use log::debug;
@@ -18,6 +19,9 @@ use rhythm_os::state::SharedState;
 
 use crate::registry::HaDeviceRegistry;
 use crate::transport::HaTransport;
+
+const DISPATCH_INFO_MS: u128 = 250;
+const DISPATCH_WARN_MS: u128 = 1000;
 
 /// Light controller implementation using Home Assistant service calls.
 ///
@@ -112,30 +116,65 @@ impl<H: HaTransport> HaLightController<H> {
             data["transition"] = serde_json::json!(transition_secs);
         }
 
-        self.client
-            .call_service("light", "turn_on", &data)
-            .map_err(|e| {
-                log::warn!(target: "cmd", "HA turn_on failed: room={} err={}", room_label, e);
-                LightControlError::CommandFailed(format!(
-                    "Failed to turn on room {}: {}",
-                    room_id, e
-                ))
-            })?;
-
-        if let Some((x, y)) = adapted.xy {
-            debug!(target: "cmd",
-                "HA turn_on: room={} bri={} xy=({:.3},{:.3}) rgb=({},{},{})",
-                room_label, adapted.brightness.unwrap_or(0),
-                x, y,
-                command.rgb.r, command.rgb.g, command.rgb.b,
+        let started = Instant::now();
+        if let Err(e) = self.client.call_service("light", "turn_on", &data) {
+            tracing::warn!(
+                target: "cmd",
+                event = "ha_turn_on_failed",
+                room_id = %room_id,
+                room = %room_label,
+                area_id = %area_id,
+                latency_ms = started.elapsed().as_millis(),
+                error = %e,
+                "HA turn_on failed"
             );
-        } else if let Some(kelvin) = adapted.kelvin {
-            debug!(target: "cmd",
-                "HA turn_on: room={} bri={} kelvin={}",
-                room_label, adapted.brightness.unwrap_or(0), kelvin
+            return Err(LightControlError::CommandFailed(format!(
+                "Failed to turn on room {}: {}",
+                room_id, e
+            )));
+        }
+
+        let latency_ms = started.elapsed().as_millis();
+        if latency_ms >= DISPATCH_WARN_MS {
+            tracing::warn!(
+                target: "cmd",
+                event = "ha_turn_on",
+                room_id = %room_id,
+                room = %room_label,
+                area_id = %area_id,
+                latency_ms,
+                brightness = adapted.brightness.unwrap_or(0),
+                kelvin = ?adapted.kelvin,
+                xy = ?adapted.xy,
+                transition_ms = ?adapted.transition_ms,
+                direct_color = command.is_direct_color,
+                "HA turn_on slow"
+            );
+        } else if latency_ms >= DISPATCH_INFO_MS {
+            tracing::info!(
+                target: "cmd",
+                event = "ha_turn_on",
+                room_id = %room_id,
+                room = %room_label,
+                area_id = %area_id,
+                latency_ms,
+                brightness = adapted.brightness.unwrap_or(0),
+                kelvin = ?adapted.kelvin,
+                xy = ?adapted.xy,
+                transition_ms = ?adapted.transition_ms,
+                direct_color = command.is_direct_color,
+                "HA turn_on"
             );
         } else {
-            debug!(target: "cmd", "HA turn_on: room={} bri={}", room_label, adapted.brightness.unwrap_or(0));
+            debug!(
+                target: "cmd",
+                "HA turn_on: room={} bri={} kelvin={:?} xy={:?} latency_ms={}",
+                room_label,
+                adapted.brightness.unwrap_or(0),
+                adapted.kelvin,
+                adapted.xy,
+                latency_ms
+            );
         }
 
         Ok(())
@@ -200,22 +239,56 @@ impl<H: HaTransport> HaLightController<H> {
             data["transition"] = serde_json::json!(transition_secs);
         }
 
-        self.client
-            .call_service("light", "turn_off", &data)
-            .map_err(|e| {
-                log::warn!(target: "cmd", "HA turn_off failed: room={} err={}", room_label, e);
-                LightControlError::CommandFailed(format!(
-                    "Failed to turn off room {}: {}",
-                    room_id, e
-                ))
-            })?;
+        let started = Instant::now();
+        if let Err(e) = self.client.call_service("light", "turn_off", &data) {
+            tracing::warn!(
+                target: "cmd",
+                event = "ha_turn_off_failed",
+                room_id = %room_id,
+                room = %room_label,
+                area_id = %area_id,
+                latency_ms = started.elapsed().as_millis(),
+                error = %e,
+                "HA turn_off failed"
+            );
+            return Err(LightControlError::CommandFailed(format!(
+                "Failed to turn off room {}: {}",
+                room_id, e
+            )));
+        }
 
-        debug!(
-            target: "cmd",
-            "HA turn_off: room={} transition_ms={:?}",
-            room_label,
-            transition_ms
-        );
+        let latency_ms = started.elapsed().as_millis();
+        if latency_ms >= DISPATCH_WARN_MS {
+            tracing::warn!(
+                target: "cmd",
+                event = "ha_turn_off",
+                room_id = %room_id,
+                room = %room_label,
+                area_id = %area_id,
+                latency_ms,
+                transition_ms = ?transition_ms,
+                "HA turn_off slow"
+            );
+        } else if latency_ms >= DISPATCH_INFO_MS {
+            tracing::info!(
+                target: "cmd",
+                event = "ha_turn_off",
+                room_id = %room_id,
+                room = %room_label,
+                area_id = %area_id,
+                latency_ms,
+                transition_ms = ?transition_ms,
+                "HA turn_off"
+            );
+        } else {
+            debug!(
+                target: "cmd",
+                "HA turn_off: room={} transition_ms={:?} latency_ms={}",
+                room_label,
+                transition_ms,
+                latency_ms
+            );
+        }
 
         Ok(())
     }

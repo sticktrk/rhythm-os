@@ -441,6 +441,18 @@ fn queue_motion_timer_clear(state: &SharedState, room_id: &str) {
     }
 }
 
+fn clear_removed_node_ephemeral_state(s: &mut AppState, node_id: &str) {
+    s.room_lights_on.remove(node_id);
+    s.motion_snapshots.remove(node_id);
+    s.room_mode_transitions.remove(node_id);
+    s.pending_periodic_ticks.remove(node_id);
+    s.pending_motion_clear.retain(|pending| pending != node_id);
+    s.pending_motion_seed
+        .retain(|(source_node_id, target_node_id)| {
+            source_node_id != node_id && target_node_id != node_id
+        });
+}
+
 fn resolved_room_motion_timeout_secs_from_parts(
     lighting: RoomLightingContext<'_>,
     settings: &RoomProfileSettings,
@@ -4552,6 +4564,7 @@ pub fn do_device_hard_remove(
     info!(target: "cmd", "device_hard_remove: {}", device_id);
 
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let runtime = s.hub_runtime();
 
     let canonical_id = if s.canonical_registry.get(device_id).is_some() {
         Some(device_id.to_string())
@@ -4601,6 +4614,10 @@ pub fn do_device_hard_remove(
         }
     }
 
+    if let Some(canonical_id) = canonical_id.as_deref() {
+        clear_removed_node_ephemeral_state(&mut s, canonical_id);
+    }
+
     for (target_hub_key, native_id) in &registry_removals {
         if let Some(hub) = s.hubs.get(target_hub_key) {
             if let Some(reg) = &hub.registry {
@@ -4612,7 +4629,13 @@ pub fn do_device_hard_remove(
         }
     }
 
+    let removed_runtime_node_id = canonical_id.clone();
     drop(s);
+
+    if let (Some(runtime), Some(node_id)) = (runtime, removed_runtime_node_id.as_deref()) {
+        runtime.remove_node(node_id);
+        queue_motion_timer_clear(state, node_id);
+    }
 
     persist_registry(state);
 
@@ -10909,6 +10932,58 @@ mod tests {
         assert!(
             runtime.engine_room_snapshot(&room_id).is_none(),
             "deleted room should be removed from runtime"
+        );
+    }
+
+    #[test]
+    fn device_hard_remove_evicts_runtime_node_and_periodic_state() {
+        let (state, runtime, device_id) = setup_attached_matter_light_without_group_dispatch();
+
+        {
+            let mut s = state.lock().unwrap();
+            s.room_lights_on.insert(device_id.clone(), true);
+            s.motion_snapshots.insert(
+                device_id.clone(),
+                crate::state::MotionSnapshot {
+                    motion_active: true,
+                    motion_owned: true,
+                    remaining_secs: Some(30),
+                    timeout_secs: 300,
+                    warning_active: false,
+                },
+            );
+            s.room_mode_transitions.insert(
+                device_id.clone(),
+                crate::state::RoomModeTransition {
+                    ends_at: std::time::Instant::now(),
+                    periodic_resume_at: std::time::Instant::now(),
+                },
+            );
+            s.pending_periodic_ticks.insert(device_id.clone(), 12.0);
+            s.pending_motion_clear.push(device_id.clone());
+            s.pending_motion_seed
+                .push((device_id.clone(), "room1".to_string()));
+        }
+
+        do_device_hard_remove(&state, &device_id, None).unwrap();
+
+        let s = state.lock().unwrap();
+        assert!(s.canonical_registry.get(&device_id).is_none());
+        assert!(s.topology.get_device_node(&device_id).is_none());
+        assert!(!s.room_lights_on.contains_key(&device_id));
+        assert!(!s.motion_snapshots.contains_key(&device_id));
+        assert!(!s.room_mode_transitions.contains_key(&device_id));
+        assert!(!s.pending_periodic_ticks.contains_key(&device_id));
+        assert_eq!(s.pending_motion_clear, vec![device_id.clone()]);
+        assert!(s
+            .pending_motion_seed
+            .iter()
+            .all(|(source, target)| source != &device_id && target != &device_id));
+        drop(s);
+
+        assert!(
+            runtime.engine_node_snapshot(&device_id).is_none(),
+            "hard-removed device should be removed from runtime"
         );
     }
 

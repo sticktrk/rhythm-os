@@ -1006,11 +1006,9 @@ impl<C: LightController> RhythmEngine<C> {
         {
             Ok(true) => PeriodicTickResult::Updated,
             Ok(false) => PeriodicTickResult::Skipped,
-            Err(e) => PeriodicTickResult::Error(format!(
-                "{}: {}",
-                self.node_log_label(source_room_id),
-                e
-            )),
+            Err(e) => {
+                PeriodicTickResult::Error(format!("{}: {}", self.node_log_label(source_room_id), e))
+            }
         }
     }
 

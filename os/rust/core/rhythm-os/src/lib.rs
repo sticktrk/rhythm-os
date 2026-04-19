@@ -20,6 +20,7 @@ pub mod handlers;
 pub mod hub;
 pub mod hue_buttons;
 pub mod lifecycle;
+pub mod logging;
 pub mod mdns;
 pub mod pairing;
 pub mod periodic;

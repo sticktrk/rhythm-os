@@ -240,8 +240,7 @@ pub(crate) fn store_device_capabilities(
     device: &CommissionedDevice,
     device_id: &str,
 ) {
-    let mut caps = crate::capabilities::capabilities_from_commissioned(device);
-    crate::capabilities::enrich_from_db(&mut caps, device, rhythm_devices::builtin_db());
+    let caps = build_device_capabilities(device);
 
     if let Ok(mut device_caps) = hub_data.device_caps.lock() {
         device_caps.insert(device_id.to_string(), caps);
@@ -252,6 +251,14 @@ pub(crate) fn store_device_capabilities(
             device_caps.len()
         );
     }
+}
+
+pub(crate) fn build_device_capabilities(
+    device: &CommissionedDevice,
+) -> rhythm_devices::LightCapabilities {
+    let mut caps = crate::capabilities::capabilities_from_commissioned(device);
+    crate::capabilities::enrich_from_db(&mut caps, device, rhythm_devices::builtin_db());
+    caps
 }
 
 fn register_canonical_identity(

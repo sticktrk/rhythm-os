@@ -22,6 +22,7 @@ use rhythm_core::runtime::hub_registry::DeviceType;
 
 use crate::api_types::{HubCredentialsResponse, NodesResponse, SyncResponse};
 use crate::commands::{self, RoomParams};
+use crate::logging;
 use crate::state::SharedState;
 use crate::topology::NodeControlKind;
 
@@ -248,7 +249,7 @@ fn perform_unpair_device(
         target: "pair",
         "Unpairing request: hub_type={}, params={}",
         request.hub_type,
-        request.params
+        logging::summarize_json_for_log(&request.params)
     );
 
     let result = start_fn(state, &request.hub_type, &request.params)?;
@@ -1217,7 +1218,12 @@ pub fn handle_pair_device(
         return ApiResponse::server_error("No pairing support configured");
     };
 
-    log::info!(target: "pair", "Pairing request: hub_type={}, params={}", request.hub_type, request.params);
+    log::info!(
+        target: "pair",
+        "Pairing request: hub_type={}, params={}",
+        request.hub_type,
+        logging::summarize_json_for_log(&request.params)
+    );
 
     match start_fn(state, &request.hub_type, &request.params) {
         Ok(session) => {

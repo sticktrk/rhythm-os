@@ -32,6 +32,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use log::warn;
@@ -41,6 +42,9 @@ use crate::controller::{
 };
 use crate::lighting::LightingCommand;
 use crate::room::Room;
+
+const DISPATCH_INFO_MS: u128 = 250;
+const DISPATCH_WARN_MS: u128 = 1000;
 
 pub(crate) fn format_node_log_label(node_id: &str, node_name: Option<&str>) -> String {
     match node_name
@@ -255,34 +259,72 @@ impl LightController for CompositeController {
             )));
         }
 
-        // Single target: await directly — avoids nested LocalPool executor on
-        // periodic/event-loop std::threads where the outer executor::block_on
-        // already created a LocalPool.
-        if targets.len() == 1 {
+        let node_label = self.node_log_label(room_id);
+        let started = Instant::now();
+
+        let result = if targets.len() == 1 {
             let (key, controller, target) = &targets[0];
-            return controller
-                .turn_on_target(target, command)
-                .await
-                .map_err(|e| {
-                    warn!(target: "composite", "hub {} failed: {}", key, e);
-                    e
-                });
-        }
-
-        // Multi-target: fan out to OS threads (thread::scope = fresh thread-locals, safe)
-        let any_ok = dispatch_parallel(&targets, |controller, target| {
-            sync_block_on(controller.turn_on_target(target, command.clone()))
-        });
-
-        if any_ok {
-            Ok(())
+            controller.turn_on_target(target, command).await.map_err(|e| {
+                warn!(target: "composite", "hub {} failed: {}", key, e);
+                e
+            })
         } else {
-            let node_label = self.node_log_label(room_id);
-            Err(LightControlError::CommandFailed(format!(
-                "All controllers failed for node {}",
-                node_label
-            )))
+            let any_ok = dispatch_parallel(&targets, |controller, target| {
+                sync_block_on(controller.turn_on_target(target, command.clone()))
+            });
+
+            if any_ok {
+                Ok(())
+            } else {
+                Err(LightControlError::CommandFailed(format!(
+                    "All controllers failed for node {}",
+                    node_label
+                )))
+            }
+        };
+
+        let latency_ms = started.elapsed().as_millis();
+        match &result {
+            Ok(()) if latency_ms >= DISPATCH_WARN_MS => tracing::warn!(
+                target: "cmd",
+                event = "dispatch_turn_on",
+                node_id = %room_id,
+                node = %node_label,
+                target_count = targets.len(),
+                latency_ms,
+                "Composite dispatch turn_on slow"
+            ),
+            Ok(()) if latency_ms >= DISPATCH_INFO_MS => tracing::info!(
+                target: "cmd",
+                event = "dispatch_turn_on",
+                node_id = %room_id,
+                node = %node_label,
+                target_count = targets.len(),
+                latency_ms,
+                "Composite dispatch turn_on"
+            ),
+            Ok(()) => tracing::debug!(
+                target: "cmd",
+                event = "dispatch_turn_on",
+                node_id = %room_id,
+                node = %node_label,
+                target_count = targets.len(),
+                latency_ms,
+                "Composite dispatch turn_on"
+            ),
+            Err(e) => tracing::warn!(
+                target: "cmd",
+                event = "dispatch_turn_on_failed",
+                node_id = %room_id,
+                node = %node_label,
+                target_count = targets.len(),
+                latency_ms,
+                error = %e,
+                "Composite dispatch turn_on failed"
+            ),
         }
+
+        result
     }
 
     async fn turn_off(&self, room_id: &str, transition_ms: Option<u32>) -> LightControlResult<()> {
@@ -295,32 +337,75 @@ impl LightController for CompositeController {
             )));
         }
 
-        // Single target: await directly (same reasoning as turn_on)
-        if targets.len() == 1 {
+        let node_label = self.node_log_label(room_id);
+        let started = Instant::now();
+
+        let result = if targets.len() == 1 {
             let (key, controller, target) = &targets[0];
-            return controller
+            controller
                 .turn_off_target(target, transition_ms)
                 .await
                 .map_err(|e| {
                     warn!(target: "composite", "hub {} failed: {}", key, e);
                     e
-                });
-        }
-
-        // Multi-target: fan out to OS threads
-        let any_ok = dispatch_parallel(&targets, |controller, target| {
-            sync_block_on(controller.turn_off_target(target, transition_ms))
-        });
-
-        if any_ok {
-            Ok(())
+                })
         } else {
-            let node_label = self.node_log_label(room_id);
-            Err(LightControlError::CommandFailed(format!(
-                "All controllers failed for node {}",
-                node_label
-            )))
+            let any_ok = dispatch_parallel(&targets, |controller, target| {
+                sync_block_on(controller.turn_off_target(target, transition_ms))
+            });
+
+            if any_ok {
+                Ok(())
+            } else {
+                Err(LightControlError::CommandFailed(format!(
+                    "All controllers failed for node {}",
+                    node_label
+                )))
+            }
+        };
+
+        let latency_ms = started.elapsed().as_millis();
+        match &result {
+            Ok(()) if latency_ms >= DISPATCH_WARN_MS => tracing::warn!(
+                target: "cmd",
+                event = "dispatch_turn_off",
+                node_id = %room_id,
+                node = %node_label,
+                target_count = targets.len(),
+                latency_ms,
+                "Composite dispatch turn_off slow"
+            ),
+            Ok(()) if latency_ms >= DISPATCH_INFO_MS => tracing::info!(
+                target: "cmd",
+                event = "dispatch_turn_off",
+                node_id = %room_id,
+                node = %node_label,
+                target_count = targets.len(),
+                latency_ms,
+                "Composite dispatch turn_off"
+            ),
+            Ok(()) => tracing::debug!(
+                target: "cmd",
+                event = "dispatch_turn_off",
+                node_id = %room_id,
+                node = %node_label,
+                target_count = targets.len(),
+                latency_ms,
+                "Composite dispatch turn_off"
+            ),
+            Err(e) => tracing::warn!(
+                target: "cmd",
+                event = "dispatch_turn_off_failed",
+                node_id = %room_id,
+                node = %node_label,
+                target_count = targets.len(),
+                latency_ms,
+                error = %e,
+                "Composite dispatch turn_off failed"
+            ),
         }
+
+        result
     }
 
     async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
@@ -721,9 +806,7 @@ mod tests {
         let result = block_on(composite.turn_on("device-1", LightingCommand::new(50, 3000)))
             .expect_err("missing routing should return an error");
 
-        assert!(result
-            .to_string()
-            .contains("Kitchen Motion (device-1)"));
+        assert!(result.to_string().contains("Kitchen Motion (device-1)"));
     }
 
     // ── Partial failure ──────────────────────────────────────────────

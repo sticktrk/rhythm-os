@@ -14,6 +14,7 @@ use rhythm_core::{ButtonAction, InputEvent};
 
 use crate::commands;
 use crate::hub::HubEvent;
+use crate::logging;
 use crate::state::{MotionSnapshot, SharedState, WorkItem};
 use crate::topology::NodeControlKind;
 
@@ -238,6 +239,15 @@ pub fn dim_node_inline(state: &SharedState, node_id: &str, factor: f32) -> bool 
 /// Used by motion - always turns ON (never toggles), skipping the
 /// `any_lights_on` HTTP round-trip that `toggle` would perform.
 pub fn turn_on_node_inline(state: &SharedState, node_id: &str) -> bool {
+    let command_id = logging::next_command_id("motion");
+    let span = tracing::info_span!(
+        target: "evt",
+        "motion_turn_on",
+        command_id = %command_id,
+        node_id = %node_id
+    );
+    let _entered = span.enter();
+    let started = Instant::now();
     let runtime = {
         let Ok(s) = state.lock() else {
             warn!(target: "evt", "turn_on_node_inline: state lock poisoned");
@@ -250,7 +260,13 @@ pub fn turn_on_node_inline(state: &SharedState, node_id: &str) -> bool {
     };
     match runtime.turn_on_room(node_id) {
         Ok(()) => {
-            info!(target: "evt", "Motion: turn_on node '{}'", node_id);
+            tracing::info!(
+                target: "evt",
+                event = "motion_turn_on_complete",
+                latency_ms = started.elapsed().as_millis(),
+                "Motion: turn_on node '{}'",
+                node_id
+            );
             if let Ok(mut s) = state.lock() {
                 if s.room_mode_transitions.remove(node_id).is_some() {
                     debug!(
@@ -266,7 +282,14 @@ pub fn turn_on_node_inline(state: &SharedState, node_id: &str) -> bool {
             true
         }
         Err(e) => {
-            warn!(target: "evt", "Motion: turn_on node '{}' failed: {}", node_id, e);
+            tracing::warn!(
+                target: "evt",
+                event = "motion_turn_on_failed",
+                latency_ms = started.elapsed().as_millis(),
+                error = %e,
+                "Motion: turn_on node '{}' failed",
+                node_id
+            );
             false
         }
     }
@@ -1030,6 +1053,18 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                 s.hub_runtime()
             };
             let Some(runtime) = runtime else { return };
+
+            if runtime.engine_node_snapshot(&node_id).is_none()
+                || runtime.engine_node_snapshot(&settings_node_id).is_none()
+            {
+                debug!(
+                    target: "sys",
+                    "Worker: skipping stale periodic tick '{}' (settings='{}')",
+                    node_id,
+                    settings_node_id
+                );
+                return;
+            }
 
             if let Err(e) = runtime.periodic_tick_node(&node_id, &settings_node_id, current_hour) {
                 warn!(target: "sys", "Periodic node tick '{}' failed: {}", node_id, e);

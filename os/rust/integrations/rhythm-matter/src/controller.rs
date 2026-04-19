@@ -1,6 +1,7 @@
 //! Matter light controller using the typed Matter transport.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use log::{debug, warn};
@@ -17,6 +18,9 @@ use crate::transport::MatterTransport;
 
 /// Type alias for the registry (same as HA and Hue).
 pub type MatterDeviceRegistry = rhythm_os::registry::HubDeviceRegistry;
+
+const DISPATCH_INFO_MS: u128 = 250;
+const DISPATCH_WARN_MS: u128 = 1000;
 
 /// Light controller implementation using typed Matter light operations.
 pub struct MatterLightController {
@@ -83,18 +87,55 @@ impl MatterLightController {
         }
     }
 
+    fn device_capabilities(&self, device_id: &str, node_id: u64) -> LightCapabilities {
+        if let Ok(device_caps) = self.hub_data.device_caps.lock() {
+            if let Some(caps) = device_caps.get(device_id) {
+                return caps.clone();
+            }
+        }
+
+        match self.transport.probe_light(node_id) {
+            Ok(device) => {
+                let caps = crate::commissioning::build_device_capabilities(&device);
+                let probed_id =
+                    crate::lifecycle::format_device_id(device.node_id, device.light_endpoint);
+
+                if let Ok(mut device_caps) = self.hub_data.device_caps.lock() {
+                    device_caps.insert(device_id.to_string(), caps.clone());
+                    if probed_id != device_id {
+                        device_caps.insert(probed_id, caps.clone());
+                    }
+                }
+
+                debug!(
+                    target: "cmd",
+                    "Matter: probed capabilities on demand for {}",
+                    device_id
+                );
+                caps
+            }
+            Err(error) => {
+                warn!(
+                    target: "cmd",
+                    "Matter: failed to probe capabilities for {} (node {}): {}; using extended-color fallback",
+                    device_id,
+                    node_id,
+                    error
+                );
+                LightCapabilities::defaults_for(LightType::ExtendedColor)
+            }
+        }
+    }
+
     fn turn_on_devices(
         &self,
         target_label: &str,
         device_ids: &[String],
         command: LightingCommand,
     ) -> LightControlResult<()> {
-        let default_caps = LightCapabilities::defaults_for(LightType::ExtendedColor);
-        let device_caps = self.hub_data.device_caps.lock().map_err(|e| {
-            LightControlError::Internal(format!("Failed to lock device capabilities: {}", e))
-        })?;
-
+        let started = Instant::now();
         let mut successful_devices = 0usize;
+        let mut partial_devices = 0usize;
         let mut failed_devices = 0usize;
 
         for device_id in device_ids {
@@ -104,14 +145,15 @@ impl MatterLightController {
                 continue;
             };
 
-            let caps = device_caps.get(device_id).unwrap_or(&default_caps);
+            let caps = self.device_capabilities(device_id, node_id);
             let adapted = rhythm_os::controller_helpers::adapt_lighting_command(
-                caps,
+                &caps,
                 &command,
                 ColorPreference::PreferXy,
             );
 
-            let mut any_success = false;
+            let mut command_successes = 0usize;
+            let mut command_failures = 0usize;
 
             if let Some(brightness) = adapted.brightness {
                 let level = clusters::brightness_to_level(brightness);
@@ -125,8 +167,9 @@ impl MatterLightController {
                         node_id,
                         e
                     );
+                    command_failures += 1;
                 } else {
-                    any_success = true;
+                    command_successes += 1;
                 }
             } else if adapted.on {
                 if let Err(e) = self.transport.set_on_off(node_id, endpoint, true) {
@@ -136,8 +179,9 @@ impl MatterLightController {
                         node_id,
                         e
                     );
+                    command_failures += 1;
                 } else {
-                    any_success = true;
+                    command_successes += 1;
                 }
             }
 
@@ -152,8 +196,9 @@ impl MatterLightController {
                         node_id,
                         e
                     );
+                    command_failures += 1;
                 } else {
-                    any_success = true;
+                    command_successes += 1;
                 }
             } else if let Some(kelvin) = adapted.kelvin {
                 if let Err(e) = self.transport.set_color_temperature(
@@ -168,54 +213,88 @@ impl MatterLightController {
                         node_id,
                         e
                     );
+                    command_failures += 1;
                 } else {
-                    any_success = true;
+                    command_successes += 1;
                 }
             }
 
-            if any_success {
-                successful_devices += 1;
-            } else {
-                failed_devices += 1;
+            match (command_successes, command_failures) {
+                (0, _) => failed_devices += 1,
+                (_, 0) => successful_devices += 1,
+                _ => {
+                    partial_devices += 1;
+                    warn!(
+                        target: "cmd",
+                        "Matter turn_on partial for device {}: successes={} failures={}",
+                        device_id,
+                        command_successes,
+                        command_failures
+                    );
+                }
             }
         }
 
-        if successful_devices == 0 && !device_ids.is_empty() {
+        if successful_devices == 0 && partial_devices == 0 && !device_ids.is_empty() {
             return Err(LightControlError::CommandFailed(format!(
                 "Matter turn_on failed for target {} ({} target devices)",
                 target_label, failed_devices,
             )));
         }
 
-        if failed_devices > 0 {
-            warn!(
+        if successful_devices == 0 && partial_devices > 0 {
+            return Err(LightControlError::CommandFailed(format!(
+                "Matter turn_on partially failed for target {} ({} partial, {} failed)",
+                target_label, partial_devices, failed_devices,
+            )));
+        }
+
+        let latency_ms = started.elapsed().as_millis();
+        if partial_devices > 0 || failed_devices > 0 {
+            tracing::warn!(
                 target: "cmd",
-                "Matter turn_on partial: target={} ok={} failed={}",
-                target_label,
-                successful_devices,
-                failed_devices,
+                event = "matter_turn_on_partial",
+                target = %target_label,
+                latency_ms,
+                ok = successful_devices,
+                partial = partial_devices,
+                failed = failed_devices,
+                device_count = device_ids.len(),
+                "Matter turn_on partial"
             );
-        } else if command.is_direct_color || command.kelvin == 0 {
-            debug!(
+        } else if latency_ms >= DISPATCH_WARN_MS {
+            tracing::warn!(
                 target: "cmd",
-                "Matter turn_on: target={} bri={} xy=({:.3},{:.3}) rgb=({},{},{}) devices={}",
-                target_label,
-                command.brightness,
-                command.xy.x,
-                command.xy.y,
-                command.rgb.r,
-                command.rgb.g,
-                command.rgb.b,
-                device_ids.len(),
+                event = "matter_turn_on",
+                target = %target_label,
+                latency_ms,
+                brightness = command.brightness,
+                kelvin = command.kelvin,
+                direct_color = command.is_direct_color,
+                device_count = device_ids.len(),
+                "Matter turn_on slow"
+            );
+        } else if latency_ms >= DISPATCH_INFO_MS {
+            tracing::info!(
+                target: "cmd",
+                event = "matter_turn_on",
+                target = %target_label,
+                latency_ms,
+                brightness = command.brightness,
+                kelvin = command.kelvin,
+                direct_color = command.is_direct_color,
+                device_count = device_ids.len(),
+                "Matter turn_on"
             );
         } else {
             debug!(
                 target: "cmd",
-                "Matter turn_on: target={} bri={} kelvin={} devices={}",
+                "Matter turn_on: target={} bri={} kelvin={} devices={} latency_ms={}",
                 target_label,
                 command.brightness,
                 command.kelvin,
-                device_ids.len()
+                device_ids.len(),
+                latency_ms
             );
         }
 
@@ -227,6 +306,7 @@ impl MatterLightController {
         target_label: &str,
         device_ids: &[String],
     ) -> LightControlResult<()> {
+        let started = Instant::now();
         let mut successful_devices = 0usize;
         let mut failed_devices = 0usize;
 
@@ -251,17 +331,46 @@ impl MatterLightController {
             )));
         }
 
+        let latency_ms = started.elapsed().as_millis();
         if failed_devices > 0 {
-            warn!(
+            tracing::warn!(
                 target: "cmd",
-                "Matter turn_off partial: target={} ok={} failed={}",
+                event = "matter_turn_off_partial",
+                target = %target_label,
+                latency_ms,
+                ok = successful_devices,
+                failed = failed_devices,
+                device_count = device_ids.len(),
+                "Matter turn_off partial"
+            );
+        } else if latency_ms >= DISPATCH_WARN_MS {
+            tracing::warn!(
+                target: "cmd",
+                event = "matter_turn_off",
+                target = %target_label,
+                latency_ms,
+                device_count = device_ids.len(),
+                "Matter turn_off slow"
+            );
+        } else if latency_ms >= DISPATCH_INFO_MS {
+            tracing::info!(
+                target: "cmd",
+                event = "matter_turn_off",
+                target = %target_label,
+                latency_ms,
+                device_count = device_ids.len(),
+                "Matter turn_off"
+            );
+        } else {
+            debug!(
+                target: "cmd",
+                "Matter turn_off: target={} devices={} latency_ms={}",
                 target_label,
-                successful_devices,
-                failed_devices,
+                device_ids.len(),
+                latency_ms
             );
         }
 
-        debug!(target: "cmd", "Matter turn_off: target={} devices={}", target_label, device_ids.len());
         Ok(())
     }
 }
@@ -369,6 +478,7 @@ impl LightController for MatterLightController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Mutex;
@@ -661,5 +771,193 @@ mod tests {
 
         let result = block_on(controller.turn_on("kitchen", LightingCommand::new(50, 3000)));
         assert!(matches!(result, Err(LightControlError::CommandFailed(_))));
+    }
+
+    #[test]
+    fn turn_on_probes_missing_caps_before_sending_color_command() {
+        let (controller, spy, _) = make_controller();
+        spy.set_probe_device(crate::transport::CommissionedDevice {
+            node_id: 42,
+            vendor_name: "Vendor".to_string(),
+            product_name: "Lamp".to_string(),
+            vendor_id: 1,
+            product_id: 2,
+            serial_number: None,
+            light_endpoint: 1,
+            color_modes: vec![crate::transport::MatterColorMode::ColorTemperature],
+            min_kelvin: Some(2700),
+            max_kelvin: Some(6500),
+        });
+
+        block_on(controller.turn_on("matter-42", LightingCommand::new(50, 3000))).unwrap();
+
+        assert!(spy.operations().iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::SetColorTemperature { node_id: 42, .. }
+        )));
+        assert!(!spy
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::SetXy { node_id: 42, .. })));
+
+        let cached = controller.hub_data.device_caps.lock().unwrap();
+        let caps = cached
+            .get("matter-42")
+            .expect("expected probed caps to be cached");
+        assert!(caps.supports_color_temp());
+        assert!(!caps.supports_xy_color());
+    }
+
+    #[test]
+    fn partial_device_failure_returns_command_failed() {
+        struct PartialFailureTransport {
+            operations: Mutex<Vec<RecordedOperation>>,
+        }
+
+        impl PartialFailureTransport {
+            fn operations(&self) -> Vec<RecordedOperation> {
+                self.operations.lock().unwrap().clone()
+            }
+        }
+
+        impl MatterTransport for PartialFailureTransport {
+            fn commission_light(
+                &self,
+                _request: &crate::transport::MatterCommissionRequest,
+            ) -> Result<crate::transport::CommissionedDevice> {
+                unreachable!()
+            }
+
+            fn decommission_device(&self, _node_id: u64, _force: bool) -> Result<()> {
+                Ok(())
+            }
+
+            fn list_devices(&self) -> Result<Vec<crate::transport::MatterDeviceInfo>> {
+                Ok(Vec::new())
+            }
+
+            fn probe_light(&self, _node_id: u64) -> Result<crate::transport::CommissionedDevice> {
+                unreachable!()
+            }
+
+            fn set_on_off(&self, node_id: u64, endpoint: u16, on: bool) -> Result<()> {
+                self.operations
+                    .lock()
+                    .unwrap()
+                    .push(RecordedOperation::SetOnOff {
+                        node_id,
+                        endpoint,
+                        on,
+                    });
+                Ok(())
+            }
+
+            fn set_brightness(
+                &self,
+                node_id: u64,
+                endpoint: u16,
+                level: u8,
+                transition_ms: Option<u32>,
+            ) -> Result<()> {
+                self.operations
+                    .lock()
+                    .unwrap()
+                    .push(RecordedOperation::SetBrightness {
+                        node_id,
+                        endpoint,
+                        level,
+                        transition_ms,
+                    });
+                Ok(())
+            }
+
+            fn set_color_temperature(
+                &self,
+                node_id: u64,
+                endpoint: u16,
+                kelvin: u16,
+                transition_ms: Option<u32>,
+            ) -> Result<()> {
+                self.operations
+                    .lock()
+                    .unwrap()
+                    .push(RecordedOperation::SetColorTemperature {
+                        node_id,
+                        endpoint,
+                        kelvin,
+                        transition_ms,
+                    });
+                Ok(())
+            }
+
+            fn set_xy(
+                &self,
+                node_id: u64,
+                endpoint: u16,
+                x: f32,
+                y: f32,
+                transition_ms: Option<u32>,
+            ) -> Result<()> {
+                self.operations
+                    .lock()
+                    .unwrap()
+                    .push(RecordedOperation::SetXy {
+                        node_id,
+                        endpoint,
+                        x,
+                        y,
+                        transition_ms,
+                    });
+                anyhow::bail!("xy failed");
+            }
+
+            fn read_on_off(&self, node_id: u64, endpoint: u16) -> Result<bool> {
+                self.operations
+                    .lock()
+                    .unwrap()
+                    .push(RecordedOperation::ReadOnOff { node_id, endpoint });
+                Ok(false)
+            }
+        }
+
+        let transport = Arc::new(PartialFailureTransport {
+            operations: Mutex::new(Vec::new()),
+        });
+        let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
+        registry
+            .lock()
+            .unwrap()
+            .upsert_room("r1", "Room", "r1", &["matter-42".to_string()]);
+        registry
+            .lock()
+            .unwrap()
+            .set_area_lights("r1", vec!["matter-42".to_string()]);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let hub_data = Arc::new(crate::hub_state::MatterHubData {
+            #[cfg(feature = "desktop")]
+            transport: std::sync::OnceLock::new(),
+            registry,
+            fabric_id: "test".to_string(),
+            commissioned: std::sync::Mutex::new(Vec::new()),
+            next_node_id: std::sync::atomic::AtomicU64::new(100),
+            device_caps: std::sync::Mutex::new(std::collections::HashMap::from([(
+                "matter-42".to_string(),
+                LightCapabilities::defaults_for(LightType::ExtendedColor),
+            )])),
+            event_tx: tx,
+        });
+        let controller = MatterLightController::new(transport.clone(), hub_data);
+
+        let result = block_on(controller.turn_on("r1", LightingCommand::new(50, 3000)));
+        assert!(matches!(result, Err(LightControlError::CommandFailed(_))));
+        assert!(transport.operations().iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::SetBrightness { node_id: 42, .. }
+        )));
+        assert!(transport
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::SetXy { node_id: 42, .. })));
     }
 }
