@@ -40,7 +40,9 @@ pub fn summarize_json_for_log(value: &Value) -> String {
 #[cfg(feature = "desktop")]
 use axum::extract::MatchedPath;
 #[cfg(feature = "desktop")]
-use axum::http::{Request, Response};
+use axum::http::Request;
+#[cfg(feature = "desktop")]
+use axum::response::Response;
 #[cfg(feature = "desktop")]
 use axum::Router;
 #[cfg(feature = "desktop")]
