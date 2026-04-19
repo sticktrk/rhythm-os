@@ -54,8 +54,6 @@ use tower_http::trace::TraceLayer;
 
 #[cfg(feature = "desktop")]
 use crate::axum_router::ApiErrorContext;
-#[cfg(feature = "desktop")]
-use crate::state::SharedState;
 
 #[cfg(feature = "desktop")]
 struct LocalTimer;
@@ -119,7 +117,10 @@ pub fn init_native_logging(default_level: &str) -> anyhow::Result<()> {
 
 #[cfg(feature = "desktop")]
 /// Apply request IDs and HTTP latency logging to a shared-state router.
-pub fn with_http_observability(router: Router<SharedState>) -> Router<SharedState> {
+pub fn with_http_observability<S>(router: Router<S>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
     router
         .layer(
             TraceLayer::new_for_http()

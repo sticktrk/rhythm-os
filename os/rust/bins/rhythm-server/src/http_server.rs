@@ -153,10 +153,10 @@ fn scan_mdns() -> Vec<serde_json::Value> {
     };
 
     let mut devices = vec![];
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
 
     while std::time::Instant::now() < deadline {
-        match receiver.recv_timeout(Duration::from_millis(100)) {
+        match receiver.recv_timeout(std::time::Duration::from_millis(100)) {
             Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) => {
                 let fullname = info.get_fullname().to_string();
                 let hostname = info.get_hostname().to_string();
