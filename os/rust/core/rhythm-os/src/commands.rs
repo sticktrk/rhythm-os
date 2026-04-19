@@ -7169,6 +7169,38 @@ mod tests {
         (state, runtime, device_id)
     }
 
+    fn setup_attached_hue_light_with_group_dispatch() -> (SharedState, Arc<MockRuntime>, String) {
+        let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let hub_key = HubKey::new(HubType::new("hue"), "bridge");
+        let device_id = insert_canonical_device(
+            &state,
+            hub_key.clone(),
+            "hue-light-1",
+            "Desk Lamp",
+            "hue-room-1",
+            "Room 1",
+        );
+        {
+            let mut s = state.lock().unwrap();
+            let mut room = crate::topology::TopologyRoom::new("room1", "room1");
+            room.upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                hub_key,
+                hub_room_id: "hue-room-1".into(),
+                control_id: "gl-room1".into(),
+                light_device_ids: vec!["hue-light-1".into()],
+            });
+            s.topology.insert_room(room);
+            assert!(s.topology.attach_device_user_override("room1", &device_id));
+        }
+        runtime
+            .snapshots
+            .lock()
+            .unwrap()
+            .push(make_light_child_snapshot(&device_id, "room1"));
+
+        (state, runtime, device_id)
+    }
+
     #[derive(Clone, Default)]
     struct TestStorage {
         inner: Arc<Mutex<TestStorageInner>>,
@@ -7626,21 +7658,15 @@ mod tests {
 
     #[test]
     fn room_action_updates_parent_lights_on_for_attached_light() {
-        let (state, runtime) = setup_state(vec![
-            make_snapshot("room1", false, false),
-            make_light_child_snapshot("light1", "room1"),
-        ]);
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
 
-        let result = do_node_action(&state, "light1", "on", false);
+        let result = do_node_action(&state, &device_id, "on", false);
 
         assert!(result.is_ok());
-        assert_eq!(
-            runtime.events(),
-            vec![("light1".into(), ButtonAction::OnPress)]
-        );
+        assert_eq!(runtime.events(), vec![(device_id, ButtonAction::OnPress)]);
         let s = state.lock().unwrap();
         assert_eq!(s.room_lights_on.get("room1"), Some(&true));
-        assert!(!s.room_lights_on.contains_key("light1"));
+        assert_eq!(s.room_lights_on.len(), 1);
     }
 
     #[test]
@@ -8024,10 +8050,7 @@ mod tests {
     #[cfg(feature = "desktop")]
     #[test]
     fn build_node_state_event_uses_parent_lights_on_for_attached_light() {
-        let (state, rt) = setup_state(vec![
-            make_snapshot("room1", false, false),
-            make_light_child_snapshot("light1", "room1"),
-        ]);
+        let (state, rt, device_id) = setup_attached_hue_light_with_group_dispatch();
         state
             .lock()
             .unwrap()
@@ -8035,7 +8058,7 @@ mod tests {
             .insert("room1".into(), true);
 
         let snap = rhythm_core::NodeSnapshot::from_room_snapshot(
-            rt.engine_room_snapshot("light1").unwrap(),
+            rt.engine_room_snapshot(&device_id).unwrap(),
         );
         let event = build_node_state_event(&state, &snap);
 
@@ -9312,17 +9335,14 @@ mod tests {
 
     #[test]
     fn set_brightness_updates_parent_lights_on_for_attached_light() {
-        let (state, _rt) = setup_state(vec![
-            make_snapshot("room1", false, false),
-            make_light_child_snapshot("light1", "room1"),
-        ]);
+        let (state, _rt, device_id) = setup_attached_hue_light_with_group_dispatch();
 
-        let result = do_set_node_brightness(&state, "light1", 75, false);
+        let result = do_set_node_brightness(&state, &device_id, 75, false);
 
         assert!(result.is_ok());
         let s = state.lock().unwrap();
         assert_eq!(s.room_lights_on.get("room1"), Some(&true));
-        assert!(!s.room_lights_on.contains_key("light1"));
+        assert_eq!(s.room_lights_on.len(), 1);
     }
 
     #[test]
@@ -9408,13 +9428,20 @@ mod tests {
 
     #[test]
     fn room_preferences_idle_updates_parent_lights_on_for_attached_light() {
-        let mut child = make_light_child_snapshot("light1", "room1");
-        child.rhythm_enabled = false;
-        let (state, _rt) = setup_state(vec![make_snapshot("room1", false, false), child]);
+        let (state, rt, device_id) = setup_attached_hue_light_with_group_dispatch();
+        if let Some(child) = rt
+            .snapshots
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|snap| snap.id == device_id)
+        {
+            child.rhythm_enabled = false;
+        }
 
         let result = do_node_preferences_set(
             &state,
-            "light1",
+            &device_id,
             Some(false),
             None,
             Some(RoomModeState::Idle),
@@ -9425,7 +9452,7 @@ mod tests {
         assert!(result.is_ok());
         let s = state.lock().unwrap();
         assert_eq!(s.room_lights_on.get("room1"), Some(&true));
-        assert!(!s.room_lights_on.contains_key("light1"));
+        assert_eq!(s.room_lights_on.len(), 1);
     }
 
     #[test]
