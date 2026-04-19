@@ -361,7 +361,7 @@ fn parse_sse_data(data: &str, event_tx: &SyncSender<HueSseEvent>, state: &mut Ss
                             .insert(id.clone(), updated.clone());
                     }
 
-                    info!(target: "sse",
+                    debug!(target: "sse",
                         "SSE: Button event passed (button={}, type={}, age={}s)",
                         id, event_type, age.unwrap_or(0));
 
@@ -385,7 +385,7 @@ fn parse_sse_data(data: &str, event_tx: &SyncSender<HueSseEvent>, state: &mut Ss
                         let valid = motion_data.motion_valid.unwrap_or(false);
                         if valid {
                             if let Some(detected) = motion_data.motion {
-                                info!(target: "sse", "SSE: Motion sensor {} -> detected={}", id, detected);
+                                debug!(target: "sse", "SSE: Motion sensor {} -> detected={}", id, detected);
                                 if let Err(e) = event_tx.try_send(HueSseEvent::MotionEvent {
                                     motion_id: id.clone(),
                                     motion_detected: detected,
@@ -393,13 +393,13 @@ fn parse_sse_data(data: &str, event_tx: &SyncSender<HueSseEvent>, state: &mut Ss
                                     warn!(target: "conn", "SSE: Dropped motion event (id={}, detected={}): {}", id, detected, e);
                                 }
                             } else {
-                                info!(target: "sse", "SSE: Motion sensor {} valid but no motion field", id);
+                                debug!(target: "sse", "SSE: Motion sensor {} valid but no motion field", id);
                             }
                         } else {
-                            info!(target: "sse", "SSE: Motion sensor {} motion_valid=false (dropped)", id);
+                            debug!(target: "sse", "SSE: Motion sensor {} motion_valid=false (dropped)", id);
                         }
                     } else {
-                        info!(target: "sse", "SSE: Motion resource {} has no motion data (dropped)", id);
+                        debug!(target: "sse", "SSE: Motion resource {} has no motion data (dropped)", id);
                     }
                 }
                 // grouped_light events are intentionally not parsed.
