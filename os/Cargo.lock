@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-chipd"
-version = "0.4.126"
+version = "0.4.127"
 dependencies = [
  "anyhow",
  "cc",
@@ -1734,6 +1734,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+ "tracing",
 ]
 
 [[package]]
@@ -1752,6 +1753,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1786,6 +1788,7 @@ dependencies = [
  "rhythm-os",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

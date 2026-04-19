@@ -25,6 +25,7 @@ serde_json = "1.0"
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
+tracing = { workspace = true }
 
 # Optional: reqwest-based transport for desktop targets
 reqwest = { workspace = true, optional = true }
