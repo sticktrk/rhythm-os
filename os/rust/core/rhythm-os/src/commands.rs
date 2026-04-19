@@ -586,6 +586,16 @@ fn light_node_uses_parent_dispatch(s: &AppState, node_id: &str, kind: LightNodeK
             .attached_light_uses_parent_dispatch(node_id, &s.canonical_registry)
 }
 
+fn semantic_lights_on_override(hard_off: bool, soft_off: bool) -> Option<bool> {
+    if hard_off {
+        Some(false)
+    } else if soft_off {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 pub(crate) fn effective_lights_on_cache_key<'a>(
     s: &AppState,
     node_id: &'a str,
@@ -692,32 +702,42 @@ pub(crate) fn refresh_lights_on_cache_for_runtime_node(
         return;
     }
 
-    let query_id = {
-        let Ok(s) = state.lock() else { return };
-        light_state_query_id(&s, &snap.id, snap.kind, snap.parent_id.as_deref()).to_string()
-    };
+    let lights_on =
+        if let Some(lights_on) = semantic_lights_on_override(snap.hard_off, snap.soft_off) {
+            lights_on
+        } else {
+            let query_id = {
+                let Ok(s) = state.lock() else { return };
+                light_state_query_id(&s, &snap.id, snap.kind, snap.parent_id.as_deref()).to_string()
+            };
 
-    match runtime.any_lights_on(&query_id) {
-        Ok(lights_on) => update_lights_on_cache_for_node(
-            state,
-            &snap.id,
-            snap.kind,
-            snap.parent_id.as_deref(),
-            lights_on,
-        ),
-        Err(e) => warn!(
-            target: "cmd",
-            "Failed to refresh lights_on for '{}' via '{}': {}",
-            node_id,
-            query_id,
-            e
-        ),
-    }
+            match runtime.any_lights_on(&query_id) {
+                Ok(lights_on) => lights_on,
+                Err(e) => {
+                    warn!(
+                        target: "cmd",
+                        "Failed to refresh lights_on for '{}' via '{}': {}",
+                        node_id,
+                        query_id,
+                        e
+                    );
+                    return;
+                }
+            }
+        };
+
+    update_lights_on_cache_for_node(
+        state,
+        &snap.id,
+        snap.kind,
+        snap.parent_id.as_deref(),
+        lights_on,
+    );
 
     if let Some(parent_id) = snap
         .parent_id
         .as_deref()
-        .filter(|parent_id| *parent_id != query_id)
+        .filter(|parent_id| *parent_id != snap.id)
     {
         match runtime.any_lights_on(parent_id) {
             Ok(parent_lights_on) => update_lights_on_cache_for_node(
