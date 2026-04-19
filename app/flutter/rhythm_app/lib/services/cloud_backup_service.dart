@@ -1,12 +1,13 @@
 import 'dart:async';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../backend/backend.dart';
 import 'auth_service.dart';
-import 'server_bundle_api.dart';
 
 /// Single cloud snapshot for the signed-in user.
 ///
@@ -87,6 +88,16 @@ DateTime? _parseDateTime(dynamic value) {
   return null;
 }
 
+class CloudBackupCaptureException implements Exception {
+  const CloudBackupCaptureException(this.message, {this.cause});
+
+  final String message;
+  final Object? cause;
+
+  @override
+  String toString() => message;
+}
+
 class CloudBackupService {
   CloudBackupService._();
 
@@ -97,7 +108,8 @@ class CloudBackupService {
       _instance ??= CloudBackupService._();
 
   final Map<String, Timer> _captureTimers = <String, Timer>{};
-  final Set<String> _capturesInFlight = <String>{};
+  final Map<String, Future<CloudBackupSnapshot>> _capturesInFlight =
+      <String, Future<CloudBackupSnapshot>>{};
   final Set<String> _capturesQueued = <String>{};
 
   String? get _currentUserId => AuthService().currentUserId;
@@ -133,7 +145,7 @@ class CloudBackupService {
     _captureTimers[opKey] = Timer(delay, () {
       _captureTimers.remove(opKey);
       unawaited(
-        captureNow(
+        _captureNowSilently(
           serverHub: serverHub,
           home: home,
           reason: reason,
@@ -142,57 +154,43 @@ class CloudBackupService {
     });
   }
 
-  Future<CloudBackupSnapshot?> captureNow({
+  Future<CloudBackupSnapshot> captureNow({
     required Hub serverHub,
     Home? home,
     String reason = 'manual',
   }) async {
     if (!canUseCloudBackups || serverHub.type != HubType.server) {
-      return null;
+      throw const CloudBackupCaptureException(
+        'Cloud backups are not available right now.',
+      );
     }
 
     final userId = _currentUserId;
     final client = _client;
-    if (userId == null || client == null) return null;
-
-    final opKey = _operationKey(serverHub);
-    if (_capturesInFlight.contains(opKey)) {
-      _capturesQueued.add(opKey);
-      return null;
+    if (userId == null || client == null) {
+      throw const CloudBackupCaptureException(
+        'Cloud backups are not available right now.',
+      );
     }
 
-    _capturesInFlight.add(opKey);
+    final opKey = _operationKey(serverHub);
+    final inFlight = _capturesInFlight[opKey];
+    if (inFlight != null) {
+      _capturesQueued.add(opKey);
+      return inFlight;
+    }
+
+    final captureFuture = _captureNowInternal(
+      serverHub: serverHub,
+      home: home,
+      userId: userId,
+      client: client,
+      reason: reason,
+    );
+    _capturesInFlight[opKey] = captureFuture;
+
     try {
-      final api = ServerBundleApi(endpoint: serverHub.endpoint);
-      final configurationBundle = await api.getConfigurationBundle();
-      // Persist the secret-bearing GET /api/backup payload. The PUT response is
-      // intentionally redacted and must not replace the stored backup.
-      final backupBundle = await api.getBackupBundle(includeSecrets: true);
-      final snapshot = buildSnapshot(
-        userId: userId,
-        serverHub: serverHub,
-        home: home,
-        configurationBundle: configurationBundle,
-        backupBundle: backupBundle,
-      );
-
-      await client.from(tableName).upsert(
-            snapshot.toUpsertJson(),
-            onConflict: 'user_id',
-          );
-
-      debugPrint(
-        'CloudBackupService: captured snapshot for user=$userId '
-        'hub=${serverHub.id} reason=$reason',
-      );
-      return snapshot;
-    } catch (error, stackTrace) {
-      debugPrint(
-        'CloudBackupService: capture failed for hub=${serverHub.id} '
-        'reason=$reason error=$error',
-      );
-      debugPrint('$stackTrace');
-      return null;
+      return await captureFuture;
     } finally {
       _capturesInFlight.remove(opKey);
       if (_capturesQueued.remove(opKey)) {
@@ -258,5 +256,167 @@ class CloudBackupService {
 
   String _operationKey(Hub serverHub) {
     return '${_currentUserId ?? 'no-user'}:${serverHub.id}';
+  }
+
+  Future<void> _captureNowSilently({
+    required Hub serverHub,
+    Home? home,
+    required String reason,
+  }) async {
+    try {
+      await captureNow(
+        serverHub: serverHub,
+        home: home,
+        reason: reason,
+      );
+    } catch (error, stackTrace) {
+      debugPrint(
+        'CloudBackupService: scheduled capture failed for hub=${serverHub.id} '
+        'reason=$reason error=$error',
+      );
+      debugPrint('$stackTrace');
+    }
+  }
+
+  Future<CloudBackupSnapshot> _captureNowInternal({
+    required Hub serverHub,
+    required String userId,
+    required SupabaseClient client,
+    required String reason,
+    Home? home,
+  }) async {
+    final api = RhythmBundleApi(baseUrl: serverHub.endpoint.baseUrl);
+
+    // Persist the secret-bearing GET /api/backup payload. The PUT response is
+    // intentionally redacted and must not replace the stored backup.
+    final backupBundle = await _runCaptureStep(
+      serverHub: serverHub,
+      reason: reason,
+      context: 'Failed to fetch backup from the server.',
+      action: () => api.getBackupBundle(includeSecrets: true),
+    );
+
+    final configurationBundle = await _getConfigurationBundleBestEffort(
+      api: api,
+      serverHub: serverHub,
+      reason: reason,
+    );
+
+    final snapshot = buildSnapshot(
+      userId: userId,
+      serverHub: serverHub,
+      home: home,
+      configurationBundle: configurationBundle,
+      backupBundle: backupBundle,
+    );
+
+    await _runCaptureStep(
+      serverHub: serverHub,
+      reason: reason,
+      context: 'Failed to save the backup to cloud storage.',
+      action: () => client.from(tableName).upsert(
+            snapshot.toUpsertJson(),
+            onConflict: 'user_id',
+          ),
+    );
+
+    debugPrint(
+      'CloudBackupService: captured snapshot for user=$userId '
+      'hub=${serverHub.id} reason=$reason',
+    );
+    return snapshot;
+  }
+
+  Future<Map<String, dynamic>> _getConfigurationBundleBestEffort({
+    required RhythmBundleApi api,
+    required Hub serverHub,
+    required String reason,
+  }) async {
+    try {
+      return await api.getConfigurationBundle();
+    } catch (error, stackTrace) {
+      final message = _buildCaptureErrorMessage(
+        'Configuration metadata was unavailable; continuing with backup only.',
+        error,
+      );
+      debugPrint(
+        'CloudBackupService: optional configuration fetch failed '
+        'for hub=${serverHub.id} reason=$reason error=$message',
+      );
+      debugPrint('$stackTrace');
+      return const <String, dynamic>{};
+    }
+  }
+
+  Future<T> _runCaptureStep<T>({
+    required Hub serverHub,
+    required String reason,
+    required String context,
+    required Future<T> Function() action,
+  }) async {
+    try {
+      return await action();
+    } catch (error, stackTrace) {
+      final message = _buildCaptureErrorMessage(context, error);
+      debugPrint(
+        'CloudBackupService: capture failed for hub=${serverHub.id} '
+        'reason=$reason error=$message',
+      );
+      debugPrint('$stackTrace');
+      throw CloudBackupCaptureException(message, cause: error);
+    }
+  }
+
+  String _buildCaptureErrorMessage(String context, Object error) {
+    final detail = _formatCaptureErrorDetail(error);
+    if (detail == null || detail.isEmpty) return context;
+    return '$context $detail';
+  }
+
+  String? _formatCaptureErrorDetail(Object error) {
+    if (error is CloudBackupCaptureException) {
+      return error.message;
+    }
+
+    if (error is RhythmApiException) {
+      final parts = <String>[
+        if (error.statusCode != null) 'HTTP ${error.statusCode}',
+        if (error.serverMessage != null && error.serverMessage!.trim().isNotEmpty)
+          error.serverMessage!.trim(),
+        if ((error.serverMessage == null || error.serverMessage!.trim().isEmpty) &&
+            error.message.trim().isNotEmpty)
+          error.message.trim(),
+      ];
+      return parts.isEmpty ? null : parts.join(' ');
+    }
+
+    if (error is DioException) {
+      final response = error.response;
+      if (response != null) {
+        final status = response.statusCode;
+        final body = response.data?.toString().trim();
+        if (body != null && body.isNotEmpty) {
+          return '(HTTP $status) $body';
+        }
+        if (status != null) {
+          return '(HTTP $status)';
+        }
+      }
+
+      return switch (error.type) {
+        DioExceptionType.connectionTimeout ||
+        DioExceptionType.receiveTimeout ||
+        DioExceptionType.sendTimeout =>
+          'The request timed out.',
+        DioExceptionType.connectionError => 'Could not reach the server.',
+        _ => error.message,
+      };
+    }
+
+    final message = error.toString().trim();
+    if (message.isEmpty) return null;
+    return message.startsWith('Exception: ')
+        ? message.substring('Exception: '.length)
+        : message;
   }
 }

@@ -2,8 +2,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:rhythm_core/rhythm_core.dart' show HubEndpoint;
+import 'package:rhythm_sdk/rhythm_sdk.dart';
 
-import '../../services/matter_pairing_api.dart';
 import '../../services/matter_setup_payload.dart';
 import '../../widgets/solar_orbit.dart';
 import 'matter_add_method.dart';
@@ -84,7 +84,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
 
   final _setupPayloadController = TextEditingController();
   late final AnimationController _pulseController;
-  late final MatterPairingApi _pairingApi;
+  late final RhythmMatterApi _pairingApi;
 
   _PairingPhase _phase = _PairingPhase.input;
   String? _errorText;
@@ -92,7 +92,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   @override
   void initState() {
     super.initState();
-    _pairingApi = MatterPairingApi(endpoint: widget.endpoint);
+    _pairingApi = RhythmMatterApi(baseUrl: widget.endpoint.baseUrl);
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2000),

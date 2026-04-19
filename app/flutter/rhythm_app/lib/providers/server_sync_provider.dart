@@ -143,6 +143,9 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Connection state of the underlying connection.
   RhythmConnectionState get connectionState => _connection.connectionState;
 
+  /// The server entry currently selected for the active connection.
+  Hub? get connectedServerHub => _serverHub;
+
   /// Firmware version reported by server.
   String get firmwareVersion => _firmwareVersion;
 

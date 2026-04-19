@@ -1,13 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:rhythm_core/rhythm_core.dart' show HubType;
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnectionState;
+import 'package:rhythm_core/rhythm_core.dart' show Hub, HubType;
+import 'package:rhythm_sdk/rhythm_sdk.dart'
+    show RhythmBundleApi, RhythmConnectionState;
 
 import '../../../providers/home_provider.dart';
 import '../../../providers/server_sync_provider.dart';
 import '../../../services/analytics_service.dart';
 import '../../../services/cloud_backup_service.dart';
-import '../../../services/server_bundle_api.dart';
 import '../../../widgets/settings_row.dart';
 import '../../../widgets/solar_orbit.dart';
 
@@ -136,7 +136,10 @@ class BackupRestoreScreen extends StatelessWidget {
   Future<void> _backupNow(BuildContext context) async {
     final serverSync = context.read<ServerSyncProvider>();
     final homeProvider = context.read<HomeProvider>();
-    final serverHub = homeProvider.getFirstHubOfType(HubType.server);
+    final serverHub = _resolveConnectedServer(
+      serverSync: serverSync,
+      homeProvider: homeProvider,
+    );
 
     if (serverHub == null ||
         serverSync.connectionState != RhythmConnectionState.connected) {
@@ -202,14 +205,14 @@ class BackupRestoreScreen extends StatelessWidget {
 
     _showProgressDialog(context, message: 'Saving cloud backup...');
     try {
+      debugPrint(
+        'BackupRestoreScreen: manual backup using ${serverHub.endpoint.baseUrl}',
+      );
       final snapshot = await cloudBackups.captureNow(
         serverHub: serverHub,
         home: homeProvider.currentHome,
         reason: 'manual_backup',
       );
-      if (snapshot == null) {
-        throw StateError('Unable to capture the current server backup.');
-      }
 
       if (context.mounted) {
         Navigator.of(context, rootNavigator: true).pop();
@@ -245,7 +248,10 @@ class BackupRestoreScreen extends StatelessWidget {
   Future<void> _restoreFromBackup(BuildContext context) async {
     final serverSync = context.read<ServerSyncProvider>();
     final homeProvider = context.read<HomeProvider>();
-    final serverHub = homeProvider.getFirstHubOfType(HubType.server);
+    final serverHub = _resolveConnectedServer(
+      serverSync: serverSync,
+      homeProvider: homeProvider,
+    );
 
     if (serverHub == null ||
         serverSync.connectionState != RhythmConnectionState.connected) {
@@ -272,21 +278,26 @@ class BackupRestoreScreen extends StatelessWidget {
     }
 
     var snapshot = await cloudBackups.getSnapshotForCurrentUser();
-    snapshot ??= await cloudBackups.captureNow(
-      serverHub: serverHub,
-      home: homeProvider.currentHome,
-      reason: 'restore_prefetch',
-    );
-    if (!context.mounted) return;
-
     if (snapshot == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('No cloud backup found yet for this account.'),
-        ),
-      );
-      return;
+      try {
+        snapshot = await cloudBackups.captureNow(
+          serverHub: serverHub,
+          home: homeProvider.currentHome,
+          reason: 'restore_prefetch',
+        );
+      } catch (error) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Could not load a cloud backup: $error'),
+              backgroundColor: Colors.red.shade800,
+            ),
+          );
+        }
+        return;
+      }
     }
+    if (!context.mounted) return;
 
     final sourceLabel = snapshot.sourceHubName.isNotEmpty
         ? snapshot.sourceHubName
@@ -336,7 +347,10 @@ class BackupRestoreScreen extends StatelessWidget {
 
     _showProgressDialog(context, message: 'Restoring backup...');
     try {
-      final api = ServerBundleApi(endpoint: serverHub.endpoint);
+      debugPrint(
+        'BackupRestoreScreen: manual restore using ${serverHub.endpoint.baseUrl}',
+      );
+      final api = RhythmBundleApi(baseUrl: serverHub.endpoint.baseUrl);
       await api.putBackupBundle(snapshot.backupBundle);
       await serverSync.fullRefresh();
       cloudBackups.scheduleCapture(
@@ -414,6 +428,14 @@ class BackupRestoreScreen extends StatelessWidget {
     final hour = local.hour.toString().padLeft(2, '0');
     final minute = local.minute.toString().padLeft(2, '0');
     return '${local.year}-$month-$day $hour:$minute';
+  }
+
+  Hub? _resolveConnectedServer({
+    required ServerSyncProvider serverSync,
+    required HomeProvider homeProvider,
+  }) {
+    return serverSync.connectedServerHub ??
+        homeProvider.getFirstHubOfType(HubType.server);
   }
 
   String _trimAnalyticsError(Object error) {

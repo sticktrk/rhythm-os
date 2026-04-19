@@ -677,7 +677,7 @@ checksum = "c08c74e62047bb2de4ff487b251e4a92e24f48745648451635cec7d591162d9f"
 
 [[package]]
 name = "rhythm-core"
-version = "0.4.106"
+version = "0.4.110"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -695,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-devices"
-version = "0.4.106"
+version = "0.4.110"
 dependencies = [
  "serde",
  "serde_json",
@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-hue"
-version = "0.4.106"
+version = "0.4.110"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -717,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-os"
-version = "0.4.106"
+version = "0.4.110"
 dependencies = [
  "anyhow",
  "chrono",
@@ -731,7 +731,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-profile"
-version = "0.4.106"
+version = "0.4.110"
 dependencies = [
  "libm",
  "serde",
