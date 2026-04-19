@@ -30,6 +30,7 @@ use crate::topology::{NodeControlKind, RoomTopologyStore};
 pub enum WorkItem {
     /// Execute a button action (involves TLS to hub).
     ButtonAction {
+        command_id: String,
         node_id: String,
         action: ButtonAction,
         device_id: Option<String>,
@@ -45,6 +46,7 @@ pub enum WorkItem {
     },
     /// Periodic update for a single schedulable light node.
     PeriodicNodeTick {
+        command_id: String,
         node_id: String,
         settings_node_id: String,
         current_hour: f32,

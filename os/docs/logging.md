@@ -31,6 +31,8 @@ Protocol-specific detail belongs in fields such as `hub_type=hue` or `integratio
 
 - HTTP requests carry `x-request-id` and the request span logs it.
 - Internal actions that are not request-originated should create a `command_id`.
+- Periodic scheduling should create one `command_id` per cycle and reuse it for dropped or failed per-node work in that cycle.
+- Button and motion-timeout actions should carry one `command_id` from ingress through inline or worker execution.
 - Follow one chain:
   ingress event -> target resolution -> engine action -> dispatch -> transport result
 
@@ -51,6 +53,7 @@ Protocol-specific detail belongs in fields such as `hub_type=hue` or `integratio
 - `trace`: raw payloads and hot-loop noise
 
 Successful high-frequency dispatches should generally stay at `debug` unless they cross a slow threshold.
+Periodic room-level tick logs should stay below `info`; operators should see one cycle summary at `info`, not one line per room.
 
 ## Redaction
 

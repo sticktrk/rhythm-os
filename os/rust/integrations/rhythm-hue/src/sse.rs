@@ -4,7 +4,7 @@
 //! transfer-encoding decoder, and pure parsing functions. The actual TLS
 //! transport and connection management live in the platform crate.
 
-use log::{info, warn};
+use log::{debug, warn};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::mpsc::SyncSender;
@@ -217,7 +217,12 @@ pub fn process_sse_line(line: &str, event_tx: &SyncSender<HueSseEvent>, state: &
         if !data.contains("\"button\"") && !data.contains("\"motion\"") {
             return;
         }
-        info!(target: "sse", "SSE event: {}...({} bytes)", &data[..data.len().min(120)], data.len());
+        debug!(
+            target: "sse",
+            "SSE event: {}...({} bytes)",
+            &data[..data.len().min(120)],
+            data.len()
+        );
         parse_sse_data(data, event_tx, state);
     }
 }

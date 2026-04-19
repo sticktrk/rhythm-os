@@ -26,6 +26,8 @@ use std::sync::Arc;
 use rhythm_core::{runtime::RuntimeHandle, RestoredNodeState};
 
 #[cfg(feature = "blocking")]
+use crate::logging;
+#[cfg(feature = "blocking")]
 use crate::state::WorkItem;
 use crate::state::{AppState, SharedState};
 #[cfg(feature = "blocking")]
@@ -305,6 +307,7 @@ fn resolve_periodic_sun_times(
 fn enqueue_periodic_tick(
     state: &SharedState,
     tx: &std::sync::mpsc::SyncSender<WorkItem>,
+    command_id: &str,
     node_id: &str,
     settings_node_id: &str,
     current_hour: f32,
@@ -318,12 +321,15 @@ fn enqueue_periodic_tick(
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 let previous_hour = *entry.get();
                 entry.insert(current_hour);
-                debug!(
+                tracing::debug!(
                     target: "sys",
-                    "Periodic tick already pending for '{}', coalescing {:.2} -> {:.2}",
-                    node_id,
+                    event = "periodic_tick_coalesced",
+                    command_id = %command_id,
+                    node_id = %node_id,
+                    settings_node_id = %settings_node_id,
                     previous_hour,
-                    current_hour
+                    current_hour,
+                    "Periodic tick already pending"
                 );
                 false
             }
@@ -339,6 +345,7 @@ fn enqueue_periodic_tick(
     }
 
     match tx.try_send(WorkItem::PeriodicNodeTick {
+        command_id: command_id.to_string(),
         node_id: node_id.to_string(),
         settings_node_id: settings_node_id.to_string(),
         current_hour,
@@ -521,6 +528,15 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
         let dispatch_summary = summarize_periodic_dispatch(&room_snapshots, &periodic_nodes);
         let last_node_index_by_emit_target =
             last_periodic_node_index_by_emit_target(&periodic_nodes);
+        let cycle_duration = effective_cycle_duration(
+            &profile_registry,
+            &ctx,
+            &room_snapshots,
+            update_interval,
+            power_save,
+        );
+        let phase_gap = dispatch_spacing(cycle_duration, periodic_nodes.len());
+        let command_id = logging::next_command_id("periodic");
 
         if transition_skipped > 0
             || rhythm_disabled_skipped > 0
@@ -528,51 +544,48 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             || expired_transitions > 0
             || dispatch_summary.no_dispatch_node_count > 0
         {
-            debug!(
+            tracing::debug!(
                 target: "sys",
-                "Periodic tick detail: dispatch={} eligible_nodes={} eligible_rooms={} eligible_devices={} dispatched_settings={} no_dispatch={} warning_skipped={} transition_skipped={} rhythm_disabled={} hard_off={} expired_transitions={}",
-                dispatch_summary.dispatch_node_count,
-                dispatch_summary.eligible_node_count,
-                dispatch_summary.eligible_room_count,
-                dispatch_summary.eligible_device_count,
-                dispatch_summary.dispatched_settings_node_count,
-                dispatch_summary.no_dispatch_node_count,
+                event = "periodic_cycle_detail",
+                command_id = %command_id,
+                dispatch_count = dispatch_summary.dispatch_node_count,
+                eligible_node_count = dispatch_summary.eligible_node_count,
+                eligible_room_count = dispatch_summary.eligible_room_count,
+                eligible_device_count = dispatch_summary.eligible_device_count,
+                dispatched_settings_count = dispatch_summary.dispatched_settings_node_count,
+                no_dispatch_count = dispatch_summary.no_dispatch_node_count,
                 warning_skipped,
                 transition_skipped,
                 rhythm_disabled_skipped,
                 hard_off_rooms,
-                expired_transitions
+                expired_transitions,
+                "Periodic cycle detail"
             );
         }
 
-        if warning_skipped > 0 {
-            info!(
-                "Periodic tick at local_hour {:.2} (solar_time {:.2}) - bri={}% kelvin={} (dispatch={} eligible_nodes={} eligible_rooms={} eligible_devices={} no_dispatch={} warning_skipped={})",
-                current_hour,
-                values.solar_time,
-                values.brightness,
-                values.kelvin,
-                dispatch_summary.dispatch_node_count,
-                dispatch_summary.eligible_node_count,
-                dispatch_summary.eligible_room_count,
-                dispatch_summary.eligible_device_count,
-                dispatch_summary.no_dispatch_node_count,
-                warning_skipped,
-            );
-        } else {
-            info!(
-                "Periodic tick at local_hour {:.2} (solar_time {:.2}) - bri={}% kelvin={} (dispatch={} eligible_nodes={} eligible_rooms={} eligible_devices={} no_dispatch={})",
-                current_hour,
-                values.solar_time,
-                values.brightness,
-                values.kelvin,
-                dispatch_summary.dispatch_node_count,
-                dispatch_summary.eligible_node_count,
-                dispatch_summary.eligible_room_count,
-                dispatch_summary.eligible_device_count,
-                dispatch_summary.no_dispatch_node_count,
-            );
-        }
+        tracing::info!(
+            target: "sys",
+            event = "periodic_cycle",
+            command_id = %command_id,
+            local_hour = current_hour,
+            solar_time = values.solar_time,
+            brightness_pct = values.brightness,
+            kelvin = values.kelvin,
+            dispatch_count = dispatch_summary.dispatch_node_count,
+            eligible_node_count = dispatch_summary.eligible_node_count,
+            eligible_room_count = dispatch_summary.eligible_room_count,
+            eligible_device_count = dispatch_summary.eligible_device_count,
+            dispatched_settings_count = dispatch_summary.dispatched_settings_node_count,
+            no_dispatch_count = dispatch_summary.no_dispatch_node_count,
+            warning_skipped,
+            transition_skipped,
+            rhythm_disabled_skipped,
+            hard_off_rooms,
+            expired_transitions,
+            cycle_secs = cycle_duration.as_secs_f32(),
+            phase_gap_ms = phase_gap.as_millis(),
+            "Periodic cycle"
+        );
 
         // Record tick timestamp and sync curve-computed motion timeout
         if let Ok(mut s) = state.lock() {
@@ -588,14 +601,6 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             cb();
         }
 
-        let cycle_duration = effective_cycle_duration(
-            &profile_registry,
-            &ctx,
-            &room_snapshots,
-            update_interval,
-            power_save,
-        );
-        let phase_gap = dispatch_spacing(cycle_duration, periodic_nodes.len());
         let cycle_started = Instant::now();
 
         // Dispatch per-node ticks with stable staggering across the cycle.
@@ -610,15 +615,20 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                 if !enqueue_periodic_tick(
                     &state,
                     tx,
+                    &command_id,
                     &node.node_id,
                     &node.settings_node_id,
                     room_hour,
                     emit_parent_node_id,
                 ) {
-                    warn!(
+                    tracing::warn!(
                         target: "sys",
-                        "Periodic queue full, dropping periodic tick for '{}'",
-                        node.node_id
+                        event = "periodic_tick_dropped",
+                        command_id = %command_id,
+                        node_id = %node.node_id,
+                        settings_node_id = %node.settings_node_id,
+                        queue = "periodic",
+                        "Periodic queue full, dropping tick"
                     );
                 }
                 if idx + 1 < periodic_nodes.len() && !phase_gap.is_zero() {
@@ -636,15 +646,20 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                 if !enqueue_periodic_tick(
                     &state,
                     tx,
+                    &command_id,
                     &node.node_id,
                     &node.settings_node_id,
                     room_hour,
                     emit_parent_node_id,
                 ) {
-                    warn!(
+                    tracing::warn!(
                         target: "sys",
-                        "Work queue full, dropping periodic tick for '{}'",
-                        node.node_id
+                        event = "periodic_tick_dropped",
+                        command_id = %command_id,
+                        node_id = %node.node_id,
+                        settings_node_id = %node.settings_node_id,
+                        queue = "work",
+                        "Work queue full, dropping periodic tick"
                     );
                 }
                 if idx + 1 < periodic_nodes.len() && !phase_gap.is_zero() {
@@ -663,14 +678,32 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             if let Some(runtime) = runtime {
                 for (idx, node) in periodic_nodes.iter().enumerate() {
                     let room_hour = BlockingTimeProvider::new(utc_offset).current_hour();
+                    let started = Instant::now();
                     if let Err(e) =
                         runtime.periodic_tick_node(&node.node_id, &node.settings_node_id, room_hour)
                     {
-                        warn!(
+                        tracing::warn!(
                             target: "sys",
-                            "Periodic node tick '{}' failed: {}",
-                            node.node_id,
-                            e
+                            event = "periodic_node_tick_failed",
+                            command_id = %command_id,
+                            node_id = %node.node_id,
+                            settings_node_id = %node.settings_node_id,
+                            current_hour = room_hour,
+                            latency_ms = started.elapsed().as_millis(),
+                            error = %e,
+                            "Periodic node tick failed"
+                        );
+                    } else {
+                        tracing::debug!(
+                            target: "sys",
+                            event = "periodic_node_tick_applied",
+                            command_id = %command_id,
+                            node_id = %node.node_id,
+                            settings_node_id = %node.settings_node_id,
+                            current_hour = room_hour,
+                            latency_ms = started.elapsed().as_millis(),
+                            dispatch = "inline",
+                            "Periodic node tick applied"
                         );
                     }
                     post_tick_node(&state, &runtime, &node.settings_node_id);
@@ -1397,6 +1430,7 @@ mod tests {
         assert!(enqueue_periodic_tick(
             &state,
             &tx,
+            "periodic-test-1",
             "node-1",
             "room1",
             10.0,
@@ -1405,6 +1439,7 @@ mod tests {
         assert!(enqueue_periodic_tick(
             &state,
             &tx,
+            "periodic-test-2",
             "node-1",
             "room1",
             10.5,
@@ -1414,6 +1449,7 @@ mod tests {
         let item = rx.try_recv().expect("first periodic item should be queued");
         match item {
             WorkItem::PeriodicNodeTick {
+                command_id: _,
                 node_id,
                 settings_node_id,
                 current_hour,

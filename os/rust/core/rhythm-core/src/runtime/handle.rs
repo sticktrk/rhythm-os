@@ -387,30 +387,23 @@ where
                         .id()
                         .to_string();
 
-                    if room_state == RoomModeState::Active {
-                        log::debug!(
-                            target: "sys",
-                            "Periodic tick: room={} state=active profile={}",
-                            node_label,
-                            profile_id
-                        );
-                    } else {
-                        log::info!(
-                            target: "sys",
-                            "Periodic tick: room={} state={} profile={}",
-                            node_label,
-                            room_state_label,
-                            profile_id
-                        );
-                    }
+                    tracing::debug!(
+                        target: "sys",
+                        event = "periodic_room_tick",
+                        room = %node_label,
+                        state = %room_state_label,
+                        profile_id = %profile_id,
+                        "Periodic room tick"
+                    );
                 }
             }
             crate::primitives::PeriodicTickResult::Error(e) => {
-                log::warn!(
+                tracing::warn!(
                     target: "sys",
-                    "Periodic room tick failed for {}: {}",
-                    node_label,
-                    e
+                    event = "periodic_room_tick_failed",
+                    room = %node_label,
+                    error = %e,
+                    "Periodic room tick failed"
                 );
             }
             crate::primitives::PeriodicTickResult::Skipped => {}

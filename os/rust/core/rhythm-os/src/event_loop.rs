@@ -136,21 +136,38 @@ pub fn process_button_inline(
     node_id: &str,
     action: ButtonAction,
     device_id: Option<&str>,
+    command_id: &str,
 ) -> bool {
+    let started = Instant::now();
     let (runtime, has_hub) = {
         let Ok(s) = state.lock() else {
-            warn!(target: "evt", "Inline: state lock poisoned, dropping {:?}", action);
+            tracing::warn!(
+                target: "evt",
+                event = "button_action_dropped",
+                command_id = %command_id,
+                action = ?action,
+                node_id = %node_id,
+                device_id = ?device_id,
+                source = "inline",
+                reason = "state_lock_poisoned",
+                "Inline button action dropped"
+            );
             return false;
         };
         (s.hub_runtime(), s.has_any_hub())
     };
     let Some(runtime) = runtime else {
-        warn!(
+        tracing::warn!(
             target: "evt",
-            "Inline: no runtime (hub={}) - dropping {:?} for node '{}'",
+            event = "button_action_dropped",
+            command_id = %command_id,
+            action = ?action,
+            node_id = %node_id,
+            device_id = ?device_id,
+            source = "inline",
             has_hub,
-            action,
-            node_id
+            reason = "no_runtime",
+            "Inline button action dropped"
         );
         return false;
     };
@@ -163,12 +180,17 @@ pub fn process_button_inline(
 
     match runtime.handle_event(&event) {
         Ok(turned_on) => {
-            info!(
+            tracing::info!(
                 target: "evt",
-                "Inline: {:?} node '{}' -> on={}",
-                action,
-                node_id,
-                turned_on
+                event = "button_action_applied",
+                command_id = %command_id,
+                action = ?action,
+                node_id = %node_id,
+                device_id = ?device_id,
+                source = "inline",
+                turned_on,
+                latency_ms = started.elapsed().as_millis(),
+                "Inline button action applied"
             );
             crate::commands::sync_active_mode_from_runtime(state, &runtime);
             if let Ok(mut s) = state.lock() {
@@ -186,12 +208,17 @@ pub fn process_button_inline(
             true
         }
         Err(e) => {
-            warn!(
+            tracing::warn!(
                 target: "evt",
-                "Inline: {:?} node '{}' failed: {}",
-                action,
-                node_id,
-                e
+                event = "button_action_failed",
+                command_id = %command_id,
+                action = ?action,
+                node_id = %node_id,
+                device_id = ?device_id,
+                source = "inline",
+                latency_ms = started.elapsed().as_millis(),
+                error = %e,
+                "Inline button action failed"
             );
             false
         }
@@ -461,13 +488,25 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             ref device_id,
         } => {
             let node_id = resolve_public_node_id(state, hub_key.as_ref(), room_id);
+            let command_id = logging::next_command_id("button");
+            tracing::info!(
+                target: "evt",
+                event = "button_ingress",
+                command_id = %command_id,
+                action = ?action,
+                node_id = %node_id,
+                source_room_id = %room_id,
+                device_id = ?device_id.as_deref(),
+                hub_present = hub_key.is_some(),
+                "Button event received"
+            );
             motion.motion_owned.remove(&node_id);
             motion.warning_active.remove(&node_id);
             motion
                 .sensors
                 .retain(|_, source| source.target_node_id != node_id);
 
-            if process_button_inline(state, &node_id, action, device_id.as_deref()) {
+            if process_button_inline(state, &node_id, action, device_id.as_deref(), &command_id) {
                 #[cfg(feature = "desktop")]
                 {
                     let runtime = {
@@ -713,7 +752,7 @@ pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
             format!("{}:[{}]", target_node_id, source_status.join(","))
         })
         .collect();
-    info!(
+    debug!(
         target: "evt",
         "Motion: checking timers - {} targets: {}",
         targets.len(),
@@ -787,14 +826,40 @@ pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
                 let Ok(s) = state.lock() else { continue };
                 s.work_tx.clone()
             };
+            let command_id = logging::next_command_id("motion-timeout");
             if let Some(tx) = work_tx {
-                let _ = tx.try_send(WorkItem::ButtonAction {
-                    node_id: target_node_id.clone(),
-                    action: ButtonAction::OffPress,
-                    device_id: None,
-                });
+                if tx
+                    .try_send(WorkItem::ButtonAction {
+                        command_id: command_id.clone(),
+                        node_id: target_node_id.clone(),
+                        action: ButtonAction::OffPress,
+                        device_id: None,
+                    })
+                    .is_err()
+                {
+                    tracing::warn!(
+                        target: "evt",
+                        event = "motion_timeout_queue_full",
+                        command_id = %command_id,
+                        node_id = %target_node_id,
+                        "Motion timeout queue full, applying inline"
+                    );
+                    process_button_inline(
+                        state,
+                        target_node_id,
+                        ButtonAction::OffPress,
+                        None,
+                        &command_id,
+                    );
+                }
             } else {
-                process_button_inline(state, target_node_id, ButtonAction::OffPress, None);
+                process_button_inline(
+                    state,
+                    target_node_id,
+                    ButtonAction::OffPress,
+                    None,
+                    &command_id,
+                );
             }
         } else {
             info!(
@@ -970,20 +1035,42 @@ pub fn sync_motion_snapshots(state: &SharedState, motion: &MotionTimerState) {
 pub fn process_work_item(state: &SharedState, item: WorkItem) {
     match item {
         WorkItem::ButtonAction {
+            command_id,
             node_id,
             action,
             device_id,
         } => {
+            let started = Instant::now();
             let (runtime, has_hub) = {
                 let Ok(s) = state.lock() else {
-                    warn!(target: "evt", "Worker: state lock poisoned, dropping {:?}", action);
+                    tracing::warn!(
+                        target: "evt",
+                        event = "button_action_dropped",
+                        command_id = %command_id,
+                        action = ?action,
+                        node_id = %node_id,
+                        device_id = ?device_id.as_deref(),
+                        source = "worker",
+                        reason = "state_lock_poisoned",
+                        "Worker button action dropped"
+                    );
                     return;
                 };
                 (s.hub_runtime(), s.has_any_hub())
             };
             let Some(runtime) = runtime else {
-                warn!(target: "evt", "Worker: no runtime (hub={}) - dropping {:?} for node '{}'",
-                    has_hub, action, node_id);
+                tracing::warn!(
+                    target: "evt",
+                    event = "button_action_dropped",
+                    command_id = %command_id,
+                    action = ?action,
+                    node_id = %node_id,
+                    device_id = ?device_id.as_deref(),
+                    source = "worker",
+                    has_hub,
+                    reason = "no_runtime",
+                    "Worker button action dropped"
+                );
                 return;
             };
 
@@ -995,7 +1082,18 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
 
             match runtime.handle_event(&event) {
                 Ok(turned_on) => {
-                    info!(target: "evt", "Worker: {:?} node '{}' -> on={}", action, node_id, turned_on);
+                    tracing::info!(
+                        target: "evt",
+                        event = "button_action_applied",
+                        command_id = %command_id,
+                        action = ?action,
+                        node_id = %node_id,
+                        device_id = ?device_id.as_deref(),
+                        source = "worker",
+                        turned_on,
+                        latency_ms = started.elapsed().as_millis(),
+                        "Worker button action applied"
+                    );
                     crate::commands::sync_active_mode_from_runtime(state, &runtime);
                     if let Ok(mut s) = state.lock() {
                         if s.room_mode_transitions.remove(&node_id).is_some() {
@@ -1011,7 +1109,18 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                     );
                 }
                 Err(e) => {
-                    warn!(target: "evt", "Worker: {:?} node '{}' failed: {}", action, node_id, e);
+                    tracing::warn!(
+                        target: "evt",
+                        event = "button_action_failed",
+                        command_id = %command_id,
+                        action = ?action,
+                        node_id = %node_id,
+                        device_id = ?device_id.as_deref(),
+                        source = "worker",
+                        latency_ms = started.elapsed().as_millis(),
+                        error = %e,
+                        "Worker button action failed"
+                    );
                 }
             }
         }
@@ -1037,6 +1146,7 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             crate::commands::emit_node_state_event_after_apply(state, &runtime, &node_id);
         }
         WorkItem::PeriodicNodeTick {
+            command_id,
             node_id,
             settings_node_id,
             current_hour,
@@ -1057,17 +1167,29 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             if runtime.engine_node_snapshot(&node_id).is_none()
                 || runtime.engine_node_snapshot(&settings_node_id).is_none()
             {
-                debug!(
+                tracing::debug!(
                     target: "sys",
-                    "Worker: skipping stale periodic tick '{}' (settings='{}')",
-                    node_id,
-                    settings_node_id
+                    event = "periodic_node_tick_skipped",
+                    command_id = %command_id,
+                    node_id = %node_id,
+                    settings_node_id = %settings_node_id,
+                    reason = "stale",
+                    "Skipping stale periodic tick"
                 );
                 return;
             }
 
             if let Err(e) = runtime.periodic_tick_node(&node_id, &settings_node_id, current_hour) {
-                warn!(target: "sys", "Periodic node tick '{}' failed: {}", node_id, e);
+                tracing::warn!(
+                    target: "sys",
+                    event = "periodic_node_tick_failed",
+                    command_id = %command_id,
+                    node_id = %node_id,
+                    settings_node_id = %settings_node_id,
+                    current_hour,
+                    error = %e,
+                    "Periodic node tick failed"
+                );
             }
 
             crate::periodic::post_tick_node(state, &runtime, &settings_node_id);

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use crate::sse::{drain_sse_lines, HueSseConfig, HueSseEvent, SseParseState};
 
@@ -123,7 +123,7 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
                 Ok(Some(Ok(chunk))) => {
                     let idle_secs = last_byte_event.elapsed().as_secs();
                     if idle_secs > 60 {
-                        info!(
+                        debug!(
                             target: "sse",
                             "SSE: bytes after {}m{}s idle",
                             idle_secs / 60,
@@ -137,7 +137,7 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
                     drain_sse_lines(&mut line_buf, tx, &mut parse_state);
 
                     if last_alive_log.elapsed().as_secs() >= ALIVE_LOG_INTERVAL_SECS {
-                        info!(
+                        debug!(
                             target: "sse",
                             "SSE: alive ({} chunks in last {}m)",
                             chunks_since_alive,
