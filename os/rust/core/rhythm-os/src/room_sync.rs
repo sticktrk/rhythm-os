@@ -899,9 +899,13 @@ pub fn poll_initial_light_state(state: &SharedState) {
             }
         };
 
-        if let Ok(mut s) = state.lock() {
-            s.room_lights_on.insert(snap.id.clone(), on);
-        }
+        commands::update_lights_on_cache_for_node(
+            state,
+            &snap.id,
+            snap.kind,
+            snap.parent_id.as_deref(),
+            on,
+        );
         if snap.kind.is_room() {
             room_count += 1;
             if on {
