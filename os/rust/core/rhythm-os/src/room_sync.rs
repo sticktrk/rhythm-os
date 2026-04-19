@@ -501,6 +501,23 @@ fn sync_with_discovery(
                         };
                         let action = s.topology.sync_hub_room(&canonical_hub_key, &topo_room);
                         let rhythm_room_id = action.rhythm_room_id().to_string();
+                        let canonical_room_assignments: Vec<(String, String)> =
+                            canonical_device_ids
+                                .iter()
+                                .map(|canonical_id| {
+                                    let assigned_room_id = s
+                                        .topology
+                                        .device_parent_room_id(canonical_id)
+                                        .map(str::to_string)
+                                        .unwrap_or_else(|| rhythm_room_id.clone());
+                                    (canonical_id.clone(), assigned_room_id)
+                                })
+                                .collect();
+
+                        for (canonical_id, assigned_room_id) in &canonical_room_assignments {
+                            s.canonical_registry
+                                .assign_room(canonical_id, Some(assigned_room_id));
+                        }
 
                         if let Some(runtime) = s.hub_runtime() {
                             if runtime.engine_room_snapshot(&rhythm_room_id).is_none() {
@@ -525,7 +542,7 @@ fn sync_with_discovery(
                                 );
                             }
 
-                            for canonical_id in &canonical_device_ids {
+                            for (canonical_id, assigned_room_id) in &canonical_room_assignments {
                                 let Some(device) = s.canonical_registry.get(canonical_id) else {
                                     continue;
                                 };
@@ -536,7 +553,7 @@ fn sync_with_discovery(
                                         commands::runtime_node_kind_for_device_type(
                                             device.device_type.clone(),
                                         ),
-                                        Some(rhythm_room_id.clone()),
+                                        Some(assigned_room_id.clone()),
                                     );
                                     runtime.restore_node_state(
                                         canonical_id,
