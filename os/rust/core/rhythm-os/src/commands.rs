@@ -2499,7 +2499,10 @@ fn node_state_events_after_apply(
 
     let mut events = vec![build_node_state_event(state, &snap)];
     if snap.kind == LightNodeKind::LightDevice {
-        if let Some(parent_id) = snap.parent_id.as_deref().filter(|parent_id| *parent_id != snap.id)
+        if let Some(parent_id) = snap
+            .parent_id
+            .as_deref()
+            .filter(|parent_id| *parent_id != snap.id)
         {
             if let Some(parent_snap) = runtime.engine_effective_node_snapshot(parent_id) {
                 events.push(build_node_state_event(state, &parent_snap));
@@ -2530,7 +2533,6 @@ pub(crate) fn emit_node_state_event_after_apply(
     {
         let _ = (state, runtime, node_id);
     }
-
 }
 
 fn apply_room_mode_defaults(
@@ -6956,6 +6958,13 @@ mod tests {
         }
     }
 
+    fn make_light_child_snapshot(id: &str, parent_id: &str) -> RoomSnapshot {
+        let mut snapshot = make_snapshot(id, false, false);
+        snapshot.kind = rhythm_core::LightNodeKind::LightDevice;
+        snapshot.parent_id = Some(parent_id.to_string());
+        snapshot
+    }
+
     fn setup_state(snapshots: Vec<RoomSnapshot>) -> (SharedState, Arc<MockRuntime>) {
         setup_state_at_hour(snapshots, 12.0)
     }
@@ -7533,6 +7542,25 @@ mod tests {
     }
 
     #[test]
+    fn room_action_updates_parent_lights_on_for_attached_light() {
+        let (state, runtime) = setup_state(vec![
+            make_snapshot("room1", false, false),
+            make_light_child_snapshot("light1", "room1"),
+        ]);
+
+        let result = do_node_action(&state, "light1", "on", false);
+
+        assert!(result.is_ok());
+        assert_eq!(
+            runtime.events(),
+            vec![("light1".into(), ButtonAction::OnPress)]
+        );
+        let s = state.lock().unwrap();
+        assert_eq!(s.room_lights_on.get("room1"), Some(&true));
+        assert!(!s.room_lights_on.contains_key("light1"));
+    }
+
+    #[test]
     fn room_action_off() {
         let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
         let result = do_node_action(&state, "room1", "off", false);
@@ -7888,6 +7916,27 @@ mod tests {
 
         assert_eq!(event.hub_types, vec!["matter", "mock"]);
         assert_eq!(json["hub_types"], serde_json::json!(["matter", "mock"]));
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn build_node_state_event_uses_parent_lights_on_for_attached_light() {
+        let (state, rt) = setup_state(vec![
+            make_snapshot("room1", false, false),
+            make_light_child_snapshot("light1", "room1"),
+        ]);
+        state
+            .lock()
+            .unwrap()
+            .room_lights_on
+            .insert("room1".into(), true);
+
+        let snap = rhythm_core::NodeSnapshot::from_room_snapshot(
+            rt.engine_room_snapshot("light1").unwrap(),
+        );
+        let event = build_node_state_event(&state, &snap);
+
+        assert!(event.lights_on);
     }
 
     #[test]
@@ -9141,6 +9190,21 @@ mod tests {
     }
 
     #[test]
+    fn set_brightness_updates_parent_lights_on_for_attached_light() {
+        let (state, _rt) = setup_state(vec![
+            make_snapshot("room1", false, false),
+            make_light_child_snapshot("light1", "room1"),
+        ]);
+
+        let result = do_set_node_brightness(&state, "light1", 75, false);
+
+        assert!(result.is_ok());
+        let s = state.lock().unwrap();
+        assert_eq!(s.room_lights_on.get("room1"), Some(&true));
+        assert!(!s.room_lights_on.contains_key("light1"));
+    }
+
+    #[test]
     fn set_brightness_clamps_high() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
         // 200 should be clamped to 100
@@ -9219,6 +9283,28 @@ mod tests {
         assert!(result.is_ok());
         // Idle implies lights conceptually on.
         assert_eq!(state.lock().unwrap().room_lights_on.get("r1"), Some(&true));
+    }
+
+    #[test]
+    fn room_preferences_idle_updates_parent_lights_on_for_attached_light() {
+        let mut child = make_light_child_snapshot("light1", "room1");
+        child.rhythm_enabled = false;
+        let (state, _rt) = setup_state(vec![make_snapshot("room1", false, false), child]);
+
+        let result = do_node_preferences_set(
+            &state,
+            "light1",
+            Some(false),
+            None,
+            Some(RoomModeState::Idle),
+            None,
+            false,
+        );
+
+        assert!(result.is_ok());
+        let s = state.lock().unwrap();
+        assert_eq!(s.room_lights_on.get("room1"), Some(&true));
+        assert!(!s.room_lights_on.contains_key("light1"));
     }
 
     #[test]

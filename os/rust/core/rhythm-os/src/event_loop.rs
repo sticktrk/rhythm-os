@@ -180,10 +180,7 @@ pub fn process_button_inline(
                 }
             }
             crate::commands::update_lights_on_cache_for_runtime_node(
-                state,
-                &runtime,
-                node_id,
-                turned_on,
+                state, &runtime, node_id, turned_on,
             );
             true
         }
@@ -263,7 +260,9 @@ pub fn turn_on_node_inline(state: &SharedState, node_id: &str) -> bool {
                     );
                 }
             }
-            crate::commands::update_lights_on_cache_for_runtime_node(state, &runtime, node_id, true);
+            crate::commands::update_lights_on_cache_for_runtime_node(
+                state, &runtime, node_id, true,
+            );
             true
         }
         Err(e) => {
@@ -454,9 +453,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     };
                     if let Some(runtime) = runtime {
                         crate::commands::emit_node_state_event_after_apply(
-                            state,
-                            &runtime,
-                            &node_id,
+                            state, &runtime, &node_id,
                         );
                     }
                 }
@@ -987,10 +984,7 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                         }
                     }
                     crate::commands::update_lights_on_cache_for_runtime_node(
-                        state,
-                        &runtime,
-                        &node_id,
-                        turned_on,
+                        state, &runtime, &node_id, turned_on,
                     );
                 }
                 Err(e) => {
