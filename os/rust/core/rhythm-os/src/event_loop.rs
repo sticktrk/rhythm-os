@@ -178,8 +178,13 @@ pub fn process_button_inline(
                         node_id
                     );
                 }
-                s.room_lights_on.insert(node_id.to_string(), turned_on);
             }
+            crate::commands::update_lights_on_cache_for_runtime_node(
+                state,
+                &runtime,
+                node_id,
+                turned_on,
+            );
             true
         }
         Err(e) => {
@@ -257,8 +262,8 @@ pub fn turn_on_node_inline(state: &SharedState, node_id: &str) -> bool {
                         node_id
                     );
                 }
-                s.room_lights_on.insert(node_id.to_string(), true);
             }
+            crate::commands::update_lights_on_cache_for_runtime_node(state, &runtime, node_id, true);
             true
         }
         Err(e) => {
@@ -448,16 +453,11 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                         s.hub_runtime()
                     };
                     if let Some(runtime) = runtime {
-                        if let Some(snap) = runtime.engine_effective_node_snapshot(&node_id) {
-                            crate::state::emit_server_event(
-                                state,
-                                crate::server_event::ServerEvent::NodeState {
-                                    nodes: vec![crate::commands::build_node_state_event(
-                                        state, &snap,
-                                    )],
-                                },
-                            );
-                        }
+                        crate::commands::emit_node_state_event_after_apply(
+                            state,
+                            &runtime,
+                            &node_id,
+                        );
                     }
                 }
 
@@ -985,8 +985,13 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                                 node_id
                             );
                         }
-                        s.room_lights_on.insert(node_id.clone(), turned_on);
                     }
+                    crate::commands::update_lights_on_cache_for_runtime_node(
+                        state,
+                        &runtime,
+                        &node_id,
+                        turned_on,
+                    );
                 }
                 Err(e) => {
                     warn!(target: "evt", "Worker: {:?} node '{}' failed: {}", action, node_id, e);
@@ -1012,14 +1017,7 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             }
 
             #[cfg(feature = "desktop")]
-            if let Some(snap) = runtime.engine_effective_node_snapshot(&node_id) {
-                crate::state::emit_server_event(
-                    state,
-                    crate::server_event::ServerEvent::NodeState {
-                        nodes: vec![crate::commands::build_node_state_event(state, &snap)],
-                    },
-                );
-            }
+            crate::commands::emit_node_state_event_after_apply(state, &runtime, &node_id);
         }
         WorkItem::PeriodicNodeTick {
             node_id,

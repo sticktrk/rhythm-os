@@ -580,6 +580,64 @@ fn room_hub_types_from_topology(s: &AppState, room_id: &str) -> Vec<String> {
     node_hub_types_from_topology(s, room_id)
 }
 
+pub(crate) fn effective_lights_on_cache_key<'a>(
+    node_id: &'a str,
+    kind: LightNodeKind,
+    parent_id: Option<&'a str>,
+) -> &'a str {
+    if kind == LightNodeKind::LightDevice {
+        parent_id.unwrap_or(node_id)
+    } else {
+        node_id
+    }
+}
+
+fn lights_on_from_cache(
+    room_lights_on: &HashMap<String, bool>,
+    node_id: &str,
+    kind: LightNodeKind,
+    parent_id: Option<&str>,
+) -> bool {
+    room_lights_on
+        .get(effective_lights_on_cache_key(node_id, kind, parent_id))
+        .copied()
+        .unwrap_or(false)
+}
+
+pub(crate) fn update_lights_on_cache_for_node(
+    state: &SharedState,
+    node_id: &str,
+    kind: LightNodeKind,
+    parent_id: Option<&str>,
+    lights_on: bool,
+) {
+    if let Ok(mut s) = state.lock() {
+        s.room_lights_on.insert(
+            effective_lights_on_cache_key(node_id, kind, parent_id).to_string(),
+            lights_on,
+        );
+    }
+}
+
+pub(crate) fn update_lights_on_cache_for_runtime_node(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+    lights_on: bool,
+) {
+    if let Some(snap) = runtime.engine_effective_node_snapshot(node_id) {
+        update_lights_on_cache_for_node(
+            state,
+            &snap.id,
+            snap.kind,
+            snap.parent_id.as_deref(),
+            lights_on,
+        );
+    } else {
+        update_lights_on_cache_for_node(state, node_id, LightNodeKind::Room, None, lights_on);
+    }
+}
+
 fn node_metadata_from_topology(
     s: &AppState,
     node_id: &str,
@@ -678,7 +736,12 @@ fn build_node_state_dto_from_snapshot_parts(
         disabled: snap.disabled,
         time_offset: snap.time_offset_minutes,
         brightness_offset: snap.brightness_offset,
-        lights_on: room_lights_on.get(&snap.id).copied().unwrap_or(false),
+        lights_on: lights_on_from_cache(
+            room_lights_on,
+            &snap.id,
+            snap.kind,
+            snap.parent_id.as_deref(),
+        ),
         transitioning: transitioning_nodes.contains(&snap.id),
         brightness,
         kelvin,
@@ -713,7 +776,12 @@ pub fn build_node_state_event(
                 .get(&snap.id)
                 .is_some_and(|motion| motion.warning_active),
         );
-        let lights_on = s.room_lights_on.get(&snap.id).copied().unwrap_or(false);
+        let lights_on = lights_on_from_cache(
+            &s.room_lights_on,
+            &snap.id,
+            snap.kind,
+            snap.parent_id.as_deref(),
+        );
         let transitioning = room_mode_transition_active(&s.room_mode_transitions, &snap.id, now);
         let hub_types = node_hub_types_from_topology(&s, &snap.id);
         let (curve_brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
@@ -1481,7 +1549,12 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
 
     if !snapshots.is_empty() {
         for snap in &snapshots {
-            let lights_on = room_lights_on.get(&snap.id).copied().unwrap_or(false);
+            let lights_on = lights_on_from_cache(
+                &room_lights_on,
+                &snap.id,
+                snap.kind,
+                snap.parent_id.as_deref(),
+            );
             let room_state = room_mode_state_from_flags(
                 snap.hard_off,
                 snap.soft_off,
@@ -2414,20 +2487,50 @@ fn node_state_event_from_runtime(
         .map(|snap| build_node_state_event(state, &snap))
 }
 
-fn emit_node_state_event_after_apply(
+#[cfg(feature = "desktop")]
+fn node_state_events_after_apply(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+) -> Vec<crate::server_event::NodeStateEvent> {
+    let Some(snap) = runtime.engine_effective_node_snapshot(node_id) else {
+        return Vec::new();
+    };
+
+    let mut events = vec![build_node_state_event(state, &snap)];
+    if snap.kind == LightNodeKind::LightDevice {
+        if let Some(parent_id) = snap.parent_id.as_deref().filter(|parent_id| *parent_id != snap.id)
+        {
+            if let Some(parent_snap) = runtime.engine_effective_node_snapshot(parent_id) {
+                events.push(build_node_state_event(state, &parent_snap));
+            }
+        }
+    }
+
+    events
+}
+
+pub(crate) fn emit_node_state_event_after_apply(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
     node_id: &str,
 ) {
     #[cfg(feature = "desktop")]
-    if let Some(event) = node_state_event_from_runtime(state, runtime, node_id) {
-        crate::state::emit_server_event(
-            state,
-            crate::server_event::ServerEvent::NodeState { nodes: vec![event] },
-        );
+    {
+        let events = node_state_events_after_apply(state, runtime, node_id);
+        if !events.is_empty() {
+            crate::state::emit_server_event(
+                state,
+                crate::server_event::ServerEvent::NodeState { nodes: events },
+            );
+        }
     }
 
-    let _ = (state, runtime, node_id);
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = (state, runtime, node_id);
+    }
+
 }
 
 fn apply_room_mode_defaults(
@@ -3969,12 +4072,7 @@ pub fn do_node_action(
     sync_active_mode_from_runtime(state, &runtime);
     clear_room_mode_transition(state, node_id);
 
-    // Track lights_on state from action result
-    {
-        if let Ok(mut s) = state.lock() {
-            s.room_lights_on.insert(node_id.to_string(), turned_on);
-        }
-    }
+    update_lights_on_cache_for_runtime_node(state, &runtime, node_id, turned_on);
 
     #[cfg(feature = "desktop")]
     {
@@ -4164,12 +4262,7 @@ pub fn do_set_node_brightness(
     runtime.set_room_brightness(node_id, brightness)?;
     clear_room_mode_transition(state, node_id);
 
-    // Setting brightness implies lights are on
-    {
-        if let Ok(mut s) = state.lock() {
-            s.room_lights_on.insert(node_id.to_string(), true);
-        }
-    }
+    update_lights_on_cache_for_runtime_node(state, &runtime, node_id, true);
 
     #[cfg(feature = "desktop")]
     {
@@ -5041,11 +5134,10 @@ pub fn do_node_preferences_set(
         room_profile.is_some()
     );
 
-    let (runtime, lights_on, valid_profile_ids) = {
+    let (runtime, valid_profile_ids) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             s.hub_runtime(),
-            s.room_lights_on.get(node_id).copied().unwrap_or(false),
             s.light_profile_configs
                 .keys()
                 .cloned()
@@ -5058,6 +5150,15 @@ pub fn do_node_preferences_set(
     let snap = runtime
         .engine_node_snapshot(node_id)
         .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+    let lights_on = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        lights_on_from_cache(
+            &s.room_lights_on,
+            &snap.id,
+            snap.kind,
+            snap.parent_id.as_deref(),
+        )
+    };
 
     let prev_soft_off = snap.soft_off;
     let prev_hard_off = snap.hard_off;
@@ -5157,13 +5258,21 @@ pub fn do_node_preferences_set(
     }
 
     if hard_off {
-        if let Ok(mut s) = state.lock() {
-            s.room_lights_on.insert(node_id.to_string(), false);
-        }
+        update_lights_on_cache_for_node(
+            state,
+            &snap.id,
+            snap.kind,
+            snap.parent_id.as_deref(),
+            false,
+        );
     } else if soft_off {
-        if let Ok(mut s) = state.lock() {
-            s.room_lights_on.insert(node_id.to_string(), true);
-        }
+        update_lights_on_cache_for_node(
+            state,
+            &snap.id,
+            snap.kind,
+            snap.parent_id.as_deref(),
+            true,
+        );
     }
 
     #[cfg(feature = "desktop")]

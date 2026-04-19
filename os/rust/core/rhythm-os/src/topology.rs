@@ -324,23 +324,18 @@ impl TopologyRoom {
         let mut assigned_by_hub: Vec<_> = preferred_light_endpoints.into_iter().collect();
         assigned_by_hub.sort_by(|left, right| left.0.to_string().cmp(&right.0.to_string()));
 
-        for (hub_key, mut remaining_ids) in assigned_by_hub {
+        for (hub_key, remaining_ids) in assigned_by_hub {
             let mut bindings: Vec<_> = self
                 .hub_room_bindings
                 .iter()
-                .filter(|binding| binding.hub_key == hub_key)
+                .filter(|binding| {
+                    binding.hub_key == hub_key && !binding.light_device_ids.is_empty()
+                })
                 .collect();
             bindings.sort_by(|left, right| left.hub_room_id.cmp(&right.hub_room_id));
 
-            for binding in bindings {
-                if binding.light_device_ids.is_empty() {
-                    continue;
-                }
-                if binding
-                    .light_device_ids
-                    .iter()
-                    .all(|native_id| remaining_ids.contains_key(native_id))
-                {
+            if !bindings.is_empty() {
+                for binding in bindings {
                     let target = HubDispatchTarget::Group {
                         room_id: binding.hub_room_id.clone(),
                         control_id: binding.control_id.clone(),
@@ -355,10 +350,8 @@ impl TopologyRoom {
                         hub_key: hub_key.clone(),
                         target,
                     });
-                    for native_id in &binding.light_device_ids {
-                        remaining_ids.remove(native_id);
-                    }
                 }
+                continue;
             }
 
             if !remaining_ids.is_empty() {
@@ -1510,6 +1503,28 @@ impl RoomTopologyStore {
                 );
             }
         }
+        let mut attached_light_node_ids: Vec<_> = self
+            .device_nodes
+            .values()
+            .filter(|node| node.parent_id.is_some())
+            .map(|node| node.id.clone())
+            .collect();
+        attached_light_node_ids.sort();
+        for node_id in attached_light_node_ids {
+            let node = self.device_nodes.get(&node_id).unwrap();
+            let Some(parent_id) = node.parent_id.as_ref() else {
+                continue;
+            };
+            let Some(device) = canonical_registry.get(&node.canonical_device_id) else {
+                continue;
+            };
+            if device.device_type != DeviceType::Light {
+                continue;
+            }
+            if let Some(parent_targets) = table.get(parent_id).cloned() {
+                table.insert(node.id.clone(), parent_targets);
+            }
+        }
         let mut standalone_node_ids: Vec<_> = self
             .device_nodes
             .values()
@@ -2091,6 +2106,85 @@ mod tests {
                 emit_node_id: room_id.clone(),
             }]
         );
+    }
+
+    #[test]
+    fn composite_routing_prefers_group_target_when_native_binding_exists() {
+        let mut store = RoomTopologyStore::new();
+        let room_id = store.translate_or_create(
+            &hue_key(),
+            "hue-room-1",
+            "Kitchen",
+            "gl-kitchen",
+            &["hue-light-1".to_string(), "hue-light-2".to_string()],
+        );
+
+        let mut registry = CanonicalRegistry::new();
+        let light_id = register_identity(
+            &mut registry,
+            &hue_key(),
+            make_identity(
+                "hue-light-1",
+                "hue-room-1",
+                "Kitchen",
+                "Counter Light",
+                DeviceType::Light,
+            ),
+        );
+
+        assert!(store.attach_device_user_override(&room_id, &light_id));
+
+        let routing = store.composite_routing(&registry);
+        assert_eq!(
+            routing.get(&room_id),
+            Some(&vec![(
+                hue_key().to_string(),
+                HubDispatchTarget::Group {
+                    room_id: "hue-room-1".to_string(),
+                    control_id: "gl-kitchen".to_string(),
+                },
+            )])
+        );
+
+        let nodes = store.periodic_light_nodes(&registry);
+        assert_eq!(
+            nodes,
+            vec![TopologyLightNode {
+                id: group_light_node_id(&room_id, &hue_key(), "hue-room-1"),
+                source_node_id: room_id.clone(),
+                emit_node_id: room_id.clone(),
+            }]
+        );
+    }
+
+    #[test]
+    fn attached_light_nodes_inherit_parent_room_dispatch_target() {
+        let mut store = RoomTopologyStore::new();
+        let room_id = store.translate_or_create(
+            &hue_key(),
+            "hue-room-1",
+            "Kitchen",
+            "gl-kitchen",
+            &["hue-light-1".to_string()],
+        );
+
+        let mut registry = CanonicalRegistry::new();
+        let light_id = register_identity(
+            &mut registry,
+            &hue_key(),
+            make_identity(
+                "hue-light-1",
+                "hue-room-1",
+                "Kitchen",
+                "Counter Light",
+                DeviceType::Light,
+            ),
+        );
+
+        assert!(store.attach_device_user_override(&room_id, &light_id));
+
+        let routing = store.composite_routing(&registry);
+        assert_eq!(routing.get(&light_id), routing.get(&room_id));
     }
 
     #[test]

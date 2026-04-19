@@ -870,19 +870,42 @@ pub fn poll_initial_light_state(state: &SharedState) {
         return;
     }
 
+    let mut query_results: HashMap<String, bool> = HashMap::new();
     let mut on_count = 0usize;
+    let mut room_count = 0usize;
     for snap in &snapshots {
-        match runtime.any_lights_on(&snap.id) {
-            Ok(on) => {
-                if let Ok(mut s) = state.lock() {
-                    s.room_lights_on.insert(snap.id.clone(), on);
+        if !snap.kind.is_light_addressable() {
+            continue;
+        }
+
+        let query_id = if snap.kind == rhythm_core::LightNodeKind::LightDevice {
+            snap.parent_id.as_deref().unwrap_or(&snap.id)
+        } else {
+            &snap.id
+        };
+
+        let on = if let Some(on) = query_results.get(query_id).copied() {
+            on
+        } else {
+            match runtime.any_lights_on(query_id) {
+                Ok(on) => {
+                    query_results.insert(query_id.to_string(), on);
+                    on
                 }
-                if on {
-                    on_count += 1;
+                Err(e) => {
+                    warn!(target: "room_sync", "Failed to poll lights for '{}': {}", query_id, e);
+                    continue;
                 }
             }
-            Err(e) => {
-                warn!(target: "room_sync", "Failed to poll lights for '{}': {}", snap.id, e);
+        };
+
+        if let Ok(mut s) = state.lock() {
+            s.room_lights_on.insert(snap.id.clone(), on);
+        }
+        if snap.kind.is_room() {
+            room_count += 1;
+            if on {
+                on_count += 1;
             }
         }
     }
@@ -890,7 +913,8 @@ pub fn poll_initial_light_state(state: &SharedState) {
     info!(
         target: "room_sync",
         "Initial light state: {}/{} rooms have lights on",
-        on_count, snapshots.len()
+        on_count,
+        room_count
     );
 
     // Emit SSE so any already-connected clients get the initial state
