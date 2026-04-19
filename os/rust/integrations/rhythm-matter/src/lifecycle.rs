@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use log::{info, warn};
-use rhythm_devices::LightCapabilities;
+use rhythm_devices::{DeviceQuirk, LightCapabilities};
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::hub::{ActiveHub, HubEvent, HubType};
 use rhythm_os::registry::HubDeviceRegistry;
@@ -22,7 +22,8 @@ pub fn connect_matter(
 ) -> Result<(ActiveHub, Receiver<HubEvent>)> {
     let hub_key = HubKey::new(HubType::new("matter"), "local");
     let commissioned = transport.list_devices().unwrap_or_default();
-    let initial_device_caps = load_initial_device_caps(&transport, &commissioned);
+    let (initial_device_caps, initial_device_quirks) =
+        load_initial_device_metadata(&transport, &commissioned);
     let next_node_id = next_node_id_seed(&commissioned);
     let fabric_id = configured_fabric_id(state, &hub_key);
 
@@ -42,6 +43,7 @@ pub fn connect_matter(
     };
 
     let commissioned_for_closure = commissioned.clone();
+    #[cfg(feature = "desktop")]
     let transport_for_closure = transport.clone();
     let fabric_id_for_closure = fabric_id.clone();
 
@@ -67,11 +69,13 @@ pub fn connect_matter(
             Box::new(Arc::new(MatterHubData {
                 #[cfg(feature = "desktop")]
                 transport: transport_cell,
+                capture_dir: std::sync::OnceLock::new(),
                 registry,
                 fabric_id: fabric_id_for_closure.clone(),
                 commissioned: std::sync::Mutex::new(commissioned_for_closure.clone()),
                 next_node_id: std::sync::atomic::AtomicU64::new(next_node_id),
                 device_caps: std::sync::Mutex::new(initial_device_caps.clone()),
+                device_quirks: std::sync::Mutex::new(initial_device_quirks.clone()),
                 event_tx,
             }))
         },
@@ -97,19 +101,27 @@ fn next_node_id_seed(commissioned: &[MatterDeviceInfo]) -> u64 {
         .saturating_add(1)
 }
 
-fn load_initial_device_caps(
+fn load_initial_device_metadata(
     transport: &Arc<dyn MatterTransport>,
     commissioned: &[MatterDeviceInfo],
-) -> HashMap<String, LightCapabilities> {
+) -> (
+    HashMap<String, LightCapabilities>,
+    HashMap<String, Vec<DeviceQuirk>>,
+) {
     let mut caps = HashMap::new();
+    let mut quirks = HashMap::new();
 
     for info in commissioned {
         match transport.probe_light(info.node_id) {
             Ok(device) => {
                 let device_id = format_device_id(device.node_id, device.light_endpoint);
                 caps.insert(
-                    device_id,
+                    device_id.clone(),
                     crate::commissioning::build_device_capabilities(&device),
+                );
+                quirks.insert(
+                    device_id,
+                    crate::commissioning::build_device_quirks(&device),
                 );
             }
             Err(error) => {
@@ -123,7 +135,7 @@ fn load_initial_device_caps(
         }
     }
 
-    caps
+    (caps, quirks)
 }
 
 /// Format a Matter node ID as a device ID string.

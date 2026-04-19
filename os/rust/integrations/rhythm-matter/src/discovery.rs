@@ -91,11 +91,17 @@ impl HubDiscovery for MatterDiscovery {
                 commissioned.node_id,
                 commissioned.light_endpoint,
             );
-            crate::commissioning::store_device_capabilities(
-                &self.hub_data,
-                &commissioned,
-                &device_id,
-            );
+            crate::commissioning::store_device_metadata(&self.hub_data, &commissioned, &device_id);
+            if let Err(error) =
+                crate::capture::persist_device_capture(&self.hub_data, &commissioned, "sync_probe")
+            {
+                warn!(
+                    target: "room_sync",
+                    "Matter: failed to persist sync probe capture for {}: {}",
+                    device_id,
+                    error
+                );
+            }
 
             identities.push(Self::device_identity(&commissioned));
         }

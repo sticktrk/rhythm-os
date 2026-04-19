@@ -1,7 +1,7 @@
 //! Matter light controller using the typed Matter transport.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use log::{debug, warn};
@@ -10,7 +10,7 @@ use rhythm_core::controller::{
 };
 use rhythm_core::lighting::LightingCommand;
 use rhythm_core::room::Room;
-use rhythm_devices::{ColorPreference, LightCapabilities, LightType};
+use rhythm_devices::{ColorPreference, DeviceQuirk, LightCapabilities, LightType};
 
 use crate::clusters;
 use crate::hub_state::MatterHubData;
@@ -87,43 +87,114 @@ impl MatterLightController {
         }
     }
 
-    fn device_capabilities(&self, device_id: &str, node_id: u64) -> LightCapabilities {
-        if let Ok(device_caps) = self.hub_data.device_caps.lock() {
-            if let Some(caps) = device_caps.get(device_id) {
-                return caps.clone();
-            }
+    fn device_metadata(
+        &self,
+        device_id: &str,
+        node_id: u64,
+    ) -> (LightCapabilities, Vec<DeviceQuirk>) {
+        let cached_caps = self
+            .hub_data
+            .device_caps
+            .lock()
+            .ok()
+            .and_then(|device_caps| device_caps.get(device_id).cloned());
+        let cached_quirks = self
+            .hub_data
+            .device_quirks
+            .lock()
+            .ok()
+            .and_then(|device_quirks| device_quirks.get(device_id).cloned());
+
+        if let (Some(caps), Some(quirks)) = (cached_caps, cached_quirks) {
+            return (caps, quirks);
         }
 
         match self.transport.probe_light(node_id) {
             Ok(device) => {
                 let caps = crate::commissioning::build_device_capabilities(&device);
+                let quirks = crate::commissioning::build_device_quirks(&device);
                 let probed_id =
                     crate::lifecycle::format_device_id(device.node_id, device.light_endpoint);
 
-                if let Ok(mut device_caps) = self.hub_data.device_caps.lock() {
-                    device_caps.insert(device_id.to_string(), caps.clone());
-                    if probed_id != device_id {
-                        device_caps.insert(probed_id, caps.clone());
-                    }
+                self.cache_device_metadata(device_id, &probed_id, &caps, &quirks);
+                if let Err(error) = crate::capture::persist_device_capture(
+                    &self.hub_data,
+                    &device,
+                    "on_demand_probe",
+                ) {
+                    warn!(
+                        target: "cmd",
+                        "Matter: failed to persist on-demand probe capture for {}: {}",
+                        probed_id,
+                        error
+                    );
                 }
 
                 debug!(
                     target: "cmd",
-                    "Matter: probed capabilities on demand for {}",
+                    "Matter: probed device metadata on demand for {}",
                     device_id
                 );
-                caps
+                (caps, quirks)
             }
             Err(error) => {
                 warn!(
                     target: "cmd",
-                    "Matter: failed to probe capabilities for {} (node {}): {}; using extended-color fallback",
+                    "Matter: failed to probe metadata for {} (node {}): {}; using extended-color fallback",
                     device_id,
                     node_id,
                     error
                 );
-                LightCapabilities::defaults_for(LightType::ExtendedColor)
+                (
+                    LightCapabilities::defaults_for(LightType::ExtendedColor),
+                    Vec::new(),
+                )
             }
+        }
+    }
+
+    fn cache_device_metadata(
+        &self,
+        requested_id: &str,
+        probed_id: &str,
+        caps: &LightCapabilities,
+        quirks: &[DeviceQuirk],
+    ) {
+        if let Ok(mut device_caps) = self.hub_data.device_caps.lock() {
+            device_caps.insert(requested_id.to_string(), caps.clone());
+            if requested_id != probed_id {
+                device_caps.insert(probed_id.to_string(), caps.clone());
+            }
+        }
+
+        if let Ok(mut device_quirks) = self.hub_data.device_quirks.lock() {
+            device_quirks.insert(requested_id.to_string(), quirks.to_vec());
+            if requested_id != probed_id {
+                device_quirks.insert(probed_id.to_string(), quirks.to_vec());
+            }
+        }
+    }
+
+    fn color_preference(quirks: &[DeviceQuirk]) -> ColorPreference {
+        if quirks
+            .iter()
+            .any(|quirk| matches!(quirk, DeviceQuirk::NeedsXyNotCt))
+        {
+            ColorPreference::PreferXy
+        } else {
+            ColorPreference::PreferColorTemperature
+        }
+    }
+
+    fn needs_explicit_on(quirks: &[DeviceQuirk]) -> bool {
+        quirks
+            .iter()
+            .any(|quirk| matches!(quirk, DeviceQuirk::NeedsExplicitOn))
+    }
+
+    fn maybe_throttle(throttle_ms: Option<u32>) {
+        if let Some(throttle_ms) = throttle_ms.filter(|ms| *ms > 0) {
+            std::thread::sleep(Duration::from_millis(throttle_ms as u64));
         }
     }
 
@@ -145,15 +216,37 @@ impl MatterLightController {
                 continue;
             };
 
-            let caps = self.device_capabilities(device_id, node_id);
+            let (caps, quirks) = self.device_metadata(device_id, node_id);
             let adapted = rhythm_os::controller_helpers::adapt_lighting_command(
                 &caps,
                 &command,
-                ColorPreference::PreferXy,
+                Self::color_preference(&quirks),
             );
+            let throttle_ms = quirks.iter().find_map(|quirk| match quirk {
+                DeviceQuirk::CommandThrottleMs(ms) => Some(*ms),
+                _ => None,
+            });
+            let needs_explicit_on = adapted.on && Self::needs_explicit_on(&quirks);
 
             let mut command_successes = 0usize;
             let mut command_failures = 0usize;
+            let mut already_sent_on = false;
+
+            if needs_explicit_on {
+                if let Err(e) = self.transport.set_on_off(node_id, endpoint, true) {
+                    warn!(
+                        target: "cmd",
+                        "Matter: explicit on command failed for node {}: {}",
+                        node_id,
+                        e
+                    );
+                    command_failures += 1;
+                } else {
+                    command_successes += 1;
+                    already_sent_on = true;
+                }
+                Self::maybe_throttle(throttle_ms);
+            }
 
             if let Some(brightness) = adapted.brightness {
                 let level = clusters::brightness_to_level(brightness);
@@ -171,7 +264,8 @@ impl MatterLightController {
                 } else {
                     command_successes += 1;
                 }
-            } else if adapted.on {
+                Self::maybe_throttle(throttle_ms);
+            } else if adapted.on && !already_sent_on {
                 if let Err(e) = self.transport.set_on_off(node_id, endpoint, true) {
                     warn!(
                         target: "cmd",
@@ -183,6 +277,7 @@ impl MatterLightController {
                 } else {
                     command_successes += 1;
                 }
+                Self::maybe_throttle(throttle_ms);
             }
 
             if let Some((x, y)) = adapted.xy {
@@ -200,6 +295,7 @@ impl MatterLightController {
                 } else {
                     command_successes += 1;
                 }
+                Self::maybe_throttle(throttle_ms);
             } else if let Some(kelvin) = adapted.kelvin {
                 if let Err(e) = self.transport.set_color_temperature(
                     node_id,
@@ -217,6 +313,7 @@ impl MatterLightController {
                 } else {
                     command_successes += 1;
                 }
+                Self::maybe_throttle(throttle_ms);
             }
 
             match (command_successes, command_failures) {
@@ -528,11 +625,13 @@ mod tests {
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
             #[cfg(feature = "desktop")]
             transport: std::sync::OnceLock::new(),
+            capture_dir: std::sync::OnceLock::new(),
             registry: registry.clone(),
             fabric_id: "test".to_string(),
             commissioned: std::sync::Mutex::new(Vec::new()),
             next_node_id: std::sync::atomic::AtomicU64::new(100),
             device_caps: std::sync::Mutex::new(std::collections::HashMap::new()),
+            device_quirks: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
 
@@ -562,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_on_sends_brightness_and_xy_commands() {
+    fn turn_on_sends_brightness_and_color_temperature_commands_by_default() {
         let (controller, spy, _) = make_controller();
         let command = LightingCommand::new(80, 4000);
 
@@ -582,7 +681,7 @@ mod tests {
         );
         assert!(matches!(
             operations[1],
-            RecordedOperation::SetXy {
+            RecordedOperation::SetColorTemperature {
                 node_id: 42,
                 endpoint: 1,
                 ..
@@ -590,7 +689,7 @@ mod tests {
         ));
         assert!(matches!(
             operations[3],
-            RecordedOperation::SetXy {
+            RecordedOperation::SetColorTemperature {
                 node_id: 43,
                 endpoint: 1,
                 ..
@@ -741,11 +840,13 @@ mod tests {
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
             #[cfg(feature = "desktop")]
             transport: std::sync::OnceLock::new(),
+            capture_dir: std::sync::OnceLock::new(),
             registry,
             fabric_id: "test".to_string(),
             commissioned: std::sync::Mutex::new(Vec::new()),
             next_node_id: std::sync::atomic::AtomicU64::new(100),
             device_caps: std::sync::Mutex::new(std::collections::HashMap::new()),
+            device_quirks: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
 
@@ -806,6 +907,106 @@ mod tests {
             .expect("expected probed caps to be cached");
         assert!(caps.supports_color_temp());
         assert!(!caps.supports_xy_color());
+    }
+
+    #[test]
+    fn turn_on_quirked_device_prefers_xy() {
+        let spy = Arc::new(SpyTransport::new());
+        let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
+        registry
+            .lock()
+            .unwrap()
+            .upsert_room("r1", "Room", "r1", &["matter-42".to_string()]);
+        registry
+            .lock()
+            .unwrap()
+            .set_area_lights("r1", vec!["matter-42".to_string()]);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let hub_data = Arc::new(crate::hub_state::MatterHubData {
+            #[cfg(feature = "desktop")]
+            transport: std::sync::OnceLock::new(),
+            capture_dir: std::sync::OnceLock::new(),
+            registry,
+            fabric_id: "test".to_string(),
+            commissioned: std::sync::Mutex::new(Vec::new()),
+            next_node_id: std::sync::atomic::AtomicU64::new(100),
+            device_caps: std::sync::Mutex::new(std::collections::HashMap::from([(
+                "matter-42".to_string(),
+                LightCapabilities::defaults_for(LightType::ExtendedColor),
+            )])),
+            device_quirks: std::sync::Mutex::new(std::collections::HashMap::from([(
+                "matter-42".to_string(),
+                vec![DeviceQuirk::NeedsXyNotCt],
+            )])),
+            event_tx: tx,
+        });
+        let controller = MatterLightController::new(spy.clone(), hub_data);
+
+        block_on(controller.turn_on("r1", LightingCommand::new(50, 3000))).unwrap();
+
+        assert!(spy
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::SetXy { node_id: 42, .. })));
+        assert!(!spy.operations().iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::SetColorTemperature { node_id: 42, .. }
+        )));
+    }
+
+    #[test]
+    fn turn_on_quirked_device_sends_explicit_on_before_brightness() {
+        let spy = Arc::new(SpyTransport::new());
+        let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
+        registry
+            .lock()
+            .unwrap()
+            .upsert_room("r1", "Room", "r1", &["matter-42".to_string()]);
+        registry
+            .lock()
+            .unwrap()
+            .set_area_lights("r1", vec!["matter-42".to_string()]);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let hub_data = Arc::new(crate::hub_state::MatterHubData {
+            #[cfg(feature = "desktop")]
+            transport: std::sync::OnceLock::new(),
+            capture_dir: std::sync::OnceLock::new(),
+            registry,
+            fabric_id: "test".to_string(),
+            commissioned: std::sync::Mutex::new(Vec::new()),
+            next_node_id: std::sync::atomic::AtomicU64::new(100),
+            device_caps: std::sync::Mutex::new(std::collections::HashMap::from([(
+                "matter-42".to_string(),
+                LightCapabilities::defaults_for(LightType::Dimmable),
+            )])),
+            device_quirks: std::sync::Mutex::new(std::collections::HashMap::from([(
+                "matter-42".to_string(),
+                vec![DeviceQuirk::NeedsExplicitOn],
+            )])),
+            event_tx: tx,
+        });
+        let controller = MatterLightController::new(spy.clone(), hub_data);
+
+        block_on(controller.turn_on("r1", LightingCommand::new(50, 3000))).unwrap();
+
+        assert_eq!(
+            spy.operations(),
+            vec![
+                RecordedOperation::SetOnOff {
+                    node_id: 42,
+                    endpoint: 1,
+                    on: true,
+                },
+                RecordedOperation::SetBrightness {
+                    node_id: 42,
+                    endpoint: 1,
+                    level: clusters::brightness_to_level(50),
+                    transition_ms: None,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -937,6 +1138,7 @@ mod tests {
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
             #[cfg(feature = "desktop")]
             transport: std::sync::OnceLock::new(),
+            capture_dir: std::sync::OnceLock::new(),
             registry,
             fabric_id: "test".to_string(),
             commissioned: std::sync::Mutex::new(Vec::new()),
@@ -944,6 +1146,10 @@ mod tests {
             device_caps: std::sync::Mutex::new(std::collections::HashMap::from([(
                 "matter-42".to_string(),
                 LightCapabilities::defaults_for(LightType::ExtendedColor),
+            )])),
+            device_quirks: std::sync::Mutex::new(std::collections::HashMap::from([(
+                "matter-42".to_string(),
+                vec![DeviceQuirk::NeedsXyNotCt],
             )])),
             event_tx: tx,
         });

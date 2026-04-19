@@ -6,6 +6,7 @@
 use std::sync::{Arc, Mutex};
 
 use rhythm_core::controller::{LightControlError, LightControlResult};
+use rhythm_core::kelvin_to_xy;
 use rhythm_core::lighting::LightingCommand;
 use rhythm_core::room::Room;
 use rhythm_devices::{
@@ -64,9 +65,11 @@ pub fn adapt_lighting_command(
     let color = if command.is_direct_color {
         ColorRequest::Xy((command.xy.x, command.xy.y))
     } else {
+        let clamped_kelvin = clamp_kelvin(command.kelvin, caps.min_kelvin, caps.max_kelvin);
+        let clamped_xy = kelvin_to_xy(clamped_kelvin);
         ColorRequest::ColorTemperature {
-            kelvin: command.kelvin,
-            xy: (command.xy.x, command.xy.y),
+            kelvin: clamped_kelvin,
+            xy: (clamped_xy.x, clamped_xy.y),
         }
     };
 
@@ -77,6 +80,18 @@ pub fn adapt_lighting_command(
         command.transition_ms,
         preference,
     )
+}
+
+fn clamp_kelvin(kelvin: u16, min_kelvin: Option<u16>, max_kelvin: Option<u16>) -> u16 {
+    let kelvin = match min_kelvin {
+        Some(min_kelvin) if kelvin < min_kelvin => min_kelvin,
+        _ => kelvin,
+    };
+
+    match max_kelvin {
+        Some(max_kelvin) if kelvin > max_kelvin => max_kelvin,
+        _ => kelvin,
+    }
 }
 
 /// Resolve common room capabilities from the canonical registry.
@@ -210,5 +225,22 @@ mod tests {
 
         assert_eq!(format_room_label(&registry, "room1"), "Living Room (room1)");
         assert_eq!(format_room_label(&registry, "unknown"), "unknown");
+    }
+
+    #[test]
+    fn adapt_lighting_command_recomputes_xy_from_clamped_kelvin() {
+        let caps = LightCapabilities {
+            min_kelvin: Some(2000),
+            max_kelvin: Some(7000),
+            ..LightCapabilities::defaults_for(LightType::ExtendedColor)
+        };
+        let command = LightingCommand::new(77, 1827);
+
+        let adapted = adapt_lighting_command(&caps, &command, ColorPreference::PreferXy);
+        let expected_xy = kelvin_to_xy(2000);
+
+        assert_eq!(adapted.brightness, Some(77));
+        assert_eq!(adapted.kelvin, None);
+        assert_eq!(adapted.xy, Some((expected_xy.x, expected_xy.y)));
     }
 }

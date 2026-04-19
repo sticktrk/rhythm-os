@@ -1475,9 +1475,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         for snap in &node_snapshots {
             let metadata = node_state_dto_metadata(&s, &snap.id);
             nodes.push(build_node_state_dto_from_snapshot_parts(
-                &dto_ctx,
-                snap,
-                metadata,
+                &dto_ctx, snap, metadata,
             ));
         }
         nodes.sort_by(|left, right| {
@@ -2210,6 +2208,7 @@ fn clear_factory_reset_storage(state: &SharedState) -> Result<()> {
 fn clear_factory_reset_ephemeral_state(state: &SharedState) -> Result<()> {
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     s.hub_connection_status.clear();
+    s.hub_seen_connected_once.clear();
     s.hub_sync_in_progress.clear();
     s.hub_reconnect_sync_at.clear();
     s.room_lights_on.clear();
@@ -5162,6 +5161,7 @@ pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
 
         old_hubs = std::mem::take(&mut s.hubs);
         s.hub_connection_status.clear();
+        s.hub_seen_connected_once.clear();
 
         s.hub_credentials.clear();
         if let Some(ref storage) = s.storage {
@@ -9187,6 +9187,7 @@ mod tests {
                 HubCredentials::new("mock", "mock", serde_json::json!({"token": "abc"})),
             );
             s.hub_connection_status.insert(hub_key.clone(), true);
+            s.hub_seen_connected_once.insert(hub_key.clone());
             s.hub_sync_in_progress.insert(hub_key.clone());
             s.hub_reconnect_sync_at
                 .insert(hub_key.clone(), std::time::Instant::now());
@@ -9231,6 +9232,7 @@ mod tests {
         let s = state.lock().unwrap();
         assert!(s.hubs.is_empty());
         assert!(s.hub_credentials.is_empty());
+        assert!(s.hub_seen_connected_once.is_empty());
         assert!(s.canonical_registry.device_count() == 0);
         assert_eq!(s.canonical_registry.triage().pending_count(), 0);
         assert_eq!(s.topology.room_count(), 0);

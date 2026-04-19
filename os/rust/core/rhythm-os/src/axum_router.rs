@@ -139,6 +139,8 @@ fn shared_routes() -> Router<SharedState> {
         // Device pairing / unpairing (Matter commissioning, Zigbee permit join)
         .route("/api/devices/pair", post(post_pair_device))
         .route("/api/devices/unpair", post(post_unpair_device))
+        .route("/api/matter/captures", get(get_matter_captures))
+        .route("/api/matter/captures/:id", get(get_matter_capture))
         // Curve visualization
         .route("/api/curve", get(get_curve).post(post_curve_preview))
         .route("/api/curve/now", get(get_curve_now))
@@ -598,6 +600,17 @@ pub async fn post_unpair_device(
     Json(body): Json<crate::pairing::UnpairingRequest>,
 ) -> ApiResponse {
     run_blocking(move || handlers::handle_unpair_device(&state, &body)).await
+}
+
+pub async fn get_matter_captures(State(state): State<SharedState>) -> ApiResponse {
+    handlers::handle_get_matter_captures(&state)
+}
+
+pub async fn get_matter_capture(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> ApiResponse {
+    handlers::handle_get_matter_capture(&state, &id)
 }
 
 // ---------------------------------------------------------------------------

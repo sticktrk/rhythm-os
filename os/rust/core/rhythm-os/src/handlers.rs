@@ -15,8 +15,11 @@
 //! | Errors                        | 400/500 with plain text                   |
 
 use std::fmt::Display;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use rhythm_core::runtime::hub_registry::DeviceType;
 
@@ -50,6 +53,14 @@ impl ApiResponse {
         }
     }
 
+    pub fn not_found(msg: &str) -> Self {
+        Self {
+            status: 404,
+            body: msg.to_string(),
+            content_type: "text/plain",
+        }
+    }
+
     pub fn server_error(e: impl Display) -> Self {
         Self {
             status: 500,
@@ -65,6 +76,178 @@ impl ApiResponse {
             content_type: "text/plain",
         }
     }
+}
+
+fn matter_capture_dir(state: &SharedState) -> Option<PathBuf> {
+    let data_dir = state.lock().ok()?.data_dir.clone();
+    if data_dir.is_empty() {
+        return None;
+    }
+    Some(Path::new(&data_dir).join("matter").join("captures"))
+}
+
+fn normalize_matter_capture_id(id: &str) -> Result<String, String> {
+    let normalized = id.strip_suffix(".json").unwrap_or(id);
+    if normalized.is_empty()
+        || !normalized
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err("Invalid Matter capture id".to_string());
+    }
+    Ok(normalized.to_string())
+}
+
+fn summarize_matter_capture(id: &str, file_name: &str, capture: &Value) -> Value {
+    json!({
+        "id": id,
+        "file": file_name,
+        "source": capture.get("source").cloned().unwrap_or(Value::Null),
+        "captured_at_unix_ms": capture
+            .get("captured_at_unix_ms")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "vendor_name": capture
+            .pointer("/commissioned/vendor_name")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "product_name": capture
+            .pointer("/commissioned/product_name")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "vendor_id": capture
+            .pointer("/commissioned/vendor_id")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "product_id": capture
+            .pointer("/commissioned/product_id")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "node_id": capture
+            .pointer("/commissioned/node_id")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "light_endpoint": capture
+            .pointer("/commissioned/light_endpoint")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "color_modes": capture
+            .pointer("/commissioned/color_modes")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "derived_quirks": capture
+            .get("derived_quirks")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "db_match_name": capture
+            .pointer("/db_match/name")
+            .cloned()
+            .unwrap_or(Value::Null),
+    })
+}
+
+pub fn handle_get_matter_captures(state: &SharedState) -> ApiResponse {
+    let Some(capture_dir) = matter_capture_dir(state) else {
+        return ApiResponse::json_ok(r#"{"captures":[]}"#.to_string());
+    };
+
+    let entries = match fs::read_dir(&capture_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            return ApiResponse::json_ok(r#"{"captures":[]}"#.to_string());
+        }
+        Err(err) => return ApiResponse::server_error(err),
+    };
+
+    let mut captures = Vec::<(u64, Value)>::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => return ApiResponse::server_error(err),
+        };
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(file_name);
+
+        let summary = match fs::read_to_string(&path) {
+            Ok(contents) => match serde_json::from_str::<Value>(&contents) {
+                Ok(capture) => summarize_matter_capture(id, file_name, &capture),
+                Err(err) => json!({
+                    "id": id,
+                    "file": file_name,
+                    "parse_error": err.to_string(),
+                }),
+            },
+            Err(err) => json!({
+                "id": id,
+                "file": file_name,
+                "read_error": err.to_string(),
+            }),
+        };
+
+        let captured_at = summary
+            .get("captured_at_unix_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        captures.push((captured_at, summary));
+    }
+
+    captures.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1["id"].as_str().cmp(&right.1["id"].as_str()))
+    });
+
+    let body = json!({
+        "captures": captures
+            .into_iter()
+            .map(|(_, capture)| capture)
+            .collect::<Vec<_>>(),
+    });
+    match serde_json::to_string(&body) {
+        Ok(body) => ApiResponse::json_ok(body),
+        Err(err) => ApiResponse::server_error(err),
+    }
+}
+
+pub fn handle_get_matter_capture(state: &SharedState, id: &str) -> ApiResponse {
+    let id = match normalize_matter_capture_id(id) {
+        Ok(id) => id,
+        Err(err) => return ApiResponse::bad_request(&err),
+    };
+
+    let Some(capture_dir) = matter_capture_dir(state) else {
+        return ApiResponse::not_found("Matter capture not found");
+    };
+    let path = capture_dir.join(format!("{}.json", id));
+
+    let body = match fs::read_to_string(&path) {
+        Ok(body) => body,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            return ApiResponse::not_found("Matter capture not found");
+        }
+        Err(err) => return ApiResponse::server_error(err),
+    };
+
+    if let Err(err) = serde_json::from_str::<Value>(&body) {
+        return ApiResponse::server_error(format!(
+            "Invalid Matter capture JSON in {}: {}",
+            path.display(),
+            err
+        ));
+    }
+
+    ApiResponse::json_ok(body)
 }
 
 // ---------------------------------------------------------------------------
@@ -1533,7 +1716,10 @@ mod tests {
     use crate::topology::HubRoomBinding;
     use rhythm_core::runtime::hub_registry::DeviceType;
     use serde_json::json;
+    use std::fs;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     // ---- ApiResponse construction ----
 
@@ -1569,6 +1755,46 @@ mod tests {
 
     fn test_state() -> SharedState {
         Arc::new(Mutex::new(AppState::default()))
+    }
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(prefix: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "rhythm-os-{}-{}-{}",
+                prefix,
+                std::process::id(),
+                unique
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn state_with_matter_capture_dir() -> (SharedState, TestDir, PathBuf) {
+        let state = test_state();
+        let temp_dir = TestDir::new("matter-capture");
+        let capture_dir = temp_dir.path().join("matter").join("captures");
+        fs::create_dir_all(&capture_dir).unwrap();
+        state.lock().unwrap().data_dir = temp_dir.path().display().to_string();
+        (state, temp_dir, capture_dir)
     }
 
     #[test]
@@ -1666,6 +1892,101 @@ mod tests {
         let r = handle_get_version("1.2.3");
         assert_eq!(r.status, 200);
         assert!(r.body.contains("1.2.3"));
+    }
+
+    #[test]
+    fn get_matter_captures_returns_sorted_capture_summaries() {
+        let (state, _temp_dir, capture_dir) = state_with_matter_capture_dir();
+        fs::write(
+            capture_dir.join("matter-100.json"),
+            serde_json::to_string_pretty(&json!({
+                "device_id": "matter-100",
+                "source": "pair",
+                "captured_at_unix_ms": 100,
+                "commissioned": {
+                    "node_id": 100,
+                    "vendor_name": "GE",
+                    "product_name": "Cync",
+                    "vendor_id": 1,
+                    "product_id": 2,
+                    "light_endpoint": 1,
+                    "color_modes": ["color_temperature"]
+                },
+                "derived_quirks": ["needs_xy_not_ct"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            capture_dir.join("matter-102.json"),
+            serde_json::to_string_pretty(&json!({
+                "device_id": "matter-102",
+                "source": "on_demand_probe",
+                "captured_at_unix_ms": 200,
+                "commissioned": {
+                    "node_id": 102,
+                    "vendor_name": "Shenzen",
+                    "product_name": "Bulb",
+                    "vendor_id": 4921,
+                    "product_id": 171,
+                    "light_endpoint": 1,
+                    "color_modes": ["xy", "color_temperature"]
+                },
+                "derived_quirks": ["needs_explicit_on"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let r = handle_get_matter_captures(&state);
+        assert_eq!(r.status, 200);
+
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        let captures = parsed["captures"].as_array().unwrap();
+        assert_eq!(captures.len(), 2);
+        assert_eq!(captures[0]["id"], "matter-102");
+        assert_eq!(captures[0]["vendor_id"], 4921);
+        assert_eq!(captures[0]["derived_quirks"][0], "needs_explicit_on");
+        assert_eq!(captures[1]["id"], "matter-100");
+    }
+
+    #[test]
+    fn get_matter_capture_returns_full_capture_json() {
+        let (state, _temp_dir, capture_dir) = state_with_matter_capture_dir();
+        fs::write(
+            capture_dir.join("matter-102.json"),
+            serde_json::to_string_pretty(&json!({
+                "device_id": "matter-102",
+                "source": "pair",
+                "captured_at_unix_ms": 200,
+                "commissioned": {
+                    "node_id": 102,
+                    "vendor_name": "Shenzen",
+                    "product_name": "Bulb",
+                    "vendor_id": 4921,
+                    "product_id": 171,
+                    "light_endpoint": 1,
+                    "color_modes": ["xy"]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let r = handle_get_matter_capture(&state, "matter-102");
+        assert_eq!(r.status, 200);
+
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["device_id"], "matter-102");
+        assert_eq!(parsed["commissioned"]["vendor_id"], 4921);
+    }
+
+    #[test]
+    fn get_matter_capture_rejects_invalid_id() {
+        let state = test_state();
+        let r = handle_get_matter_capture(&state, "../matter-102");
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("Invalid Matter capture id"));
     }
 
     // ---- Hub credentials validation ----

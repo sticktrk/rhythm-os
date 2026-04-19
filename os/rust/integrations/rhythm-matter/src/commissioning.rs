@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use log::{error, info};
+use log::{error, info, warn};
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_os::canonical::identity::{HardwareId, HubKey};
 use rhythm_os::hub::HubType;
@@ -208,7 +208,15 @@ fn build_success_session(
     );
 
     hub_data.record_commissioned_device(&device);
-    store_device_capabilities(hub_data, &device, &device_id);
+    store_device_metadata(hub_data, &device, &device_id);
+    if let Err(error) = crate::capture::persist_device_capture(hub_data, &device, "pair") {
+        warn!(
+            target: "sys",
+            "Matter: failed to persist pair capture for {}: {}",
+            device_id,
+            error
+        );
+    }
     register_canonical_identity(state, &hub_key, &device, &device_id, &device_name)?;
     queue_unassigned_canonical_device(state, &hub_key, &device_id)?;
 
@@ -235,12 +243,13 @@ fn build_success_session(
     })
 }
 
-pub(crate) fn store_device_capabilities(
+pub(crate) fn store_device_metadata(
     hub_data: &Arc<MatterHubData>,
     device: &CommissionedDevice,
     device_id: &str,
 ) {
     let caps = build_device_capabilities(device);
+    let quirks = build_device_quirks(device);
 
     if let Ok(mut device_caps) = hub_data.device_caps.lock() {
         device_caps.insert(device_id.to_string(), caps);
@@ -251,6 +260,10 @@ pub(crate) fn store_device_capabilities(
             device_caps.len()
         );
     }
+
+    if let Ok(mut device_quirks) = hub_data.device_quirks.lock() {
+        device_quirks.insert(device_id.to_string(), quirks);
+    }
 }
 
 pub(crate) fn build_device_capabilities(
@@ -259,6 +272,10 @@ pub(crate) fn build_device_capabilities(
     let mut caps = crate::capabilities::capabilities_from_commissioned(device);
     crate::capabilities::enrich_from_db(&mut caps, device, rhythm_devices::builtin_db());
     caps
+}
+
+pub(crate) fn build_device_quirks(device: &CommissionedDevice) -> Vec<rhythm_devices::DeviceQuirk> {
+    crate::capabilities::quirks_from_db(device, rhythm_devices::builtin_db())
 }
 
 fn register_canonical_identity(

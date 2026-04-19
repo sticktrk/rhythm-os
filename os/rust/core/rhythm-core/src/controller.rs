@@ -9,6 +9,7 @@
 //! - Direct ZigBee (future)
 
 use async_trait::async_trait;
+use std::sync::Arc;
 use thiserror::Error;
 
 use crate::lighting::LightingCommand;
@@ -143,6 +144,36 @@ pub trait LightController: Send + Sync {
     fn name(&self) -> &str;
 }
 
+#[async_trait]
+impl<T> LightController for Arc<T>
+where
+    T: LightController + ?Sized,
+{
+    async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
+        (**self).turn_on(room_id, command).await
+    }
+
+    async fn turn_off(&self, room_id: &str, transition_ms: Option<u32>) -> LightControlResult<()> {
+        (**self).turn_off(room_id, transition_ms).await
+    }
+
+    async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
+        (**self).get_rooms().await
+    }
+
+    async fn is_connected(&self) -> bool {
+        (**self).is_connected().await
+    }
+
+    async fn any_lights_on(&self, room_id: &str) -> LightControlResult<bool> {
+        (**self).any_lights_on(room_id).await
+    }
+
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+}
+
 /// Trait for dispatching hub-native light commands.
 ///
 /// Per-hub integrations implement this trait. The engine-facing
@@ -175,6 +206,44 @@ pub trait HubLightController: Send + Sync {
 
     /// Get the name of this controller (for logging/debugging).
     fn name(&self) -> &str;
+}
+
+#[async_trait]
+impl<T> HubLightController for Arc<T>
+where
+    T: HubLightController + ?Sized,
+{
+    async fn turn_on_target(
+        &self,
+        target: &HubDispatchTarget,
+        command: LightingCommand,
+    ) -> LightControlResult<()> {
+        (**self).turn_on_target(target, command).await
+    }
+
+    async fn turn_off_target(
+        &self,
+        target: &HubDispatchTarget,
+        transition_ms: Option<u32>,
+    ) -> LightControlResult<()> {
+        (**self).turn_off_target(target, transition_ms).await
+    }
+
+    async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
+        (**self).get_rooms().await
+    }
+
+    async fn is_connected(&self) -> bool {
+        (**self).is_connected().await
+    }
+
+    async fn any_lights_on_target(&self, target: &HubDispatchTarget) -> LightControlResult<bool> {
+        (**self).any_lights_on_target(target).await
+    }
+
+    fn name(&self) -> &str {
+        (**self).name()
+    }
 }
 
 /// A no-op light controller for testing.
@@ -278,5 +347,30 @@ mod tests {
 
         let rooms = LightController::get_rooms(&controller).await.unwrap();
         assert!(rooms.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_arc_controller_wrapper_delegates() {
+        let controller = Arc::new(NoOpController::new());
+
+        assert!(LightController::is_connected(&controller).await);
+        assert_eq!(LightController::name(&controller), "NoOp");
+
+        let cmd = LightingCommand::new(42, 3200);
+        assert!(LightController::turn_on(&controller, "test", cmd)
+            .await
+            .is_ok());
+        assert!(LightController::turn_off(&controller, "test", None)
+            .await
+            .is_ok());
+        assert!(!HubLightController::any_lights_on_target(
+            &controller,
+            &HubDispatchTarget::Group {
+                room_id: "test".to_string(),
+                control_id: "test".to_string(),
+            }
+        )
+        .await
+        .unwrap());
     }
 }

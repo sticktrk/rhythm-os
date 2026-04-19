@@ -189,6 +189,11 @@ pub struct AppState {
     /// A hub can remain configured and active in-process while its transport
     /// is temporarily disconnected and reconnecting.
     pub hub_connection_status: HashMap<HubKey, bool>,
+    /// Hubs that have emitted at least one `Connected` event since configuration.
+    ///
+    /// Initial startup connect is covered by explicit bootstrap sync, so only
+    /// later disconnect→connect transitions should trigger reconnect handling.
+    pub hub_seen_connected_once: HashSet<HubKey>,
     /// Per-hub room syncs currently running in background threads.
     ///
     /// Used to avoid racing the initial bootstrap sync against reconnect-
@@ -392,6 +397,7 @@ impl Default for AppState {
             timezone_name: None,
             hubs: HashMap::new(),
             hub_connection_status: HashMap::new(),
+            hub_seen_connected_once: HashSet::new(),
             hub_sync_in_progress: HashSet::new(),
             hub_reconnect_sync_at: HashMap::new(),
             hub_credentials: HashMap::new(),
@@ -675,7 +681,16 @@ impl AppState {
     /// Forget the live connection state for a hub.
     pub fn clear_hub_connected(&mut self, key: &HubKey) {
         self.hub_connection_status.remove(key);
+        self.hub_seen_connected_once.remove(key);
         self.hub_reconnect_sync_at.remove(key);
+    }
+
+    /// Record that a hub emitted a `Connected` event.
+    ///
+    /// Returns `true` when this is the first observed connected event for the
+    /// hub since it was configured.
+    pub fn note_hub_connected_event(&mut self, key: &HubKey) -> bool {
+        self.hub_seen_connected_once.insert(key.clone())
     }
 
     /// Whether a reconnect-triggered full sync ran recently for this hub.

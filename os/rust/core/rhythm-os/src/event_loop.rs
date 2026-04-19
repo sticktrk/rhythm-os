@@ -439,23 +439,32 @@ fn should_run_reconnect_resync(
 pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut MotionTimerState) {
     let hub_key = event.hub_key().cloned();
     let connected = !matches!(&event, HubEvent::Disconnected { .. });
-    let became_connected = if let Some(ref key) = hub_key {
+    let (became_connected, first_connected_event) = if let Some(ref key) = hub_key {
         if let Ok(mut s) = state.lock() {
             let was_connected = s.hub_is_connected(key);
+            let first_connected_event = connected && s.note_hub_connected_event(key);
             s.set_hub_connected(key, connected);
-            connected && !was_connected
+            (connected && !was_connected, first_connected_event)
         } else {
-            false
+            (false, false)
         }
     } else {
-        false
+        (false, false)
     };
 
     match event {
         HubEvent::Connected { .. } => {
             info!(target: "conn", "Hub connected");
             if became_connected {
-                if let Some(ref key) = hub_key {
+                if first_connected_event {
+                    if let Some(ref key) = hub_key {
+                        debug!(
+                            target: "conn",
+                            "Skipping reconnect resync for initial connect of {}",
+                            key
+                        );
+                    }
+                } else if let Some(ref key) = hub_key {
                     if should_run_reconnect_resync(state, key) {
                         spawn_reconnect_sync(state, key);
                     } else {
@@ -1637,7 +1646,7 @@ mod tests {
     }
 
     #[test]
-    fn connected_event_resyncs_room_devices_for_api_state() {
+    fn reconnected_event_resyncs_room_devices_for_api_state() {
         let state = make_state();
         let hub_type = HubType::new("test");
         let hub_key = HubKey::new(hub_type.clone(), "hub.local");
@@ -1690,6 +1699,37 @@ mod tests {
             &mut MotionTimerState::new(),
         );
 
+        let after_initial: serde_json::Value =
+            serde_json::from_str(&crate::commands::build_state_snapshot(&state).unwrap()).unwrap();
+        let initial_room = after_initial["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["name"] == "Room A" && node["kind"] == "room")
+            .unwrap();
+        assert_eq!(
+            initial_room["id"].as_str().unwrap(),
+            before_room_id,
+            "initial connect should not trigger reconnect-style resync"
+        );
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Disconnected {
+                hub_key: Some(hub_key.clone()),
+                reason: "SSE dropped".into(),
+            },
+            &mut MotionTimerState::new(),
+        );
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Connected {
+                hub_key: Some(hub_key.clone()),
+            },
+            &mut MotionTimerState::new(),
+        );
+
         let mut after: Option<serde_json::Value> = None;
         for _ in 0..50 {
             std::thread::sleep(Duration::from_millis(20));
@@ -1709,7 +1749,7 @@ mod tests {
             }
         }
 
-        let after = after.expect("connected event should remap the room to a topology node id");
+        let after = after.expect("reconnected event should remap the room to a topology node id");
         let after_room = after["nodes"]
             .as_array()
             .unwrap()
@@ -1720,7 +1760,7 @@ mod tests {
     }
 
     #[test]
-    fn rapid_reconnect_skips_full_resync_but_polls_light_state() {
+    fn initial_connect_skips_resync_then_rapid_reconnect_polls_light_state() {
         let state = make_state();
         let hub_type = HubType::new("test");
         let hub_key = HubKey::new(hub_type.clone(), "hub.local");
@@ -1784,6 +1824,35 @@ mod tests {
             &mut MotionTimerState::new(),
         );
 
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            discover_rooms_calls.load(Ordering::SeqCst),
+            0,
+            "initial connect should not trigger reconnect resync"
+        );
+        assert_eq!(
+            light_poll_calls.load(Ordering::SeqCst),
+            0,
+            "initial connect should not poll light state through reconnect path"
+        );
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Disconnected {
+                hub_key: Some(hub_key.clone()),
+                reason: "SSE dropped".into(),
+            },
+            &mut MotionTimerState::new(),
+        );
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Connected {
+                hub_key: Some(hub_key.clone()),
+            },
+            &mut MotionTimerState::new(),
+        );
+
         for _ in 0..50 {
             if discover_rooms_calls.load(Ordering::SeqCst) >= 1
                 && light_poll_calls.load(Ordering::SeqCst) >= 1
@@ -1797,7 +1866,7 @@ mod tests {
         let first_light_poll_calls = light_poll_calls.load(Ordering::SeqCst);
         assert!(
             first_light_poll_calls >= 1,
-            "first reconnect sync should poll light state"
+            "first real reconnect should poll light state"
         );
 
         handle_hub_event(

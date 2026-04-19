@@ -38,6 +38,16 @@ pub enum PeriodicTickResult {
     Error(String),
 }
 
+pub(crate) enum PeriodicTickPlan {
+    Skipped,
+    RequiresLightCheck,
+    Dispatch {
+        command: LightingCommand,
+        room_state: RoomModeState,
+        profile_id: String,
+    },
+}
+
 const PERIODIC_DEDUPE_MAX_SKIPS: u8 = 5;
 
 #[derive(Clone)]
@@ -317,6 +327,112 @@ impl<C: LightController> RhythmEngine<C> {
 
     fn clear_all_periodic_dedupe(&mut self) {
         self.periodic_command_cache.clear();
+    }
+
+    pub(crate) fn invalidate_periodic_cache_for_room(&mut self, source_room_id: &str) {
+        self.clear_periodic_dedupe_room(source_room_id);
+    }
+
+    pub(crate) fn record_turn_on_dispatch(
+        &mut self,
+        source_room_id: &str,
+        target_id: &str,
+        command: LightingCommand,
+    ) {
+        self.periodic_command_cache.insert(
+            Self::periodic_cache_key(source_room_id, target_id),
+            PeriodicCommandCacheEntry {
+                command,
+                skipped_cycles: 0,
+            },
+        );
+    }
+
+    fn should_dispatch_periodic_command(
+        &mut self,
+        source_room_id: &str,
+        target_id: &str,
+        command: &LightingCommand,
+    ) -> bool {
+        let cache_key = Self::periodic_cache_key(source_room_id, target_id);
+        if let Some(entry) = self.periodic_command_cache.get_mut(&cache_key) {
+            if entry.command == *command && entry.skipped_cycles < PERIODIC_DEDUPE_MAX_SKIPS {
+                entry.skipped_cycles = entry.skipped_cycles.saturating_add(1);
+                return false;
+            }
+        }
+
+        true
+    }
+
+    pub(crate) fn plan_periodic_tick_node(
+        &mut self,
+        target_id: &str,
+        source_room_id: &str,
+        current_hour: f32,
+        lights_on: Option<bool>,
+    ) -> PeriodicTickPlan {
+        let effective = self.effective_room_state(source_room_id);
+        let rhythm_enabled = effective.rhythm_enabled;
+        let soft_off = effective.soft_off;
+        let hard_off = effective.hard_off;
+
+        if !rhythm_enabled || hard_off {
+            return PeriodicTickPlan::Skipped;
+        }
+
+        let mode = self.profile_registry.active_mode();
+
+        if soft_off && !self.power_save {
+            let offset = effective.time_offset_minutes;
+            let profile_settings = effective.profile_settings.clone();
+            let values =
+                self.idle_values_for_settings(Some(&profile_settings), current_hour, offset);
+            let command = Self::build_command(&values, values.brightness);
+            if !self.should_dispatch_periodic_command(source_room_id, target_id, &command) {
+                return PeriodicTickPlan::Skipped;
+            }
+
+            let profile_id = self
+                .profile_registry
+                .profile_for_room_state(mode, RoomModeState::Idle, Some(&profile_settings))
+                .id()
+                .to_string();
+            return PeriodicTickPlan::Dispatch {
+                command,
+                room_state: RoomModeState::Idle,
+                profile_id,
+            };
+        }
+
+        match lights_on {
+            None => return PeriodicTickPlan::RequiresLightCheck,
+            Some(false) => return PeriodicTickPlan::Skipped,
+            Some(true) => {}
+        }
+
+        let offset_minutes = effective.time_offset_minutes;
+        let brightness_offset = effective.brightness_offset;
+        let profile_settings = effective.profile_settings.clone();
+        let ctx = self.create_context(current_hour);
+        let module = self.active_profile_for_settings(Some(&profile_settings));
+        let values = module.calculate_with_offset(&ctx, offset_minutes);
+        let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
+        let command = Self::build_command(&values, brightness);
+        if !self.should_dispatch_periodic_command(source_room_id, target_id, &command) {
+            return PeriodicTickPlan::Skipped;
+        }
+
+        let profile_id = self
+            .profile_registry
+            .profile_for_room_state(mode, RoomModeState::Active, Some(&profile_settings))
+            .id()
+            .to_string();
+        PeriodicTickPlan::Dispatch {
+            command,
+            room_state: RoomModeState::Active,
+            profile_id,
+        }
     }
 
     pub(crate) fn remove_room_state(&mut self, room_id: &str) {

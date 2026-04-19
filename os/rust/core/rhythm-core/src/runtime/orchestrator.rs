@@ -3,7 +3,8 @@
 //! This module provides the main `RhythmRuntime` struct that ties together
 //! the RhythmEngine with scheduling, event handling, and persistence.
 
-use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
 
 use tracing::{debug, info};
 
@@ -40,7 +41,15 @@ where
     R: DeviceRegistry + Send + Sync + 'static,
 {
     /// The underlying RhythmEngine (wrapped in RwLock for thread-safe access).
-    engine: Arc<RwLock<RhythmEngine<C>>>,
+    engine: Arc<RwLock<RhythmEngine<Arc<C>>>>,
+
+    /// Shared controller handle kept outside the engine so background work
+    /// can dispatch I/O without holding the engine lock.
+    controller: Arc<C>,
+
+    /// Per-target dispatch gates. These serialize same-target controller I/O
+    /// while still allowing unrelated targets to proceed independently.
+    dispatch_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 
     /// Time provider for getting current time.
     time_provider: Arc<T>,
@@ -73,16 +82,18 @@ where
     /// * `device_registry` - The device registry
     /// * `config` - Runtime configuration
     pub fn new(
-        controller: C,
+        controller: Arc<C>,
         time_provider: T,
         scheduler: S,
         device_registry: R,
         config: RuntimeConfig,
     ) -> Self {
-        let engine = RhythmEngine::new(controller);
+        let engine = RhythmEngine::new(controller.clone());
 
         Self {
             engine: Arc::new(RwLock::new(engine)),
+            controller,
+            dispatch_locks: Mutex::new(HashMap::new()),
             time_provider: Arc::new(time_provider),
             scheduler: Arc::new(scheduler),
             device_registry: Arc::new(RwLock::new(device_registry)),
@@ -91,8 +102,25 @@ where
     }
 
     /// Get a reference to the engine (for direct access if needed).
-    pub fn engine(&self) -> &Arc<RwLock<RhythmEngine<C>>> {
+    pub fn engine(&self) -> &Arc<RwLock<RhythmEngine<Arc<C>>>> {
         &self.engine
+    }
+
+    /// Get a cloned light-controller handle.
+    pub(crate) fn controller(&self) -> Arc<C> {
+        self.controller.clone()
+    }
+
+    /// Get or create the per-target dispatch gate.
+    pub(crate) fn dispatch_lock(&self, target_id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self
+            .dispatch_locks
+            .lock()
+            .expect("dispatch lock map poisoned");
+        locks
+            .entry(target_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     /// Get a reference to the device registry.
@@ -302,7 +330,7 @@ mod tests {
     fn test_runtime(
     ) -> RhythmRuntime<NoOpController, MockTimeProvider, NoOpScheduler, SimpleDeviceRegistry> {
         RhythmRuntime::new(
-            NoOpController::new(),
+            Arc::new(NoOpController::new()),
             MockTimeProvider::default(),
             NoOpScheduler::new(),
             SimpleDeviceRegistry::new(),

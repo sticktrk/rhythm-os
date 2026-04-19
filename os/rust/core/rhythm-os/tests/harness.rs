@@ -125,7 +125,7 @@ impl TestHarness {
             }
 
             let runtime = RhythmRuntime::new(
-                NoOpController::new(),
+                Arc::new(NoOpController::new()),
                 MockTimeProvider::new(14.0, 172, 2026), // 2 PM, June 21
                 NoOpScheduler::new(),
                 SimpleDeviceRegistry::new(),

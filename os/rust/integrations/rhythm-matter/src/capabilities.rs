@@ -1,9 +1,12 @@
 //! Matter → rhythm-devices capability conversion.
 //!
 //! Converts Matter-specific capability data (discovered during commissioning)
-//! into the protocol-agnostic [`LightCapabilities`] used by `rhythm-devices`.
+//! into the protocol-agnostic [`LightCapabilities`] and device metadata used by
+//! `rhythm-devices`.
 
-use rhythm_devices::{ColorMode, LightCapabilities, LightType};
+use rhythm_devices::{
+    ColorMode, DeviceDatabase, DeviceEntry, DeviceQuirk, LightCapabilities, LightType,
+};
 
 use crate::transport::{CommissionedDevice, MatterColorMode};
 
@@ -58,16 +61,20 @@ fn infer_light_type(color_modes: &[ColorMode]) -> LightType {
 /// Matter commissioning discovers color modes and kelvin range but not gamut
 /// or min_brightness. This looks up the device by (vendor_id, product_id) or
 /// (vendor_name, product_name) and fills in fields the DB knows about.
+pub fn lookup_db_entry<'a>(
+    device: &CommissionedDevice,
+    db: &'a DeviceDatabase,
+) -> Option<&'a DeviceEntry> {
+    db.lookup_matter(device.vendor_id, device.product_id)
+        .or_else(|| db.lookup(&device.vendor_name, &device.product_name))
+}
+
 pub fn enrich_from_db(
     caps: &mut LightCapabilities,
     device: &CommissionedDevice,
-    db: &rhythm_devices::DeviceDatabase,
+    db: &DeviceDatabase,
 ) {
-    let entry = db
-        .lookup_matter(device.vendor_id, device.product_id)
-        .or_else(|| db.lookup(&device.vendor_name, &device.product_name));
-
-    if let Some(entry) = entry {
+    if let Some(entry) = lookup_db_entry(device, db) {
         if caps.gamut.is_none() {
             caps.gamut = entry.gamut.clone();
         }
@@ -75,6 +82,14 @@ pub fn enrich_from_db(
             caps.min_brightness = entry.min_brightness;
         }
     }
+}
+
+/// Look up Matter-specific quirks for a commissioned device.
+pub fn quirks_from_db(device: &CommissionedDevice, db: &DeviceDatabase) -> Vec<DeviceQuirk> {
+    lookup_db_entry(device, db)
+        .and_then(|entry| entry.matter.as_ref())
+        .map(|matter| matter.quirks.clone())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -262,5 +277,49 @@ mod tests {
         assert_eq!(caps.gamut, None);
         assert_eq!(caps.min_brightness, None);
         assert_eq!(caps.min_kelvin, Some(2700));
+    }
+
+    #[test]
+    fn quirks_use_model_lookup_when_matter_ids_are_unknown() {
+        use rhythm_devices::{DeviceDatabase, DeviceEntry, MatterDeviceData};
+
+        let device = CommissionedDevice {
+            node_id: 99,
+            vendor_name: "TestCo".to_string(),
+            product_name: "Quirky Bulb".to_string(),
+            vendor_id: 0,
+            product_id: 0,
+            serial_number: None,
+            light_endpoint: 1,
+            color_modes: vec![MatterColorMode::ColorTemperature],
+            min_kelvin: Some(2700),
+            max_kelvin: Some(5000),
+        };
+
+        let db = DeviceDatabase::from_entries(vec![DeviceEntry {
+            manufacturer: "TestCo".to_string(),
+            model: "Quirky Bulb".to_string(),
+            name: "Test Matter Light".to_string(),
+            light_type: LightType::ColorTemperature,
+            color_modes: vec![ColorMode::ColorTemperature],
+            min_kelvin: Some(2700),
+            max_kelvin: Some(5000),
+            gamut: None,
+            min_brightness: None,
+            supports_transition: true,
+            aliases: vec![],
+            zigbee: None,
+            hue_api: None,
+            matter: Some(MatterDeviceData {
+                vendor_id: None,
+                product_id: None,
+                quirks: vec![DeviceQuirk::NeedsExplicitOn],
+            }),
+        }]);
+
+        assert_eq!(
+            quirks_from_db(&device, &db),
+            vec![DeviceQuirk::NeedsExplicitOn]
+        );
     }
 }

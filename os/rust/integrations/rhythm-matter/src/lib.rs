@@ -10,6 +10,7 @@
 //! the `rhythm-devices` database.
 
 pub mod capabilities;
+pub mod capture;
 #[cfg(feature = "desktop")]
 pub mod chip_rpc;
 #[cfg(feature = "desktop")]

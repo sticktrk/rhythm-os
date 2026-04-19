@@ -7,6 +7,7 @@
 use crate::controller::LightController;
 use crate::light_profile::LightProfileConfig;
 use crate::lighting::LightingCommand;
+use crate::primitives::PeriodicTickPlan;
 use crate::room::{LightNodeKind, ModeConfig, RoomModeState, RoomProfileSettings};
 use crate::solar::SolarTime;
 use anyhow::Result;
@@ -306,7 +307,10 @@ where
     R: DeviceRegistry + Send + Sync + 'static,
 {
     fn handle_event(&self, event: &InputEvent) -> Result<bool> {
-        // Inherent async method takes priority over trait method in resolution.
+        let dispatch_lock = self.dispatch_lock(&event.room_id);
+        let _dispatch_guard = dispatch_lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock dispatch gate: {}", e))?;
         Ok(crate::runtime::executor::block_on(
             self.handle_event(event),
         )?)
@@ -339,76 +343,109 @@ where
         source_room_id: &str,
         current_hour: f32,
     ) -> Result<()> {
-        let mut engine = self
-            .engine()
-            .write()
-            .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
+        let dispatch_lock = self.dispatch_lock(node_id);
+        let _dispatch_guard = dispatch_lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock dispatch gate: {}", e))?;
+        let controller = self.controller();
+        let mut lights_on = None;
 
-        let result = crate::runtime::executor::block_on(engine.periodic_tick_node(
-            node_id,
-            source_room_id,
-            current_hour,
-        ));
+        loop {
+            let (node_label, plan) = {
+                let mut engine = self
+                    .engine()
+                    .write()
+                    .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
 
-        let room_label = engine
-            .rooms()
-            .get(source_room_id)
-            .map(|room| {
-                crate::composite_controller::format_node_log_label(source_room_id, Some(&room.name))
-            })
-            .unwrap_or_else(|| source_room_id.to_string());
-        let node_label = if node_id == source_room_id {
-            room_label.clone()
-        } else if let Some(node) = engine.rooms().get(node_id) {
-            crate::composite_controller::format_node_log_label(node_id, Some(&node.name))
-        } else {
-            format!(
-                "{} via {}",
-                room_label,
-                crate::composite_controller::format_node_log_label(node_id, None)
-            )
-        };
+                let room_label = engine
+                    .rooms()
+                    .get(source_room_id)
+                    .map(|room| {
+                        crate::composite_controller::format_node_log_label(
+                            source_room_id,
+                            Some(&room.name),
+                        )
+                    })
+                    .unwrap_or_else(|| source_room_id.to_string());
+                let node_label = if node_id == source_room_id {
+                    room_label.clone()
+                } else if let Some(node) = engine.rooms().get(node_id) {
+                    crate::composite_controller::format_node_log_label(node_id, Some(&node.name))
+                } else {
+                    format!(
+                        "{} via {}",
+                        room_label,
+                        crate::composite_controller::format_node_log_label(node_id, None)
+                    )
+                };
 
-        match result {
-            crate::primitives::PeriodicTickResult::Updated => {
-                if let Some(room) = engine.rooms().get(source_room_id) {
-                    let room_state = RoomModeState::from_flags(room.hard_off, room.soft_off, false);
-                    let room_state_label = match room_state {
-                        RoomModeState::Active => "active",
-                        RoomModeState::Idle => "idle",
-                        RoomModeState::Wake => "wake",
-                        RoomModeState::Warning => "warning",
-                        RoomModeState::HardOff => "hard_off",
-                    };
-                    let mode = engine.profile_registry().active_mode();
-                    let profile_id = engine
-                        .profile_registry()
-                        .profile_for_room_state(mode, room_state, Some(&room.profile_settings))
-                        .id()
-                        .to_string();
+                (
+                    node_label,
+                    engine.plan_periodic_tick_node(
+                        node_id,
+                        source_room_id,
+                        current_hour,
+                        lights_on,
+                    ),
+                )
+            };
 
-                    tracing::debug!(
-                        target: "sys",
-                        event = "periodic_room_tick",
-                        room = %node_label,
-                        state = %room_state_label,
-                        profile_id = %profile_id,
-                        "Periodic room tick"
-                    );
+            match plan {
+                PeriodicTickPlan::Skipped => return Ok(()),
+                PeriodicTickPlan::RequiresLightCheck => {
+                    lights_on =
+                        match crate::runtime::executor::block_on(controller.any_lights_on(node_id))
+                        {
+                            Ok(is_on) => Some(is_on),
+                            Err(_) => return Ok(()),
+                        };
+                }
+                PeriodicTickPlan::Dispatch {
+                    command,
+                    room_state,
+                    profile_id,
+                } => {
+                    match crate::runtime::executor::block_on(
+                        controller.turn_on(node_id, command.clone()),
+                    ) {
+                        Ok(()) => {
+                            let mut engine = self
+                                .engine()
+                                .write()
+                                .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
+                            engine.record_turn_on_dispatch(source_room_id, node_id, command);
+
+                            let room_state_label = match room_state {
+                                RoomModeState::Active => "active",
+                                RoomModeState::Idle => "idle",
+                                RoomModeState::Wake => "wake",
+                                RoomModeState::Warning => "warning",
+                                RoomModeState::HardOff => "hard_off",
+                            };
+
+                            tracing::debug!(
+                                target: "sys",
+                                event = "periodic_room_tick",
+                                room = %node_label,
+                                state = %room_state_label,
+                                profile_id = %profile_id,
+                                "Periodic room tick"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "sys",
+                                event = "periodic_room_tick_failed",
+                                room = %node_label,
+                                error = %e,
+                                "Periodic room tick failed"
+                            );
+                        }
+                    }
+                    return Ok(());
                 }
             }
-            crate::primitives::PeriodicTickResult::Error(e) => {
-                tracing::warn!(
-                    target: "sys",
-                    event = "periodic_room_tick_failed",
-                    room = %node_label,
-                    error = %e,
-                    "Periodic room tick failed"
-                );
-            }
-            crate::primitives::PeriodicTickResult::Skipped => {}
         }
-        Ok(())
     }
 
     fn engine_room_snapshot(&self, room_id: &str) -> Option<RoomSnapshot> {
@@ -607,6 +644,10 @@ where
     }
 
     fn dim_room(&self, room_id: &str, factor: f32) -> Result<()> {
+        let dispatch_lock = self.dispatch_lock(room_id);
+        let _dispatch_guard = dispatch_lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock dispatch gate: {}", e))?;
         let current_hour = self.current_hour();
         let mut engine = self
             .engine()
@@ -617,6 +658,10 @@ where
     }
 
     fn turn_on_room(&self, room_id: &str) -> Result<()> {
+        let dispatch_lock = self.dispatch_lock(room_id);
+        let _dispatch_guard = dispatch_lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock dispatch gate: {}", e))?;
         let current_hour = self.current_hour();
         let mut engine = self
             .engine()
@@ -636,15 +681,34 @@ where
             command.transition_ms,
             command.is_direct_color
         );
+        let dispatch_lock = self.dispatch_lock(room_id);
+        let _dispatch_guard = dispatch_lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock dispatch gate: {}", e))?;
+        {
+            let mut engine = self
+                .engine()
+                .write()
+                .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
+            engine.invalidate_periodic_cache_for_room(room_id);
+        }
+
+        crate::runtime::executor::block_on(self.controller().turn_on(room_id, command.clone()))
+            .map_err(|e| anyhow::anyhow!("apply_room_command failed: {}", e))?;
+
         let mut engine = self
             .engine()
             .write()
             .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
-        crate::runtime::executor::block_on(engine.apply_room_command(room_id, command))
-            .map_err(|e| anyhow::anyhow!("apply_room_command failed: {}", e))
+        engine.record_turn_on_dispatch(room_id, room_id, command);
+        Ok(())
     }
 
     fn lights_off_room(&self, room_id: &str, transition_ms: Option<u32>) -> Result<()> {
+        let dispatch_lock = self.dispatch_lock(room_id);
+        let _dispatch_guard = dispatch_lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock dispatch gate: {}", e))?;
         let mut engine = self
             .engine()
             .write()
@@ -666,6 +730,10 @@ where
     }
 
     fn set_room_brightness(&self, room_id: &str, brightness: u8) -> Result<()> {
+        let dispatch_lock = self.dispatch_lock(room_id);
+        let _dispatch_guard = dispatch_lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock dispatch gate: {}", e))?;
         let current_hour = self.current_hour();
         let mut engine = self
             .engine()
@@ -676,6 +744,10 @@ where
     }
 
     fn set_room_time_offset(&self, room_id: &str, offset_minutes: f32) -> Result<()> {
+        let dispatch_lock = self.dispatch_lock(room_id);
+        let _dispatch_guard = dispatch_lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock dispatch gate: {}", e))?;
         let current_hour = self.current_hour();
         let mut engine = self
             .engine()
@@ -698,6 +770,10 @@ where
     }
 
     fn soft_off_tick_room(&self, room_id: &str) -> Result<()> {
+        let dispatch_lock = self.dispatch_lock(room_id);
+        let _dispatch_guard = dispatch_lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock dispatch gate: {}", e))?;
         let current_hour = self.current_hour();
         let mut engine = self
             .engine()
@@ -708,11 +784,7 @@ where
     }
 
     fn any_lights_on(&self, room_id: &str) -> Result<bool> {
-        let engine = self
-            .engine()
-            .read()
-            .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
-        crate::runtime::executor::block_on(engine.controller().any_lights_on(room_id))
+        crate::runtime::executor::block_on(self.controller().any_lights_on(room_id))
             .map_err(|e| anyhow::anyhow!("any_lights_on failed: {}", e))
     }
 
@@ -752,17 +824,29 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use crate::controller::NoOpController;
     use crate::runtime::config::RuntimeConfig;
     use crate::runtime::orchestrator::RhythmRuntime;
     use crate::runtime::registry::SimpleDeviceRegistry;
     use crate::runtime::scheduler::NoOpScheduler;
     use crate::runtime::time::MockTimeProvider;
+    #[cfg(feature = "blocking")]
+    use crate::spy_controller::{SpyCall, SpyLightController};
+    #[cfg(feature = "blocking")]
+    use std::time::{Duration, Instant};
+
+    #[cfg(feature = "blocking")]
+    type SpyTestRuntime =
+        RhythmRuntime<SpyLightController, MockTimeProvider, NoOpScheduler, SimpleDeviceRegistry>;
+    #[cfg(feature = "blocking")]
+    type SharedSpyTestRuntime = Arc<SpyTestRuntime>;
 
     fn test_runtime(
     ) -> RhythmRuntime<NoOpController, MockTimeProvider, NoOpScheduler, SimpleDeviceRegistry> {
         RhythmRuntime::new(
-            NoOpController::new(),
+            Arc::new(NoOpController::new()),
             MockTimeProvider::default(),
             NoOpScheduler::new(),
             SimpleDeviceRegistry::new(),
@@ -850,9 +934,48 @@ mod tests {
         assert!(!snap.hard_off);
     }
 
-    // Tests that call block_on() internally require the tokio feature flag.
-    // They run under `cargo test -p rhythm-core --features tokio` or
-    // via `cargo test` (workspace enables tokio through rhythm-os/rhythm-addon).
+    #[cfg(feature = "blocking")]
+    fn spy_runtime() -> (SharedSpyTestRuntime, Arc<SpyLightController>) {
+        let spy = Arc::new(SpyLightController::new());
+        let runtime = Arc::new(RhythmRuntime::new(
+            spy.clone(),
+            MockTimeProvider::default(),
+            NoOpScheduler::new(),
+            SimpleDeviceRegistry::new(),
+            RuntimeConfig::default(),
+        ));
+        (runtime, spy)
+    }
+
+    #[cfg(feature = "blocking")]
+    fn restored_active_room_state() -> RestoredRoomState {
+        RestoredRoomState {
+            rhythm_enabled: true,
+            disabled: false,
+            time_offset_minutes: 0.0,
+            brightness_offset: 0.0,
+            soft_off: false,
+            hard_off: false,
+            profile_settings: crate::RoomProfileSettings::default(),
+        }
+    }
+
+    #[cfg(feature = "blocking")]
+    fn wait_for_any_lights_on_call(spy: &SpyLightController, room_id: &str) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if spy.calls().into_iter().any(|call| {
+                matches!(call, SpyCall::AnyLightsOn { room_id: call_room_id } if call_room_id == room_id)
+            }) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("Timed out waiting for any_lights_on({})", room_id);
+    }
+
+    // Tests that call block_on() internally require a sync executor feature.
+    // The workspace normally exercises these through rhythm-os/rhythm-addon.
 
     #[cfg(feature = "tokio")]
     #[test]
@@ -905,5 +1028,139 @@ mod tests {
         let result = handle.any_lights_on("room1");
         assert!(result.is_ok());
         assert!(!result.unwrap());
+    }
+
+    #[cfg(feature = "blocking")]
+    #[test]
+    fn slow_periodic_tick_does_not_block_turn_on_room_for_other_room() {
+        let (runtime, spy) = spy_runtime();
+        runtime.add_room("room-a", "Room A");
+        runtime.add_room("room-b", "Room B");
+        runtime.restore_room_state("room-a", restored_active_room_state());
+        spy.set_any_lights_on(true);
+        spy.set_turn_on_delay_for_room("room-a", Duration::from_millis(250));
+
+        let runtime_for_thread = runtime.clone();
+        let background = std::thread::spawn(move || {
+            RuntimeHandle::periodic_tick_node(runtime_for_thread.as_ref(), "room-a", "room-a", 14.0)
+        });
+
+        wait_for_any_lights_on_call(&spy, "room-a");
+
+        let start = Instant::now();
+        RuntimeHandle::turn_on_room(runtime.as_ref(), "room-b").unwrap();
+        let elapsed = start.elapsed();
+
+        background.join().unwrap().unwrap();
+
+        assert!(
+            elapsed < Duration::from_millis(150),
+            "turn_on_room on room-b took {:?} while room-a periodic dispatch was slow",
+            elapsed
+        );
+        let turn_on_rooms: Vec<_> = spy
+            .turn_on_calls()
+            .into_iter()
+            .map(|(room_id, _)| room_id)
+            .collect();
+        assert!(turn_on_rooms.contains(&"room-a".to_string()));
+        assert!(turn_on_rooms.contains(&"room-b".to_string()));
+    }
+
+    #[cfg(feature = "blocking")]
+    #[test]
+    fn slow_periodic_tick_does_not_block_button_press_for_other_room() {
+        let (runtime, spy) = spy_runtime();
+        runtime.add_room("room-a", "Room A");
+        runtime.add_room("room-b", "Room B");
+        runtime.restore_room_state("room-a", restored_active_room_state());
+        spy.set_any_lights_on(true);
+        spy.set_turn_on_delay_for_room("room-a", Duration::from_millis(250));
+
+        let runtime_for_thread = runtime.clone();
+        let background = std::thread::spawn(move || {
+            RuntimeHandle::periodic_tick_node(runtime_for_thread.as_ref(), "room-a", "room-a", 14.0)
+        });
+
+        wait_for_any_lights_on_call(&spy, "room-a");
+
+        let start = Instant::now();
+        RuntimeHandle::handle_event(
+            runtime.as_ref(),
+            &InputEvent::new("room-b", crate::runtime::events::ButtonAction::OnPress),
+        )
+        .unwrap();
+        let elapsed = start.elapsed();
+
+        background.join().unwrap().unwrap();
+
+        assert!(
+            elapsed < Duration::from_millis(150),
+            "handle_event on room-b took {:?} while room-a periodic dispatch was slow",
+            elapsed
+        );
+        let turn_on_rooms: Vec<_> = spy
+            .turn_on_calls()
+            .into_iter()
+            .map(|(room_id, _)| room_id)
+            .collect();
+        assert!(turn_on_rooms.contains(&"room-a".to_string()));
+        assert!(turn_on_rooms.contains(&"room-b".to_string()));
+    }
+
+    #[cfg(feature = "blocking")]
+    #[test]
+    fn apply_room_command_preserves_periodic_dedupe_cache() {
+        let (runtime, spy) = spy_runtime();
+        runtime.add_room("room-a", "Room A");
+        runtime.restore_room_state("room-a", restored_active_room_state());
+        spy.set_any_lights_on(true);
+
+        RuntimeHandle::periodic_tick_node(runtime.as_ref(), "room-a", "room-a", 14.0).unwrap();
+        let command = spy
+            .last_command_for("room-a")
+            .expect("periodic tick should dispatch command");
+
+        spy.reset();
+        RuntimeHandle::apply_room_command(runtime.as_ref(), "room-a", command).unwrap();
+        assert_eq!(spy.turn_on_count(), 1);
+
+        spy.reset();
+        RuntimeHandle::periodic_tick_node(runtime.as_ref(), "room-a", "room-a", 14.0).unwrap();
+        assert_eq!(
+            spy.turn_on_count(),
+            0,
+            "matching apply_room_command should keep periodic dedupe cache hot"
+        );
+    }
+
+    #[cfg(feature = "blocking")]
+    #[test]
+    fn same_room_dispatches_remain_serialized() {
+        let (runtime, spy) = spy_runtime();
+        runtime.add_room("room-a", "Room A");
+        runtime.restore_room_state("room-a", restored_active_room_state());
+        spy.set_any_lights_on(true);
+        spy.set_turn_on_delay_for_room("room-a", Duration::from_millis(250));
+
+        let runtime_for_thread = runtime.clone();
+        let background = std::thread::spawn(move || {
+            RuntimeHandle::periodic_tick_node(runtime_for_thread.as_ref(), "room-a", "room-a", 14.0)
+        });
+
+        wait_for_any_lights_on_call(&spy, "room-a");
+
+        let start = Instant::now();
+        RuntimeHandle::turn_on_room(runtime.as_ref(), "room-a").unwrap();
+        let elapsed = start.elapsed();
+
+        background.join().unwrap().unwrap();
+
+        assert!(
+            elapsed >= Duration::from_millis(200),
+            "same-room turn_on_room should wait behind in-flight periodic dispatch, elapsed {:?}",
+            elapsed
+        );
+        assert_eq!(spy.turn_on_count(), 2);
     }
 }

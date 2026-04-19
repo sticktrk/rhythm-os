@@ -43,7 +43,7 @@ fn make_ha_pipeline() -> (
     let controller = HaLightController::new(spy.clone(), controller_registry);
 
     let runtime = RhythmRuntime::new(
-        controller,
+        Arc::new(controller),
         MockTimeProvider::new(14.0, 172, 2026), // 2 PM, June 21
         NoOpScheduler::new(),
         SimpleDeviceRegistry::new(),

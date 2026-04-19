@@ -480,30 +480,6 @@ impl LightController for CompositeController {
     }
 }
 
-/// `LightController` impl for `Arc<CompositeController>` so the runtime can
-/// hold a shared reference while `AppState` holds another for dynamic registration.
-#[async_trait]
-impl LightController for Arc<CompositeController> {
-    async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
-        (**self).turn_on(room_id, command).await
-    }
-    async fn turn_off(&self, room_id: &str, transition_ms: Option<u32>) -> LightControlResult<()> {
-        (**self).turn_off(room_id, transition_ms).await
-    }
-    async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
-        (**self).get_rooms().await
-    }
-    async fn is_connected(&self) -> bool {
-        (**self).is_connected().await
-    }
-    async fn any_lights_on(&self, room_id: &str) -> LightControlResult<bool> {
-        (**self).any_lights_on(room_id).await
-    }
-    fn name(&self) -> &str {
-        (**self).name()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

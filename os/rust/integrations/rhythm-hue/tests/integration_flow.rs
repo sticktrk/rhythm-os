@@ -48,7 +48,7 @@ fn make_hue_pipeline() -> (
     let controller = HueLightController::new(spy.clone(), "testuser".to_string(), registry.clone());
 
     let runtime = RhythmRuntime::new(
-        controller,
+        Arc::new(controller),
         MockTimeProvider::new(14.0, 172, 2026),
         NoOpScheduler::new(),
         SimpleDeviceRegistry::new(),

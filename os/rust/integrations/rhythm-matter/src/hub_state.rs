@@ -4,17 +4,21 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use rhythm_devices::LightCapabilities;
+use rhythm_devices::{DeviceQuirk, LightCapabilities};
 use rhythm_os::hub::HubEvent;
 
 use crate::controller::MatterDeviceRegistry;
-use crate::transport::{CommissionedDevice, MatterDeviceInfo, MatterTransport};
+#[cfg(feature = "desktop")]
+use crate::transport::MatterTransport;
+use crate::transport::{CommissionedDevice, MatterDeviceInfo};
 
 /// Matter-specific state stored in `ActiveHub::hub_data`.
 pub struct MatterHubData {
     /// Shared transport for all controller, commissioning, and probe paths.
     #[cfg(feature = "desktop")]
     pub transport: std::sync::OnceLock<Arc<dyn MatterTransport>>,
+    /// Optional directory for raw probe captures.
+    pub capture_dir: std::sync::OnceLock<String>,
     /// Device registry (shared with controller).
     pub registry: Arc<Mutex<MatterDeviceRegistry>>,
     /// Matter fabric identifier.
@@ -25,6 +29,8 @@ pub struct MatterHubData {
     pub next_node_id: AtomicU64,
     /// Per-device capabilities keyed by device ID (for example `matter-42`).
     pub device_caps: Mutex<HashMap<String, LightCapabilities>>,
+    /// Per-device Matter quirks from `rhythm-devices`.
+    pub device_quirks: Mutex<HashMap<String, Vec<DeviceQuirk>>>,
     /// Event channel sender kept alive by the hub data.
     pub event_tx: std::sync::mpsc::Sender<HubEvent>,
 }
@@ -77,6 +83,9 @@ impl MatterHubData {
         if let Ok(mut caps) = self.device_caps.lock() {
             caps.retain(|key, _| key != &prefix && !key.starts_with(&format!("{}-", prefix)));
         }
+        if let Ok(mut quirks) = self.device_quirks.lock() {
+            quirks.retain(|key, _| key != &prefix && !key.starts_with(&format!("{}-", prefix)));
+        }
     }
 }
 
@@ -108,11 +117,13 @@ mod tests {
         MatterHubData {
             #[cfg(feature = "desktop")]
             transport: std::sync::OnceLock::new(),
+            capture_dir: std::sync::OnceLock::new(),
             registry: Arc::new(Mutex::new(MatterDeviceRegistry::new())),
             fabric_id: "default".to_string(),
             commissioned: Mutex::new(Vec::new()),
             next_node_id: AtomicU64::new(100),
             device_caps: Mutex::new(HashMap::new()),
+            device_quirks: Mutex::new(HashMap::new()),
             event_tx,
         }
     }

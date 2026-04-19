@@ -233,7 +233,7 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
     };
 
     let runtime = RhythmRuntime::new(
-        controller,
+        Arc::new(controller),
         time_provider,
         scheduler,
         {

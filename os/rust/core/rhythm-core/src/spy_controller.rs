@@ -6,7 +6,9 @@
 //! Gated behind `#[cfg(any(test, feature = "test-support"))]` — never compiled
 //! in production builds.
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use async_trait::async_trait;
 
@@ -47,6 +49,15 @@ pub struct SpyLightController {
     calls: Mutex<Vec<SpyCall>>,
     /// Configurable response for `any_lights_on`. Default: false.
     any_lights_on_response: Mutex<bool>,
+    delays: Mutex<SpyControllerDelays>,
+    turn_on_room_delays: Mutex<HashMap<String, Duration>>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SpyControllerDelays {
+    turn_on: Duration,
+    turn_off: Duration,
+    any_lights_on: Duration,
 }
 
 impl SpyLightController {
@@ -54,12 +65,37 @@ impl SpyLightController {
         Self {
             calls: Mutex::new(Vec::new()),
             any_lights_on_response: Mutex::new(false),
+            delays: Mutex::new(SpyControllerDelays::default()),
+            turn_on_room_delays: Mutex::new(HashMap::new()),
         }
     }
 
     /// Set the response for `any_lights_on` calls.
     pub fn set_any_lights_on(&self, on: bool) {
         *self.any_lights_on_response.lock().unwrap() = on;
+    }
+
+    /// Add a blocking delay before `turn_on` returns.
+    pub fn set_turn_on_delay(&self, delay: Duration) {
+        self.delays.lock().unwrap().turn_on = delay;
+    }
+
+    /// Add a blocking delay before `turn_on` returns for a specific room.
+    pub fn set_turn_on_delay_for_room(&self, room_id: &str, delay: Duration) {
+        self.turn_on_room_delays
+            .lock()
+            .unwrap()
+            .insert(room_id.to_string(), delay);
+    }
+
+    /// Add a blocking delay before `turn_off` returns.
+    pub fn set_turn_off_delay(&self, delay: Duration) {
+        self.delays.lock().unwrap().turn_off = delay;
+    }
+
+    /// Add a blocking delay before `any_lights_on` returns.
+    pub fn set_any_lights_on_delay(&self, delay: Duration) {
+        self.delays.lock().unwrap().any_lights_on = delay;
     }
 
     /// Get all recorded calls.
@@ -149,6 +185,12 @@ impl SpyLightController {
     pub fn reset(&self) {
         self.calls.lock().unwrap().clear();
     }
+
+    fn delay_for(&self, delay: Duration) {
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
+    }
 }
 
 impl Default for SpyLightController {
@@ -160,6 +202,14 @@ impl Default for SpyLightController {
 #[async_trait]
 impl LightController for SpyLightController {
     async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
+        let delay = self
+            .turn_on_room_delays
+            .lock()
+            .unwrap()
+            .get(room_id)
+            .copied()
+            .unwrap_or_else(|| self.delays.lock().unwrap().turn_on);
+        self.delay_for(delay);
         self.calls.lock().unwrap().push(SpyCall::TurnOn {
             room_id: room_id.to_string(),
             command,
@@ -168,6 +218,8 @@ impl LightController for SpyLightController {
     }
 
     async fn turn_off(&self, room_id: &str, transition_ms: Option<u32>) -> LightControlResult<()> {
+        let delay = self.delays.lock().unwrap().turn_off;
+        self.delay_for(delay);
         self.calls.lock().unwrap().push(SpyCall::TurnOff {
             room_id: room_id.to_string(),
             transition_ms,
@@ -184,6 +236,8 @@ impl LightController for SpyLightController {
     }
 
     async fn any_lights_on(&self, room_id: &str) -> LightControlResult<bool> {
+        let delay = self.delays.lock().unwrap().any_lights_on;
+        self.delay_for(delay);
         self.calls.lock().unwrap().push(SpyCall::AnyLightsOn {
             room_id: room_id.to_string(),
         });
@@ -192,30 +246,6 @@ impl LightController for SpyLightController {
 
     fn name(&self) -> &str {
         "Spy"
-    }
-}
-
-/// `LightController` impl for `Arc<SpyLightController>` so the runtime can
-/// hold a shared reference while tests hold another for inspection.
-#[async_trait]
-impl LightController for Arc<SpyLightController> {
-    async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
-        (**self).turn_on(room_id, command).await
-    }
-    async fn turn_off(&self, room_id: &str, transition_ms: Option<u32>) -> LightControlResult<()> {
-        (**self).turn_off(room_id, transition_ms).await
-    }
-    async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
-        (**self).get_rooms().await
-    }
-    async fn is_connected(&self) -> bool {
-        (**self).is_connected().await
-    }
-    async fn any_lights_on(&self, room_id: &str) -> LightControlResult<bool> {
-        (**self).any_lights_on(room_id).await
-    }
-    fn name(&self) -> &str {
-        (**self).name()
     }
 }
 
@@ -277,5 +307,23 @@ mod tests {
 
         spy.set_any_lights_on(true);
         assert!(spy.any_lights_on("room").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn configurable_delays_do_not_drop_calls() {
+        let spy = SpyLightController::new();
+        spy.set_turn_on_delay(Duration::from_millis(1));
+        spy.set_turn_off_delay(Duration::from_millis(1));
+        spy.set_any_lights_on_delay(Duration::from_millis(1));
+
+        spy.turn_on("kitchen", LightingCommand::new(50, 3000))
+            .await
+            .unwrap();
+        spy.turn_off("kitchen", Some(250)).await.unwrap();
+        let _ = spy.any_lights_on("kitchen").await.unwrap();
+
+        assert_eq!(spy.turn_on_count(), 1);
+        assert_eq!(spy.turn_off_count(), 1);
+        assert_eq!(spy.calls().len(), 3);
     }
 }

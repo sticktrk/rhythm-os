@@ -92,6 +92,7 @@ pub fn connect_and_start(state: SharedState, _key: &HubKey) -> Result<Receiver<H
         .data::<Arc<MatterHubData>>()
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("Matter hub data missing"))?;
+    let _ = hub_data.capture_dir.set(format!("{}/captures", data_path));
 
     hub.discovery = Some(Arc::new(crate::discovery::MatterDiscovery::new(
         transport, hub_data,
@@ -130,7 +131,11 @@ impl HubProvider for MatterHubProvider {
             let fabric_id = configured_fabric_id(state);
             let transport: Arc<dyn MatterTransport> =
                 Arc::new(ChipTransport::load_or_create(&data_path, &fabric_id)?);
-            crate::lifecycle::connect_matter(state, transport)
+            let (hub, event_rx) = crate::lifecycle::connect_matter(state, transport)?;
+            if let Some(hub_data) = hub.data::<Arc<MatterHubData>>().cloned() {
+                let _ = hub_data.capture_dir.set(format!("{}/captures", data_path));
+            }
+            Ok((hub, event_rx))
         })
     }
 }
