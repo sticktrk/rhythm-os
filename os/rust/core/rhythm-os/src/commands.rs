@@ -6921,6 +6921,7 @@ mod tests {
         config_updates: Mutex<Vec<LightProfileConfig>>,
         restore_calls: Mutex<Vec<(String, bool, bool)>>,
         time_offset_updates: Mutex<Vec<(String, f32)>>,
+        light_states: Mutex<HashMap<String, bool>>,
         current_hour: f32,
     }
 
@@ -6935,7 +6936,56 @@ mod tests {
                 config_updates: Mutex::new(Vec::new()),
                 restore_calls: Mutex::new(Vec::new()),
                 time_offset_updates: Mutex::new(Vec::new()),
+                light_states: Mutex::new(HashMap::new()),
                 current_hour,
+            }
+        }
+
+        fn set_light_on(&self, node_id: &str, on: bool) {
+            self.light_states
+                .lock()
+                .unwrap()
+                .insert(node_id.to_string(), on);
+        }
+
+        fn set_target_lights(&self, node_id: &str, on: bool) {
+            let snapshots = self.snapshots.lock().unwrap().clone();
+            let child_ids: Vec<_> = snapshots
+                .iter()
+                .filter(|snap| {
+                    snap.parent_id.as_deref() == Some(node_id) && snap.kind.is_light_addressable()
+                })
+                .map(|snap| snap.id.clone())
+                .collect();
+
+            let mut light_states = self.light_states.lock().unwrap();
+            if child_ids.is_empty() {
+                light_states.insert(node_id.to_string(), on);
+            } else {
+                for child_id in child_ids {
+                    light_states.insert(child_id, on);
+                }
+                light_states.insert(node_id.to_string(), on);
+            }
+        }
+
+        fn any_target_lights_on(&self, node_id: &str) -> bool {
+            let snapshots = self.snapshots.lock().unwrap().clone();
+            let child_ids: Vec<_> = snapshots
+                .iter()
+                .filter(|snap| {
+                    snap.parent_id.as_deref() == Some(node_id) && snap.kind.is_light_addressable()
+                })
+                .map(|snap| snap.id.clone())
+                .collect();
+
+            let light_states = self.light_states.lock().unwrap();
+            if child_ids.is_empty() {
+                light_states.get(node_id).copied().unwrap_or(false)
+            } else {
+                child_ids
+                    .iter()
+                    .any(|child_id| light_states.get(child_id).copied().unwrap_or(false))
             }
         }
 
@@ -6975,10 +7025,12 @@ mod tests {
                 .unwrap()
                 .push((event.room_id.clone(), event.action));
             // Reset/OnPress → lights on; LightsOff/OffPress → lights off
-            Ok(!matches!(
+            let turned_on = !matches!(
                 event.action,
                 ButtonAction::LightsOff | ButtonAction::OffPress
-            ))
+            );
+            self.set_target_lights(&event.room_id, turned_on);
+            Ok(turned_on)
         }
         fn sync_rooms(&self) -> anyhow::Result<()> {
             Ok(())
@@ -7057,7 +7109,8 @@ mod tests {
         fn dim_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
             Ok(())
         }
-        fn turn_on_room(&self, _: &str) -> anyhow::Result<()> {
+        fn turn_on_room(&self, room_id: &str) -> anyhow::Result<()> {
+            self.set_target_lights(room_id, true);
             Ok(())
         }
         fn apply_room_command(
@@ -7094,6 +7147,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((room_id.to_string(), transition_ms));
+            self.set_target_lights(room_id, false);
             Ok(())
         }
         fn set_power_save(&self, _: bool) -> Vec<String> {
@@ -7102,7 +7156,8 @@ mod tests {
         fn is_power_save(&self) -> bool {
             false
         }
-        fn set_room_brightness(&self, _: &str, _: u8) -> anyhow::Result<()> {
+        fn set_room_brightness(&self, room_id: &str, _: u8) -> anyhow::Result<()> {
+            self.set_target_lights(room_id, true);
             Ok(())
         }
         fn set_room_time_offset(&self, room_id: &str, offset_minutes: f32) -> anyhow::Result<()> {
@@ -7115,11 +7170,12 @@ mod tests {
         fn idle_brightness(&self) -> u8 {
             1
         }
-        fn soft_off_tick_room(&self, _: &str) -> anyhow::Result<()> {
+        fn soft_off_tick_room(&self, room_id: &str) -> anyhow::Result<()> {
+            self.set_target_lights(room_id, true);
             Ok(())
         }
-        fn any_lights_on(&self, _: &str) -> anyhow::Result<bool> {
-            Ok(false)
+        fn any_lights_on(&self, room_id: &str) -> anyhow::Result<bool> {
+            Ok(self.any_target_lights_on(room_id))
         }
         fn current_hour(&self) -> f32 {
             self.current_hour
@@ -7337,6 +7393,84 @@ mod tests {
             .push(make_light_child_snapshot(&device_id, "room1"));
 
         (state, runtime, device_id)
+    }
+
+    fn setup_mixed_room_with_hub_groups() -> (
+        SharedState,
+        Arc<MockRuntime>,
+        String,
+        String,
+        String,
+        String,
+    ) {
+        let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let matter_key = HubKey::new(HubType::new("matter"), "local");
+        let ha_key = HubKey::new(HubType::new("homeassistant"), "ha.local");
+        let hue_key = HubKey::new(HubType::new("hue"), "bridge");
+
+        let matter_id = insert_canonical_device(
+            &state,
+            matter_key.clone(),
+            "matter-light-1",
+            "Matter Lamp",
+            "",
+            "",
+        );
+        let ha_id = insert_canonical_device(
+            &state,
+            ha_key.clone(),
+            "ha-light-1",
+            "HA Lamp",
+            "ha-room-1",
+            "Room 1",
+        );
+        let hue_one_id = insert_canonical_device(
+            &state,
+            hue_key.clone(),
+            "hue-light-1",
+            "Hue Lamp 1",
+            "hue-room-1",
+            "Room 1",
+        );
+        let hue_two_id = insert_canonical_device(
+            &state,
+            hue_key.clone(),
+            "hue-light-2",
+            "Hue Lamp 2",
+            "hue-room-1",
+            "Room 1",
+        );
+
+        {
+            let mut s = state.lock().unwrap();
+            let mut room = crate::topology::TopologyRoom::new("room1", "room1");
+            room.upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                hub_key: ha_key,
+                hub_room_id: "ha-room-1".into(),
+                control_id: "ha-room-1".into(),
+                light_device_ids: vec!["ha-light-1".into()],
+            });
+            room.upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                hub_key: hue_key,
+                hub_room_id: "hue-room-1".into(),
+                control_id: "gl-room1".into(),
+                light_device_ids: vec!["hue-light-1".into(), "hue-light-2".into()],
+            });
+            s.topology.insert_room(room);
+            assert!(s.topology.attach_device_user_override("room1", &matter_id));
+            assert!(s.topology.attach_device_user_override("room1", &ha_id));
+            assert!(s.topology.attach_device_user_override("room1", &hue_one_id));
+            assert!(s.topology.attach_device_user_override("room1", &hue_two_id));
+        }
+
+        runtime.snapshots.lock().unwrap().extend([
+            make_light_child_snapshot(&matter_id, "room1"),
+            make_light_child_snapshot(&ha_id, "room1"),
+            make_light_child_snapshot(&hue_one_id, "room1"),
+            make_light_child_snapshot(&hue_two_id, "room1"),
+        ]);
+
+        (state, runtime, matter_id, ha_id, hue_one_id, hue_two_id)
     }
 
     #[derive(Clone, Default)]
@@ -7825,6 +7959,35 @@ mod tests {
         let s = state.lock().unwrap();
         assert_eq!(s.room_lights_on.get(&device_id), Some(&true));
         assert_eq!(s.room_lights_on.get("room1"), Some(&false));
+    }
+
+    #[test]
+    fn room_action_turning_on_matter_child_updates_mixed_room_parent_aggregate() {
+        let (state, _runtime, matter_id, _ha_id, _hue_one_id, _hue_two_id) =
+            setup_mixed_room_with_hub_groups();
+
+        let result = do_node_action(&state, &matter_id, "on", false);
+
+        assert!(result.is_ok());
+        let s = state.lock().unwrap();
+        assert_eq!(s.room_lights_on.get(&matter_id), Some(&true));
+        assert_eq!(s.room_lights_on.get("room1"), Some(&true));
+    }
+
+    #[test]
+    fn room_action_turning_off_matter_child_preserves_parent_when_siblings_are_on() {
+        let (state, runtime, matter_id, ha_id, hue_one_id, _hue_two_id) =
+            setup_mixed_room_with_hub_groups();
+        runtime.set_light_on(&matter_id, true);
+        runtime.set_light_on(&ha_id, true);
+        runtime.set_light_on(&hue_one_id, true);
+
+        let result = do_node_action(&state, &matter_id, "off", false);
+
+        assert!(result.is_ok());
+        let s = state.lock().unwrap();
+        assert_eq!(s.room_lights_on.get(&matter_id), Some(&false));
+        assert_eq!(s.room_lights_on.get("room1"), Some(&true));
     }
 
     #[test]
@@ -9591,6 +9754,30 @@ mod tests {
         let s = state.lock().unwrap();
         assert_eq!(s.room_lights_on.get("room1"), Some(&true));
         assert_eq!(s.room_lights_on.len(), 1);
+    }
+
+    #[test]
+    fn room_preferences_hard_off_keeps_mixed_room_parent_on_when_siblings_are_on() {
+        let (state, runtime, matter_id, ha_id, hue_one_id, _hue_two_id) =
+            setup_mixed_room_with_hub_groups();
+        runtime.set_light_on(&matter_id, true);
+        runtime.set_light_on(&ha_id, true);
+        runtime.set_light_on(&hue_one_id, true);
+
+        let result = do_node_preferences_set(
+            &state,
+            &matter_id,
+            None,
+            None,
+            Some(RoomModeState::HardOff),
+            None,
+            false,
+        );
+
+        assert!(result.is_ok());
+        let s = state.lock().unwrap();
+        assert_eq!(s.room_lights_on.get(&matter_id), Some(&false));
+        assert_eq!(s.room_lights_on.get("room1"), Some(&true));
     }
 
     #[test]
