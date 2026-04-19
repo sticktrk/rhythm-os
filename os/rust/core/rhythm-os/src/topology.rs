@@ -541,7 +541,7 @@ impl RoomTopologyStore {
         create_if_missing: bool,
     ) -> bool {
         if let Some(room_id) = parent_id {
-            if self.rooms.get(room_id).is_none() {
+            if !self.rooms.contains_key(room_id) {
                 return false;
             }
         }
@@ -1307,7 +1307,7 @@ impl RoomTopologyStore {
 
     /// Move a device from one room to another.
     pub fn move_device(&mut self, device_id: &str, from_room: &str, to_room: &str) -> bool {
-        if self.rooms.get(from_room).is_none() {
+        if !self.rooms.contains_key(from_room) {
             return false;
         }
         if self.device_parent_room_id(device_id) != Some(from_room) {

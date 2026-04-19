@@ -789,36 +789,55 @@ fn node_metadata_from_topology(
     )
 }
 
-fn build_node_state_dto_from_snapshot_parts(
-    s: &AppState,
-    snap: &rhythm_core::NodeSnapshot,
-    light_profile_configs: &BTreeMap<String, LightProfileConfig>,
-    mode_configs: &[ModeConfig],
+struct NodeStateDtoBuildContext<'a> {
+    state: &'a AppState,
+    light_profile_configs: &'a BTreeMap<String, LightProfileConfig>,
+    mode_configs: &'a [ModeConfig],
     active_mode: RhythmMode,
     solar_noon: f32,
     latitude: f32,
     utc_offset: f32,
-    room_lights_on: &HashMap<String, bool>,
-    motion_snapshots: &HashMap<String, crate::state::MotionSnapshot>,
-    nodes_with_sensors: &HashSet<String>,
-    transitioning_nodes: &HashSet<String>,
+    room_lights_on: &'a HashMap<String, bool>,
+    motion_snapshots: &'a HashMap<String, crate::state::MotionSnapshot>,
+    nodes_with_sensors: &'a HashSet<String>,
+    transitioning_nodes: &'a HashSet<String>,
+}
+
+struct NodeStateDtoMetadata {
     hub_types: Vec<String>,
     placement: Option<crate::topology::DevicePlacement>,
     manufacturer: Option<String>,
     model: Option<String>,
+}
+
+fn node_state_dto_metadata(s: &AppState, node_id: &str) -> NodeStateDtoMetadata {
+    let (placement, manufacturer, model) = node_metadata_from_topology(s, node_id);
+    NodeStateDtoMetadata {
+        hub_types: node_hub_types_from_topology(s, node_id),
+        placement,
+        manufacturer,
+        model,
+    }
+}
+
+fn build_node_state_dto_from_snapshot_parts(
+    ctx: &NodeStateDtoBuildContext<'_>,
+    snap: &rhythm_core::NodeSnapshot,
+    metadata: NodeStateDtoMetadata,
 ) -> NodeStateDto {
-    let warning_active = motion_snapshots
+    let warning_active = ctx
+        .motion_snapshots
         .get(&snap.id)
         .is_some_and(|motion| motion.warning_active);
     let state = room_mode_state_from_flags(snap.hard_off, snap.soft_off, warning_active);
     let (brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
         RoomLightingContext {
-            light_profile_configs,
-            mode_configs,
-            mode: active_mode,
-            solar_noon,
-            latitude,
-            utc_offset,
+            light_profile_configs: ctx.light_profile_configs,
+            mode_configs: ctx.mode_configs,
+            mode: ctx.active_mode,
+            solar_noon: ctx.solar_noon,
+            latitude: ctx.latitude,
+            utc_offset: ctx.utc_offset,
         },
         RoomLightingInput {
             settings: &snap.profile_settings,
@@ -829,7 +848,7 @@ fn build_node_state_dto_from_snapshot_parts(
     );
 
     let (motion_active, motion_owned, remaining_secs, timeout_secs, warning_active) =
-        if let Some(ms) = motion_snapshots.get(&snap.id) {
+        if let Some(ms) = ctx.motion_snapshots.get(&snap.id) {
             (
                 Some(ms.motion_active),
                 Some(ms.motion_owned),
@@ -837,18 +856,18 @@ fn build_node_state_dto_from_snapshot_parts(
                 Some(ms.timeout_secs),
                 Some(ms.warning_active),
             )
-        } else if nodes_with_sensors.contains(&snap.id) {
+        } else if ctx.nodes_with_sensors.contains(&snap.id) {
             let timeout = resolved_room_motion_timeout_secs_from_parts(
                 RoomLightingContext {
-                    light_profile_configs,
-                    mode_configs,
-                    mode: active_mode,
-                    solar_noon,
-                    latitude,
-                    utc_offset,
+                    light_profile_configs: ctx.light_profile_configs,
+                    mode_configs: ctx.mode_configs,
+                    mode: ctx.active_mode,
+                    solar_noon: ctx.solar_noon,
+                    latitude: ctx.latitude,
+                    utc_offset: ctx.utc_offset,
                 },
                 &snap.profile_settings,
-                current_local_hour(utc_offset),
+                current_local_hour(ctx.utc_offset),
             );
             (Some(false), Some(false), None, Some(timeout), Some(false))
         } else {
@@ -860,23 +879,23 @@ fn build_node_state_dto_from_snapshot_parts(
         name: snap.name.clone(),
         kind: snap.kind,
         parent_id: snap.parent_id.clone(),
-        placement,
-        hub_types,
-        manufacturer,
-        model,
+        placement: metadata.placement,
+        hub_types: metadata.hub_types,
+        manufacturer: metadata.manufacturer,
+        model: metadata.model,
         state,
         rhythm_enabled: snap.rhythm_enabled,
         disabled: snap.disabled,
         time_offset: snap.time_offset_minutes,
         brightness_offset: snap.brightness_offset,
         lights_on: lights_on_from_cache(
-            s,
-            room_lights_on,
+            ctx.state,
+            ctx.room_lights_on,
             &snap.id,
             snap.kind,
             snap.parent_id.as_deref(),
         ),
-        transitioning: transitioning_nodes.contains(&snap.id),
+        transitioning: ctx.transitioning_nodes.contains(&snap.id),
         brightness,
         kelvin,
         profile_settings: snap.profile_settings.clone(),
@@ -1439,27 +1458,26 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
 
     let nodes = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let dto_ctx = NodeStateDtoBuildContext {
+            state: &s,
+            light_profile_configs: &light_profile_configs,
+            mode_configs: &mode_configs,
+            active_mode,
+            solar_noon,
+            latitude,
+            utc_offset,
+            room_lights_on: &room_lights_on,
+            motion_snapshots: &motion_snapshots,
+            nodes_with_sensors: &nodes_with_sensors,
+            transitioning_nodes: &transitioning_nodes,
+        };
         let mut nodes = Vec::with_capacity(node_snapshots.len());
         for snap in &node_snapshots {
-            let hub_types = node_hub_types_from_topology(&s, &snap.id);
-            let (placement, manufacturer, model) = node_metadata_from_topology(&s, &snap.id);
+            let metadata = node_state_dto_metadata(&s, &snap.id);
             nodes.push(build_node_state_dto_from_snapshot_parts(
-                &s,
+                &dto_ctx,
                 snap,
-                &light_profile_configs,
-                &mode_configs,
-                active_mode,
-                solar_noon,
-                latitude,
-                utc_offset,
-                &room_lights_on,
-                &motion_snapshots,
-                &nodes_with_sensors,
-                &transitioning_nodes,
-                hub_types,
-                placement,
-                manufacturer,
-                model,
+                metadata,
             ));
         }
         nodes.sort_by(|left, right| {
@@ -1511,25 +1529,30 @@ pub fn build_node_state(state: &SharedState, node_id: &str) -> Result<NodeStateD
         .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
 
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    let hub_types = node_hub_types_from_topology(&s, node_id);
+    let mode_configs = s.mode_configs();
+    let dto_ctx = NodeStateDtoBuildContext {
+        state: &s,
+        light_profile_configs: &s.light_profile_configs,
+        mode_configs: &mode_configs,
+        active_mode: s.active_mode,
+        solar_noon: s.solar_noon_hour(),
+        latitude: s.latitude.unwrap_or(35.0),
+        utc_offset: s.utc_offset_hours,
+        room_lights_on: &room_lights_on,
+        motion_snapshots: &motion_snapshots,
+        nodes_with_sensors: &nodes_with_sensors,
+        transitioning_nodes: &transitioning_nodes,
+    };
     let (placement, manufacturer, model) = node_metadata_from_topology(&s, node_id);
     Ok(build_node_state_dto_from_snapshot_parts(
-        &s,
+        &dto_ctx,
         &snap,
-        &s.light_profile_configs,
-        &s.mode_configs(),
-        s.active_mode,
-        s.solar_noon_hour(),
-        s.latitude.unwrap_or(35.0),
-        s.utc_offset_hours,
-        &room_lights_on,
-        &motion_snapshots,
-        &nodes_with_sensors,
-        &transitioning_nodes,
-        hub_types,
-        placement,
-        manufacturer,
-        model,
+        NodeStateDtoMetadata {
+            hub_types: node_hub_types_from_topology(&s, node_id),
+            placement,
+            manufacturer,
+            model,
+        },
     ))
 }
 
@@ -1594,27 +1617,25 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
     node_snapshots.sort_by(|left, right| left.id.cmp(&right.id));
 
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let dto_ctx = NodeStateDtoBuildContext {
+        state: &s,
+        light_profile_configs: &light_profile_configs,
+        mode_configs: &mode_configs,
+        active_mode,
+        solar_noon,
+        latitude,
+        utc_offset,
+        room_lights_on: &room_lights_on,
+        motion_snapshots: &motion_snapshots,
+        nodes_with_sensors: &nodes_with_sensors,
+        transitioning_nodes: &transitioning_nodes,
+    };
     let mut nodes = Vec::with_capacity(node_snapshots.len());
     for snap in &node_snapshots {
-        let hub_types = node_hub_types_from_topology(&s, &snap.id);
-        let (placement, manufacturer, model) = node_metadata_from_topology(&s, &snap.id);
         nodes.push(build_node_state_dto_from_snapshot_parts(
-            &s,
+            &dto_ctx,
             snap,
-            &light_profile_configs,
-            &mode_configs,
-            active_mode,
-            solar_noon,
-            latitude,
-            utc_offset,
-            &room_lights_on,
-            &motion_snapshots,
-            &nodes_with_sensors,
-            &transitioning_nodes,
-            hub_types,
-            placement,
-            manufacturer,
-            model,
+            node_state_dto_metadata(&s, &snap.id),
         ));
     }
     nodes.sort_by(|left, right| {

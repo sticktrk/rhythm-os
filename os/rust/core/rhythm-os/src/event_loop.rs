@@ -593,31 +593,29 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                         target_node_id
                     );
                 }
-            } else {
-                if let Some(source) = motion.sensors.get_mut(&source_node_id) {
-                    source.target_node_id = target_node_id.clone();
-                    source.stopped_at = Some(Instant::now());
+            } else if let Some(source) = motion.sensors.get_mut(&source_node_id) {
+                source.target_node_id = target_node_id.clone();
+                source.stopped_at = Some(Instant::now());
 
-                    let all_cleared = motion
-                        .sensors
-                        .values()
-                        .filter(|source| source.target_node_id == target_node_id)
-                        .all(|source| source.stopped_at.is_some());
-                    info!(
-                        target: "evt",
-                        "Motion: source {} stopped on target {} - all_cleared={}",
-                        source_node_id,
-                        target_node_id,
-                        all_cleared
-                    );
-                } else {
-                    info!(
-                        target: "evt",
-                        "Motion: detected=false for source {} target {} but not tracked, ignoring",
-                        source_node_id,
-                        target_node_id
-                    );
-                }
+                let all_cleared = motion
+                    .sensors
+                    .values()
+                    .filter(|source| source.target_node_id == target_node_id)
+                    .all(|source| source.stopped_at.is_some());
+                info!(
+                    target: "evt",
+                    "Motion: source {} stopped on target {} - all_cleared={}",
+                    source_node_id,
+                    target_node_id,
+                    all_cleared
+                );
+            } else {
+                info!(
+                    target: "evt",
+                    "Motion: detected=false for source {} target {} but not tracked, ignoring",
+                    source_node_id,
+                    target_node_id
+                );
             }
         }
 

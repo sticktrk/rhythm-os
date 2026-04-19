@@ -1494,8 +1494,10 @@ mod tests {
 
     #[test]
     fn periodic_dispatch_nodes_ignore_non_light_addressable_nodes() {
-        let mut state = crate::state::AppState::default();
-        state.composite_controller = Some(Arc::new(CompositeController::new()));
+        let mut state = crate::state::AppState {
+            composite_controller: Some(Arc::new(CompositeController::new())),
+            ..Default::default()
+        };
 
         let room_id = state.topology.create_room("Kitchen");
         state
@@ -1567,8 +1569,10 @@ mod tests {
 
     #[test]
     fn periodic_dispatch_nodes_follow_topology_light_nodes_with_composite() {
-        let mut state = crate::state::AppState::default();
-        state.composite_controller = Some(Arc::new(CompositeController::new()));
+        let mut state = crate::state::AppState {
+            composite_controller: Some(Arc::new(CompositeController::new())),
+            ..Default::default()
+        };
 
         let room_id = state.topology.create_room("Kitchen");
         state
