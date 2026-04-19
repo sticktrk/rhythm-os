@@ -5352,7 +5352,10 @@ pub fn do_node_preferences_set(
     let entered_hard_off = hard_off && !prev_hard_off;
     let left_hard_off = !hard_off && prev_hard_off;
 
+    let mut refresh_lights_on = false;
+
     if entered_hard_off {
+        refresh_lights_on = true;
         info!(target: "cmd", "node_preferences_set: {} entering hard_off", node_id);
         queue_motion_timer_clear(state, node_id);
         let event = InputEvent::new(node_id, ButtonAction::LightsOff);
@@ -5360,16 +5363,19 @@ pub fn do_node_preferences_set(
             warn!(target: "cmd", "lights_off for '{}' failed: {}", node_id, e);
         }
     } else if soft_off && !prev_soft_off {
+        refresh_lights_on = true;
         info!(target: "cmd", "node_preferences_set: {} entering idle", node_id);
         if let Err(e) = runtime.soft_off_tick_room(node_id) {
             warn!(target: "cmd", "soft_off_tick for '{}' failed: {}", node_id, e);
         }
     } else if !soft_off && prev_soft_off {
+        refresh_lights_on = true;
         info!(target: "cmd", "node_preferences_set: {} leaving idle, turning on", node_id);
         if let Err(e) = runtime.turn_on_room(node_id) {
             warn!(target: "cmd", "turn_on for '{}' failed: {}", node_id, e);
         }
     } else if left_hard_off {
+        refresh_lights_on = true;
         match persistent_state {
             RoomModeState::Active => {
                 info!(target: "cmd", "node_preferences_set: {} leaving hard_off to active", node_id);
@@ -5388,12 +5394,14 @@ pub fn do_node_preferences_set(
     } else if room_profile.is_some_and(|patch| patch.touches_profile_settings()) {
         match persistent_state {
             RoomModeState::Idle => {
+                refresh_lights_on = true;
                 info!(target: "cmd", "node_preferences_set: {} applying profile settings to idle state", node_id);
                 if let Err(e) = runtime.soft_off_tick_room(node_id) {
                     warn!(target: "cmd", "soft_off_tick for '{}' failed: {}", node_id, e);
                 }
             }
             RoomModeState::Active if lights_on => {
+                refresh_lights_on = true;
                 info!(target: "cmd", "node_preferences_set: {} applying profile settings to active lights", node_id);
                 if let Err(e) = runtime.turn_on_room(node_id) {
                     warn!(target: "cmd", "turn_on for '{}' failed: {}", node_id, e);
@@ -5406,7 +5414,9 @@ pub fn do_node_preferences_set(
         }
     }
 
-    refresh_lights_on_cache_for_runtime_node(state, &runtime, node_id);
+    if refresh_lights_on {
+        refresh_lights_on_cache_for_runtime_node(state, &runtime, node_id);
+    }
 
     #[cfg(feature = "desktop")]
     {
@@ -9784,6 +9794,23 @@ mod tests {
         let (state, _rt) = setup_state(vec![snap]);
         let result = do_node_preferences_set(&state, "r1", Some(true), None, None, None, false);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn room_preferences_disabled_does_not_change_lights_on_cache() {
+        let snap = make_snapshot("r1", false, false);
+        let (state, _rt) = setup_state(vec![snap]);
+        state
+            .lock()
+            .unwrap()
+            .room_lights_on
+            .insert("r1".into(), true);
+
+        let result = do_node_preferences_set(&state, "r1", None, Some(true), None, None, false);
+
+        assert!(result.is_ok());
+        let s = state.lock().unwrap();
+        assert_eq!(s.room_lights_on.get("r1"), Some(&true));
     }
 
     #[test]
