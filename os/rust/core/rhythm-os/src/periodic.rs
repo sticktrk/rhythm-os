@@ -81,8 +81,11 @@ fn periodic_dispatch_nodes_from_state(
     state: &AppState,
     room_snapshots: &[rhythm_core::NodeSnapshot],
 ) -> Vec<PeriodicDispatchNode> {
-    let mut eligible_room_ids: Vec<String> =
-        room_snapshots.iter().map(|room| room.id.clone()).collect();
+    let mut eligible_room_ids: Vec<String> = room_snapshots
+        .iter()
+        .filter(|node| node.kind.is_light_addressable())
+        .map(|node| node.id.clone())
+        .collect();
     eligible_room_ids.sort();
     eligible_room_ids.dedup();
 
@@ -438,7 +441,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
         let module = profile_registry.active_profile();
         let values = module.calculate(&ctx);
 
-        // Get rhythm-enabled runtime nodes, skipping warning-dimmed nodes
+        // Get rhythm-enabled light-addressable runtime nodes, skipping warning-dimmed nodes
         let (
             mut room_snapshots,
             mut periodic_nodes,
@@ -470,6 +473,9 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             let rooms: Vec<rhythm_core::NodeSnapshot> = all_rooms
                 .into_iter()
                 .filter(|room| {
+                    if !room.kind.is_light_addressable() {
+                        return false;
+                    }
                     let event_room_id = room.parent_id.as_deref().unwrap_or(&room.id);
                     if !room.rhythm_enabled {
                         rhythm_disabled_skipped += 1;
@@ -1446,6 +1452,54 @@ mod tests {
                 node_id: "room-a".to_string(),
                 settings_node_id: "room-a".to_string(),
                 emit_node_id: "room-a".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn periodic_dispatch_nodes_ignore_non_light_addressable_nodes() {
+        let mut state = crate::state::AppState::default();
+        state.composite_controller = Some(Arc::new(CompositeController::new()));
+
+        let room_id = state.topology.create_room("Kitchen");
+        state
+            .topology
+            .get_mut(&room_id)
+            .unwrap()
+            .upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                hub_key: crate::canonical::identity::HubKey::new(
+                    crate::hub::HubType::new("hue"),
+                    "192.168.1.10",
+                ),
+                hub_room_id: "hue-room-1".to_string(),
+                control_id: "gl-1".to_string(),
+                light_device_ids: vec!["hue-light-1".to_string()],
+            });
+
+        let snapshots = vec![
+            make_room(&room_id, 0.0),
+            make_node(
+                "button-1",
+                rhythm_core::LightNodeKind::Button,
+                Some(&room_id),
+            ),
+            make_node(
+                "motion-1",
+                rhythm_core::LightNodeKind::MotionSensor,
+                Some(&room_id),
+            ),
+        ];
+        let expected = state
+            .topology
+            .periodic_light_nodes(&state.canonical_registry);
+        assert_eq!(expected.len(), 1);
+
+        assert_eq!(
+            periodic_dispatch_nodes_from_state(&state, &snapshots),
+            vec![PeriodicDispatchNode {
+                node_id: expected[0].id.clone(),
+                settings_node_id: room_id,
+                emit_node_id: expected[0].emit_node_id.clone(),
             }]
         );
     }

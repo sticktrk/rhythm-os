@@ -350,6 +350,28 @@ where
             current_hour,
         ));
 
+        let room_label = engine
+            .rooms()
+            .get(source_room_id)
+            .map(|room| {
+                crate::composite_controller::format_node_log_label(
+                    source_room_id,
+                    Some(&room.name),
+                )
+            })
+            .unwrap_or_else(|| source_room_id.to_string());
+        let node_label = if node_id == source_room_id {
+            room_label.clone()
+        } else if let Some(node) = engine.rooms().get(node_id) {
+            crate::composite_controller::format_node_log_label(node_id, Some(&node.name))
+        } else {
+            format!(
+                "{} via {}",
+                room_label,
+                crate::composite_controller::format_node_log_label(node_id, None)
+            )
+        };
+
         match result {
             crate::primitives::PeriodicTickResult::Updated => {
                 if let Some(room) = engine.rooms().get(source_room_id) {
@@ -360,16 +382,6 @@ where
                         RoomModeState::Wake => "wake",
                         RoomModeState::Warning => "warning",
                         RoomModeState::HardOff => "hard_off",
-                    };
-                    let room_label = if room.name != room.id {
-                        format!("{} ({})", room.name, room.id)
-                    } else {
-                        room.id.clone()
-                    };
-                    let node_label = if node_id == source_room_id {
-                        room_label.clone()
-                    } else {
-                        format!("{room_label} via {node_id}")
                     };
                     let mode = engine.profile_registry().active_mode();
                     let profile_id = engine
@@ -397,7 +409,12 @@ where
                 }
             }
             crate::primitives::PeriodicTickResult::Error(e) => {
-                log::warn!(target: "sys", "Periodic room tick failed: {}", e);
+                log::warn!(
+                    target: "sys",
+                    "Periodic room tick failed for {}: {}",
+                    node_label,
+                    e
+                );
             }
             crate::primitives::PeriodicTickResult::Skipped => {}
         }

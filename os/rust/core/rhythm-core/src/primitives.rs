@@ -174,6 +174,11 @@ impl<C: LightController> RhythmEngine<C> {
         self.profile_registry.set_mode_configs(configs);
     }
 
+    fn node_log_label(&self, node_id: &str) -> String {
+        let node_name = self.rooms.get(node_id).map(|node| node.name.as_str());
+        crate::composite_controller::format_node_log_label(node_id, node_name)
+    }
+
     /// Set the solar time reference.
     pub fn set_solar(&mut self, solar: SolarTime) {
         self.solar = solar;
@@ -962,7 +967,11 @@ impl<C: LightController> RhythmEngine<C> {
             {
                 Ok(true) => PeriodicTickResult::Updated,
                 Ok(false) => PeriodicTickResult::Skipped,
-                Err(e) => PeriodicTickResult::Error(format!("{}: {}", source_room_id, e)),
+                Err(e) => PeriodicTickResult::Error(format!(
+                    "{}: {}",
+                    self.node_log_label(source_room_id),
+                    e
+                )),
             };
         }
 
@@ -997,7 +1006,11 @@ impl<C: LightController> RhythmEngine<C> {
         {
             Ok(true) => PeriodicTickResult::Updated,
             Ok(false) => PeriodicTickResult::Skipped,
-            Err(e) => PeriodicTickResult::Error(format!("{}: {}", source_room_id, e)),
+            Err(e) => PeriodicTickResult::Error(format!(
+                "{}: {}",
+                self.node_log_label(source_room_id),
+                e
+            )),
         }
     }
 

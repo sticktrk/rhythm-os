@@ -586,6 +586,14 @@ fn light_node_uses_parent_dispatch(s: &AppState, node_id: &str, kind: LightNodeK
             .attached_light_uses_parent_dispatch(node_id, &s.canonical_registry)
 }
 
+fn room_has_group_light_dispatch(s: &AppState, room_id: &str) -> bool {
+    s.topology.get(room_id).is_some_and(|room| {
+        room.hub_room_bindings
+            .iter()
+            .any(|binding| !binding.light_device_ids.is_empty())
+    })
+}
+
 pub(crate) fn effective_lights_on_cache_key<'a>(
     s: &AppState,
     node_id: &'a str,
@@ -650,24 +658,30 @@ pub(crate) fn update_lights_on_cache_for_runtime_node(
         );
 
         if let Some(parent_id) = snap.parent_id.as_deref() {
-            match runtime.any_lights_on(parent_id) {
-                Ok(parent_lights_on) => {
-                    update_lights_on_cache_for_node(
-                        state,
-                        parent_id,
-                        LightNodeKind::Room,
-                        None,
-                        parent_lights_on,
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        target: "cmd",
-                        "Failed to refresh parent lights_on for '{}' after node '{}': {}",
-                        parent_id,
-                        node_id,
-                        e
-                    );
+            let should_refresh_parent = state
+                .lock()
+                .ok()
+                .is_some_and(|s| room_has_group_light_dispatch(&s, parent_id));
+            if should_refresh_parent {
+                match runtime.any_lights_on(parent_id) {
+                    Ok(parent_lights_on) => {
+                        update_lights_on_cache_for_node(
+                            state,
+                            parent_id,
+                            LightNodeKind::Room,
+                            None,
+                            parent_lights_on,
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            target: "cmd",
+                            "Failed to refresh parent lights_on for '{}' after node '{}': {}",
+                            parent_id,
+                            node_id,
+                            e
+                        );
+                    }
                 }
             }
         }
@@ -715,21 +729,27 @@ pub(crate) fn refresh_lights_on_cache_for_runtime_node(
         .as_deref()
         .filter(|parent_id| *parent_id != query_id)
     {
-        match runtime.any_lights_on(parent_id) {
-            Ok(parent_lights_on) => update_lights_on_cache_for_node(
-                state,
-                parent_id,
-                LightNodeKind::Room,
-                None,
-                parent_lights_on,
-            ),
-            Err(e) => warn!(
-                target: "cmd",
-                "Failed to refresh parent lights_on for '{}' after node '{}': {}",
-                parent_id,
-                node_id,
-                e
-            ),
+        let should_refresh_parent = state
+            .lock()
+            .ok()
+            .is_some_and(|s| room_has_group_light_dispatch(&s, parent_id));
+        if should_refresh_parent {
+            match runtime.any_lights_on(parent_id) {
+                Ok(parent_lights_on) => update_lights_on_cache_for_node(
+                    state,
+                    parent_id,
+                    LightNodeKind::Room,
+                    None,
+                    parent_lights_on,
+                ),
+                Err(e) => warn!(
+                    target: "cmd",
+                    "Failed to refresh parent lights_on for '{}' after node '{}': {}",
+                    parent_id,
+                    node_id,
+                    e
+                ),
+            }
         }
     }
 }
@@ -5551,19 +5571,70 @@ fn ensure_runtime_device_node_exists(
 /// Call after any operation that changes room-to-hub mappings: room sync,
 /// hub connect/disconnect, topology merge/split/device-move.
 #[cfg(feature = "desktop")]
+fn composite_node_labels(s: &AppState) -> HashMap<String, String> {
+    let mut labels = HashMap::new();
+
+    let mut room_ids: Vec<_> = s.topology.rooms().map(|room| room.id.clone()).collect();
+    room_ids.sort();
+    for room_id in room_ids {
+        let Some(room) = s.topology.get(&room_id) else {
+            continue;
+        };
+        labels.insert(room.id.clone(), room.name.clone());
+    }
+
+    let mut device_ids: Vec<_> = s.topology.device_nodes().map(|node| node.id.clone()).collect();
+    device_ids.sort();
+    for device_id in device_ids {
+        let Some(node) = s.topology.get_device_node(&device_id) else {
+            continue;
+        };
+        let label = s
+            .canonical_registry
+            .get(&node.canonical_device_id)
+            .map(|device| device.name.clone())
+            .unwrap_or_else(|| node.id.clone());
+        labels.insert(node.id.clone(), label);
+    }
+
+    for light_node in s.topology.periodic_light_nodes(&s.canonical_registry) {
+        let label = s
+            .topology
+            .get(&light_node.source_node_id)
+            .map(|room| room.name.clone())
+            .or_else(|| {
+                s.topology
+                    .get_device_node(&light_node.source_node_id)
+                    .and_then(|node| {
+                        s.canonical_registry
+                            .get(&node.canonical_device_id)
+                            .map(|device| device.name.clone())
+                    })
+            });
+        if let Some(label) = label {
+            labels.insert(light_node.id, label);
+        }
+    }
+
+    labels
+}
+
+#[cfg(feature = "desktop")]
 pub fn rebuild_composite_routing(state: &SharedState) {
-    let (composite, routing, room_count) = {
+    let (composite, routing, labels, room_count) = {
         let Ok(s) = state.lock() else { return };
         let composite = match s.composite_controller.clone() {
             Some(c) => c,
             None => return, // No composite yet — nothing to rebuild
         };
         let routing = s.topology.composite_routing(&s.canonical_registry);
+        let labels = composite_node_labels(&s);
         let rooms = s.topology.room_count();
-        (composite, routing, rooms)
+        (composite, routing, labels, rooms)
     };
     let route_count = routing.len();
     composite.update_routing(routing);
+    composite.update_node_labels(labels);
     info!(target: "cmd", "Rebuilt composite routing: {} rooms, {} route entries (incl. hub aliases)",
         room_count, route_count);
 }

@@ -42,6 +42,16 @@ use crate::controller::{
 use crate::lighting::LightingCommand;
 use crate::room::Room;
 
+pub(crate) fn format_node_log_label(node_id: &str, node_name: Option<&str>) -> String {
+    match node_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != node_id)
+    {
+        Some(name) => format!("{} ({})", name, node_id),
+        None => node_id.to_string(),
+    }
+}
+
 /// Block on a future from a non-async context (spawned OS threads).
 #[cfg(any(feature = "tokio", feature = "blocking"))]
 fn sync_block_on<F: std::future::Future>(f: F) -> F::Output {
@@ -127,6 +137,8 @@ pub struct CompositeController {
     controllers: RwLock<HashMap<String, Arc<dyn HubLightController>>>,
     /// Room routing: topology_room_id → list of (hub_key, dispatch target) pairs.
     routing: RwLock<HashMap<String, Vec<(String, HubDispatchTarget)>>>,
+    /// Human-readable node labels for logs keyed by public/synthetic node ID.
+    node_labels: RwLock<HashMap<String, String>>,
 }
 
 impl CompositeController {
@@ -135,6 +147,7 @@ impl CompositeController {
         Self {
             controllers: RwLock::new(HashMap::new()),
             routing: RwLock::new(HashMap::new()),
+            node_labels: RwLock::new(HashMap::new()),
         }
     }
 
@@ -161,6 +174,13 @@ impl CompositeController {
     pub fn update_routing(&self, table: HashMap<String, Vec<(String, HubDispatchTarget)>>) {
         if let Ok(mut routing) = self.routing.write() {
             *routing = table;
+        }
+    }
+
+    /// Replace the node-label lookup table used for logs.
+    pub fn update_node_labels(&self, labels: HashMap<String, String>) {
+        if let Ok(mut node_labels) = self.node_labels.write() {
+            *node_labels = labels;
         }
     }
 
@@ -197,13 +217,23 @@ impl CompositeController {
                 })
                 .collect()
         } else {
+            let node_label = self.node_log_label(room_id);
             warn!(
                 target: "composite",
-                "No routing entry for room '{}'",
-                room_id
+                "No routing entry for node {}",
+                node_label
             );
             Vec::new()
         }
+    }
+
+    fn node_log_label(&self, node_id: &str) -> String {
+        let node_name = self
+            .node_labels
+            .read()
+            .ok()
+            .and_then(|labels| labels.get(node_id).cloned());
+        format_node_log_label(node_id, node_name.as_deref())
     }
 }
 
@@ -218,9 +248,10 @@ impl LightController for CompositeController {
     async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
         let targets = self.controllers_for_room(room_id);
         if targets.is_empty() {
+            let node_label = self.node_log_label(room_id);
             return Err(LightControlError::RoomNotFound(format!(
-                "No controllers for room '{}'",
-                room_id
+                "No controllers for node {}",
+                node_label
             )));
         }
 
@@ -246,9 +277,10 @@ impl LightController for CompositeController {
         if any_ok {
             Ok(())
         } else {
+            let node_label = self.node_log_label(room_id);
             Err(LightControlError::CommandFailed(format!(
-                "All controllers failed for room '{}'",
-                room_id
+                "All controllers failed for node {}",
+                node_label
             )))
         }
     }
@@ -256,9 +288,10 @@ impl LightController for CompositeController {
     async fn turn_off(&self, room_id: &str, transition_ms: Option<u32>) -> LightControlResult<()> {
         let targets = self.controllers_for_room(room_id);
         if targets.is_empty() {
+            let node_label = self.node_log_label(room_id);
             return Err(LightControlError::RoomNotFound(format!(
-                "No controllers for room '{}'",
-                room_id
+                "No controllers for node {}",
+                node_label
             )));
         }
 
@@ -282,9 +315,10 @@ impl LightController for CompositeController {
         if any_ok {
             Ok(())
         } else {
+            let node_label = self.node_log_label(room_id);
             Err(LightControlError::CommandFailed(format!(
-                "All controllers failed for room '{}'",
-                room_id
+                "All controllers failed for node {}",
+                node_label
             )))
         }
     }
@@ -328,9 +362,10 @@ impl LightController for CompositeController {
     async fn any_lights_on(&self, room_id: &str) -> LightControlResult<bool> {
         let targets = self.controllers_for_room(room_id);
         if targets.is_empty() {
+            let node_label = self.node_log_label(room_id);
             return Err(LightControlError::RoomNotFound(format!(
-                "No controllers for room '{}'",
-                room_id
+                "No controllers for node {}",
+                node_label
             )));
         }
 
@@ -673,6 +708,22 @@ mod tests {
         // No controllers registered at all
         let result = block_on(composite.turn_on("unknown", LightingCommand::new(50, 3000)));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn unknown_room_error_uses_node_label_when_available() {
+        let composite = CompositeController::new();
+        composite.update_node_labels(HashMap::from([(
+            "device-1".to_string(),
+            "Kitchen Motion".to_string(),
+        )]));
+
+        let result = block_on(composite.turn_on("device-1", LightingCommand::new(50, 3000)))
+            .expect_err("missing routing should return an error");
+
+        assert!(result
+            .to_string()
+            .contains("Kitchen Motion (device-1)"));
     }
 
     // ── Partial failure ──────────────────────────────────────────────
