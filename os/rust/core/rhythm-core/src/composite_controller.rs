@@ -264,10 +264,13 @@ impl LightController for CompositeController {
 
         let result = if targets.len() == 1 {
             let (key, controller, target) = &targets[0];
-            controller.turn_on_target(target, command).await.map_err(|e| {
-                warn!(target: "composite", "hub {} failed: {}", key, e);
-                e
-            })
+            controller
+                .turn_on_target(target, command)
+                .await
+                .map_err(|e| {
+                    warn!(target: "composite", "hub {} failed: {}", key, e);
+                    e
+                })
         } else {
             let any_ok = dispatch_parallel(&targets, |controller, target| {
                 sync_block_on(controller.turn_on_target(target, command.clone()))
