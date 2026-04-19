@@ -212,7 +212,7 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
     },
     SharedRoute {
         path: "/api/topology/rooms/:id",
-        methods: &["PUT"],
+        methods: &["PUT", "DELETE"],
     },
     SharedRoute {
         path: "/api/topology/rooms/:id/merge",

@@ -648,8 +648,89 @@ pub(crate) fn update_lights_on_cache_for_runtime_node(
             snap.parent_id.as_deref(),
             lights_on,
         );
+
+        if let Some(parent_id) = snap.parent_id.as_deref() {
+            match runtime.any_lights_on(parent_id) {
+                Ok(parent_lights_on) => {
+                    update_lights_on_cache_for_node(
+                        state,
+                        parent_id,
+                        LightNodeKind::Room,
+                        None,
+                        parent_lights_on,
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        target: "cmd",
+                        "Failed to refresh parent lights_on for '{}' after node '{}': {}",
+                        parent_id,
+                        node_id,
+                        e
+                    );
+                }
+            }
+        }
     } else {
         update_lights_on_cache_for_node(state, node_id, LightNodeKind::Room, None, lights_on);
+    }
+}
+
+pub(crate) fn refresh_lights_on_cache_for_runtime_node(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+) {
+    let Some(snap) = runtime.engine_effective_node_snapshot(node_id) else {
+        return;
+    };
+    if !snap.kind.is_light_addressable() {
+        return;
+    }
+
+    let query_id = {
+        let Ok(s) = state.lock() else { return };
+        light_state_query_id(&s, &snap.id, snap.kind, snap.parent_id.as_deref()).to_string()
+    };
+
+    match runtime.any_lights_on(&query_id) {
+        Ok(lights_on) => update_lights_on_cache_for_node(
+            state,
+            &snap.id,
+            snap.kind,
+            snap.parent_id.as_deref(),
+            lights_on,
+        ),
+        Err(e) => warn!(
+            target: "cmd",
+            "Failed to refresh lights_on for '{}' via '{}': {}",
+            node_id,
+            query_id,
+            e
+        ),
+    }
+
+    if let Some(parent_id) = snap
+        .parent_id
+        .as_deref()
+        .filter(|parent_id| *parent_id != query_id)
+    {
+        match runtime.any_lights_on(parent_id) {
+            Ok(parent_lights_on) => update_lights_on_cache_for_node(
+                state,
+                parent_id,
+                LightNodeKind::Room,
+                None,
+                parent_lights_on,
+            ),
+            Err(e) => warn!(
+                target: "cmd",
+                "Failed to refresh parent lights_on for '{}' after node '{}': {}",
+                parent_id,
+                node_id,
+                e
+            ),
+        }
     }
 }
 
@@ -2521,11 +2602,7 @@ fn node_state_events_after_apply(
     };
 
     let mut events = vec![build_node_state_event(state, &snap)];
-    let emit_parent = state
-        .lock()
-        .ok()
-        .is_some_and(|s| light_node_uses_parent_dispatch(&s, &snap.id, snap.kind));
-    if emit_parent {
+    if snap.kind == LightNodeKind::LightDevice {
         if let Some(parent_id) = snap
             .parent_id
             .as_deref()
@@ -4006,10 +4083,10 @@ pub fn do_room_set(
     serde_json::to_string(&room_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
 }
 
-/// Remove a room from registry + engine + topology, persist.
+/// Legacy room-centric removal from registry + engine state.
 ///
-/// `room_id` should be a topology room ID (handler resolves before calling).
-/// Looks up hub-native IDs from topology for registry removal.
+/// This path exists for older room-registry sync flows. It is not the
+/// topology-room delete API.
 pub fn do_room_remove(state: &SharedState, room_id: &str) -> Result<()> {
     info!(target: "cmd", "room_remove: {}", room_id);
 
@@ -4198,13 +4275,7 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
         match runtime.handle_event(&event) {
             Ok(turned_on) => {
                 sync_active_mode_from_runtime(state, &runtime);
-                update_lights_on_cache_for_node(
-                    state,
-                    &snap.id,
-                    snap.kind,
-                    snap.parent_id.as_deref(),
-                    turned_on,
-                );
+                update_lights_on_cache_for_runtime_node(state, &runtime, &snap.id, turned_on);
                 reset_ids.push(snap.id.clone());
             }
             Err(e) => {
@@ -4236,13 +4307,7 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
         match runtime.handle_event(&event) {
             Ok(turned_on) => {
                 sync_active_mode_from_runtime(state, &runtime);
-                update_lights_on_cache_for_node(
-                    state,
-                    &snap.id,
-                    snap.kind,
-                    snap.parent_id.as_deref(),
-                    turned_on,
-                );
+                update_lights_on_cache_for_runtime_node(state, &runtime, &snap.id, turned_on);
                 motion_off_ids.push(snap.id.clone());
             }
             Err(e) => {
@@ -5317,23 +5382,7 @@ pub fn do_node_preferences_set(
         }
     }
 
-    if hard_off {
-        update_lights_on_cache_for_node(
-            state,
-            &snap.id,
-            snap.kind,
-            snap.parent_id.as_deref(),
-            false,
-        );
-    } else if soft_off {
-        update_lights_on_cache_for_node(
-            state,
-            &snap.id,
-            snap.kind,
-            snap.parent_id.as_deref(),
-            true,
-        );
-    }
+    refresh_lights_on_cache_for_runtime_node(state, &runtime, node_id);
 
     #[cfg(feature = "desktop")]
     {
@@ -6339,6 +6388,95 @@ pub fn do_topology_create_room(state: &SharedState, name: &str) -> Result<String
     drop(s);
     ensure_runtime_room_exists(state, &id, name)?;
     Ok(format!(r#"{{"id":"{}","name":"{}"}}"#, id, name))
+}
+
+/// Delete a topology room and unassign any attached devices.
+pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()> {
+    let (runtime, detached_devices) = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let detached_device_ids = s
+            .topology
+            .remove_room(room_id)
+            .ok_or_else(|| anyhow::anyhow!("Room not found: {}", room_id))?;
+
+        let mut detached_devices = Vec::new();
+        for device_id in detached_device_ids {
+            let Some(device) = s.canonical_registry.get(&device_id).cloned() else {
+                continue;
+            };
+
+            s.canonical_registry.assign_room(&device_id, None);
+            detached_devices.push((
+                device.id.clone(),
+                device.name.clone(),
+                device.device_type.clone(),
+            ));
+
+            for endpoint in &device.endpoints {
+                if let Some(hub) = s.hubs.get(&endpoint.hub_key) {
+                    if let Some(reg) = &hub.registry {
+                        if let Ok(mut reg) = reg.lock() {
+                            reg.remove_room(&endpoint.native_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        s.room_lights_on.remove(room_id);
+        s.motion_snapshots.remove(room_id);
+        s.room_mode_transitions.remove(room_id);
+        s.pending_motion_clear.retain(|pending| pending != room_id);
+
+        persist_topology(&s);
+        if !detached_devices.is_empty() {
+            persist_canonical(&s);
+        }
+
+        (s.hub_runtime(), detached_devices)
+    };
+
+    if !detached_devices.is_empty() {
+        persist_registry(state);
+    }
+
+    queue_motion_timer_clear(state, room_id);
+
+    if let Some(runtime) = runtime {
+        runtime.remove_room(room_id);
+        for (device_id, device_name, device_type) in &detached_devices {
+            let existed = runtime.engine_node_snapshot(device_id).is_some();
+            runtime.add_node(
+                device_id,
+                device_name,
+                runtime_node_kind_for_device_type(device_type.clone()),
+                None,
+            );
+            if !existed {
+                runtime.restore_node_state(
+                    device_id,
+                    RestoredNodeState {
+                        rhythm_enabled: true,
+                        disabled: false,
+                        time_offset_minutes: 0.0,
+                        brightness_offset: 0.0,
+                        soft_off: false,
+                        hard_off: false,
+                        profile_settings: RoomProfileSettings::default(),
+                    },
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "desktop")]
+    {
+        rebuild_composite_routing(state);
+        emit_triage_changed(state);
+        crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
+    }
+
+    Ok(())
 }
 
 /// Merge two rooms.
@@ -10388,6 +10526,68 @@ mod tests {
             .expect("created topology room should exist in runtime");
         assert_eq!(snap.name, "Office");
         assert!(snap.rhythm_enabled);
+    }
+
+    #[test]
+    fn topology_delete_room_unassigns_devices_and_cleans_state() {
+        let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
+
+        let result = do_topology_create_room(&state, "Office").unwrap();
+        let created: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let room_id = created["id"].as_str().unwrap().to_string();
+        let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+
+        {
+            let mut s = state.lock().unwrap();
+            s.canonical_registry.assign_room(&device_id, Some(&room_id));
+            assert!(s.topology.attach_device_user_override(&room_id, &device_id));
+            s.room_lights_on.insert(room_id.clone(), true);
+            s.motion_snapshots.insert(
+                room_id.clone(),
+                crate::state::MotionSnapshot {
+                    motion_active: true,
+                    motion_owned: true,
+                    remaining_secs: None,
+                    timeout_secs: 300,
+                    warning_active: false,
+                },
+            );
+            s.room_mode_transitions.insert(
+                room_id.clone(),
+                crate::state::RoomModeTransition {
+                    ends_at: std::time::Instant::now(),
+                    periodic_resume_at: std::time::Instant::now(),
+                },
+            );
+        }
+
+        do_topology_delete_room(&state, &room_id).unwrap();
+
+        let s = state.lock().unwrap();
+        assert!(s.topology.get(&room_id).is_none());
+        assert_eq!(
+            s.topology.get_device_node(&device_id).unwrap().parent_id,
+            None
+        );
+        assert_eq!(
+            s.canonical_registry
+                .get(&device_id)
+                .unwrap()
+                .room_id
+                .as_deref(),
+            None
+        );
+        assert_eq!(s.canonical_registry.triage().pending_unassigned_count(), 1);
+        assert!(!s.room_lights_on.contains_key(&room_id));
+        assert!(!s.motion_snapshots.contains_key(&room_id));
+        assert!(!s.room_mode_transitions.contains_key(&room_id));
+        assert_eq!(s.pending_motion_clear, vec![room_id.clone()]);
+        drop(s);
+
+        assert!(
+            runtime.engine_room_snapshot(&room_id).is_none(),
+            "deleted room should be removed from runtime"
+        );
     }
 
     #[test]

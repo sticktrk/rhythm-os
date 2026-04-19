@@ -1278,6 +1278,33 @@ impl RoomTopologyStore {
         true
     }
 
+    /// Remove a room and detach its devices into standalone nodes.
+    pub fn remove_room(&mut self, room_id: &str) -> Option<Vec<String>> {
+        let room = self.rooms.remove(room_id)?;
+
+        for binding in &room.hub_room_bindings {
+            self.hub_room_index
+                .remove(&(binding.hub_key.to_string(), binding.hub_room_id.clone()));
+        }
+
+        self.approved_bindings
+            .retain(|binding| binding.rhythm_room_id != room_id);
+
+        let mut detached_device_ids = Vec::new();
+        for node in self.device_nodes.values_mut() {
+            if node.parent_id.as_deref() != Some(room_id) {
+                continue;
+            }
+            node.parent_id = None;
+            node.placement = DevicePlacement::Standalone;
+            detached_device_ids.push(node.canonical_device_id.clone());
+        }
+
+        detached_device_ids.sort();
+        self.rebuild_room_device_projections();
+        Some(detached_device_ids)
+    }
+
     /// Move a device from one room to another.
     pub fn move_device(&mut self, device_id: &str, from_room: &str, to_room: &str) -> bool {
         if self.rooms.get(from_room).is_none() {
@@ -1967,6 +1994,32 @@ mod tests {
             .find(|d| d.device_id == "dev-1")
             .unwrap();
         assert_eq!(dev.placement, DevicePlacement::UserOverride);
+    }
+
+    #[test]
+    fn remove_room_detaches_devices_and_cleans_links() {
+        let mut store = RoomTopologyStore::new();
+        let discovered = make_discovered("ha-room-1", "Office", "ha-control-1");
+        let room_id = store
+            .sync_hub_room(&ha_key(), &discovered)
+            .rhythm_room_id()
+            .to_string();
+
+        assert!(store.attach_device_user_override(&room_id, "dev-1"));
+        assert!(store.set_control_target("dev-1", NodeControlKind::Motion, Some(&room_id)));
+        store.approve_binding(hue_key(), "hue-room-1".to_string(), room_id.clone(), 42);
+
+        let detached = store.remove_room(&room_id).unwrap();
+
+        assert_eq!(detached, vec!["dev-1".to_string()]);
+        assert!(store.get(&room_id).is_none());
+        assert!(store.translate_room_id(&ha_key(), "ha-room-1").is_none());
+        assert!(store.approved_bindings.is_empty());
+        assert!(store.control_links().is_empty());
+
+        let node = store.get_device_node("dev-1").unwrap();
+        assert_eq!(node.parent_id, None);
+        assert_eq!(node.placement, DevicePlacement::Standalone);
     }
 
     #[test]

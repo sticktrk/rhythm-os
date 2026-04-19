@@ -123,7 +123,10 @@ fn shared_routes() -> Router<SharedState> {
             get(get_topology_rooms).post(post_topology_room),
         )
         .route("/api/topology/nodes", get(get_topology_nodes))
-        .route("/api/topology/rooms/:id", put(put_topology_rename))
+        .route(
+            "/api/topology/rooms/:id",
+            put(put_topology_rename).delete(delete_topology_room),
+        )
         .route("/api/topology/rooms/:id/merge", put(put_topology_merge))
         .route(
             "/api/topology/rooms/:id/devices/move",
@@ -419,6 +422,13 @@ async fn post_topology_room(
     Json(body): Json<Value>,
 ) -> ApiResponse {
     handlers::handle_post_topology_room(&state, &body)
+}
+
+async fn delete_topology_room(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> ApiResponse {
+    handlers::handle_delete_topology_room(&state, &id)
 }
 
 async fn put_topology_rename(

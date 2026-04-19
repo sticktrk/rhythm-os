@@ -183,14 +183,6 @@ pub fn handle_put_rooms(state: &SharedState, body: &Value, persist: bool) -> Api
     ApiResponse::json_ok(format!(r#"{{"rooms":[{}]}}"#, results.join(",")))
 }
 
-pub fn handle_delete_room(state: &SharedState, id: &str) -> ApiResponse {
-    let id = commands::resolve_node_id(state, id);
-    match commands::do_room_remove(state, &id) {
-        Ok(()) => ApiResponse::no_content(),
-        Err(e) => ApiResponse::server_error(e),
-    }
-}
-
 /// Upsert device(s). Accepts single object or array.
 ///
 /// Supports optional `"device_type"` field (default: `"button"`).
@@ -1434,6 +1426,16 @@ pub fn handle_post_topology_room(state: &SharedState, body: &Value) -> ApiRespon
     }
 }
 
+pub fn handle_delete_topology_room(state: &SharedState, room_id: &str) -> ApiResponse {
+    match commands::do_topology_delete_room(state, room_id) {
+        Ok(()) => ApiResponse::no_content(),
+        Err(e) if e.to_string().contains("Room not found") => {
+            ApiResponse::bad_request("Room not found")
+        }
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
 pub fn handle_put_topology_rename(state: &SharedState, room_id: &str, body: &Value) -> ApiResponse {
     let name = match body.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
@@ -1909,11 +1911,22 @@ mod tests {
     // -- Void mutations return 204 --
 
     #[test]
-    fn delete_room_returns_204() {
-        let state = handler_state_with_runtime();
-        let r = handle_delete_room(&state, "room1");
+    fn delete_topology_room_returns_204() {
+        let (state, _registry, canonical_id, room_id, _hub_key) =
+            handler_state_with_canonical_light();
+        let r = handle_delete_topology_room(&state, &room_id);
         assert_eq!(r.status, 204);
         assert!(r.body.is_empty());
+
+        let state = state.lock().unwrap();
+        assert!(state.topology.get(&room_id).is_none());
+        assert_eq!(
+            state
+                .canonical_registry
+                .get(&canonical_id)
+                .and_then(|device| device.room_id.clone()),
+            None
+        );
     }
 
     #[test]
