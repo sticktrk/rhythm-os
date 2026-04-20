@@ -446,6 +446,7 @@ fn sync_with_discovery(
                     .as_secs();
 
                 let mut canonical_room_devices: HashMap<String, Vec<String>> = HashMap::new();
+                let mut pending_standalone_runtime_nodes = Vec::new();
 
                 {
                     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -501,33 +502,11 @@ fn sync_with_discovery(
                                 s.canonical_registry.assign_room(&canonical_id, None);
                                 s.topology.ensure_standalone_device(&canonical_id);
                                 if let Some(device) = s.canonical_registry.get(&canonical_id) {
-                                    if let Some(runtime) = s.hub_runtime() {
-                                        let existed =
-                                            runtime.engine_node_snapshot(&canonical_id).is_some();
-                                        runtime.add_node(
-                                            &canonical_id,
-                                            &device.name,
-                                            commands::runtime_node_kind_for_device_type(
-                                                device.device_type.clone(),
-                                            ),
-                                            None,
-                                        );
-                                        if !existed {
-                                            runtime.restore_node_state(
-                                                &canonical_id,
-                                                rhythm_core::RestoredNodeState {
-                                                    rhythm_enabled: true,
-                                                    disabled: false,
-                                                    time_offset_minutes: 0.0,
-                                                    brightness_offset: 0.0,
-                                                    soft_off: false,
-                                                    hard_off: false,
-                                                    profile_settings:
-                                                        rhythm_core::RoomProfileSettings::default(),
-                                                },
-                                            );
-                                        }
-                                    }
+                                    pending_standalone_runtime_nodes.push((
+                                        canonical_id.clone(),
+                                        device.name.clone(),
+                                        device.device_type.clone(),
+                                    ));
                                 }
                             }
                             continue;
@@ -682,6 +661,16 @@ fn sync_with_discovery(
                     // Persist canonical registry and topology
                     commands::persist_canonical(&s);
                     commands::persist_topology(&s);
+                }
+
+                for (device_id, device_name, device_type) in pending_standalone_runtime_nodes {
+                    commands::ensure_runtime_device_node_exists(
+                        state,
+                        &device_id,
+                        &device_name,
+                        device_type,
+                        None,
+                    )?;
                 }
 
                 let (affected_devices, hidden_devices) =

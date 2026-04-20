@@ -27,11 +27,20 @@ fn scenario_sync_imports_roomless_commissioned_device() {
     assert_eq!(canonical.manufacturer.as_deref(), Some("Vendor"));
     assert_eq!(canonical.model.as_deref(), Some("Lamp"));
     assert!(canonical.room_id.is_none());
+    let canonical_id = canonical.id.clone();
     assert_eq!(
         state.canonical_registry.triage().pending_unassigned_count(),
         1
     );
+    let runtime = state
+        .hub_runtime()
+        .expect("syncing roomless Matter devices should bootstrap the runtime");
     drop(state);
+
+    let node = runtime
+        .engine_node_snapshot(&canonical_id)
+        .expect("roomless Matter canonical device should exist in the runtime");
+    assert_eq!(node.parent_id, None);
 
     let caps = rig.hub_data.device_caps.lock().unwrap();
     let stored = caps

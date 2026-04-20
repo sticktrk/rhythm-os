@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use rhythm_matter::hub_state::MatterHubData;
 use rhythm_matter::test_support::SpyTransport;
 use rhythm_matter::transport::MatterTransport;
+use rhythm_os::hub::ExternalLightHubIntegration;
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::hub::HubType;
 use rhythm_os::provisioning::WifiCredentials;
@@ -38,6 +39,11 @@ where
         state_guard.storage = Some(Box::new(
             FileStorage::new(data_dir.to_str().unwrap()).unwrap(),
         ));
+        state_guard.ensure_runtime_fn = Some(Arc::new(|state: &SharedState| {
+            let integrations: [&'static dyn ExternalLightHubIntegration; 1] =
+                [&rhythm_matter::desktop_lifecycle::INTEGRATION];
+            rhythm_os::lifecycle::ensure_composite_runtime(state, &integrations)
+        }));
     }
 
     let transport = Arc::new(SpyTransport::new());
