@@ -1,12 +1,13 @@
 #!/bin/bash
 #
-# Create and push a server/embedded release tag so GitHub Actions can publish
-# the GitHub release assets.
+# Create a server/embedded release tag, and optionally upload the rpiz OTA feed
+# locally instead of relying on GitHub Actions.
 #
 # Usage:
 #   ./scripts/release.sh
 #   ./scripts/release.sh --minor
 #   ./scripts/release.sh --version 0.5.0
+#   ./scripts/release.sh --upload
 
 set -euo pipefail
 
@@ -18,6 +19,7 @@ VERSION=""
 BUMP_KIND="patch"
 PUSH=true
 DRY_RUN=false
+UPLOAD=false
 MESSAGE=""
 WORKSPACE_VERSION_FILES=("Cargo.toml" "Cargo.lock")
 WORKSPACE_PACKAGES=(
@@ -37,16 +39,17 @@ usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
 
-Create and push a release tag. The GitHub release workflow then builds and
-uploads the release assets for that tag. The script updates the workspace crate
-version first so Cargo metadata, runtime version reporting, and the git tag all
-match.
+Create a release tag. By default this pushes the release commit and tag so the
+GitHub release workflow can publish the assets. With --upload, the script keeps
+the release local, builds the rpiz artifact, packages the OTA feed, and uploads
+it directly using credentials loaded from .env.
 
 Options:
   --version X.Y.Z   Use an explicit version instead of auto-bumping
   --major           Bump the latest vX.Y.Z tag to the next major version
   --minor           Bump the latest vX.Y.Z tag to the next minor version
   --patch           Bump the latest vX.Y.Z tag to the next patch version (default)
+  --upload          Build/package/upload the rpiz OTA feed locally; implies --no-push
   --message TEXT    Annotated tag message (default: "Release vX.Y.Z")
   --remote NAME     Remote to push to (default: origin)
   --no-push         Create the local tag but do not push branch or tag
@@ -57,6 +60,7 @@ Examples:
   $0
   $0 --minor
   $0 --version 0.4.1
+  $0 --upload
   $0 --version v0.4.1 --dry-run
 EOF
 }
@@ -77,6 +81,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --patch)
             BUMP_KIND="patch"
+            shift
+            ;;
+        --upload)
+            UPLOAD=true
+            PUSH=false
             shift
             ;;
         --message)
@@ -111,6 +120,64 @@ require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
         echo "Error: Required command not found: $1" >&2
         exit 1
+    fi
+}
+
+require_env_value() {
+    local name="$1"
+    if [ -z "${!name:-}" ]; then
+        echo "Error: Required environment variable not set: $name" >&2
+        exit 1
+    fi
+}
+
+load_project_env() {
+    local env_file="$PROJECT_ROOT/.env"
+
+    if [ ! -f "$env_file" ]; then
+        echo "Error: --upload requires $env_file" >&2
+        exit 1
+    fi
+
+    echo "Loading environment from .env"
+    set -a
+    # shellcheck disable=SC1090
+    source "$env_file"
+    set +a
+}
+
+resolve_project_path() {
+    local path_value="$1"
+
+    case "$path_value" in
+        /*)
+            echo "$path_value"
+            ;;
+        ~/*)
+            echo "$HOME/${path_value#~/}"
+            ;;
+        *)
+            echo "$PROJECT_ROOT/$path_value"
+            ;;
+    esac
+}
+
+ensure_upload_env() {
+    require_env_value RHYTHM_UPDATES_SSH_HOST
+    require_env_value RHYTHM_UPDATES_SSH_USER
+    require_env_value RHYTHM_UPDATES_BASE_DIR
+
+    if [ -z "${RHYTHM_UPDATES_SSH_KEY_FILE:-}" ] && [ -z "${RHYTHM_UPDATES_SSH_KEY:-}" ]; then
+        echo "Error: Set RHYTHM_UPDATES_SSH_KEY_FILE or RHYTHM_UPDATES_SSH_KEY in .env for --upload" >&2
+        exit 1
+    fi
+
+    if [ -n "${RHYTHM_UPDATES_SSH_KEY_FILE:-}" ]; then
+        RHYTHM_UPDATES_SSH_KEY_FILE="$(resolve_project_path "$RHYTHM_UPDATES_SSH_KEY_FILE")"
+        if [ ! -f "$RHYTHM_UPDATES_SSH_KEY_FILE" ]; then
+            echo "Error: RHYTHM_UPDATES_SSH_KEY_FILE does not exist: $RHYTHM_UPDATES_SSH_KEY_FILE" >&2
+            exit 1
+        fi
     fi
 }
 
@@ -213,6 +280,75 @@ github_repo_url() {
     echo ""
 }
 
+TEMP_RELEASE_DIR=""
+
+cleanup_temp_release_dir() {
+    if [ -n "$TEMP_RELEASE_DIR" ] && [ -d "$TEMP_RELEASE_DIR" ]; then
+        rm -rf "$TEMP_RELEASE_DIR"
+    fi
+}
+
+setup_upload_ssh() {
+    local key_path="$TEMP_RELEASE_DIR/id_ed25519"
+    local known_hosts_path="$TEMP_RELEASE_DIR/known_hosts"
+
+    mkdir -p "$TEMP_RELEASE_DIR"
+
+    if [ -n "${RHYTHM_UPDATES_SSH_KEY_FILE:-}" ]; then
+        cp "$RHYTHM_UPDATES_SSH_KEY_FILE" "$key_path"
+    else
+        printf '%s\n' "$RHYTHM_UPDATES_SSH_KEY" > "$key_path"
+    fi
+
+    chmod 600 "$key_path"
+    ssh-keyscan -H "$RHYTHM_UPDATES_SSH_HOST" > "$known_hosts_path"
+}
+
+upload_rpiz_feed() {
+    local version="$1"
+    local artifact_root="$TEMP_RELEASE_DIR/dist/bin"
+    local output_dir="$PROJECT_ROOT/out/server-updates"
+    local ssh_key_path="$TEMP_RELEASE_DIR/id_ed25519"
+    local known_hosts_path="$TEMP_RELEASE_DIR/known_hosts"
+
+    echo ""
+    echo "=== Building rpiz release artifacts locally ==="
+    "$SCRIPT_DIR/build-server.sh" --release --target rpiz
+
+    if [ ! -d "$PROJECT_ROOT/dist/bin/rpiz" ]; then
+        echo "Error: Missing dist/bin/rpiz after build" >&2
+        exit 1
+    fi
+
+    echo ""
+    echo "=== Staging rpiz artifacts ==="
+    mkdir -p "$artifact_root"
+    cp -R "$PROJECT_ROOT/dist/bin/rpiz" "$artifact_root/"
+
+    echo ""
+    echo "=== Packaging rpiz OTA feed ==="
+    bash "$SCRIPT_DIR/package-server-updates.sh" \
+        --artifact-root "$artifact_root" \
+        --output-dir "$output_dir" \
+        --version "$version"
+
+    echo ""
+    echo "=== Configuring SSH upload ==="
+    setup_upload_ssh
+
+    echo ""
+    echo "=== Uploading rpiz OTA feed ==="
+    ssh -i "$ssh_key_path" -o UserKnownHostsFile="$known_hosts_path" \
+        "$RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST" \
+        "mkdir -p '$RHYTHM_UPDATES_BASE_DIR'"
+    scp -i "$ssh_key_path" -o UserKnownHostsFile="$known_hosts_path" -r \
+        "$output_dir/." \
+        "$RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST:$RHYTHM_UPDATES_BASE_DIR/"
+
+    echo ""
+    echo "Uploaded rpiz OTA feed for $version to $RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST:$RHYTHM_UPDATES_BASE_DIR"
+}
+
 update_workspace_version_files() {
     local new_version="$1"
     local current_version="$2"
@@ -256,6 +392,14 @@ commit_release_version_update() {
 
 require_command git
 require_command perl
+
+if [ "$UPLOAD" = true ]; then
+    require_command ssh
+    require_command scp
+    require_command ssh-keyscan
+    load_project_env
+    ensure_upload_env
+fi
 
 if ! git -C "$PROJECT_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     echo "Error: $PROJECT_ROOT is not a git repository" >&2
@@ -316,7 +460,11 @@ CURRENT_WORKSPACE_VERSION="$(read_workspace_version)"
 
 echo "Release plan"
 echo "  Branch:  $CURRENT_BRANCH"
-echo "  Remote:  $REMOTE"
+if [ "$UPLOAD" = true ]; then
+    echo "  Remote:  (disabled by --upload)"
+else
+    echo "  Remote:  $REMOTE"
+fi
 if [ -n "$LATEST_TAG" ]; then
     echo "  Previous: $LATEST_TAG"
 fi
@@ -324,6 +472,9 @@ echo "  New tag: $TAG"
 echo "  Message: $MESSAGE"
 if [ "$CURRENT_WORKSPACE_VERSION" != "$VERSION" ]; then
     echo "  Workspace version: $CURRENT_WORKSPACE_VERSION -> $VERSION"
+fi
+if [ "$UPLOAD" = true ]; then
+    echo "  Upload: rpiz OTA feed -> $RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST:$RHYTHM_UPDATES_BASE_DIR"
 fi
 echo ""
 
@@ -333,7 +484,12 @@ if [ "$DRY_RUN" = true ]; then
         echo "[dry-run] Would create release commit: git commit -m \"Release $TAG\""
     fi
     echo "[dry-run] Would create annotated tag: git tag -a $TAG -m \"$MESSAGE\""
-    if [ "$PUSH" = true ]; then
+    if [ "$UPLOAD" = true ]; then
+        echo "[dry-run] Would build rpiz release binary: ./scripts/build-server.sh --release --target rpiz"
+        echo "[dry-run] Would package rpiz OTA feed from a temporary artifact root"
+        echo "[dry-run] Would upload OTA feed to $RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST:$RHYTHM_UPDATES_BASE_DIR"
+        echo "[dry-run] Would not push branch or tag in --upload mode"
+    elif [ "$PUSH" = true ]; then
         echo "[dry-run] Would push branch: git push $REMOTE HEAD:refs/heads/$CURRENT_BRANCH"
         echo "[dry-run] Would push tag:    git push $REMOTE refs/tags/$TAG"
     fi
@@ -352,7 +508,11 @@ fi
 
 git -C "$PROJECT_ROOT" tag -a "$TAG" -m "$MESSAGE"
 
-if [ "$PUSH" = true ]; then
+if [ "$UPLOAD" = true ]; then
+    TEMP_RELEASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rhythm-release.XXXXXX")"
+    trap cleanup_temp_release_dir EXIT
+    upload_rpiz_feed "$VERSION"
+elif [ "$PUSH" = true ]; then
     git -C "$PROJECT_ROOT" push "$REMOTE" "HEAD:refs/heads/$CURRENT_BRANCH"
     git -C "$PROJECT_ROOT" push "$REMOTE" "refs/tags/$TAG"
 fi
@@ -367,6 +527,9 @@ if [ "$PUSH" = true ]; then
         echo "  Actions:  $REPO_URL/actions/workflows/release.yml"
         echo "  Release:  $REPO_URL/releases/tag/$TAG"
     fi
+elif [ "$UPLOAD" = true ]; then
+    echo "Built and uploaded the rpiz OTA feed locally."
+    echo "Branch and tag were left local only in --upload mode."
 else
     echo "Tag created locally only. Push it when ready:"
     echo "  git push $REMOTE HEAD:refs/heads/$CURRENT_BRANCH"

@@ -17,6 +17,7 @@ This directory contains all build and deployment scripts for Rhythm OS.
 ./scripts/deploy-addon.sh               # Push addon to Docker Hub
 ./scripts/deploy-addon.sh --local       # Deploy to local HA for testing
 ./scripts/release.sh                    # Tag and push the next GitHub release
+./scripts/release.sh --upload           # Build + upload the rpiz OTA feed locally
 ```
 
 ---
@@ -134,13 +135,15 @@ By default, rpiz image builds include the bring-up extras: Dropbear SSH, root pa
 
 ### release.sh
 
-Create and push a Git release tag so the GitHub release workflow can build and
-publish the release assets.
+Create a Git release tag. By default this pushes the release so the GitHub
+workflow can build and publish the assets. Use `--upload` to keep the release
+local, build the `rpiz` artifact, and upload the OTA feed directly.
 
 ```bash
 ./scripts/release.sh                    # Tags and pushes the next patch release
 ./scripts/release.sh --minor            # Tags and pushes the next minor release
 ./scripts/release.sh --version 0.4.1    # Tags and pushes an explicit version
+./scripts/release.sh --upload           # Builds and uploads only the rpiz OTA feed locally
 ./scripts/release.sh --version 0.4.101  # Explicit high patch version is valid semver
 ./scripts/release.sh --dry-run          # Preview without creating the tag
 ```
@@ -152,6 +155,7 @@ publish the release assets.
 | `--major` | Bump the latest release tag to the next major version |
 | `--minor` | Bump the latest release tag to the next minor version |
 | `--patch` | Bump the latest release tag to the next patch version (default) |
+| `--upload` | Build/package/upload the `rpiz` OTA feed locally; implies `--no-push` |
 | `--message <text>` | Custom annotated tag message |
 | `--remote <name>` | Git remote to push to, default `origin` |
 | `--no-push` | Create the local tag without pushing |
@@ -163,6 +167,8 @@ publish the release assets.
 - Creates the release commit automatically when those version files change.
 - Pushes the current branch and the new tag to `origin` by default.
 - The GitHub Actions release workflow turns that tag into the GitHub release with the platform binary tarballs.
+- `--upload` is local-only for now: it loads `.env`, builds only `rpiz`, packages only the `rpiz` OTA feed, uploads it over SSH, and leaves the branch/tag unpushed.
+- `--upload` accepts either `RHYTHM_UPDATES_SSH_KEY_FILE` or `RHYTHM_UPDATES_SSH_KEY` for the SSH key material.
 
 ### Versioning
 
@@ -305,6 +311,11 @@ These can be set in `.env` or exported in your shell:
 | `HA_USER` | deploy-addon.sh | SSH user for local deploy |
 | `HA_ARCH` | deploy-addon.sh | Target architecture |
 | `INGRESS_PORT` | run-dev.sh | Local web UI port |
+| `RHYTHM_UPDATES_SSH_HOST` | release.sh `--upload` | OTA upload SSH host |
+| `RHYTHM_UPDATES_SSH_USER` | release.sh `--upload` | OTA upload SSH user |
+| `RHYTHM_UPDATES_BASE_DIR` | release.sh `--upload` | OTA upload destination directory |
+| `RHYTHM_UPDATES_SSH_KEY_FILE` | release.sh `--upload` | Path to the SSH private key to use for OTA upload |
+| `RHYTHM_UPDATES_SSH_KEY` | release.sh `--upload` | Inline SSH private key, used when no key file path is set |
 
 ---
 
