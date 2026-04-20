@@ -559,7 +559,8 @@
     "color_modes": ["xy", "color_temperature"],
     "matter": {
       "vendor_id": 4999,
-      "product_id": 24580
+      "product_id": 24580,
+      "quirks": ["needs_explicit_on"]
     }
   }
 ]

@@ -195,6 +195,14 @@ mod tests {
             entry.light_type,
             crate::capabilities::LightType::ExtendedColor
         );
+        assert_eq!(
+            entry
+                .matter
+                .as_ref()
+                .map(|matter| matter.quirks.clone())
+                .unwrap_or_default(),
+            vec![crate::quirks::DeviceQuirk::NeedsExplicitOn]
+        );
     }
 
     #[test]
