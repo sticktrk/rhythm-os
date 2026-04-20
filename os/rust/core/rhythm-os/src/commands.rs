@@ -5664,7 +5664,11 @@ pub fn try_ensure_runtime(state: &SharedState) -> Result<()> {
 ///
 /// Matter can route directly by device endpoint and discover zero hub rooms, so
 /// runtime creation cannot rely solely on `do_room_set()` during room sync.
-fn ensure_runtime_room_exists(state: &SharedState, room_id: &str, room_name: &str) -> Result<()> {
+pub(crate) fn ensure_runtime_room_exists(
+    state: &SharedState,
+    room_id: &str,
+    room_name: &str,
+) -> Result<()> {
     let needs_runtime = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let has_runtime = s.hubs.values().any(|h| h.runtime.is_some());

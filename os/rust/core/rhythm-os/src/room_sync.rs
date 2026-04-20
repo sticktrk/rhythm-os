@@ -446,7 +446,7 @@ fn sync_with_discovery(
                     .as_secs();
 
                 let mut canonical_room_devices: HashMap<String, Vec<String>> = HashMap::new();
-                let mut pending_standalone_runtime_nodes = Vec::new();
+                let mut pending_runtime_node_ids = Vec::new();
 
                 {
                     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -502,12 +502,10 @@ fn sync_with_discovery(
                                 s.canonical_registry.assign_room(&canonical_id, None);
                                 s.topology.ensure_standalone_device(&canonical_id);
                                 if let Some(device) = s.canonical_registry.get(&canonical_id) {
-                                    pending_standalone_runtime_nodes.push((
-                                        canonical_id.clone(),
-                                        device.name.clone(),
-                                        device.device_type.clone(),
-                                    ));
+                                    pending_runtime_node_ids.push(device.id.clone());
                                 }
+                            } else {
+                                pending_runtime_node_ids.push(canonical_id.clone());
                             }
                             continue;
                         }
@@ -663,7 +661,48 @@ fn sync_with_discovery(
                     commands::persist_topology(&s);
                 }
 
-                for (device_id, device_name, device_type) in pending_standalone_runtime_nodes {
+                pending_runtime_node_ids.sort();
+                pending_runtime_node_ids.dedup();
+
+                for device_id in pending_runtime_node_ids {
+                    let (device_name, device_type, parent_room) = {
+                        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+                        let Some(device) = s.canonical_registry.get(&device_id) else {
+                            continue;
+                        };
+                        let parent_room_id = s
+                            .topology
+                            .device_parent_room_id(&device_id)
+                            .map(str::to_string)
+                            .or_else(|| {
+                                device.room_id.as_ref().and_then(|room_id| {
+                                    s.topology.get(room_id).map(|_| room_id.clone())
+                                })
+                            });
+                        let parent_room = parent_room_id.and_then(|room_id| {
+                            s.topology
+                                .get(&room_id)
+                                .map(|room| (room_id, room.name.clone()))
+                        });
+                        (
+                            device.name.clone(),
+                            device.device_type.clone(),
+                            parent_room,
+                        )
+                    };
+
+                    if let Some((room_id, room_name)) = parent_room {
+                        commands::ensure_runtime_room_exists(state, &room_id, &room_name)?;
+                        commands::ensure_runtime_device_node_exists(
+                            state,
+                            &device_id,
+                            &device_name,
+                            device_type,
+                            Some(room_id),
+                        )?;
+                        continue;
+                    }
+
                     commands::ensure_runtime_device_node_exists(
                         state,
                         &device_id,

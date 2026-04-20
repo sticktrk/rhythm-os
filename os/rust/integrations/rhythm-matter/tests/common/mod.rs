@@ -29,6 +29,24 @@ pub fn connect_rig_with_transport<F>(data_dir: Option<PathBuf>, init_transport: 
 where
     F: FnOnce(&Arc<SpyTransport>),
 {
+    connect_rig_internal(data_dir, false, init_transport)
+}
+
+pub fn reconnect_rig_with_transport<F>(data_dir: PathBuf, init_transport: F) -> TestRig
+where
+    F: FnOnce(&Arc<SpyTransport>),
+{
+    connect_rig_internal(Some(data_dir), true, init_transport)
+}
+
+fn connect_rig_internal<F>(
+    data_dir: Option<PathBuf>,
+    load_persisted_state: bool,
+    init_transport: F,
+) -> TestRig
+where
+    F: FnOnce(&Arc<SpyTransport>),
+{
     let data_dir = data_dir.unwrap_or_else(unique_data_dir);
     std::fs::create_dir_all(&data_dir).unwrap();
 
@@ -44,6 +62,9 @@ where
                 [&rhythm_matter::desktop_lifecycle::INTEGRATION];
             rhythm_os::lifecycle::ensure_composite_runtime(state, &integrations)
         }));
+        if load_persisted_state {
+            rhythm_os::storage::load_persisted_state(&mut state_guard);
+        }
     }
 
     let transport = Arc::new(SpyTransport::new());
