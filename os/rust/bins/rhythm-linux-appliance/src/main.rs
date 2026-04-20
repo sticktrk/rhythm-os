@@ -9,7 +9,6 @@ mod http_server;
 mod wifi;
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Parser;
@@ -165,8 +164,6 @@ fn main() -> Result<()> {
         );
     }
 
-    wait_for_wifi_credentials(&provisioning);
-
     info!(
         target: "sys",
         "Starting async runtime with {} MiB worker stacks",
@@ -179,53 +176,6 @@ fn main() -> Result<()> {
         .thread_stack_size(TOKIO_WORKER_STACK_SIZE)
         .build()?
         .block_on(run_server(state, args.port, provisioning))
-}
-
-fn wait_for_wifi_credentials(provisioning: &ble_provision::ProvisioningManager) {
-    if wifi::has_wifi_config() {
-        return;
-    }
-
-    info!(
-        target: "sys",
-        "No Wi-Fi credentials present; delaying HTTP startup until provisioning writes wlan settings"
-    );
-
-    let mut last_status_log = Instant::now();
-    loop {
-        if wifi::has_wifi_config() {
-            info!(
-                target: "sys",
-                "Wi-Fi credentials detected; continuing appliance startup"
-            );
-            return;
-        }
-
-        if !provisioning.is_running() {
-            match provisioning.ensure_running_if_needed("startup-wait") {
-                Ok(true) => info!(
-                    target: "sys",
-                    "Restarted BLE provisioning while waiting for Wi-Fi credentials"
-                ),
-                Ok(false) => {}
-                Err(e) => warn!(
-                    target: "sys",
-                    "BLE provisioning retry failed while waiting for Wi-Fi credentials: {:#}",
-                    e
-                ),
-            }
-        }
-
-        if last_status_log.elapsed() >= Duration::from_secs(15) {
-            info!(
-                target: "sys",
-                "Still waiting for Wi-Fi credentials before starting the HTTP server"
-            );
-            last_status_log = Instant::now();
-        }
-
-        std::thread::sleep(Duration::from_secs(1));
-    }
 }
 
 fn spawn_hub_bootstrap(state: SharedState) {

@@ -295,6 +295,7 @@ impl ProvisioningBackend for LinuxWifiBackend {
 
 #[cfg(target_os = "linux")]
 mod bluez {
+    use std::future::Future;
     use std::sync::mpsc::{Receiver, RecvTimeoutError};
     use std::time::Duration;
 
@@ -317,6 +318,9 @@ mod bluez {
         Sender as StdSender, PROVISIONING_DEVICE_INFO_UUID, PROVISIONING_SERVICE_UUID,
         PROVISIONING_STATUS_UUID, PROVISIONING_WIFI_CMD_UUID,
     };
+
+    const BLUEZ_STEP_TIMEOUT: Duration = Duration::from_secs(15);
+
     pub(super) struct BluezFrontend {
         runtime: Runtime,
         event_tx: StdSender<ProvisioningEvent>,
@@ -393,33 +397,38 @@ mod bluez {
         }
     }
 
+    async fn bluez_step<T, E, Fut>(label: &str, fut: Fut) -> Result<T>
+    where
+        Fut: Future<Output = std::result::Result<T, E>>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        info!(target: "sys", "BLE BlueZ step: {}", label);
+        tokio::time::timeout(BLUEZ_STEP_TIMEOUT, fut)
+            .await
+            .map_err(|_| anyhow::anyhow!("timed out while {}", label))?
+            .with_context(|| label.to_string())
+    }
+
     async fn start_bluez(
         mut info: ProvisioningDeviceInfo,
         event_tx: StdSender<ProvisioningEvent>,
         status_tx: watch::Sender<Vec<u8>>,
     ) -> Result<BluezHandles> {
-        let session = Session::new().await.context("opening BlueZ session")?;
-        let adapter = session
-            .default_adapter()
-            .await
-            .context("finding default Bluetooth adapter")?;
+        let session = bluez_step("opening BlueZ session", Session::new()).await?;
+        let adapter = bluez_step(
+            "finding default Bluetooth adapter",
+            session.default_adapter(),
+        )
+        .await?;
 
-        adapter
-            .set_powered(true)
-            .await
-            .context("powering Bluetooth adapter")?;
-        adapter
-            .set_pairable(false)
-            .await
-            .context("disabling pairable mode")?;
-        let previous_alias = adapter
-            .alias()
-            .await
-            .context("reading Bluetooth adapter alias")?;
-        adapter
-            .set_alias(info.name.clone())
-            .await
-            .context("setting Bluetooth adapter alias")?;
+        bluez_step("powering Bluetooth adapter", adapter.set_powered(true)).await?;
+        bluez_step("disabling pairable mode", adapter.set_pairable(false)).await?;
+        let previous_alias = bluez_step("reading Bluetooth adapter alias", adapter.alias()).await?;
+        bluez_step(
+            "setting Bluetooth adapter alias",
+            adapter.set_alias(info.name.clone()),
+        )
+        .await?;
 
         if info.mac.is_none() {
             info.mac = adapter.address().await.ok().map(|addr| addr.to_string());
@@ -535,10 +544,11 @@ mod bluez {
             ..Default::default()
         };
 
-        let app_handle = adapter
-            .serve_gatt_application(app)
-            .await
-            .context("registering GATT application")?;
+        let app_handle = bluez_step(
+            "registering GATT application",
+            adapter.serve_gatt_application(app),
+        )
+        .await?;
 
         let advertisement = Advertisement {
             advertisement_type: bluer::adv::Type::Peripheral,
@@ -547,10 +557,11 @@ mod bluez {
             local_name: Some(info.name.clone()),
             ..Default::default()
         };
-        let adv_handle = adapter
-            .advertise(advertisement)
-            .await
-            .context("starting BLE advertisement")?;
+        let adv_handle = bluez_step(
+            "starting BLE advertisement",
+            adapter.advertise(advertisement),
+        )
+        .await?;
 
         let adapter_addr = adapter.address().await.ok();
         info!(
