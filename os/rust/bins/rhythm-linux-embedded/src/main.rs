@@ -67,11 +67,9 @@ fn main() -> Result<()> {
         s.listen_port = Some(args.port);
         s.data_dir = args.data_dir.clone();
         s.storage = Some(Box::new(file_storage));
-        s.platform = PlatformConfig {
-            eager_tls_warmup: false,
-            full_device_discovery: false,
-            ..PlatformConfig::desktop()
-        };
+        // Linux embedded is an active platform and should match the other
+        // desktop/server-class runtimes for bootstrap behavior.
+        s.platform = PlatformConfig::desktop();
 
         rhythm_os::storage::load_persisted_state(&mut s);
 
