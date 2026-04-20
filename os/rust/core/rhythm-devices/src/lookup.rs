@@ -201,7 +201,10 @@ mod tests {
                 .as_ref()
                 .map(|matter| matter.quirks.clone())
                 .unwrap_or_default(),
-            vec![crate::quirks::DeviceQuirk::NeedsExplicitOn]
+            vec![
+                crate::quirks::DeviceQuirk::NeedsExplicitOn,
+                crate::quirks::DeviceQuirk::CommandThrottleMs(250),
+            ]
         );
     }
 
