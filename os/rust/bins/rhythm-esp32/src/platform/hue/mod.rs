@@ -179,7 +179,7 @@ pub fn start_event_stream(
     });
 
     // Shared translator thread (16KB stack for TLS handshake in discovery callback)
-    rhythm_hue::hue_lifecycle::start_event_translator(
+    rhythm_hue::events::start_event_translator(
         sse_rx,
         registry,
         shutdown,

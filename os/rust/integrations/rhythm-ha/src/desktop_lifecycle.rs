@@ -44,7 +44,6 @@ pub fn connect_and_start(state: SharedState, key: &HubKey) -> Result<Receiver<Hu
         let ha_creds = s
             .hub_credentials
             .get(key)
-            .or_else(|| s.first_hub_credentials())
             .ok_or_else(|| anyhow::anyhow!("No HA credentials configured for {}", key))?;
         let config = crate::provider::config_from_credentials(&ha_creds.address, ha_creds)?;
 
@@ -92,7 +91,6 @@ pub fn ensure_runtime(state: &SharedState) -> Result<()> {
                     .as_ref()
                     .is_some_and(|t| t.as_str() == "homeassistant")
             })
-            .or_else(|| s.first_hub_credentials())
             .ok_or_else(|| anyhow::anyhow!("No HA credentials configured"))?;
         crate::provider::config_from_credentials(&ha_creds.address, ha_creds)?
     };
@@ -135,13 +133,9 @@ impl HubProvider for ReqwestHaHubProvider {
                     .and_then(|st| st.load_hub_registry_for(&configure_key).ok().flatten())
                     .and_then(|v| serde_json::from_value::<HaRegistrySnapshot>(v).ok());
 
-                let ha_creds = s
-                    .hub_credentials
-                    .get(&configure_key)
-                    .or_else(|| s.first_hub_credentials())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("No HA credentials configured for {}", configure_key)
-                    })?;
+                let ha_creds = s.hub_credentials.get(&configure_key).ok_or_else(|| {
+                    anyhow::anyhow!("No HA credentials configured for {}", configure_key)
+                })?;
                 let config = crate::provider::config_from_credentials(&ha_creds.address, ha_creds)?;
 
                 (snapshot, config)

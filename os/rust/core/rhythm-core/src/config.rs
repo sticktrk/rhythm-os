@@ -1,6 +1,6 @@
 //! Shared runtime configuration helpers.
 //!
-//! The profile-native runtime no longer exposes a separate legacy profile config type.
+//! The profile-native runtime no longer exposes a separate profile config type.
 //! This module now only carries common timing constants and the public
 //! `SolarContext` helper type.
 

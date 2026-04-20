@@ -13,10 +13,6 @@ pub const HUE_SWITCH_PREFIXES: &[&str] = &[
     "00:17:88:01:0b", // Hue buttons
 ];
 
-/// Legacy single prefix for backwards compatibility.
-#[deprecated(note = "Use HUE_SWITCH_PREFIXES instead")]
-pub const HUE_OUI_PREFIX: &str = "00:17:88:01:09";
-
 /// Normalize an IEEE address to lowercase with colons.
 ///
 /// Handles various input formats:

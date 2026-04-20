@@ -724,11 +724,6 @@ impl AppState {
         self.hub_sync_in_progress.remove(key);
     }
 
-    /// Get the first configured hub credentials (for legacy single-hub callers).
-    pub fn first_hub_credentials(&self) -> Option<&HubCredentials> {
-        self.hub_credentials.values().next()
-    }
-
     /// Get solar noon hour from runtime config.
     pub fn solar_noon_hour(&self) -> f32 {
         self.runtime_config.solar_noon_hour

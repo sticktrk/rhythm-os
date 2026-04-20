@@ -98,7 +98,13 @@ where
             info!(target: "sys", "Rooms found, starting runtime...");
             let bridge_ip = {
                 let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-                s.first_hub_credentials()
+                s.hub_credentials
+                    .values()
+                    .find(|c| {
+                        c.hub_type
+                            .as_ref()
+                            .is_some_and(|t| t.as_str() == HubType::HUE)
+                    })
                     .map(|c| c.address.clone())
                     .unwrap_or_default()
             };
@@ -147,7 +153,13 @@ where
     let (hub_key, snapshot) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let key = s
-            .first_hub_credentials()
+            .hub_credentials
+            .values()
+            .find(|c| {
+                c.hub_type
+                    .as_ref()
+                    .is_some_and(|t| t.as_str() == HubType::HUE)
+            })
             .and_then(|c| c.hub_key())
             .unwrap_or_else(|| HubKey::new(HubType::new(HubType::HUE), "unknown"));
         let snap = s

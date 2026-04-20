@@ -640,44 +640,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_idle_mapping_normalizes_to_synthesized_fallback() {
-        let mut registry = LightProfileRegistry::new();
-        let ctx = test_context(12.0);
-        let active = registry.active_profile().calculate(&ctx);
-
-        let mut day_idle = registry.profile_config_cloned(DAY_IDLE_PROFILE_ID).unwrap();
-        day_idle.curve = LightCurveShape::Constant {
-            brightness: 1.0,
-            color_temp: 0.0,
-            direct_color: Some(LightDirectColor {
-                xy: crate::rgb_to_xy(crate::Rgb::new(38, 82, 255)),
-                rgb: crate::Rgb::new(38, 82, 255),
-            }),
-        };
-        day_idle.min_brightness = 1;
-        day_idle.max_brightness = 1;
-        assert!(registry.set_profile_config(day_idle));
-
-        registry.set_mode_configs(vec![ModeConfig {
-            mode: RhythmMode::Day,
-            active_profile_id: Some(RHYTHM_PROFILE_ID.into()),
-            idle_profile_id: Some("idle".into()),
-            wake_profile_id: None,
-            warning_profile_id: None,
-            room_defaults: vec![],
-        }]);
-
-        let idle = registry
-            .profile_for_room_state(RhythmMode::Day, RoomModeState::Idle, None)
-            .calculate(&ctx);
-
-        assert_eq!(idle.brightness, 1);
-        assert_eq!(idle.rgb, active.rgb);
-        assert_eq!(idle.xy, active.xy);
-        assert_eq!(idle.is_direct_color, active.is_direct_color);
-    }
-
-    #[test]
     fn null_idle_mapping_ignores_custom_day_idle_profile() {
         let mut registry = LightProfileRegistry::new();
         let ctx = test_context(12.0);

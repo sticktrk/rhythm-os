@@ -15,7 +15,6 @@ pub struct PairingRequest {
     /// Protocol-specific pairing parameters.
     ///
     /// Matter: `{ "setup_payload": "3497-011-2332", "network": "wifi", "rendezvous": "on_network" }`
-    /// Legacy Matter: `{ "setup_code": "3497-011-2332" }`
     /// Zigbee: `{ "duration_secs": 60 }`
     #[serde(default)]
     pub params: serde_json::Value,

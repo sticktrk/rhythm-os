@@ -579,26 +579,38 @@ impl rhythm_os::storage::Storage for NvsStorage {
         Ok(())
     }
 
-    fn load_hub_credentials(&self) -> Result<HubCredentials> {
-        Ok(load_hub_credentials_inner(&EspNvs::new(
-            self.nvs.clone(),
-            NVS_NAMESPACE,
-            true,
-        )?))
+    fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>> {
+        let creds = load_hub_credentials_inner(&EspNvs::new(self.nvs.clone(), NVS_NAMESPACE, true)?);
+        if creds.is_configured() {
+            Ok(vec![creds])
+        } else {
+            Ok(Vec::new())
+        }
     }
 
-    fn save_hub_credentials(&self, creds: &HubCredentials) -> Result<()> {
-        save_hub_credentials(&self.nvs, creds)
+    fn save_all_hub_credentials(&self, creds: &[HubCredentials]) -> Result<()> {
+        if let Some(creds) = creds.first() {
+            save_hub_credentials(&self.nvs, creds)
+        } else {
+            save_hub_credentials(&self.nvs, &HubCredentials::default())
+        }
     }
 
-    fn load_hub_registry(&self) -> Result<Option<serde_json::Value>> {
+    fn load_hub_registry_for(
+        &self,
+        _key: &rhythm_os::canonical::identity::HubKey,
+    ) -> Result<Option<serde_json::Value>> {
         match load_hue_registry(&self.nvs)? {
             Some(snapshot) => Ok(Some(serde_json::to_value(snapshot)?)),
             None => Ok(None),
         }
     }
 
-    fn save_hub_registry(&self, data: &serde_json::Value) -> Result<()> {
+    fn save_hub_registry_for(
+        &self,
+        _key: &rhythm_os::canonical::identity::HubKey,
+        data: &serde_json::Value,
+    ) -> Result<()> {
         let snapshot: rhythm_hue::registry::HueRegistrySnapshot =
             serde_json::from_value(data.clone())?;
         save_hue_registry(&self.nvs, &snapshot)

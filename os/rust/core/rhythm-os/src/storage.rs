@@ -10,10 +10,9 @@ use log::{debug, info, warn};
 use rhythm_core::room::RoomManager;
 use rhythm_core::RuntimeConfig;
 use rhythm_core::{
-    LightProfileConfig, ModeChangeCause, ModeConfig, ModeTransitionConfig, ModeTransitionTrigger,
-    RhythmMode,
+    LightProfileConfig, ModeChangeCause, ModeConfig, ModeTransitionConfig, RhythmMode,
 };
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::canonical::identity::HubKey;
@@ -23,9 +22,6 @@ use crate::hub::HubCredentials;
 ///
 /// Each method loads/saves a single domain object. Implementations should
 /// be safe to call from any thread (`Send + Sync`).
-///
-/// The canonical registry and topology store methods have default no-op
-/// implementations for backwards compatibility (ESP32 doesn't use them).
 pub trait Storage: Send + Sync {
     fn load_rooms(&self) -> Result<RoomManager>;
     fn save_rooms(&self, rooms: &RoomManager) -> Result<()>;
@@ -35,44 +31,10 @@ pub trait Storage: Send + Sync {
     fn save_location(&self, loc: &StoredLocation) -> Result<()>;
     fn load_settings(&self) -> Result<StoredSettings>;
     fn save_settings(&self, settings: &StoredSettings) -> Result<()>;
-    fn load_hub_credentials(&self) -> Result<HubCredentials>;
-    fn save_hub_credentials(&self, creds: &HubCredentials) -> Result<()>;
-
-    /// Load all hub credentials (multi-hub support).
-    ///
-    /// Default implementation wraps `load_hub_credentials` into a single-element vec.
-    /// The FileStorage implementation handles both legacy single-object and new array format.
-    fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>> {
-        match self.load_hub_credentials() {
-            Ok(creds) if creds.is_configured() => Ok(vec![creds]),
-            Ok(_) => Ok(Vec::new()),
-            Err(_) => Ok(Vec::new()),
-        }
-    }
-
-    /// Save all hub credentials (multi-hub support).
-    ///
-    /// Default implementation saves the first credential via `save_hub_credentials`.
-    fn save_all_hub_credentials(&self, creds: &[HubCredentials]) -> Result<()> {
-        if let Some(first) = creds.first() {
-            self.save_hub_credentials(first)
-        } else {
-            self.save_hub_credentials(&HubCredentials::default())
-        }
-    }
-
-    fn load_hub_registry(&self) -> Result<Option<Value>>;
-    fn save_hub_registry(&self, data: &Value) -> Result<()>;
-
-    /// Load hub registry for a specific hub key. Default: falls back to load_hub_registry.
-    fn load_hub_registry_for(&self, _key: &HubKey) -> Result<Option<Value>> {
-        self.load_hub_registry()
-    }
-
-    /// Save hub registry for a specific hub key. Default: falls back to save_hub_registry.
-    fn save_hub_registry_for(&self, _key: &HubKey, data: &Value) -> Result<()> {
-        self.save_hub_registry(data)
-    }
+    fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>>;
+    fn save_all_hub_credentials(&self, creds: &[HubCredentials]) -> Result<()>;
+    fn load_hub_registry_for(&self, key: &HubKey) -> Result<Option<Value>>;
+    fn save_hub_registry_for(&self, key: &HubKey, data: &Value) -> Result<()>;
 
     /// Load the canonical device registry. Default: returns None (not persisted).
     fn load_canonical_registry(&self) -> Result<Option<Value>> {
@@ -149,9 +111,6 @@ impl StoredLightProfiles {
     ) {
         *profiles = crate::factory_default_config::factory_default_light_profile_config_map();
         for profile in &self.profiles {
-            if profile.id == "idle" {
-                continue;
-            }
             let mut normalized = profile.clone();
             rhythm_core::normalize_builtin_state_profile_config(&mut normalized);
             profiles.insert(normalized.id.clone(), normalized);
@@ -207,7 +166,7 @@ impl StoredLocation {
 }
 
 /// Global settings for persistence.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredSettings {
     pub power_save: bool,
     pub active_mode: RhythmMode,
@@ -221,55 +180,6 @@ pub struct StoredSettings {
     pub modes: Vec<ModeConfig>,
     #[serde(default)]
     pub mode_transitions: Vec<ModeTransitionConfig>,
-}
-
-impl<'de> Deserialize<'de> for StoredSettings {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct StoredSettingsCompat {
-            power_save: bool,
-            active_mode: RhythmMode,
-            #[serde(default)]
-            last_active_mode_cause: Option<ModeChangeCause>,
-            #[serde(default)]
-            last_active_mode_transition_id: Option<String>,
-            #[serde(default)]
-            last_active_mode_change_utc_ms: Option<i64>,
-            #[serde(default)]
-            modes: Vec<ModeConfig>,
-            #[serde(default)]
-            mode_transitions: Vec<ModeTransitionConfig>,
-            #[serde(default)]
-            last_active_mode_trigger: Option<ModeTransitionTrigger>,
-        }
-
-        let compat = StoredSettingsCompat::deserialize(deserializer)?;
-        let last_active_mode_cause = compat
-            .last_active_mode_cause
-            .or_else(|| {
-                compat.last_active_mode_trigger.map(|trigger| {
-                    if trigger.is_manual() {
-                        ModeChangeCause::Manual
-                    } else {
-                        ModeChangeCause::Schedule
-                    }
-                })
-            })
-            .unwrap_or_default();
-
-        Ok(Self {
-            power_save: compat.power_save,
-            active_mode: compat.active_mode,
-            last_active_mode_cause,
-            last_active_mode_transition_id: compat.last_active_mode_transition_id,
-            last_active_mode_change_utc_ms: compat.last_active_mode_change_utc_ms,
-            modes: compat.modes,
-            mode_transitions: compat.mode_transitions,
-        })
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -370,40 +280,16 @@ impl Storage for FileStorage {
         self.write_atomic("settings.json", data.as_bytes())
     }
 
-    fn load_hub_credentials(&self) -> Result<HubCredentials> {
-        self.read_json("hub_credentials.json")
-    }
-
-    fn save_hub_credentials(&self, creds: &HubCredentials) -> Result<()> {
-        let data = serde_json::to_string_pretty(creds)?;
-        self.write_atomic("hub_credentials.json", data.as_bytes())
-    }
-
     fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>> {
         let path = self.file_path("hub_credentials.json");
-        let data = match std::fs::read_to_string(&path) {
-            Ok(d) => d,
-            Err(_) => return Ok(Vec::new()),
-        };
-        let value: serde_json::Value = serde_json::from_str(&data)
-            .with_context(|| format!("Failed to parse {}", path.display()))?;
-
-        // Handle both legacy single-object and new array format
-        if value.is_array() {
-            let creds: Vec<HubCredentials> = serde_json::from_value(value)?;
-            Ok(creds.into_iter().filter(|c| c.is_configured()).collect())
-        } else {
-            let creds: HubCredentials = serde_json::from_value(value)?;
-            if creds.is_configured() {
-                Ok(vec![creds])
-            } else {
-                Ok(Vec::new())
-            }
+        if !path.exists() {
+            return Ok(Vec::new());
         }
+        let creds: Vec<HubCredentials> = self.read_json("hub_credentials.json")?;
+        Ok(creds.into_iter().filter(|c| c.is_configured()).collect())
     }
 
     fn save_all_hub_credentials(&self, creds: &[HubCredentials]) -> Result<()> {
-        // Always write as array for forward compat
         let data = serde_json::to_string_pretty(creds)?;
         self.write_atomic("hub_credentials.json", data.as_bytes())
     }
@@ -417,7 +303,7 @@ impl Storage for FileStorage {
                 if path.exists() {
                     warn!(
                         target: "sys",
-                        "Failed to load hub registry {}: {}. Falling back to legacy hub_registry.json",
+                        "Failed to load hub registry {}: {}",
                         path.display(),
                         e
                     );
@@ -428,8 +314,7 @@ impl Storage for FileStorage {
                         path.display()
                     );
                 }
-                // Fallback to legacy un-keyed file
-                self.load_hub_registry()
+                Ok(None)
             }
         }
     }
@@ -438,31 +323,6 @@ impl Storage for FileStorage {
         let filename = format!("hub_registry_{}.json", sanitize_hub_key(key));
         let json = serde_json::to_string_pretty(data)?;
         self.write_atomic(&filename, json.as_bytes())
-    }
-
-    fn load_hub_registry(&self) -> Result<Option<serde_json::Value>> {
-        let path = self.file_path("hub_registry.json");
-        match self.read_json::<serde_json::Value>("hub_registry.json") {
-            Ok(v) => Ok(Some(v)),
-            Err(e) => {
-                if path.exists() {
-                    warn!(
-                        target: "sys",
-                        "Failed to load hub registry {}: {}",
-                        path.display(),
-                        e
-                    );
-                } else {
-                    debug!(target: "sys", "No persisted hub registry at {}", path.display());
-                }
-                Ok(None)
-            }
-        }
-    }
-
-    fn save_hub_registry(&self, data: &serde_json::Value) -> Result<()> {
-        let json = serde_json::to_string_pretty(data)?;
-        self.write_atomic("hub_registry.json", json.as_bytes())
     }
 
     fn load_canonical_registry(&self) -> Result<Option<serde_json::Value>> {
@@ -723,7 +583,7 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
 
     if let Some(storage) = s.storage.as_ref() {
         match storage.load_all_hub_credentials() {
-            Ok(all_creds) if !all_creds.is_empty() => {
+            Ok(all_creds) => {
                 for creds in all_creds {
                     info!(target: "sys", "Loaded hub credentials: type={:?}, addr={}", creds.hub_type, creds.address);
                     if let Some(key) = creds.hub_key() {
@@ -732,29 +592,7 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                 }
             }
             Err(e) => {
-                warn!(
-                    target: "sys",
-                    "Failed to load multi-hub credentials: {}. Falling back to legacy credentials",
-                    e
-                );
-                if let Ok(creds) = storage.load_hub_credentials() {
-                    if creds.is_configured() {
-                        info!(target: "sys", "Loaded hub credentials: type={:?}, addr={}", creds.hub_type, creds.address);
-                        if let Some(key) = creds.hub_key() {
-                            s.hub_credentials.insert(key, creds);
-                        }
-                    }
-                }
-            }
-            _ => {
-                if let Ok(creds) = storage.load_hub_credentials() {
-                    if creds.is_configured() {
-                        info!(target: "sys", "Loaded hub credentials: type={:?}, addr={}", creds.hub_type, creds.address);
-                        if let Some(key) = creds.hub_key() {
-                            s.hub_credentials.insert(key, creds);
-                        }
-                    }
-                }
+                warn!(target: "sys", "Failed to load hub credentials: {}", e);
             }
         }
     }
@@ -855,19 +693,19 @@ mod tests {
             Ok(())
         }
 
-        fn load_hub_credentials(&self) -> Result<HubCredentials> {
-            Ok(HubCredentials::default())
+        fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>> {
+            Ok(Vec::new())
         }
 
-        fn save_hub_credentials(&self, _creds: &HubCredentials) -> Result<()> {
+        fn save_all_hub_credentials(&self, _creds: &[HubCredentials]) -> Result<()> {
             Ok(())
         }
 
-        fn load_hub_registry(&self) -> Result<Option<Value>> {
+        fn load_hub_registry_for(&self, _key: &HubKey) -> Result<Option<Value>> {
             Ok(None)
         }
 
-        fn save_hub_registry(&self, _data: &Value) -> Result<()> {
+        fn save_hub_registry_for(&self, _key: &HubKey, _data: &Value) -> Result<()> {
             Ok(())
         }
 
@@ -915,15 +753,15 @@ mod tests {
     }
 
     #[test]
-    fn stored_light_profiles_apply_state_seeds_builtins_and_drops_legacy_idle() {
-        let legacy_idle = rhythm_core::LightProfileConfig {
-            id: "idle".into(),
-            name: "Idle".into(),
+    fn stored_light_profiles_apply_state_seeds_builtins_and_keeps_custom_profiles() {
+        let custom = rhythm_core::LightProfileConfig {
+            id: "custom".into(),
+            name: "Custom".into(),
             ..rhythm_core::default_day_idle_profile()
         };
         let stored = StoredLightProfiles {
             solar_noon_hour: 12.5,
-            profiles: vec![rhythm_core::default_rhythm_profile(), legacy_idle],
+            profiles: vec![rhythm_core::default_rhythm_profile(), custom],
         };
 
         let mut profiles = std::collections::BTreeMap::new();
@@ -934,7 +772,7 @@ mod tests {
         assert!(profiles.contains_key(rhythm_core::SLEEP_PROFILE_ID));
         assert!(profiles.contains_key(rhythm_core::DAY_IDLE_PROFILE_ID));
         assert!(profiles.contains_key(rhythm_core::SLEEP_IDLE_PROFILE_ID));
-        assert!(!profiles.contains_key("idle"));
+        assert!(profiles.contains_key("custom"));
     }
 
     #[test]
@@ -1109,106 +947,6 @@ mod tests {
 
         assert_eq!(app.active_mode, RhythmMode::Sleep);
         assert_eq!(app.active_mode_profile_id(), rhythm_core::SLEEP_PROFILE_ID);
-    }
-
-    #[test]
-    fn load_persisted_state_legacy_idle_mode_mapping_is_normalized_and_persisted() {
-        let saved_settings = Arc::new(Mutex::new(Vec::new()));
-        let storage = TestStorage {
-            light_profiles: Some(StoredLightProfiles {
-                solar_noon_hour: 12.5,
-                profiles: rhythm_core::default_builtin_profiles().into(),
-            }),
-            settings: Some(StoredSettings {
-                power_save: false,
-                active_mode: RhythmMode::Day,
-                last_active_mode_cause: ModeChangeCause::Manual,
-                last_active_mode_transition_id: None,
-                last_active_mode_change_utc_ms: None,
-                modes: vec![
-                    rhythm_core::ModeConfig {
-                        mode: RhythmMode::Day,
-                        active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
-                        idle_profile_id: Some("idle".into()),
-                        wake_profile_id: None,
-                        warning_profile_id: None,
-                        room_defaults: vec![],
-                    },
-                    rhythm_core::ModeConfig {
-                        mode: RhythmMode::Sleep,
-                        active_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
-                        idle_profile_id: Some("idle".into()),
-                        wake_profile_id: None,
-                        warning_profile_id: None,
-                        room_defaults: vec![],
-                    },
-                ],
-                mode_transitions: vec![],
-            }),
-            saved_settings: saved_settings.clone(),
-            ..Default::default()
-        };
-
-        let mut app = crate::state::AppState {
-            storage: Some(Box::new(storage)),
-            ..Default::default()
-        };
-        load_persisted_state(&mut app);
-
-        let modes = app.mode_configs();
-        assert_eq!(modes[0].idle_profile_id, None);
-        assert_eq!(modes[1].idle_profile_id, None);
-
-        let persisted = saved_settings.lock().unwrap();
-        assert_eq!(persisted.len(), 1);
-        assert_eq!(persisted[0].modes[0].idle_profile_id, None);
-        assert_eq!(persisted[0].modes[1].idle_profile_id, None);
-    }
-
-    #[test]
-    fn load_persisted_state_normalizes_default_transition_identity_and_label() {
-        let saved_settings = Arc::new(Mutex::new(Vec::new()));
-        let storage = TestStorage {
-            light_profiles: Some(StoredLightProfiles {
-                solar_noon_hour: 12.5,
-                profiles: rhythm_core::default_builtin_profiles().into(),
-            }),
-            settings: Some(StoredSettings {
-                power_save: false,
-                active_mode: RhythmMode::Day,
-                last_active_mode_cause: ModeChangeCause::Manual,
-                last_active_mode_transition_id: None,
-                last_active_mode_change_utc_ms: None,
-                modes: vec![],
-                mode_transitions: vec![rhythm_core::ModeTransitionConfig {
-                    id: "sleep_to_day_sunrise".into(),
-                    label: "Sleep to Day (Sunrise)".into(),
-                    from_mode: RhythmMode::Sleep,
-                    to_mode: RhythmMode::Day,
-                    trigger: ModeTransitionTrigger::Sunrise,
-                    duration_ms: rhythm_core::TimerSetting::Fixed { value: 10_000 },
-                    preserve_hard_off: true,
-                }],
-            }),
-            saved_settings: saved_settings.clone(),
-            ..Default::default()
-        };
-
-        let mut app = crate::state::AppState {
-            storage: Some(Box::new(storage)),
-            ..Default::default()
-        };
-        load_persisted_state(&mut app);
-
-        let transitions = app.mode_transition_configs();
-        assert_eq!(transitions.len(), 1);
-        assert_eq!(transitions[0].id, "sleep_to_day");
-        assert_eq!(transitions[0].label, "Sleep to Day");
-
-        let persisted = saved_settings.lock().unwrap();
-        assert_eq!(persisted.len(), 1);
-        assert_eq!(persisted[0].mode_transitions[0].id, "sleep_to_day");
-        assert_eq!(persisted[0].mode_transitions[0].label, "Sleep to Day");
     }
 
     #[test]
@@ -1471,26 +1209,6 @@ mod tests {
         }
 
         #[test]
-        fn settings_load_legacy_trigger_field_maps_to_cause() {
-            let (storage, path) = temp_storage();
-            let json = r#"{
-                "power_save": false,
-                "active_mode": "day",
-                "last_active_mode_trigger": "sunrise",
-                "last_active_mode_change_utc_ms": 123,
-                "modes": [],
-                "mode_transitions": []
-            }"#;
-            std::fs::write(path.join("settings.json"), json).unwrap();
-
-            let loaded = storage.load_settings().unwrap();
-            assert_eq!(loaded.last_active_mode_cause, ModeChangeCause::Schedule);
-            assert_eq!(loaded.last_active_mode_transition_id, None);
-            assert_eq!(loaded.last_active_mode_change_utc_ms, Some(123));
-            cleanup(&path);
-        }
-
-        #[test]
         fn hub_credentials_save_load_roundtrip() {
             let (storage, path) = temp_storage();
             let creds = HubCredentials::new(
@@ -1498,24 +1216,25 @@ mod tests {
                 "192.168.1.1",
                 serde_json::json!({"username": "test"}),
             );
-            storage.save_hub_credentials(&creds).unwrap();
-            let loaded = storage.load_hub_credentials().unwrap();
-            assert!(loaded.is_configured());
-            assert_eq!(loaded.hub_type.as_ref().unwrap().as_str(), "hue");
-            assert_eq!(loaded.address, "192.168.1.1");
-            assert_eq!(loaded.get_str("username"), Some("test"));
+            storage.save_all_hub_credentials(&[creds]).unwrap();
+            let loaded = storage.load_all_hub_credentials().unwrap();
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[0].hub_type.as_ref().unwrap().as_str(), "hue");
+            assert_eq!(loaded[0].address, "192.168.1.1");
+            assert_eq!(loaded[0].get_str("username"), Some("test"));
             cleanup(&path);
         }
 
         #[test]
         fn hub_registry_save_load_roundtrip() {
             let (storage, path) = temp_storage();
+            let key = HubKey::new(crate::hub::HubType::new("hue"), "192.168.1.50");
             let data = serde_json::json!({
                 "devices": [{"id": "light-1", "name": "Desk Lamp"}],
                 "buttons": [{"id": "switch-1", "name": "Wall Switch"}]
             });
-            storage.save_hub_registry(&data).unwrap();
-            let loaded = storage.load_hub_registry().unwrap();
+            storage.save_hub_registry_for(&key, &data).unwrap();
+            let loaded = storage.load_hub_registry_for(&key).unwrap();
             assert!(loaded.is_some());
             let loaded = loaded.unwrap();
             assert_eq!(loaded["devices"][0]["id"], "light-1");
@@ -1526,7 +1245,8 @@ mod tests {
         #[test]
         fn hub_registry_missing_returns_none() {
             let (storage, path) = temp_storage();
-            let loaded = storage.load_hub_registry().unwrap();
+            let key = HubKey::new(crate::hub::HubType::new("hue"), "192.168.1.50");
+            let loaded = storage.load_hub_registry_for(&key).unwrap();
             assert!(loaded.is_none());
             cleanup(&path);
         }
@@ -1631,9 +1351,6 @@ mod tests {
                 )])
                 .unwrap();
             storage
-                .save_hub_registry(&serde_json::json!({"rooms": []}))
-                .unwrap();
-            storage
                 .save_hub_registry_for(
                     &crate::canonical::identity::HubKey::new(
                         crate::hub::HubType::new("hue"),
@@ -1665,7 +1382,6 @@ mod tests {
                 "location.json",
                 "settings.json",
                 "hub_credentials.json",
-                "hub_registry.json",
                 "canonical_registry.json",
                 "topology.json",
                 "commissioning_wifi.json",
@@ -1734,20 +1450,6 @@ mod tests {
         }
 
         #[test]
-        fn all_hub_credentials_loads_legacy_single_object() {
-            let (storage, path) = temp_storage();
-            // Write legacy single-object format
-            let creds =
-                HubCredentials::new("hue", "10.0.0.1", serde_json::json!({"username": "u"}));
-            storage.save_hub_credentials(&creds).unwrap();
-            // load_all should parse it as a single-element vec
-            let loaded = storage.load_all_hub_credentials().unwrap();
-            assert_eq!(loaded.len(), 1);
-            assert_eq!(loaded[0].address, "10.0.0.1");
-            cleanup(&path);
-        }
-
-        #[test]
         fn all_hub_credentials_filters_unconfigured() {
             let (storage, path) = temp_storage();
             let creds = vec![
@@ -1778,21 +1480,6 @@ mod tests {
             let loaded = storage.load_hub_registry_for(&key).unwrap();
             assert!(loaded.is_some());
             assert_eq!(loaded.unwrap()["rooms"][0]["id"], "kitchen");
-            cleanup(&path);
-        }
-
-        #[test]
-        fn hub_registry_for_falls_back_to_legacy() {
-            let (storage, path) = temp_storage();
-            // Write legacy hub_registry.json
-            let data = serde_json::json!({"rooms": [{"id": "legacy_room"}]});
-            storage.save_hub_registry(&data).unwrap();
-
-            // Load via per-hub key that doesn't have its own file
-            let key = HubKey::new(crate::hub::HubType::new("hue"), "unknown_ip");
-            let loaded = storage.load_hub_registry_for(&key).unwrap();
-            assert!(loaded.is_some());
-            assert_eq!(loaded.unwrap()["rooms"][0]["id"], "legacy_room");
             cleanup(&path);
         }
 

@@ -31,22 +31,16 @@ pub struct MatterPairingParams {
 impl MatterPairingParams {
     /// Parse the integration-specific request payload.
     ///
-    /// `setup_payload` is the preferred field name. The legacy `setup_code`
-    /// field remains accepted for older clients. When clients omit
-    /// `rendezvous`, manual setup codes default to on-network commissioning
-    /// while QR payloads keep the existing auto behavior.
+    /// When clients omit `rendezvous`, manual setup codes default to
+    /// on-network commissioning while QR payloads keep the existing auto
+    /// behavior.
     pub fn from_value(params: &Value) -> Result<Self> {
         let setup_payload = params
             .get("setup_payload")
-            .or_else(|| params.get("setup_code"))
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Missing 'setup_payload' (or legacy 'setup_code') in pairing params"
-                )
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("Missing 'setup_payload' in pairing params"))?;
 
         let network = match params.get("network").and_then(|value| value.as_str()) {
             None | Some("wifi") => MatterCommissioningNetwork::Wifi,
@@ -340,19 +334,6 @@ fn queue_unassigned_canonical_device(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pairing_params_accept_legacy_setup_code() {
-        let params = serde_json::json!({
-            "setup_code": "34970112332"
-        });
-
-        let parsed = MatterPairingParams::from_value(&params).unwrap();
-
-        assert_eq!(parsed.setup_payload, "34970112332");
-        assert_eq!(parsed.network, MatterCommissioningNetwork::Wifi);
-        assert_eq!(parsed.rendezvous, MatterCommissioningRendezvous::OnNetwork);
-    }
 
     #[test]
     fn pairing_params_accept_raw_mt_payload() {

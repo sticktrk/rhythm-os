@@ -188,27 +188,6 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         path: "/api/triage/:id/bind",
         methods: &["PUT"],
     },
-    // Triage queue (legacy paths)
-    SharedRoute {
-        path: "/api/devices/triage",
-        methods: &["GET"],
-    },
-    SharedRoute {
-        path: "/api/devices/triage/:id/merge",
-        methods: &["PUT"],
-    },
-    SharedRoute {
-        path: "/api/devices/triage/:id/new",
-        methods: &["PUT"],
-    },
-    SharedRoute {
-        path: "/api/devices/triage/:id/dismiss",
-        methods: &["PUT"],
-    },
-    SharedRoute {
-        path: "/api/devices/triage/:id/room",
-        methods: &["PUT"],
-    },
     // Topology room management
     SharedRoute {
         path: "/api/topology/rooms",

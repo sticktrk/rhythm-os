@@ -6,7 +6,6 @@
 
 pub mod api_types;
 pub mod behavior;
-pub mod buttons;
 pub mod controller;
 pub mod device_types;
 pub mod discovery;

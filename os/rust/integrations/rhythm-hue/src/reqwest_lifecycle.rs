@@ -79,7 +79,6 @@ pub fn ensure_runtime(state: &SharedState) -> Result<()> {
         s.hub_credentials
             .values()
             .find(|c| c.hub_type.as_ref().is_some_and(|t| t.as_str() == "hue"))
-            .or_else(|| s.first_hub_credentials())
             .map(|c| c.address.clone())
             .unwrap_or_default()
     };
@@ -114,22 +113,13 @@ pub fn create_hue_controller(
         let creds = s
             .hub_credentials
             .get(key)
-            .or_else(|| {
-                s.hub_credentials
-                    .values()
-                    .find(|c| c.hub_type.as_ref().is_some_and(|t| t.as_str() == "hue"))
-            })
             .ok_or_else(|| anyhow::anyhow!("No Hue credentials for {}", key))?;
         let username = crate::provider::hue_username(creds)
             .ok_or_else(|| anyhow::anyhow!("Hue credentials missing username"))?
             .to_string();
         let bridge_ip = creds.address.clone();
 
-        let hue_data = s
-            .hubs
-            .get(key)
-            .and_then(|h| h.data::<HueHubData>())
-            .or_else(|| s.hubs.values().find_map(|h| h.data::<HueHubData>()));
+        let hue_data = s.hubs.get(key).and_then(|h| h.data::<HueHubData>());
         let reg = hue_data
             .map(|hue| hue.registry.clone())
             .ok_or_else(|| anyhow::anyhow!("Hue hub not active for {}", key))?;
@@ -264,5 +254,5 @@ fn start_event_stream(
 
     let sse_rx = start_reqwest_sse(sse_config, shutdown.clone());
 
-    crate::hue_lifecycle::start_event_translator(sse_rx, registry, shutdown, None, None, None, None)
+    crate::events::start_event_translator(sse_rx, registry, shutdown, None, None, None, None)
 }

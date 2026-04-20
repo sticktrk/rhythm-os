@@ -37,7 +37,7 @@ pub struct HourBreakpoint {
 /// Used for `fade_ms`, `motion_timeout_secs`, and `rhythm_interval_secs`
 /// on [`LightProfileConfig`].
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(tag = "mode"))]
 pub enum TimerSetting {
     /// System-computed. Behavior depends on which field uses this setting:
@@ -90,94 +90,6 @@ impl TimerSetting {
     /// Returns `true` if this setting is [`Auto`](TimerSetting::Auto).
     pub fn is_auto(&self) -> bool {
         matches!(self, Self::Auto)
-    }
-}
-
-/// Internal tagged-enum helper for deserializing new-format objects.
-/// Avoids infinite recursion by using derive instead of the custom impl.
-#[cfg(feature = "serde")]
-#[derive(Deserialize)]
-#[serde(tag = "mode")]
-enum TimerSettingTagged {
-    #[serde(rename = "auto")]
-    Auto,
-    #[serde(rename = "fixed")]
-    Fixed { value: u32 },
-    #[serde(rename = "scheduled")]
-    Scheduled { breakpoints: Vec<HourBreakpoint> },
-}
-
-#[cfg(feature = "serde")]
-impl From<TimerSettingTagged> for TimerSetting {
-    fn from(tagged: TimerSettingTagged) -> Self {
-        match tagged {
-            TimerSettingTagged::Auto => TimerSetting::Auto,
-            TimerSettingTagged::Fixed { value } => TimerSetting::Fixed { value },
-            TimerSettingTagged::Scheduled { breakpoints } => {
-                TimerSetting::Scheduled { breakpoints }
-            }
-        }
-    }
-}
-
-/// Custom Deserialize for backward compatibility.
-///
-/// Accepts:
-/// - Object with `mode` key: new format (`{"mode":"auto"}`, `{"mode":"fixed","value":300}`, etc.)
-/// - Bare number: legacy `Some(n)` → `Fixed { value: n }`
-/// - null: legacy `None` → `Auto`
-#[cfg(feature = "serde")]
-impl<'de> Deserialize<'de> for TimerSetting {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::de;
-
-        struct TimerSettingVisitor;
-
-        impl<'de> de::Visitor<'de> for TimerSettingVisitor {
-            type Value = TimerSetting;
-
-            fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
-                formatter.write_str(
-                    "a timer setting object, a number (legacy fixed), or null (legacy auto)",
-                )
-            }
-
-            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
-                Ok(TimerSetting::Auto)
-            }
-
-            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
-                Ok(TimerSetting::Auto)
-            }
-
-            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
-                Ok(TimerSetting::Fixed { value: v as u32 })
-            }
-
-            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
-                if v < 0 {
-                    return Err(de::Error::custom(
-                        "timer setting value must be non-negative",
-                    ));
-                }
-                Ok(TimerSetting::Fixed { value: v as u32 })
-            }
-
-            fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
-                Ok(TimerSetting::Fixed { value: v as u32 })
-            }
-
-            fn visit_map<A: de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
-                let tagged: TimerSettingTagged =
-                    de::Deserialize::deserialize(de::value::MapAccessDeserializer::new(map))?;
-                Ok(tagged.into())
-            }
-        }
-
-        deserializer.deserialize_any(TimerSettingVisitor)
     }
 }
 
@@ -465,40 +377,6 @@ mod tests {
             let json = serde_json::to_string(&ts).unwrap();
             let back: TimerSetting = serde_json::from_str(&json).unwrap();
             assert_eq!(back, ts);
-        }
-
-        #[test]
-        fn test_timer_setting_legacy_bare_number() {
-            let back: TimerSetting = serde_json::from_str("300").unwrap();
-            assert_eq!(back, TimerSetting::Fixed { value: 300 });
-        }
-
-        #[test]
-        fn test_timer_setting_legacy_null() {
-            let back: TimerSetting = serde_json::from_str("null").unwrap();
-            assert_eq!(back, TimerSetting::Auto);
-        }
-
-        #[test]
-        fn test_legacy_profile_config_with_bare_numbers() {
-            let json = r#"{
-                "id": "test",
-                "name": "Test",
-                "curve": {"type": "super-gaussian"},
-                "fade_ms": 300,
-                "motion_timeout_secs": 1200,
-                "rhythm_interval_secs": 60
-            }"#;
-            let config: LightProfileConfig = serde_json::from_str(json).unwrap();
-            assert_eq!(config.fade_ms, TimerSetting::Fixed { value: 300 });
-            assert_eq!(
-                config.motion_timeout_secs,
-                TimerSetting::Fixed { value: 1200 }
-            );
-            assert_eq!(
-                config.rhythm_interval_secs,
-                TimerSetting::Fixed { value: 60 }
-            );
         }
 
         #[test]

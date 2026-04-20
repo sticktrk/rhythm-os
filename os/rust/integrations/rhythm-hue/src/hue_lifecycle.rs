@@ -21,10 +21,6 @@ use rhythm_os::state::SharedState;
 
 use crate::hub_state::HueHubData;
 
-// Re-export event functions for backward compatibility with callers
-// that import from `hue_lifecycle::translate_sse_event` etc.
-pub use crate::events::{start_event_translator, translate_sse_event};
-
 /// Configuration for connecting the Hue SSE event stream.
 pub struct HueSseConnectConfig {
     pub bridge_ip: String,
@@ -55,16 +51,9 @@ where
         let s = state
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
-        // Look up credentials by key, fallback to scan for backward compat
         let creds = s
             .hub_credentials
             .get(&hub_key)
-            .or_else(|| {
-                s.hub_credentials
-                    .values()
-                    .find(|c| c.hub_type.as_ref().is_some_and(|t| t.as_str() == "hue"))
-            })
-            .or_else(|| s.first_hub_credentials())
             .ok_or_else(|| anyhow::anyhow!("No hub credentials configured for {}", hub_key))?;
         let username = crate::provider::hue_username(creds)
             .ok_or_else(|| anyhow::anyhow!("Hue credentials not configured"))?
@@ -133,7 +122,6 @@ pub fn ensure_hue_runtime<H: crate::transport::HueTransport + 'static>(
         let hue_creds = s
             .hub_credentials
             .get(&hub_key)
-            .or_else(|| s.first_hub_credentials())
             .ok_or_else(|| anyhow::anyhow!("No hub credentials configured"))?;
         let user = crate::provider::hue_username(hue_creds)
             .ok_or_else(|| anyhow::anyhow!("Hue credentials not configured"))?

@@ -19,6 +19,3 @@ pub struct HueHubData {
     /// Shared device registry for room lookups and SSE routing.
     pub registry: Arc<Mutex<HueDeviceRegistry>>,
 }
-
-/// Backward-compatible alias.
-pub type HueHubState = HueHubData;

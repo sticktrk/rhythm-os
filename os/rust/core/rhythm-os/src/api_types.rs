@@ -40,7 +40,7 @@ pub struct RoomRhythmState {
     pub room_profile: RoomProfileSettings,
 }
 
-/// Room state for legacy poll payloads.
+/// Room state for poll payloads.
 ///
 /// Extends `RoomRhythmState` with optional motion fields (using SSE names).
 #[derive(Clone, Debug, Serialize)]

@@ -15,7 +15,7 @@ use rhythm_core::runtime::RuntimeConfig;
 use rhythm_core::InputEvent;
 
 use rhythm_hue::controller::HueLightController;
-use rhythm_hue::hue_lifecycle::translate_sse_event;
+use rhythm_hue::events::translate_sse_event;
 use rhythm_hue::sse::HueSseEvent;
 use rhythm_hue::test_support::{HueTransportCall, SpyHueTransport};
 

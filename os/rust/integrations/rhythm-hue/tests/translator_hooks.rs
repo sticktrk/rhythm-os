@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::ButtonAction;
-use rhythm_hue::hue_lifecycle::start_event_translator;
+use rhythm_hue::events::start_event_translator;
 use rhythm_hue::registry::HueDeviceRegistry;
 use rhythm_hue::sse::HueSseEvent;
 use rhythm_os::button_resolve::RawButtonEvent;

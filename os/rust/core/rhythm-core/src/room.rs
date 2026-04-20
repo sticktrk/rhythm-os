@@ -15,12 +15,7 @@ use crate::light_profile::{
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-const REMOVED_LEGACY_IDLE_PROFILE_ID: &str = "idle";
 pub const DEFAULT_MODE_TRANSITION_DURATION_MS: u32 = 30_000;
-
-fn is_removed_legacy_idle_profile_id(id: &str) -> bool {
-    id == REMOVED_LEGACY_IDLE_PROFILE_ID
-}
 
 /// High-level global mode selected by the user.
 ///
@@ -173,19 +168,12 @@ impl ModeConfig {
     pub fn normalize_profile_ids(&mut self) -> bool {
         let mut changed = self.normalize_room_defaults();
 
-        if self.active_profile_id.as_deref().is_some_and(|id| {
-            is_builtin_state_profile_id(id) || is_removed_legacy_idle_profile_id(id)
-        }) {
-            self.active_profile_id = Some(self.mode.default_active_profile_id().to_string());
-            changed = true;
-        }
-
         if self
-            .idle_profile_id
+            .active_profile_id
             .as_deref()
-            .is_some_and(is_removed_legacy_idle_profile_id)
+            .is_some_and(is_builtin_state_profile_id)
         {
-            self.idle_profile_id = None;
+            self.active_profile_id = Some(self.mode.default_active_profile_id().to_string());
             changed = true;
         }
 
@@ -213,15 +201,10 @@ impl ModeConfig {
             RoomModeState::Active => Some(
                 self.active_profile_id
                     .as_deref()
-                    .filter(|id| {
-                        !is_builtin_state_profile_id(id) && !is_removed_legacy_idle_profile_id(id)
-                    })
+                    .filter(|id| !is_builtin_state_profile_id(id))
                     .unwrap_or(active_profile_id),
             ),
-            RoomModeState::Idle => self
-                .idle_profile_id
-                .as_deref()
-                .filter(|id| !is_removed_legacy_idle_profile_id(id)),
+            RoomModeState::Idle => self.idle_profile_id.as_deref(),
             RoomModeState::Wake => {
                 Some(self.wake_profile_id.as_deref().unwrap_or(active_profile_id))
             }
@@ -230,10 +213,7 @@ impl ModeConfig {
                     .as_deref()
                     .unwrap_or(active_profile_id),
             ),
-            RoomModeState::HardOff => self
-                .idle_profile_id
-                .as_deref()
-                .filter(|id| !is_removed_legacy_idle_profile_id(id)),
+            RoomModeState::HardOff => self.idle_profile_id.as_deref(),
         }
     }
 }
@@ -533,30 +513,6 @@ fn default_mode_transition_duration_ms() -> TimerSetting {
     TimerSetting::Auto
 }
 
-#[cfg(feature = "serde")]
-fn serialize_mode_transition_duration_ms<S>(
-    duration_ms: &TimerSetting,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    match duration_ms {
-        TimerSetting::Fixed { value } => serializer.serialize_u32(*value),
-        _ => duration_ms.serialize(serializer),
-    }
-}
-
-#[cfg(feature = "serde")]
-fn deserialize_mode_transition_duration_ms<'de, D>(
-    deserializer: D,
-) -> Result<TimerSetting, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    TimerSetting::deserialize(deserializer)
-}
-
 /// Configured transition between two high-level modes.
 ///
 /// Transitions operate in rendered output space: the runtime captures the
@@ -574,11 +530,7 @@ pub struct ModeTransitionConfig {
     pub trigger: ModeTransitionTrigger,
     #[cfg_attr(
         feature = "serde",
-        serde(
-            default = "default_mode_transition_duration_ms",
-            serialize_with = "serialize_mode_transition_duration_ms",
-            deserialize_with = "deserialize_mode_transition_duration_ms"
-        )
+        serde(default = "default_mode_transition_duration_ms")
     )]
     pub duration_ms: TimerSetting,
     #[cfg_attr(feature = "serde", serde(default = "default_preserve_hard_off"))]
@@ -724,10 +676,7 @@ where
             .unwrap_or(0);
         let reserved_default = reserved_default_transition_id(config.from_mode, config.to_mode)
             .filter(|reserved| {
-                pair_count == 1
-                    && (requested_id.is_empty()
-                        || requested_id == *reserved
-                        || requested_id.starts_with(&format!("{}_", reserved)))
+                pair_count == 1 && (requested_id.is_empty() || requested_id == *reserved)
             });
 
         if let Some(label) = reserved_default_transition_label(config.from_mode, config.to_mode)
@@ -1487,47 +1436,6 @@ mod tests {
     }
 
     #[test]
-    fn test_mode_config_normalizes_removed_legacy_idle_profile_ids() {
-        let mut config = ModeConfig {
-            mode: RhythmMode::Sleep,
-            active_profile_id: Some("idle".into()),
-            idle_profile_id: Some("idle".into()),
-            wake_profile_id: None,
-            warning_profile_id: None,
-            room_defaults: vec![],
-        };
-
-        assert!(config.normalize_profile_ids());
-        assert_eq!(config.active_profile_id.as_deref(), Some("sleep"));
-        assert_eq!(config.idle_profile_id, None);
-    }
-
-    #[test]
-    fn test_mode_config_resolve_state_profile_id_ignores_removed_legacy_idle() {
-        let config = ModeConfig {
-            mode: RhythmMode::Day,
-            active_profile_id: Some("idle".into()),
-            idle_profile_id: Some("idle".into()),
-            wake_profile_id: None,
-            warning_profile_id: None,
-            room_defaults: vec![],
-        };
-
-        assert_eq!(
-            config.resolve_state_profile_id(RoomModeState::Active, "rhythm"),
-            Some("rhythm")
-        );
-        assert_eq!(
-            config.resolve_state_profile_id(RoomModeState::Idle, "rhythm"),
-            None
-        );
-        assert_eq!(
-            config.resolve_state_profile_id(RoomModeState::HardOff, "rhythm"),
-            None
-        );
-    }
-
-    #[test]
     fn test_room_manager_add_get() {
         let mut manager = RoomManager::new();
 
@@ -1732,7 +1640,7 @@ mod tests {
         }
 
         #[test]
-        fn test_mode_transition_serialize_fixed_duration_as_number() {
+        fn test_mode_transition_serialize_fixed_duration_as_object() {
             let json = serde_json::to_value(ModeTransitionConfig::new(
                 RhythmMode::Sleep,
                 RhythmMode::Day,
@@ -1740,7 +1648,8 @@ mod tests {
             ))
             .unwrap();
 
-            assert_eq!(json["duration_ms"], DEFAULT_MODE_TRANSITION_DURATION_MS);
+            assert_eq!(json["duration_ms"]["mode"], "fixed");
+            assert_eq!(json["duration_ms"]["value"], DEFAULT_MODE_TRANSITION_DURATION_MS);
         }
 
         #[test]
@@ -1870,23 +1779,6 @@ mod tests {
         }
 
         #[test]
-        fn test_normalize_mode_transition_configs_migrates_legacy_default_ids() {
-            let configs = normalize_mode_transition_configs(vec![ModeTransitionConfig {
-                id: "sleep_to_day_sunrise".into(),
-                label: "Sleep to Day (Sunrise)".into(),
-                from_mode: RhythmMode::Sleep,
-                to_mode: RhythmMode::Day,
-                trigger: ModeTransitionTrigger::Sunrise,
-                duration_ms: TimerSetting::Fixed { value: 10_000 },
-                preserve_hard_off: true,
-            }]);
-
-            assert_eq!(configs.len(), 1);
-            assert_eq!(configs[0].id, "sleep_to_day");
-            assert_eq!(configs[0].label, "Sleep to Day");
-        }
-
-        #[test]
         fn test_mode_config_normalize_room_defaults_last_wins_and_drops_runtime_only_states() {
             let mut config = ModeConfig {
                 mode: RhythmMode::Sleep,
@@ -1975,23 +1867,6 @@ mod tests {
 
             assert_eq!(configs[0].id, "day_to_sleep_custom");
             assert_eq!(configs[1].id, "day_to_sleep_nautical_twilight");
-        }
-
-        #[test]
-        fn test_room_deserialize_ignores_legacy_source_field() {
-            // Old rooms.json may contain a "source" field — serde should ignore it
-            let json = r#"{
-                "id": "room1",
-                "name": "Test Room",
-                "source": "Hue",
-                "rhythm_enabled": true,
-                "time_offset_minutes": 0.0,
-                "brightness_offset": 0.0
-            }"#;
-
-            let room: Room = serde_json::from_str(json).unwrap();
-            assert_eq!(room.id, "room1");
-            assert!(room.rhythm_enabled);
         }
 
         #[test]

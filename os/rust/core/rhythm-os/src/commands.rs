@@ -7918,53 +7918,12 @@ mod tests {
             Ok(())
         }
 
-        fn load_hub_credentials(&self) -> Result<HubCredentials> {
-            Ok(self
-                .inner
-                .lock()
-                .unwrap()
-                .hub_credentials
-                .first()
-                .cloned()
-                .unwrap_or_default())
-        }
-
-        fn save_hub_credentials(&self, creds: &HubCredentials) -> Result<()> {
-            let mut inner = self.inner.lock().unwrap();
-            inner.hub_credentials = if creds.is_configured() {
-                vec![creds.clone()]
-            } else {
-                Vec::new()
-            };
-            Ok(())
-        }
-
         fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>> {
             Ok(self.inner.lock().unwrap().hub_credentials.clone())
         }
 
         fn save_all_hub_credentials(&self, creds: &[HubCredentials]) -> Result<()> {
             self.inner.lock().unwrap().hub_credentials = creds.to_vec();
-            Ok(())
-        }
-
-        fn load_hub_registry(&self) -> Result<Option<Value>> {
-            Ok(self
-                .inner
-                .lock()
-                .unwrap()
-                .hub_registries
-                .values()
-                .next()
-                .cloned())
-        }
-
-        fn save_hub_registry(&self, data: &Value) -> Result<()> {
-            self.inner
-                .lock()
-                .unwrap()
-                .hub_registries
-                .insert("legacy".into(), data.clone());
             Ok(())
         }
 
