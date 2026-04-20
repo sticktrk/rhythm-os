@@ -20,7 +20,7 @@ How Rhythm OS supports multiple lighting product ecosystems (Hue, LIFX, IKEA, WL
 ```
 +---------------------------------------------------+
 |  Binary targets (platform I/O)                    |
-|  rhythm-server, rhythm-linux-embedded, rhythm-addon |
+|  rhythm-server, rhythm-linux-appliance, rhythm-addon |
 +---------------------------------------------------+
 |  OS / Business logic                              |
 |  rhythm-os (state, commands, event loop)          |
@@ -52,7 +52,7 @@ rhythm-ikea ---> rhythm-core + rhythm-zigbee
 rhythm-os ---> rhythm-core (+ integration crates via features)
     |
 rhythm-server         ---> rhythm-os + rhythm-hue + ...
-rhythm-linux-embedded ---> rhythm-server + rhythm-os + ...
+rhythm-linux-appliance ---> rhythm-server + rhythm-os + ...
 ```
 
 ## Integration Contract
@@ -187,7 +187,7 @@ Each binary provides the concrete transport implementation:
 | Binary | Transport | SSE |
 |--------|-----------|-----|
 | rhythm-server | `rhythm-hue/src/reqwest_transport.rs` | `rhythm-hue/src/reqwest_sse.rs` |
-| rhythm-linux-embedded | Reuses `rhythm-server`'s reqwest transport stack | Reuses `rhythm-server`'s SSE stack |
+| rhythm-linux-appliance | Reuses `rhythm-server`'s reqwest transport stack | Reuses `rhythm-server`'s SSE stack |
 
 The integration crate owns the lifecycle logic; the binary only provides the transport factory.
 
@@ -368,4 +368,4 @@ Refine the existing multi-hub model only if a future platform needs additional o
 | `rust/core/rhythm-os/src/storage.rs` | `Storage` persistence trait |
 | `rust/integrations/rhythm-hue/` | Reference integration implementation |
 | `rust/bins/rhythm-server/src/hub.rs` | Provider dispatch table (server) |
-| `rust/bins/rhythm-linux-embedded/src/main.rs` | Appliance runtime wiring on top of the server stack |
+| `rust/bins/rhythm-linux-appliance/src/main.rs` | Appliance runtime wiring on top of the server stack |

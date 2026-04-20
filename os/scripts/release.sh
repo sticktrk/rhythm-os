@@ -28,7 +28,7 @@ WORKSPACE_PACKAGES=(
     rhythm-devices
     rhythm-ha
     rhythm-hue
-    rhythm-linux-embedded
+    rhythm-linux-appliance
     rhythm-matter
     rhythm-os
     rhythm-profile

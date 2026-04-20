@@ -44,7 +44,7 @@ mkdir -p "${TARGET_DIR}/data/ota"
         printf '  psk="%s"\n' "$(escape_wpa_string "$WIFI_PSK")"
         printf '}\n'
     else
-        printf '\n# Wi-Fi credentials were not embedded into this image.\n'
+        printf '\n# Wi-Fi credentials were not bundled into this image.\n'
         printf '# Rebuild with --wifi-ssid and --wifi-psk to enable auto-join.\n'
     fi
 } > "$WPA_CONF"

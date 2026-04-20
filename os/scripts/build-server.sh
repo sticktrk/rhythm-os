@@ -286,8 +286,8 @@ build_for_target() {
     fi
 
     if [ "$target" = "rpiz" ]; then
-        package="rhythm-linux-embedded"
-        bins=(rhythm-linux-embedded)
+        package="rhythm-linux-appliance"
+        bins=(rhythm-linux-appliance)
     fi
 
     echo "Building for $target ($rust_target)..."
@@ -356,10 +356,10 @@ build_for_target() {
     local output_dir="$PROJECT_ROOT/dist/bin/$target"
     mkdir -p "$output_dir"
     if [ "$target" = "rpiz" ]; then
-        cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-linux-embedded" "$output_dir/"
-        cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-linux-embedded" "$output_dir/rhythm-server"
+        cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-linux-appliance" "$output_dir/"
+        cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-linux-appliance" "$output_dir/rhythm-server"
         cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-chipd" "$output_dir/"
-        echo "Output: dist/bin/$target/{rhythm-linux-embedded,rhythm-server,rhythm-chipd}"
+        echo "Output: dist/bin/$target/{rhythm-linux-appliance,rhythm-server,rhythm-chipd}"
     else
         cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-server" "$output_dir/"
         cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-cli" "$output_dir/"
@@ -411,7 +411,7 @@ if [ "$CLEAN" = true ]; then
     echo "Cleaning target artifacts..."
     cargo clean -p rhythm-server
     cargo clean -p rhythm-chipd
-    cargo clean -p rhythm-linux-embedded
+    cargo clean -p rhythm-linux-appliance
 fi
 
 MACOS_TARGETS="macos-arm64 macos-x86_64"

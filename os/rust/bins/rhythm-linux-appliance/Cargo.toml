@@ -1,13 +1,13 @@
 [package]
-name = "rhythm-linux-embedded"
+name = "rhythm-linux-appliance"
 version.workspace = true
 edition = "2021"
 license.workspace = true
 description = "Linux appliance runtime for Rhythm OS"
-default-run = "rhythm-linux-embedded"
+default-run = "rhythm-linux-appliance"
 
 [[bin]]
-name = "rhythm-linux-embedded"
+name = "rhythm-linux-appliance"
 
 [dependencies]
 rhythm-server = { path = "../rhythm-server" }

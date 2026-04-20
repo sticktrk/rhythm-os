@@ -33,7 +33,7 @@ Rhythm OS manages your lights through **curves** — continuous functions that d
 | Target | Crate | Notes |
 |--------|-------|-------|
 | macOS / Linux | `rhythm-server` | CLI server with HTTP API and mDNS discovery. |
-| Raspberry Pi Zero | `rhythm-linux-embedded` (`rpiz` target) | Buildroot appliance image with USB gadget first-boot access. |
+| Raspberry Pi Zero | `rhythm-linux-appliance` (`rpiz` target) | Buildroot appliance image with USB gadget first-boot access. |
 | Home Assistant | `rhythm-addon` | Add-on with ingress support. Auto-configures from HA Supervisor. |
 
 ## Quick start
@@ -74,7 +74,7 @@ Rhythm is built as a layered crate architecture. Each layer has a single respons
 ```
 ┌─────────────────────────────────────────────────────┐
 │  Binaries (platform I/O)                            │
-│  rhythm-server · rhythm-linux-embedded · rhythm-addon │
+│  rhythm-server · rhythm-linux-appliance · rhythm-addon │
 ├─────────────────────────────────────────────────────┤
 │  OS layer (hub-agnostic business logic)             │
 │  rhythm-os                                          │
@@ -97,7 +97,7 @@ Rhythm is built as a layered crate architecture. Each layer has a single respons
 | **rhythm-hue** | Philips Hue V2 integration. Implements `LightController`, `HubRegistry`, and `HubProvider`. Platform-abstracted via `HueTransport` trait — same logic across server, appliance, and add-on builds. |
 | **rhythm-ha** | Home Assistant integration. Implements `LightController`, `HubRegistry`, and `HubProvider` for HA's WebSocket API and ZHA events. |
 | **rhythm-server** | macOS/Linux CLI server. HTTP API + mDNS discovery. Runs the full engine as a native process. |
-| **rhythm-linux-embedded** | Linux appliance runtime for the `rpiz` target. Adds appliance provisioning and recovery behavior on top of the native server stack. |
+| **rhythm-linux-appliance** | Linux appliance runtime for the `rpiz` target. Adds appliance provisioning and recovery behavior on top of the native server stack. |
 | **rhythm-addon** | Home Assistant add-on binary. Connects to HA via WebSocket, serves HTTP API with ingress support. |
 
 ### Dependency graph
@@ -112,7 +112,7 @@ rhythm-hue   ──→ rhythm-core + rhythm-os
 rhythm-ha    ──→ rhythm-core + rhythm-os
     ↑
 rhythm-server         ──→ rhythm-os + rhythm-hue + rhythm-ha
-rhythm-linux-embedded ──→ rhythm-server + rhythm-os
+rhythm-linux-appliance ──→ rhythm-server + rhythm-os
 rhythm-addon          ──→ rhythm-os + rhythm-hue + rhythm-ha
 ```
 

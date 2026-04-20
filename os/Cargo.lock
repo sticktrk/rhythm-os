@@ -1757,7 +1757,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rhythm-linux-embedded"
+name = "rhythm-linux-appliance"
 version = "0.4.147"
 dependencies = [
  "anyhow",

@@ -1,6 +1,6 @@
 # Raspberry Pi Zero
 
-This target is for a Pi Zero / Zero W without Raspberry Pi OS. The Rust appliance crate is `rhythm-linux-embedded`; the `rpiz` target cross-compiles it for the Pi Zero's ARMv6 userspace, and the Buildroot external tree in `install/rpiz/buildroot` wraps the packaged appliance binary in a minimal image.
+This target is for a Pi Zero / Zero W without Raspberry Pi OS. The Rust appliance crate is `rhythm-linux-appliance`; the `rpiz` target cross-compiles it for the Pi Zero's ARMv6 userspace, and the Buildroot external tree in `install/rpiz/buildroot` wraps the packaged appliance binary in a minimal image.
 
 ## What the target does
 
@@ -45,7 +45,7 @@ out of the box. The lab-only extras are:
 That produces:
 
 ```bash
-dist/bin/rpiz/rhythm-linux-embedded
+dist/bin/rpiz/rhythm-linux-appliance
 dist/bin/rpiz/rhythm-server
 ```
 
@@ -86,7 +86,7 @@ If your host is macOS, or you just want the Linux image build isolated, use Dock
 ./scripts/build-rpiz-image.sh --release --docker
 ```
 
-That flow still builds the `rhythm-linux-embedded` appliance on the host, writes the compatibility binary to `dist/bin/rpiz/rhythm-server`, then runs the Buildroot image step in a Debian-based Docker container defined by `install/rpiz/docker/Dockerfile`.
+That flow still builds the `rhythm-linux-appliance` appliance on the host, writes the compatibility binary to `dist/bin/rpiz/rhythm-server`, then runs the Buildroot image step in a Debian-based Docker container defined by `install/rpiz/docker/Dockerfile`.
 By default, the Docker flow writes images to `out/rpiz-docker` so it does not reuse macOS-generated Buildroot host artifacts from `out/rpiz`.
 
 To embed Wi-Fi credentials for a Pi Zero W / Zero 2 W image:

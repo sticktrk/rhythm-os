@@ -10,7 +10,7 @@ Thanks for your interest in contributing! This guide covers what you need to get
 
 ```bash
 cargo build -p rhythm-server          # Build the macOS/Linux server
-cargo build -p rhythm-linux-embedded  # Build the Linux appliance binary
+cargo build -p rhythm-linux-appliance  # Build the Linux appliance binary
 cargo build -p rhythm-addon           # Build the HA add-on binary
 ```
 

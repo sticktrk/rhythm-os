@@ -150,7 +150,7 @@ start() {
     local iface attempt state ssid ip_addr
 
     if ! has_wifi_config; then
-        log "no embedded credentials; skipping wlan0 bring-up"
+        log "no bundled credentials; skipping wlan0 bring-up"
         return 0
     fi
 

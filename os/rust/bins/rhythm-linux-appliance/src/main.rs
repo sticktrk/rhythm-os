@@ -26,7 +26,7 @@ const TOKIO_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 /// Rhythm OS Linux appliance.
 #[derive(Parser, Debug)]
-#[command(name = "rhythm-linux-embedded", version = VERSION, about)]
+#[command(name = "rhythm-linux-appliance", version = VERSION, about)]
 struct Args {
     /// HTTP server port.
     #[arg(short, long, default_value_t = 54448)]
