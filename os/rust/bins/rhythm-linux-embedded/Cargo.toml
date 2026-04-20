@@ -3,7 +3,7 @@ name = "rhythm-linux-embedded"
 version.workspace = true
 edition = "2021"
 license.workspace = true
-description = "Linux embedded appliance runtime for Rhythm OS"
+description = "Linux appliance runtime for Rhythm OS"
 default-run = "rhythm-linux-embedded"
 
 [[bin]]
@@ -11,7 +11,7 @@ name = "rhythm-linux-embedded"
 
 [dependencies]
 rhythm-server = { path = "../rhythm-server" }
-rhythm-os = { path = "../../core/rhythm-os", features = ["desktop"] }
+rhythm-os = { path = "../../core/rhythm-os" }
 
 tokio = { workspace = true }
 axum = { workspace = true }

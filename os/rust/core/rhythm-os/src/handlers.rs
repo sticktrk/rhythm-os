@@ -378,7 +378,7 @@ fn appliance_delete_unpair_request(
     id: &str,
 ) -> anyhow::Result<Option<crate::pairing::UnpairingRequest>> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    if !matches!(s.platform_type, "appliance" | "embedded") {
+    if s.platform_type != "appliance" {
         return Ok(None);
     }
 
@@ -1336,7 +1336,6 @@ pub fn handle_pair_device(
                 // Persist hub registry updates if the integration created any
                 commands::persist_registry(state);
                 // Notify SSE clients
-                #[cfg(feature = "desktop")]
                 {
                     commands::emit_triage_changed(state);
                     crate::state::emit_server_event(

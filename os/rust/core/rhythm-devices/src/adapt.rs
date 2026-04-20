@@ -56,6 +56,8 @@ pub struct AdaptedCommand {
     pub transition_ms: Option<u32>,
 }
 
+type SelectedColor = (Option<u16>, Option<(f32, f32)>, Option<(u8, u8)>);
+
 /// Adapt a lighting request to a specific device's capabilities.
 pub fn adapt_command(
     caps: &LightCapabilities,
@@ -99,7 +101,7 @@ fn select_color(
     caps: &LightCapabilities,
     color: ColorRequest,
     preference: ColorPreference,
-) -> (Option<u16>, Option<(f32, f32)>, Option<(u8, u8)>) {
+) -> SelectedColor {
     let supports_ct = caps.supports_color_temp();
     let supports_hs = caps.supports_hue_saturation();
     let supports_xy = caps.supports_xy_color();

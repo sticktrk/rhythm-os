@@ -32,7 +32,7 @@ impl ChipFfiController {
     ) -> Result<CommissionedDevice> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
-            return ffi_probe::commission_light(request);
+            ffi_probe::commission_light(request)
         }
 
         #[cfg(not(rhythm_chipd_chip_ffi))]
@@ -45,7 +45,7 @@ impl ChipFfiController {
     pub fn probe_light(&mut self, node_id: u64) -> Result<CommissionedDevice> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
-            return ffi_probe::probe_light(node_id);
+            ffi_probe::probe_light(node_id)
         }
 
         #[cfg(not(rhythm_chipd_chip_ffi))]
@@ -58,7 +58,7 @@ impl ChipFfiController {
     pub fn decommission_device(&mut self, node_id: u64, force: bool) -> Result<()> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
-            return ffi_probe::decommission_device(node_id, force);
+            ffi_probe::decommission_device(node_id, force)
         }
 
         #[cfg(not(rhythm_chipd_chip_ffi))]
@@ -71,7 +71,7 @@ impl ChipFfiController {
     pub fn set_on_off(&mut self, node_id: u64, endpoint: u16, on: bool) -> Result<()> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
-            return ffi_probe::set_on_off(node_id, endpoint, on);
+            ffi_probe::set_on_off(node_id, endpoint, on)
         }
 
         #[cfg(not(rhythm_chipd_chip_ffi))]
@@ -90,7 +90,7 @@ impl ChipFfiController {
     ) -> Result<()> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
-            return ffi_probe::set_brightness(node_id, endpoint, level, transition_ms);
+            ffi_probe::set_brightness(node_id, endpoint, level, transition_ms)
         }
 
         #[cfg(not(rhythm_chipd_chip_ffi))]
@@ -109,7 +109,7 @@ impl ChipFfiController {
     ) -> Result<()> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
-            return ffi_probe::set_color_temperature(node_id, endpoint, kelvin, transition_ms);
+            ffi_probe::set_color_temperature(node_id, endpoint, kelvin, transition_ms)
         }
 
         #[cfg(not(rhythm_chipd_chip_ffi))]
@@ -129,7 +129,7 @@ impl ChipFfiController {
     ) -> Result<()> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
-            return ffi_probe::set_xy(node_id, endpoint, x, y, transition_ms);
+            ffi_probe::set_xy(node_id, endpoint, x, y, transition_ms)
         }
 
         #[cfg(not(rhythm_chipd_chip_ffi))]
@@ -149,13 +149,13 @@ impl ChipFfiController {
     ) -> Result<()> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
-            return ffi_probe::set_hue_saturation(
+            ffi_probe::set_hue_saturation(
                 node_id,
                 endpoint,
                 hue,
                 saturation,
                 transition_ms,
-            );
+            )
         }
 
         #[cfg(not(rhythm_chipd_chip_ffi))]
@@ -168,7 +168,7 @@ impl ChipFfiController {
     pub fn read_on_off(&mut self, node_id: u64, endpoint: u16) -> Result<bool> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
-            return ffi_probe::read_on_off(node_id, endpoint);
+            ffi_probe::read_on_off(node_id, endpoint)
         }
 
         #[cfg(not(rhythm_chipd_chip_ffi))]

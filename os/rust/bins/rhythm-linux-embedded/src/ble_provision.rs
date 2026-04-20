@@ -1,4 +1,4 @@
-//! Linux embedded BLE provisioning sidecar.
+//! Linux appliance BLE provisioning sidecar.
 //!
 //! This keeps the shared provisioning session in `rhythm_os::provisioning`
 //! and swaps only the transport/frontend implementation from ESP-IDF to BlueZ.

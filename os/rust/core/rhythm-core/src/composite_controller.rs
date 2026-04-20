@@ -57,23 +57,8 @@ pub(crate) fn format_node_log_label(node_id: &str, node_name: Option<&str>) -> S
 }
 
 /// Block on a future from a non-async context (spawned OS threads).
-#[cfg(any(feature = "tokio", feature = "blocking"))]
 fn sync_block_on<F: std::future::Future>(f: F) -> F::Output {
     futures::executor::block_on(f)
-}
-
-/// Minimal poll loop when no executor crate is available (tests).
-#[cfg(not(any(feature = "tokio", feature = "blocking")))]
-fn sync_block_on<F: std::future::Future>(f: F) -> F::Output {
-    let waker = std::task::Waker::noop();
-    let mut cx = std::task::Context::from_waker(&waker);
-    let mut f = std::pin::pin!(f);
-    loop {
-        match f.as_mut().poll(&mut cx) {
-            std::task::Poll::Ready(v) => return v,
-            std::task::Poll::Pending => std::thread::yield_now(),
-        }
-    }
 }
 
 /// Dispatch an operation to all hub targets in parallel on OS threads.

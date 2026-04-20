@@ -1,8 +1,8 @@
 //! Test support utilities for rhythm-ha.
 //!
 //! Provides `SpyHaTransport` — a recording implementation of `HaTransport`
-//! for use in integration tests. Accessible cross-crate via the `test-support`
-//! feature flag.
+//! for use in integration tests. Accessible cross-crate when `test-support`
+//! is enabled.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};

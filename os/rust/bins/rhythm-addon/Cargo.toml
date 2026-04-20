@@ -9,10 +9,10 @@ description = "Home Assistant add-on binary for Rhythm OS"
 name = "rhythm-addon"
 
 [dependencies]
-rhythm-ha = { path = "../../integrations/rhythm-ha", features = ["desktop"] }
-rhythm-hue = { path = "../../integrations/rhythm-hue", features = ["desktop"] }
-rhythm-matter = { path = "../../integrations/rhythm-matter", features = ["desktop"] }
-rhythm-os = { path = "../../core/rhythm-os", features = ["desktop"] }
+rhythm-ha = { path = "../../integrations/rhythm-ha" }
+rhythm-hue = { path = "../../integrations/rhythm-hue" }
+rhythm-matter = { path = "../../integrations/rhythm-matter" }
+rhythm-os = { path = "../../core/rhythm-os" }
 
 # Workspace deps
 tokio = { workspace = true }

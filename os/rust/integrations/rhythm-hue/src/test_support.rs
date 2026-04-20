@@ -1,8 +1,8 @@
 //! Test support utilities for rhythm-hue.
 //!
 //! Provides `SpyHueTransport` — a recording implementation of `HueTransport`
-//! for use in integration tests. Accessible cross-crate via the `test-support`
-//! feature flag.
+//! for use in integration tests. Accessible cross-crate when `test-support`
+//! is enabled.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

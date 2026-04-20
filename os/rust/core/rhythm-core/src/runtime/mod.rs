@@ -25,9 +25,4 @@ pub use registry::{DeviceRegistry, SimpleDeviceRegistry};
 pub use scheduler::{NoOpScheduler, ScheduleHandle, Scheduler};
 pub use storage::{NoOpRoomStateStore, RoomStateStore, StorageError, StorageResult};
 pub use time::{MockTimeProvider, TimeProvider};
-
-#[cfg(feature = "tokio")]
-pub use adapters::{TokioScheduler, TokioTimeProvider};
-
-#[cfg(feature = "blocking")]
-pub use adapters::{BlockingScheduler, BlockingTimeProvider};
+pub use adapters::{SystemTimeProvider, ThreadScheduler};

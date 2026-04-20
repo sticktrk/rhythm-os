@@ -1,7 +1,7 @@
 //! SSE reader for Hue bridge event streams using raw `reqwest` streaming.
 //!
-//! Enabled by the `desktop` feature flag. We stream raw response bytes and
-//! feed them through the shared SSE line parser so Hue heartbeat comments
+//! We stream raw response bytes and feed them through the shared SSE line parser
+//! so Hue heartbeat comments
 //! (`: hi`) count as real activity. `reqwest-eventsource` only surfaces
 //! parsed message events, which made quiet-but-healthy streams look stalled.
 

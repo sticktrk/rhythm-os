@@ -43,7 +43,7 @@ pub type PersistenceResult<T> = Result<T, PersistenceError>;
 /// This trait abstracts the storage mechanism, allowing different platforms
 /// to implement persistence using their native storage:
 /// - File system (HA addon)
-/// - Custom embedded or appliance storage
+/// - Custom appliance or board-specific storage
 /// - Database (future cloud sync)
 ///
 /// # Example

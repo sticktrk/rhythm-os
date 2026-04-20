@@ -1009,7 +1009,6 @@ fn build_node_state_dto_from_snapshot_parts(
 ///
 /// For soft-off nodes, brightness is the soft-off percentage (not curve value).
 /// Kelvin is always from the curve (soft-off tracks color temp).
-#[cfg(feature = "desktop")]
 pub fn build_node_state_event(
     state: &SharedState,
     snap: &rhythm_core::NodeSnapshot,
@@ -2479,7 +2478,6 @@ fn restore_backup_installation_metadata(
         persist_topology(&s);
     }
 
-    #[cfg(feature = "desktop")]
     rebuild_composite_routing(state);
 
     Ok(())
@@ -2546,7 +2544,6 @@ fn restore_backup_room_manager(
         }
     }
 
-    #[cfg(feature = "desktop")]
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
 
     Ok(())
@@ -2710,7 +2707,6 @@ fn mode_apply_cycle_duration(
     periodic_cycle.min(Duration::from_millis(u64::from(fade_window_ms)))
 }
 
-#[cfg(feature = "desktop")]
 fn node_state_event_from_runtime(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
@@ -2721,7 +2717,6 @@ fn node_state_event_from_runtime(
         .map(|snap| build_node_state_event(state, &snap))
 }
 
-#[cfg(feature = "desktop")]
 fn node_state_events_after_apply(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
@@ -2752,7 +2747,6 @@ pub(crate) fn emit_node_state_event_after_apply(
     runtime: &Arc<dyn RuntimeHandle>,
     node_id: &str,
 ) {
-    #[cfg(feature = "desktop")]
     {
         let events = node_state_events_after_apply(state, runtime, node_id);
         if !events.is_empty() {
@@ -2761,11 +2755,6 @@ pub(crate) fn emit_node_state_event_after_apply(
                 crate::server_event::ServerEvent::NodeState { nodes: events },
             );
         }
-    }
-
-    #[cfg(not(feature = "desktop"))]
-    {
-        let _ = (state, runtime, node_id);
     }
 }
 
@@ -3585,7 +3574,6 @@ fn do_settings_set_internal(
         }
     }
 
-    #[cfg(feature = "desktop")]
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::SettingsChanged);
 
     build_settings(state)
@@ -3861,7 +3849,6 @@ pub fn do_configuration_import(
         skipped_rooms
     );
 
-    #[cfg(feature = "desktop")]
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
 
     build_configuration_bundle(state)
@@ -3908,7 +3895,6 @@ pub fn do_backup_restore(state: &SharedState, bundle: BackupBundle) -> Result<St
     restore_backup_room_manager(state, &bundle.installation.rooms)?;
     restore_backup_runtime_state(state, &bundle.runtime_state)?;
 
-    #[cfg(feature = "desktop")]
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
 
     build_backup_bundle(state, false)
@@ -4203,7 +4189,6 @@ pub fn do_room_set(
         persist_state(state);
     }
 
-    #[cfg(feature = "desktop")]
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
 
     let room_state = build_room_rhythm_state(state, &engine_room_id)?;
@@ -4264,7 +4249,6 @@ pub fn do_node_action(
 
     update_lights_on_cache_for_runtime_node(state, &runtime, node_id, turned_on);
 
-    #[cfg(feature = "desktop")]
     {
         emit_node_state_event_after_apply(state, &runtime, node_id);
     }
@@ -4407,7 +4391,6 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
         .cloned()
         .collect();
 
-    #[cfg(feature = "desktop")]
     {
         let events: Vec<_> = all_affected
             .iter()
@@ -4464,7 +4447,6 @@ pub fn do_set_node_brightness(
 
     update_lights_on_cache_for_runtime_node(state, &runtime, node_id, true);
 
-    #[cfg(feature = "desktop")]
     {
         emit_node_state_event_after_apply(state, &runtime, node_id);
     }
@@ -4504,7 +4486,6 @@ pub fn do_set_node_time_offset(
     runtime.set_room_time_offset(node_id, offset_minutes)?;
     clear_room_mode_transition(state, node_id);
 
-    #[cfg(feature = "desktop")]
     {
         emit_node_state_event_after_apply(state, &runtime, node_id);
     }
@@ -4670,7 +4651,6 @@ pub fn do_device_hard_remove(
     persist_registry(state);
     reconcile_runtime_from_state(state)?;
 
-    #[cfg(feature = "desktop")]
     {
         emit_triage_changed(state);
         crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
@@ -4862,7 +4842,6 @@ pub fn do_config_set(state: &SharedState, mut config: LightProfileConfig) -> Res
         }
     }
 
-    #[cfg(feature = "desktop")]
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
 
     Ok(())
@@ -4981,7 +4960,6 @@ pub fn do_absorb_time_offset(
 
     persist_rooms(state);
 
-    #[cfg(feature = "desktop")]
     {
         crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
         crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
@@ -5102,7 +5080,6 @@ pub fn do_hub_credentials(
     let hub_key = crate::canonical::identity::HubKey::new(hub_type, address);
 
     // Register the new hub's controller with the composite (if runtime already exists).
-    #[cfg(feature = "desktop")]
     register_hub_with_composite(state, &hub_key);
 
     // Auto-sync rooms from the newly configured hub.
@@ -5139,7 +5116,6 @@ pub fn do_hub_credentials(
             .and_then(|h| h.join().map_err(|_| std::io::Error::other("panicked")));
     }
 
-    #[cfg(feature = "desktop")]
     {
         let hub_connected = state
             .lock()
@@ -5211,11 +5187,9 @@ pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
     persist_registry(state);
 
     // Capture keys before old_hubs is moved into the drop thread
-    #[cfg(feature = "desktop")]
     let old_hub_keys: Vec<_> = old_hubs.keys().cloned().collect();
 
     // Clear all controllers from the composite
-    #[cfg(feature = "desktop")]
     {
         let composite = state
             .lock()
@@ -5237,7 +5211,6 @@ pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
             .ok();
     }
 
-    #[cfg(feature = "desktop")]
     {
         for key in &old_hub_keys {
             crate::state::emit_server_event(
@@ -5305,7 +5278,6 @@ pub fn do_hub_disconnect_one(state: &SharedState, hub_type_str: &str, address: &
     persist_state(state);
 
     // Remove the hub's controller from the composite and rebuild routing
-    #[cfg(feature = "desktop")]
     {
         let composite = state
             .lock()
@@ -5326,7 +5298,6 @@ pub fn do_hub_disconnect_one(state: &SharedState, hub_type_str: &str, address: &
             .ok();
     }
 
-    #[cfg(feature = "desktop")]
     {
         crate::state::emit_server_event(
             state,
@@ -5501,7 +5472,6 @@ pub fn do_node_preferences_set(
         refresh_lights_on_cache_for_runtime_node(state, &runtime, node_id);
     }
 
-    #[cfg(feature = "desktop")]
     {
         emit_node_state_event_after_apply(state, &runtime, node_id);
     }
@@ -5748,7 +5718,6 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
         }
     }
 
-    #[cfg(feature = "desktop")]
     rebuild_composite_routing(state);
 
     Ok(())
@@ -5815,7 +5784,6 @@ pub(crate) fn ensure_runtime_device_node_exists(
 ///
 /// Call after any operation that changes room-to-hub mappings: room sync,
 /// hub connect/disconnect, topology merge/split/device-move.
-#[cfg(feature = "desktop")]
 fn composite_node_labels(s: &AppState) -> HashMap<String, String> {
     let mut labels = HashMap::new();
 
@@ -5868,7 +5836,6 @@ fn composite_node_labels(s: &AppState) -> HashMap<String, String> {
     labels
 }
 
-#[cfg(feature = "desktop")]
 pub fn rebuild_composite_routing(state: &SharedState) {
     let (composite, routing, labels, room_count) = {
         let Ok(s) = state.lock() else { return };
@@ -5899,7 +5866,6 @@ pub fn rebuild_composite_routing(state: &SharedState) {
 /// is already running. If the composite controller doesn't exist yet (runtime
 /// not created), this is a no-op — the controller will be picked up when
 /// `ensure_composite_runtime` runs on first room arrival.
-#[cfg(feature = "desktop")]
 pub fn register_hub_with_composite(
     state: &SharedState,
     hub_key: &crate::canonical::identity::HubKey,
@@ -6175,7 +6141,6 @@ pub fn do_canonical_assign_room(
     persist_registry(state);
     reconcile_runtime_from_state(state)?;
 
-    #[cfg(feature = "desktop")]
     {
         emit_triage_changed(state);
         crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
@@ -6282,7 +6247,6 @@ pub fn do_triage_merge(state: &SharedState, entry_id: &str, canonical_id: &str) 
         persist_topology(&s);
         drop(s);
         reconcile_runtime_from_state(state)?;
-        #[cfg(feature = "desktop")]
         {
             emit_triage_changed(state);
             crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
@@ -6337,7 +6301,6 @@ pub fn do_triage_new_device(state: &SharedState, entry_id: &str) -> Result<Strin
                     persist_topology(&s);
                     drop(s);
                     reconcile_runtime_from_state(state)?;
-                    #[cfg(feature = "desktop")]
                     {
                         emit_triage_changed(state);
                         crate::state::emit_server_event(
@@ -6357,7 +6320,6 @@ pub fn do_triage_new_device(state: &SharedState, entry_id: &str) -> Result<Strin
             {
                 persist_canonical(&s);
                 drop(s);
-                #[cfg(feature = "desktop")]
                 emit_triage_changed(state);
                 Ok(r#"{"status":"kept_separate"}"#.to_string())
             } else {
@@ -6408,7 +6370,6 @@ pub fn do_triage_dismiss(state: &SharedState, entry_id: &str) -> Result<()> {
     if s.canonical_registry.triage_mut().dismiss(entry_id, now) {
         persist_canonical(&s);
         drop(s);
-        #[cfg(feature = "desktop")]
         emit_triage_changed(state);
         Ok(())
     } else {
@@ -6506,7 +6467,6 @@ pub fn do_triage_bind_room_to(
     reconcile_runtime_from_state(state)?;
 
     // Emit SSE events
-    #[cfg(feature = "desktop")]
     {
         emit_triage_changed(state);
         crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
@@ -6531,7 +6491,6 @@ pub fn build_triage_count(state: &SharedState) -> Result<String> {
 }
 
 /// Emit a TriageChanged SSE event with current counts.
-#[cfg(feature = "desktop")]
 pub fn emit_triage_changed(state: &SharedState) {
     // Read counts under lock, then drop before emitting (emit_server_event locks too)
     let counts = state.lock().ok().map(|s| {
@@ -6690,7 +6649,6 @@ pub fn do_topology_set_control_target(
         }
     }
 
-    #[cfg(feature = "desktop")]
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
 
     Ok(())
@@ -6758,7 +6716,6 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
     queue_motion_timer_clear(state, room_id);
     reconcile_runtime_from_state(state)?;
 
-    #[cfg(feature = "desktop")]
     {
         emit_triage_changed(state);
         crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
@@ -6782,7 +6739,6 @@ pub fn do_topology_merge_rooms(
         drop(s);
         reconcile_runtime_from_state(state)?;
 
-        #[cfg(feature = "desktop")]
         {
             crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
         }
@@ -6806,7 +6762,6 @@ pub fn do_topology_move_device(
         drop(s);
         reconcile_runtime_from_state(state)?;
 
-        #[cfg(feature = "desktop")]
         {
             crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
         }
@@ -8607,7 +8562,6 @@ mod tests {
         assert!(!room_state.transitioning);
     }
 
-    #[cfg(feature = "desktop")]
     #[test]
     fn build_node_state_event_marks_active_mode_transition() {
         let (state, rt) = setup_state(vec![make_snapshot("r1", false, false)]);
@@ -8633,7 +8587,6 @@ mod tests {
         assert_eq!(json["transitioning"], true);
     }
 
-    #[cfg(feature = "desktop")]
     #[test]
     fn build_node_state_event_includes_hub_types_from_topology() {
         let (state, rt) = setup_state(vec![make_snapshot("r1", false, false)]);
@@ -8649,7 +8602,6 @@ mod tests {
         assert_eq!(json["hub_types"], serde_json::json!(["matter", "mock"]));
     }
 
-    #[cfg(feature = "desktop")]
     #[test]
     fn build_node_state_event_uses_parent_lights_on_for_attached_light() {
         let (state, rt, device_id) = setup_attached_hue_light_with_group_dispatch();
@@ -8667,7 +8619,6 @@ mod tests {
         assert!(event.lights_on);
     }
 
-    #[cfg(feature = "desktop")]
     #[test]
     fn build_node_state_event_uses_child_lights_on_without_parent_group_dispatch() {
         let (state, rt, device_id) = setup_attached_matter_light_without_group_dispatch();

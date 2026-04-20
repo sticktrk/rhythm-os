@@ -163,9 +163,9 @@ pub fn sync_from_hub_for_key(
 
 /// Internal sync implementation that takes a discovery reference directly.
 ///
-/// Interleaved order to minimize peak memory on constrained blocking runtimes:
+/// Interleaved order to minimize peak memory during sync:
 /// 1. Discover rooms (builds device→room cache inside discovery impl)
-/// 2. Process rooms (first room triggers runtime creation — TLS deferred on embedded)
+/// 2. Process rooms (first room triggers runtime creation)
 /// 3. Discover devices (uses cached device→room mapping, skips rooms re-fetch)
 /// 4. Process devices
 /// 5. Persist state
@@ -540,7 +540,6 @@ fn sync_with_discovery(
                     affected_devices,
                     hidden_devices
                 );
-                #[cfg(feature = "desktop")]
                 crate::state::emit_server_event(
                     state,
                     crate::server_event::ServerEvent::NodesChanged,
@@ -851,7 +850,6 @@ pub fn poll_initial_light_state(state: &SharedState) {
     );
 
     // Emit SSE so any already-connected clients get the initial state
-    #[cfg(feature = "desktop")]
     {
         let events: Vec<_> = snapshots
             .iter()

@@ -5,18 +5,6 @@ edition = "2021"
 license.workspace = true
 description = "Platform-agnostic business logic for Rhythm OS controllers"
 
-# Feature flags:
-#   embedded  - Legacy resource-constrained blocking runtime alias.
-#   desktop   - Server binaries: blocking + async + axum + mdns.
-#   blocking  - Blocking runtime (forwarded to rhythm-core/blocking).
-#               Activated by embedded and desktop; also valid standalone
-#               for integration test-support.
-[features]
-default = ["desktop"]
-blocking = ["rhythm-core/blocking"]
-embedded = ["blocking"]
-desktop = ["blocking", "rhythm-core/tokio", "dep:axum", "dep:tower-http", "dep:tower", "dep:tokio", "dep:mdns-sd", "dep:if-addrs", "dep:futures", "dep:tracing-subscriber"]
-
 [dependencies]
 rhythm-core = { path = "../rhythm-core" }
 rhythm-devices = { path = "../rhythm-devices" }
@@ -27,16 +15,15 @@ anyhow = "1.0"
 log = "0.4"
 chrono = { workspace = true }
 
-# Optional: shared Axum router + mDNS (behind "desktop" feature)
-axum = { workspace = true, optional = true }
-tower = { workspace = true, optional = true }
-tower-http = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
-mdns-sd = { workspace = true, optional = true }
-if-addrs = { version = "0.13", optional = true }
-futures = { workspace = true, optional = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+mdns-sd = { workspace = true }
+if-addrs = { version = "0.13" }
+futures = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }

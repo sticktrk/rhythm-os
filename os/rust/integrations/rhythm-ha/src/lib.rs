@@ -14,16 +14,10 @@ pub mod registry;
 pub mod test_support;
 pub mod transport;
 
-#[cfg(feature = "desktop")]
 pub mod area_sync;
-#[cfg(feature = "desktop")]
 pub mod desktop_lifecycle;
-#[cfg(feature = "desktop")]
 pub mod post_connect;
-#[cfg(feature = "desktop")]
 pub mod reqwest_transport;
-#[cfg(feature = "desktop")]
 pub mod ws_client;
 
-#[cfg(feature = "desktop")]
 pub use desktop_lifecycle as reqwest_lifecycle;

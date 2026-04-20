@@ -7,15 +7,12 @@ description = "Platform-agnostic Home Assistant integration for Rhythm OS"
 
 [features]
 default = []
-blocking = ["rhythm-core/blocking", "rhythm-os/blocking"]
-embedded = ["blocking"]
-desktop = ["blocking", "rhythm-os/desktop", "dep:reqwest", "dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
-test-support = ["blocking", "rhythm-core/test-support"]
+test-support = ["rhythm-core/test-support"]
 
 [dependencies]
 rhythm-core = { path = "../../core/rhythm-core" }
 rhythm-devices = { path = "../../core/rhythm-devices" }
-rhythm-os = { path = "../../core/rhythm-os", default-features = false }
+rhythm-os = { path = "../../core/rhythm-os" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
@@ -23,8 +20,7 @@ async-trait = "0.1"
 log = "0.4"
 tracing = { workspace = true }
 
-# Optional: desktop transport (reqwest + tungstenite)
-reqwest = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
-tokio-tungstenite = { workspace = true, optional = true }
-futures-util = { workspace = true, optional = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }

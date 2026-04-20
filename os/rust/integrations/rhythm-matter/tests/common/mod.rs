@@ -1,4 +1,4 @@
-#![cfg(all(feature = "desktop", feature = "test-support"))]
+#![cfg(feature = "test-support")]
 #![allow(dead_code)]
 
 use std::path::PathBuf;

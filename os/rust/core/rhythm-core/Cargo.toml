@@ -9,8 +9,6 @@ description = "Core adaptive lighting algorithms for Rhythm OS"
 [features]
 default = ["serde"]
 serde = ["dep:serde", "dep:serde_json"]
-tokio = ["dep:tokio", "dep:futures"]
-blocking = ["dep:futures"]
 test-support = []
 
 [dependencies]
@@ -28,8 +26,8 @@ sunrise = "3.0"
 # Runtime dependencies
 anyhow = "1.0"
 log = "0.4"
-tokio = { version = "1.0", features = ["rt", "time", "sync"], optional = true }
-futures = { version = "0.3", optional = true }
+tokio = { version = "1.0", features = ["rt", "time", "sync"] }
+futures = { version = "0.3" }
 
 [dev-dependencies]
 serde_json = "1.0"

@@ -180,7 +180,7 @@ fn bootstrap_hubs(state: &SharedState) {
             .iter()
             .filter_map(|(key, creds)| {
                 (creds.can_connect())
-                    .then(|| creds.hub_type.as_ref())
+                    .then_some(creds.hub_type.as_ref())
                     .flatten()
                     .map(|ht| (key.clone(), ht.as_str().to_string()))
             })

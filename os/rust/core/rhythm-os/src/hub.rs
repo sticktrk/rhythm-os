@@ -298,10 +298,9 @@ pub trait HubProvider: Send + Sync {
 
 /// Bundles everything a platform crate needs from an integration.
 ///
-/// Desktop integration crates (rhythm-hue, rhythm-ha) provide a static
-/// `INTEGRATION` behind their `desktop` feature flag. Embedded platforms
-/// create their own struct wrapping the embedded lifecycle with
-/// platform-specific transport.
+/// Integration crates provide a static `INTEGRATION` value that platform
+/// binaries can register directly. Platform crates can still wrap or extend
+/// that integration when they need extra board-specific behavior.
 ///
 /// Platform crates store a `&[&dyn ExternalLightHubIntegration]` registry
 /// and use [`integration_callbacks`] to derive the `ensure_runtime_fn`
@@ -342,8 +341,8 @@ pub trait ExternalLightHubIntegration: Send + Sync {
     /// Returns `Arc<dyn HubLightController>` so the composite can store them
     /// without knowing the concrete type.
     ///
-    /// Default returns an error — embedded integrations that don't support
-    /// composite mode don't need to implement this.
+    /// Default returns an error for integrations that do not support
+    /// composite mode.
     fn create_controller(
         &self,
         _state: &SharedState,
@@ -455,7 +454,6 @@ pub struct IntegrationCallbacks {
     /// Look up a hub provider by hub type.
     pub get_hub_provider_fn: Arc<dyn Fn(HubType) -> &'static (dyn HubProvider) + Send + Sync>,
     /// Create and register a per-hub controller with the composite (desktop only).
-    #[cfg(feature = "desktop")]
     pub register_controller_fn: Arc<dyn Fn(&SharedState, &HubKey) -> Result<()> + Send + Sync>,
     /// Start a device pairing session (delegates to integration's `start_pairing`).
     pub start_pairing_fn: Arc<
@@ -488,35 +486,7 @@ pub fn integration_callbacks(
     hub_capabilities.dedup_by(|left, right| left.hub_type == right.hub_type);
 
     let ensure_runtime_fn = Arc::new(move |state: &SharedState| -> Result<()> {
-        // Use composite runtime on desktop (creates CompositeController + single shared runtime).
-        // Non-blocking platforms still delegate to the integration-specific runtime initializer.
-        #[cfg(feature = "blocking")]
-        {
-            #[allow(clippy::needless_return)]
-            return crate::lifecycle::ensure_composite_runtime(state, integrations);
-        }
-        #[cfg(not(feature = "blocking"))]
-        {
-            let hub_type_str = {
-                let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-                s.hubs
-                    .keys()
-                    .next()
-                    .map(|key| key.hub_type.as_str().to_string())
-                    .or_else(|| {
-                        s.hub_credentials
-                            .values()
-                            .find(|creds| creds.can_connect())
-                            .and_then(|c| c.hub_type.as_ref().map(|t| t.as_str().to_string()))
-                    })
-            }
-            .ok_or_else(|| anyhow::anyhow!("No active or connectable hub available"))?;
-
-            let integration = find_integration(integrations, &hub_type_str).ok_or_else(|| {
-                anyhow::anyhow!("No integration registered for hub type: {}", hub_type_str)
-            })?;
-            integration.ensure_runtime(state)
-        }
+        crate::lifecycle::ensure_composite_runtime(state, integrations)
     });
 
     let get_hub_provider_fn = Arc::new(move |hub_type: HubType| -> &'static dyn HubProvider {
@@ -530,7 +500,6 @@ pub fn integration_callbacks(
             .provider()
     });
 
-    #[cfg(feature = "desktop")]
     let register_controller_fn = Arc::new(move |state: &SharedState, key: &HubKey| -> Result<()> {
         let composite = {
             let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -576,7 +545,6 @@ pub fn integration_callbacks(
     IntegrationCallbacks {
         ensure_runtime_fn,
         get_hub_provider_fn,
-        #[cfg(feature = "desktop")]
         register_controller_fn,
         start_pairing_fn,
         start_unpairing_fn,
@@ -721,26 +689,6 @@ mod tests {
         let callbacks = integration_callbacks(TEST_INTEGRATIONS);
 
         let _ = (callbacks.get_hub_provider_fn)(HubType::new("unknown"));
-    }
-
-    #[cfg(not(feature = "blocking"))]
-    #[test]
-    fn ensure_runtime_callback_errors_for_unknown_connectable_hub_type() {
-        let callbacks = integration_callbacks(TEST_INTEGRATIONS);
-        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
-
-        {
-            let mut s = state.lock().unwrap();
-            s.hub_credentials.insert(
-                HubKey::new(HubType::new("unknown"), "local"),
-                HubCredentials::new("unknown", "local", serde_json::json!({"token": "test"})),
-            );
-        }
-
-        let error = (callbacks.ensure_runtime_fn)(&state)
-            .unwrap_err()
-            .to_string();
-        assert_eq!(error, "No integration registered for hub type: unknown");
     }
 
     #[test]

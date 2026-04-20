@@ -1,17 +1,8 @@
 //! Platform-specific adapters for time and scheduling.
 //!
-//! This module provides implementations of the `TimeProvider` and `Scheduler`
-//! traits for different platforms.
+//! This module provides the standard thread-based implementations of the
+//! `TimeProvider` and `Scheduler` traits used by production binaries.
 
-#[cfg(feature = "tokio")]
-pub mod tokio;
+pub mod thread;
 
-#[cfg(feature = "blocking")]
-pub mod blocking;
-
-// Re-exports
-#[cfg(feature = "tokio")]
-pub use self::tokio::{TokioScheduler, TokioTimeProvider};
-
-#[cfg(feature = "blocking")]
-pub use self::blocking::{BlockingScheduler, BlockingTimeProvider};
+pub use self::thread::{SystemTimeProvider, ThreadScheduler};

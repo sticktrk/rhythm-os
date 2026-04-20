@@ -7,30 +7,24 @@
 //! engine to update light values based on the current time/solar position.
 //!
 //! Both `run_periodic_loop` and `check_solar_midnight` use blocking
-//! `std::thread::sleep` and `BlockingTimeProvider`. On rhythm-server,
+//! `std::thread::sleep` and `SystemTimeProvider`. On rhythm-server,
 //! this runs inside `tokio::task::spawn_blocking()`.
 
 use std::collections::{HashMap, HashSet};
-#[cfg(feature = "blocking")]
 use std::thread;
 use std::time::Duration;
-#[cfg(feature = "blocking")]
 use std::time::Instant;
 
 use log::{debug, info, warn};
-#[cfg(feature = "blocking")]
-use rhythm_core::{BlockingTimeProvider, TimeProvider};
+use rhythm_core::{SystemTimeProvider, TimeProvider};
 
 use std::sync::Arc;
 
 use rhythm_core::{runtime::RuntimeHandle, RestoredNodeState};
 
-#[cfg(feature = "blocking")]
 use crate::logging;
-#[cfg(feature = "blocking")]
 use crate::state::WorkItem;
 use crate::state::{AppState, SharedState};
-#[cfg(feature = "blocking")]
 use crate::storage::StoredLocation;
 
 pub(crate) fn stable_room_phase_key(room_id: &str) -> u64 {
@@ -91,10 +85,7 @@ fn periodic_dispatch_nodes_from_state(
     eligible_room_ids.sort();
     eligible_room_ids.dedup();
 
-    #[cfg(feature = "desktop")]
     let has_composite_controller = state.composite_controller.is_some();
-    #[cfg(not(feature = "desktop"))]
-    let has_composite_controller = false;
 
     if !has_composite_controller {
         return eligible_room_ids
@@ -278,7 +269,6 @@ pub(crate) fn effective_cycle_duration(
     Duration::from_secs(chosen_secs)
 }
 
-#[cfg(feature = "blocking")]
 fn resolve_periodic_sun_times(
     latitude: Option<f32>,
     longitude: Option<f32>,
@@ -303,7 +293,6 @@ fn resolve_periodic_sun_times(
     ))
 }
 
-#[cfg(feature = "blocking")]
 fn enqueue_periodic_tick(
     state: &SharedState,
     tx: &std::sync::mpsc::SyncSender<WorkItem>,
@@ -362,10 +351,9 @@ fn enqueue_periodic_tick(
 }
 
 /// Run the blocking periodic update loop.
-#[cfg(feature = "blocking")]
 ///
 /// Sleeps `update_interval_secs` between iterations. Each iteration:
-/// 1. Calculates current hour via `BlockingTimeProvider`
+/// 1. Calculates current hour via `SystemTimeProvider`
 /// 2. Logs curve values for the current time
 /// 3. Gets rhythm-enabled runtime nodes, skipping warning-dimmed nodes
 /// 4. Dispatches `PeriodicNodeTick` via `work_tx` if `Some`, or calls
@@ -424,7 +412,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
         let lat = latitude.unwrap_or(35.0);
         let lon = longitude.unwrap_or(-80.84);
 
-        let doy = BlockingTimeProvider::new(utc_offset).day_of_year();
+        let doy = SystemTimeProvider::new(utc_offset).day_of_year();
 
         // Check for DST transition and refresh UTC offset if needed
         let (utc_offset, solar_noon, doy) = refresh_dst_offset(
@@ -437,7 +425,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             timezone_name.as_deref(),
         );
 
-        let time_provider = BlockingTimeProvider::new(utc_offset);
+        let time_provider = SystemTimeProvider::new(utc_offset);
         let current_hour = time_provider.current_hour();
         let sun_times =
             resolve_periodic_sun_times(latitude, longitude, timezone_name.as_deref(), utc_offset);
@@ -606,7 +594,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
         // Dispatch per-node ticks with stable staggering across the cycle.
         if let Some(ref tx) = periodic_work_tx {
             for (idx, node) in periodic_nodes.iter().enumerate() {
-                let room_hour = BlockingTimeProvider::new(utc_offset).current_hour();
+                let room_hour = SystemTimeProvider::new(utc_offset).current_hour();
                 let emit_parent_node_id = last_node_index_by_emit_target
                     .get(&node.emit_node_id)
                     .is_some_and(|last_idx| *last_idx == idx)
@@ -637,7 +625,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             }
         } else if let Some(ref tx) = work_tx {
             for (idx, node) in periodic_nodes.iter().enumerate() {
-                let room_hour = BlockingTimeProvider::new(utc_offset).current_hour();
+                let room_hour = SystemTimeProvider::new(utc_offset).current_hour();
                 let emit_parent_node_id = last_node_index_by_emit_target
                     .get(&node.emit_node_id)
                     .is_some_and(|last_idx| *last_idx == idx)
@@ -677,7 +665,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             };
             if let Some(runtime) = runtime {
                 for (idx, node) in periodic_nodes.iter().enumerate() {
-                    let room_hour = BlockingTimeProvider::new(utc_offset).current_hour();
+                    let room_hour = SystemTimeProvider::new(utc_offset).current_hour();
                     let started = Instant::now();
                     if let Err(e) =
                         runtime.periodic_tick_node(&node.node_id, &node.settings_node_id, room_hour)
@@ -729,7 +717,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
 
         // Read last_check_hour before check_solar_midnight updates it
         let last_hour = state.lock().ok().and_then(|s| s.last_check_hour);
-        let current_hour = BlockingTimeProvider::new(utc_offset).current_hour();
+        let current_hour = SystemTimeProvider::new(utc_offset).current_hour();
         check_solar_midnight(&state, current_hour);
         if let Some(last) = last_hour {
             check_mode_transitions(&state, last, current_hour);
@@ -752,7 +740,6 @@ pub fn post_tick_node(state: &SharedState, runtime: &Arc<dyn RuntimeHandle>, nod
         return;
     };
 
-    #[cfg(feature = "desktop")]
     {
         let mut event = crate::commands::build_node_state_event(state, &snap);
         event.tick = true;
@@ -813,7 +800,6 @@ pub fn check_solar_midnight(state: &SharedState, current_hour: f32) {
                 );
             }
 
-            #[cfg(feature = "desktop")]
             {
                 let events: Vec<_> = runtime
                     .engine_all_room_snapshots()
@@ -1250,7 +1236,6 @@ pub fn update_interval_secs(state: &SharedState) -> u64 {
 /// location, and emits an SSE event.
 ///
 /// Returns the (possibly updated) `(utc_offset, solar_noon, day_of_year)`.
-#[cfg(feature = "blocking")]
 pub fn refresh_dst_offset(
     state: &SharedState,
     current_offset: f32,
@@ -1309,7 +1294,6 @@ pub fn refresh_dst_offset(
             }
         }
 
-        #[cfg(feature = "desktop")]
         s.emit_event(crate::server_event::ServerEvent::ConfigChanged);
     }
 

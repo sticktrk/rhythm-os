@@ -1,4 +1,4 @@
-//! Blocking adapters for std-based platforms.
+//! Thread-based adapters for std-based platforms.
 //!
 //! This module provides `TimeProvider` and `Scheduler` implementations
 //! that use std::thread for scheduling and std::time for time access.
@@ -20,13 +20,13 @@ use crate::runtime::time::TimeProvider;
 /// This provider requires a UTC offset to be set, as SystemTime only
 /// provides UTC time. The offset should be set based on the local timezone.
 #[derive(Clone)]
-pub struct BlockingTimeProvider {
+pub struct SystemTimeProvider {
     /// UTC offset in hours (e.g., -5.0 for EST).
     utc_offset_hours: f32,
 }
 
-impl BlockingTimeProvider {
-    /// Create a new BlockingTimeProvider with the given UTC offset.
+impl SystemTimeProvider {
+    /// Create a new SystemTimeProvider with the given UTC offset.
     ///
     /// # Arguments
     ///
@@ -63,14 +63,14 @@ impl BlockingTimeProvider {
     }
 }
 
-impl Default for BlockingTimeProvider {
+impl Default for SystemTimeProvider {
     fn default() -> Self {
         // Default to UTC (0 hours) — neutral default
         Self::new(0.0)
     }
 }
 
-impl TimeProvider for BlockingTimeProvider {
+impl TimeProvider for SystemTimeProvider {
     fn current_hour(&self) -> f32 {
         let utc_hour = self.utc_hour();
         // Apply offset and wrap around 24 hours
@@ -103,8 +103,8 @@ impl TimeProvider for BlockingTimeProvider {
     }
 }
 
-/// Scheduler using std::thread for blocking platforms.
-pub struct BlockingScheduler {
+/// Scheduler using std::thread for server-class platforms.
+pub struct ThreadScheduler {
     /// Next handle ID.
     next_id: AtomicU32,
 
@@ -114,14 +114,14 @@ pub struct BlockingScheduler {
     /// Thread handles for cleanup.
     handles: Arc<Mutex<HashMap<u64, JoinHandle<()>>>>,
 
-    /// Stack size for spawned threads (bytes). On constrained blocking targets,
+    /// Stack size for spawned threads (bytes). On constrained appliance targets,
     /// the default pthread stack is very small (~3KB usable). Callbacks that
     /// perform TLS, float math, or string formatting need 16KB+.
     stack_size: Option<usize>,
 }
 
-impl BlockingScheduler {
-    /// Create a new BlockingScheduler with default thread stack size.
+impl ThreadScheduler {
+    /// Create a new ThreadScheduler with default thread stack size.
     pub fn new() -> Self {
         Self {
             next_id: AtomicU32::new(1),
@@ -131,7 +131,7 @@ impl BlockingScheduler {
         }
     }
 
-    /// Create a new BlockingScheduler with a specific thread stack size.
+    /// Create a new ThreadScheduler with a specific thread stack size.
     pub fn with_stack_size(stack_size: usize) -> Self {
         Self {
             stack_size: Some(stack_size),
@@ -140,13 +140,13 @@ impl BlockingScheduler {
     }
 }
 
-impl Default for BlockingScheduler {
+impl Default for ThreadScheduler {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Scheduler for BlockingScheduler {
+impl Scheduler for ThreadScheduler {
     fn schedule_periodic<F>(
         &self,
         name: &str,
@@ -245,8 +245,8 @@ mod tests {
     use std::sync::atomic::AtomicU32;
 
     #[test]
-    fn test_blocking_time_provider() {
-        let provider = BlockingTimeProvider::new(-5.0); // EST
+    fn test_system_time_provider() {
+        let provider = SystemTimeProvider::new(-5.0); // EST
 
         let hour = provider.current_hour();
         assert!((0.0..24.0).contains(&hour), "Hour {} out of range", hour);
@@ -259,10 +259,10 @@ mod tests {
     }
 
     #[test]
-    fn test_blocking_time_provider_offset() {
+    fn test_system_time_provider_offset() {
         // Test that offset is applied correctly
-        let est = BlockingTimeProvider::new(-5.0);
-        let pst = BlockingTimeProvider::new(-8.0);
+        let est = SystemTimeProvider::new(-5.0);
+        let pst = SystemTimeProvider::new(-8.0);
 
         // PST should be 3 hours behind EST
         let est_hour = est.current_hour();
@@ -284,8 +284,8 @@ mod tests {
     }
 
     #[test]
-    fn test_blocking_scheduler_basic() {
-        let scheduler = BlockingScheduler::new();
+    fn test_thread_scheduler_basic() {
+        let scheduler = ThreadScheduler::new();
         let counter = Arc::new(AtomicU32::new(0));
         let counter_clone = counter.clone();
 

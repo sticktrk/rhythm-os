@@ -87,9 +87,8 @@ where
 /// Create the RhythmRuntime for an HA hub, generic over transport.
 ///
 /// Reads credentials, registry, and config from AppState.
-/// Creates `HaLightController<H>`, `BlockingTimeProvider`, `BlockingScheduler`,
+/// Creates `HaLightController<H>`, `SystemTimeProvider`, `ThreadScheduler`,
 /// and `RhythmRuntime`. Restores persisted room state from storage.
-#[cfg(feature = "blocking")]
 pub fn ensure_ha_runtime<H: crate::transport::HaTransport + 'static>(
     state: &SharedState,
     transport: H,

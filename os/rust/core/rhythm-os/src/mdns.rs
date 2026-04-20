@@ -6,11 +6,9 @@ pub const MDNS_HOSTNAME_PREFIX: &str = "rhythm-";
 pub const MDNS_TXT_VERSION: &str = "version";
 pub const MDNS_TXT_TYPE: &str = "type";
 
-#[cfg(feature = "desktop")]
 const MDNS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Find the first non-loopback IPv4 address on this machine.
-#[cfg(feature = "desktop")]
 pub fn local_ipv4() -> Option<std::net::Ipv4Addr> {
     use std::net::IpAddr;
     let ifaces = if_addrs::get_if_addrs().ok()?;
@@ -52,7 +50,6 @@ pub fn local_ipv4() -> Option<std::net::Ipv4Addr> {
 /// Returns `Some(handle)` on success. Keep the returned handle alive for the
 /// lifetime of the process to maintain and refresh the advertisement as the
 /// local IPv4 changes.
-#[cfg(feature = "desktop")]
 pub fn register_mdns_service(
     port: u16,
     device_suffix: &str,
@@ -87,7 +84,6 @@ pub fn register_mdns_service(
     })
 }
 
-#[cfg(feature = "desktop")]
 struct MdnsRegistrationConfig {
     port: u16,
     device_suffix: String,
@@ -96,13 +92,11 @@ struct MdnsRegistrationConfig {
 }
 
 /// Keeps desktop/Linux mDNS registration aligned with the current local IPv4.
-#[cfg(feature = "desktop")]
 pub struct MdnsRegistrationHandle {
     stop_tx: Option<std::sync::mpsc::Sender<()>>,
     join_handle: Option<std::thread::JoinHandle<()>>,
 }
 
-#[cfg(feature = "desktop")]
 impl Drop for MdnsRegistrationHandle {
     fn drop(&mut self) {
         if let Some(stop_tx) = self.stop_tx.take() {
@@ -114,7 +108,6 @@ impl Drop for MdnsRegistrationHandle {
     }
 }
 
-#[cfg(feature = "desktop")]
 fn run_mdns_registration_loop(
     config: MdnsRegistrationConfig,
     stop_rx: std::sync::mpsc::Receiver<()>,
@@ -186,7 +179,6 @@ fn run_mdns_registration_loop(
     }
 }
 
-#[cfg(feature = "desktop")]
 fn register_mdns_service_for_ip(
     port: u16,
     device_suffix: &str,
@@ -240,7 +232,6 @@ fn register_mdns_service_for_ip(
     Some(daemon)
 }
 
-#[cfg(feature = "desktop")]
 fn mdns_hostname(device_suffix: &str, local_ip: std::net::Ipv4Addr) -> String {
     let octets = local_ip.octets();
     format!(
@@ -249,7 +240,7 @@ fn mdns_hostname(device_suffix: &str, local_ip: std::net::Ipv4Addr) -> String {
     )
 }
 
-#[cfg(all(test, feature = "desktop"))]
+#[cfg(test)]
 mod tests {
     use super::mdns_hostname;
     use std::net::Ipv4Addr;

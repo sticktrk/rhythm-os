@@ -1,4 +1,4 @@
-//! Linux embedded Wi-Fi helpers for rpiz provisioning and recovery.
+//! Linux appliance Wi-Fi helpers for rpiz provisioning and recovery.
 
 use std::fs;
 use std::path::Path;

@@ -1,6 +1,6 @@
 //! Shared logging helpers for active native platforms.
 //!
-//! The server, add-on, and Linux embedded builds all use the same native
+//! The server, add-on, and Linux appliance builds all use the same native
 //! subscriber setup and HTTP request tracing so operators get one consistent
 //! log shape across active platforms.
 
@@ -37,28 +37,19 @@ pub fn summarize_json_for_log(value: &Value) -> String {
     }
 }
 
-#[cfg(feature = "desktop")]
 use axum::extract::MatchedPath;
-#[cfg(feature = "desktop")]
 use axum::http::Request;
-#[cfg(feature = "desktop")]
 use axum::response::Response;
-#[cfg(feature = "desktop")]
 use axum::Router;
-#[cfg(feature = "desktop")]
 use tower_http::request_id::{
     MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
 };
-#[cfg(feature = "desktop")]
 use tower_http::trace::TraceLayer;
 
-#[cfg(feature = "desktop")]
 use crate::axum_router::ApiErrorContext;
 
-#[cfg(feature = "desktop")]
 struct LocalTimer;
 
-#[cfg(feature = "desktop")]
 impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
     fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
         write!(
@@ -69,7 +60,6 @@ impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
     }
 }
 
-#[cfg(feature = "desktop")]
 fn request_id_from_request<B>(request: &Request<B>) -> String {
     request
         .extensions()
@@ -79,7 +69,6 @@ fn request_id_from_request<B>(request: &Request<B>) -> String {
         .to_string()
 }
 
-#[cfg(feature = "desktop")]
 /// Initialize the native tracing subscriber used by active platforms.
 pub fn init_native_logging(default_level: &str) -> anyhow::Result<()> {
     let base_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| default_level.to_string());
@@ -115,7 +104,6 @@ pub fn init_native_logging(default_level: &str) -> anyhow::Result<()> {
     .map_err(|e| anyhow::anyhow!("failed to initialize logging: {}", e))
 }
 
-#[cfg(feature = "desktop")]
 /// Apply request IDs and HTTP latency logging to a shared-state router.
 pub fn with_http_observability<S>(router: Router<S>) -> Router<S>
 where

@@ -95,9 +95,8 @@ where
 /// Create the RhythmRuntime for a Hue hub, generic over transport.
 ///
 /// Reads credentials, registry, and config from AppState.
-/// Creates `HueLightController<H>`, `BlockingTimeProvider`, `BlockingScheduler`,
+/// Creates `HueLightController<H>`, `SystemTimeProvider`, `ThreadScheduler`,
 /// and `RhythmRuntime`. Restores persisted room state from storage.
-#[cfg(feature = "blocking")]
 pub fn ensure_hue_runtime<H: crate::transport::HueTransport + 'static>(
     state: &SharedState,
     transport: H,

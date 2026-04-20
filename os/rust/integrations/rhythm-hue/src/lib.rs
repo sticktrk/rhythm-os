@@ -9,18 +9,13 @@ pub mod behavior;
 pub mod controller;
 pub mod device_types;
 pub mod discovery;
-#[cfg(feature = "embedded")]
-pub mod embedded_lifecycle;
 pub mod events;
 pub mod hub_state;
 pub mod hue_lifecycle;
 pub mod provider;
 pub mod registry;
-#[cfg(feature = "desktop")]
 pub mod reqwest_lifecycle;
-#[cfg(feature = "desktop")]
 pub mod reqwest_sse;
-#[cfg(feature = "desktop")]
 pub mod reqwest_transport;
 pub mod sse;
 #[cfg(any(test, feature = "test-support"))]

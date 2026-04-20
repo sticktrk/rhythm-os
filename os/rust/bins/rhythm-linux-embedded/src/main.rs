@@ -1,6 +1,6 @@
 //! Rhythm OS Linux appliance runtime.
 //!
-//! Reuses the native Linux/macOS server stack, but gives embedded-appliance
+//! Reuses the native Linux/macOS server stack, but gives appliance
 //! targets like rpiz their own binary crate so board-specific provisioning,
 //! networking, and packaging concerns do not accumulate in `rhythm-server`.
 
@@ -197,7 +197,7 @@ fn bootstrap_hubs(state: &SharedState) {
             .iter()
             .filter_map(|(key, creds)| {
                 (creds.can_connect())
-                    .then(|| creds.hub_type.as_ref())
+                    .then_some(creds.hub_type.as_ref())
                     .flatten()
                     .map(|ht| (key.clone(), ht.as_str().to_string()))
             })

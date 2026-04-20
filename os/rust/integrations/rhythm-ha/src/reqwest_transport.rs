@@ -1,7 +1,7 @@
-//! Reqwest-based implementation of [`HaTransport`] for desktop targets.
+//! Reqwest-based implementation of [`HaTransport`] for server-class targets.
 //!
-//! Enabled by the `desktop` feature flag. Provides a ready-to-use transport
-//! so desktop targets get HA communication without platform-specific code.
+//! Provides a ready-to-use transport so current binaries get HA communication
+//! without platform-specific code.
 
 use std::mem::ManuallyDrop;
 use std::time::Duration;

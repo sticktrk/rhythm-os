@@ -18,29 +18,29 @@ use sha2::{Digest, Sha256};
 use tar::Archive;
 
 const DEFAULT_UPDATE_BASE_URL: &str = "https://dl.rhythm.lighting/server";
-const EMBEDDED_INSTALL_PATH: &str = "/usr/bin/rhythm-server";
-const EMBEDDED_BOOT_MOUNT: &str = "/boot";
-const EMBEDDED_BOOT_DEVICE: &str = "/dev/mmcblk0p1";
-const EMBEDDED_ROOTFS_A_DEVICE: &str = "/dev/mmcblk0p2";
-const EMBEDDED_ROOTFS_B_DEVICE: &str = "/dev/mmcblk0p3";
-const EMBEDDED_OTA_STAGING_DIR: &str = "/data/ota";
-const EMBEDDED_CMDLINE_PATH: &str = "/boot/cmdline.txt";
-const EMBEDDED_CMDLINE_BACKUP_PATH: &str = "/boot/cmdline.txt.bak";
-const EMBEDDED_BOOT_STATE_PATH: &str = "/boot/rhythm-bootstate.env";
+const APPLIANCE_INSTALL_PATH: &str = "/usr/bin/rhythm-server";
+const APPLIANCE_BOOT_MOUNT: &str = "/boot";
+const APPLIANCE_BOOT_DEVICE: &str = "/dev/mmcblk0p1";
+const APPLIANCE_ROOTFS_A_DEVICE: &str = "/dev/mmcblk0p2";
+const APPLIANCE_ROOTFS_B_DEVICE: &str = "/dev/mmcblk0p3";
+const APPLIANCE_OTA_STAGING_DIR: &str = "/data/ota";
+const APPLIANCE_CMDLINE_PATH: &str = "/boot/cmdline.txt";
+const APPLIANCE_CMDLINE_BACKUP_PATH: &str = "/boot/cmdline.txt.bak";
+const APPLIANCE_BOOT_STATE_PATH: &str = "/boot/rhythm-bootstate.env";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RestartStrategy {
     SupervisorExit,
-    EmbeddedReboot,
+    ApplianceReboot,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum EmbeddedSlot {
+enum ApplianceSlot {
     A,
     B,
 }
 
-impl EmbeddedSlot {
+impl ApplianceSlot {
     fn as_str(self) -> &'static str {
         match self {
             Self::A => "a",
@@ -50,8 +50,8 @@ impl EmbeddedSlot {
 
     fn root_device(self) -> &'static str {
         match self {
-            Self::A => EMBEDDED_ROOTFS_A_DEVICE,
-            Self::B => EMBEDDED_ROOTFS_B_DEVICE,
+            Self::A => APPLIANCE_ROOTFS_A_DEVICE,
+            Self::B => APPLIANCE_ROOTFS_B_DEVICE,
         }
     }
 
@@ -179,10 +179,10 @@ impl OtaStatusHandle {
     }
 
     pub fn capabilities(&self) -> OtaCapabilities {
-        let embedded = restart_strategy() == RestartStrategy::EmbeddedReboot;
+        let appliance = restart_strategy() == RestartStrategy::ApplianceReboot;
         OtaCapabilities {
             strategy: "self_pull",
-            scope: if embedded {
+            scope: if appliance {
                 "rootfs_slot"
             } else {
                 "component_bundle"
@@ -191,12 +191,12 @@ impl OtaStatusHandle {
             can_update: true,
             can_upload: false,
             requires_restart: true,
-            rollback: if embedded {
+            rollback: if appliance {
                 "automatic_slot_switch"
             } else {
                 "backup_files"
             },
-            payloads: if embedded {
+            payloads: if appliance {
                 vec!["archive_bundle", "rootfs_image"]
             } else {
                 vec!["archive_bundle"]
@@ -351,9 +351,9 @@ pub struct ApplyResult {
 
 impl UpdateInfo {
     pub fn apply_blocking(&self) -> Result<ApplyResult, String> {
-        if restart_strategy() == RestartStrategy::EmbeddedReboot {
-            if let Some(image_asset) = self.preferred_embedded_image_asset() {
-                return apply_embedded_image_blocking(
+        if restart_strategy() == RestartStrategy::ApplianceReboot {
+            if let Some(image_asset) = self.preferred_appliance_image_asset() {
+                return apply_appliance_image_blocking(
                     image_asset,
                     &self.current_version,
                     &self.latest_version,
@@ -379,7 +379,7 @@ impl UpdateInfo {
         )
     }
 
-    fn preferred_embedded_image_asset(&self) -> Option<&UpdateImageAsset> {
+    fn preferred_appliance_image_asset(&self) -> Option<&UpdateImageAsset> {
         self.image_assets
             .iter()
             .filter(|asset| asset.kind == ReleaseArtifactKind::RootfsImage)
@@ -524,10 +524,10 @@ fn check_manifest_blocking(current_version: &str) -> Result<UpdateInfo, String> 
         .as_ref()
         .map(|artifact| resolve_package_artifact(&manifest_url, artifact, &install_root))
         .transpose()?;
-    let embedded_rootfs_only =
-        restart_strategy() == RestartStrategy::EmbeddedReboot && has_rootfs_image(&image_assets);
+    let appliance_rootfs_only =
+        restart_strategy() == RestartStrategy::ApplianceReboot && has_rootfs_image(&image_assets);
 
-    if package.is_none() && !embedded_rootfs_only {
+    if package.is_none() && !appliance_rootfs_only {
         return Err("Update manifest did not provide an archive bundle payload".to_string());
     }
 
@@ -742,36 +742,36 @@ fn has_rootfs_image(image_assets: &[UpdateImageAsset]) -> bool {
         .any(|asset| asset.kind == ReleaseArtifactKind::RootfsImage)
 }
 
-fn parse_embedded_slot_from_cmdline(cmdline: &str) -> Result<EmbeddedSlot, String> {
+fn parse_appliance_slot_from_cmdline(cmdline: &str) -> Result<ApplianceSlot, String> {
     for token in cmdline.split_whitespace() {
         if let Some(root_device) = token.strip_prefix("root=") {
-            return embedded_slot_from_root_device(root_device);
+            return appliance_slot_from_root_device(root_device);
         }
     }
 
     Err("Kernel command line did not include a root= device".to_string())
 }
 
-fn embedded_slot_from_root_device(root_device: &str) -> Result<EmbeddedSlot, String> {
+fn appliance_slot_from_root_device(root_device: &str) -> Result<ApplianceSlot, String> {
     match root_device {
-        EMBEDDED_ROOTFS_A_DEVICE => Ok(EmbeddedSlot::A),
-        EMBEDDED_ROOTFS_B_DEVICE => Ok(EmbeddedSlot::B),
-        other => Err(format!("Unsupported embedded root device {}", other)),
+        APPLIANCE_ROOTFS_A_DEVICE => Ok(ApplianceSlot::A),
+        APPLIANCE_ROOTFS_B_DEVICE => Ok(ApplianceSlot::B),
+        other => Err(format!("Unsupported appliance root device {}", other)),
     }
 }
 
-fn current_embedded_slot() -> Result<EmbeddedSlot, String> {
+fn current_appliance_slot() -> Result<ApplianceSlot, String> {
     let cmdline = fs::read_to_string("/proc/cmdline")
         .map_err(|e| format!("Failed to read /proc/cmdline: {}", e))?;
-    parse_embedded_slot_from_cmdline(&cmdline)
+    parse_appliance_slot_from_cmdline(&cmdline)
 }
 
-fn embedded_root_arg_for_slot(slot: EmbeddedSlot) -> String {
+fn appliance_root_arg_for_slot(slot: ApplianceSlot) -> String {
     format!("root={}", slot.root_device())
 }
 
-fn rewrite_cmdline_root_device(cmdline: &str, slot: EmbeddedSlot) -> Result<String, String> {
-    let replacement = embedded_root_arg_for_slot(slot);
+fn rewrite_cmdline_root_device(cmdline: &str, slot: ApplianceSlot) -> Result<String, String> {
+    let replacement = appliance_root_arg_for_slot(slot);
     let mut found_root = false;
     let rewritten = cmdline
         .split_whitespace()
@@ -839,9 +839,9 @@ fn ensure_mount(path: &str, device: &str, fs_type: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn write_embedded_boot_state(
-    current_slot: EmbeddedSlot,
-    target_slot: EmbeddedSlot,
+fn write_appliance_boot_state(
+    current_slot: ApplianceSlot,
+    target_slot: ApplianceSlot,
     current_version: &str,
     pending_version: &str,
 ) -> Result<(), String> {
@@ -854,20 +854,20 @@ fn write_embedded_boot_state(
         current_version,
         now_ms()
     );
-    fs::write(EMBEDDED_BOOT_STATE_PATH, body)
-        .map_err(|e| format!("Failed to write {}: {}", EMBEDDED_BOOT_STATE_PATH, e))
+    fs::write(APPLIANCE_BOOT_STATE_PATH, body)
+        .map_err(|e| format!("Failed to write {}: {}", APPLIANCE_BOOT_STATE_PATH, e))
 }
 
-fn update_embedded_cmdline_for_slot(slot: EmbeddedSlot) -> Result<(), String> {
-    ensure_mount(EMBEDDED_BOOT_MOUNT, EMBEDDED_BOOT_DEVICE, "vfat")?;
+fn update_appliance_cmdline_for_slot(slot: ApplianceSlot) -> Result<(), String> {
+    ensure_mount(APPLIANCE_BOOT_MOUNT, APPLIANCE_BOOT_DEVICE, "vfat")?;
 
-    let current_cmdline = fs::read_to_string(EMBEDDED_CMDLINE_PATH)
-        .map_err(|e| format!("Failed to read {}: {}", EMBEDDED_CMDLINE_PATH, e))?;
+    let current_cmdline = fs::read_to_string(APPLIANCE_CMDLINE_PATH)
+        .map_err(|e| format!("Failed to read {}: {}", APPLIANCE_CMDLINE_PATH, e))?;
     let rewritten = rewrite_cmdline_root_device(&current_cmdline, slot)?;
 
-    let _ = fs::copy(EMBEDDED_CMDLINE_PATH, EMBEDDED_CMDLINE_BACKUP_PATH);
-    fs::write(EMBEDDED_CMDLINE_PATH, format!("{}\n", rewritten))
-        .map_err(|e| format!("Failed to write {}: {}", EMBEDDED_CMDLINE_PATH, e))
+    let _ = fs::copy(APPLIANCE_CMDLINE_PATH, APPLIANCE_CMDLINE_BACKUP_PATH);
+    fs::write(APPLIANCE_CMDLINE_PATH, format!("{}\n", rewritten))
+        .map_err(|e| format!("Failed to write {}: {}", APPLIANCE_CMDLINE_PATH, e))
 }
 
 fn artifact_uses_gzip(asset: &UpdateImageAsset) -> bool {
@@ -885,7 +885,7 @@ fn artifact_staging_path(asset_name: &str) -> PathBuf {
             }
         })
         .collect::<String>();
-    Path::new(EMBEDDED_OTA_STAGING_DIR).join(format!("{}.download", safe_name))
+    Path::new(APPLIANCE_OTA_STAGING_DIR).join(format!("{}.download", safe_name))
 }
 
 fn write_image_artifact_to_device(
@@ -934,7 +934,7 @@ fn write_image_artifact_to_device(
     Ok(())
 }
 
-fn apply_embedded_image_blocking(
+fn apply_appliance_image_blocking(
     image_asset: &UpdateImageAsset,
     current_version: &str,
     latest_version: &str,
@@ -945,12 +945,12 @@ fn apply_embedded_image_blocking(
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
-    let current_slot = current_embedded_slot()?;
+    let current_slot = current_appliance_slot()?;
     let target_slot = current_slot.inactive();
 
-    ensure_mount(EMBEDDED_BOOT_MOUNT, EMBEDDED_BOOT_DEVICE, "vfat")?;
-    fs::create_dir_all(EMBEDDED_OTA_STAGING_DIR)
-        .map_err(|e| format!("Failed to create {}: {}", EMBEDDED_OTA_STAGING_DIR, e))?;
+    ensure_mount(APPLIANCE_BOOT_MOUNT, APPLIANCE_BOOT_DEVICE, "vfat")?;
+    fs::create_dir_all(APPLIANCE_OTA_STAGING_DIR)
+        .map_err(|e| format!("Failed to create {}: {}", APPLIANCE_OTA_STAGING_DIR, e))?;
 
     let download_path = artifact_staging_path(&image_asset.name);
     remove_if_exists(&download_path);
@@ -978,8 +978,8 @@ fn apply_embedded_image_blocking(
             Path::new(target_slot.root_device()),
             artifact_uses_gzip(image_asset),
         )?;
-        update_embedded_cmdline_for_slot(target_slot)?;
-        write_embedded_boot_state(current_slot, target_slot, current_version, latest_version)?;
+        update_appliance_cmdline_for_slot(target_slot)?;
+        write_appliance_boot_state(current_slot, target_slot, current_version, latest_version)?;
         Ok::<(), String>(())
     })() {
         remove_if_exists(&download_path);
@@ -1135,15 +1135,13 @@ fn apply_payload_blocking(
     };
 
     let staged_targets = stage_install_targets(&download_path, asset_name, &resolved_targets)
-        .map_err(|error| {
+        .inspect_err(|_error| {
             cleanup_install_artifacts(&resolved_targets);
             remove_if_exists(&download_path);
-            error
         })?;
-    let installed_targets = commit_staged_targets(&staged_targets).map_err(|error| {
+    let installed_targets = commit_staged_targets(&staged_targets).inspect_err(|_error| {
         cleanup_staged_files(&staged_targets);
         remove_if_exists(&download_path);
-        error
     })?;
 
     remove_if_exists(&download_path);
@@ -1178,10 +1176,9 @@ fn download_release(
 
 fn install_target_executable() -> Result<PathBuf, String> {
     let platform_type = std::env::var("RHYTHM_PLATFORM_TYPE").ok();
-    let platform_context = std::env::var("RHYTHM_PLATFORM_CONTEXT").ok();
 
-    if is_appliance_runtime(platform_type.as_deref(), platform_context.as_deref()) {
-        return Ok(PathBuf::from(EMBEDDED_INSTALL_PATH));
+    if is_appliance_runtime(platform_type.as_deref()) {
+        return Ok(PathBuf::from(APPLIANCE_INSTALL_PATH));
     }
 
     let current_exe =
@@ -1198,30 +1195,23 @@ fn normalize_server_install_path(current_exe: PathBuf) -> PathBuf {
 
 fn restart_strategy() -> RestartStrategy {
     let platform_type = std::env::var("RHYTHM_PLATFORM_TYPE").ok();
-    let platform_context = std::env::var("RHYTHM_PLATFORM_CONTEXT").ok();
 
-    if is_appliance_runtime(platform_type.as_deref(), platform_context.as_deref()) {
-        RestartStrategy::EmbeddedReboot
+    if is_appliance_runtime(platform_type.as_deref()) {
+        RestartStrategy::ApplianceReboot
     } else {
         RestartStrategy::SupervisorExit
     }
 }
 
-fn is_appliance_runtime(platform_type: Option<&str>, platform_context: Option<&str>) -> bool {
-    match platform_type {
-        Some("appliance") => true,
-        // Accept the older runtime identity so existing appliance images can
-        // still self-update into the renamed platform without a flag-day.
-        Some("embedded") => matches!(platform_context, Some("rpiz") | Some("linux-embedded")),
-        _ => false,
-    }
+fn is_appliance_runtime(platform_type: Option<&str>) -> bool {
+    matches!(platform_type, Some("appliance"))
 }
 
 pub fn schedule_post_update_restart() {
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_secs(1));
         match restart_strategy() {
-            RestartStrategy::EmbeddedReboot => {
+            RestartStrategy::ApplianceReboot => {
                 log::info!(target: "sys", "Rebooting appliance after self-update...");
 
                 let reboot_result = Command::new("/sbin/reboot")
@@ -1233,7 +1223,7 @@ pub fn schedule_post_update_restart() {
                     Ok(status) => {
                         log::error!(
                             target: "sys",
-                            "Embedded reboot command exited with status {:?}; falling back to process exit",
+                            "Appliance reboot command exited with status {:?}; falling back to process exit",
                             status.code()
                         );
                         std::process::exit(1);
@@ -1241,7 +1231,7 @@ pub fn schedule_post_update_restart() {
                     Err(error) => {
                         log::error!(
                             target: "sys",
-                            "Failed to invoke embedded reboot after self-update: {}; falling back to process exit",
+                            "Failed to invoke appliance reboot after self-update: {}; falling back to process exit",
                             error
                         );
                         std::process::exit(1);
@@ -1522,16 +1512,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_embedded_slot_from_cmdline_reads_root_partition() {
+    fn parse_appliance_slot_from_cmdline_reads_root_partition() {
         assert_eq!(
-            parse_embedded_slot_from_cmdline("console=tty1 root=/dev/mmcblk0p2 rootwait rw")
+            parse_appliance_slot_from_cmdline("console=tty1 root=/dev/mmcblk0p2 rootwait rw")
                 .unwrap(),
-            EmbeddedSlot::A
+            ApplianceSlot::A
         );
         assert_eq!(
-            parse_embedded_slot_from_cmdline("console=tty1 root=/dev/mmcblk0p3 rootwait rw")
+            parse_appliance_slot_from_cmdline("console=tty1 root=/dev/mmcblk0p3 rootwait rw")
                 .unwrap(),
-            EmbeddedSlot::B
+            ApplianceSlot::B
         );
     }
 
@@ -1540,7 +1530,7 @@ mod tests {
         assert_eq!(
             rewrite_cmdline_root_device(
                 "console=tty1 root=/dev/mmcblk0p2 rootwait rw",
-                EmbeddedSlot::B
+                ApplianceSlot::B
             )
             .unwrap(),
             "console=tty1 root=/dev/mmcblk0p3 rootwait rw"
@@ -1548,7 +1538,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_update_prefers_gzip_rootfs_asset() {
+    fn appliance_update_prefers_gzip_rootfs_asset() {
         let info = UpdateInfo {
             current_version: "0.4.146".to_string(),
             latest_version: "0.4.147".to_string(),
@@ -1580,7 +1570,7 @@ mod tests {
         };
 
         assert_eq!(
-            info.preferred_embedded_image_asset()
+            info.preferred_appliance_image_asset()
                 .map(|asset| asset.name.as_str()),
             Some("rootfs.ext2.gz")
         );
@@ -1805,7 +1795,7 @@ mod tests {
         std::env::set_var("RHYTHM_PLATFORM_CONTEXT", "rpiz");
 
         let path = install_target_executable().unwrap();
-        assert_eq!(path, PathBuf::from(EMBEDDED_INSTALL_PATH));
+        assert_eq!(path, PathBuf::from(APPLIANCE_INSTALL_PATH));
 
         std::env::remove_var("RHYTHM_PLATFORM_TYPE");
         std::env::remove_var("RHYTHM_PLATFORM_CONTEXT");
@@ -1817,7 +1807,7 @@ mod tests {
         std::env::set_var("RHYTHM_PLATFORM_TYPE", "appliance");
         std::env::set_var("RHYTHM_PLATFORM_CONTEXT", "rpiz");
 
-        assert_eq!(restart_strategy(), RestartStrategy::EmbeddedReboot);
+        assert_eq!(restart_strategy(), RestartStrategy::ApplianceReboot);
 
         std::env::remove_var("RHYTHM_PLATFORM_TYPE");
         std::env::remove_var("RHYTHM_PLATFORM_CONTEXT");

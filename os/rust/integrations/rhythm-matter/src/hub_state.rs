@@ -8,14 +8,12 @@ use rhythm_devices::{DeviceQuirk, LightCapabilities};
 use rhythm_os::hub::HubEvent;
 
 use crate::controller::MatterDeviceRegistry;
-#[cfg(feature = "desktop")]
 use crate::transport::MatterTransport;
 use crate::transport::{CommissionedDevice, MatterDeviceInfo};
 
 /// Matter-specific state stored in `ActiveHub::hub_data`.
 pub struct MatterHubData {
     /// Shared transport for all controller, commissioning, and probe paths.
-    #[cfg(feature = "desktop")]
     pub transport: std::sync::OnceLock<Arc<dyn MatterTransport>>,
     /// Optional directory for raw probe captures.
     pub capture_dir: std::sync::OnceLock<String>,
@@ -115,7 +113,6 @@ mod tests {
     fn hub_data() -> MatterHubData {
         let (event_tx, _event_rx) = std::sync::mpsc::channel();
         MatterHubData {
-            #[cfg(feature = "desktop")]
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
             registry: Arc::new(Mutex::new(MatterDeviceRegistry::new())),

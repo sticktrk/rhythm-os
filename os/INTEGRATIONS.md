@@ -137,7 +137,7 @@ rhythm-hue is the reference integration. Its structure demonstrates the pattern:
 ```
 rhythm-hue/
   src/
-    lib.rs              -- module structure, re-exports, feature gates
+    lib.rs              -- module structure, re-exports
     controller.rs       -- HueLightController<H: HueTransport> implements LightController
     registry.rs         -- HueDeviceRegistry implements HubRegistry + DeviceRegistry
     transport.rs        -- HueTransport trait (platform-abstracted HTTP/TLS)
@@ -149,20 +149,13 @@ rhythm-hue/
     behavior.rs         -- HueBehaviorTracker for multi-button sequences
     api_types.rs        -- Hue V2 API type definitions
     device_types.rs     -- HueRoom, HueButton, HueSwitchDevice
-    embedded_lifecycle.rs  -- optional blocking wrapper kept behind the legacy `embedded` feature
-    reqwest_lifecycle.rs   -- Desktop/server lifecycle (feature = "desktop")
+    reqwest_lifecycle.rs   -- Server/add-on/appliance lifecycle
     reqwest_transport.rs   -- reqwest-based HueTransport impl
     reqwest_sse.rs         -- reqwest-based SSE reader
 ```
 
-Feature flags:
-```toml
-[features]
-default = []
-blocking = ["rhythm-core/blocking", "rhythm-os/blocking"]
-embedded = ["blocking"] # legacy alias retained for blocking wrappers
-desktop = ["blocking", "dep:reqwest", "dep:reqwest-eventsource", "dep:tokio", "dep:futures"]
-```
+The reqwest transport stack is built in unconditionally for the active
+server/add-on/appliance targets.
 
 ## Wiring an Integration into a Binary
 
@@ -206,7 +199,7 @@ For creating a new integration crate:
 rhythm-{name}/
   Cargo.toml
   src/
-    lib.rs              -- module structure, re-exports, feature gates
+    lib.rs              -- module structure, re-exports
     controller.rs       -- LightController impl
     registry.rs         -- HubRegistry + DeviceRegistry impl
     transport.rs        -- communication trait (platform-abstracted)
@@ -215,22 +208,12 @@ rhythm-{name}/
     events.rs           -- native events -> HubEvent translation
     buttons.rs          -- native buttons -> ButtonAction mapping (if applicable)
     hub_state.rs        -- integration data stored in ActiveHub::hub_data
-    embedded_lifecycle.rs   -- optional legacy blocking wrapper (feature = "embedded")
-    desktop_lifecycle.rs    -- optional first-party desktop wrapper (feature = "desktop")
+    desktop_lifecycle.rs    -- optional first-party server-class wrapper
 ```
 
-Feature flag pattern:
-```toml
-[features]
-default = []
-blocking = ["rhythm-core/blocking", "rhythm-os/blocking"]
-embedded = ["blocking"] # legacy alias retained for blocking wrappers
-desktop = ["blocking", "dep:reqwest"]
-```
-
-The `embedded` feature remains as a legacy blocking alias. It is not an active
-platform target, but some integrations still keep a blocking wrapper behind it
-until the runtime feature surface is simplified.
+For active targets, reqwest- or daemon-backed runtime wrappers are compiled in
+unconditionally. New integrations should follow the same server-class shape
+instead of introducing parallel feature-gated runtime stacks.
 
 ## Minimal Integration Checklist
 
@@ -317,7 +300,7 @@ Shared protocol crates abstract radio/transport access for multiple integrations
 - Used by integrations controlling lights via BLE (some Govee, some IKEA)
 
 ### WiFi/HTTP
-No crate needed -- just std networking (`reqwest` on the active server/appliance paths). Already handled by feature flags in integration crates.
+No crate needed -- just std networking (`reqwest` on the active server/appliance paths). Already handled directly in the integration crates.
 
 ## Multi-Integration Support
 

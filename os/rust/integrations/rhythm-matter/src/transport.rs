@@ -1,9 +1,10 @@
 //! Typed Matter controller transport abstraction.
 //!
 //! The transport boundary is intentionally shaped around the light operations
-//! Rhythm actually needs, not around raw cluster/TLV plumbing. Desktop builds
-//! map this to the official CHIP controller stack through a native daemon;
-//! embedded targets can provide their own controller implementation later.
+//! Rhythm actually needs, not around raw cluster/TLV plumbing. Current
+//! server-class builds map this to the official CHIP controller stack through
+//! a native daemon; future board-specific targets can provide their own
+//! controller implementation later.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

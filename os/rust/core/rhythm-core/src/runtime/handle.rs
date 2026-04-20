@@ -834,15 +834,11 @@ mod tests {
     use crate::runtime::registry::SimpleDeviceRegistry;
     use crate::runtime::scheduler::NoOpScheduler;
     use crate::runtime::time::MockTimeProvider;
-    #[cfg(feature = "blocking")]
     use crate::spy_controller::{SpyCall, SpyLightController};
-    #[cfg(feature = "blocking")]
     use std::time::{Duration, Instant};
 
-    #[cfg(feature = "blocking")]
     type SpyTestRuntime =
         RhythmRuntime<SpyLightController, MockTimeProvider, NoOpScheduler, SimpleDeviceRegistry>;
-    #[cfg(feature = "blocking")]
     type SharedSpyTestRuntime = Arc<SpyTestRuntime>;
 
     fn test_runtime(
@@ -936,7 +932,6 @@ mod tests {
         assert!(!snap.hard_off);
     }
 
-    #[cfg(feature = "blocking")]
     fn spy_runtime() -> (SharedSpyTestRuntime, Arc<SpyLightController>) {
         let spy = Arc::new(SpyLightController::new());
         let runtime = Arc::new(RhythmRuntime::new(
@@ -949,7 +944,6 @@ mod tests {
         (runtime, spy)
     }
 
-    #[cfg(feature = "blocking")]
     fn restored_active_room_state() -> RestoredRoomState {
         RestoredRoomState {
             rhythm_enabled: true,
@@ -962,7 +956,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "blocking")]
     fn wait_for_any_lights_on_call(spy: &SpyLightController, room_id: &str) {
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
@@ -979,7 +972,6 @@ mod tests {
     // Tests that call block_on() internally require a sync executor feature.
     // The workspace normally exercises these through rhythm-os/rhythm-addon.
 
-    #[cfg(feature = "tokio")]
     #[test]
     fn periodic_tick_room_succeeds() {
         let rt = test_runtime();
@@ -989,7 +981,6 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[cfg(feature = "tokio")]
     #[test]
     fn set_room_brightness_succeeds() {
         let rt = test_runtime();
@@ -999,7 +990,6 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[cfg(feature = "tokio")]
     #[test]
     fn set_room_time_offset_succeeds() {
         let rt = test_runtime();
@@ -1021,7 +1011,6 @@ mod tests {
         assert!(handle.is_power_save());
     }
 
-    #[cfg(feature = "tokio")]
     #[test]
     fn any_lights_on_returns_false_for_noop() {
         let rt = test_runtime();
@@ -1032,7 +1021,6 @@ mod tests {
         assert!(!result.unwrap());
     }
 
-    #[cfg(feature = "blocking")]
     #[test]
     fn slow_periodic_tick_does_not_block_turn_on_room_for_other_room() {
         let (runtime, spy) = spy_runtime();
@@ -1069,7 +1057,6 @@ mod tests {
         assert!(turn_on_rooms.contains(&"room-b".to_string()));
     }
 
-    #[cfg(feature = "blocking")]
     #[test]
     fn slow_periodic_tick_does_not_block_button_press_for_other_room() {
         let (runtime, spy) = spy_runtime();
@@ -1110,7 +1097,6 @@ mod tests {
         assert!(turn_on_rooms.contains(&"room-b".to_string()));
     }
 
-    #[cfg(feature = "blocking")]
     #[test]
     fn apply_room_command_preserves_periodic_dedupe_cache() {
         let (runtime, spy) = spy_runtime();
@@ -1136,7 +1122,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "blocking")]
     #[test]
     fn same_room_dispatches_remain_serialized() {
         let (runtime, spy) = spy_runtime();

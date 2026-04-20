@@ -43,7 +43,6 @@ pub fn connect_matter(
     };
 
     let commissioned_for_closure = commissioned.clone();
-    #[cfg(feature = "desktop")]
     let transport_for_closure = transport.clone();
     let fabric_id_for_closure = fabric_id.clone();
 
@@ -59,7 +58,6 @@ pub fn connect_matter(
         true,
         snapshot,
         move |registry: Arc<Mutex<HubDeviceRegistry>>| -> Box<dyn std::any::Any + Send + Sync> {
-            #[cfg(feature = "desktop")]
             let transport_cell = {
                 let cell = std::sync::OnceLock::new();
                 let _ = cell.set(transport_for_closure.clone());
@@ -67,7 +65,6 @@ pub fn connect_matter(
             };
 
             Box::new(Arc::new(MatterHubData {
-                #[cfg(feature = "desktop")]
                 transport: transport_cell,
                 capture_dir: std::sync::OnceLock::new(),
                 registry,

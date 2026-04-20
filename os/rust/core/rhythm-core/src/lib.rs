@@ -104,10 +104,6 @@ pub use runtime::{
 pub use runtime::{DeviceType, HubRegistry};
 
 pub use composite_controller::CompositeController;
-#[cfg(feature = "tokio")]
-pub use runtime::{TokioScheduler, TokioTimeProvider};
+pub use runtime::{SystemTimeProvider, ThreadScheduler};
 #[cfg(any(test, feature = "test-support"))]
 pub use spy_controller::SpyLightController;
-
-#[cfg(feature = "blocking")]
-pub use runtime::{BlockingScheduler, BlockingTimeProvider};

@@ -11,9 +11,7 @@
 
 pub mod capabilities;
 pub mod capture;
-#[cfg(feature = "desktop")]
 pub mod chip_rpc;
-#[cfg(feature = "desktop")]
 pub mod chip_transport;
 pub mod clusters;
 pub mod commissioning;
@@ -27,5 +25,4 @@ pub mod provider;
 pub mod test_support;
 pub mod transport;
 
-#[cfg(feature = "desktop")]
 pub mod desktop_lifecycle;

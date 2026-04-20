@@ -1,8 +1,7 @@
-//! Reqwest-based implementation of [`HueTransport`] for desktop targets.
+//! Reqwest-based implementation of [`HueTransport`] for server-class targets.
 //!
-//! Enabled by the `reqwest` feature flag. Provides a ready-to-use transport
-//! so desktop targets (rhythm-server, macOS, Linux) get Hue communication
-//! without writing platform-specific code.
+//! Provides a ready-to-use transport so current binaries get Hue
+//! communication without writing platform-specific code.
 
 use std::mem::ManuallyDrop;
 use std::time::Duration;

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build a Raspberry Pi Zero SD-card image around the prebuilt Linux embedded appliance binary.
+# Build a Raspberry Pi Zero SD-card image around the prebuilt Linux appliance binary.
 #
 # Usage: ./scripts/build-rpiz-image.sh --buildroot-dir <path> [--release|--debug] [--dev|--prod] [--output-dir <path>] [--skip-server-build]
 

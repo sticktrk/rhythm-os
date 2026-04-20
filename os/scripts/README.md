@@ -289,7 +289,7 @@ cargo install cross
 git add -A
 git commit -m "Release v0.4.0"
 
-# 4. Tag and push the server/embedded release
+# 4. Tag and push the server/appliance release
 ./scripts/release.sh
 ```
 

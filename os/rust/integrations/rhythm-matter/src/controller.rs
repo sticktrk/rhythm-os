@@ -633,7 +633,6 @@ mod tests {
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
-            #[cfg(feature = "desktop")]
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
             registry: registry.clone(),
@@ -875,7 +874,6 @@ mod tests {
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
-            #[cfg(feature = "desktop")]
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
             registry,
@@ -967,7 +965,6 @@ mod tests {
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
-            #[cfg(feature = "desktop")]
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
             registry,
@@ -1013,7 +1010,6 @@ mod tests {
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
-            #[cfg(feature = "desktop")]
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
             registry,
@@ -1072,7 +1068,6 @@ mod tests {
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
-            #[cfg(feature = "desktop")]
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
             registry,
@@ -1259,7 +1254,6 @@ mod tests {
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
-            #[cfg(feature = "desktop")]
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
             registry,

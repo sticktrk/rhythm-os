@@ -144,7 +144,7 @@ pub fn translate_sse_event(
 ///
 /// Takes a `Receiver<HueSseEvent>` (from the platform's SSE reader) and spawns
 /// a thread that translates each event via `translate_sse_event`. Used by both
-/// embedded and desktop lifecycle modules.
+/// lifecycle wrappers and tests.
 #[allow(clippy::type_complexity)]
 pub fn start_event_translator(
     sse_rx: Receiver<crate::sse::HueSseEvent>,

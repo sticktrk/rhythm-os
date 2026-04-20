@@ -342,7 +342,6 @@ fn run_button_ingress_action(
     persist_after: bool,
 ) {
     if process_button_inline(state, node_id, action, device_id, command_id) && persist_after {
-        #[cfg(feature = "desktop")]
         {
             let runtime = {
                 let Ok(s) = state.lock() else { return };
@@ -593,7 +592,6 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 }
             }
 
-            #[cfg(feature = "desktop")]
             crate::state::emit_server_event(
                 state,
                 crate::server_event::ServerEvent::HubStatus {
@@ -742,7 +740,6 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             // means a transient SSE reconnection permanently prevents the
             // timeout from firing, so lights never turn off.
 
-            #[cfg(feature = "desktop")]
             crate::state::emit_server_event(
                 state,
                 crate::server_event::ServerEvent::HubStatus {
@@ -802,7 +799,6 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                         "Created UnassignedDevice triage entry for button {} (canonical={})",
                         button_id, cid);
                 }
-                #[cfg(feature = "desktop")]
                 commands::emit_triage_changed(state);
             }
         }
@@ -1103,12 +1099,10 @@ pub fn sync_motion_snapshots(state: &SharedState, motion: &MotionTimerState) {
         if motion.sensors.is_empty() {
             if !s.motion_snapshots.is_empty() {
                 s.motion_snapshots.clear();
-                #[cfg(feature = "desktop")]
                 s.emit_event(crate::server_event::ServerEvent::MotionTimer { timers: vec![] });
             }
         } else {
             s.motion_snapshots = motion.snapshots(&timeouts, default_timeout_secs);
-            #[cfg(feature = "desktop")]
             {
                 let timers: Vec<_> = s
                     .motion_snapshots
@@ -1237,7 +1231,6 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                 return;
             }
 
-            #[cfg(feature = "desktop")]
             crate::commands::emit_node_state_event_after_apply(state, &runtime, &node_id);
         }
         WorkItem::PeriodicNodeTick {

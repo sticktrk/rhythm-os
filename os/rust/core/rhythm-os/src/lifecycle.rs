@@ -116,7 +116,6 @@ fn tag_hub_events(raw_rx: Receiver<HubEvent>, hub_key: HubKey) -> Receiver<HubEv
 /// * `controller` - Platform-specific light controller
 /// * `registry` - Shared device registry
 /// * `warmup` - Optional TLS warmup closure (Hue uses this, HA passes None)
-#[cfg(feature = "blocking")]
 #[allow(clippy::type_complexity)]
 pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'static>(
     state: &SharedState,
@@ -126,7 +125,7 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
 ) -> Result<()> {
     use rhythm_core::solar::SolarTime;
     use rhythm_core::{
-        BlockingScheduler, BlockingTimeProvider, DeviceRegistry, HubRegistry, RhythmRuntime,
+        ThreadScheduler, SystemTimeProvider, DeviceRegistry, HubRegistry, RhythmRuntime,
         RuntimeConfig, RuntimeHandle, TimeProvider,
     };
 
@@ -199,11 +198,11 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
         let doy = rhythm_core::timezone::day_of_year(year, month, day);
         (fresh_offset, noon, doy)
     } else {
-        let day_of_year = BlockingTimeProvider::new(utc_offset).day_of_year();
+        let day_of_year = SystemTimeProvider::new(utc_offset).day_of_year();
         let noon = rhythm_core::calculate_solar_noon_from_offset(lon, utc_offset, day_of_year);
         (utc_offset, noon, day_of_year)
     };
-    let time_provider = BlockingTimeProvider::new(utc_offset);
+    let time_provider = SystemTimeProvider::new(utc_offset);
 
     // Write back the fresh offset to state (may differ from startup if DST changed)
     if let Some(ref tz_name) = timezone_name {
@@ -228,8 +227,8 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
         .with_utc_offset(utc_offset);
 
     let scheduler = match scheduler_stack {
-        Some(size) => BlockingScheduler::with_stack_size(size),
-        None => BlockingScheduler::new(),
+        Some(size) => ThreadScheduler::with_stack_size(size),
+        None => ThreadScheduler::new(),
     };
 
     let runtime = RhythmRuntime::new(
@@ -466,14 +465,13 @@ pub fn start_event_translator<E: Send + 'static>(
 /// The `CompositeController` is stored on `AppState.composite_controller`
 /// so that subsequent hub connections can register their controllers
 /// dynamically without recreating the runtime.
-#[cfg(feature = "blocking")]
 pub fn ensure_composite_runtime(
     state: &SharedState,
     integrations: &[&dyn crate::hub::ExternalLightHubIntegration],
 ) -> Result<()> {
     use rhythm_core::solar::SolarTime;
     use rhythm_core::{
-        BlockingScheduler, BlockingTimeProvider, CompositeController, DeviceRegistry, HubRegistry,
+        ThreadScheduler, SystemTimeProvider, CompositeController, DeviceRegistry, HubRegistry,
         RhythmRuntime, RuntimeConfig, RuntimeHandle, SimpleDeviceRegistry, TimeProvider,
     };
 
@@ -582,11 +580,11 @@ pub fn ensure_composite_runtime(
         let doy = rhythm_core::timezone::day_of_year(year, month, day);
         (fresh_offset, noon, doy)
     } else {
-        let day_of_year = BlockingTimeProvider::new(utc_offset).day_of_year();
+        let day_of_year = SystemTimeProvider::new(utc_offset).day_of_year();
         let noon = rhythm_core::calculate_solar_noon_from_offset(lon, utc_offset, day_of_year);
         (utc_offset, noon, day_of_year)
     };
-    let time_provider = BlockingTimeProvider::new(utc_offset);
+    let time_provider = SystemTimeProvider::new(utc_offset);
 
     // Write back fresh offset
     if timezone_name.is_some() {
@@ -610,8 +608,8 @@ pub fn ensure_composite_runtime(
         .with_utc_offset(utc_offset);
 
     let scheduler = match scheduler_stack {
-        Some(size) => BlockingScheduler::with_stack_size(size),
-        None => BlockingScheduler::new(),
+        Some(size) => ThreadScheduler::with_stack_size(size),
+        None => ThreadScheduler::new(),
     };
 
     // Create the shared runtime with the composite controller.
@@ -763,7 +761,6 @@ pub fn ensure_composite_runtime(
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.runtime_config = new_runtime_config;
-        #[cfg(feature = "desktop")]
         {
             s.composite_controller = Some(composite);
         }

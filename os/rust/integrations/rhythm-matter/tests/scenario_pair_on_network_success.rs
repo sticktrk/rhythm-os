@@ -1,4 +1,4 @@
-#![cfg(all(feature = "desktop", feature = "test-support"))]
+#![cfg(feature = "test-support")]
 
 #[path = "common/mod.rs"]
 mod harness;

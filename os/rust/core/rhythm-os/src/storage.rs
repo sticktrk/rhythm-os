@@ -3,7 +3,6 @@
 //! Platform crates implement this trait to provide concrete storage
 //! (e.g., filesystem on Linux, SQLite on Raspberry Pi, or future custom backends).
 
-#[cfg(feature = "desktop")]
 use anyhow::Context;
 use anyhow::Result;
 use log::{debug, info, warn};
@@ -190,12 +189,10 @@ pub struct StoredSettings {
 ///
 /// Implements [`Storage`] using JSON files with atomic writes (write to .tmp,
 /// then rename). Used by rhythm-addon and rhythm-server.
-#[cfg(feature = "desktop")]
 pub struct FileStorage {
     dir: std::path::PathBuf,
 }
 
-#[cfg(feature = "desktop")]
 impl FileStorage {
     /// Create a new `FileStorage` rooted at `dir`.
     ///
@@ -242,7 +239,6 @@ impl FileStorage {
     }
 }
 
-#[cfg(feature = "desktop")]
 impl Storage for FileStorage {
     fn load_rooms(&self) -> Result<rhythm_core::room::RoomManager> {
         self.read_json("rooms.json")
@@ -463,7 +459,6 @@ impl Storage for FileStorage {
 }
 
 /// Sanitize a HubKey into a filesystem-safe string for per-hub filenames.
-#[cfg(feature = "desktop")]
 fn sanitize_hub_key(key: &HubKey) -> String {
     format!(
         "{}_{}",
@@ -1095,7 +1090,6 @@ mod tests {
 
     // ---- FileStorage tests (desktop only) ----
 
-    #[cfg(feature = "desktop")]
     mod file_storage_tests {
         use super::*;
         use std::sync::atomic::{AtomicU64, Ordering};

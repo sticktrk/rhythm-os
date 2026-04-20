@@ -93,8 +93,7 @@ pub struct RoomModeTransition {
 
 /// Platform-specific tuning for stack sizes and resource limits.
 ///
-/// Constrained blocking targets have tight memory and need small stacks.
-/// Desktop/server targets can use the OS defaults (typically 8MB).
+/// Active server-class targets can use the OS defaults (typically 8MB).
 #[derive(Clone, Debug)]
 pub struct PlatformConfig {
     /// Stack size for the runtime-init thread (creates TLS clients, serde, etc.).
@@ -107,34 +106,17 @@ pub struct PlatformConfig {
     pub event_thread_stack: Option<usize>,
     /// Whether to eagerly establish the runtime's TLS connection at startup.
     ///
-    /// When `true` (desktop default), `warmup_tls()` is called during runtime
-    /// creation so the first light command doesn't pay the TLS handshake cost.
-    /// When `false` (embedded default), TLS is deferred until the first
-    /// periodic tick (~60s), avoiding a third simultaneous TLS session during
-    /// hub sync which would exceed the constrained runtime's heap budget.
+    /// When `true`, `warmup_tls()` is called during runtime creation so the
+    /// first light command doesn't pay the TLS handshake cost.
     pub eager_tls_warmup: bool,
     /// Whether `sync_from_hub` should discover devices and sensors.
     ///
-    /// When `true` (desktop default), room sync also fetches the device
-    /// endpoint to map buttons and motion sensors in one shot.
-    /// When `false` (embedded default), only rooms are synced — device/sensor
-    /// mappings arrive organically via the SSE event stream, avoiding the
-    /// large device endpoint response that can OOM a constrained runtime.
+    /// When `true`, room sync also fetches the device endpoint to map buttons
+    /// and motion sensors in one shot.
     pub full_device_discovery: bool,
 }
 
 impl PlatformConfig {
-    /// Preset for constrained blocking targets.
-    pub fn embedded() -> Self {
-        Self {
-            runtime_init_stack: 16 * 1024,
-            scheduler_stack: Some(16 * 1024),
-            event_thread_stack: Some(16 * 1024),
-            eager_tls_warmup: false,
-            full_device_discovery: false,
-        }
-    }
-
     /// Preset for desktop/server targets (macOS, Linux, Windows).
     pub fn desktop() -> Self {
         Self {
@@ -272,7 +254,6 @@ pub struct AppState {
     /// The composite controller shared between AppState (for dynamic registration)
     /// and the RhythmEngine (for light control). Both hold Arc refs to the same instance.
     /// None on constrained blocking targets or before runtime creation.
-    #[cfg(feature = "desktop")]
     pub composite_controller: Option<Arc<rhythm_core::CompositeController>>,
 
     // ---- Callbacks ----
@@ -291,7 +272,6 @@ pub struct AppState {
     /// Called when a new hub is configured via HTTP while the runtime is already running.
     /// The callback finds the integration by hub type, calls `create_controller`,
     /// and registers the result with `composite_controller`.
-    #[cfg(feature = "desktop")]
     #[allow(clippy::type_complexity)]
     pub register_controller_fn: Option<
         Arc<
@@ -355,9 +335,6 @@ pub struct AppState {
     pub firmware_version: &'static str,
 
     /// Platform type: "desktop" or "appliance".
-    ///
-    /// Older appliance images may still report `"embedded"` until they are
-    /// updated into the renamed runtime.
     pub platform_type: &'static str,
 
     /// Deployment context: "ha_addon", "server", "rpiz", etc.
@@ -376,7 +353,6 @@ pub struct AppState {
     pub platform: PlatformConfig,
 
     /// Broadcast sender for SSE server events.
-    #[cfg(feature = "desktop")]
     pub event_tx: Option<tokio::sync::broadcast::Sender<crate::server_event::ServerEvent>>,
 }
 
@@ -425,12 +401,10 @@ impl Default for AppState {
             pending_hub_event_rxs: Vec::new(),
             pending_motion_clear: Vec::new(),
             pending_motion_seed: Vec::new(),
-            #[cfg(feature = "desktop")]
             composite_controller: None,
             on_hub_heartbeat: None,
             on_hub_disconnect: None,
             ensure_runtime_fn: None,
-            #[cfg(feature = "desktop")]
             register_controller_fn: None,
             get_hub_provider_fn: None,
             start_pairing_fn: None,
@@ -442,7 +416,6 @@ impl Default for AppState {
             data_dir: String::new(),
             listen_port: None,
             platform: PlatformConfig::default(),
-            #[cfg(feature = "desktop")]
             event_tx: None,
         };
         state.sync_active_mode_runtime_overrides();
@@ -738,7 +711,6 @@ impl AppState {
     }
 }
 
-#[cfg(feature = "desktop")]
 impl AppState {
     /// Emit a server event to all connected SSE clients.
     pub fn emit_event(&self, event: crate::server_event::ServerEvent) {
@@ -752,7 +724,6 @@ impl AppState {
 pub type SharedState = Arc<Mutex<AppState>>;
 
 /// Emit a server event, briefly locking state to access the broadcast sender.
-#[cfg(feature = "desktop")]
 pub fn emit_server_event(state: &SharedState, event: crate::server_event::ServerEvent) {
     if let Ok(s) = state.lock() {
         s.emit_event(event);
@@ -834,16 +805,11 @@ mod tests {
     }
 
     #[test]
-    fn platform_config_embedded_vs_desktop() {
-        let embedded = PlatformConfig::embedded();
+    fn platform_config_desktop_defaults_match_active_targets() {
         let desktop = PlatformConfig::desktop();
 
-        assert!(embedded.runtime_init_stack < desktop.runtime_init_stack);
-        assert!(embedded.scheduler_stack.is_some());
         assert!(desktop.scheduler_stack.is_none());
-        assert!(!embedded.eager_tls_warmup);
         assert!(desktop.eager_tls_warmup);
-        assert!(!embedded.full_device_discovery);
         assert!(desktop.full_device_discovery);
     }
 

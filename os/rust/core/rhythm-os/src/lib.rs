@@ -31,7 +31,5 @@ pub mod state;
 pub mod storage;
 pub mod topology;
 
-#[cfg(feature = "desktop")]
 pub mod axum_router;
-#[cfg(feature = "desktop")]
 pub mod server_event;

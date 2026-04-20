@@ -50,6 +50,6 @@ pub trait HueTransport: Send + Sync {
     ///
     /// Called after bulk discovery is complete to release heap before
     /// the runtime creates its own transport. Default is a no-op;
-    /// embedded transports should clear their keep-alive connection.
+    /// custom transports can clear their keep-alive connection.
     fn release_connection(&self) {}
 }
