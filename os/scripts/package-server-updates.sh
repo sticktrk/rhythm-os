@@ -3,7 +3,6 @@
 #
 # Output layout:
 #   <output>/<target>/manifest.json
-#   <output>/<target>/v<version>/rhythm-server-<target>
 #   <output>/<target>/v<version>/rhythm-server-<target>.tar.gz
 #   <output>/<target>/v<version>/sdcard.img[.gz]   (optional rpiz image artifact)
 #   <output>/<target>/v<version>/rootfs.ext2[.gz]  (optional rpiz image artifact)
@@ -123,20 +122,18 @@ for target in $TARGETS; do
 
     ota_name="rhythm-server-$target"
     version_dir="$OUTPUT_DIR/$target/v$VERSION"
-    output_bin="$version_dir/$ota_name"
     archive_path="$version_dir/$ota_name.tar.gz"
     sums_path="$version_dir/SHA256SUMS.txt"
     manifest_path="$OUTPUT_DIR/$target/manifest.json"
     image_candidates=()
     if [ "$target" = "rpiz" ] && [ -n "$IMAGE_ROOT" ]; then
-        for image_name in sdcard.img sdcard.img.gz rootfs.ext2 rootfs.ext2.gz; do
+        for image_name in sdcard.img.gz sdcard.img rootfs.ext2.gz rootfs.ext2; do
             [ -f "$IMAGE_ROOT/$image_name" ] && image_candidates+=("$image_name")
         done
     fi
 
     if [ "$DRY_RUN" = true ]; then
         echo "Would package:"
-        echo "  $server_bin -> $output_bin"
         archive_members=("rhythm-server")
         [ -f "$cli_bin" ] && archive_members+=("rhythm-cli")
         [ -f "$chipd_bin" ] && archive_members+=("rhythm-chipd")
@@ -151,16 +148,12 @@ for target in $TARGETS; do
     fi
 
     mkdir -p "$version_dir"
-    cp "$server_bin" "$output_bin"
-    chmod 755 "$output_bin"
 
     archive_members=("rhythm-server")
     [ -f "$cli_bin" ] && archive_members+=("rhythm-cli")
     [ -f "$chipd_bin" ] && archive_members+=("rhythm-chipd")
     tar -czf "$archive_path" -C "$target_dir" "${archive_members[@]}"
 
-    bin_sha="$(sha256_file "$output_bin")"
-    bin_size="$(file_size "$output_bin")"
     archive_sha="$(sha256_file "$archive_path")"
     archive_size="$(file_size "$archive_path")"
 
@@ -179,7 +172,6 @@ for target in $TARGETS; do
     fi
 
     sums_entries=()
-    sums_entries+=("$bin_sha  $ota_name")
     sums_entries+=("$archive_sha  $(basename "$archive_path")")
     image_entries=()
     if [ "${#image_candidates[@]}" -gt 0 ]; then
@@ -226,9 +218,6 @@ for target in $TARGETS; do
     cat > "$manifest_path" <<EOF
 {
   "version": "$VERSION",
-  "url": "v$VERSION/$ota_name",
-  "sha256": "$bin_sha",
-  "size": $bin_size,
   "published_at": "$TIMESTAMP",
   "package": {
     "name": "$(basename "$archive_path")",

@@ -6,8 +6,10 @@ This target is for a Pi Zero / Zero W without Raspberry Pi OS. The Rust applianc
 
 - Cross-builds `rhythm-server` for `arm-unknown-linux-musleabihf`
 - Boots a minimal Buildroot image instead of Raspberry Pi OS
+- Lays out the SD card as `boot + rootfs_a + rootfs_b + data` so future OTA can write the inactive rootfs slot instead of patching live files
 - Starts Rhythm automatically at boot under BusyBox `init` with `RHYTHM_PLATFORM_TYPE=embedded` and `RHYTHM_PLATFORM_CONTEXT=rpiz`
 - Uses BusyBox `init` `respawn`, not `systemd`, so the appliance always brings `rhythm-server` back if it exits
+- Mounts `/boot` from the FAT partition and `/data` from the dedicated persistent partition
 - Writes the main appliance log to `/var/log/rhythm-server.log` and raw Matter `rhythm-chipd` output to `/var/log/rhythm-matter.log`
 - Brings up `usb0` at `192.168.7.2/24` for first-boot API testing over the Pi Zero OTG port
 - Optionally embeds Wi-Fi credentials for Pi Zero W / Zero 2 W images
@@ -66,6 +68,13 @@ The image lands at:
 out/rpiz/images/sdcard.img
 ```
 
+The build also writes slot-update artifacts that can be published into the OTA feed:
+
+```bash
+out/rpiz/images/rootfs.ext2
+out/rpiz/images/rootfs.ext2.gz
+```
+
 ### Docker-backed image build
 
 If your host is macOS, or you just want the Linux image build isolated, use Docker:
@@ -104,6 +113,17 @@ diskutil eject /dev/diskN
 ```
 
 Use the Pi Zero's USB OTG/data port, not the power-only port.
+
+## Image OTA model
+
+The `rpiz` appliance now treats image OTA as an A/B rootfs switch:
+
+- The running slot is selected by `root=/dev/mmcblk0p2` (`rootfs_a`) or `root=/dev/mmcblk0p3` (`rootfs_b`) in `/boot/cmdline.txt`
+- `/boot/rhythm-bootstate.env` records the active slot, pending slot, and last update metadata
+- `POST /api/ota/update` on an embedded `rpiz` server prefers a published `rootfs.ext2.gz` or `rootfs.ext2` artifact, writes it to the inactive slot, updates `/boot/cmdline.txt`, and reboots
+- `/data` lives on `mmcblk0p4`, so backups, topology, captures, and update staging survive slot switches
+
+This is not a full rollback bootloader yet. The next slot is selected in userspace by rewriting `/boot/cmdline.txt`, and successful boots clear the pending slot marker during init. The published `sdcard.img` remains the factory/master image for fresh cards.
 
 ## USB-first smoke test
 

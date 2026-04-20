@@ -30,6 +30,8 @@ escape_wpa_string() {
 mkdir -p "$(dirname "$WPA_CONF")"
 mkdir -p "$FIRMWARE_ROOT_DIR"
 mkdir -p "$FIRMWARE_DIR"
+mkdir -p "${TARGET_DIR}/boot"
+mkdir -p "${TARGET_DIR}/data/ota"
 
 {
     printf 'ctrl_interface=/var/run/wpa_supplicant\n'

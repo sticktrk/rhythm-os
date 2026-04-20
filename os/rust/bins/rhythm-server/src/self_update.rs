@@ -1,9 +1,9 @@
 //! Self-update from a static OTA feed.
 //!
 //! Prefers a per-platform `manifest.json` feed hosted outside the repo. The
-//! manifest can advertise a legacy single-binary payload for existing clients,
-//! a bundle payload for coordinated `rhythm-server`/`rhythm-chipd` updates, and
-//! future full-image artifacts for appliance update flows.
+//! manifest advertises an archive bundle for coordinated `rhythm-server` /
+//! `rhythm-chipd` updates and optional full-image artifacts for appliance
+//! update flows.
 
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
@@ -17,16 +17,50 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tar::Archive;
 
-const GITHUB_REPO: &str = "sticktrk/rhythm-os";
-const GITHUB_API: &str = "https://api.github.com";
-const CHECKSUM_ASSET_NAME: &str = "SHA256SUMS.txt";
 const DEFAULT_UPDATE_BASE_URL: &str = "https://dl.rhythm.lighting/server";
 const EMBEDDED_INSTALL_PATH: &str = "/usr/bin/rhythm-server";
+const EMBEDDED_BOOT_MOUNT: &str = "/boot";
+const EMBEDDED_BOOT_DEVICE: &str = "/dev/mmcblk0p1";
+const EMBEDDED_ROOTFS_A_DEVICE: &str = "/dev/mmcblk0p2";
+const EMBEDDED_ROOTFS_B_DEVICE: &str = "/dev/mmcblk0p3";
+const EMBEDDED_OTA_STAGING_DIR: &str = "/data/ota";
+const EMBEDDED_CMDLINE_PATH: &str = "/boot/cmdline.txt";
+const EMBEDDED_CMDLINE_BACKUP_PATH: &str = "/boot/cmdline.txt.bak";
+const EMBEDDED_BOOT_STATE_PATH: &str = "/boot/rhythm-bootstate.env";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RestartStrategy {
     SupervisorExit,
     EmbeddedReboot,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EmbeddedSlot {
+    A,
+    B,
+}
+
+impl EmbeddedSlot {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::A => "a",
+            Self::B => "b",
+        }
+    }
+
+    fn root_device(self) -> &'static str {
+        match self {
+            Self::A => EMBEDDED_ROOTFS_A_DEVICE,
+            Self::B => EMBEDDED_ROOTFS_B_DEVICE,
+        }
+    }
+
+    fn inactive(self) -> Self {
+        match self {
+            Self::A => Self::B,
+            Self::B => Self::A,
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -146,15 +180,28 @@ impl OtaStatusHandle {
     }
 
     pub fn capabilities(&self) -> OtaCapabilities {
+        let embedded = restart_strategy() == RestartStrategy::EmbeddedReboot;
         OtaCapabilities {
             strategy: "self_pull",
-            scope: "component_bundle",
+            scope: if embedded {
+                "rootfs_slot"
+            } else {
+                "component_bundle"
+            },
             can_check: true,
             can_update: true,
             can_upload: false,
             requires_restart: true,
-            rollback: "backup_files",
-            payloads: vec!["legacy_binary", "archive_bundle", "image_manifest"],
+            rollback: if embedded {
+                "slot_switch"
+            } else {
+                "backup_files"
+            },
+            payloads: if embedded {
+                vec!["archive_bundle", "rootfs_image"]
+            } else {
+                vec!["archive_bundle"]
+            },
         }
     }
 
@@ -291,7 +338,6 @@ pub struct UpdateInfo {
     pub update_available: bool,
     pub update_reason: Option<UpdateReason>,
     pub download_url: Option<String>,
-    pub checksum_url: Option<String>,
     pub expected_sha256: Option<String>,
     pub asset_name: Option<String>,
     pub install_targets: Vec<UpdateTargetSummary>,
@@ -306,6 +352,16 @@ pub struct ApplyResult {
 
 impl UpdateInfo {
     pub fn apply_blocking(&self) -> Result<ApplyResult, String> {
+        if restart_strategy() == RestartStrategy::EmbeddedReboot {
+            if let Some(image_asset) = self.preferred_embedded_image_asset() {
+                return apply_embedded_image_blocking(
+                    image_asset,
+                    &self.latest_version,
+                    self.expected_sha256.as_deref(),
+                );
+            }
+        }
+
         let download_url = self
             .download_url
             .as_deref()
@@ -319,31 +375,21 @@ impl UpdateInfo {
             download_url,
             asset_name,
             self.expected_sha256.as_deref(),
-            self.checksum_url.as_deref(),
             &self.resolved_install_targets,
         )
     }
-}
 
-#[derive(Deserialize)]
-struct Release {
-    tag_name: String,
-    assets: Vec<Asset>,
-}
-
-#[derive(Deserialize)]
-struct Asset {
-    name: String,
-    browser_download_url: String,
+    fn preferred_embedded_image_asset(&self) -> Option<&UpdateImageAsset> {
+        self.image_assets
+            .iter()
+            .filter(|asset| asset.kind == ReleaseArtifactKind::RootfsImage)
+            .min_by_key(|asset| if artifact_uses_gzip(asset) { 0 } else { 1 })
+    }
 }
 
 #[derive(Deserialize)]
 struct UpdateManifest {
     version: String,
-    #[serde(default)]
-    url: Option<String>,
-    #[serde(default)]
-    sha256: Option<String>,
     #[serde(default)]
     package: Option<ManifestArtifact>,
     #[serde(default)]
@@ -394,7 +440,6 @@ struct ResolvedPackage {
     asset_name: String,
     download_url: String,
     expected_sha256: Option<String>,
-    checksum_url: Option<String>,
     install_targets: Vec<InstallTarget>,
 }
 
@@ -427,34 +472,6 @@ fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
 
-fn platform_asset_names() -> Option<Vec<&'static str>> {
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        Some(vec![
-            "rhythm-server-macos-arm64.tar.gz",
-            "rhythm-server-macos-arm64",
-        ])
-    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-        Some(vec![
-            "rhythm-server-macos-x86_64.tar.gz",
-            "rhythm-server-macos-x86_64",
-        ])
-    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        Some(vec![
-            "rhythm-server-linux-amd64.tar.gz",
-            "rhythm-server-linux-amd64",
-        ])
-    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
-        Some(vec![
-            "rhythm-server-linux-aarch64.tar.gz",
-            "rhythm-server-linux-aarch64",
-        ])
-    } else if cfg!(all(target_os = "linux", target_arch = "arm")) {
-        Some(vec!["rhythm-server-rpiz.tar.gz", "rhythm-server-rpiz"])
-    } else {
-        None
-    }
-}
-
 fn platform_feed_name() -> Option<&'static str> {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         Some("macos-arm64")
@@ -471,34 +488,9 @@ fn platform_feed_name() -> Option<&'static str> {
     }
 }
 
-fn release_version(tag_name: &str) -> Option<&str> {
-    tag_name
-        .strip_prefix("server-v")
-        .or_else(|| tag_name.strip_prefix('v'))
-}
-
 /// Check the configured OTA feed for an available update (blocking).
 pub fn check_blocking(current_version: &str) -> Result<UpdateInfo, String> {
-    match check_manifest_blocking(current_version) {
-        Ok(info) => return Ok(info),
-        Err(manifest_error) => {
-            if std::env::var_os("RHYTHM_UPDATE_MANIFEST_URL").is_some()
-                || std::env::var_os("RHYTHM_UPDATE_BASE_URL").is_some()
-            {
-                return Err(manifest_error);
-            }
-
-            if std::env::var("RHYTHM_UPDATE_GITHUB_FALLBACK")
-                .ok()
-                .as_deref()
-                != Some("1")
-            {
-                return Err(manifest_error);
-            }
-        }
-    }
-
-    check_github_blocking(current_version)
+    check_manifest_blocking(current_version)
 }
 
 fn check_manifest_blocking(current_version: &str) -> Result<UpdateInfo, String> {
@@ -522,16 +514,31 @@ fn check_manifest_blocking(current_version: &str) -> Result<UpdateInfo, String> 
         .json()
         .map_err(|e| format!("Failed to parse update manifest: {}", e))?;
     let install_root = install_target_executable()?;
-    let package = resolve_manifest_package(&manifest_url, &manifest, &install_root)?;
     let image_assets = manifest
         .images
         .iter()
         .map(|image| resolve_manifest_image(&manifest_url, image))
         .collect::<Result<Vec<_>, _>>()?;
+    let package = manifest
+        .package
+        .as_ref()
+        .map(|artifact| resolve_package_artifact(&manifest_url, artifact, &install_root))
+        .transpose()?;
+    let embedded_rootfs_only =
+        restart_strategy() == RestartStrategy::EmbeddedReboot && has_rootfs_image(&image_assets);
+
+    if package.is_none() && !embedded_rootfs_only {
+        return Err("Update manifest did not provide an archive bundle payload".to_string());
+    }
 
     let version_mismatch = manifest.version != current_version;
     let component_drift = !version_mismatch
-        && detect_component_drift(&manifest.version, &install_root, &package.install_targets);
+        && package
+            .as_ref()
+            .map(|package| {
+                detect_component_drift(&manifest.version, &install_root, &package.install_targets)
+            })
+            .unwrap_or(false);
 
     let update_reason = if version_mismatch {
         Some(UpdateReason::VersionMismatch)
@@ -547,17 +554,27 @@ fn check_manifest_blocking(current_version: &str) -> Result<UpdateInfo, String> 
         latest_version: manifest.version.clone(),
         update_available,
         update_reason,
-        download_url: update_available.then_some(package.download_url.clone()),
-        checksum_url: update_available
-            .then_some(package.checksum_url.clone())
+        download_url: update_available
+            .then_some(package.as_ref().map(|package| package.download_url.clone()))
             .flatten(),
         expected_sha256: update_available
-            .then_some(package.expected_sha256.clone())
+            .then_some(
+                package
+                    .as_ref()
+                    .and_then(|package| package.expected_sha256.clone()),
+            )
             .flatten(),
-        asset_name: update_available.then_some(package.asset_name.clone()),
-        install_targets: install_targets_to_summaries(&package.install_targets),
+        asset_name: update_available
+            .then_some(package.as_ref().map(|package| package.asset_name.clone()))
+            .flatten(),
+        install_targets: package
+            .as_ref()
+            .map(|package| install_targets_to_summaries(&package.install_targets))
+            .unwrap_or_default(),
         image_assets,
-        resolved_install_targets: package.install_targets,
+        resolved_install_targets: package
+            .map(|package| package.install_targets)
+            .unwrap_or_default(),
     })
 }
 
@@ -599,45 +616,26 @@ fn asset_name_from_url(download_url: &str) -> Result<String, String> {
         .ok_or_else(|| "Update URL did not contain a filename".to_string())
 }
 
-fn resolve_manifest_package(
-    manifest_url: &str,
-    manifest: &UpdateManifest,
-    install_root: &Path,
-) -> Result<ResolvedPackage, String> {
-    if let Some(package) = &manifest.package {
-        return resolve_package_artifact(manifest_url, package, install_root);
-    }
-
-    let legacy_url = manifest
-        .url
-        .as_deref()
-        .ok_or_else(|| "Update manifest did not provide a downloadable payload".to_string())?;
-    let download_url = resolve_download_url(manifest_url, legacy_url)?;
-    let asset_name = asset_name_from_url(&download_url)?;
-    let install_targets = infer_install_targets(&asset_name, install_root);
-
-    Ok(ResolvedPackage {
-        asset_name,
-        download_url,
-        expected_sha256: manifest.sha256.clone(),
-        checksum_url: None,
-        install_targets,
-    })
-}
-
 fn resolve_package_artifact(
     manifest_url: &str,
     artifact: &ManifestArtifact,
     install_root: &Path,
 ) -> Result<ResolvedPackage, String> {
+    if artifact.kind != Some(ReleaseArtifactKind::ArchiveBundle) {
+        return Err("Manifest package kind must be archive_bundle".to_string());
+    }
+
     let download_url = resolve_download_url(manifest_url, &artifact.url)?;
     let asset_name = if artifact.name.is_empty() {
         asset_name_from_url(&download_url)?
     } else {
         artifact.name.clone()
     };
+    if !asset_name.ends_with(".tar.gz") {
+        return Err("Manifest package must reference a .tar.gz archive bundle".to_string());
+    }
     let install_targets = if artifact.install.is_empty() {
-        infer_install_targets(&asset_name, install_root)
+        default_bundle_install_targets(install_root)
     } else {
         resolve_manifest_install_targets(&artifact.install, install_root)?
     };
@@ -646,7 +644,6 @@ fn resolve_package_artifact(
         asset_name,
         download_url,
         expected_sha256: artifact.sha256.clone(),
-        checksum_url: None,
         install_targets,
     })
 }
@@ -739,16 +736,261 @@ fn infer_image_kind(name: &str) -> ReleaseArtifactKind {
     }
 }
 
-fn infer_install_targets(asset_name: &str, install_root: &Path) -> Vec<InstallTarget> {
-    if asset_name.ends_with(".tar.gz") {
-        default_bundle_install_targets(install_root)
-    } else {
-        vec![InstallTarget {
-            archive_path: "rhythm-server".to_string(),
-            destination: install_root.to_path_buf(),
-            required: true,
-        }]
+fn has_rootfs_image(image_assets: &[UpdateImageAsset]) -> bool {
+    image_assets
+        .iter()
+        .any(|asset| asset.kind == ReleaseArtifactKind::RootfsImage)
+}
+
+fn parse_embedded_slot_from_cmdline(cmdline: &str) -> Result<EmbeddedSlot, String> {
+    for token in cmdline.split_whitespace() {
+        if let Some(root_device) = token.strip_prefix("root=") {
+            return embedded_slot_from_root_device(root_device);
+        }
     }
+
+    Err("Kernel command line did not include a root= device".to_string())
+}
+
+fn embedded_slot_from_root_device(root_device: &str) -> Result<EmbeddedSlot, String> {
+    match root_device {
+        EMBEDDED_ROOTFS_A_DEVICE => Ok(EmbeddedSlot::A),
+        EMBEDDED_ROOTFS_B_DEVICE => Ok(EmbeddedSlot::B),
+        other => Err(format!("Unsupported embedded root device {}", other)),
+    }
+}
+
+fn current_embedded_slot() -> Result<EmbeddedSlot, String> {
+    let cmdline = fs::read_to_string("/proc/cmdline")
+        .map_err(|e| format!("Failed to read /proc/cmdline: {}", e))?;
+    parse_embedded_slot_from_cmdline(&cmdline)
+}
+
+fn embedded_root_arg_for_slot(slot: EmbeddedSlot) -> String {
+    format!("root={}", slot.root_device())
+}
+
+fn rewrite_cmdline_root_device(cmdline: &str, slot: EmbeddedSlot) -> Result<String, String> {
+    let replacement = embedded_root_arg_for_slot(slot);
+    let mut found_root = false;
+    let rewritten = cmdline
+        .split_whitespace()
+        .map(|token| {
+            if token.starts_with("root=") {
+                found_root = true;
+                replacement.clone()
+            } else {
+                token.to_string()
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if !found_root {
+        return Err("cmdline.txt did not contain a root= argument".to_string());
+    }
+
+    Ok(rewritten.join(" "))
+}
+
+fn mountpoint_is_active(path: &str) -> bool {
+    fs::read_to_string("/proc/mounts")
+        .ok()
+        .map(|mounts| {
+            mounts.lines().any(|line| {
+                let mut parts = line.split_whitespace();
+                let _source = parts.next();
+                parts.next() == Some(path)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn ensure_mount(path: &str, device: &str, fs_type: &str) -> Result<(), String> {
+    fs::create_dir_all(path).map_err(|e| format!("Failed to create {}: {}", path, e))?;
+    if mountpoint_is_active(path) {
+        return Ok(());
+    }
+
+    let status = Command::new("/bin/mount")
+        .arg("-t")
+        .arg(fs_type)
+        .arg(device)
+        .arg(path)
+        .status()
+        .or_else(|_| {
+            Command::new("mount")
+                .arg("-t")
+                .arg(fs_type)
+                .arg(device)
+                .arg(path)
+                .status()
+        })
+        .map_err(|e| format!("Failed to mount {} on {}: {}", device, path, e))?;
+
+    if !status.success() {
+        return Err(format!(
+            "Mounting {} on {} failed with status {:?}",
+            device,
+            path,
+            status.code()
+        ));
+    }
+
+    Ok(())
+}
+
+fn write_embedded_boot_state(
+    current_slot: EmbeddedSlot,
+    target_slot: EmbeddedSlot,
+    version: &str,
+) -> Result<(), String> {
+    let body = format!(
+        "RHYTHM_ACTIVE_SLOT={}\nRHYTHM_LAST_GOOD_SLOT={}\nRHYTHM_PENDING_SLOT={}\nRHYTHM_PENDING_VERSION={}\nRHYTHM_LAST_UPDATE_EPOCH_MS={}\n",
+        current_slot.as_str(),
+        current_slot.as_str(),
+        target_slot.as_str(),
+        version,
+        now_ms()
+    );
+    fs::write(EMBEDDED_BOOT_STATE_PATH, body)
+        .map_err(|e| format!("Failed to write {}: {}", EMBEDDED_BOOT_STATE_PATH, e))
+}
+
+fn update_embedded_cmdline_for_slot(slot: EmbeddedSlot) -> Result<(), String> {
+    ensure_mount(EMBEDDED_BOOT_MOUNT, EMBEDDED_BOOT_DEVICE, "vfat")?;
+
+    let current_cmdline = fs::read_to_string(EMBEDDED_CMDLINE_PATH)
+        .map_err(|e| format!("Failed to read {}: {}", EMBEDDED_CMDLINE_PATH, e))?;
+    let rewritten = rewrite_cmdline_root_device(&current_cmdline, slot)?;
+
+    let _ = fs::copy(EMBEDDED_CMDLINE_PATH, EMBEDDED_CMDLINE_BACKUP_PATH);
+    fs::write(EMBEDDED_CMDLINE_PATH, format!("{}\n", rewritten))
+        .map_err(|e| format!("Failed to write {}: {}", EMBEDDED_CMDLINE_PATH, e))
+}
+
+fn artifact_uses_gzip(asset: &UpdateImageAsset) -> bool {
+    asset.compression.as_deref() == Some("gzip") || asset.name.ends_with(".gz")
+}
+
+fn artifact_staging_path(asset_name: &str) -> PathBuf {
+    let safe_name = asset_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    Path::new(EMBEDDED_OTA_STAGING_DIR).join(format!("{}.download", safe_name))
+}
+
+fn write_image_artifact_to_device(
+    artifact_path: &Path,
+    target_device: &Path,
+    gzip: bool,
+) -> Result<(), String> {
+    let source_file = File::open(artifact_path)
+        .map_err(|e| format!("Failed to open {}: {}", artifact_path.display(), e))?;
+    let mut source: Box<dyn Read> = if gzip {
+        Box::new(GzDecoder::new(source_file))
+    } else {
+        Box::new(source_file)
+    };
+
+    let mut target = File::options()
+        .write(true)
+        .open(target_device)
+        .map_err(|e| {
+            format!(
+                "Failed to open {} for writing: {}",
+                target_device.display(),
+                e
+            )
+        })?;
+    let metadata = target
+        .metadata()
+        .map_err(|e| format!("Failed to stat {}: {}", target_device.display(), e))?;
+    if metadata.is_file() {
+        target
+            .set_len(0)
+            .map_err(|e| format!("Failed to reset {}: {}", target_device.display(), e))?;
+    }
+
+    std::io::copy(&mut source, &mut target)
+        .map_err(|e| format!("Failed to write {}: {}", target_device.display(), e))?;
+    target
+        .flush()
+        .map_err(|e| format!("Failed to flush {}: {}", target_device.display(), e))?;
+    target
+        .sync_all()
+        .map_err(|e| format!("Failed to sync {}: {}", target_device.display(), e))?;
+
+    let _ = Command::new("sync").status();
+
+    Ok(())
+}
+
+fn apply_embedded_image_blocking(
+    image_asset: &UpdateImageAsset,
+    latest_version: &str,
+    fallback_sha256: Option<&str>,
+) -> Result<ApplyResult, String> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("rhythm-server")
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    let current_slot = current_embedded_slot()?;
+    let target_slot = current_slot.inactive();
+
+    ensure_mount(EMBEDDED_BOOT_MOUNT, EMBEDDED_BOOT_DEVICE, "vfat")?;
+    fs::create_dir_all(EMBEDDED_OTA_STAGING_DIR)
+        .map_err(|e| format!("Failed to create {}: {}", EMBEDDED_OTA_STAGING_DIR, e))?;
+
+    let download_path = artifact_staging_path(&image_asset.name);
+    remove_if_exists(&download_path);
+    download_release(&client, &image_asset.url, &download_path)?;
+
+    let expected_sha256 = image_asset.sha256.as_deref().or(fallback_sha256);
+    let checksum_verified = match expected_sha256 {
+        Some(expected) => {
+            let actual = compute_sha256_hex(&download_path)?;
+            if actual != expected.to_ascii_lowercase() {
+                remove_if_exists(&download_path);
+                return Err(format!(
+                    "SHA256 mismatch for {}: expected {}, got {}",
+                    image_asset.name, expected, actual
+                ));
+            }
+            Some(true)
+        }
+        None => None,
+    };
+
+    if let Err(error) = (|| {
+        write_image_artifact_to_device(
+            &download_path,
+            Path::new(target_slot.root_device()),
+            artifact_uses_gzip(image_asset),
+        )?;
+        update_embedded_cmdline_for_slot(target_slot)?;
+        write_embedded_boot_state(current_slot, target_slot, latest_version)?;
+        Ok::<(), String>(())
+    })() {
+        remove_if_exists(&download_path);
+        return Err(error);
+    }
+    remove_if_exists(&download_path);
+
+    Ok(ApplyResult {
+        checksum_verified,
+        installed_targets: vec![
+            format!("rootfs_{}", target_slot.as_str()),
+            format!("boot_slot_{}", target_slot.as_str()),
+        ],
+    })
 }
 
 fn default_bundle_install_targets(install_root: &Path) -> Vec<InstallTarget> {
@@ -849,83 +1091,11 @@ fn normalize_version_candidate(token: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-fn check_github_blocking(current_version: &str) -> Result<UpdateInfo, String> {
-    let asset_names = platform_asset_names().ok_or("Unsupported platform for self-update")?;
-    let install_root = install_target_executable()?;
-    let url = format!("{}/repos/{}/releases?per_page=20", GITHUB_API, GITHUB_REPO);
-
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("rhythm-server")
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
-
-    let resp = client
-        .get(&url)
-        .send()
-        .map_err(|e| format!("GitHub API request failed: {}", e))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("GitHub API returned {}", resp.status()));
-    }
-
-    let releases: Vec<Release> = resp
-        .json()
-        .map_err(|e| format!("Failed to parse releases: {}", e))?;
-
-    for release in &releases {
-        let version = match release_version(&release.tag_name) {
-            Some(v) => v,
-            None => continue,
-        };
-
-        for asset_name in &asset_names {
-            if let Some(asset) = release.assets.iter().find(|a| a.name == *asset_name) {
-                let checksum_url = release
-                    .assets
-                    .iter()
-                    .find(|a| a.name == CHECKSUM_ASSET_NAME)
-                    .map(|a| a.browser_download_url.clone());
-                let install_targets = infer_install_targets(&asset.name, &install_root);
-                let update_available = version != current_version;
-
-                return Ok(UpdateInfo {
-                    current_version: current_version.to_string(),
-                    latest_version: version.to_string(),
-                    update_available,
-                    update_reason: update_available.then_some(UpdateReason::VersionMismatch),
-                    download_url: update_available.then(|| asset.browser_download_url.clone()),
-                    checksum_url: update_available.then_some(checksum_url).flatten(),
-                    expected_sha256: None,
-                    asset_name: update_available.then(|| asset.name.clone()),
-                    install_targets: install_targets_to_summaries(&install_targets),
-                    image_assets: Vec::new(),
-                    resolved_install_targets: install_targets,
-                });
-            }
-        }
-    }
-
-    Ok(UpdateInfo {
-        current_version: current_version.to_string(),
-        latest_version: current_version.to_string(),
-        update_available: false,
-        update_reason: None,
-        download_url: None,
-        checksum_url: None,
-        expected_sha256: None,
-        asset_name: None,
-        install_targets: Vec::new(),
-        image_assets: Vec::new(),
-        resolved_install_targets: Vec::new(),
-    })
-}
-
 /// Download and install a new payload, replacing the current server bundle.
 fn apply_payload_blocking(
     download_url: &str,
     asset_name: &str,
     expected_sha256: Option<&str>,
-    checksum_url: Option<&str>,
     install_targets: &[InstallTarget],
 ) -> Result<ApplyResult, String> {
     let client = reqwest::blocking::Client::builder()
@@ -935,7 +1105,7 @@ fn apply_payload_blocking(
 
     let install_root = install_target_executable()?;
     let resolved_targets = if install_targets.is_empty() {
-        infer_install_targets(asset_name, &install_root)
+        default_bundle_install_targets(&install_root)
     } else {
         install_targets.to_vec()
     };
@@ -958,21 +1128,7 @@ fn apply_payload_blocking(
             }
             Some(true)
         }
-        None => match checksum_url {
-            Some(url) => {
-                let expected = fetch_expected_sha256(&client, url, asset_name)?;
-                let actual = compute_sha256_hex(&download_path)?;
-                if actual != expected {
-                    remove_if_exists(&download_path);
-                    return Err(format!(
-                        "SHA256 mismatch for {}: expected {}, got {}",
-                        asset_name, expected, actual
-                    ));
-                }
-                Some(true)
-            }
-            None => None,
-        },
+        None => None,
     };
 
     let staged_targets = stage_install_targets(&download_path, asset_name, &resolved_targets)
@@ -1095,42 +1251,6 @@ pub fn schedule_post_update_restart() {
             }
         }
     });
-}
-
-fn fetch_expected_sha256(
-    client: &reqwest::blocking::Client,
-    checksum_url: &str,
-    asset_name: &str,
-) -> Result<String, String> {
-    let resp = client
-        .get(checksum_url)
-        .send()
-        .map_err(|e| format!("Failed to fetch checksums: {}", e))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("Checksum download returned {}", resp.status()));
-    }
-
-    let body = resp
-        .text()
-        .map_err(|e| format!("Failed to read checksums: {}", e))?;
-    parse_sha256sums(&body, asset_name)
-        .ok_or_else(|| format!("Missing checksum entry for {}", asset_name))
-}
-
-fn parse_sha256sums(body: &str, asset_name: &str) -> Option<String> {
-    for line in body.lines() {
-        let mut parts = line.split_whitespace();
-        let Some(digest) = parts.next() else { continue };
-        let Some(file_name) = parts.next() else {
-            continue;
-        };
-        let file_name = file_name.trim_start_matches('*');
-        if file_name == asset_name {
-            return Some(digest.to_ascii_lowercase());
-        }
-    }
-    None
 }
 
 fn compute_sha256_hex(path: &Path) -> Result<String, String> {
@@ -1387,26 +1507,6 @@ mod tests {
     }
 
     #[test]
-    fn release_version_supports_current_and_legacy_tags() {
-        assert_eq!(release_version("v1.2.3"), Some("1.2.3"));
-        assert_eq!(release_version("server-v1.2.3"), Some("1.2.3"));
-        assert_eq!(release_version("not-a-release"), None);
-    }
-
-    #[test]
-    fn parse_sha256sums_finds_named_entry() {
-        let body = "\
-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  rhythm-server-linux-amd64.tar.gz\n\
-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  rhythm-server-rpiz.tar.gz\n";
-
-        assert_eq!(
-            parse_sha256sums(body, "rhythm-server-rpiz.tar.gz"),
-            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string())
-        );
-        assert_eq!(parse_sha256sums(body, "missing.tar.gz"), None);
-    }
-
-    #[test]
     fn parse_version_output_finds_semver_token() {
         assert_eq!(
             parse_version_output("rhythm-chipd 0.4.146\n"),
@@ -1415,6 +1515,137 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  rhythm-server-
         assert_eq!(
             parse_version_output("Usage: rhythm-chipd --socket /tmp"),
             None
+        );
+    }
+
+    #[test]
+    fn parse_embedded_slot_from_cmdline_reads_root_partition() {
+        assert_eq!(
+            parse_embedded_slot_from_cmdline("console=tty1 root=/dev/mmcblk0p2 rootwait rw")
+                .unwrap(),
+            EmbeddedSlot::A
+        );
+        assert_eq!(
+            parse_embedded_slot_from_cmdline("console=tty1 root=/dev/mmcblk0p3 rootwait rw")
+                .unwrap(),
+            EmbeddedSlot::B
+        );
+    }
+
+    #[test]
+    fn rewrite_cmdline_root_device_swaps_slots() {
+        assert_eq!(
+            rewrite_cmdline_root_device(
+                "console=tty1 root=/dev/mmcblk0p2 rootwait rw",
+                EmbeddedSlot::B
+            )
+            .unwrap(),
+            "console=tty1 root=/dev/mmcblk0p3 rootwait rw"
+        );
+    }
+
+    #[test]
+    fn embedded_update_prefers_gzip_rootfs_asset() {
+        let info = UpdateInfo {
+            current_version: "0.4.146".to_string(),
+            latest_version: "0.4.147".to_string(),
+            update_available: true,
+            update_reason: Some(UpdateReason::VersionMismatch),
+            download_url: None,
+            expected_sha256: None,
+            asset_name: None,
+            install_targets: Vec::new(),
+            image_assets: vec![
+                UpdateImageAsset {
+                    name: "rootfs.ext2".to_string(),
+                    kind: ReleaseArtifactKind::RootfsImage,
+                    url: "https://example.invalid/rootfs.ext2".to_string(),
+                    sha256: None,
+                    size: None,
+                    compression: None,
+                },
+                UpdateImageAsset {
+                    name: "rootfs.ext2.gz".to_string(),
+                    kind: ReleaseArtifactKind::RootfsImage,
+                    url: "https://example.invalid/rootfs.ext2.gz".to_string(),
+                    sha256: None,
+                    size: None,
+                    compression: Some("gzip".to_string()),
+                },
+            ],
+            resolved_install_targets: Vec::new(),
+        };
+
+        assert_eq!(
+            info.preferred_embedded_image_asset()
+                .map(|asset| asset.name.as_str()),
+            Some("rootfs.ext2.gz")
+        );
+    }
+
+    #[test]
+    fn write_image_artifact_to_device_handles_gzip() {
+        let dir = unique_test_dir("rootfs-gzip");
+        let artifact = dir.join("rootfs.ext2.gz");
+        let target = dir.join("rootfs-slot.img");
+
+        {
+            let tar_gz = File::create(&artifact).unwrap();
+            let mut encoder = flate2::write::GzEncoder::new(tar_gz, flate2::Compression::default());
+            encoder.write_all(b"fake-rootfs").unwrap();
+            encoder.finish().unwrap();
+        }
+
+        File::create(&target).unwrap();
+        write_image_artifact_to_device(&artifact, &target, true).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"fake-rootfs");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resolve_package_artifact_requires_archive_bundle_kind() {
+        let install_root = PathBuf::from("/tmp/rhythm-server");
+        let error = resolve_package_artifact(
+            "https://example.invalid/manifest.json",
+            &ManifestArtifact {
+                name: "rhythm-server-rpiz.tar.gz".to_string(),
+                url: "v1/rhythm-server-rpiz.tar.gz".to_string(),
+                sha256: None,
+                size: None,
+                kind: Some(ReleaseArtifactKind::Binary),
+                compression: None,
+                install: Vec::new(),
+            },
+            &install_root,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "Manifest package kind must be archive_bundle");
+    }
+
+    #[test]
+    fn resolve_package_artifact_requires_tar_gz_name() {
+        let install_root = PathBuf::from("/tmp/rhythm-server");
+        let error = resolve_package_artifact(
+            "https://example.invalid/manifest.json",
+            &ManifestArtifact {
+                name: "rhythm-server-rpiz.zip".to_string(),
+                url: "v1/rhythm-server-rpiz.zip".to_string(),
+                sha256: None,
+                size: None,
+                kind: Some(ReleaseArtifactKind::ArchiveBundle),
+                compression: None,
+                install: Vec::new(),
+            },
+            &install_root,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "Manifest package must reference a .tar.gz archive bundle"
         );
     }
 

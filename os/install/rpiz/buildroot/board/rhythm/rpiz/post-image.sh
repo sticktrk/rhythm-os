@@ -14,6 +14,13 @@ cp -a "${BINARIES_DIR}/rpi-firmware/." "${INPUT_DIR}/"
 cp -f "${BINARIES_DIR}/zImage" "${INPUT_DIR}/kernel.img"
 cp -f "${BOARD_DIR}/config.txt" "${INPUT_DIR}/config.txt"
 cp -f "${BOARD_DIR}/cmdline.txt" "${INPUT_DIR}/cmdline.txt"
+cat > "${INPUT_DIR}/rhythm-bootstate.env" <<'EOF'
+RHYTHM_ACTIVE_SLOT=a
+RHYTHM_LAST_GOOD_SLOT=a
+RHYTHM_PENDING_SLOT=
+RHYTHM_PENDING_VERSION=
+RHYTHM_LAST_UPDATE_EPOCH_MS=
+EOF
 ln -f "${BINARIES_DIR}/rootfs.ext2" "${INPUT_DIR}/rootfs.ext2"
 
 if [ -f "${BINARIES_DIR}/bcm2708-rpi-zero.dtb" ]; then

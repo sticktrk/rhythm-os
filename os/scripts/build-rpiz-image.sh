@@ -298,7 +298,15 @@ fi
 make -C "$BUILDROOT_DIR" BR2_EXTERNAL="$EXTERNAL_DIR" O="$OUTPUT_DIR" rhythm-prebuilt-dirclean
 make -C "$BUILDROOT_DIR" BR2_EXTERNAL="$EXTERNAL_DIR" O="$OUTPUT_DIR"
 
+if command -v gzip >/dev/null 2>&1; then
+    gzip -c -n "$OUTPUT_DIR/images/rootfs.ext2" > "$OUTPUT_DIR/images/rootfs.ext2.gz"
+    gzip -c -n "$OUTPUT_DIR/images/sdcard.img" > "$OUTPUT_DIR/images/sdcard.img.gz"
+fi
+
 echo ""
 echo "RPi Zero image build complete"
 echo "  Image: $OUTPUT_DIR/images/sdcard.img"
 echo "  Rootfs: $OUTPUT_DIR/images/rootfs.ext2"
+if [ -f "$OUTPUT_DIR/images/rootfs.ext2.gz" ]; then
+    echo "  Rootfs OTA: $OUTPUT_DIR/images/rootfs.ext2.gz"
+fi
