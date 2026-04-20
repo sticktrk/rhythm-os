@@ -22,6 +22,7 @@ const VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
 };
+const TOKIO_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 /// Rhythm OS Linux embedded appliance.
 #[derive(Parser, Debug)]
@@ -165,8 +166,16 @@ fn main() -> Result<()> {
         );
     }
 
+    info!(
+        target: "sys",
+        "Starting async runtime with {} MiB worker stacks",
+        TOKIO_WORKER_STACK_SIZE / (1024 * 1024)
+    );
+
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .thread_name("rhythm-main-rt")
+        .thread_stack_size(TOKIO_WORKER_STACK_SIZE)
         .build()?
         .block_on(run_server(state, args.port, provisioning))
 }

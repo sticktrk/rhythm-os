@@ -10,6 +10,14 @@ use rhythm_core::runtime::hub_registry::DeviceType;
 
 use crate::hub::HubType;
 
+fn integration_endpoint_active_default() -> bool {
+    true
+}
+
+fn integration_endpoint_active_is_true(value: &bool) -> bool {
+    *value
+}
+
 /// A hardware identifier used for cross-hub deduplication.
 ///
 /// IEEE and MAC addresses are the same thing for Zigbee devices — the dedup
@@ -84,6 +92,15 @@ pub struct IntegrationEndpoint {
     /// policy (control vs state preference, health-based failover) without
     /// breaking changes.
     pub preferred: bool,
+    /// Whether this endpoint is currently present in the latest hub discovery.
+    ///
+    /// Missing endpoints are marked inactive instead of being removed so the
+    /// same canonical device can reactivate cleanly on a later reconnect.
+    #[serde(
+        default = "integration_endpoint_active_default",
+        skip_serializing_if = "integration_endpoint_active_is_true"
+    )]
+    pub active: bool,
     /// When this device was last seen on this hub (Unix timestamp seconds).
     pub last_seen: u64,
     /// Hub-native room name at discovery time (for cross-hub matching).
@@ -176,6 +193,16 @@ impl CanonicalDevice {
         self.endpoints.iter().find(|e| &e.hub_key == hub_key)
     }
 
+    /// Iterate only currently-active endpoints.
+    pub fn active_endpoints(&self) -> impl Iterator<Item = &IntegrationEndpoint> {
+        self.endpoints.iter().filter(|endpoint| endpoint.active)
+    }
+
+    /// Check whether any active endpoint remains.
+    pub fn has_active_endpoint(&self) -> bool {
+        self.active_endpoints().next().is_some()
+    }
+
     /// Find an endpoint by native ID.
     pub fn endpoint_by_native_id(&self, native_id: &str) -> Option<&IntegrationEndpoint> {
         self.endpoints.iter().find(|e| e.native_id == native_id)
@@ -185,8 +212,8 @@ impl CanonicalDevice {
     pub fn preferred_endpoint(&self) -> Option<&IntegrationEndpoint> {
         self.endpoints
             .iter()
-            .find(|e| e.preferred)
-            .or_else(|| self.endpoints.first())
+            .find(|e| e.active && e.preferred)
+            .or_else(|| self.endpoints.iter().find(|e| e.active))
     }
 
     /// Add or update an endpoint for a hub.
@@ -205,6 +232,7 @@ impl CanonicalDevice {
             .iter_mut()
             .find(|e| e.hub_key == hub_key && e.native_id == native_id)
         {
+            ep.active = true;
             ep.last_seen = now;
             if source_room_name.is_some() {
                 ep.source_room_name = source_room_name;
@@ -215,11 +243,29 @@ impl CanonicalDevice {
                 hub_key,
                 native_id,
                 preferred,
+                active: true,
                 last_seen: now,
                 source_room_name,
                 capabilities: None,
             });
         }
+    }
+
+    /// Mark an endpoint active/inactive. Returns `true` if it changed.
+    pub fn set_endpoint_active(&mut self, hub_key: &HubKey, native_id: &str, active: bool) -> bool {
+        let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| &endpoint.hub_key == hub_key && endpoint.native_id == native_id)
+        else {
+            return false;
+        };
+
+        if endpoint.active == active {
+            return false;
+        }
+        endpoint.active = active;
+        true
     }
 
     /// Record a merge event in the device's history.
@@ -370,6 +416,7 @@ mod tests {
 
         assert_eq!(dev.endpoints.len(), 1);
         assert!(dev.endpoints[0].preferred);
+        assert!(dev.endpoints[0].active);
         assert_eq!(dev.endpoints[0].native_id, "native-1");
         assert_eq!(
             dev.endpoints[0].source_room_name.as_deref(),
@@ -423,6 +470,21 @@ mod tests {
 
         let pref = dev.preferred_endpoint().unwrap();
         assert_eq!(pref.native_id, "native-1");
+    }
+
+    #[test]
+    fn preferred_endpoint_skips_inactive() {
+        let mut dev = CanonicalDevice::new("Light", DeviceType::Light, vec![], 1000);
+        let key1 = HubKey::new(HubType::new("hue"), "192.168.1.1");
+        let key2 = HubKey::new(HubType::new("ha"), "192.168.1.2");
+        dev.upsert_endpoint(key1.clone(), "native-1".into(), 1000, None);
+        dev.upsert_endpoint(key2.clone(), "native-2".into(), 1001, None);
+        assert!(dev.set_endpoint_active(&key1, "native-1", false));
+
+        let pref = dev.preferred_endpoint().unwrap();
+        assert_eq!(pref.native_id, "native-2");
+        assert!(pref.active);
+        assert!(!dev.endpoints[0].active);
     }
 
     #[test]

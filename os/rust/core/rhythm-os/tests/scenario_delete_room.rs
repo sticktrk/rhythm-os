@@ -58,6 +58,21 @@ fn delete_room_unassigns_devices_and_queues_triage() {
         1
     );
     assert!(state.pending_motion_clear.contains(&room_id));
+    let registry = state
+        .hubs
+        .get(&harness.hub_key)
+        .and_then(|hub| hub.registry.as_ref())
+        .expect("hub registry should exist")
+        .lock()
+        .unwrap();
+    assert_eq!(
+        registry.devices_for_room("light-office"),
+        vec!["light-office".to_string()]
+    );
+    assert_eq!(
+        registry.get_grouped_light_id("light-office"),
+        Some("light-office".to_string())
+    );
     assert!(state
         .hub_runtime()
         .expect("runtime should exist after sync")

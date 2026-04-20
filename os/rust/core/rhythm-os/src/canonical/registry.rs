@@ -4,7 +4,7 @@
 //! physical devices. It assigns each device a stable Rhythm UUID and
 //! deduplicates across integrations using hardware identifiers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,12 @@ pub enum ResolveResult {
     Queued { triage_entry_id: String },
     /// No match — created new canonical device (works immediately in its hub's silo).
     Created { canonical_id: String },
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct EndpointVisibilityReport {
+    pub affected_device_ids: Vec<String>,
+    pub hidden_device_ids: Vec<String>,
 }
 
 /// The canonical device registry.
@@ -539,6 +545,16 @@ impl CanonicalRegistry {
             .and_then(|id| self.devices.get(id))
     }
 
+    /// Check whether this hub currently has any active canonical endpoints.
+    pub fn has_active_endpoints_for_hub(&self, hub_key: &HubKey) -> bool {
+        self.devices.values().any(|device| {
+            !device.is_removed()
+                && device
+                    .active_endpoints()
+                    .any(|endpoint| &endpoint.hub_key == hub_key)
+        })
+    }
+
     /// Get all devices assigned to a room.
     pub fn devices_in_room(&self, room_id: &str) -> Vec<&CanonicalDevice> {
         self.devices
@@ -599,6 +615,54 @@ impl CanonicalRegistry {
         }
     }
 
+    /// Mark missing endpoints for a hub inactive while retaining their identity
+    /// mapping for future reactivation.
+    pub fn deactivate_missing_endpoints_for_hub(
+        &mut self,
+        hub_key: &HubKey,
+        discovered_native_ids: &HashSet<String>,
+    ) -> EndpointVisibilityReport {
+        let mut affected_device_ids = HashSet::new();
+        let mut hidden_device_ids = HashSet::new();
+
+        for (device_id, device) in &mut self.devices {
+            if device.is_removed() {
+                continue;
+            }
+
+            let mut changed = false;
+            for endpoint in &mut device.endpoints {
+                if endpoint.hub_key != *hub_key || !endpoint.active {
+                    continue;
+                }
+                if discovered_native_ids.contains(&endpoint.native_id) {
+                    continue;
+                }
+                endpoint.active = false;
+                changed = true;
+            }
+
+            if !changed {
+                continue;
+            }
+
+            affected_device_ids.insert(device_id.clone());
+            if !device.has_active_endpoint() {
+                hidden_device_ids.insert(device_id.clone());
+            }
+        }
+
+        let mut affected_device_ids: Vec<String> = affected_device_ids.into_iter().collect();
+        affected_device_ids.sort();
+        let mut hidden_device_ids: Vec<String> = hidden_device_ids.into_iter().collect();
+        hidden_device_ids.sort();
+
+        EndpointVisibilityReport {
+            affected_device_ids,
+            hidden_device_ids,
+        }
+    }
+
     /// Get the triage queue.
     pub fn triage(&self) -> &TriageQueue {
         &self.triage
@@ -617,6 +681,7 @@ impl CanonicalRegistry {
     /// Remove a canonical device and clean up indices.
     pub fn remove_device(&mut self, device_id: &str) -> Option<CanonicalDevice> {
         if let Some(device) = self.devices.remove(device_id) {
+            let removed_device_id = device.id.clone();
             // Auto-resolve any pending unassigned triage entry
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -626,12 +691,16 @@ impl CanonicalRegistry {
 
             // Clean up hw_index
             for hw_id in &device.hardware_ids {
-                self.hw_index.remove(hw_id.value());
+                if self.hw_index.get(hw_id.value()) == Some(&removed_device_id) {
+                    self.hw_index.remove(hw_id.value());
+                }
             }
             // Clean up native_index
             for ep in &device.endpoints {
                 let key = (ep.hub_key.to_string(), ep.native_id.clone());
-                self.native_index.remove(&key);
+                if self.native_index.get(&key) == Some(&removed_device_id) {
+                    self.native_index.remove(&key);
+                }
             }
             Some(device)
         } else {
@@ -1071,6 +1140,88 @@ mod tests {
         assert!(reg.find_by_hardware_id(&mac).is_none());
         assert!(reg.find_by_native_id(&hue_key(), "hue-light-1").is_none());
         assert_eq!(reg.device_count(), 0);
+    }
+
+    #[test]
+    fn deactivate_missing_endpoints_hides_device_with_no_active_endpoints() {
+        let mut reg = CanonicalRegistry::new();
+        let identity = make_identity("hue-light-1", "Kitchen Spot", vec![]);
+        let canonical_id = match reg.resolve(&identity, &hue_key(), 1000) {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            _ => panic!("expected Created"),
+        };
+
+        let discovered = HashSet::new();
+        let report = reg.deactivate_missing_endpoints_for_hub(&hue_key(), &discovered);
+
+        assert_eq!(report.affected_device_ids, vec![canonical_id.clone()]);
+        assert_eq!(report.hidden_device_ids, vec![canonical_id.clone()]);
+        let device = reg.get(&canonical_id).unwrap();
+        assert!(!device.endpoints[0].active);
+        assert!(reg.find_by_native_id(&hue_key(), "hue-light-1").is_some());
+    }
+
+    #[test]
+    fn deactivate_missing_endpoints_keeps_cross_hub_device_visible() {
+        let mut reg = CanonicalRegistry::new();
+        let hue_identity = make_identity("hue-light-1", "Kitchen Spot", vec![]);
+        let canonical_id = match reg.resolve(&hue_identity, &hue_key(), 1000) {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            _ => panic!("expected Created"),
+        };
+        reg.get_mut(&canonical_id).unwrap().upsert_endpoint(
+            ha_key(),
+            "light.kitchen".to_string(),
+            1001,
+            None,
+        );
+
+        let discovered = HashSet::new();
+        let report = reg.deactivate_missing_endpoints_for_hub(&ha_key(), &discovered);
+
+        assert_eq!(report.affected_device_ids, vec![canonical_id.clone()]);
+        assert!(report.hidden_device_ids.is_empty());
+        let device = reg.get(&canonical_id).unwrap();
+        assert_eq!(device.active_endpoints().count(), 1);
+        assert_eq!(device.preferred_endpoint().unwrap().hub_key, hue_key());
+    }
+
+    #[test]
+    fn remove_device_keeps_reassigned_native_index() {
+        let mut reg = CanonicalRegistry::new();
+        let identity = make_identity("hue-light-1", "Kitchen Spot", vec![]);
+        let canonical_id = match reg.resolve(&identity, &hue_key(), 1000) {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            _ => panic!("expected Created"),
+        };
+        let silo_id = match reg.resolve(
+            &make_identity("light.kitchen", "Kitchen Spot", vec![]),
+            &ha_key(),
+            2000,
+        ) {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            _ => panic!("expected Created"),
+        };
+
+        reg.get_mut(&canonical_id).unwrap().upsert_endpoint(
+            ha_key(),
+            "light.kitchen".to_string(),
+            3000,
+            None,
+        );
+        reg.native_index.insert(
+            (ha_key().to_string(), "light.kitchen".to_string()),
+            canonical_id.clone(),
+        );
+
+        reg.remove_device(&silo_id);
+
+        assert_eq!(
+            reg.find_by_native_id(&ha_key(), "light.kitchen")
+                .unwrap()
+                .id,
+            canonical_id
+        );
     }
 
     #[test]

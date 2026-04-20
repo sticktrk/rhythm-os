@@ -453,6 +453,91 @@ fn clear_removed_node_ephemeral_state(s: &mut AppState, node_id: &str) {
         });
 }
 
+pub(crate) fn reconcile_hub_endpoint_visibility(
+    state: &SharedState,
+    hub_key: &HubKey,
+    discovered_native_ids: &HashSet<String>,
+) -> Result<(usize, usize)> {
+    let (runtime, hidden_ids, restored_devices, affected_count) = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let report = s
+            .canonical_registry
+            .deactivate_missing_endpoints_for_hub(hub_key, discovered_native_ids);
+        if report.affected_device_ids.is_empty() {
+            return Ok((0, 0));
+        }
+
+        let hidden_ids = report.hidden_device_ids.clone();
+        let mut restored_devices = Vec::new();
+        for device_id in &hidden_ids {
+            s.topology.remove_device_everywhere(device_id);
+            clear_removed_node_ephemeral_state(&mut s, device_id);
+        }
+        for device_id in &report.affected_device_ids {
+            if hidden_ids.iter().any(|hidden_id| hidden_id == device_id) {
+                continue;
+            }
+            if s.topology.device_parent_room_id(device_id).is_some() {
+                continue;
+            }
+            let Some(device) = s.canonical_registry.get(device_id).cloned() else {
+                continue;
+            };
+            let desired_parent_id = device
+                .room_id
+                .clone()
+                .filter(|room_id| s.topology.get(room_id).is_some());
+            if let Some(ref room_id) = desired_parent_id {
+                s.topology.ensure_standalone_device(device_id);
+                let _ = s.topology.assign_device(
+                    device_id,
+                    Some(room_id),
+                    crate::topology::DevicePlacement::HubDefault,
+                );
+            } else {
+                s.topology.ensure_standalone_device(device_id);
+            }
+            restored_devices.push((
+                device.id.clone(),
+                device.name.clone(),
+                device.device_type.clone(),
+                desired_parent_id,
+            ));
+        }
+
+        persist_canonical(&s);
+        if !hidden_ids.is_empty() || !restored_devices.is_empty() {
+            persist_topology(&s);
+        }
+
+        (
+            s.hub_runtime(),
+            hidden_ids,
+            restored_devices,
+            report.affected_device_ids.len(),
+        )
+    };
+
+    for (device_id, device_name, device_type, parent_id) in &restored_devices {
+        let _ = ensure_runtime_device_node_exists(
+            state,
+            device_id,
+            device_name,
+            device_type.clone(),
+            parent_id.clone(),
+        );
+    }
+
+    if let Some(runtime) = runtime {
+        for device_id in &hidden_ids {
+            runtime.remove_node(device_id);
+            queue_motion_timer_clear(state, device_id);
+        }
+    }
+
+    Ok((affected_count, hidden_ids.len()))
+}
+
 fn resolved_room_motion_timeout_secs_from_parts(
     lighting: RoomLightingContext<'_>,
     settings: &RoomProfileSettings,
@@ -528,18 +613,29 @@ fn collect_room_hub_types<'a>(
     hub_types
 }
 
+fn hub_is_active(s: &AppState, hub_key: &HubKey) -> bool {
+    s.hubs.contains_key(hub_key)
+}
+
 fn collect_room_hub_types_from_topology_room(
     s: &AppState,
     room: &crate::topology::TopologyRoom,
 ) -> Vec<String> {
-    let mut hub_types = collect_room_hub_types(room.hub_room_bindings.iter());
+    let mut hub_types = collect_room_hub_types(
+        room.hub_room_bindings
+            .iter()
+            .filter(|binding| hub_is_active(s, &binding.hub_key)),
+    );
     let mut seen: HashSet<String> = hub_types.iter().cloned().collect();
 
     for room_device in &room.devices {
         let Some(device) = s.canonical_registry.get(&room_device.device_id) else {
             continue;
         };
-        for endpoint in &device.endpoints {
+        for endpoint in device.active_endpoints() {
+            if !hub_is_active(s, &endpoint.hub_key) {
+                continue;
+            }
             let hub_type = endpoint.hub_key.hub_type.as_str().to_string();
             if seen.insert(hub_type.clone()) {
                 hub_types.push(hub_type);
@@ -571,7 +667,10 @@ fn node_hub_types_from_topology(s: &AppState, node_id: &str) -> Vec<String> {
         if let Some(device) = s.canonical_registry.get(&node.canonical_device_id) {
             let mut hub_types = Vec::new();
             let mut seen = HashSet::new();
-            for endpoint in &device.endpoints {
+            for endpoint in device.active_endpoints() {
+                if !hub_is_active(s, &endpoint.hub_key) {
+                    continue;
+                }
                 let hub_type = endpoint.hub_key.hub_type.as_str().to_string();
                 if seen.insert(hub_type.clone()) {
                     hub_types.push(hub_type);
@@ -805,6 +904,7 @@ struct NodeStateDtoBuildContext<'a> {
 
 struct NodeStateDtoMetadata {
     hub_types: Vec<String>,
+    topology_parent_id: Option<Option<String>>,
     placement: Option<crate::topology::DevicePlacement>,
     manufacturer: Option<String>,
     model: Option<String>,
@@ -814,6 +914,10 @@ fn node_state_dto_metadata(s: &AppState, node_id: &str) -> NodeStateDtoMetadata 
     let (placement, manufacturer, model) = node_metadata_from_topology(s, node_id);
     NodeStateDtoMetadata {
         hub_types: node_hub_types_from_topology(s, node_id),
+        topology_parent_id: s
+            .topology
+            .get_device_node(node_id)
+            .map(|node| node.parent_id.clone()),
         placement,
         manufacturer,
         model,
@@ -825,6 +929,14 @@ fn build_node_state_dto_from_snapshot_parts(
     snap: &rhythm_core::NodeSnapshot,
     metadata: NodeStateDtoMetadata,
 ) -> NodeStateDto {
+    let NodeStateDtoMetadata {
+        hub_types,
+        topology_parent_id,
+        placement,
+        manufacturer,
+        model,
+    } = metadata;
+    let effective_parent_id = topology_parent_id.unwrap_or_else(|| snap.parent_id.clone());
     let warning_active = ctx
         .motion_snapshots
         .get(&snap.id)
@@ -878,11 +990,11 @@ fn build_node_state_dto_from_snapshot_parts(
         id: snap.id.clone(),
         name: snap.name.clone(),
         kind: snap.kind,
-        parent_id: snap.parent_id.clone(),
-        placement: metadata.placement,
-        hub_types: metadata.hub_types,
-        manufacturer: metadata.manufacturer,
-        model: metadata.model,
+        parent_id: effective_parent_id.clone(),
+        placement,
+        hub_types,
+        manufacturer,
+        model,
         state,
         rhythm_enabled: snap.rhythm_enabled,
         disabled: snap.disabled,
@@ -893,7 +1005,7 @@ fn build_node_state_dto_from_snapshot_parts(
             ctx.room_lights_on,
             &snap.id,
             snap.kind,
-            snap.parent_id.as_deref(),
+            effective_parent_id.as_deref(),
         ),
         transitioning: ctx.transitioning_nodes.contains(&snap.id),
         brightness,
@@ -1239,7 +1351,7 @@ fn hub_room_ids_for_topology(state: &SharedState, topo_id: &str) -> Vec<String> 
                         let Some(device) = s.canonical_registry.get(&room_device.device_id) else {
                             continue;
                         };
-                        for endpoint in &device.endpoints {
+                        for endpoint in device.active_endpoints() {
                             if seen.insert(endpoint.native_id.clone()) {
                                 ids.push(endpoint.native_id.clone());
                             }
@@ -1547,6 +1659,10 @@ pub fn build_node_state(state: &SharedState, node_id: &str) -> Result<NodeStateD
         &snap,
         NodeStateDtoMetadata {
             hub_types: node_hub_types_from_topology(&s, node_id),
+            topology_parent_id: s
+                .topology
+                .get_device_node(node_id)
+                .map(|node| node.parent_id.clone()),
             placement,
             manufacturer,
             model,
@@ -5153,13 +5269,29 @@ pub fn do_hub_credentials(
 pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
     info!(target: "cmd", "hub_disconnect: clearing all hubs, credentials, and rooms");
 
+    let hub_keys: Vec<HubKey> = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .hubs
+        .keys()
+        .cloned()
+        .collect();
+    let discovered_native_ids = HashSet::new();
+    for hub_key in &hub_keys {
+        let _ = reconcile_hub_endpoint_visibility(state, hub_key, &discovered_native_ids)?;
+    }
+
     // Capture hub keys before clearing for SSE notifications
     let old_hubs;
+    let mut topology_changed = false;
 
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
         old_hubs = std::mem::take(&mut s.hubs);
+        for key in old_hubs.keys() {
+            topology_changed |= !s.topology.remove_stale_bindings(key, &[]).is_empty();
+        }
         s.hub_connection_status.clear();
         s.hub_seen_connected_once.clear();
 
@@ -5174,6 +5306,10 @@ pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
         if let Some(ref storage) = s.storage {
             let empty = rhythm_core::room::RoomManager::new();
             let _ = storage.save_rooms(&empty);
+        }
+
+        if topology_changed {
+            persist_topology(&s);
         }
     }
 
@@ -5247,19 +5383,27 @@ pub fn do_hub_disconnect_one(state: &SharedState, hub_type_str: &str, address: &
     let hub_type = crate::hub::HubType::parse(hub_type_str)
         .ok_or_else(|| anyhow::anyhow!("Unknown hub type: {}", hub_type_str))?;
     let key = HubKey::new(hub_type, address);
+    let discovered_native_ids = HashSet::new();
+    let _ = reconcile_hub_endpoint_visibility(state, &key, &discovered_native_ids)?;
 
     let old_hub;
+    let topology_changed;
 
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
         old_hub = s.hubs.remove(&key);
+        topology_changed = !s.topology.remove_stale_bindings(&key, &[]).is_empty();
         s.clear_hub_connected(&key);
         s.hub_credentials.remove(&key);
 
         if let Some(ref storage) = s.storage {
             let all: Vec<_> = s.hub_credentials.values().cloned().collect();
             let _ = storage.save_all_hub_credentials(&all);
+        }
+
+        if topology_changed {
+            persist_topology(&s);
         }
     }
 
@@ -5576,7 +5720,7 @@ pub(crate) fn runtime_node_kind_for_device_type(device_type: DeviceType) -> Ligh
     }
 }
 
-fn ensure_runtime_device_node_exists(
+pub(crate) fn ensure_runtime_device_node_exists(
     state: &SharedState,
     node_id: &str,
     node_name: &str,
@@ -5594,13 +5738,14 @@ fn ensure_runtime_device_node_exists(
     }
 
     if let Some(runtime) = state.lock().ok().and_then(|s| s.hub_runtime()) {
-        if runtime.engine_node_snapshot(node_id).is_none() {
-            runtime.add_node(
-                node_id,
-                node_name,
-                runtime_node_kind_for_device_type(device_type),
-                parent_id,
-            );
+        let existed = runtime.engine_node_snapshot(node_id).is_some();
+        runtime.add_node(
+            node_id,
+            node_name,
+            runtime_node_kind_for_device_type(device_type),
+            parent_id,
+        );
+        if !existed {
             runtime.restore_node_state(
                 node_id,
                 RestoredNodeState {
@@ -5689,7 +5834,12 @@ pub fn rebuild_composite_routing(state: &SharedState) {
             Some(c) => c,
             None => return, // No composite yet — nothing to rebuild
         };
-        let routing = s.topology.composite_routing(&s.canonical_registry);
+        let active_hubs: HashSet<String> = s.hubs.keys().map(ToString::to_string).collect();
+        let mut routing = s.topology.composite_routing(&s.canonical_registry);
+        routing.retain(|_, targets| {
+            targets.retain(|(hub_key, _)| active_hubs.contains(hub_key));
+            !targets.is_empty()
+        });
         let labels = composite_node_labels(&s);
         let rooms = s.topology.room_count();
         (composite, routing, labels, rooms)
@@ -5860,6 +6010,31 @@ pub fn build_canonical_device(state: &SharedState, id: &str) -> Result<String> {
     }
 }
 
+fn ensure_synthetic_device_registry_rooms(
+    s: &mut AppState,
+    device_name: &str,
+    endpoints: &[crate::canonical::identity::IntegrationEndpoint],
+) {
+    for endpoint in endpoints {
+        if let Some(hub) = s.hubs.get(&endpoint.hub_key) {
+            if let Some(reg) = &hub.registry {
+                if let Ok(mut registry) = reg.lock() {
+                    // Keep a synthetic per-device registry room so
+                    // device-addressed integrations still have an exact
+                    // native grouped target after detach/unassign flows.
+                    registry.remove_room(&endpoint.native_id);
+                    registry.upsert_room(
+                        &endpoint.native_id,
+                        device_name,
+                        &endpoint.native_id,
+                        std::slice::from_ref(&endpoint.native_id),
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Assign a canonical device to a Rhythm room (or unassign with None).
 ///
 /// Updates the canonical registry AND the topology so the composite routing
@@ -5877,6 +6052,7 @@ pub fn do_canonical_assign_room(
         .get(device_id)
         .ok_or_else(|| anyhow::anyhow!("Device not found: {}", device_id))?;
     let endpoints: Vec<_> = device.endpoints.clone();
+    let active_endpoints: Vec<_> = device.active_endpoints().cloned().collect();
     let device_name = device.name.clone();
     let device_type = device.device_type.clone();
     let old_room_id = s
@@ -5922,25 +6098,16 @@ pub fn do_canonical_assign_room(
             room.user_customized = true;
         }
 
-        for ep in &endpoints {
-            // Keep a synthetic per-device registry room so device-addressed
-            // endpoints still appear in hub snapshots. Topology/state mapping
-            // now derives the owning topology room from canonical assignments,
-            // so this registry room is transport-local only.
-            if let Some(hub) = s.hubs.get(&ep.hub_key) {
+        for endpoint in &endpoints {
+            if let Some(hub) = s.hubs.get(&endpoint.hub_key) {
                 if let Some(reg) = &hub.registry {
-                    if let Ok(mut r) = reg.lock() {
-                        r.remove_room(&ep.native_id);
-                        r.upsert_room(
-                            &ep.native_id,
-                            &device_name,
-                            &ep.native_id,
-                            std::slice::from_ref(&ep.native_id),
-                        );
+                    if let Ok(mut registry) = reg.lock() {
+                        registry.remove_room(&endpoint.native_id);
                     }
                 }
             }
         }
+        ensure_synthetic_device_registry_rooms(&mut s, &device_name, &active_endpoints);
     } else {
         s.topology.ensure_standalone_device(device_id);
         s.topology.assign_device(
@@ -5953,15 +6120,16 @@ pub fn do_canonical_assign_room(
                 room.user_customized = true;
             }
         }
-        for ep in &endpoints {
-            if let Some(hub) = s.hubs.get(&ep.hub_key) {
+        for endpoint in &endpoints {
+            if let Some(hub) = s.hubs.get(&endpoint.hub_key) {
                 if let Some(reg) = &hub.registry {
-                    if let Ok(mut r) = reg.lock() {
-                        r.remove_room(&ep.native_id);
+                    if let Ok(mut registry) = reg.lock() {
+                        registry.remove_room(&endpoint.native_id);
                     }
                 }
             }
         }
+        ensure_synthetic_device_registry_rooms(&mut s, &device_name, &active_endpoints);
     }
 
     persist_canonical(&s);
@@ -6537,6 +6705,7 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
             let Some(device) = s.canonical_registry.get(&device_id).cloned() else {
                 continue;
             };
+            let active_endpoints: Vec<_> = device.active_endpoints().cloned().collect();
 
             s.canonical_registry.assign_room(&device_id, None);
             detached_devices.push((
@@ -6554,6 +6723,8 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
                     }
                 }
             }
+
+            ensure_synthetic_device_registry_rooms(&mut s, &device.name, &active_endpoints);
         }
 
         s.room_lights_on.remove(room_id);
@@ -7224,6 +7395,35 @@ mod tests {
                 name: name.to_string(),
                 kind: rhythm_core::LightNodeKind::Room,
                 parent_id: None,
+                rhythm_enabled: false,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                hard_off: false,
+                profile_settings: RoomProfileSettings::default(),
+            });
+        }
+        fn add_node(
+            &self,
+            node_id: &str,
+            node_name: &str,
+            kind: rhythm_core::LightNodeKind,
+            parent_id: Option<String>,
+        ) {
+            let mut snapshots = self.snapshots.lock().unwrap();
+            if let Some(snap) = snapshots.iter_mut().find(|snap| snap.id == node_id) {
+                snap.name = node_name.to_string();
+                snap.kind = kind;
+                snap.parent_id = parent_id;
+                return;
+            }
+
+            snapshots.push(RoomSnapshot {
+                id: node_id.to_string(),
+                name: node_name.to_string(),
+                kind,
+                parent_id,
                 rhythm_enabled: false,
                 disabled: false,
                 time_offset_minutes: 0.0,
@@ -10881,6 +11081,106 @@ mod tests {
     }
 
     #[test]
+    fn canonical_assign_room_reparents_existing_runtime_device() {
+        let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
+        let room_one = state.lock().unwrap().topology.create_room("Office");
+        let room_two = state.lock().unwrap().topology.create_room("Desk");
+        let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+
+        do_canonical_assign_room(&state, &device_id, Some(&room_one)).unwrap();
+        assert_eq!(
+            runtime
+                .engine_node_snapshot(&device_id)
+                .expect("runtime node should exist after initial assignment")
+                .parent_id
+                .as_deref(),
+            Some(room_one.as_str())
+        );
+
+        do_canonical_assign_room(&state, &device_id, Some(&room_two)).unwrap();
+        assert_eq!(
+            runtime
+                .engine_node_snapshot(&device_id)
+                .expect("runtime node should still exist after reassignment")
+                .parent_id
+                .as_deref(),
+            Some(room_two.as_str())
+        );
+
+        do_canonical_assign_room(&state, &device_id, None).unwrap();
+        assert_eq!(
+            runtime
+                .engine_node_snapshot(&device_id)
+                .expect("runtime node should still exist after unassign")
+                .parent_id,
+            None
+        );
+    }
+
+    #[test]
+    fn canonical_unassign_keeps_synthetic_registry_room_for_device_queries() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+        let room_id = state.lock().unwrap().topology.create_room("Office");
+        let device_id =
+            insert_canonical_device(&state, hub_key.clone(), "matter-100", "Desk Lamp", "", "");
+
+        do_canonical_assign_room(&state, &device_id, Some(&room_id)).unwrap();
+        do_canonical_assign_room(&state, &device_id, None).unwrap();
+
+        let s = state.lock().unwrap();
+        let registry = s
+            .hubs
+            .get(&hub_key)
+            .and_then(|hub| hub.registry.as_ref())
+            .expect("hub registry should exist")
+            .lock()
+            .unwrap();
+        assert_eq!(
+            registry.devices_for_room("matter-100"),
+            vec!["matter-100".to_string()]
+        );
+        assert_eq!(
+            registry.get_grouped_light_id("matter-100"),
+            Some("matter-100".to_string())
+        );
+    }
+
+    #[test]
+    fn build_state_snapshot_prefers_topology_parent_for_device_nodes() {
+        let (state, runtime) = setup_state(vec![]);
+        add_topology_room(&state, "room1", &["mock"]);
+        let hub_key = state.lock().unwrap().hubs.keys().next().cloned().unwrap();
+        let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+
+        {
+            let mut s = state.lock().unwrap();
+            s.canonical_registry.assign_room(&device_id, None);
+            s.topology.ensure_standalone_device(&device_id);
+        }
+
+        runtime.add_node(
+            &device_id,
+            "Desk Lamp",
+            rhythm_core::LightNodeKind::LightDevice,
+            Some("room1".to_string()),
+        );
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&build_state_snapshot(&state).unwrap()).unwrap();
+        let device = parsed["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"].as_str() == Some(device_id.as_str()))
+            .expect("device should appear in state snapshot");
+
+        assert!(
+            device["parent_id"].is_null(),
+            "state snapshot should follow topology parent, not stale runtime parent"
+        );
+    }
+
+    #[test]
     fn topology_create_room_initializes_runtime_when_hub_exists() {
         let (state, runtime, _hub_key) = setup_state_with_deferred_runtime();
 
@@ -10903,7 +11203,8 @@ mod tests {
         let result = do_topology_create_room(&state, "Office").unwrap();
         let created: serde_json::Value = serde_json::from_str(&result).unwrap();
         let room_id = created["id"].as_str().unwrap().to_string();
-        let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+        let device_id =
+            insert_canonical_device(&state, hub_key.clone(), "matter-100", "Desk Lamp", "", "");
 
         {
             let mut s = state.lock().unwrap();
@@ -10950,6 +11251,23 @@ mod tests {
         assert!(!s.motion_snapshots.contains_key(&room_id));
         assert!(!s.room_mode_transitions.contains_key(&room_id));
         assert_eq!(s.pending_motion_clear, vec![room_id.clone()]);
+        {
+            let registry = s
+                .hubs
+                .get(&hub_key)
+                .and_then(|hub| hub.registry.as_ref())
+                .expect("hub registry should exist")
+                .lock()
+                .unwrap();
+            assert_eq!(
+                registry.devices_for_room("matter-100"),
+                vec!["matter-100".to_string()]
+            );
+            assert_eq!(
+                registry.get_grouped_light_id("matter-100"),
+                Some("matter-100".to_string())
+            );
+        }
         drop(s);
 
         assert!(

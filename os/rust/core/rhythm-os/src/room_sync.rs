@@ -300,21 +300,63 @@ fn sync_with_discovery(
         }
     }
 
-    // Remove stale rooms (in registry but not discovered).
-    // Skip when discovery returned 0 rooms — the hub doesn't do room discovery
-    // (e.g. Matter, where rooms are managed via canonical assign_room).
-    if !discovered_ids.is_empty() {
+    // Remove stale source rooms from the hub registry.
+    //
+    // If the hub has never reported any rooms, treat an empty discovery result
+    // as "this hub doesn't do room discovery" and no-op. If it previously had
+    // rooms, an empty discovery result means all source rooms disappeared and
+    // should be pruned.
+    let should_prune_stale_rooms = !discovered_ids.is_empty() || !current_room_ids.is_empty();
+    if should_prune_stale_rooms {
         let stale_ids: Vec<String> = current_room_ids
             .difference(&discovered_ids)
             .cloned()
             .collect();
 
-        for room_id in &stale_ids {
-            info!(target: "room_sync", "Removing stale room '{}'", room_id);
-            if let Err(e) = commands::do_room_remove(state, room_id) {
-                warn!(target: "room_sync", "Failed to remove room '{}': {}", room_id, e);
+        let registry = extract_registry_for(state, hub_key);
+        for room_id in stale_ids {
+            info!(target: "room_sync", "Removing stale source room '{}'", room_id);
+            let Some(registry) = registry.as_ref() else {
+                warn!(target: "room_sync", "No hub registry available for stale room '{}'", room_id);
+                continue;
+            };
+            match registry.lock() {
+                Ok(mut reg) => {
+                    reg.remove_room(&room_id);
+                    report.rooms_removed += 1;
+                }
+                Err(_) => {
+                    warn!(target: "room_sync", "Failed to lock hub registry for stale room '{}'", room_id);
+                }
             }
-            report.rooms_removed += 1;
+        }
+    }
+
+    if should_prune_stale_rooms {
+        let discovered_room_ids: Vec<String> = discovered_rooms
+            .iter()
+            .map(|room| room.id.clone())
+            .collect();
+        if let Some(hub_key) = hub_key {
+            let removed_bindings = {
+                let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+                let removed_bindings = s
+                    .topology
+                    .remove_stale_bindings(hub_key, &discovered_room_ids);
+                if !removed_bindings.is_empty() {
+                    commands::persist_topology(&s);
+                }
+                removed_bindings
+            };
+
+            if !removed_bindings.is_empty() {
+                info!(
+                    target: "room_sync",
+                    "Removed stale source bindings for {} topology rooms on {}",
+                    removed_bindings.len(),
+                    hub_key
+                );
+            }
         }
     }
 
@@ -375,15 +417,29 @@ fn sync_with_discovery(
         });
 
         if let Some(canonical_hub_key) = canonical_hub_key {
-            let identities = match discovery.discover_identities() {
-                Ok(ids) => ids,
+            let (identities, identities_fresh) = match discovery.discover_identities() {
+                Ok(ids) => (ids, true),
                 Err(e) => {
                     warn!(target: "room_sync", "Identity discovery failed: {}", e);
-                    Vec::new()
+                    (Vec::new(), false)
                 }
             };
+            let discovered_native_ids: HashSet<String> = identities
+                .iter()
+                .map(|identity| identity.native_id.clone())
+                .collect();
+            let had_active_endpoints = state
+                .lock()
+                .ok()
+                .map(|s| {
+                    s.canonical_registry
+                        .has_active_endpoints_for_hub(&canonical_hub_key)
+                })
+                .unwrap_or(false);
+            let should_process_identities =
+                identities_fresh && (!discovered_native_ids.is_empty() || had_active_endpoints);
 
-            if !identities.is_empty() {
+            if should_process_identities {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -407,8 +463,6 @@ fn sync_with_discovery(
                     // group entities that are no longer produced).
                     // RoomBinding entries are NOT checked here — they use
                     // room_binding.hub_room_id, not discovered.native_id.
-                    let discovered_native_ids: HashSet<String> =
-                        identities.iter().map(|i| i.native_id.clone()).collect();
                     let stale_triage: Vec<String> = s
                         .canonical_registry
                         .triage()
@@ -448,15 +502,17 @@ fn sync_with_discovery(
                                 s.topology.ensure_standalone_device(&canonical_id);
                                 if let Some(device) = s.canonical_registry.get(&canonical_id) {
                                     if let Some(runtime) = s.hub_runtime() {
-                                        if runtime.engine_node_snapshot(&canonical_id).is_none() {
-                                            runtime.add_node(
-                                                &canonical_id,
-                                                &device.name,
-                                                commands::runtime_node_kind_for_device_type(
-                                                    device.device_type.clone(),
-                                                ),
-                                                None,
-                                            );
+                                        let existed =
+                                            runtime.engine_node_snapshot(&canonical_id).is_some();
+                                        runtime.add_node(
+                                            &canonical_id,
+                                            &device.name,
+                                            commands::runtime_node_kind_for_device_type(
+                                                device.device_type.clone(),
+                                            ),
+                                            None,
+                                        );
+                                        if !existed {
                                             runtime.restore_node_state(
                                                 &canonical_id,
                                                 rhythm_core::RestoredNodeState {
@@ -509,6 +565,11 @@ fn sync_with_discovery(
                                         .topology
                                         .device_parent_room_id(canonical_id)
                                         .map(str::to_string)
+                                        .or_else(|| {
+                                            s.canonical_registry
+                                                .get(canonical_id)
+                                                .and_then(|device| device.room_id.clone())
+                                        })
                                         .unwrap_or_else(|| rhythm_room_id.clone());
                                     (canonical_id.clone(), assigned_room_id)
                                 })
@@ -546,15 +607,16 @@ fn sync_with_discovery(
                                 let Some(device) = s.canonical_registry.get(canonical_id) else {
                                     continue;
                                 };
-                                if runtime.engine_node_snapshot(canonical_id).is_none() {
-                                    runtime.add_node(
-                                        canonical_id,
-                                        &device.name,
-                                        commands::runtime_node_kind_for_device_type(
-                                            device.device_type.clone(),
-                                        ),
-                                        Some(assigned_room_id.clone()),
-                                    );
+                                let existed = runtime.engine_node_snapshot(canonical_id).is_some();
+                                runtime.add_node(
+                                    canonical_id,
+                                    &device.name,
+                                    commands::runtime_node_kind_for_device_type(
+                                        device.device_type.clone(),
+                                    ),
+                                    Some(assigned_room_id.clone()),
+                                );
+                                if !existed {
                                     runtime.restore_node_state(
                                         canonical_id,
                                         rhythm_core::RestoredNodeState {
@@ -617,14 +679,29 @@ fn sync_with_discovery(
                         }
                     }
 
-                    let current_room_ids: Vec<String> =
-                        discovered_rooms.iter().map(|r| r.id.clone()).collect();
-                    s.topology
-                        .remove_stale_bindings(&canonical_hub_key, &current_room_ids);
-
                     // Persist canonical registry and topology
                     commands::persist_canonical(&s);
                     commands::persist_topology(&s);
+                }
+
+                let (affected_devices, hidden_devices) =
+                    commands::reconcile_hub_endpoint_visibility(
+                        state,
+                        &canonical_hub_key,
+                        &discovered_native_ids,
+                    )?;
+                if affected_devices > 0 {
+                    info!(
+                        target: "room_sync",
+                        "Canonical endpoint visibility: {} devices updated, {} hidden",
+                        affected_devices,
+                        hidden_devices
+                    );
+                    #[cfg(feature = "desktop")]
+                    crate::state::emit_server_event(
+                        state,
+                        crate::server_event::ServerEvent::NodesChanged,
+                    );
                 }
 
                 info!(target: "room_sync",

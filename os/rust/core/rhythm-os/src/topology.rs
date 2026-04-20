@@ -1118,7 +1118,8 @@ impl RoomTopologyStore {
                 .get(&node.canonical_device_id)
                 .is_some_and(|device| {
                     device.endpoints.iter().any(|endpoint| {
-                        endpoint.native_id == room_id
+                        endpoint.active
+                            && endpoint.native_id == room_id
                             && hub_key.is_none_or(|expected| &endpoint.hub_key == expected)
                     })
                 })
