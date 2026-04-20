@@ -25,6 +25,8 @@ use rhythm_os::state::SharedState;
 use crate::wifi;
 
 const FORCE_ENV: &str = "RHYTHM_BLE_PROVISION_ALWAYS";
+const START_RETRY_DELAY: Duration = Duration::from_secs(5);
+const START_RETRY_ATTEMPTS: usize = 12;
 
 #[derive(Clone)]
 pub struct ProvisioningManager {
@@ -77,7 +79,7 @@ impl ProvisioningManager {
                     reason
                 );
 
-                let result = run_service(&manager.inner.version);
+                let result = run_service_with_retries(&manager, &reason);
                 match result {
                     Ok(creds) => {
                         persist_commissioning_wifi_credentials(&manager.inner.state, &creds);
@@ -146,6 +148,42 @@ fn run_service(version: &str) -> Result<WifiCredentials> {
     let config = ProvisioningSessionConfig::default();
 
     run_provisioning_session(&mut frontend, &mut backend, &identity, &config)
+}
+
+fn run_service_with_retries(
+    manager: &ProvisioningManager,
+    reason: &str,
+) -> Result<WifiCredentials> {
+    let mut attempts = 0usize;
+
+    loop {
+        attempts += 1;
+        match run_service(&manager.inner.version) {
+            Ok(creds) => return Ok(creds),
+            Err(error) => {
+                let should_retry =
+                    attempts < START_RETRY_ATTEMPTS && provisioning_still_needed(manager);
+                if !should_retry {
+                    return Err(error);
+                }
+
+                warn!(
+                    target: "sys",
+                    "BLE provisioning startup failed (reason={}, attempt={}/{}): {:#}; retrying in {}s",
+                    reason,
+                    attempts,
+                    START_RETRY_ATTEMPTS,
+                    error,
+                    START_RETRY_DELAY.as_secs()
+                );
+                thread::sleep(START_RETRY_DELAY);
+            }
+        }
+    }
+}
+
+fn provisioning_still_needed(manager: &ProvisioningManager) -> bool {
+    manager.force_enabled() || !wifi::has_active_connection()
 }
 
 fn build_identity(version: &str) -> ProvisioningDeviceInfo {

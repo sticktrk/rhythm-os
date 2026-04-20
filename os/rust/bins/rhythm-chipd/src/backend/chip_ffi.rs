@@ -149,13 +149,7 @@ impl ChipFfiController {
     ) -> Result<()> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
-            ffi_probe::set_hue_saturation(
-                node_id,
-                endpoint,
-                hue,
-                saturation,
-                transition_ms,
-            )
+            ffi_probe::set_hue_saturation(node_id, endpoint, hue, saturation, transition_ms)
         }
 
         #[cfg(not(rhythm_chipd_chip_ffi))]
