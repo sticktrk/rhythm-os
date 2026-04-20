@@ -306,34 +306,6 @@ pub fn start_server(
     // Single items persist inline; batch items defer persist to the 16KB worker
     // thread stack to avoid stack-heavy serde on the 12KB HTTP handler stack.
 
-    let s = state.clone();
-    server.fn_handler::<anyhow::Error, _>("/api/rooms", Method::Put, move |mut req| {
-        let body = match read_json_body(&mut req) {
-            Ok(b) => b,
-            Err(e) => return write_api_response(req, &ApiResponse::bad_request(&e.to_string())),
-        };
-        let is_batch = body.is_array() && body.as_array().map(|a| a.len() > 1).unwrap_or(false);
-        let resp = handlers::handle_put_rooms(&s, &body, !is_batch);
-        if is_batch && resp.status == 200 {
-            defer_persist(&s);
-        }
-        write_api_response(req, &resp)
-    })?;
-
-    let s = state.clone();
-    server.fn_handler::<anyhow::Error, _>("/api/devices", Method::Put, move |mut req| {
-        let body = match read_json_body(&mut req) {
-            Ok(b) => b,
-            Err(e) => return write_api_response(req, &ApiResponse::bad_request(&e.to_string())),
-        };
-        let is_batch = body.is_array() && body.as_array().map(|a| a.len() > 1).unwrap_or(false);
-        let resp = handlers::handle_put_devices(&s, &body, !is_batch);
-        if is_batch && resp.status == 200 {
-            defer_persist(&s);
-        }
-        write_api_response(req, &resp)
-    })?;
-
     // =========================================================================
     // ESP32-only: WiFi, Diagnostics, OTA, System
     // =========================================================================

@@ -7,10 +7,10 @@
 //! ## API journey
 //!
 //! 1. Kitchen is bound to both Hue and HA (from Scenario 1)
-//! 2. User taps Kitchen card → on → PUT /api/rooms/action
-//! 3. User drags brightness → PUT /api/rooms/brightness
-//! 4. User taps idle → PUT /api/rooms/preferences (soft_off: true)
-//! 5. User long-presses → off → PUT /api/rooms/action lights_off
+//! 2. User taps Kitchen card → on → PUT /api/nodes/action
+//! 3. User drags brightness → PUT /api/nodes/brightness
+//! 4. User taps idle → PUT /api/nodes/preferences (soft_off: true)
+//! 5. User long-presses → off → PUT /api/nodes/action lights_off
 //! 6. Single-hub room (Office) works normally through just HA
 
 mod harness;

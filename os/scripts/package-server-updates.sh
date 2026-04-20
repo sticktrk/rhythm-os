@@ -4,9 +4,8 @@
 # Output layout:
 #   <output>/<target>/manifest.json
 #   <output>/<target>/v<version>/rhythm-server-<target>.tar.gz
-#   <output>/<target>/v<version>/sdcard.img[.gz]   (optional rpiz image artifact)
-#   <output>/<target>/v<version>/rootfs.ext2[.gz]  (optional rpiz image artifact)
-#   <output>/<target>/v<version>/SHA256SUMS.txt
+#   <output>/<target>/v<version>/sdcard.img        (optional rpiz factory image)
+#   <output>/<target>/v<version>/rootfs.ext2.gz    (optional rpiz OTA image, falls back to rootfs.ext2)
 
 set -euo pipefail
 
@@ -123,13 +122,15 @@ for target in $TARGETS; do
     ota_name="rhythm-server-$target"
     version_dir="$OUTPUT_DIR/$target/v$VERSION"
     archive_path="$version_dir/$ota_name.tar.gz"
-    sums_path="$version_dir/SHA256SUMS.txt"
     manifest_path="$OUTPUT_DIR/$target/manifest.json"
     image_candidates=()
     if [ "$target" = "rpiz" ] && [ -n "$IMAGE_ROOT" ]; then
-        for image_name in sdcard.img.gz sdcard.img rootfs.ext2.gz rootfs.ext2; do
-            [ -f "$IMAGE_ROOT/$image_name" ] && image_candidates+=("$image_name")
-        done
+        [ -f "$IMAGE_ROOT/sdcard.img" ] && image_candidates+=("sdcard.img")
+        if [ -f "$IMAGE_ROOT/rootfs.ext2.gz" ]; then
+            image_candidates+=("rootfs.ext2.gz")
+        elif [ -f "$IMAGE_ROOT/rootfs.ext2" ]; then
+            image_candidates+=("rootfs.ext2")
+        fi
     fi
 
     if [ "$DRY_RUN" = true ]; then
@@ -171,8 +172,6 @@ for target in $TARGETS; do
         fi
     fi
 
-    sums_entries=()
-    sums_entries+=("$archive_sha  $(basename "$archive_path")")
     image_entries=()
     if [ "${#image_candidates[@]}" -gt 0 ]; then
         for image_name in "${image_candidates[@]}"; do
@@ -195,15 +194,8 @@ for target in $TARGETS; do
             esac
             image_json="$image_json}"
             image_entries+=("$image_json")
-            sums_entries+=("$image_sha  $image_name")
         done
     fi
-
-    {
-        for entry in "${sums_entries[@]}"; do
-            printf '%s\n' "$entry"
-        done
-    } > "$sums_path"
 
     images_json="[]"
     if [ "${#image_entries[@]}" -gt 0 ]; then

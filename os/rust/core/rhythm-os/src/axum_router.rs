@@ -9,7 +9,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use futures::stream::Stream;
 use serde_json::Value;
@@ -71,7 +71,7 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/backup", get(get_backup).put(put_backup))
         .route("/api/nodes/state", get(get_nodes_state))
         .route("/api/events", get(sse_events))
-        .route("/api/devices", put(put_devices).delete(delete_device))
+        .route("/api/devices", delete(delete_device))
         .route("/api/nodes/motion-timeout", put(put_motion_timeout))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/config/absorb-offset", post(absorb_time_offset))
@@ -93,7 +93,6 @@ fn shared_routes() -> Router<SharedState> {
             put(put_hub_credentials).delete(delete_hub),
         )
         .route("/api/nodes/preferences", put(put_node_preferences))
-        .route("/api/ota/version", get(get_version))
         // Canonical device management
         .route("/api/devices/canonical", get(get_canonical_devices))
         .route("/api/devices/canonical/:id", get(get_canonical_device))
@@ -191,10 +190,6 @@ async fn put_backup(State(state): State<SharedState>, Json(body): Json<Value>) -
 
 async fn get_nodes_state(State(state): State<SharedState>) -> ApiResponse {
     handlers::handle_get_nodes_state(&state)
-}
-
-async fn put_devices(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {
-    handlers::handle_put_devices(&state, &body, true)
 }
 
 async fn delete_device(
@@ -308,11 +303,6 @@ async fn put_node_preferences(
     Json(body): Json<Value>,
 ) -> ApiResponse {
     run_blocking(move || handlers::handle_put_node_preferences(&state, &body, true)).await
-}
-
-async fn get_version(State(state): State<SharedState>) -> ApiResponse {
-    let version = state.lock().map(|s| s.firmware_version).unwrap_or("0.0.0");
-    handlers::handle_get_version(version)
 }
 
 // ---------------------------------------------------------------------------

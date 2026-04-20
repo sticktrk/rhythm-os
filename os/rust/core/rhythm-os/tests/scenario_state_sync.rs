@@ -7,8 +7,8 @@
 //!
 //! ## API journey
 //!
-//! 1. User taps room card → PUT /api/rooms/action returns immediate state
-//! 2. GET /api/rooms/state (15s poll) returns current state reflecting last action
+//! 1. User taps room card → PUT /api/nodes/action returns immediate state
+//! 2. GET /api/nodes/state (15s poll) returns current state reflecting last action
 //! 3. Multiple rapid taps → server processes in order, final state correct
 //! 4. Fix My Lights → all affected rooms visible in next poll
 

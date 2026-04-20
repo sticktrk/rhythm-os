@@ -206,7 +206,6 @@ pub fn clear_config(nvs: &EspDefaultNvsPartition) -> Result<()> {
 
 /// Inner implementation that works with an already-opened NVS handle.
 fn load_hub_credentials_inner(nvs: &EspNvs<NvsDefault>) -> HubCredentials {
-    // Try hub_type key first
     let mut type_buf = [0u8; 16];
     let hub_type = nvs
         .get_str(KEY_HUB_TYPE, &mut type_buf)
@@ -217,14 +216,7 @@ fn load_hub_credentials_inner(nvs: &EspNvs<NvsDefault>) -> HubCredentials {
     match hub_type {
         Some(ref ht) if ht.as_str() == HubType::HUE => load_hue_credentials(nvs),
         Some(_) => HubCredentials::default(),
-        None => {
-            // Backwards compatibility: check if Hue keys exist without hub_type
-            let creds = load_hue_credentials(nvs);
-            if creds.is_configured() {
-                info!("Found legacy Hue credentials (no hub_type key)");
-            }
-            creds
-        }
+        None => HubCredentials::default(),
     }
 }
 
@@ -672,22 +664,6 @@ fn load_hue_registry(nvs: &EspDefaultNvsPartition) -> Result<Option<HueRegistryS
                 Err(e) => {
                     warn!("Failed to parse Hue registry JSON: {}", e);
                 }
-            }
-        }
-    }
-
-    // Fallback: try legacy string format
-    if let Ok(Some(json)) = nvs.get_str(KEY_HUE_REG, &mut buf) {
-        match serde_json::from_str::<HueRegistrySnapshot>(json) {
-            Ok(snapshot) => {
-                info!(
-                    "Loaded Hue registry from NVS (legacy str): {} rooms",
-                    snapshot.rooms.len()
-                );
-                return Ok(Some(snapshot));
-            }
-            Err(e) => {
-                warn!("Failed to parse legacy Hue registry JSON: {}", e);
             }
         }
     }

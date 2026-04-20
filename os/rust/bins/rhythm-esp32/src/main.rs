@@ -95,7 +95,6 @@ fn install_panic_hook() {
 }
 
 mod ble_prov;
-pub mod commands;
 pub mod diag;
 mod http_server;
 pub mod hub;
@@ -473,7 +472,6 @@ fn main() -> Result<()> {
     info!("  GET    /health - Health check");
     info!("  GET    /api/state - Full state snapshot");
     info!("  GET    /api/rooms/state - Room state for polling");
-    info!("  PUT    /api/rooms - Upsert room(s)");
     info!("  PUT    /api/config - Save light profile config");
     info!("  GET    /api/ota/version - Firmware version");
     info!("  POST   /api/ota/upload - OTA firmware upload");

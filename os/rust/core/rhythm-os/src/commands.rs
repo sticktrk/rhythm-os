@@ -6,7 +6,7 @@
 //! a result that the transport layer can format into a response.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -14,7 +14,7 @@ use chrono::{Datelike, Timelike};
 use log::{debug, info, warn};
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::{
-    ButtonAction, HubRegistry, InputEvent, LightNodeKind, LightProfileConfig, LightProfileRegistry,
+    ButtonAction, InputEvent, LightNodeKind, LightProfileConfig, LightProfileRegistry,
     LightingCommand, ModeChangeCause, ModeConfig, ModeTransitionConfig, ModeTransitionTrigger,
     RestoredNodeState, RestoredRoomState, RhythmMode, RoomModeState, RoomProfileSettings,
     RuntimeHandle, TimerSetting,
@@ -1073,15 +1073,6 @@ pub fn build_node_state_event(
             kelvin,
         },
     )
-}
-
-/// Extract a single registry Arc from any active hub (brief AppState lock).
-/// Used as a fallback for single-item operations when no hub_key is provided.
-fn extract_registry(state: &SharedState) -> Option<Arc<Mutex<dyn HubRegistry>>> {
-    state
-        .lock()
-        .ok()
-        .and_then(|s| s.all_hub_registries().into_iter().next())
 }
 
 fn light_profile_registry_from_state(s: &AppState) -> LightProfileRegistry {
@@ -4052,26 +4043,29 @@ impl RoomParams {
 pub fn do_room_set(
     state: &SharedState,
     params: &RoomParams,
-    hub_key: Option<&HubKey>,
+    hub_key: &HubKey,
     persist: bool,
     apply_runtime: bool,
 ) -> Result<String> {
     info!(target: "cmd", "room_set: {} '{}' gl={}", params.id, params.name, params.grouped_light_id);
 
-    // Dedup: skip write if room already matches (check targeted registry when hub_key provided)
-    let dedup_registry = hub_key
-        .and_then(|k| state.lock().ok().and_then(|s| s.hub_registry_for(k)))
-        .or_else(|| extract_registry(state));
-    let room_unchanged = dedup_registry
-        .and_then(|r| {
-            r.lock().ok().map(|reg| {
-                reg.room_matches(
-                    &params.id,
-                    &params.name,
-                    &params.grouped_light_id,
-                    &params.device_ids,
-                )
-            })
+    let registry = state
+        .lock()
+        .ok()
+        .and_then(|s| s.hub_registry_for(hub_key))
+        .ok_or_else(|| anyhow::anyhow!("No hub registry available for {}", hub_key))?;
+
+    // Dedup: skip write if the targeted registry already matches.
+    let room_unchanged = registry
+        .lock()
+        .ok()
+        .map(|reg| {
+            reg.room_matches(
+                &params.id,
+                &params.name,
+                &params.grouped_light_id,
+                &params.device_ids,
+            )
         })
         .unwrap_or(false);
     if room_unchanged {
@@ -4092,51 +4086,28 @@ pub fn do_room_set(
         // Room is in registry but not yet in engine — fall through to add it
     }
 
-    // Upsert into the targeted hub's registry (when hub_key provided) or all
-    // registries (when None — backward compat for HTTP handler path).
     {
-        let registries: Vec<Arc<Mutex<dyn HubRegistry>>> = state
+        let mut reg = registry
             .lock()
-            .ok()
-            .map(|s| {
-                if let Some(key) = hub_key {
-                    s.hub_registry_for(key).into_iter().collect()
-                } else {
-                    s.hubs
-                        .values()
-                        .filter_map(|hub| hub.registry.clone())
-                        .collect()
-                }
-            })
-            .unwrap_or_default();
-        for reg in &registries {
-            if let Ok(mut reg) = reg.lock() {
-                reg.upsert_room(
-                    &params.id,
-                    &params.name,
-                    &params.grouped_light_id,
-                    &params.device_ids,
-                );
-            }
-        }
+            .map_err(|_| anyhow::anyhow!("hub registry lock poisoned for {}", hub_key))?;
+        reg.upsert_room(
+            &params.id,
+            &params.name,
+            &params.grouped_light_id,
+            &params.device_ids,
+        );
     }
 
     // Determine engine room ID: always use topology room IDs for the engine.
-    // When hub_key is provided (room_sync path), translate_or_create ensures a
-    // topology entry exists. When hub_key is None (HTTP handler path), params.id
-    // should already be a topology ID (clients send topology IDs from GET /api/state).
-    // Registry operations (above) always use params.id (hub-native).
-    let engine_room_id = if let Some(k) = hub_key {
+    let engine_room_id = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.topology.translate_or_create(
-            k,
+            hub_key,
             &params.id,
             &params.name,
             &params.grouped_light_id,
             &params.device_ids,
         )
-    } else {
-        params.id.clone()
     };
 
     if !apply_runtime {
@@ -4553,42 +4524,39 @@ pub fn do_set_node_time_offset(
 
 /// Upsert a device with button mappings and type in the registry.
 ///
-/// When `hub_key` is provided, only that hub's registry is updated.
-/// When `None`, the first available registry is used (backward compat).
+/// Updates only the specified hub's registry.
 pub fn do_device_set(
     state: &SharedState,
     device_id: &str,
     room_id: &str,
     buttons: &[(String, u8)],
     device_type: DeviceType,
-    hub_key: Option<&HubKey>,
+    hub_key: &HubKey,
     persist: bool,
 ) -> Result<()> {
     info!(target: "cmd", "device_set: {} ({:?}) -> room {} ({} buttons)", device_id, device_type, room_id, buttons.len());
 
-    let registry = hub_key
-        .and_then(|k| state.lock().ok().and_then(|s| s.hub_registry_for(k)))
-        .or_else(|| extract_registry(state));
+    let registry = state
+        .lock()
+        .ok()
+        .and_then(|s| s.hub_registry_for(hub_key))
+        .ok_or_else(|| anyhow::anyhow!("No hub registry available for {}", hub_key))?;
 
     // Dedup
     let device_unchanged = registry
-        .as_ref()
-        .and_then(|r| {
-            r.lock()
-                .ok()
-                .map(|reg| reg.device_matches(device_id, room_id, buttons, &device_type))
-        })
+        .lock()
+        .ok()
+        .map(|reg| reg.device_matches(device_id, room_id, buttons, &device_type))
         .unwrap_or(false);
     if device_unchanged {
         info!(target: "cmd", "device_set: {} unchanged, skipping persist", device_id);
         return Ok(());
     }
 
-    if let Some(reg) = registry {
-        if let Ok(mut reg) = reg.lock() {
-            reg.upsert_device(device_id, room_id, buttons, device_type);
-        }
-    }
+    registry
+        .lock()
+        .map_err(|_| anyhow::anyhow!("hub registry lock poisoned for {}", hub_key))?
+        .upsert_device(device_id, room_id, buttons, device_type);
 
     if persist {
         persist_state(state);
@@ -4598,23 +4566,19 @@ pub fn do_device_set(
 
 /// Remove a device from the registry.
 ///
-/// When `hub_key` is provided, removes from that hub's registry only.
-/// When `None`, falls back to the first hub's registry (backward compat).
-pub fn do_device_remove(
-    state: &SharedState,
-    device_id: &str,
-    hub_key: Option<&HubKey>,
-) -> Result<()> {
+/// Removes from the specified hub's registry only.
+pub fn do_device_remove(state: &SharedState, device_id: &str, hub_key: &HubKey) -> Result<()> {
     info!(target: "cmd", "device_remove: {}", device_id);
 
-    let registry = hub_key
-        .and_then(|k| state.lock().ok().and_then(|s| s.hub_registry_for(k)))
-        .or_else(|| extract_registry(state));
-    if let Some(reg) = registry {
-        if let Ok(mut reg) = reg.lock() {
-            reg.remove_device(device_id);
-        }
-    }
+    let registry = state
+        .lock()
+        .ok()
+        .and_then(|s| s.hub_registry_for(hub_key))
+        .ok_or_else(|| anyhow::anyhow!("No hub registry available for {}", hub_key))?;
+    registry
+        .lock()
+        .map_err(|_| anyhow::anyhow!("hub registry lock poisoned for {}", hub_key))?
+        .remove_device(device_id);
 
     persist_state(state);
     Ok(())
@@ -7219,7 +7183,7 @@ mod tests {
     use crate::state::{AppState, MotionSnapshot};
     use crate::storage::{Storage, StoredLightProfiles, StoredSettings};
     use chrono::{Datelike, Timelike};
-    use rhythm_core::{LightProfileConfig, RoomSnapshot, RuntimeHandle};
+    use rhythm_core::{HubRegistry, LightProfileConfig, RoomSnapshot, RuntimeHandle};
     use std::sync::{Arc, Mutex};
 
     /// Mock runtime that returns configurable room snapshots and tracks events.

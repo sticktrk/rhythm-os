@@ -68,12 +68,15 @@ The image lands at:
 out/rpiz/images/sdcard.img
 ```
 
-The build also writes slot-update artifacts that can be published into the OTA feed:
+The build also writes the rootfs OTA artifact that can be published into the OTA feed:
 
 ```bash
-out/rpiz/images/rootfs.ext2
 out/rpiz/images/rootfs.ext2.gz
 ```
+
+Buildroot still produces a raw `rootfs.ext2` internally while assembling
+`sdcard.img`, but the published OTA artifact should normally be
+`rootfs.ext2.gz`.
 
 ### Docker-backed image build
 

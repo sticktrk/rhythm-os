@@ -56,14 +56,15 @@ Rhythm OS exposes a complete REST API for managing lights, rooms, and curves. Al
 
 | Category | Endpoints | Description |
 |----------|-----------|-------------|
-| **State** | `GET /api/state`, `GET /api/rooms/state` | Full snapshot or lightweight room state |
+| **State** | `GET /api/state`, `GET /api/nodes/state` | Full snapshot or lightweight node state |
 | **Events** | `GET /api/events` | SSE stream (room state, motion, hub status, config changes) |
 | **Backup** | `GET /api/configuration`, `PUT /api/configuration`, `GET /api/backup`, `PUT /api/backup` | Portable configuration import/export plus full installation backup/restore |
-| **Rooms** | `PUT /api/rooms`, `PUT /api/rooms/action`, `PUT /api/rooms/brightness` | Create rooms, dispatch actions, set brightness |
-| **Devices** | `PUT /api/devices`, `PUT /api/sensors` | Register lights, buttons, and motion sensors |
+| **Nodes** | `PUT /api/nodes/action`, `PUT /api/nodes/brightness`, `PUT /api/nodes/offset`, `PUT /api/nodes/preferences`, `POST /api/nodes/fix` | Control live nodes and room/device preferences |
+| **Topology** | `GET/POST /api/topology/rooms`, `PUT /api/topology/rooms/:id`, `PUT /api/topology/rooms/:id/merge`, `PUT /api/topology/rooms/:id/devices/move` | Manage user-facing room/device graph |
+| **Canonical & Triage** | `GET /api/devices/canonical`, `PUT /api/devices/canonical/:id/room`, `PUT /api/devices/canonical/:id/parent`, `GET /api/triage` | Review normalized devices and resolve merge/binding decisions |
 | **Config** | `GET /api/config`, `PUT /api/config`, `PUT /api/location` | Read/write curve config and location |
-| **Settings** | `GET /api/settings`, `PUT /api/settings` | Fade duration, update interval, power save |
-| **Hub** | `PUT /api/hub/credentials`, `POST /api/sync` | Connect to a lighting hub, trigger re-discovery |
+| **Settings** | `GET /api/settings`, `PUT /api/settings`, `GET/PUT /api/mode`, `GET/PUT /api/transitions`, `GET /api/profiles` | Runtime settings, mode state, transitions, and profiles |
+| **Hub** | `PUT /api/hub/credentials`, `POST /api/sync`, `POST /api/devices/pair`, `POST /api/devices/unpair` | Connect hubs, resync, and pair/unpair devices |
 
 See [CLAUDE.md](CLAUDE.md#api-endpoints) for the full endpoint reference.
 

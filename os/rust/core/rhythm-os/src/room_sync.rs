@@ -155,7 +155,7 @@ pub fn sync_from_hub_for_key(
     }
     .ok_or_else(|| anyhow::anyhow!("No hub discovery for {}", hub_key))?;
 
-    let report = sync_with_discovery(state, Some(hub_key), discovery.as_ref(), discover_devices)?;
+    let report = sync_with_discovery(state, hub_key, discovery.as_ref(), discover_devices)?;
     commands::reconcile_runtime_from_state(state)?;
     Ok(report)
 }
@@ -171,7 +171,7 @@ pub fn sync_from_hub_for_key(
 /// 6. Release discovery resources (drops discovery TLS)
 fn sync_with_discovery(
     state: &SharedState,
-    hub_key: Option<&HubKey>,
+    hub_key: &HubKey,
     discovery: &dyn HubDiscovery,
     discover_devices: bool,
 ) -> Result<SyncReport> {
@@ -271,26 +271,24 @@ fn sync_with_discovery(
             .iter()
             .map(|room| room.id.clone())
             .collect();
-        if let Some(hub_key) = hub_key {
-            let removed_bindings = {
-                let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-                let removed_bindings = s
-                    .topology
-                    .remove_stale_bindings(hub_key, &discovered_room_ids);
-                if !removed_bindings.is_empty() {
-                    commands::persist_topology(&s);
-                }
-                removed_bindings
-            };
-
+        let removed_bindings = {
+            let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            let removed_bindings = s
+                .topology
+                .remove_stale_bindings(hub_key, &discovered_room_ids);
             if !removed_bindings.is_empty() {
-                info!(
-                    target: "room_sync",
-                    "Removed stale source bindings for {} topology rooms on {}",
-                    removed_bindings.len(),
-                    hub_key
-                );
+                commands::persist_topology(&s);
             }
+            removed_bindings
+        };
+
+        if !removed_bindings.is_empty() {
+            info!(
+                target: "room_sync",
+                "Removed stale source bindings for {} topology rooms on {}",
+                removed_bindings.len(),
+                hub_key
+            );
         }
     }
 
@@ -342,325 +340,322 @@ fn sync_with_discovery(
     // and resolve each through the canonical registry. Only runs when device
     // discovery is enabled (desktop only — ESP32 doesn't persist canonical).
     if discover_devices {
-        // Use the hub_key passed to sync_with_discovery, falling back to first credential
-        let canonical_hub_key = hub_key.cloned().or_else(|| {
-            state
-                .lock()
-                .ok()
-                .and_then(|s| s.hub_credentials.keys().next().cloned())
-        });
+        let canonical_hub_key = hub_key.clone();
+        let (identities, identities_fresh) = match discovery.discover_identities() {
+            Ok(ids) => (ids, true),
+            Err(e) => {
+                warn!(target: "room_sync", "Identity discovery failed: {}", e);
+                (Vec::new(), false)
+            }
+        };
+        let discovered_native_ids: HashSet<String> = identities
+            .iter()
+            .map(|identity| identity.native_id.clone())
+            .collect();
+        let had_active_endpoints = state
+            .lock()
+            .ok()
+            .map(|s| {
+                s.canonical_registry
+                    .has_active_endpoints_for_hub(&canonical_hub_key)
+            })
+            .unwrap_or(false);
+        let should_process_identities =
+            identities_fresh && (!discovered_native_ids.is_empty() || had_active_endpoints);
 
-        if let Some(canonical_hub_key) = canonical_hub_key {
-            let (identities, identities_fresh) = match discovery.discover_identities() {
-                Ok(ids) => (ids, true),
-                Err(e) => {
-                    warn!(target: "room_sync", "Identity discovery failed: {}", e);
-                    (Vec::new(), false)
-                }
-            };
-            let discovered_native_ids: HashSet<String> = identities
-                .iter()
-                .map(|identity| identity.native_id.clone())
-                .collect();
-            let had_active_endpoints = state
-                .lock()
-                .ok()
-                .map(|s| {
+        if should_process_identities {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            let mut canonical_room_devices: HashMap<String, Vec<String>> = HashMap::new();
+
+            {
+                let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+
+                // Prune triage entries resolved more than 7 days ago
+                let seven_days = 7 * 24 * 60 * 60;
+                if now > seven_days {
                     s.canonical_registry
-                        .has_active_endpoints_for_hub(&canonical_hub_key)
-                })
-                .unwrap_or(false);
-            let should_process_identities =
-                identities_fresh && (!discovered_native_ids.is_empty() || had_active_endpoints);
+                        .triage_mut()
+                        .prune_resolved(now - seven_days);
+                }
 
-            if should_process_identities {
+                // Dismiss pending DeviceMerge triage entries whose native_id
+                // is no longer in the discovered identity set (e.g. HA virtual
+                // group entities that are no longer produced).
+                // RoomBinding entries are NOT checked here — they use
+                // room_binding.hub_room_id, not discovered.native_id.
+                let stale_triage: Vec<String> = s
+                    .canonical_registry
+                    .triage()
+                    .pending()
+                    .iter()
+                    .filter(|e| {
+                        e.hub_key == canonical_hub_key
+                            && e.kind == crate::canonical::triage::TriageKind::DeviceMerge
+                            && !discovered_native_ids.contains(&e.discovered.native_id)
+                    })
+                    .map(|e| e.id.clone())
+                    .collect();
+                for entry_id in &stale_triage {
+                    s.canonical_registry.triage_mut().dismiss(entry_id, now);
+                    info!(target: "room_sync", "Dismissed stale triage entry '{}'", entry_id);
+                }
+
+                for identity in &identities {
+                    let result = s
+                        .canonical_registry
+                        .resolve(identity, &canonical_hub_key, now);
+                    let canonical_id = match result {
+                        ResolveResult::AlreadyKnown { canonical_id } => canonical_id,
+                        ResolveResult::ReApproved { canonical_id } => canonical_id,
+                        ResolveResult::Queued { .. } => continue,
+                        ResolveResult::Created { canonical_id } => canonical_id,
+                    };
+
+                    if identity.room_id.is_empty() {
+                        let still_unassigned = s
+                            .canonical_registry
+                            .get(&canonical_id)
+                            .map(|device| device.room_id.is_none())
+                            .unwrap_or(false);
+                        if still_unassigned {
+                            s.canonical_registry.assign_room(&canonical_id, None);
+                            s.topology.ensure_standalone_device(&canonical_id);
+                        }
+                        continue;
+                    }
+
+                    canonical_room_devices
+                        .entry(identity.room_id.clone())
+                        .or_default()
+                        .push(canonical_id);
+                }
+
+                // ============================================================
+                // Phase 4c: Topology sync
+                // ============================================================
+                for room in &discovered_rooms {
+                    let canonical_device_ids = canonical_room_devices
+                        .get(&room.id)
+                        .cloned()
+                        .unwrap_or_default();
+
+                    let topo_room = DiscoveredTopologyRoom {
+                        hub_room_id: room.id.clone(),
+                        name: room.name.clone(),
+                        control_id: room.grouped_light_id.clone(),
+                        light_device_ids: room.device_ids.clone(),
+                        canonical_device_ids: canonical_device_ids.clone(),
+                    };
+                    let action = s.topology.sync_hub_room(&canonical_hub_key, &topo_room);
+                    let rhythm_room_id = action.rhythm_room_id().to_string();
+                    let canonical_room_assignments: Vec<(String, String)> = canonical_device_ids
+                        .iter()
+                        .map(|canonical_id| {
+                            let assigned_room_id = s
+                                .topology
+                                .device_parent_room_id(canonical_id)
+                                .map(str::to_string)
+                                .or_else(|| {
+                                    s.canonical_registry
+                                        .get(canonical_id)
+                                        .and_then(|device| device.room_id.clone())
+                                })
+                                .unwrap_or_else(|| rhythm_room_id.clone());
+                            (canonical_id.clone(), assigned_room_id)
+                        })
+                        .collect();
+
+                    for (canonical_id, assigned_room_id) in &canonical_room_assignments {
+                        s.canonical_registry
+                            .assign_room(canonical_id, Some(assigned_room_id));
+                    }
+
+                    // Queue room binding proposals for cross-hub name matches
+                    if let SyncAction::CreatedWithProposal {
+                        proposed_target_id,
+                        proposed_target_name,
+                        candidate_rooms,
+                        ..
+                    } = action
+                    {
+                        if !s
+                            .canonical_registry
+                            .triage()
+                            .has_room_binding(&canonical_hub_key, &room.id)
+                        {
+                            let entry = TriageEntry {
+                                id: format!("room-triage-{}-{}", now, room.id),
+                                kind: TriageKind::RoomBinding,
+                                discovered: TriageDiscoveredDevice::default(),
+                                hub_key: canonical_hub_key.clone(),
+                                candidate_matches: vec![],
+                                room_binding: Some(RoomBindingProposal {
+                                    hub_room_id: room.id.clone(),
+                                    hub_room_name: room.name.clone(),
+                                    control_id: room.grouped_light_id.clone(),
+                                    light_device_ids: room.device_ids.clone(),
+                                    canonical_device_ids,
+                                    target_rhythm_room_id: proposed_target_id,
+                                    target_rhythm_room_name: proposed_target_name,
+                                    candidate_rooms,
+                                }),
+                                confidence: 80,
+                                status: TriageStatus::Pending,
+                                resolved_by: None,
+                                created_at: now,
+                                resolved_at: None,
+                                canonical_id: None,
+                            };
+                            s.canonical_registry.triage_mut().add(entry);
+                            info!(
+                                target: "room_sync",
+                                "Queued room binding proposal: hub room '{}' → candidates",
+                                room.name
+                            );
+                        }
+                    }
+                }
+
+                // Persist canonical registry and topology
+                commands::persist_canonical(&s);
+                commands::persist_topology(&s);
+            }
+
+            let (affected_devices, hidden_devices) = commands::reconcile_hub_endpoint_visibility(
+                state,
+                &canonical_hub_key,
+                &discovered_native_ids,
+            )?;
+            if affected_devices > 0 {
+                info!(
+                    target: "room_sync",
+                    "Canonical endpoint visibility: {} devices updated, {} hidden",
+                    affected_devices,
+                    hidden_devices
+                );
+                #[cfg(feature = "desktop")]
+                crate::state::emit_server_event(
+                    state,
+                    crate::server_event::ServerEvent::NodesChanged,
+                );
+            }
+
+            info!(
+                target: "room_sync",
+                "Canonical resolution: {} identities processed, {} topology rooms synced",
+                identities.len(),
+                discovered_rooms.len()
+            );
+
+            // Phase 4d (engine remap) eliminated: do_room_set now uses
+            // translate_or_create to add rooms with topology IDs from the
+            // start, so no post-hoc remap is needed.
+        }
+
+        // ============================================================
+        // Phase 4e: Hub-configured device triage
+        // ============================================================
+        // Check for devices with native hub automation (e.g. Hue
+        // behavior_instances). These conflict with Rhythm and should
+        // be surfaced as triage items.
+        match discovery.discover_configured_devices() {
+            Ok(mappings) if !mappings.is_empty() => {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
 
-                let mut canonical_room_devices: HashMap<String, Vec<String>> = HashMap::new();
+                // Collect currently-configured device IDs for stale entry cleanup
+                let configured_device_ids: HashSet<&str> =
+                    mappings.iter().map(|(_, d)| d.as_str()).collect();
 
-                {
-                    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+                let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
-                    // Prune triage entries resolved more than 7 days ago
-                    let seven_days = 7 * 24 * 60 * 60;
-                    if now > seven_days {
-                        s.canonical_registry
-                            .triage_mut()
-                            .prune_resolved(now - seven_days);
-                    }
-
-                    // Dismiss pending DeviceMerge triage entries whose native_id
-                    // is no longer in the discovered identity set (e.g. HA virtual
-                    // group entities that are no longer produced).
-                    // RoomBinding entries are NOT checked here — they use
-                    // room_binding.hub_room_id, not discovered.native_id.
-                    let stale_triage: Vec<String> = s
-                        .canonical_registry
+                // Create triage entries for newly-configured devices
+                for (_, device_id) in &mappings {
+                    if s.canonical_registry
                         .triage()
-                        .pending()
-                        .iter()
-                        .filter(|e| {
-                            e.hub_key == canonical_hub_key
-                                && e.kind == crate::canonical::triage::TriageKind::DeviceMerge
-                                && !discovered_native_ids.contains(&e.discovered.native_id)
-                        })
-                        .map(|e| e.id.clone())
-                        .collect();
-                    for entry_id in &stale_triage {
-                        s.canonical_registry.triage_mut().dismiss(entry_id, now);
-                        info!(target: "room_sync", "Dismissed stale triage entry '{}'", entry_id);
+                        .has_hub_configured(&canonical_hub_key, device_id)
+                    {
+                        continue; // already pending
                     }
 
-                    for identity in &identities {
-                        let result =
-                            s.canonical_registry
-                                .resolve(identity, &canonical_hub_key, now);
-                        let canonical_id = match result {
-                            ResolveResult::AlreadyKnown { canonical_id } => canonical_id,
-                            ResolveResult::ReApproved { canonical_id } => canonical_id,
-                            ResolveResult::Queued { .. } => continue,
-                            ResolveResult::Created { canonical_id } => canonical_id,
-                        };
+                    // Look up device info from canonical registry
+                    let (name, device_type) = s
+                        .canonical_registry
+                        .find_by_native_id(&canonical_hub_key, device_id)
+                        .map(|cd| (cd.name.clone(), cd.device_type.clone()))
+                        .unwrap_or_else(|| (device_id.clone(), DeviceType::Button));
 
-                        if identity.room_id.is_empty() {
-                            let still_unassigned = s
-                                .canonical_registry
-                                .get(&canonical_id)
-                                .map(|device| device.room_id.is_none())
-                                .unwrap_or(false);
-                            if still_unassigned {
-                                s.canonical_registry.assign_room(&canonical_id, None);
-                                s.topology.ensure_standalone_device(&canonical_id);
-                            }
-                            continue;
-                        }
-
-                        canonical_room_devices
-                            .entry(identity.room_id.clone())
-                            .or_default()
-                            .push(canonical_id);
-                    }
-
-                    // ============================================================
-                    // Phase 4c: Topology sync
-                    // ============================================================
-                    for room in &discovered_rooms {
-                        let canonical_device_ids = canonical_room_devices
-                            .get(&room.id)
-                            .cloned()
-                            .unwrap_or_default();
-
-                        let topo_room = DiscoveredTopologyRoom {
-                            hub_room_id: room.id.clone(),
-                            name: room.name.clone(),
-                            control_id: room.grouped_light_id.clone(),
-                            light_device_ids: room.device_ids.clone(),
-                            canonical_device_ids: canonical_device_ids.clone(),
-                        };
-                        let action = s.topology.sync_hub_room(&canonical_hub_key, &topo_room);
-                        let rhythm_room_id = action.rhythm_room_id().to_string();
-                        let canonical_room_assignments: Vec<(String, String)> =
-                            canonical_device_ids
-                                .iter()
-                                .map(|canonical_id| {
-                                    let assigned_room_id = s
-                                        .topology
-                                        .device_parent_room_id(canonical_id)
-                                        .map(str::to_string)
-                                        .or_else(|| {
-                                            s.canonical_registry
-                                                .get(canonical_id)
-                                                .and_then(|device| device.room_id.clone())
-                                        })
-                                        .unwrap_or_else(|| rhythm_room_id.clone());
-                                    (canonical_id.clone(), assigned_room_id)
-                                })
-                                .collect();
-
-                        for (canonical_id, assigned_room_id) in &canonical_room_assignments {
-                            s.canonical_registry
-                                .assign_room(canonical_id, Some(assigned_room_id));
-                        }
-
-                        // Queue room binding proposals for cross-hub name matches
-                        if let SyncAction::CreatedWithProposal {
-                            proposed_target_id,
-                            proposed_target_name,
-                            candidate_rooms,
-                            ..
-                        } = action
-                        {
-                            if !s
-                                .canonical_registry
-                                .triage()
-                                .has_room_binding(&canonical_hub_key, &room.id)
-                            {
-                                let entry = TriageEntry {
-                                    id: format!("room-triage-{}-{}", now, room.id),
-                                    kind: TriageKind::RoomBinding,
-                                    discovered: TriageDiscoveredDevice::default(),
-                                    hub_key: canonical_hub_key.clone(),
-                                    candidate_matches: vec![],
-                                    room_binding: Some(RoomBindingProposal {
-                                        hub_room_id: room.id.clone(),
-                                        hub_room_name: room.name.clone(),
-                                        control_id: room.grouped_light_id.clone(),
-                                        light_device_ids: room.device_ids.clone(),
-                                        canonical_device_ids,
-                                        target_rhythm_room_id: proposed_target_id,
-                                        target_rhythm_room_name: proposed_target_name,
-                                        candidate_rooms,
-                                    }),
-                                    confidence: 80,
-                                    status: TriageStatus::Pending,
-                                    resolved_by: None,
-                                    created_at: now,
-                                    resolved_at: None,
-                                    canonical_id: None,
-                                };
-                                s.canonical_registry.triage_mut().add(entry);
-                                info!(target: "room_sync",
-                                    "Queued room binding proposal: hub room '{}' → candidates",
-                                    room.name
-                                );
-                            }
-                        }
-                    }
-
-                    // Persist canonical registry and topology
-                    commands::persist_canonical(&s);
-                    commands::persist_topology(&s);
-                }
-
-                let (affected_devices, hidden_devices) =
-                    commands::reconcile_hub_endpoint_visibility(
-                        state,
-                        &canonical_hub_key,
-                        &discovered_native_ids,
-                    )?;
-                if affected_devices > 0 {
+                    let entry = TriageEntry {
+                        id: format!("hub-configured-{}-{}", now, device_id),
+                        kind: TriageKind::HubConfigured,
+                        discovered: TriageDiscoveredDevice {
+                            native_id: device_id.clone(),
+                            name,
+                            device_type,
+                            room_id: String::new(),
+                            room_name: String::new(),
+                            manufacturer: None,
+                            model: None,
+                        },
+                        hub_key: canonical_hub_key.clone(),
+                        candidate_matches: vec![],
+                        room_binding: None,
+                        confidence: 0,
+                        status: TriageStatus::Pending,
+                        resolved_by: None,
+                        created_at: now,
+                        resolved_at: None,
+                        canonical_id: None,
+                    };
+                    s.canonical_registry.triage_mut().add(entry);
                     info!(
                         target: "room_sync",
-                        "Canonical endpoint visibility: {} devices updated, {} hidden",
-                        affected_devices,
-                        hidden_devices
-                    );
-                    #[cfg(feature = "desktop")]
-                    crate::state::emit_server_event(
-                        state,
-                        crate::server_event::ServerEvent::NodesChanged,
+                        "Queued HubConfigured triage: device '{}' has native automation",
+                        device_id
                     );
                 }
 
-                info!(target: "room_sync",
-                    "Canonical resolution: {} identities processed, {} topology rooms synced",
-                    identities.len(), discovered_rooms.len());
+                // Auto-resolve stale HubConfigured entries for devices that
+                // no longer have behavior_instances (user removed them in Hue app)
+                let stale_ids: Vec<String> = s
+                    .canonical_registry
+                    .triage()
+                    .pending_by_kind(TriageKind::HubConfigured)
+                    .iter()
+                    .filter(|e| {
+                        e.hub_key == canonical_hub_key
+                            && !configured_device_ids.contains(e.discovered.native_id.as_str())
+                    })
+                    .map(|e| e.id.clone())
+                    .collect();
+                for entry_id in &stale_ids {
+                    s.canonical_registry.triage_mut().resolve(
+                        entry_id,
+                        TriageStatus::Confirmed,
+                        "auto",
+                        now,
+                    );
+                    info!(
+                        target: "room_sync",
+                        "Auto-resolved HubConfigured triage '{}': behavior removed",
+                        entry_id
+                    );
+                }
 
-                // Phase 4d (engine remap) eliminated: do_room_set now uses
-                // translate_or_create to add rooms with topology IDs from the
-                // start, so no post-hoc remap is needed.
+                if !mappings.is_empty() || !stale_ids.is_empty() {
+                    commands::persist_canonical(&s);
+                }
             }
-
-            // ============================================================
-            // Phase 4e: Hub-configured device triage
-            // ============================================================
-            // Check for devices with native hub automation (e.g. Hue
-            // behavior_instances). These conflict with Rhythm and should
-            // be surfaced as triage items.
-            match discovery.discover_configured_devices() {
-                Ok(mappings) if !mappings.is_empty() => {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-
-                    // Collect currently-configured device IDs for stale entry cleanup
-                    let configured_device_ids: HashSet<&str> =
-                        mappings.iter().map(|(_, d)| d.as_str()).collect();
-
-                    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-
-                    // Create triage entries for newly-configured devices
-                    for (_, device_id) in &mappings {
-                        if s.canonical_registry
-                            .triage()
-                            .has_hub_configured(&canonical_hub_key, device_id)
-                        {
-                            continue; // already pending
-                        }
-
-                        // Look up device info from canonical registry
-                        let (name, device_type) = s
-                            .canonical_registry
-                            .find_by_native_id(&canonical_hub_key, device_id)
-                            .map(|cd| (cd.name.clone(), cd.device_type.clone()))
-                            .unwrap_or_else(|| (device_id.clone(), DeviceType::Button));
-
-                        let entry = TriageEntry {
-                            id: format!("hub-configured-{}-{}", now, device_id),
-                            kind: TriageKind::HubConfigured,
-                            discovered: TriageDiscoveredDevice {
-                                native_id: device_id.clone(),
-                                name,
-                                device_type,
-                                room_id: String::new(),
-                                room_name: String::new(),
-                                manufacturer: None,
-                                model: None,
-                            },
-                            hub_key: canonical_hub_key.clone(),
-                            candidate_matches: vec![],
-                            room_binding: None,
-                            confidence: 0,
-                            status: TriageStatus::Pending,
-                            resolved_by: None,
-                            created_at: now,
-                            resolved_at: None,
-                            canonical_id: None,
-                        };
-                        s.canonical_registry.triage_mut().add(entry);
-                        info!(target: "room_sync",
-                            "Queued HubConfigured triage: device '{}' has native automation",
-                            device_id);
-                    }
-
-                    // Auto-resolve stale HubConfigured entries for devices that
-                    // no longer have behavior_instances (user removed them in Hue app)
-                    let stale_ids: Vec<String> = s
-                        .canonical_registry
-                        .triage()
-                        .pending_by_kind(TriageKind::HubConfigured)
-                        .iter()
-                        .filter(|e| {
-                            e.hub_key == canonical_hub_key
-                                && !configured_device_ids.contains(e.discovered.native_id.as_str())
-                        })
-                        .map(|e| e.id.clone())
-                        .collect();
-                    for entry_id in &stale_ids {
-                        s.canonical_registry.triage_mut().resolve(
-                            entry_id,
-                            TriageStatus::Confirmed,
-                            "auto",
-                            now,
-                        );
-                        info!(target: "room_sync",
-                            "Auto-resolved HubConfigured triage '{}': behavior removed",
-                            entry_id);
-                    }
-
-                    if !mappings.is_empty() || !stale_ids.is_empty() {
-                        commands::persist_canonical(&s);
-                    }
-                }
-                Ok(_) => {} // no configured devices
-                Err(e) => {
-                    warn!(target: "room_sync",
-                        "Behavior instance discovery failed (non-fatal): {}", e);
-                }
+            Ok(_) => {} // no configured devices
+            Err(e) => {
+                warn!(target: "room_sync",
+                    "Behavior instance discovery failed (non-fatal): {}", e);
             }
         }
     }
@@ -696,7 +691,7 @@ fn sync_with_discovery(
                 .filter_map(|ms| {
                     commands::resolve_node_control_target(
                         state,
-                        hub_key,
+                        Some(hub_key),
                         &ms.sensor_id,
                         &ms.room_id,
                         &crate::topology::NodeControlKind::Motion,
@@ -751,22 +746,12 @@ fn sync_with_discovery(
     Ok(report)
 }
 
-/// Extract registry Arc from state (brief lock).
-fn extract_registry(state: &SharedState) -> Option<Arc<Mutex<dyn HubRegistry>>> {
-    state
-        .lock()
-        .ok()
-        .and_then(|s| s.hubs.values().find_map(|hub| hub.registry.clone()))
-}
-
-/// Extract registry for a specific hub, falling back to first hub if no key provided.
+/// Extract registry for a specific hub.
 fn extract_registry_for(
     state: &SharedState,
-    hub_key: Option<&HubKey>,
+    hub_key: &HubKey,
 ) -> Option<Arc<Mutex<dyn HubRegistry>>> {
-    hub_key
-        .and_then(|k| state.lock().ok().and_then(|s| s.hub_registry_for(k)))
-        .or_else(|| extract_registry(state))
+    state.lock().ok().and_then(|s| s.hub_registry_for(hub_key))
 }
 
 /// Get all managed (typed) device IDs with their types from the registry.
@@ -776,7 +761,7 @@ fn extract_registry_for(
 /// When `hub_key` is provided, only returns devices from that hub's registry.
 fn get_all_typed_device_ids_with_types(
     state: &SharedState,
-    hub_key: Option<&HubKey>,
+    hub_key: &HubKey,
 ) -> Vec<(String, rhythm_core::runtime::hub_registry::DeviceType)> {
     let registry = extract_registry_for(state, hub_key);
     registry

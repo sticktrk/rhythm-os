@@ -85,7 +85,6 @@ pub enum UpdateReason {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReleaseArtifactKind {
-    Binary,
     ArchiveBundle,
     DiskImage,
     RootfsImage,
@@ -1614,7 +1613,7 @@ mod tests {
                 url: "v1/rhythm-server-rpiz.tar.gz".to_string(),
                 sha256: None,
                 size: None,
-                kind: Some(ReleaseArtifactKind::Binary),
+                kind: Some(ReleaseArtifactKind::DiskImage),
                 compression: None,
                 install: Vec::new(),
             },

@@ -21,10 +21,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use rhythm_core::runtime::hub_registry::DeviceType;
-
 use crate::api_types::{HubCredentialsResponse, NodesResponse, SyncResponse};
-use crate::commands::{self, RoomParams};
+use crate::commands::{self};
 use crate::logging;
 use crate::state::SharedState;
 use crate::topology::NodeControlKind;
@@ -332,87 +330,6 @@ pub fn handle_get_nodes_state(state: &SharedState) -> ApiResponse {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
     }
-}
-
-/// Upsert room(s). Accepts single object or array.
-///
-/// Always returns `{"rooms":[...]}` regardless of count.
-pub fn handle_put_rooms(state: &SharedState, body: &Value, persist: bool) -> ApiResponse {
-    let rooms: Vec<Value> = if body.is_array() {
-        body.as_array().cloned().unwrap_or_default()
-    } else {
-        vec![body.clone()]
-    };
-
-    let mut results = Vec::new();
-    let batch = rooms.len() > 1;
-
-    for room_json in &rooms {
-        match RoomParams::from_json(room_json) {
-            Ok(params) => {
-                let per_room_persist = persist && !batch;
-                match commands::do_room_set(state, &params, None, per_room_persist, true) {
-                    Ok(json) => results.push(json),
-                    Err(e) => return ApiResponse::server_error(e),
-                }
-            }
-            Err(e) => return ApiResponse::bad_request(&e.to_string()),
-        }
-    }
-
-    if batch && persist {
-        commands::persist_state(state);
-    }
-
-    ApiResponse::json_ok(format!(r#"{{"rooms":[{}]}}"#, results.join(",")))
-}
-
-/// Upsert device(s). Accepts single object or array.
-///
-/// Supports optional `"device_type"` field (default: `"button"`).
-pub fn handle_put_devices(state: &SharedState, body: &Value, persist: bool) -> ApiResponse {
-    let devices: Vec<Value> = if body.is_array() {
-        body.as_array().cloned().unwrap_or_default()
-    } else {
-        vec![body.clone()]
-    };
-
-    let batch = devices.len() > 1;
-
-    for dev in &devices {
-        let device_id = match dev.get("device_id").and_then(|v| v.as_str()) {
-            Some(id) => id,
-            None => return ApiResponse::bad_request("Missing device.device_id"),
-        };
-        let room_id = match dev.get("room_id").and_then(|v| v.as_str()) {
-            Some(id) => id,
-            None => return ApiResponse::bad_request("Missing device.room_id"),
-        };
-        let buttons = commands::parse_buttons(dev);
-        let device_type = match dev.get("device_type").and_then(|v| v.as_str()) {
-            Some("motion") => DeviceType::Motion,
-            Some("light") => DeviceType::Light,
-            _ => DeviceType::Button, // default
-        };
-        let per_item_persist = persist && !batch;
-        if let Err(e) = commands::do_device_set(
-            state,
-            device_id,
-            room_id,
-            &buttons,
-            device_type,
-            None,
-            per_item_persist,
-        ) {
-            return ApiResponse::server_error(e);
-        }
-    }
-
-    if batch && persist {
-        commands::persist_state(state);
-    }
-
-    ApiResponse::no_content()
 }
 
 fn perform_unpair_device(
@@ -1798,22 +1715,6 @@ mod tests {
     }
 
     #[test]
-    fn put_devices_missing_device_id() {
-        let state = test_state();
-        let r = handle_put_devices(&state, &json!({"room_id": "r"}), true);
-        assert_eq!(r.status, 400);
-        assert!(r.body.contains("device_id"));
-    }
-
-    #[test]
-    fn put_devices_missing_room_id() {
-        let state = test_state();
-        let r = handle_put_devices(&state, &json!({"device_id": "d"}), true);
-        assert_eq!(r.status, 400);
-        assert!(r.body.contains("room_id"));
-    }
-
-    #[test]
     fn put_motion_timeout_missing_node_id() {
         let state = test_state();
         let r = handle_put_motion_timeout(&state, &json!({"timeout_secs": 60}));
@@ -2683,20 +2584,6 @@ mod tests {
         );
         assert_eq!(r.status, 400);
         assert!(r.body.contains("Invalid control kind"));
-    }
-
-    #[test]
-    fn put_devices_returns_204() {
-        let state = handler_state_with_runtime();
-        let r = handle_put_devices(
-            &state,
-            &json!({
-                "device_id": "d1", "room_id": "room1"
-            }),
-            false,
-        );
-        assert_eq!(r.status, 204);
-        assert!(r.body.is_empty());
     }
 
     #[test]

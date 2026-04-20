@@ -489,7 +489,7 @@ pub fn integration_callbacks(
 
     let ensure_runtime_fn = Arc::new(move |state: &SharedState| -> Result<()> {
         // Use composite runtime on desktop (creates CompositeController + single shared runtime).
-        // Falls back to per-integration ensure_runtime for backward compat (ESP32).
+        // Non-blocking platforms still delegate to the integration-specific runtime initializer.
         #[cfg(feature = "blocking")]
         {
             #[allow(clippy::needless_return)]
@@ -499,31 +499,34 @@ pub fn integration_callbacks(
         {
             let hub_type_str = {
                 let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-                s.hub_credentials
-                    .values()
-                    .find(|creds| creds.can_connect())
-                    .and_then(|c| c.hub_type.as_ref().map(|t| t.as_str().to_string()))
-            };
-            if let Some(ht) = &hub_type_str {
-                if let Some(integration) = find_integration(integrations, ht) {
-                    return integration.ensure_runtime(state);
-                }
+                s.hubs
+                    .keys()
+                    .next()
+                    .map(|key| key.hub_type.as_str().to_string())
+                    .or_else(|| {
+                        s.hub_credentials
+                            .values()
+                            .find(|creds| creds.can_connect())
+                            .and_then(|c| c.hub_type.as_ref().map(|t| t.as_str().to_string()))
+                    })
             }
-            if let Some(integration) = integrations.first() {
-                return integration.ensure_runtime(state);
-            }
-            Err(anyhow::anyhow!("No integrations registered"))
+            .ok_or_else(|| anyhow::anyhow!("No active or connectable hub available"))?;
+
+            let integration = find_integration(integrations, &hub_type_str).ok_or_else(|| {
+                anyhow::anyhow!("No integration registered for hub type: {}", hub_type_str)
+            })?;
+            integration.ensure_runtime(state)
         }
     });
 
     let get_hub_provider_fn = Arc::new(move |hub_type: HubType| -> &'static dyn HubProvider {
-        if let Some(integration) = find_integration(integrations, hub_type.as_str()) {
-            return integration.provider();
-        }
-        // Fallback: first integration's provider
-        integrations
-            .first()
-            .expect("No integrations registered")
+        find_integration(integrations, hub_type.as_str())
+            .unwrap_or_else(|| {
+                panic!(
+                    "No integration registered for hub type: {}",
+                    hub_type.as_str()
+                )
+            })
             .provider()
     });
 
@@ -713,12 +716,31 @@ mod tests {
     }
 
     #[test]
-    fn provider_callback_falls_back_to_first() {
+    #[should_panic(expected = "No integration registered for hub type: unknown")]
+    fn provider_callback_panics_for_unknown_hub_type() {
         let callbacks = integration_callbacks(TEST_INTEGRATIONS);
 
-        // Unknown hub type should fall back to first integration (hue)
-        let fallback = (callbacks.get_hub_provider_fn)(HubType::new("unknown"));
-        assert_eq!(fallback.hub_type().as_str(), "hue");
+        let _ = (callbacks.get_hub_provider_fn)(HubType::new("unknown"));
+    }
+
+    #[cfg(not(feature = "blocking"))]
+    #[test]
+    fn ensure_runtime_callback_errors_for_unknown_connectable_hub_type() {
+        let callbacks = integration_callbacks(TEST_INTEGRATIONS);
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+
+        {
+            let mut s = state.lock().unwrap();
+            s.hub_credentials.insert(
+                HubKey::new(HubType::new("unknown"), "local"),
+                HubCredentials::new("unknown", "local", serde_json::json!({"token": "test"})),
+            );
+        }
+
+        let error = (callbacks.ensure_runtime_fn)(&state)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "No integration registered for hub type: unknown");
     }
 
     #[test]

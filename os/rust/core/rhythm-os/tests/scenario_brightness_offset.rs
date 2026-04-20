@@ -7,7 +7,7 @@
 //! ## API journey
 //!
 //! 1. User taps room card → step up/down buttons on card
-//! 2. Drags brightness slider → PUT /api/rooms/brightness
+//! 2. Drags brightness slider → PUT /api/nodes/brightness
 //! 3. Multiple taps accumulate offsets along the curve
 //! 4. Reset returns to current adaptive position (zeroes all offsets)
 //!

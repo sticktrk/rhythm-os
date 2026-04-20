@@ -50,12 +50,7 @@ impl MatterLightController {
         Some((node_id, endpoint))
     }
 
-    /// Resolve the concrete Matter device IDs for a room or direct device target.
-    ///
-    /// Assigned devices are stored in the hub registry under a synthetic
-    /// per-device room, while newly paired roomless devices may arrive here as a
-    /// raw `matter-{node}` identifier through the composite controller's
-    /// single-hub fallback routing. Accept both forms.
+    /// Resolve the concrete Matter device IDs for a registry-backed room target.
     fn target_device_ids(&self, room_id: &str) -> LightControlResult<Vec<String>> {
         let registry =
             self.hub_data.registry.lock().map_err(|e| {
@@ -65,10 +60,6 @@ impl MatterLightController {
         let device_ids = registry.get_light_entities(room_id);
         if !device_ids.is_empty() || registry.get_grouped_light_id(room_id).is_some() {
             return Ok(device_ids);
-        }
-
-        if Self::parse_device_id(room_id).is_some() {
-            return Ok(vec![room_id.to_string()]);
         }
 
         Err(LightControlError::RoomNotFound(format!(
@@ -740,10 +731,16 @@ mod tests {
     }
 
     #[test]
-    fn turn_on_direct_device_id_without_registry_room_succeeds() {
+    fn turn_on_direct_device_target_succeeds() {
         let (controller, spy, _) = make_controller();
 
-        block_on(controller.turn_on("matter-42", LightingCommand::new(50, 3000))).unwrap();
+        block_on(controller.turn_on_target(
+            &HubDispatchTarget::Devices {
+                native_ids: vec!["matter-42".to_string()],
+            },
+            LightingCommand::new(50, 3000),
+        ))
+        .unwrap();
 
         assert!(
             spy.operations().iter().any(|operation| matches!(
@@ -752,6 +749,15 @@ mod tests {
             )),
             "expected direct device control to address node 42",
         );
+    }
+
+    #[test]
+    fn turn_on_direct_device_id_without_registry_room_errors() {
+        let (controller, _, _) = make_controller();
+
+        let error =
+            block_on(controller.turn_on("matter-42", LightingCommand::new(50, 3000))).unwrap_err();
+        assert!(matches!(error, LightControlError::RoomNotFound(_)));
     }
 
     #[test]
@@ -778,10 +784,16 @@ mod tests {
     }
 
     #[test]
-    fn turn_off_direct_device_id_without_registry_room_succeeds() {
+    fn turn_off_direct_device_target_succeeds() {
         let (controller, spy, _) = make_controller();
 
-        block_on(controller.turn_off("matter-42", None)).unwrap();
+        block_on(controller.turn_off_target(
+            &HubDispatchTarget::Devices {
+                native_ids: vec!["matter-42".to_string()],
+            },
+            None,
+        ))
+        .unwrap();
 
         assert_eq!(
             spy.operations(),
@@ -810,11 +822,16 @@ mod tests {
     }
 
     #[test]
-    fn any_lights_on_direct_device_id_reads_state() {
+    fn any_lights_on_direct_device_target_reads_state() {
         let (controller, spy, _) = make_controller();
         spy.set_on_off_state(42, true);
 
-        let result = block_on(controller.any_lights_on("matter-42")).unwrap();
+        let result = block_on(
+            controller.any_lights_on_target(&HubDispatchTarget::Devices {
+                native_ids: vec!["matter-42".to_string()],
+            }),
+        )
+        .unwrap();
         assert!(result);
     }
 
@@ -910,7 +927,13 @@ mod tests {
             max_kelvin: Some(6500),
         });
 
-        block_on(controller.turn_on("matter-42", LightingCommand::new(50, 3000))).unwrap();
+        block_on(controller.turn_on_target(
+            &HubDispatchTarget::Devices {
+                native_ids: vec!["matter-42".to_string()],
+            },
+            LightingCommand::new(50, 3000),
+        ))
+        .unwrap();
 
         assert!(spy.operations().iter().any(|operation| matches!(
             operation,
