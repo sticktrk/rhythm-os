@@ -1,9 +1,11 @@
 //! Self-update from a static OTA feed.
 //!
-//! Prefers a per-platform `manifest.json` feed hosted outside the repo, with
-//! an optional GitHub-release fallback for legacy/manual flows.
+//! Prefers a per-platform `manifest.json` feed hosted outside the repo. The
+//! manifest can advertise a legacy single-binary payload for existing clients,
+//! a bundle payload for coordinated `rhythm-server`/`rhythm-chipd` updates, and
+//! future full-image artifacts for appliance update flows.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -39,6 +41,22 @@ pub enum OtaUpdateState {
     Error,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateReason {
+    VersionMismatch,
+    ComponentDrift,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseArtifactKind {
+    Binary,
+    ArchiveBundle,
+    DiskImage,
+    RootfsImage,
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 pub struct OtaCapabilities {
@@ -49,6 +67,28 @@ pub struct OtaCapabilities {
     pub can_upload: bool,
     pub requires_restart: bool,
     pub rollback: &'static str,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub payloads: Vec<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct UpdateTargetSummary {
+    pub archive_path: String,
+    pub destination: String,
+    pub required: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct UpdateImageAsset {
+    pub name: String,
+    pub kind: ReleaseArtifactKind,
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compression: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -63,9 +103,15 @@ pub struct OtaStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub update_available: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_reason: Option<UpdateReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub checked_at_epoch_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checksum_verified: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub install_targets: Vec<UpdateTargetSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_assets: Vec<UpdateImageAsset>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,8 +134,11 @@ impl OtaStatusHandle {
                 latest_version: None,
                 target_version: None,
                 update_available: None,
+                update_reason: None,
                 checked_at_epoch_ms: None,
                 checksum_verified: None,
+                install_targets: Vec::new(),
+                image_assets: Vec::new(),
                 message: None,
                 last_error: None,
             })),
@@ -99,12 +148,13 @@ impl OtaStatusHandle {
     pub fn capabilities(&self) -> OtaCapabilities {
         OtaCapabilities {
             strategy: "self_pull",
-            scope: "binary",
+            scope: "component_bundle",
             can_check: true,
             can_update: true,
             can_upload: false,
             requires_restart: true,
-            rollback: "manual",
+            rollback: "backup_files",
+            payloads: vec!["legacy_binary", "archive_bundle", "image_manifest"],
         }
     }
 
@@ -118,8 +168,11 @@ impl OtaStatusHandle {
                 latest_version: None,
                 target_version: None,
                 update_available: None,
+                update_reason: None,
                 checked_at_epoch_ms: Some(now_ms()),
                 checksum_verified: None,
+                install_targets: Vec::new(),
+                image_assets: Vec::new(),
                 message: Some("OTA state lock poisoned".to_string()),
                 last_error: Some("OTA state lock poisoned".to_string()),
             })
@@ -130,7 +183,10 @@ impl OtaStatusHandle {
             status.state = OtaUpdateState::Checking;
             status.checked_at_epoch_ms = Some(now_ms());
             status.target_version = None;
+            status.update_reason = None;
             status.checksum_verified = None;
+            status.install_targets.clear();
+            status.image_assets.clear();
             status.message = Some("Checking for updates...".to_string());
             status.last_error = None;
         });
@@ -145,13 +201,20 @@ impl OtaStatusHandle {
             };
             status.latest_version = Some(info.latest_version.clone());
             status.update_available = Some(info.update_available);
+            status.update_reason = info.update_reason;
             status.checked_at_epoch_ms = Some(now_ms());
             status.target_version = None;
             status.checksum_verified = None;
-            status.message = Some(if info.update_available {
-                format!("Update available: v{}", info.latest_version)
-            } else {
-                "Already up to date".to_string()
+            status.install_targets = info.install_targets.clone();
+            status.image_assets = info.image_assets.clone();
+            status.message = Some(match info.update_reason {
+                Some(UpdateReason::VersionMismatch) => {
+                    format!("Update available: v{}", info.latest_version)
+                }
+                Some(UpdateReason::ComponentDrift) => {
+                    format!("Repairing OTA bundle for v{}", info.latest_version)
+                }
+                None => "Already up to date".to_string(),
             });
             status.last_error = None;
         });
@@ -189,12 +252,17 @@ impl OtaStatusHandle {
             status.latest_version = Some(new_version.to_string());
             status.target_version = Some(new_version.to_string());
             status.update_available = Some(false);
+            status.update_reason = None;
             status.checked_at_epoch_ms = Some(now_ms());
             status.checksum_verified = checksum_verified;
-            status.message = Some(format!(
-                "Updated from v{} to v{}, restarting...",
-                previous_version, new_version
-            ));
+            status.message = Some(if previous_version == new_version {
+                format!("Updated OTA bundle for v{}, restarting...", new_version)
+            } else {
+                format!(
+                    "Updated from v{} to v{}, restarting...",
+                    previous_version, new_version
+                )
+            });
             status.last_error = None;
         });
     }
@@ -221,14 +289,40 @@ pub struct UpdateInfo {
     pub current_version: String,
     pub latest_version: String,
     pub update_available: bool,
+    pub update_reason: Option<UpdateReason>,
     pub download_url: Option<String>,
     pub checksum_url: Option<String>,
     pub expected_sha256: Option<String>,
     pub asset_name: Option<String>,
+    pub install_targets: Vec<UpdateTargetSummary>,
+    pub image_assets: Vec<UpdateImageAsset>,
+    resolved_install_targets: Vec<InstallTarget>,
 }
 
 pub struct ApplyResult {
     pub checksum_verified: Option<bool>,
+    pub installed_targets: Vec<String>,
+}
+
+impl UpdateInfo {
+    pub fn apply_blocking(&self) -> Result<ApplyResult, String> {
+        let download_url = self
+            .download_url
+            .as_deref()
+            .ok_or_else(|| "No download URL for this platform".to_string())?;
+        let asset_name = self
+            .asset_name
+            .as_deref()
+            .ok_or_else(|| "No release asset for this platform".to_string())?;
+
+        apply_payload_blocking(
+            download_url,
+            asset_name,
+            self.expected_sha256.as_deref(),
+            self.checksum_url.as_deref(),
+            &self.resolved_install_targets,
+        )
+    }
 }
 
 #[derive(Deserialize)]
@@ -246,9 +340,87 @@ struct Asset {
 #[derive(Deserialize)]
 struct UpdateManifest {
     version: String,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default)]
+    package: Option<ManifestArtifact>,
+    #[serde(default)]
+    images: Vec<ManifestArtifact>,
+}
+
+#[derive(Clone, Deserialize)]
+struct ManifestArtifact {
+    name: String,
     url: String,
     #[serde(default)]
     sha256: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    kind: Option<ReleaseArtifactKind>,
+    #[serde(default)]
+    compression: Option<String>,
+    #[serde(default)]
+    install: Vec<ManifestInstallTarget>,
+}
+
+#[derive(Clone, Deserialize)]
+struct ManifestInstallTarget {
+    #[serde(default)]
+    archive_path: Option<String>,
+    #[serde(default)]
+    slot: InstallSlot,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default = "default_required")]
+    required: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+enum InstallSlot {
+    #[default]
+    #[serde(rename = "self")]
+    Current,
+    #[serde(rename = "sibling")]
+    Sibling,
+    #[serde(rename = "absolute")]
+    Absolute,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedPackage {
+    asset_name: String,
+    download_url: String,
+    expected_sha256: Option<String>,
+    checksum_url: Option<String>,
+    install_targets: Vec<InstallTarget>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InstallTarget {
+    archive_path: String,
+    destination: PathBuf,
+    required: bool,
+}
+
+#[derive(Clone, Debug)]
+struct StagedInstallTarget {
+    spec: InstallTarget,
+    stage_path: PathBuf,
+    backup_path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct AppliedInstallTarget {
+    destination: PathBuf,
+    backup_path: PathBuf,
+    previously_existed: bool,
+}
+
+fn default_required() -> bool {
+    true
 }
 
 fn now_ms() -> i64 {
@@ -258,26 +430,26 @@ fn now_ms() -> i64 {
 fn platform_asset_names() -> Option<Vec<&'static str>> {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         Some(vec![
-            "rhythm-server-macos-arm64",
             "rhythm-server-macos-arm64.tar.gz",
+            "rhythm-server-macos-arm64",
         ])
     } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
         Some(vec![
-            "rhythm-server-macos-x86_64",
             "rhythm-server-macos-x86_64.tar.gz",
+            "rhythm-server-macos-x86_64",
         ])
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         Some(vec![
-            "rhythm-server-linux-amd64",
             "rhythm-server-linux-amd64.tar.gz",
+            "rhythm-server-linux-amd64",
         ])
     } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         Some(vec![
-            "rhythm-server-linux-aarch64",
             "rhythm-server-linux-aarch64.tar.gz",
+            "rhythm-server-linux-aarch64",
         ])
     } else if cfg!(all(target_os = "linux", target_arch = "arm")) {
-        Some(vec!["rhythm-server-rpiz", "rhythm-server-rpiz.tar.gz"])
+        Some(vec!["rhythm-server-rpiz.tar.gz", "rhythm-server-rpiz"])
     } else {
         None
     }
@@ -349,18 +521,43 @@ fn check_manifest_blocking(current_version: &str) -> Result<UpdateInfo, String> 
     let manifest: UpdateManifest = resp
         .json()
         .map_err(|e| format!("Failed to parse update manifest: {}", e))?;
-    let download_url = resolve_download_url(&manifest_url, &manifest.url)?;
-    let asset_name = asset_name_from_url(&download_url)?;
-    let update_available = manifest.version != current_version;
+    let install_root = install_target_executable()?;
+    let package = resolve_manifest_package(&manifest_url, &manifest, &install_root)?;
+    let image_assets = manifest
+        .images
+        .iter()
+        .map(|image| resolve_manifest_image(&manifest_url, image))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let version_mismatch = manifest.version != current_version;
+    let component_drift = !version_mismatch
+        && detect_component_drift(&manifest.version, &install_root, &package.install_targets);
+
+    let update_reason = if version_mismatch {
+        Some(UpdateReason::VersionMismatch)
+    } else if component_drift {
+        Some(UpdateReason::ComponentDrift)
+    } else {
+        None
+    };
+    let update_available = update_reason.is_some();
 
     Ok(UpdateInfo {
         current_version: current_version.to_string(),
         latest_version: manifest.version.clone(),
         update_available,
-        download_url: update_available.then_some(download_url),
-        checksum_url: None,
-        expected_sha256: update_available.then_some(manifest.sha256).flatten(),
-        asset_name: update_available.then_some(asset_name),
+        update_reason,
+        download_url: update_available.then_some(package.download_url.clone()),
+        checksum_url: update_available
+            .then_some(package.checksum_url.clone())
+            .flatten(),
+        expected_sha256: update_available
+            .then_some(package.expected_sha256.clone())
+            .flatten(),
+        asset_name: update_available.then_some(package.asset_name.clone()),
+        install_targets: install_targets_to_summaries(&package.install_targets),
+        image_assets,
+        resolved_install_targets: package.install_targets,
     })
 }
 
@@ -402,8 +599,259 @@ fn asset_name_from_url(download_url: &str) -> Result<String, String> {
         .ok_or_else(|| "Update URL did not contain a filename".to_string())
 }
 
+fn resolve_manifest_package(
+    manifest_url: &str,
+    manifest: &UpdateManifest,
+    install_root: &Path,
+) -> Result<ResolvedPackage, String> {
+    if let Some(package) = &manifest.package {
+        return resolve_package_artifact(manifest_url, package, install_root);
+    }
+
+    let legacy_url = manifest
+        .url
+        .as_deref()
+        .ok_or_else(|| "Update manifest did not provide a downloadable payload".to_string())?;
+    let download_url = resolve_download_url(manifest_url, legacy_url)?;
+    let asset_name = asset_name_from_url(&download_url)?;
+    let install_targets = infer_install_targets(&asset_name, install_root);
+
+    Ok(ResolvedPackage {
+        asset_name,
+        download_url,
+        expected_sha256: manifest.sha256.clone(),
+        checksum_url: None,
+        install_targets,
+    })
+}
+
+fn resolve_package_artifact(
+    manifest_url: &str,
+    artifact: &ManifestArtifact,
+    install_root: &Path,
+) -> Result<ResolvedPackage, String> {
+    let download_url = resolve_download_url(manifest_url, &artifact.url)?;
+    let asset_name = if artifact.name.is_empty() {
+        asset_name_from_url(&download_url)?
+    } else {
+        artifact.name.clone()
+    };
+    let install_targets = if artifact.install.is_empty() {
+        infer_install_targets(&asset_name, install_root)
+    } else {
+        resolve_manifest_install_targets(&artifact.install, install_root)?
+    };
+
+    Ok(ResolvedPackage {
+        asset_name,
+        download_url,
+        expected_sha256: artifact.sha256.clone(),
+        checksum_url: None,
+        install_targets,
+    })
+}
+
+fn resolve_manifest_install_targets(
+    specs: &[ManifestInstallTarget],
+    install_root: &Path,
+) -> Result<Vec<InstallTarget>, String> {
+    let mut targets = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let destination =
+            match spec.slot {
+                InstallSlot::Current => install_root.to_path_buf(),
+                InstallSlot::Sibling => {
+                    let relative = spec.path.as_deref().ok_or_else(|| {
+                        "Install target with slot=sibling requires a path".to_string()
+                    })?;
+                    let parent = install_root
+                        .parent()
+                        .ok_or_else(|| "Install target had no parent directory".to_string())?;
+                    parent.join(relative)
+                }
+                InstallSlot::Absolute => PathBuf::from(spec.path.as_deref().ok_or_else(|| {
+                    "Install target with slot=absolute requires a path".to_string()
+                })?),
+            };
+
+        let archive_path = match &spec.archive_path {
+            Some(path) => path.clone(),
+            None => default_archive_path(spec, &destination)?,
+        };
+
+        targets.push(InstallTarget {
+            archive_path,
+            destination,
+            required: spec.required,
+        });
+    }
+
+    Ok(targets)
+}
+
+fn default_archive_path(
+    spec: &ManifestInstallTarget,
+    destination: &Path,
+) -> Result<String, String> {
+    if spec.slot == InstallSlot::Current {
+        return Ok("rhythm-server".to_string());
+    }
+
+    destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+        .ok_or_else(|| {
+            format!(
+                "Cannot infer archive path for install target {}",
+                destination.display()
+            )
+        })
+}
+
+fn resolve_manifest_image(
+    manifest_url: &str,
+    artifact: &ManifestArtifact,
+) -> Result<UpdateImageAsset, String> {
+    let download_url = resolve_download_url(manifest_url, &artifact.url)?;
+    let name = if artifact.name.is_empty() {
+        asset_name_from_url(&download_url)?
+    } else {
+        artifact.name.clone()
+    };
+    let kind = artifact.kind.unwrap_or_else(|| infer_image_kind(&name));
+
+    Ok(UpdateImageAsset {
+        name,
+        kind,
+        url: download_url,
+        sha256: artifact.sha256.clone(),
+        size: artifact.size,
+        compression: artifact.compression.clone(),
+    })
+}
+
+fn infer_image_kind(name: &str) -> ReleaseArtifactKind {
+    if name.starts_with("rootfs.") {
+        ReleaseArtifactKind::RootfsImage
+    } else {
+        ReleaseArtifactKind::DiskImage
+    }
+}
+
+fn infer_install_targets(asset_name: &str, install_root: &Path) -> Vec<InstallTarget> {
+    if asset_name.ends_with(".tar.gz") {
+        default_bundle_install_targets(install_root)
+    } else {
+        vec![InstallTarget {
+            archive_path: "rhythm-server".to_string(),
+            destination: install_root.to_path_buf(),
+            required: true,
+        }]
+    }
+}
+
+fn default_bundle_install_targets(install_root: &Path) -> Vec<InstallTarget> {
+    let parent = install_root.parent().unwrap_or_else(|| Path::new("."));
+    vec![
+        InstallTarget {
+            archive_path: "rhythm-server".to_string(),
+            destination: install_root.to_path_buf(),
+            required: true,
+        },
+        InstallTarget {
+            archive_path: "rhythm-chipd".to_string(),
+            destination: parent.join("rhythm-chipd"),
+            required: true,
+        },
+        InstallTarget {
+            archive_path: "rhythm-cli".to_string(),
+            destination: parent.join("rhythm-cli"),
+            required: false,
+        },
+    ]
+}
+
+fn install_targets_to_summaries(targets: &[InstallTarget]) -> Vec<UpdateTargetSummary> {
+    targets
+        .iter()
+        .map(|target| UpdateTargetSummary {
+            archive_path: target.archive_path.clone(),
+            destination: target.destination.display().to_string(),
+            required: target.required,
+        })
+        .collect()
+}
+
+fn detect_component_drift(
+    latest_version: &str,
+    install_root: &Path,
+    targets: &[InstallTarget],
+) -> bool {
+    targets
+        .iter()
+        .filter(|target| target.required)
+        .any(|target| {
+            if target.destination == install_root {
+                return false;
+            }
+
+            match read_installed_binary_version(&target.destination) {
+                Some(installed_version) => installed_version != latest_version,
+                None => true,
+            }
+        })
+}
+
+fn read_installed_binary_version(path: &Path) -> Option<String> {
+    if !path.is_file() {
+        return None;
+    }
+
+    let output = Command::new(path).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    parse_version_output(&stdout).or_else(|| parse_version_output(&stderr))
+}
+
+fn parse_version_output(output: &str) -> Option<String> {
+    output
+        .split_whitespace()
+        .find_map(normalize_version_candidate)
+}
+
+fn normalize_version_candidate(token: &str) -> Option<String> {
+    let trimmed = token
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != '-' && c != '_')
+        .trim_start_matches('v');
+
+    if trimmed.is_empty() || !trimmed.contains('.') {
+        return None;
+    }
+    if !trimmed
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
 fn check_github_blocking(current_version: &str) -> Result<UpdateInfo, String> {
     let asset_names = platform_asset_names().ok_or("Unsupported platform for self-update")?;
+    let install_root = install_target_executable()?;
     let url = format!("{}/repos/{}/releases?per_page=20", GITHUB_API, GITHUB_REPO);
 
     let client = reqwest::blocking::Client::builder()
@@ -424,7 +872,6 @@ fn check_github_blocking(current_version: &str) -> Result<UpdateInfo, String> {
         .json()
         .map_err(|e| format!("Failed to parse releases: {}", e))?;
 
-    // GitHub returns releases newest-first; use the first compatible asset we find.
     for release in &releases {
         let version = match release_version(&release.tag_name) {
             Some(v) => v,
@@ -438,16 +885,21 @@ fn check_github_blocking(current_version: &str) -> Result<UpdateInfo, String> {
                     .iter()
                     .find(|a| a.name == CHECKSUM_ASSET_NAME)
                     .map(|a| a.browser_download_url.clone());
-
+                let install_targets = infer_install_targets(&asset.name, &install_root);
                 let update_available = version != current_version;
+
                 return Ok(UpdateInfo {
                     current_version: current_version.to_string(),
                     latest_version: version.to_string(),
                     update_available,
+                    update_reason: update_available.then_some(UpdateReason::VersionMismatch),
                     download_url: update_available.then(|| asset.browser_download_url.clone()),
                     checksum_url: update_available.then_some(checksum_url).flatten(),
                     expected_sha256: None,
                     asset_name: update_available.then(|| asset.name.clone()),
+                    install_targets: install_targets_to_summaries(&install_targets),
+                    image_assets: Vec::new(),
+                    resolved_install_targets: install_targets,
                 });
             }
         }
@@ -457,32 +909,40 @@ fn check_github_blocking(current_version: &str) -> Result<UpdateInfo, String> {
         current_version: current_version.to_string(),
         latest_version: current_version.to_string(),
         update_available: false,
+        update_reason: None,
         download_url: None,
         checksum_url: None,
         expected_sha256: None,
         asset_name: None,
+        install_targets: Vec::new(),
+        image_assets: Vec::new(),
+        resolved_install_targets: Vec::new(),
     })
 }
 
-/// Download and install a new binary, replacing the current executable (blocking).
-pub fn apply_blocking(
+/// Download and install a new payload, replacing the current server bundle.
+fn apply_payload_blocking(
     download_url: &str,
     asset_name: &str,
     expected_sha256: Option<&str>,
     checksum_url: Option<&str>,
+    install_targets: &[InstallTarget],
 ) -> Result<ApplyResult, String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("rhythm-server")
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
-    let current_exe = install_target_executable()?;
-    let download_path = current_exe.with_extension("download");
-    let new_path = current_exe.with_extension("new");
-    let old_path = current_exe.with_extension("old");
+    let install_root = install_target_executable()?;
+    let resolved_targets = if install_targets.is_empty() {
+        infer_install_targets(asset_name, &install_root)
+    } else {
+        install_targets.to_vec()
+    };
+    let download_path = install_root.with_extension("download");
 
     remove_if_exists(&download_path);
-    remove_if_exists(&new_path);
+    cleanup_install_artifacts(&resolved_targets);
 
     download_release(&client, download_url, &download_path)?;
 
@@ -515,36 +975,24 @@ pub fn apply_blocking(
         },
     };
 
-    if let Err(e) = install_downloaded_binary(&download_path, &new_path, asset_name) {
+    let staged_targets = stage_install_targets(&download_path, asset_name, &resolved_targets)
+        .map_err(|error| {
+            cleanup_install_artifacts(&resolved_targets);
+            remove_if_exists(&download_path);
+            error
+        })?;
+    let installed_targets = commit_staged_targets(&staged_targets).map_err(|error| {
+        cleanup_staged_files(&staged_targets);
         remove_if_exists(&download_path);
-        remove_if_exists(&new_path);
-        return Err(e);
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&new_path, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("Failed to set permissions: {}", e))?;
-    }
-
-    if old_path.exists() {
-        std::fs::remove_file(&old_path).ok();
-    }
-
-    std::fs::rename(&current_exe, &old_path)
-        .map_err(|e| format!("Failed to backup current binary: {}", e))?;
-
-    if let Err(e) = std::fs::rename(&new_path, &current_exe) {
-        let _ = std::fs::rename(&old_path, &current_exe);
-        remove_if_exists(&download_path);
-        remove_if_exists(&new_path);
-        return Err(format!("Failed to install new binary: {}", e));
-    }
+        error
+    })?;
 
     remove_if_exists(&download_path);
 
-    Ok(ApplyResult { checksum_verified })
+    Ok(ApplyResult {
+        checksum_verified,
+        installed_targets,
+    })
 }
 
 fn download_release(
@@ -582,7 +1030,16 @@ fn install_target_executable() -> Result<PathBuf, String> {
         return Ok(PathBuf::from(EMBEDDED_INSTALL_PATH));
     }
 
-    std::env::current_exe().map_err(|e| format!("Cannot determine exe path: {}", e))
+    let current_exe =
+        std::env::current_exe().map_err(|e| format!("Cannot determine exe path: {}", e))?;
+    Ok(normalize_server_install_path(current_exe))
+}
+
+fn normalize_server_install_path(current_exe: PathBuf) -> PathBuf {
+    if current_exe.file_name().and_then(|name| name.to_str()) == Some("rhythm-cli") {
+        return current_exe.with_file_name("rhythm-server");
+    }
+    current_exe
 }
 
 fn restart_strategy() -> RestartStrategy {
@@ -695,42 +1152,195 @@ fn compute_sha256_hex(path: &Path) -> Result<String, String> {
     Ok(hex_string(&hasher.finalize()))
 }
 
-fn install_downloaded_binary(
+fn stage_install_targets(
     download_path: &Path,
-    new_path: &Path,
     asset_name: &str,
-) -> Result<(), String> {
+    install_targets: &[InstallTarget],
+) -> Result<Vec<StagedInstallTarget>, String> {
+    let staged_targets = install_targets
+        .iter()
+        .cloned()
+        .map(|spec| StagedInstallTarget {
+            stage_path: spec.destination.with_extension("new"),
+            backup_path: spec.destination.with_extension("old"),
+            spec,
+        })
+        .collect::<Vec<_>>();
+
     if asset_name.ends_with(".tar.gz") {
-        extract_binary_from_archive(download_path, new_path)
+        extract_targets_from_archive(download_path, &staged_targets)?;
     } else {
-        std::fs::copy(download_path, new_path)
-            .map(|_| ())
-            .map_err(|e| format!("Failed to copy downloaded binary: {}", e))
+        if staged_targets.len() != 1 {
+            return Err(format!(
+                "Binary payload {} cannot satisfy multi-file install plan",
+                asset_name
+            ));
+        }
+        let staged = &staged_targets[0];
+        if let Some(parent) = staged.stage_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to prepare {}: {}", parent.display(), e))?;
+        }
+        fs::copy(download_path, &staged.stage_path)
+            .map_err(|e| format!("Failed to copy downloaded binary: {}", e))?;
     }
+
+    for staged in &staged_targets {
+        if staged.stage_path.exists() {
+            set_executable_permissions(&staged.stage_path)?;
+        }
+    }
+
+    Ok(staged_targets)
 }
 
-fn extract_binary_from_archive(archive_path: &Path, destination: &Path) -> Result<(), String> {
+fn extract_targets_from_archive(
+    archive_path: &Path,
+    install_targets: &[StagedInstallTarget],
+) -> Result<(), String> {
     let file = File::open(archive_path).map_err(|e| format!("Failed to open archive: {}", e))?;
     let decoder = GzDecoder::new(file);
     let mut archive = Archive::new(decoder);
     let entries = archive
         .entries()
         .map_err(|e| format!("Failed to read archive entries: {}", e))?;
+    let mut found = vec![false; install_targets.len()];
 
     for entry in entries {
         let mut entry = entry.map_err(|e| format!("Failed to read archive entry: {}", e))?;
-        let path = entry
+        let entry_path = entry
             .path()
             .map_err(|e| format!("Failed to inspect archive entry: {}", e))?;
-        if path.file_name().and_then(|name| name.to_str()) == Some("rhythm-server") {
+        let entry_name = entry_path.to_string_lossy();
+        let entry_file_name = entry_path.file_name().and_then(|name| name.to_str());
+
+        for (index, target) in install_targets.iter().enumerate() {
+            let matches = entry_name == target.spec.archive_path
+                || entry_file_name == Some(target.spec.archive_path.as_str());
+            if !matches {
+                continue;
+            }
+
+            if let Some(parent) = target.stage_path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to prepare {}: {}", parent.display(), e))?;
+            }
             entry
-                .unpack(destination)
-                .map_err(|e| format!("Failed to extract rhythm-server: {}", e))?;
-            return Ok(());
+                .unpack(&target.stage_path)
+                .map_err(|e| format!("Failed to extract {}: {}", target.spec.archive_path, e))?;
+            found[index] = true;
+            break;
         }
     }
 
-    Err("Archive did not contain rhythm-server".to_string())
+    for (index, target) in install_targets.iter().enumerate() {
+        if !found[index] && target.spec.required {
+            return Err(format!(
+                "Archive did not contain required payload {}",
+                target.spec.archive_path
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn commit_staged_targets(staged_targets: &[StagedInstallTarget]) -> Result<Vec<String>, String> {
+    let mut applied = Vec::<AppliedInstallTarget>::new();
+    let mut installed_targets = Vec::new();
+
+    for staged in staged_targets {
+        if !staged.stage_path.exists() {
+            continue;
+        }
+
+        if let Some(parent) = staged.spec.destination.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to prepare {}: {}", parent.display(), e))?;
+        }
+
+        let previously_existed = staged.spec.destination.exists();
+        if previously_existed {
+            remove_if_exists(&staged.backup_path);
+            fs::rename(&staged.spec.destination, &staged.backup_path).map_err(|e| {
+                format!(
+                    "Failed to backup {}: {}",
+                    staged.spec.destination.display(),
+                    e
+                )
+            })?;
+        }
+
+        if let Err(error) = fs::rename(&staged.stage_path, &staged.spec.destination) {
+            if previously_existed {
+                let _ = fs::rename(&staged.backup_path, &staged.spec.destination);
+            }
+            rollback_applied_targets(&applied);
+            return Err(format!(
+                "Failed to install {}: {}",
+                staged.spec.destination.display(),
+                error
+            ));
+        }
+
+        applied.push(AppliedInstallTarget {
+            destination: staged.spec.destination.clone(),
+            backup_path: staged.backup_path.clone(),
+            previously_existed,
+        });
+        installed_targets.push(
+            staged
+                .spec
+                .destination
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_else(|| {
+                    staged
+                        .spec
+                        .destination
+                        .as_os_str()
+                        .to_str()
+                        .unwrap_or("unknown")
+                })
+                .to_string(),
+        );
+    }
+
+    Ok(installed_targets)
+}
+
+fn rollback_applied_targets(applied: &[AppliedInstallTarget]) {
+    for target in applied.iter().rev() {
+        if target.destination.exists() {
+            let _ = fs::remove_file(&target.destination);
+        }
+        if target.previously_existed && target.backup_path.exists() {
+            let _ = fs::rename(&target.backup_path, &target.destination);
+        }
+    }
+}
+
+fn cleanup_install_artifacts(install_targets: &[InstallTarget]) {
+    for target in install_targets {
+        remove_if_exists(&target.destination.with_extension("new"));
+    }
+}
+
+fn cleanup_staged_files(staged_targets: &[StagedInstallTarget]) {
+    for target in staged_targets {
+        remove_if_exists(&target.stage_path);
+    }
+}
+
+fn set_executable_permissions(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("Failed to set permissions on {}: {}", path.display(), e))?;
+    }
+
+    Ok(())
 }
 
 fn hex_string(bytes: &[u8]) -> String {
@@ -744,14 +1354,14 @@ fn hex_string(bytes: &[u8]) -> String {
 
 fn remove_if_exists(path: &Path) {
     if path.exists() {
-        let _ = std::fs::remove_file(path);
+        let _ = fs::remove_file(path);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::io::Write;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -762,8 +1372,18 @@ mod tests {
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rhythm-server-{}-{}", name, nanos));
-        std::fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn write_executable(path: &Path, body: &str) {
+        let mut file = File::create(path).unwrap();
+        writeln!(file, "{}", body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
 
     #[test]
@@ -787,33 +1407,139 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  rhythm-server-
     }
 
     #[test]
-    fn extract_binary_from_archive_unpacks_rhythm_server() {
-        let dir = unique_test_dir("extract");
+    fn parse_version_output_finds_semver_token() {
+        assert_eq!(
+            parse_version_output("rhythm-chipd 0.4.146\n"),
+            Some("0.4.146".to_string())
+        );
+        assert_eq!(
+            parse_version_output("Usage: rhythm-chipd --socket /tmp"),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_manifest_install_targets_maps_self_and_sibling() {
+        let root = PathBuf::from("/tmp/rhythm-server");
+        let targets = resolve_manifest_install_targets(
+            &[
+                ManifestInstallTarget {
+                    archive_path: Some("rhythm-server".to_string()),
+                    slot: InstallSlot::Current,
+                    path: None,
+                    required: true,
+                },
+                ManifestInstallTarget {
+                    archive_path: Some("rhythm-chipd".to_string()),
+                    slot: InstallSlot::Sibling,
+                    path: Some("rhythm-chipd".to_string()),
+                    required: true,
+                },
+            ],
+            &root,
+        )
+        .unwrap();
+
+        assert_eq!(targets[0].destination, PathBuf::from("/tmp/rhythm-server"));
+        assert_eq!(targets[1].destination, PathBuf::from("/tmp/rhythm-chipd"));
+    }
+
+    #[test]
+    fn component_drift_detects_missing_required_chipd() {
+        let dir = unique_test_dir("drift-missing");
+        let install_root = dir.join("rhythm-server");
+        write_executable(&install_root, "#!/bin/sh\necho \"rhythm-server 0.4.146\"\n");
+
+        assert!(detect_component_drift(
+            "0.4.146",
+            &install_root,
+            &default_bundle_install_targets(&install_root)
+        ));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn component_drift_ignores_optional_cli() {
+        let dir = unique_test_dir("drift-optional");
+        let install_root = dir.join("rhythm-server");
+        let chipd_path = dir.join("rhythm-chipd");
+        write_executable(&install_root, "#!/bin/sh\necho \"rhythm-server 0.4.146\"\n");
+        write_executable(&chipd_path, "#!/bin/sh\necho \"rhythm-chipd 0.4.146\"\n");
+
+        let mut targets = default_bundle_install_targets(&install_root);
+        targets[2].required = false;
+        assert!(!detect_component_drift("0.4.146", &install_root, &targets));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn component_drift_detects_old_chipd_without_version_flag() {
+        let dir = unique_test_dir("drift-old-chipd");
+        let install_root = dir.join("rhythm-server");
+        let chipd_path = dir.join("rhythm-chipd");
+        write_executable(&install_root, "#!/bin/sh\necho \"rhythm-server 0.4.146\"\n");
+        write_executable(
+            &chipd_path,
+            "#!/bin/sh\necho \"Usage: rhythm-chipd --socket /tmp\" >&2\nexit 1\n",
+        );
+
+        assert!(detect_component_drift(
+            "0.4.146",
+            &install_root,
+            &default_bundle_install_targets(&install_root)
+        ));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage_archive_installs_server_and_chipd() {
+        let dir = unique_test_dir("stage-archive");
         let archive_path = dir.join("release.tar.gz");
-        let extracted_path = dir.join("rhythm-server.new");
+        let server_stage = dir.join("rhythm-server.new");
+        let chipd_stage = dir.join("rhythm-chipd.new");
+        let install_targets = vec![
+            InstallTarget {
+                archive_path: "rhythm-server".to_string(),
+                destination: dir.join("rhythm-server"),
+                required: true,
+            },
+            InstallTarget {
+                archive_path: "rhythm-chipd".to_string(),
+                destination: dir.join("rhythm-chipd"),
+                required: true,
+            },
+        ];
 
         {
             let tar_gz = File::create(&archive_path).unwrap();
             let encoder = flate2::write::GzEncoder::new(tar_gz, flate2::Compression::default());
             let mut builder = tar::Builder::new(encoder);
 
-            let payload = b"fake-rhythm-server";
-            let mut header = tar::Header::new_gnu();
-            header.set_path("rhythm-server").unwrap();
-            header.set_size(payload.len() as u64);
-            header.set_mode(0o755);
-            header.set_cksum();
-            builder.append(&header, &payload[..]).unwrap();
+            for (name, payload) in [
+                ("rhythm-server", b"fake-rhythm-server".as_slice()),
+                ("rhythm-chipd", b"fake-rhythm-chipd".as_slice()),
+            ] {
+                let mut header = tar::Header::new_gnu();
+                header.set_path(name).unwrap();
+                header.set_size(payload.len() as u64);
+                header.set_mode(0o755);
+                header.set_cksum();
+                builder.append(&header, payload).unwrap();
+            }
             builder.finish().unwrap();
         }
 
-        extract_binary_from_archive(&archive_path, &extracted_path).unwrap();
-        assert_eq!(
-            std::fs::read(&extracted_path).unwrap(),
-            b"fake-rhythm-server"
-        );
+        let staged =
+            stage_install_targets(&archive_path, "rhythm-server-rpiz.tar.gz", &install_targets)
+                .unwrap();
 
-        let _ = std::fs::remove_dir_all(dir);
+        assert_eq!(fs::read(server_stage).unwrap(), b"fake-rhythm-server");
+        assert_eq!(fs::read(chipd_stage).unwrap(), b"fake-rhythm-chipd");
+        cleanup_staged_files(&staged);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -824,6 +1550,18 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  rhythm-server-
         assert_eq!(snapshot.state, OtaUpdateState::Idle);
         assert_eq!(snapshot.current_version, "1.0.0");
         assert_eq!(snapshot.latest_version, None);
+    }
+
+    #[test]
+    fn normalize_server_install_path_prefers_server_for_cli() {
+        assert_eq!(
+            normalize_server_install_path(PathBuf::from("/tmp/rhythm-cli")),
+            PathBuf::from("/tmp/rhythm-server")
+        );
+        assert_eq!(
+            normalize_server_install_path(PathBuf::from("/tmp/rhythm-server")),
+            PathBuf::from("/tmp/rhythm-server")
+        );
     }
 
     #[test]

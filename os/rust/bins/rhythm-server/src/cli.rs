@@ -70,27 +70,23 @@ fn do_update() -> Result<(), String> {
         "Update available: v{} -> v{}",
         info.current_version, info.latest_version
     );
-
-    let url = info
-        .download_url
-        .clone()
-        .ok_or("No download URL for this platform")?;
-    let asset_name = info
-        .asset_name
-        .clone()
-        .ok_or("No release asset for this platform")?;
+    if let Some(reason) = info.update_reason {
+        let reason = match reason {
+            self_update::UpdateReason::VersionMismatch => "version mismatch",
+            self_update::UpdateReason::ComponentDrift => "component drift",
+        };
+        println!("Reason: {}", reason);
+    }
 
     println!("Downloading...");
-    let apply_result = self_update::apply_blocking(
-        &url,
-        &asset_name,
-        info.expected_sha256.as_deref(),
-        info.checksum_url.as_deref(),
-    )?;
+    let apply_result = info.apply_blocking()?;
 
     println!("Updated to v{}.", info.latest_version);
     if apply_result.checksum_verified == Some(true) {
         println!("Checksum verified.");
+    }
+    if !apply_result.installed_targets.is_empty() {
+        println!("Installed: {}", apply_result.installed_targets.join(", "));
     }
 
     // Restart service with new binary

@@ -13,19 +13,40 @@ use rhythm_matter::chip_rpc::{ChipRpcRequestEnvelope, ChipRpcResponseEnvelope};
 use crate::backend::build_backend_from_env;
 use crate::service::ChipControllerService;
 
+const BUILD_VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 fn main() -> Result<()> {
-    let socket_path = parse_socket_arg()?;
+    let socket_path = match parse_args()? {
+        ParsedArgs::Version => {
+            println!("rhythm-chipd {}", BUILD_VERSION);
+            return Ok(());
+        }
+        ParsedArgs::Serve { socket_path } => socket_path,
+    };
     serve(socket_path)
 }
 
-fn parse_socket_arg() -> Result<PathBuf> {
+enum ParsedArgs {
+    Version,
+    Serve { socket_path: PathBuf },
+}
+
+fn parse_args() -> Result<ParsedArgs> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
+        if arg == "--version" || arg == "-V" {
+            return Ok(ParsedArgs::Version);
+        }
         if arg == "--socket" {
             let value = args
                 .next()
                 .ok_or_else(|| anyhow::anyhow!("Missing value for --socket"))?;
-            return Ok(PathBuf::from(value));
+            return Ok(ParsedArgs::Serve {
+                socket_path: PathBuf::from(value),
+            });
         }
     }
     anyhow::bail!("Usage: rhythm-chipd --socket /path/to/socket")

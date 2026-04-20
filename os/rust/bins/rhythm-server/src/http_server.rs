@@ -98,6 +98,9 @@ async fn check_update(ota_status: crate::self_update::OtaStatusHandle) -> Respon
                 "current_version": info.current_version,
                 "latest_version": info.latest_version,
                 "update_available": info.update_available,
+                "update_reason": info.update_reason,
+                "install_targets": info.install_targets,
+                "image_assets": info.image_assets,
             });
             json_ok(json.to_string())
         }
@@ -244,35 +247,15 @@ async fn do_update(ota_status: crate::self_update::OtaStatusHandle) -> Response 
         return json_ok(r#"{"status":"ok","message":"Already up to date"}"#.to_string());
     }
 
-    let download_url = match info.download_url {
-        Some(url) => url,
-        None => return err_500("No download URL for this platform"),
-    };
-    let asset_name = match info.asset_name.clone() {
-        Some(name) => name,
-        None => return err_500("No release asset for this platform"),
-    };
-
     if let Err(e) = ota_status.begin_update(&info.latest_version) {
         return err_409(e);
     }
 
     let latest = info.latest_version.clone();
     let previous = info.current_version.clone();
-    let checksum_url = info.checksum_url.clone();
-    let expected_sha256 = info.expected_sha256.clone();
 
     // Download and install
-    let apply_result = match tokio::task::spawn_blocking(move || {
-        crate::self_update::apply_blocking(
-            &download_url,
-            &asset_name,
-            expected_sha256.as_deref(),
-            checksum_url.as_deref(),
-        )
-    })
-    .await
-    {
+    let apply_result = match tokio::task::spawn_blocking(move || info.apply_blocking()).await {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
             ota_status.mark_error(e.clone());
@@ -288,13 +271,14 @@ async fn do_update(ota_status: crate::self_update::OtaStatusHandle) -> Response 
     crate::self_update::schedule_post_update_restart();
 
     json_ok(format!(
-        r#"{{"status":"ok","message":"Updated to v{}, restarting...","previous_version":"{}","new_version":"{}","checksum_verified":{}}}"#,
+        r#"{{"status":"ok","message":"Updated to v{}, restarting...","previous_version":"{}","new_version":"{}","checksum_verified":{},"installed_targets":{}}}"#,
         latest,
         previous,
         latest,
         apply_result
             .checksum_verified
             .map(serde_json::Value::Bool)
-            .unwrap_or(serde_json::Value::Null)
+            .unwrap_or(serde_json::Value::Null),
+        serde_json::to_string(&apply_result.installed_targets).unwrap_or_else(|_| "[]".to_string())
     ))
 }

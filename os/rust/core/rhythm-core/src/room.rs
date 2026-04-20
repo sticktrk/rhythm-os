@@ -1649,7 +1649,10 @@ mod tests {
             .unwrap();
 
             assert_eq!(json["duration_ms"]["mode"], "fixed");
-            assert_eq!(json["duration_ms"]["value"], DEFAULT_MODE_TRANSITION_DURATION_MS);
+            assert_eq!(
+                json["duration_ms"]["value"],
+                DEFAULT_MODE_TRANSITION_DURATION_MS
+            );
         }
 
         #[test]

@@ -310,6 +310,7 @@ upload_rpiz_feed() {
     local output_dir="$PROJECT_ROOT/out/server-updates"
     local ssh_key_path="$TEMP_RELEASE_DIR/id_ed25519"
     local known_hosts_path="$TEMP_RELEASE_DIR/known_hosts"
+    local package_args=()
 
     echo ""
     echo "=== Building rpiz release artifacts locally ==="
@@ -327,10 +328,14 @@ upload_rpiz_feed() {
 
     echo ""
     echo "=== Packaging rpiz OTA feed ==="
+    if [ -n "${RHYTHM_RELEASE_RPIZ_IMAGE_ROOT:-}" ]; then
+        package_args+=(--image-root "$RHYTHM_RELEASE_RPIZ_IMAGE_ROOT")
+    fi
     bash "$SCRIPT_DIR/package-server-updates.sh" \
         --artifact-root "$artifact_root" \
         --output-dir "$output_dir" \
-        --version "$version"
+        --version "$version" \
+        "${package_args[@]}"
 
     echo ""
     echo "=== Configuring SSH upload ==="
