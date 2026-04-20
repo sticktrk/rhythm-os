@@ -196,9 +196,9 @@ fn bootstrap_hubs(state: &SharedState) {
             .hub_credentials
             .iter()
             .filter_map(|(key, creds)| {
-                creds
-                    .hub_type
-                    .as_ref()
+                (creds.can_connect())
+                    .then(|| creds.hub_type.as_ref())
+                    .flatten()
                     .map(|ht| (key.clone(), ht.as_str().to_string()))
             })
             .collect(),
@@ -209,7 +209,10 @@ fn bootstrap_hubs(state: &SharedState) {
     };
 
     if all_creds.is_empty() {
-        info!(target: "sys", "No hub configured, waiting for credentials via HTTP");
+        info!(
+            target: "sys",
+            "No connectable hub credentials loaded, waiting for credential push"
+        );
         return;
     }
 

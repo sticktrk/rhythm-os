@@ -24,8 +24,12 @@ fn scenario_restart_roomless_assigned_device_bootstraps_runtime() {
             .id
             .clone();
         let room_id = state.topology.create_room("Desk");
-        state.canonical_registry.assign_room(&canonical_id, Some(&room_id));
-        assert!(state.topology.attach_device_user_override(&room_id, &canonical_id));
+        state
+            .canonical_registry
+            .assign_room(&canonical_id, Some(&room_id));
+        assert!(state
+            .topology
+            .attach_device_user_override(&room_id, &canonical_id));
         let storage = state.storage.as_ref().unwrap();
         storage
             .save_canonical_registry(&serde_json::to_value(&state.canonical_registry).unwrap())
@@ -36,10 +40,9 @@ fn scenario_restart_roomless_assigned_device_bootstraps_runtime() {
         (canonical_id, room_id)
     };
 
-    let restarted =
-        harness::reconnect_rig_with_transport(initial.data_dir.clone(), |transport| {
-            transport.add_device(200, "Vendor", "Lamp");
-        });
+    let restarted = harness::reconnect_rig_with_transport(initial.data_dir.clone(), |transport| {
+        transport.add_device(200, "Vendor", "Lamp");
+    });
 
     let report = rhythm_os::room_sync::sync_all_hubs(&restarted.state).unwrap();
     assert_eq!(report.rooms_added, 0);

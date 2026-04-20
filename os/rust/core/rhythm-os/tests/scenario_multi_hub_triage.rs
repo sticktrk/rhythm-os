@@ -110,6 +110,11 @@ fn resolve_room_binding_merges_rooms() {
         "first binding should be Kitchen or Living Room, got '{}'",
         name
     );
+    let source_topology_id = if name == "Kitchen" {
+        harness.resolve("ha-kitchen")
+    } else {
+        harness.resolve("ha-living")
+    };
     harness.triage_bind(&entry_id).expect("bind should succeed");
 
     // -- Assert: one fewer topology room, one binding resolved --
@@ -134,6 +139,22 @@ fn resolve_room_binding_merges_rooms() {
         harness.hub_target_count(hue_room_id),
         2,
         "merged room should have targets from both hubs"
+    );
+    assert_eq!(
+        harness.all_snapshots().len(),
+        5,
+        "engine should prune the merged room"
+    );
+    assert!(
+        harness
+            .state
+            .lock()
+            .unwrap()
+            .hub_runtime()
+            .unwrap()
+            .engine_room_snapshot(&source_topology_id)
+            .is_none(),
+        "merged source room should stay removed from the engine"
     );
 }
 
@@ -239,12 +260,24 @@ fn re_sync_after_approved_binding_re_applies_silently() {
     // Resolve the Kitchen binding
     let (entry_id, name, _) = harness.triage_room_binding(0).expect("should have binding");
     assert_eq!(name, "Kitchen");
+    let source_topology_id = harness.resolve("ha-kitchen");
     harness.triage_bind(&entry_id).expect("bind should succeed");
 
     let room_count_after_bind = harness.topology_room_count();
     assert_eq!(room_count_after_bind, 2, "Kitchen merged, Bedroom stays");
     assert_eq!(harness.hub_target_count("hue-kitchen"), 2);
     assert_eq!(harness.triage_pending_room_count(), 0);
+    assert!(
+        harness
+            .state
+            .lock()
+            .unwrap()
+            .hub_runtime()
+            .unwrap()
+            .engine_room_snapshot(&source_topology_id)
+            .is_none(),
+        "merged room should not linger in the engine before re-sync"
+    );
 
     // -- Action: re-sync HA hub (simulates hub reconnect) --
     harness.sync_hub(&ha_key);
@@ -264,6 +297,17 @@ fn re_sync_after_approved_binding_re_applies_silently() {
         harness.triage_pending_room_count(),
         0,
         "no new triage entries — binding re-applied"
+    );
+    assert!(
+        harness
+            .state
+            .lock()
+            .unwrap()
+            .hub_runtime()
+            .unwrap()
+            .engine_room_snapshot(&source_topology_id)
+            .is_none(),
+        "re-sync should not recreate the merged engine room"
     );
 }
 

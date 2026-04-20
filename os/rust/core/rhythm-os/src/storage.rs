@@ -1720,6 +1720,20 @@ mod tests {
         }
 
         #[test]
+        fn all_hub_credentials_preserves_redacted_placeholders() {
+            let (storage, path) = temp_storage();
+            let creds = vec![HubCredentials::redacted_placeholder("matter", "local")];
+            storage.save_all_hub_credentials(&creds).unwrap();
+            let loaded = storage.load_all_hub_credentials().unwrap();
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[0].hub_type.as_ref().unwrap().as_str(), "matter");
+            assert_eq!(loaded[0].address, "local");
+            assert!(loaded[0].secrets_redacted);
+            assert!(!loaded[0].can_connect());
+            cleanup(&path);
+        }
+
+        #[test]
         fn all_hub_credentials_loads_legacy_single_object() {
             let (storage, path) = temp_storage();
             // Write legacy single-object format

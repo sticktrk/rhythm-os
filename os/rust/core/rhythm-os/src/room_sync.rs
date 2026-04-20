@@ -155,7 +155,9 @@ pub fn sync_from_hub_for_key(
     }
     .ok_or_else(|| anyhow::anyhow!("No hub discovery for {}", hub_key))?;
 
-    sync_with_discovery(state, Some(hub_key), discovery.as_ref(), discover_devices)
+    let report = sync_with_discovery(state, Some(hub_key), discovery.as_ref(), discover_devices)?;
+    commands::reconcile_runtime_from_state(state)?;
+    Ok(report)
 }
 
 /// Internal sync implementation that takes a discovery reference directly.
@@ -180,24 +182,10 @@ fn sync_with_discovery(
     info!(target: "room_sync", "Discovered {} rooms from hub", discovered_rooms.len());
 
     // ========================================================================
-    // Phase 2: Diff and apply rooms (first room triggers runtime creation)
+    // Phase 2: Diff and apply source rooms into registry + topology only.
+    // Runtime materialization is an explicit final sync phase.
     // ========================================================================
-    let (mut current_snapshots, current_room_ids) = {
-        let runtime = {
-            let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-            s.hub_runtime()
-        };
-
-        let snapshots: HashMap<String, _> = runtime
-            .as_ref()
-            .map(|rt| {
-                rt.engine_all_room_snapshots()
-                    .into_iter()
-                    .map(|snap| (snap.id.clone(), snap))
-                    .collect()
-            })
-            .unwrap_or_default();
-
+    let current_room_ids = {
         let registry = extract_registry_for(state, hub_key);
         let room_ids: HashSet<String> = registry
             .and_then(|r| {
@@ -206,8 +194,7 @@ fn sync_with_discovery(
                     .map(|reg| reg.rooms().into_iter().map(|r| r.id).collect())
             })
             .unwrap_or_default();
-
-        (snapshots, room_ids)
+        room_ids
     };
 
     let discovered_ids: HashSet<String> = discovered_rooms.iter().map(|r| r.id.clone()).collect();
@@ -222,71 +209,18 @@ fn sync_with_discovery(
     for room in &discovered_rooms {
         let is_new = !current_room_ids.contains(&room.id);
 
-        // Preserve user state from existing engine snapshot.
-        // Engine stores rooms under topology IDs, so translate the hub-native
-        // room ID through topology before looking up the snapshot.
-        let engine_id = hub_key
-            .and_then(|k| {
-                state.lock().ok().and_then(|s| {
-                    s.topology
-                        .translate_room_id(k, &room.id)
-                        .map(|s| s.to_string())
-                })
-            })
-            .unwrap_or_else(|| room.id.clone());
-        let (rhythm_enabled, disabled, room_state) =
-            if let Some(snap) = current_snapshots.get(&engine_id) {
-                let room_state =
-                    rhythm_core::RoomModeState::from_flags(snap.hard_off, snap.soft_off, false);
-                debug!(
-                    target: "room_sync",
-                    "Preserving room '{}' via engine '{}': rhythm={} disabled={} state={:?}",
-                    room.id,
-                    engine_id,
-                    snap.rhythm_enabled,
-                    snap.disabled,
-                    room_state
-                );
-                (snap.rhythm_enabled, snap.disabled, Some(room_state))
-            } else {
-                debug!(
-                    target: "room_sync",
-                    "New room '{}' discovered, defaulting rhythm_enabled=true",
-                    room.id
-                );
-                (true, false, None) // New rooms default to rhythm_enabled=true
-            };
-
         let params = RoomParams {
             id: room.id.clone(),
             name: room.name.clone(),
             grouped_light_id: room.grouped_light_id.clone(),
-            rhythm_enabled,
-            disabled,
-            state: room_state,
+            rhythm_enabled: true,
+            disabled: false,
+            state: None,
             device_ids: room.device_ids.clone(),
         };
 
-        match commands::do_room_set(state, &params, hub_key, false) {
+        match commands::do_room_set(state, &params, hub_key, false, false) {
             Ok(_) => {
-                // After the first do_room_set triggers runtime creation,
-                // re-capture engine snapshots so remaining rooms preserve
-                // their persisted preferences (rhythm_enabled, disabled, state).
-                if current_snapshots.is_empty() {
-                    if let Some(runtime) = state.lock().ok().and_then(|s| s.hub_runtime()) {
-                        current_snapshots = runtime
-                            .engine_all_room_snapshots()
-                            .into_iter()
-                            .map(|snap| (snap.id.clone(), snap))
-                            .collect();
-                        debug!(
-                            target: "room_sync",
-                            "Captured {} engine snapshots after runtime creation",
-                            current_snapshots.len()
-                        );
-                    }
-                }
-
                 if is_new {
                     info!(target: "room_sync", "Added room '{}' ({})", room.name, room.id);
                     report.rooms_added += 1;
@@ -446,7 +380,6 @@ fn sync_with_discovery(
                     .as_secs();
 
                 let mut canonical_room_devices: HashMap<String, Vec<String>> = HashMap::new();
-                let mut pending_runtime_node_ids = Vec::new();
 
                 {
                     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -501,11 +434,6 @@ fn sync_with_discovery(
                             if still_unassigned {
                                 s.canonical_registry.assign_room(&canonical_id, None);
                                 s.topology.ensure_standalone_device(&canonical_id);
-                                if let Some(device) = s.canonical_registry.get(&canonical_id) {
-                                    pending_runtime_node_ids.push(device.id.clone());
-                                }
-                            } else {
-                                pending_runtime_node_ids.push(canonical_id.clone());
                             }
                             continue;
                         }
@@ -557,60 +485,6 @@ fn sync_with_discovery(
                                 .assign_room(canonical_id, Some(assigned_room_id));
                         }
 
-                        if let Some(runtime) = s.hub_runtime() {
-                            if runtime.engine_room_snapshot(&rhythm_room_id).is_none() {
-                                let room_name = s
-                                    .topology
-                                    .get(&rhythm_room_id)
-                                    .map(|room| room.name.clone())
-                                    .unwrap_or_else(|| topo_room.name.clone());
-                                runtime.add_room(&rhythm_room_id, &room_name);
-                                runtime.restore_room_state(
-                                    &rhythm_room_id,
-                                    rhythm_core::RestoredRoomState {
-                                        rhythm_enabled: true,
-                                        disabled: false,
-                                        time_offset_minutes: 0.0,
-                                        brightness_offset: 0.0,
-                                        soft_off: false,
-                                        hard_off: false,
-                                        profile_settings: rhythm_core::RoomProfileSettings::default(
-                                        ),
-                                    },
-                                );
-                            }
-
-                            for (canonical_id, assigned_room_id) in &canonical_room_assignments {
-                                let Some(device) = s.canonical_registry.get(canonical_id) else {
-                                    continue;
-                                };
-                                let existed = runtime.engine_node_snapshot(canonical_id).is_some();
-                                runtime.add_node(
-                                    canonical_id,
-                                    &device.name,
-                                    commands::runtime_node_kind_for_device_type(
-                                        device.device_type.clone(),
-                                    ),
-                                    Some(assigned_room_id.clone()),
-                                );
-                                if !existed {
-                                    runtime.restore_node_state(
-                                        canonical_id,
-                                        rhythm_core::RestoredNodeState {
-                                            rhythm_enabled: true,
-                                            disabled: false,
-                                            time_offset_minutes: 0.0,
-                                            brightness_offset: 0.0,
-                                            soft_off: false,
-                                            hard_off: false,
-                                            profile_settings:
-                                                rhythm_core::RoomProfileSettings::default(),
-                                        },
-                                    );
-                                }
-                            }
-                        }
-
                         // Queue room binding proposals for cross-hub name matches
                         if let SyncAction::CreatedWithProposal {
                             proposed_target_id,
@@ -659,57 +533,6 @@ fn sync_with_discovery(
                     // Persist canonical registry and topology
                     commands::persist_canonical(&s);
                     commands::persist_topology(&s);
-                }
-
-                pending_runtime_node_ids.sort();
-                pending_runtime_node_ids.dedup();
-
-                for device_id in pending_runtime_node_ids {
-                    let (device_name, device_type, parent_room) = {
-                        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-                        let Some(device) = s.canonical_registry.get(&device_id) else {
-                            continue;
-                        };
-                        let parent_room_id = s
-                            .topology
-                            .device_parent_room_id(&device_id)
-                            .map(str::to_string)
-                            .or_else(|| {
-                                device.room_id.as_ref().and_then(|room_id| {
-                                    s.topology.get(room_id).map(|_| room_id.clone())
-                                })
-                            });
-                        let parent_room = parent_room_id.and_then(|room_id| {
-                            s.topology
-                                .get(&room_id)
-                                .map(|room| (room_id, room.name.clone()))
-                        });
-                        (
-                            device.name.clone(),
-                            device.device_type.clone(),
-                            parent_room,
-                        )
-                    };
-
-                    if let Some((room_id, room_name)) = parent_room {
-                        commands::ensure_runtime_room_exists(state, &room_id, &room_name)?;
-                        commands::ensure_runtime_device_node_exists(
-                            state,
-                            &device_id,
-                            &device_name,
-                            device_type,
-                            Some(room_id),
-                        )?;
-                        continue;
-                    }
-
-                    commands::ensure_runtime_device_node_exists(
-                        state,
-                        &device_id,
-                        &device_name,
-                        device_type,
-                        None,
-                    )?;
                 }
 
                 let (affected_devices, hidden_devices) =
@@ -914,10 +737,6 @@ fn sync_with_discovery(
 
     // Persist once after all changes
     commands::persist_state(state);
-
-    // Update composite controller routing from topology
-    #[cfg(feature = "desktop")]
-    commands::rebuild_composite_routing(state);
 
     // Release discovery transport's TLS connection now that sync is complete.
     // On ESP32 this frees ~12KB of heap before the first periodic tick.

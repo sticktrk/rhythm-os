@@ -184,6 +184,10 @@ pub struct HubCredentials {
     /// Provider-specific credential data (e.g., username, API key).
     #[serde(default)]
     pub data: serde_json::Value,
+    /// Whether this entry came from a redacted restore and cannot be used to connect
+    /// until fresh credentials are provided again.
+    #[serde(default)]
+    pub secrets_redacted: bool,
 }
 
 impl HubCredentials {
@@ -192,12 +196,28 @@ impl HubCredentials {
         self.hub_type.is_some()
     }
 
+    /// Check whether these credentials are usable for a live hub connection.
+    pub fn can_connect(&self) -> bool {
+        self.is_configured() && !self.secrets_redacted
+    }
+
     /// Create credentials for any hub type.
     pub fn new(hub_type: impl Into<String>, address: &str, data: serde_json::Value) -> Self {
         Self {
             hub_type: Some(HubType::new(hub_type)),
             address: address.to_string(),
             data,
+            secrets_redacted: false,
+        }
+    }
+
+    /// Create a configured-but-disconnected placeholder restored from a redacted backup.
+    pub fn redacted_placeholder(hub_type: impl Into<String>, address: &str) -> Self {
+        Self {
+            hub_type: Some(HubType::new(hub_type)),
+            address: address.to_string(),
+            data: serde_json::Value::Null,
+            secrets_redacted: true,
         }
     }
 
@@ -479,7 +499,9 @@ pub fn integration_callbacks(
         {
             let hub_type_str = {
                 let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-                s.first_hub_credentials()
+                s.hub_credentials
+                    .values()
+                    .find(|creds| creds.can_connect())
                     .and_then(|c| c.hub_type.as_ref().map(|t| t.as_str().to_string()))
             };
             if let Some(ht) = &hub_type_str {
@@ -771,5 +793,16 @@ mod tests {
         );
         assert_eq!(creds.get_str("token"), Some("my_token"));
         assert_eq!(creds.get_str("username"), None);
+    }
+
+    #[test]
+    fn redacted_hub_credentials_are_configured_but_not_connectable() {
+        let creds = HubCredentials::redacted_placeholder("matter", "local");
+        let key = creds.hub_key().unwrap();
+        assert!(creds.is_configured());
+        assert!(!creds.can_connect());
+        assert!(creds.secrets_redacted);
+        assert_eq!(key.hub_type.as_str(), "matter");
+        assert_eq!(key.address, "local");
     }
 }

@@ -458,7 +458,7 @@ pub(crate) fn reconcile_hub_endpoint_visibility(
     hub_key: &HubKey,
     discovered_native_ids: &HashSet<String>,
 ) -> Result<(usize, usize)> {
-    let (runtime, hidden_ids, restored_devices, affected_count) = {
+    let (hidden_ids, topology_changed, affected_count) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let report = s
             .canonical_registry
@@ -468,9 +468,9 @@ pub(crate) fn reconcile_hub_endpoint_visibility(
         }
 
         let hidden_ids = report.hidden_device_ids.clone();
-        let mut restored_devices = Vec::new();
+        let mut topology_changed = false;
         for device_id in &hidden_ids {
-            s.topology.remove_device_everywhere(device_id);
+            topology_changed |= !s.topology.remove_device_everywhere(device_id).is_empty();
             clear_removed_node_ephemeral_state(&mut s, device_id);
         }
         for device_id in &report.affected_device_ids {
@@ -489,50 +489,35 @@ pub(crate) fn reconcile_hub_endpoint_visibility(
                 .filter(|room_id| s.topology.get(room_id).is_some());
             if let Some(ref room_id) = desired_parent_id {
                 s.topology.ensure_standalone_device(device_id);
-                let _ = s.topology.assign_device(
+                topology_changed |= s.topology.assign_device(
                     device_id,
                     Some(room_id),
                     crate::topology::DevicePlacement::HubDefault,
                 );
             } else {
                 s.topology.ensure_standalone_device(device_id);
+                topology_changed = true;
             }
-            restored_devices.push((
-                device.id.clone(),
-                device.name.clone(),
-                device.device_type.clone(),
-                desired_parent_id,
-            ));
         }
 
         persist_canonical(&s);
-        if !hidden_ids.is_empty() || !restored_devices.is_empty() {
+        if topology_changed {
             persist_topology(&s);
         }
 
         (
-            s.hub_runtime(),
             hidden_ids,
-            restored_devices,
+            topology_changed,
             report.affected_device_ids.len(),
         )
     };
 
-    for (device_id, device_name, device_type, parent_id) in &restored_devices {
-        let _ = ensure_runtime_device_node_exists(
-            state,
-            device_id,
-            device_name,
-            device_type.clone(),
-            parent_id.clone(),
-        );
+    for device_id in &hidden_ids {
+        queue_motion_timer_clear(state, device_id);
     }
 
-    if let Some(runtime) = runtime {
-        for device_id in &hidden_ids {
-            runtime.remove_node(device_id);
-            queue_motion_timer_clear(state, device_id);
-        }
+    if topology_changed {
+        reconcile_runtime_from_state(state)?;
     }
 
     Ok((affected_count, hidden_ids.len()))
@@ -1324,45 +1309,6 @@ pub(crate) fn resolve_node_control_target(
         source_node_id.unwrap_or_else(|| fallback_source_node_id(hub_key, source_native_id)),
         target_node_id,
     ))
-}
-
-/// Reverse-lookup: topology room ID → hub-native room IDs for registry operations.
-///
-/// The hub-native registry uses hub room IDs, but callers use topology IDs.
-/// Returns the ID unchanged as fallback (ESP32 / no topology entry).
-fn hub_room_ids_for_topology(state: &SharedState, topo_id: &str) -> Vec<String> {
-    state
-        .lock()
-        .ok()
-        .map(|s| {
-            s.topology
-                .get(topo_id)
-                .map(|room| {
-                    let mut ids = Vec::new();
-                    let mut seen = HashSet::new();
-
-                    for binding in &room.hub_room_bindings {
-                        if seen.insert(binding.hub_room_id.clone()) {
-                            ids.push(binding.hub_room_id.clone());
-                        }
-                    }
-
-                    for room_device in &room.devices {
-                        let Some(device) = s.canonical_registry.get(&room_device.device_id) else {
-                            continue;
-                        };
-                        for endpoint in device.active_endpoints() {
-                            if seen.insert(endpoint.native_id.clone()) {
-                                ids.push(endpoint.native_id.clone());
-                            }
-                        }
-                    }
-
-                    ids
-                })
-                .unwrap_or_else(|| vec![topo_id.to_string()])
-        })
-        .unwrap_or_else(|| vec![topo_id.to_string()])
 }
 
 // ============================================================================
@@ -2278,7 +2224,7 @@ fn backup_hub_credentials_from_state(
     BackupHubCredentials {
         hub_type: creds.hub_type.clone(),
         address: creds.address.clone(),
-        data: include_secrets.then(|| creds.data.clone()),
+        data: (include_secrets && !creds.secrets_redacted).then(|| creds.data.clone()),
     }
 }
 
@@ -2656,14 +2602,19 @@ fn restore_backup_hub_credentials(
     state: &SharedState,
     credentials: &[BackupHubCredentials],
 ) -> Result<()> {
+    let mut restored_redacted = Vec::new();
     for credential in credentials {
         let Some(hub_type) = credential.hub_type.as_ref() else {
             continue;
         };
         let Some(data) = credential.data.as_ref() else {
-            warn!(
+            restored_redacted.push(crate::hub::HubCredentials::redacted_placeholder(
+                hub_type.as_str(),
+                &credential.address,
+            ));
+            info!(
                 target: "cmd",
-                "Skipping restored hub {} at {} because the backup is redacted",
+                "Restored redacted hub placeholder {} at {}; awaiting fresh credentials",
                 hub_type.as_str(),
                 credential.address
             );
@@ -2678,6 +2629,22 @@ fn restore_backup_hub_credentials(
                 credential.address,
                 e
             );
+        }
+    }
+
+    if !restored_redacted.is_empty() {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        for creds in restored_redacted {
+            if let Some(key) = creds.hub_key() {
+                s.clear_hub_connected(&key);
+                s.hub_credentials.insert(key, creds);
+            }
+        }
+        if let Some(storage) = s.storage.as_ref() {
+            let all_creds: Vec<_> = s.hub_credentials.values().cloned().collect();
+            if let Err(e) = storage.save_all_hub_credentials(&all_creds) {
+                warn!(target: "cmd", "Failed to save restored redacted hub credentials: {}", e);
+            }
         }
     }
 
@@ -4087,6 +4054,7 @@ pub fn do_room_set(
     params: &RoomParams,
     hub_key: Option<&HubKey>,
     persist: bool,
+    apply_runtime: bool,
 ) -> Result<String> {
     info!(target: "cmd", "room_set: {} '{}' gl={}", params.id, params.name, params.grouped_light_id);
 
@@ -4107,10 +4075,19 @@ pub fn do_room_set(
         })
         .unwrap_or(false);
     if room_unchanged {
-        if let Ok(room_state) = build_room_rhythm_state(state, &params.id) {
-            info!(target: "cmd", "room_set: {} unchanged, skipping persist", params.id);
-            return serde_json::to_string(&room_state)
-                .map_err(|e| anyhow::anyhow!("serialize: {}", e));
+        if apply_runtime {
+            if let Ok(room_state) = build_room_rhythm_state(state, &params.id) {
+                info!(target: "cmd", "room_set: {} unchanged, skipping persist", params.id);
+                return serde_json::to_string(&room_state)
+                    .map_err(|e| anyhow::anyhow!("serialize: {}", e));
+            }
+        } else {
+            debug!(
+                target: "cmd",
+                "room_set: {} unchanged, skipping runtime apply during sync",
+                params.id
+            );
+            return Ok(String::new());
         }
         // Room is in registry but not yet in engine — fall through to add it
     }
@@ -4161,6 +4138,13 @@ pub fn do_room_set(
     } else {
         params.id.clone()
     };
+
+    if !apply_runtime {
+        if persist {
+            persist_state(state);
+        }
+        return Ok(String::new());
+    }
 
     // Ensure runtime exists after topology translation so bootstrap sees the
     // latest topology-first room graph, not only hub registry state.
@@ -4253,57 +4237,6 @@ pub fn do_room_set(
 
     let room_state = build_room_rhythm_state(state, &engine_room_id)?;
     serde_json::to_string(&room_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
-}
-
-/// Legacy room-centric removal from registry + engine state.
-///
-/// This path exists for older room-registry sync flows. It is not the
-/// topology-room delete API.
-pub fn do_room_remove(state: &SharedState, room_id: &str) -> Result<()> {
-    info!(target: "cmd", "room_remove: {}", room_id);
-
-    // Look up hub-native room IDs for registry removal
-    let hub_room_ids = hub_room_ids_for_topology(state, room_id);
-
-    // Remove from ALL hub registries using hub-native IDs
-    {
-        let registries: Vec<Arc<Mutex<dyn HubRegistry>>> = state
-            .lock()
-            .ok()
-            .map(|s| s.hubs.values().filter_map(|h| h.registry.clone()).collect())
-            .unwrap_or_default();
-        for reg in &registries {
-            if let Ok(mut reg) = reg.lock() {
-                for hub_room_id in &hub_room_ids {
-                    reg.remove_room(hub_room_id);
-                }
-            }
-        }
-    }
-
-    // Remove from engine using topology ID
-    let runtime = {
-        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.hub_runtime()
-    };
-    if let Some(runtime) = runtime {
-        runtime.remove_room(room_id);
-    }
-
-    // Clean up AppState maps (all topology-keyed)
-    {
-        if let Ok(mut s) = state.lock() {
-            s.room_lights_on.remove(room_id);
-            s.motion_snapshots.remove(room_id);
-        }
-    }
-
-    persist_state(state);
-
-    #[cfg(feature = "desktop")]
-    crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
-
-    Ok(())
 }
 
 // ============================================================================
@@ -4700,7 +4633,6 @@ pub fn do_device_hard_remove(
     info!(target: "cmd", "device_hard_remove: {}", device_id);
 
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    let runtime = s.hub_runtime();
 
     let canonical_id = if s.canonical_registry.get(device_id).is_some() {
         Some(device_id.to_string())
@@ -4765,19 +4697,17 @@ pub fn do_device_hard_remove(
         }
     }
 
-    let removed_runtime_node_id = canonical_id.clone();
     drop(s);
 
-    if let (Some(runtime), Some(node_id)) = (runtime, removed_runtime_node_id.as_deref()) {
-        runtime.remove_node(node_id);
+    if let Some(node_id) = canonical_id.as_deref() {
         queue_motion_timer_clear(state, node_id);
     }
 
     persist_registry(state);
+    reconcile_runtime_from_state(state)?;
 
     #[cfg(feature = "desktop")]
     {
-        rebuild_composite_routing(state);
         emit_triage_changed(state);
         crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
     }
@@ -5680,8 +5610,9 @@ pub(crate) fn ensure_runtime_room_exists(
     }
 
     if let Some(runtime) = state.lock().ok().and_then(|s| s.hub_runtime()) {
-        if runtime.engine_room_snapshot(room_id).is_none() {
-            runtime.add_room(room_id, room_name);
+        let existed = runtime.engine_room_snapshot(room_id).is_some();
+        runtime.add_room(room_id, room_name);
+        if !existed {
             runtime.restore_room_state(
                 room_id,
                 RestoredRoomState {
@@ -5712,6 +5643,148 @@ pub(crate) fn ensure_runtime_room_exists(
             "Runtime initialization completed without installing a runtime"
         ));
     }
+
+    Ok(())
+}
+
+/// Reconcile the shared runtime from topology + canonical state.
+///
+/// This is the explicit topology-first runtime phase that runs after sync and
+/// after topology/manual mutations so integrations that discover devices
+/// without rooms do not depend on incidental room bootstrap paths.
+pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
+    let (has_any_hub, has_runtime_initializer, rooms, nodes) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let rooms = s
+            .topology
+            .rooms()
+            .map(|room| (room.id.clone(), room.name.clone()))
+            .collect::<Vec<_>>();
+        let nodes = s
+            .topology
+            .device_nodes()
+            .filter_map(|node| {
+                s.canonical_registry
+                    .get(&node.canonical_device_id)
+                    .map(|device| {
+                        (
+                            node.id.clone(),
+                            device.name.clone(),
+                            device.device_type.clone(),
+                            node.parent_id.clone(),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        (s.has_any_hub(), s.ensure_runtime_fn.is_some(), rooms, nodes)
+    };
+
+    let existing_runtime = state.lock().ok().and_then(|s| s.hub_runtime());
+    let existing_room_states: HashMap<String, rhythm_core::RoomSnapshot> = existing_runtime
+        .as_ref()
+        .map(|runtime| {
+            runtime
+                .engine_all_room_snapshots()
+                .into_iter()
+                .map(|snap| (snap.id.clone(), snap))
+                .collect()
+        })
+        .unwrap_or_default();
+    let existing_node_states: HashMap<String, rhythm_core::NodeSnapshot> = existing_runtime
+        .as_ref()
+        .map(|runtime| {
+            runtime
+                .engine_all_node_snapshots()
+                .into_iter()
+                .map(|snap| (snap.id.clone(), snap))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let needs_runtime = has_any_hub && (!rooms.is_empty() || !nodes.is_empty());
+    if needs_runtime
+        && has_runtime_initializer
+        && state.lock().ok().and_then(|s| s.hub_runtime()).is_none()
+    {
+        try_ensure_runtime(state)?;
+    }
+
+    let has_runtime = state.lock().ok().and_then(|s| s.hub_runtime()).is_some();
+    if needs_runtime && has_runtime_initializer && !has_runtime {
+        return Err(anyhow::anyhow!(
+            "Runtime reconciliation completed without installing a runtime"
+        ));
+    }
+
+    if !has_runtime {
+        return Ok(());
+    }
+
+    let runtime = state
+        .lock()
+        .ok()
+        .and_then(|s| s.hub_runtime())
+        .ok_or_else(|| anyhow::anyhow!("Runtime reconciliation expected a live runtime"))?;
+
+    let desired_room_ids = rooms
+        .iter()
+        .map(|(room_id, _)| room_id.clone())
+        .collect::<HashSet<_>>();
+    let desired_node_ids = nodes
+        .iter()
+        .map(|(node_id, _, _, _)| node_id.clone())
+        .collect::<HashSet<_>>();
+
+    for snapshot in runtime.engine_all_room_snapshots() {
+        if !desired_room_ids.contains(&snapshot.id) {
+            runtime.remove_room(&snapshot.id);
+        }
+    }
+
+    for snapshot in runtime.engine_all_node_snapshots() {
+        if !desired_node_ids.contains(&snapshot.id) {
+            runtime.remove_node(&snapshot.id);
+        }
+    }
+
+    for (room_id, room_name) in rooms {
+        ensure_runtime_room_exists(state, &room_id, &room_name)?;
+        if let Some(snap) = existing_room_states.get(&room_id) {
+            runtime.restore_room_state(
+                &room_id,
+                RestoredRoomState {
+                    rhythm_enabled: snap.rhythm_enabled,
+                    disabled: snap.disabled,
+                    time_offset_minutes: snap.time_offset_minutes,
+                    brightness_offset: snap.brightness_offset,
+                    soft_off: snap.soft_off,
+                    hard_off: snap.hard_off,
+                    profile_settings: snap.profile_settings.clone(),
+                },
+            );
+        }
+    }
+
+    for (node_id, node_name, device_type, parent_id) in nodes {
+        ensure_runtime_device_node_exists(state, &node_id, &node_name, device_type, parent_id)?;
+        if let Some(snap) = existing_node_states.get(&node_id) {
+            runtime.restore_node_state(
+                &node_id,
+                RestoredNodeState {
+                    rhythm_enabled: snap.rhythm_enabled,
+                    disabled: snap.disabled,
+                    time_offset_minutes: snap.time_offset_minutes,
+                    brightness_offset: snap.brightness_offset,
+                    soft_off: snap.soft_off,
+                    hard_off: snap.hard_off,
+                    profile_settings: snap.profile_settings.clone(),
+                },
+            );
+        }
+    }
+
+    #[cfg(feature = "desktop")]
+    rebuild_composite_routing(state);
 
     Ok(())
 }
@@ -6058,17 +6131,11 @@ pub fn do_canonical_assign_room(
     let endpoints: Vec<_> = device.endpoints.clone();
     let active_endpoints: Vec<_> = device.active_endpoints().cloned().collect();
     let device_name = device.name.clone();
-    let device_type = device.device_type.clone();
     let old_room_id = s
         .topology
         .device_parent_room_id(device_id)
         .map(|id| id.to_string())
         .or_else(|| device.room_id.clone());
-    let target_room = room_id.and_then(|target_room_id| {
-        s.topology
-            .get(target_room_id)
-            .map(|room| (target_room_id.to_string(), room.name.clone()))
-    });
 
     if let Some(target_room_id) = room_id {
         if s.topology.get(target_room_id).is_none() {
@@ -6141,23 +6208,10 @@ pub fn do_canonical_assign_room(
     drop(s);
 
     persist_registry(state);
-
-    if let Some((target_room_id, target_room_name)) = target_room {
-        ensure_runtime_room_exists(state, &target_room_id, &target_room_name)?;
-        ensure_runtime_device_node_exists(
-            state,
-            device_id,
-            &device_name,
-            device_type,
-            Some(target_room_id),
-        )?;
-    } else {
-        ensure_runtime_device_node_exists(state, device_id, &device_name, device_type, None)?;
-    }
+    reconcile_runtime_from_state(state)?;
 
     #[cfg(feature = "desktop")]
     {
-        rebuild_composite_routing(state);
         emit_triage_changed(state);
         crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
     }
@@ -6262,8 +6316,12 @@ pub fn do_triage_merge(state: &SharedState, entry_id: &str, canonical_id: &str) 
         persist_canonical(&s);
         persist_topology(&s);
         drop(s);
+        reconcile_runtime_from_state(state)?;
         #[cfg(feature = "desktop")]
-        emit_triage_changed(state);
+        {
+            emit_triage_changed(state);
+            crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
+        }
         Ok(())
     } else {
         Err(anyhow::anyhow!("Failed to merge"))
@@ -6313,8 +6371,15 @@ pub fn do_triage_new_device(state: &SharedState, entry_id: &str) -> Result<Strin
                     persist_canonical(&s);
                     persist_topology(&s);
                     drop(s);
+                    reconcile_runtime_from_state(state)?;
                     #[cfg(feature = "desktop")]
-                    emit_triage_changed(state);
+                    {
+                        emit_triage_changed(state);
+                        crate::state::emit_server_event(
+                            state,
+                            crate::server_event::ServerEvent::NodesChanged,
+                        );
+                    }
                     Ok(format!(r#"{{"canonical_id":"{}"}}"#, canonical_id))
                 }
                 None => Err(anyhow::anyhow!("Failed to create new device")),
@@ -6432,11 +6497,9 @@ pub fn do_triage_bind_room_to(
     let target_id = resolved_target_override.unwrap_or(binding.target_rhythm_room_id.clone());
 
     // Validate target room exists
-    let target_name = s
-        .topology
-        .get(&target_id)
-        .map(|r| r.name.clone())
-        .ok_or_else(|| anyhow::anyhow!("Target room '{}' not found", target_id))?;
+    if s.topology.get(&target_id).is_none() {
+        return Err(anyhow::anyhow!("Target room '{}' not found", target_id));
+    }
 
     // Find the silo room (the one created for this hub's room)
     let source_id = s
@@ -6474,25 +6537,8 @@ pub fn do_triage_bind_room_to(
 
     persist_canonical(&s);
     persist_topology(&s);
-
-    // Remap engine room if runtime exists
     drop(s);
-
-    if let Some(runtime) = state.lock().ok().and_then(|s| s.hub_runtime()) {
-        // If the silo room exists in the engine, merge it into the target
-        if let Some(snap) = runtime.engine_room_snapshot(&source_id) {
-            if runtime.engine_room_snapshot(&target_id).is_none() {
-                runtime.add_room(&target_id, &target_name);
-                runtime.restore_room_state(&target_id, RestoredRoomState::from(&snap));
-            }
-            runtime.remove_room(&source_id);
-            info!(target: "triage", "Remapped engine room '{}' → '{}'", source_id, target_id);
-        }
-    }
-
-    // Rebuild composite routing
-    #[cfg(feature = "desktop")]
-    rebuild_composite_routing(state);
+    reconcile_runtime_from_state(state)?;
 
     // Emit SSE events
     #[cfg(feature = "desktop")]
@@ -6691,13 +6737,13 @@ pub fn do_topology_create_room(state: &SharedState, name: &str) -> Result<String
     let id = s.topology.create_room(name);
     persist_topology(&s);
     drop(s);
-    ensure_runtime_room_exists(state, &id, name)?;
+    reconcile_runtime_from_state(state)?;
     Ok(format!(r#"{{"id":"{}","name":"{}"}}"#, id, name))
 }
 
 /// Delete a topology room and unassign any attached devices.
 pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()> {
-    let (runtime, detached_devices) = {
+    let detached_devices = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let detached_device_ids = s
             .topology
@@ -6712,11 +6758,7 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
             let active_endpoints: Vec<_> = device.active_endpoints().cloned().collect();
 
             s.canonical_registry.assign_room(&device_id, None);
-            detached_devices.push((
-                device.id.clone(),
-                device.name.clone(),
-                device.device_type.clone(),
-            ));
+            detached_devices.push(device.id.clone());
 
             for endpoint in &device.endpoints {
                 if let Some(hub) = s.hubs.get(&endpoint.hub_key) {
@@ -6741,7 +6783,7 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
             persist_canonical(&s);
         }
 
-        (s.hub_runtime(), detached_devices)
+        detached_devices
     };
 
     if !detached_devices.is_empty() {
@@ -6749,37 +6791,10 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
     }
 
     queue_motion_timer_clear(state, room_id);
-
-    if let Some(runtime) = runtime {
-        runtime.remove_room(room_id);
-        for (device_id, device_name, device_type) in &detached_devices {
-            let existed = runtime.engine_node_snapshot(device_id).is_some();
-            runtime.add_node(
-                device_id,
-                device_name,
-                runtime_node_kind_for_device_type(device_type.clone()),
-                None,
-            );
-            if !existed {
-                runtime.restore_node_state(
-                    device_id,
-                    RestoredNodeState {
-                        rhythm_enabled: true,
-                        disabled: false,
-                        time_offset_minutes: 0.0,
-                        brightness_offset: 0.0,
-                        soft_off: false,
-                        hard_off: false,
-                        profile_settings: RoomProfileSettings::default(),
-                    },
-                );
-            }
-        }
-    }
+    reconcile_runtime_from_state(state)?;
 
     #[cfg(feature = "desktop")]
     {
-        rebuild_composite_routing(state);
         emit_triage_changed(state);
         crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
     }
@@ -6794,28 +6809,16 @@ pub fn do_topology_merge_rooms(
     source_id: &str,
 ) -> Result<()> {
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    let target_name = s
-        .topology
-        .get(target_id)
-        .map(|room| room.name.clone())
-        .ok_or_else(|| anyhow::anyhow!("Target room not found"))?;
+    if s.topology.get(target_id).is_none() {
+        return Err(anyhow::anyhow!("Target room not found"));
+    }
     if s.topology.merge_rooms(target_id, source_id) {
         persist_topology(&s);
         drop(s);
-
-        if let Some(runtime) = state.lock().ok().and_then(|s| s.hub_runtime()) {
-            if let Some(snap) = runtime.engine_room_snapshot(source_id) {
-                if runtime.engine_room_snapshot(target_id).is_none() {
-                    runtime.add_room(target_id, &target_name);
-                    runtime.restore_room_state(target_id, RestoredRoomState::from(&snap));
-                }
-                runtime.remove_room(source_id);
-            }
-        }
+        reconcile_runtime_from_state(state)?;
 
         #[cfg(feature = "desktop")]
         {
-            rebuild_composite_routing(state);
             crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
         }
 
@@ -6836,10 +6839,10 @@ pub fn do_topology_move_device(
     if s.topology.move_device(device_id, from_room, to_room) {
         persist_topology(&s);
         drop(s);
+        reconcile_runtime_from_state(state)?;
 
         #[cfg(feature = "desktop")]
         {
-            rebuild_composite_routing(state);
             crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
         }
 
@@ -9084,6 +9087,95 @@ mod tests {
     }
 
     #[test]
+    fn build_backup_bundle_dto_keeps_redacted_placeholders_redacted_even_with_secrets() {
+        let (state, _rt) = setup_state(vec![]);
+        state.lock().unwrap().hub_credentials.insert(
+            HubKey::new(HubType::new("matter"), "local"),
+            HubCredentials::redacted_placeholder("matter", "local"),
+        );
+
+        let included = build_backup_bundle_dto(&state, true).unwrap();
+        assert!(included.secrets_included);
+        assert_eq!(included.installation.hub_credentials.len(), 1);
+        assert_eq!(
+            included.installation.hub_credentials[0].hub_type,
+            Some(HubType::new("matter"))
+        );
+        assert_eq!(included.installation.hub_credentials[0].address, "local");
+        assert_eq!(included.installation.hub_credentials[0].data, None);
+    }
+
+    #[test]
+    fn build_backup_bundle_dto_prunes_runtime_drift_and_uses_topology_parenting() {
+        let (state, runtime) = setup_state(vec![
+            make_snapshot("room1", false, false),
+            make_snapshot("stale-room", false, false),
+        ]);
+        let device_id = insert_canonical_device(
+            &state,
+            HubKey::new(HubType::new("matter"), "local"),
+            "matter-light-1",
+            "Desk Lamp",
+            "",
+            "",
+        );
+        add_topology_room(&state, "room1", &[]);
+        {
+            let mut s = state.lock().unwrap();
+            assert!(s.topology.attach_device_user_override("room1", &device_id));
+        }
+        runtime.snapshots.lock().unwrap().extend([
+            make_light_child_snapshot(&device_id, "stale-room"),
+            make_light_child_snapshot("stale-node", "stale-room"),
+        ]);
+
+        let bundle = build_backup_bundle_dto(&state, false).unwrap();
+
+        assert_eq!(
+            bundle
+                .configuration
+                .rooms
+                .iter()
+                .map(|room| room.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["room1"],
+            "backup configuration should follow topology rooms, not stale runtime rooms"
+        );
+
+        let mut exported_ids: Vec<_> = bundle
+            .installation
+            .rooms
+            .iter()
+            .map(|room| room.id.clone())
+            .collect();
+        exported_ids.sort();
+        assert_eq!(
+            exported_ids,
+            vec![device_id.clone(), "room1".to_string()],
+            "backup runtime export should exclude stale runtime-only rooms and nodes"
+        );
+        assert_eq!(
+            bundle
+                .installation
+                .rooms
+                .get(&device_id)
+                .expect("exported device node should exist")
+                .parent_id
+                .as_deref(),
+            Some("room1"),
+            "topology parenting should override stale runtime parenting during export"
+        );
+        assert!(
+            bundle.installation.rooms.get("stale-room").is_none(),
+            "stale runtime room should not leak into backup export"
+        );
+        assert!(
+            bundle.installation.rooms.get("stale-node").is_none(),
+            "stale runtime node should not leak into backup export"
+        );
+    }
+
+    #[test]
     fn backup_restore_applies_installation_state_after_hub_restore() {
         let storage = TestStorage::default();
         let app = AppState {
@@ -9230,7 +9322,407 @@ mod tests {
     }
 
     #[test]
-    fn backup_restore_redacted_backup_restores_without_hubs() {
+    fn restore_backup_room_manager_prunes_stale_runtime_nodes_and_periodic_state() {
+        let (state, runtime) = setup_state(vec![
+            make_snapshot("stale-room", false, false),
+            make_light_child_snapshot("stale-node", "stale-room"),
+        ]);
+
+        {
+            let mut s = state.lock().unwrap();
+            s.room_lights_on.insert("stale-room".into(), true);
+            s.room_lights_on.insert("office".into(), true);
+            s.motion_snapshots.insert(
+                "stale-room".into(),
+                MotionSnapshot {
+                    motion_active: true,
+                    motion_owned: true,
+                    remaining_secs: Some(10),
+                    timeout_secs: 300,
+                    warning_active: false,
+                },
+            );
+            s.motion_snapshots.insert(
+                "desk-lamp".into(),
+                MotionSnapshot {
+                    motion_active: true,
+                    motion_owned: true,
+                    remaining_secs: Some(20),
+                    timeout_secs: 300,
+                    warning_active: false,
+                },
+            );
+            s.room_mode_transitions.insert(
+                "stale-node".into(),
+                crate::state::RoomModeTransition {
+                    ends_at: std::time::Instant::now(),
+                    periodic_resume_at: std::time::Instant::now(),
+                },
+            );
+            s.room_mode_transitions.insert(
+                "office".into(),
+                crate::state::RoomModeTransition {
+                    ends_at: std::time::Instant::now(),
+                    periodic_resume_at: std::time::Instant::now(),
+                },
+            );
+            s.pending_motion_clear
+                .extend(["stale-room".into(), "desk-lamp".into()]);
+        }
+
+        let mut rooms = rhythm_core::RoomManager::new();
+        let room = rooms.get_or_create("office", "Office");
+        room.rhythm_enabled = true;
+        room.disabled = true;
+        room.time_offset_minutes = 18.0;
+        room.brightness_offset = 6.0;
+        room.soft_off = true;
+        let mut node = rhythm_core::Room::new_node(
+            "desk-lamp",
+            "Desk Lamp",
+            LightNodeKind::LightDevice,
+            Some("office".into()),
+        );
+        node.rhythm_enabled = true;
+        node.brightness_offset = 4.0;
+        rooms.add_room(node);
+
+        restore_backup_room_manager(&state, &rooms).unwrap();
+
+        let s = state.lock().unwrap();
+        assert_eq!(
+            s.room_lights_on,
+            HashMap::from([("office".to_string(), true)])
+        );
+        assert!(!s.motion_snapshots.contains_key("stale-room"));
+        assert!(s.motion_snapshots.contains_key("desk-lamp"));
+        assert!(!s.room_mode_transitions.contains_key("stale-node"));
+        assert!(s.room_mode_transitions.contains_key("office"));
+        assert_eq!(s.pending_motion_clear, vec!["desk-lamp".to_string()]);
+        drop(s);
+
+        assert!(
+            runtime.engine_room_snapshot("stale-room").is_none(),
+            "stale backup runtime room should be pruned"
+        );
+        assert!(
+            runtime.engine_node_snapshot("stale-node").is_none(),
+            "stale backup runtime node should be pruned"
+        );
+        let office = runtime
+            .engine_room_snapshot("office")
+            .expect("restored backup room should exist");
+        assert_eq!(office.name, "Office");
+        assert!(office.disabled);
+        assert!(office.soft_off);
+        let lamp = runtime
+            .engine_node_snapshot("desk-lamp")
+            .expect("restored backup device node should exist");
+        assert_eq!(lamp.parent_id.as_deref(), Some("office"));
+        assert_eq!(lamp.brightness_offset, 4.0);
+    }
+
+    #[test]
+    fn backup_restore_reconnects_runtime_and_restores_assigned_device_parent() {
+        let (source_state, _runtime) = setup_state_with_registry(vec![]);
+        let hub_key = source_state
+            .lock()
+            .unwrap()
+            .hubs
+            .keys()
+            .next()
+            .cloned()
+            .unwrap();
+        source_state.lock().unwrap().hub_credentials.insert(
+            hub_key.clone(),
+            HubCredentials::new("mock", "mock", serde_json::json!({ "token": "abc" })),
+        );
+
+        let created = do_topology_create_room(&source_state, "Office").unwrap();
+        let room_id = serde_json::from_str::<serde_json::Value>(&created).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let device_id =
+            insert_canonical_device(&source_state, hub_key, "matter-100", "Desk Lamp", "", "");
+        do_canonical_assign_room(&source_state, &device_id, Some(&room_id)).unwrap();
+
+        let bundle = build_backup_bundle_dto(&source_state, true).unwrap();
+
+        let target_state = Arc::new(Mutex::new(AppState::default()));
+        install_mock_hub_provider(&target_state);
+
+        let restored_json = do_backup_restore(&target_state, bundle).unwrap();
+        let restored_bundle: BackupBundle = serde_json::from_str(&restored_json).unwrap();
+        assert_eq!(restored_bundle.installation.hub_credentials.len(), 1);
+        assert_eq!(restored_bundle.installation.hub_credentials[0].data, None);
+
+        let s = target_state.lock().unwrap();
+        assert_eq!(s.topology.room_count(), 1);
+        assert_eq!(
+            s.topology
+                .get_device_node(&device_id)
+                .expect("restored topology device should exist")
+                .parent_id
+                .as_deref(),
+            Some(room_id.as_str())
+        );
+        assert_eq!(
+            s.canonical_registry
+                .get(&device_id)
+                .expect("restored canonical device should exist")
+                .room_id
+                .as_deref(),
+            Some(room_id.as_str())
+        );
+        let runtime = s
+            .hub_runtime()
+            .expect("backup restore should reconnect a runtime");
+        assert_eq!(
+            runtime
+                .engine_room_snapshot(&room_id)
+                .expect("restored runtime room should exist")
+                .name,
+            "Office"
+        );
+        assert_eq!(
+            runtime
+                .engine_node_snapshot(&device_id)
+                .expect("restored runtime node should exist")
+                .parent_id
+                .as_deref(),
+            Some(room_id.as_str())
+        );
+        assert_eq!(
+            runtime.engine_all_node_snapshots().len(),
+            2,
+            "restored runtime should contain exactly the room and its device node"
+        );
+    }
+
+    #[test]
+    fn backup_restore_preserves_multi_hub_binding_and_merged_device_state() {
+        let (source_state, _runtime) = setup_state(vec![]);
+        let (primary_key, shared_runtime) = {
+            let s = source_state.lock().unwrap();
+            (
+                s.hubs.keys().next().cloned().unwrap(),
+                s.hub_runtime().expect("source runtime should exist"),
+            )
+        };
+        let secondary_key = HubKey::new(HubType::new("mock"), "backup-b");
+        {
+            let mut s = source_state.lock().unwrap();
+            let registry: Arc<Mutex<dyn HubRegistry>> =
+                Arc::new(Mutex::new(crate::registry::HubDeviceRegistry::new()));
+            s.hubs.insert(
+                secondary_key.clone(),
+                ActiveHub {
+                    hub_type: secondary_key.hub_type.clone(),
+                    hub_key: secondary_key.clone(),
+                    runtime: Some(shared_runtime.clone()),
+                    hub_data: Box::new(()),
+                    registry: Some(registry),
+                    discovery: None,
+                    shutdown: Default::default(),
+                },
+            );
+            s.hub_credentials.insert(
+                primary_key.clone(),
+                HubCredentials::new(
+                    "mock",
+                    &primary_key.address,
+                    serde_json::json!({ "token": "primary" }),
+                ),
+            );
+            s.hub_credentials.insert(
+                secondary_key.clone(),
+                HubCredentials::new(
+                    "mock",
+                    &secondary_key.address,
+                    serde_json::json!({ "token": "secondary" }),
+                ),
+            );
+        }
+
+        let room_id = serde_json::from_str::<serde_json::Value>(
+            &do_topology_create_room(&source_state, "Kitchen").unwrap(),
+        )
+        .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        {
+            let mut s = source_state.lock().unwrap();
+            s.topology
+                .get_mut(&room_id)
+                .expect("target room should exist")
+                .upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                    hub_key: primary_key.clone(),
+                    hub_room_id: "kitchen-a".to_string(),
+                    control_id: "control-a".to_string(),
+                    light_device_ids: vec!["lamp-1".to_string()],
+                });
+
+            let mut source_room = crate::topology::TopologyRoom::new("silo-kitchen", "Kitchen");
+            source_room.upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                hub_key: secondary_key.clone(),
+                hub_room_id: "kitchen-b".to_string(),
+                control_id: "control-b".to_string(),
+                light_device_ids: vec!["lamp-1".to_string()],
+            });
+            s.topology.insert_room(source_room);
+
+            s.canonical_registry
+                .triage_mut()
+                .add(crate::canonical::triage::TriageEntry {
+                    id: "room-bind".to_string(),
+                    kind: crate::canonical::triage::TriageKind::RoomBinding,
+                    discovered: crate::canonical::triage::TriageDiscoveredDevice::default(),
+                    hub_key: secondary_key.clone(),
+                    candidate_matches: vec![],
+                    room_binding: Some(crate::canonical::triage::RoomBindingProposal {
+                        hub_room_id: "kitchen-b".to_string(),
+                        hub_room_name: "Kitchen".to_string(),
+                        control_id: "control-b".to_string(),
+                        light_device_ids: vec!["lamp-1".to_string()],
+                        canonical_device_ids: vec![],
+                        target_rhythm_room_id: room_id.clone(),
+                        target_rhythm_room_name: "Kitchen".to_string(),
+                        candidate_rooms: vec![],
+                    }),
+                    confidence: 80,
+                    status: crate::canonical::triage::TriageStatus::Pending,
+                    resolved_by: None,
+                    created_at: 1000,
+                    resolved_at: None,
+                    canonical_id: None,
+                });
+        }
+        do_triage_bind_room(&source_state, "room-bind").unwrap();
+
+        let canonical_id = insert_canonical_device(
+            &source_state,
+            primary_key.clone(),
+            "lamp-1",
+            "Kitchen Lamp",
+            "",
+            "",
+        );
+        do_canonical_assign_room(&source_state, &canonical_id, Some(&room_id)).unwrap();
+        {
+            let mut s = source_state.lock().unwrap();
+            s.canonical_registry
+                .triage_mut()
+                .add(crate::canonical::triage::TriageEntry {
+                    id: "device-merge".to_string(),
+                    kind: crate::canonical::triage::TriageKind::DeviceMerge,
+                    discovered: crate::canonical::triage::TriageDiscoveredDevice {
+                        native_id: "lamp-1".to_string(),
+                        name: "Kitchen Lamp".to_string(),
+                        device_type: DeviceType::Light,
+                        room_id: "kitchen-b".to_string(),
+                        room_name: "Kitchen".to_string(),
+                        manufacturer: None,
+                        model: None,
+                    },
+                    hub_key: secondary_key.clone(),
+                    candidate_matches: vec![crate::canonical::triage::CandidateMatch {
+                        canonical_id: canonical_id.clone(),
+                        name: "Kitchen Lamp".to_string(),
+                        score: 8,
+                        reasons: vec![
+                            crate::canonical::triage::MatchReason::ExactName,
+                            crate::canonical::triage::MatchReason::SameDeviceType,
+                        ],
+                    }],
+                    room_binding: None,
+                    confidence: 80,
+                    status: crate::canonical::triage::TriageStatus::Pending,
+                    resolved_by: None,
+                    created_at: 1000,
+                    resolved_at: None,
+                    canonical_id: None,
+                });
+        }
+        do_triage_merge(&source_state, "device-merge", &canonical_id).unwrap();
+
+        let bundle = build_backup_bundle_dto(&source_state, true).unwrap();
+        let target_state = Arc::new(Mutex::new(AppState::default()));
+        install_mock_hub_provider(&target_state);
+
+        let restored_json = do_backup_restore(&target_state, bundle).unwrap();
+        let restored_bundle: BackupBundle = serde_json::from_str(&restored_json).unwrap();
+        assert_eq!(restored_bundle.installation.hub_credentials.len(), 2);
+        assert!(restored_bundle
+            .installation
+            .hub_credentials
+            .iter()
+            .all(|creds| creds.data.is_none()));
+
+        let s = target_state.lock().unwrap();
+        assert_eq!(s.topology.room_count(), 1);
+        assert_eq!(
+            s.topology.translate_room_id(&secondary_key, "kitchen-b"),
+            Some(room_id.as_str())
+        );
+        assert_eq!(
+            s.topology
+                .get(&room_id)
+                .expect("restored room should exist")
+                .hub_room_bindings
+                .len(),
+            2
+        );
+        assert_eq!(s.canonical_registry.device_count(), 1);
+        let primary_device = s
+            .canonical_registry
+            .find_by_native_id(&primary_key, "lamp-1")
+            .expect("primary endpoint should survive restore");
+        let secondary_device = s
+            .canonical_registry
+            .find_by_native_id(&secondary_key, "lamp-1")
+            .expect("secondary endpoint should survive restore");
+        assert_eq!(primary_device.id, canonical_id);
+        assert_eq!(secondary_device.id, canonical_id);
+        assert_eq!(primary_device.active_endpoints().count(), 2);
+        assert_eq!(primary_device.room_id.as_deref(), Some(room_id.as_str()));
+        assert_eq!(
+            s.topology
+                .get_device_node(&canonical_id)
+                .expect("restored merged device node should exist")
+                .parent_id
+                .as_deref(),
+            Some(room_id.as_str())
+        );
+        let populated_runtimes: Vec<_> = s
+            .all_hub_runtimes()
+            .into_iter()
+            .filter(|(_, runtime)| runtime.engine_node_snapshot(&canonical_id).is_some())
+            .collect();
+        assert!(
+            !populated_runtimes.is_empty(),
+            "at least one restored runtime should contain the merged device"
+        );
+        for (_, runtime) in populated_runtimes {
+            assert!(
+                runtime.engine_room_snapshot(&room_id).is_some(),
+                "restored runtime should contain the merged room"
+            );
+            assert_eq!(
+                runtime
+                    .engine_node_snapshot(&canonical_id)
+                    .unwrap()
+                    .parent_id
+                    .as_deref(),
+                Some(room_id.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn backup_restore_redacted_backup_preserves_disconnected_hub_identity() {
         let storage = TestStorage::default();
         let app = AppState {
             storage: Some(Box::new(storage.clone())),
@@ -9280,7 +9772,16 @@ mod tests {
         let json = do_backup_restore(&state, bundle).unwrap();
         let restored: BackupBundle = serde_json::from_str(&json).unwrap();
 
-        assert!(restored.installation.hub_credentials.is_empty());
+        assert_eq!(restored.installation.hub_credentials.len(), 1);
+        assert_eq!(
+            restored.installation.hub_credentials[0].hub_type,
+            Some(HubType::new("mock"))
+        );
+        assert_eq!(
+            restored.installation.hub_credentials[0].address,
+            "bridge.local"
+        );
+        assert_eq!(restored.installation.hub_credentials[0].data, None);
         let restored_room = restored
             .installation
             .rooms
@@ -9289,6 +9790,17 @@ mod tests {
         assert_eq!(restored_room.name, "Office");
         assert_eq!(restored_room.time_offset_minutes, 12.0);
         assert_eq!(restored_room.brightness_offset, 5.0);
+
+        let s = state.lock().unwrap();
+        let hub_key = HubKey::new(HubType::new("mock"), "bridge.local");
+        let restored_creds = s
+            .hub_credentials
+            .get(&hub_key)
+            .expect("redacted hub placeholder should be restored");
+        assert!(restored_creds.secrets_redacted);
+        assert!(!restored_creds.can_connect());
+        assert!(s.hubs.is_empty());
+        drop(s);
 
         let saved = storage.inner.lock().unwrap();
         assert_eq!(
@@ -9300,7 +9812,14 @@ mod tests {
             Some(1_600_000_000_000)
         );
         assert!(saved.location.is_some());
-        assert!(saved.hub_credentials.is_empty());
+        assert_eq!(saved.hub_credentials.len(), 1);
+        assert_eq!(
+            saved.hub_credentials[0].hub_type,
+            Some(HubType::new("mock"))
+        );
+        assert_eq!(saved.hub_credentials[0].address, "bridge.local");
+        assert!(saved.hub_credentials[0].secrets_redacted);
+        assert_eq!(saved.hub_credentials[0].data, serde_json::Value::Null);
     }
 
     #[test]
@@ -11036,7 +11555,7 @@ mod tests {
 
     #[test]
     fn triage_new_device_without_room_creates_standalone_topology_node() {
-        let (state, _runtime) = setup_state(vec![]);
+        let (state, runtime, _hub_key) = setup_state_with_deferred_runtime();
         {
             let mut s = state.lock().unwrap();
             s.canonical_registry
@@ -11079,6 +11598,296 @@ mod tests {
         assert_eq!(
             s.canonical_registry.get(canonical_id).unwrap().room_id,
             None
+        );
+        drop(s);
+
+        assert_eq!(
+            runtime
+                .engine_node_snapshot(canonical_id)
+                .expect("standalone triage device should be materialized in runtime")
+                .parent_id,
+            None
+        );
+    }
+
+    #[test]
+    fn reconcile_runtime_from_state_bootstraps_persisted_room_and_device_assignments() {
+        let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
+        let room_id = state.lock().unwrap().topology.create_room("Office");
+        let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+
+        {
+            let mut s = state.lock().unwrap();
+            s.canonical_registry.assign_room(&device_id, Some(&room_id));
+            assert!(s.topology.attach_device_user_override(&room_id, &device_id));
+        }
+
+        reconcile_runtime_from_state(&state).unwrap();
+
+        assert!(state.lock().unwrap().hub_runtime().is_some());
+        assert_eq!(
+            runtime
+                .engine_room_snapshot(&room_id)
+                .expect("persisted topology room should be materialized")
+                .name,
+            "Office"
+        );
+        assert_eq!(
+            runtime
+                .engine_node_snapshot(&device_id)
+                .expect("persisted topology device should be materialized")
+                .parent_id
+                .as_deref(),
+            Some(room_id.as_str())
+        );
+    }
+
+    #[test]
+    fn reconcile_runtime_from_state_prunes_stale_runtime_snapshots() {
+        let (state, runtime) = setup_state(vec![make_snapshot("stale-room", false, false)]);
+        runtime.add_node(
+            "stale-node",
+            "Stale Lamp",
+            rhythm_core::LightNodeKind::LightDevice,
+            Some("stale-room".to_string()),
+        );
+        add_topology_room(&state, "office", &[]);
+        let hub_key = state.lock().unwrap().hubs.keys().next().cloned().unwrap();
+        let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+
+        {
+            let mut s = state.lock().unwrap();
+            s.canonical_registry.assign_room(&device_id, Some("office"));
+            assert!(s.topology.attach_device_user_override("office", &device_id));
+        }
+
+        reconcile_runtime_from_state(&state).unwrap();
+
+        assert!(
+            runtime.engine_room_snapshot("stale-room").is_none(),
+            "stale runtime room should be pruned"
+        );
+        assert!(
+            runtime.engine_node_snapshot("stale-node").is_none(),
+            "stale runtime node should be pruned"
+        );
+        assert!(
+            runtime.engine_room_snapshot("office").is_some(),
+            "current topology room should remain in runtime"
+        );
+        assert_eq!(
+            runtime
+                .engine_node_snapshot(&device_id)
+                .expect("current topology device should remain in runtime")
+                .parent_id
+                .as_deref(),
+            Some("office")
+        );
+    }
+
+    #[test]
+    fn reconcile_runtime_from_state_preserves_existing_room_flags() {
+        let (state, runtime) = setup_state(vec![make_snapshot("office", false, true)]);
+        add_topology_room(&state, "office", &[]);
+
+        reconcile_runtime_from_state(&state).unwrap();
+
+        let office = runtime
+            .engine_room_snapshot("office")
+            .expect("topology room should still exist in runtime");
+        assert!(
+            office.soft_off,
+            "reconcile should preserve existing soft_off"
+        );
+        assert!(
+            office.rhythm_enabled,
+            "reconcile should preserve existing rhythm state"
+        );
+    }
+
+    #[test]
+    fn reconcile_runtime_from_state_skips_when_runtime_initializer_is_missing() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+        let room_id = state.lock().unwrap().topology.create_room("Office");
+        let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+
+        {
+            let mut s = state.lock().unwrap();
+            s.ensure_runtime_fn = None;
+            s.canonical_registry.assign_room(&device_id, Some(&room_id));
+            assert!(s.topology.attach_device_user_override(&room_id, &device_id));
+        }
+
+        reconcile_runtime_from_state(&state).unwrap();
+
+        let s = state.lock().unwrap();
+        assert!(
+            s.hub_runtime().is_none(),
+            "reconcile should not fail or fabricate a runtime without an initializer"
+        );
+        assert_eq!(
+            s.topology
+                .get_device_node(&device_id)
+                .expect("topology device should still exist")
+                .parent_id
+                .as_deref(),
+            Some(room_id.as_str())
+        );
+    }
+
+    #[test]
+    fn triage_new_device_with_bound_room_materializes_parented_runtime_node() {
+        let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
+        let room_id = "room-kitchen".to_string();
+        {
+            let mut s = state.lock().unwrap();
+            let mut room = crate::topology::TopologyRoom::new(&room_id, "Kitchen");
+            room.upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                hub_key: hub_key.clone(),
+                hub_room_id: "matter-room-1".to_string(),
+                control_id: "control-1".to_string(),
+                light_device_ids: vec![],
+            });
+            s.topology.insert_room(room);
+            s.canonical_registry
+                .triage_mut()
+                .add(crate::canonical::triage::TriageEntry {
+                    id: "td2".to_string(),
+                    kind: crate::canonical::triage::TriageKind::DeviceMerge,
+                    discovered: crate::canonical::triage::TriageDiscoveredDevice {
+                        native_id: "matter-kitchen-1".to_string(),
+                        name: "Desk Lamp".to_string(),
+                        device_type: DeviceType::Light,
+                        room_id: "matter-room-1".to_string(),
+                        room_name: "Kitchen".to_string(),
+                        manufacturer: None,
+                        model: None,
+                    },
+                    hub_key: hub_key.clone(),
+                    candidate_matches: vec![],
+                    room_binding: None,
+                    confidence: 80,
+                    status: crate::canonical::triage::TriageStatus::Pending,
+                    resolved_by: None,
+                    created_at: 1000,
+                    resolved_at: None,
+                    canonical_id: None,
+                });
+        }
+
+        let result = do_triage_new_device(&state, "td2").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let canonical_id = parsed["canonical_id"].as_str().unwrap().to_string();
+
+        let s = state.lock().unwrap();
+        assert!(s.hub_runtime().is_some());
+        assert_eq!(
+            s.topology
+                .get_device_node(&canonical_id)
+                .expect("bound topology device node should exist")
+                .parent_id
+                .as_deref(),
+            Some(room_id.as_str())
+        );
+        assert_eq!(
+            s.canonical_registry
+                .get(&canonical_id)
+                .unwrap()
+                .room_id
+                .as_deref(),
+            Some(room_id.as_str())
+        );
+        drop(s);
+
+        assert_eq!(
+            runtime
+                .engine_node_snapshot(&canonical_id)
+                .expect("bound triage device should be materialized in runtime")
+                .parent_id
+                .as_deref(),
+            Some(room_id.as_str())
+        );
+    }
+
+    #[test]
+    fn triage_bind_room_bootstraps_runtime_and_reparents_silo_devices() {
+        let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
+        let target_id = state.lock().unwrap().topology.create_room("Kitchen");
+        let source_id = "matter-kitchen-silo".to_string();
+        let device_id =
+            insert_canonical_device(&state, hub_key.clone(), "matter-100", "Desk Lamp", "", "");
+
+        {
+            let mut s = state.lock().unwrap();
+            let mut room = crate::topology::TopologyRoom::new(&source_id, "Kitchen");
+            room.upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                hub_key: hub_key.clone(),
+                hub_room_id: "matter-room-1".to_string(),
+                control_id: "control-1".to_string(),
+                light_device_ids: vec!["matter-100".to_string()],
+            });
+            s.topology.insert_room(room);
+            s.canonical_registry
+                .assign_room(&device_id, Some(&source_id));
+            assert!(s
+                .topology
+                .attach_device_user_override(&source_id, &device_id));
+            s.canonical_registry
+                .triage_mut()
+                .add(crate::canonical::triage::TriageEntry {
+                    id: "rb2".to_string(),
+                    kind: crate::canonical::triage::TriageKind::RoomBinding,
+                    discovered: crate::canonical::triage::TriageDiscoveredDevice::default(),
+                    hub_key: hub_key.clone(),
+                    candidate_matches: vec![],
+                    room_binding: Some(crate::canonical::triage::RoomBindingProposal {
+                        hub_room_id: "matter-room-1".to_string(),
+                        hub_room_name: "Kitchen".to_string(),
+                        control_id: "control-1".to_string(),
+                        light_device_ids: vec!["matter-100".to_string()],
+                        canonical_device_ids: vec![device_id.clone()],
+                        target_rhythm_room_id: target_id.clone(),
+                        target_rhythm_room_name: "Kitchen".to_string(),
+                        candidate_rooms: vec![],
+                    }),
+                    confidence: 80,
+                    status: crate::canonical::triage::TriageStatus::Pending,
+                    resolved_by: None,
+                    created_at: 1000,
+                    resolved_at: None,
+                    canonical_id: None,
+                });
+        }
+
+        do_triage_bind_room(&state, "rb2").unwrap();
+
+        let s = state.lock().unwrap();
+        assert!(s.hub_runtime().is_some());
+        assert!(
+            s.topology.get(&source_id).is_none(),
+            "source silo room should be removed from topology"
+        );
+        assert_eq!(
+            s.topology
+                .get_device_node(&device_id)
+                .expect("merged device should remain in topology")
+                .parent_id
+                .as_deref(),
+            Some(target_id.as_str())
+        );
+        drop(s);
+
+        assert!(
+            runtime.engine_room_snapshot(&source_id).is_none(),
+            "source silo room should be removed from runtime"
+        );
+        assert_eq!(
+            runtime
+                .engine_node_snapshot(&device_id)
+                .expect("merged device should remain in runtime")
+                .parent_id
+                .as_deref(),
+            Some(target_id.as_str())
         );
     }
 
@@ -11316,6 +12125,83 @@ mod tests {
         assert!(
             runtime.engine_room_snapshot(&room_id).is_none(),
             "deleted room should be removed from runtime"
+        );
+    }
+
+    #[test]
+    fn topology_merge_rooms_reconciles_runtime_room_and_device_parent() {
+        let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
+
+        let office: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Office").unwrap()).unwrap();
+        let den: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Den").unwrap()).unwrap();
+        let target_id = office["id"].as_str().unwrap().to_string();
+        let source_id = den["id"].as_str().unwrap().to_string();
+        let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+
+        do_canonical_assign_room(&state, &device_id, Some(&source_id)).unwrap();
+        do_topology_merge_rooms(&state, &target_id, &source_id).unwrap();
+
+        let s = state.lock().unwrap();
+        assert!(s.topology.get(&source_id).is_none());
+        assert_eq!(
+            s.topology
+                .get_device_node(&device_id)
+                .unwrap()
+                .parent_id
+                .as_deref(),
+            Some(target_id.as_str())
+        );
+        drop(s);
+
+        assert!(
+            runtime.engine_room_snapshot(&source_id).is_none(),
+            "merged source room should be removed from runtime"
+        );
+        assert_eq!(
+            runtime
+                .engine_node_snapshot(&device_id)
+                .unwrap()
+                .parent_id
+                .as_deref(),
+            Some(target_id.as_str())
+        );
+    }
+
+    #[test]
+    fn topology_move_device_reconciles_runtime_parent() {
+        let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
+
+        let office: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Office").unwrap()).unwrap();
+        let den: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Den").unwrap()).unwrap();
+        let from_room = office["id"].as_str().unwrap().to_string();
+        let to_room = den["id"].as_str().unwrap().to_string();
+        let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+
+        do_canonical_assign_room(&state, &device_id, Some(&from_room)).unwrap();
+        do_topology_move_device(&state, &device_id, &from_room, &to_room).unwrap();
+
+        let s = state.lock().unwrap();
+        assert_eq!(
+            s.topology
+                .get_device_node(&device_id)
+                .unwrap()
+                .parent_id
+                .as_deref(),
+            Some(to_room.as_str())
+        );
+        drop(s);
+
+        assert_eq!(
+            runtime
+                .engine_node_snapshot(&device_id)
+                .unwrap()
+                .parent_id
+                .as_deref(),
+            Some(to_room.as_str())
         );
     }
 

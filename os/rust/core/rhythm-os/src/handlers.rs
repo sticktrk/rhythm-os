@@ -351,7 +351,7 @@ pub fn handle_put_rooms(state: &SharedState, body: &Value, persist: bool) -> Api
         match RoomParams::from_json(room_json) {
             Ok(params) => {
                 let per_room_persist = persist && !batch;
-                match commands::do_room_set(state, &params, None, per_room_persist) {
+                match commands::do_room_set(state, &params, None, per_room_persist, true) {
                     Ok(json) => results.push(json),
                     Err(e) => return ApiResponse::server_error(e),
                 }
