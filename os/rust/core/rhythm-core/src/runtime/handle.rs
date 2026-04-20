@@ -312,12 +312,14 @@ where
             .lock()
             .map_err(|e| anyhow::anyhow!("Failed to lock dispatch gate: {}", e))?;
         Ok(crate::runtime::executor::block_on(
-            self.handle_event(event),
+            RhythmRuntime::handle_event(self, event),
         )?)
     }
 
     fn sync_rooms(&self) -> Result<()> {
-        Ok(crate::runtime::executor::block_on(self.sync_rooms())?)
+        Ok(crate::runtime::executor::block_on(
+            RhythmRuntime::sync_rooms(self),
+        )?)
     }
 
     fn set_solar(&self, solar: SolarTime) -> Result<()> {
