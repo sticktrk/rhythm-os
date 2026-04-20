@@ -26,6 +26,10 @@ pub const WARNING_DIM_FACTOR: f32 = 0.5;
 
 /// Rate-limit reconnect-triggered full hub resyncs during SSE flapping.
 const RECONNECT_RESYNC_COOLDOWN: Duration = Duration::from_secs(120);
+/// How often the idle event loop wakes to check for new hub events.
+const EVENT_LOOP_IDLE_SLEEP: Duration = Duration::from_millis(10);
+/// How often to evaluate motion timeouts while sources are active.
+const MOTION_TIMER_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug)]
 pub struct MotionSourceState {
@@ -322,6 +326,116 @@ pub fn turn_on_node_inline(state: &SharedState, node_id: &str) -> bool {
     }
 }
 
+fn ingress_thread_stack_size(state: &SharedState) -> Option<usize> {
+    state
+        .lock()
+        .ok()
+        .and_then(|s| s.platform.event_thread_stack)
+}
+
+fn run_button_ingress_action(
+    state: &SharedState,
+    node_id: &str,
+    action: ButtonAction,
+    device_id: Option<&str>,
+    command_id: &str,
+    persist_after: bool,
+) {
+    if process_button_inline(state, node_id, action, device_id, command_id) && persist_after {
+        #[cfg(feature = "desktop")]
+        {
+            let runtime = {
+                let Ok(s) = state.lock() else { return };
+                s.hub_runtime()
+            };
+            if let Some(runtime) = runtime {
+                crate::commands::emit_node_state_event_after_apply(state, &runtime, node_id);
+            }
+        }
+
+        let work_tx = {
+            let Ok(s) = state.lock() else { return };
+            s.work_tx.clone()
+        };
+        if let Some(tx) = work_tx {
+            let _ = tx.try_send(WorkItem::DeferredPersist {
+                node_id: node_id.to_string(),
+            });
+        } else {
+            commands::persist_rooms(state);
+        }
+    }
+}
+
+fn spawn_button_ingress_action(
+    state: &SharedState,
+    node_id: String,
+    action: ButtonAction,
+    device_id: Option<String>,
+    command_id: String,
+    persist_after: bool,
+) {
+    let mut builder = std::thread::Builder::new().name("evt-button".to_string());
+    if let Some(stack_size) = ingress_thread_stack_size(state) {
+        builder = builder.stack_size(stack_size);
+    }
+
+    let state_clone = state.clone();
+    let node_id_clone = node_id.clone();
+    let device_id_clone = device_id.clone();
+    let command_id_clone = command_id.clone();
+
+    if let Err(error) = builder.spawn(move || {
+        run_button_ingress_action(
+            &state_clone,
+            &node_id_clone,
+            action,
+            device_id_clone.as_deref(),
+            &command_id_clone,
+            persist_after,
+        );
+    }) {
+        warn!(
+            target: "evt",
+            "Failed to spawn button ingress dispatch thread: {}",
+            error
+        );
+        run_button_ingress_action(
+            state,
+            &node_id,
+            action,
+            device_id.as_deref(),
+            &command_id,
+            persist_after,
+        );
+    }
+}
+
+fn run_motion_turn_on_action(state: &SharedState, node_id: &str) {
+    turn_on_node_inline(state, node_id);
+}
+
+fn spawn_motion_turn_on_action(state: &SharedState, node_id: String) {
+    let mut builder = std::thread::Builder::new().name("evt-motion".to_string());
+    if let Some(stack_size) = ingress_thread_stack_size(state) {
+        builder = builder.stack_size(stack_size);
+    }
+
+    let state_clone = state.clone();
+    let node_id_clone = node_id.clone();
+
+    if let Err(error) = builder.spawn(move || {
+        run_motion_turn_on_action(&state_clone, &node_id_clone);
+    }) {
+        warn!(
+            target: "evt",
+            "Failed to spawn motion dispatch thread: {}",
+            error
+        );
+        run_motion_turn_on_action(state, &node_id);
+    }
+}
+
 /// Translate a hub-native room/device ID to the public topology node ID if available.
 ///
 /// Used at the event boundary so all downstream processing uses public node
@@ -434,8 +548,8 @@ fn should_run_reconnect_resync(
 /// Handle a hub-agnostic event from the event stream.
 ///
 /// Routes events through `RuntimeHandle` regardless of which hub produced them.
-/// Button/motion events are processed inline (zero queue delay), with persist
-/// deferred to the cmd-worker thread.
+/// Button/motion events are dispatched onto short-lived worker threads so a
+/// slow light command cannot block the shared hub-event ingress loop.
 pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut MotionTimerState) {
     let hub_key = event.hub_key().cloned();
     let connected = !matches!(&event, HubEvent::Disconnected { .. });
@@ -515,32 +629,14 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 .sensors
                 .retain(|_, source| source.target_node_id != node_id);
 
-            if process_button_inline(state, &node_id, action, device_id.as_deref(), &command_id) {
-                #[cfg(feature = "desktop")]
-                {
-                    let runtime = {
-                        let Ok(s) = state.lock() else { return };
-                        s.hub_runtime()
-                    };
-                    if let Some(runtime) = runtime {
-                        crate::commands::emit_node_state_event_after_apply(
-                            state, &runtime, &node_id,
-                        );
-                    }
-                }
-
-                let work_tx = {
-                    let Ok(s) = state.lock() else { return };
-                    s.work_tx.clone()
-                };
-                if let Some(tx) = work_tx {
-                    let _ = tx.try_send(WorkItem::DeferredPersist {
-                        node_id: node_id.clone(),
-                    });
-                } else {
-                    commands::persist_rooms(state);
-                }
-            }
+            spawn_button_ingress_action(
+                state,
+                node_id,
+                action,
+                device_id.clone(),
+                command_id,
+                true,
+            );
         }
 
         HubEvent::Motion {
@@ -593,7 +689,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                         target_node_id
                     );
 
-                    turn_on_node_inline(state, &target_node_id);
+                    spawn_motion_turn_on_action(state, target_node_id.clone());
                 } else {
                     info!(
                         target: "evt",
@@ -834,33 +930,17 @@ pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
                 s.work_tx.clone()
             };
             let command_id = logging::next_command_id("motion-timeout");
-            if let Some(tx) = work_tx {
-                if tx
-                    .try_send(WorkItem::ButtonAction {
-                        command_id: command_id.clone(),
-                        node_id: target_node_id.clone(),
-                        action: ButtonAction::OffPress,
-                        device_id: None,
-                    })
-                    .is_err()
-                {
-                    tracing::warn!(
-                        target: "evt",
-                        event = "motion_timeout_queue_full",
-                        command_id = %command_id,
-                        node_id = %target_node_id,
-                        "Motion timeout queue full, applying inline"
-                    );
-                    process_button_inline(
-                        state,
-                        target_node_id,
-                        ButtonAction::OffPress,
-                        None,
-                        &command_id,
-                    );
-                }
+            if work_tx.is_some() {
+                spawn_button_ingress_action(
+                    state,
+                    target_node_id.clone(),
+                    ButtonAction::OffPress,
+                    None,
+                    command_id,
+                    false,
+                );
             } else {
-                process_button_inline(
+                let _ = process_button_inline(
                     state,
                     target_node_id,
                     ButtonAction::OffPress,
@@ -889,7 +969,7 @@ pub fn run_event_loop(
 ) {
     let mut hub_event_rxs: Vec<std::sync::mpsc::Receiver<HubEvent>> = initial_event_rxs;
     let mut motion_state = MotionTimerState::new();
-    let mut motion_tick: u32 = 0;
+    let mut last_motion_check = Instant::now();
     let mut motion_dirty = false;
 
     // Seed motion state from startup prefetch of binary_sensor states.
@@ -917,12 +997,15 @@ pub fn run_event_loop(
     }
 
     loop {
+        let mut processed_hub_event = false;
+
         // Pick up new hub event receivers from reconfiguration
         if let Ok(mut s) = state.lock() {
             if !s.pending_hub_event_rxs.is_empty() {
                 let new_rxs = std::mem::take(&mut s.pending_hub_event_rxs);
                 hub_event_rxs.extend(new_rxs);
                 motion_state = MotionTimerState::new();
+                last_motion_check = Instant::now();
             }
 
             if !s.pending_motion_clear.is_empty() {
@@ -950,6 +1033,7 @@ pub fn run_event_loop(
         hub_event_rxs.retain(|rx| loop {
             match rx.try_recv() {
                 Ok(event) => {
+                    processed_hub_event = true;
                     handle_hub_event(&state, event, &mut motion_state);
                     motion_dirty = true;
                 }
@@ -964,10 +1048,10 @@ pub fn run_event_loop(
         // Persist registry if on-demand discovery registered new sensors/devices
         check_registry_dirty(&state);
 
-        // Check motion timers every ~30s (600 * 50ms)
-        motion_tick += 1;
-        if motion_tick >= 600 {
-            motion_tick = 0;
+        // Check motion timers periodically without tying the cadence to the
+        // event-loop sleep interval.
+        if last_motion_check.elapsed() >= MOTION_TIMER_CHECK_INTERVAL {
+            last_motion_check = Instant::now();
             if !motion_state.sensors.is_empty() {
                 check_motion_timers(&state, &mut motion_state);
                 motion_dirty = true;
@@ -980,7 +1064,11 @@ pub fn run_event_loop(
             sync_motion_snapshots(&state, &motion_state);
         }
 
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        if processed_hub_event {
+            std::thread::yield_now();
+        } else {
+            std::thread::sleep(EVENT_LOOP_IDLE_SLEEP);
+        }
     }
 }
 
@@ -1465,6 +1553,25 @@ mod tests {
         std::sync::Arc::new(std::sync::Mutex::new(crate::state::AppState::default()))
     }
 
+    fn make_state_with_runtime(runtime: Arc<dyn RuntimeHandle>) -> SharedState {
+        let mut app = crate::state::AppState::default();
+        let hub_type = HubType::new("test");
+        let hub_key = HubKey::new(hub_type.clone(), "hub.local");
+        app.hubs.insert(
+            hub_key.clone(),
+            ActiveHub {
+                hub_type,
+                hub_key,
+                runtime: Some(runtime),
+                hub_data: Box::new(()),
+                registry: None,
+                discovery: None,
+                shutdown: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        Arc::new(Mutex::new(app))
+    }
+
     struct MotionTestRuntime {
         snapshots: Vec<RoomSnapshot>,
         any_lights_on_calls: Option<Arc<AtomicUsize>>,
@@ -1556,6 +1663,96 @@ mod tests {
                 ("rhythm".into(), "Rhythm Curve".into()),
                 ("sleep".into(), "Sleep Curve".into()),
             ]
+        }
+    }
+
+    struct SlowDispatchRuntime {
+        handle_event_delay: Duration,
+        turn_on_room_delay: Duration,
+        handle_event_calls: Arc<AtomicUsize>,
+        turn_on_room_calls: Arc<AtomicUsize>,
+    }
+
+    impl RuntimeHandle for SlowDispatchRuntime {
+        fn handle_event(&self, _: &rhythm_core::InputEvent) -> anyhow::Result<bool> {
+            self.handle_event_calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(self.handle_event_delay);
+            Ok(true)
+        }
+        fn sync_rooms(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn set_solar(&self, _: rhythm_core::SolarTime) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn set_light_profile_config(&self, _: LightProfileConfig) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn set_mode_configs(&self, _: Vec<rhythm_core::ModeConfig>) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn periodic_tick_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn engine_room_snapshot(&self, _: &str) -> Option<RoomSnapshot> {
+            None
+        }
+        fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot> {
+            vec![]
+        }
+        fn restore_room_state(&self, _: &str, _: rhythm_core::RestoredRoomState) {}
+        fn add_room(&self, _: &str, _: &str) {}
+        fn remove_room(&self, _: &str) {}
+        fn dim_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn turn_on_room(&self, _: &str) -> anyhow::Result<()> {
+            self.turn_on_room_calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(self.turn_on_room_delay);
+            Ok(())
+        }
+        fn apply_room_command(
+            &self,
+            _: &str,
+            _: rhythm_core::LightingCommand,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn lights_off_room(&self, _: &str, _: Option<u32>) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn set_power_save(&self, _: bool) -> Vec<String> {
+            vec![]
+        }
+        fn is_power_save(&self) -> bool {
+            false
+        }
+        fn set_room_brightness(&self, _: &str, _: u8) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn set_room_time_offset(&self, _: &str, _: f32) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn idle_brightness(&self) -> u8 {
+            1
+        }
+        fn soft_off_tick_room(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn any_lights_on(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn current_hour(&self) -> f32 {
+            12.0
+        }
+        fn set_light_profile(&self, _: &str) -> bool {
+            true
+        }
+        fn active_light_profile_id(&self) -> String {
+            rhythm_core::RHYTHM_PROFILE_ID.to_string()
+        }
+        fn available_light_profiles(&self) -> Vec<(String, String)> {
+            vec![]
         }
     }
 
@@ -1757,6 +1954,85 @@ mod tests {
             .find(|node| node["name"] == "Room A" && node["kind"] == "room")
             .unwrap();
         assert_ne!(after_room["id"], before_room_id);
+    }
+
+    #[test]
+    fn button_event_dispatches_without_blocking_event_ingress() {
+        let handle_event_calls = Arc::new(AtomicUsize::new(0));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
+            handle_event_delay: Duration::from_millis(250),
+            turn_on_room_delay: Duration::ZERO,
+            handle_event_calls: handle_event_calls.clone(),
+            turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let state = make_state_with_runtime(runtime);
+
+        let started = Instant::now();
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Button {
+                hub_key: None,
+                room_id: "room_a".into(),
+                action: ButtonAction::OnPress,
+                device_id: None,
+            },
+            &mut MotionTimerState::new(),
+        );
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "button ingress should return quickly, elapsed {:?}",
+            elapsed
+        );
+
+        for _ in 0..30 {
+            if handle_event_calls.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(handle_event_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn motion_event_dispatches_without_blocking_event_ingress() {
+        let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
+            handle_event_delay: Duration::ZERO,
+            turn_on_room_delay: Duration::from_millis(250),
+            handle_event_calls: Arc::new(AtomicUsize::new(0)),
+            turn_on_room_calls: turn_on_room_calls.clone(),
+        });
+        let state = make_state_with_runtime(runtime);
+        let mut motion = MotionTimerState::new();
+
+        let started = Instant::now();
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: None,
+                room_id: "room_a".into(),
+                sensor_id: "sensor_a".into(),
+                detected: true,
+            },
+            &mut motion,
+        );
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "motion ingress should return quickly, elapsed {:?}",
+            elapsed
+        );
+
+        for _ in 0..30 {
+            if turn_on_room_calls.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(turn_on_room_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
