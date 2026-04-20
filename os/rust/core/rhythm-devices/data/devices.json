@@ -499,7 +499,10 @@
     "color_modes": ["xy", "color_temperature"],
     "min_kelvin": 2000,
     "max_kelvin": 7000,
-    "matter": {}
+    "matter": {
+      "vendor_id": 4921,
+      "product_id": 171
+    }
   },
   {
     "manufacturer": "Savant Systems, Inc.",
@@ -547,5 +550,16 @@
     "min_kelvin": 2000,
     "max_kelvin": 7000,
     "matter": {}
+  },
+  {
+    "manufacturer": "Shenzhen Qianyan Technology",
+    "model": "H6004",
+    "name": "Shenzhen Qianyan H6004",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "matter": {
+      "vendor_id": 4999,
+      "product_id": 24580
+    }
   }
 ]

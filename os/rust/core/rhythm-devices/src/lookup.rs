@@ -165,6 +165,38 @@ mod tests {
         assert!(entry.matter.is_some());
     }
 
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_lookup_cync_by_matter_id() {
+        let db = DeviceDatabase::builtin();
+        let entry = db.lookup_matter(4921, 171);
+        assert!(
+            entry.is_some(),
+            "GE Cync Full Color A19 Matter IDs should match"
+        );
+        let entry = entry.unwrap();
+        assert_eq!(entry.name, "GE Cync Full Color A19");
+        assert_eq!(entry.model, "93128983");
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_lookup_h6004_by_matter_id() {
+        let db = DeviceDatabase::builtin();
+        let entry = db.lookup_matter(4999, 24580);
+        assert!(
+            entry.is_some(),
+            "Shenzhen Qianyan H6004 Matter IDs should match"
+        );
+        let entry = entry.unwrap();
+        assert_eq!(entry.manufacturer, "Shenzhen Qianyan Technology");
+        assert_eq!(entry.model, "H6004");
+        assert_eq!(
+            entry.light_type,
+            crate::capabilities::LightType::ExtendedColor
+        );
+    }
+
     #[test]
     fn test_lookup_matter_from_entries() {
         use crate::capabilities::{ColorMode, LightType};
