@@ -14,7 +14,7 @@ use anyhow::Result;
 use clap::Parser;
 use log::{info, warn};
 use rhythm_os::logging;
-use rhythm_os::state::{AppState, SharedState, WorkItem};
+use rhythm_os::state::{AppState, PlatformConfig, SharedState, WorkItem};
 use rhythm_os::storage::FileStorage;
 use rhythm_server::hub;
 
@@ -66,6 +66,11 @@ fn main() -> Result<()> {
         s.listen_port = Some(args.port);
         s.data_dir = args.data_dir.clone();
         s.storage = Some(Box::new(file_storage));
+        s.platform = PlatformConfig {
+            eager_tls_warmup: false,
+            full_device_discovery: false,
+            ..PlatformConfig::desktop()
+        };
 
         rhythm_os::storage::load_persisted_state(&mut s);
 
