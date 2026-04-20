@@ -7642,6 +7642,41 @@ mod tests {
         state.lock().unwrap().topology.insert_room(room);
     }
 
+    fn activate_topology_room_hubs(state: &SharedState, room_id: &str) {
+        let hub_keys: Vec<HubKey> = {
+            let s = state.lock().unwrap();
+            s.topology
+                .get(room_id)
+                .map(|room| {
+                    room.hub_room_bindings
+                        .iter()
+                        .map(|binding| binding.hub_key.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        let mut s = state.lock().unwrap();
+        for hub_key in hub_keys {
+            if s.hubs.contains_key(&hub_key) {
+                continue;
+            }
+
+            s.hubs.insert(
+                hub_key.clone(),
+                ActiveHub {
+                    hub_type: hub_key.hub_type.clone(),
+                    hub_key,
+                    runtime: None,
+                    hub_data: Box::new(()),
+                    registry: None,
+                    discovery: None,
+                    shutdown: Default::default(),
+                },
+            );
+        }
+    }
+
     fn insert_canonical_device(
         state: &SharedState,
         hub_key: HubKey,
@@ -8561,6 +8596,7 @@ mod tests {
     fn build_room_rhythm_state_includes_deduped_hub_types_from_topology() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
         add_topology_room(&state, "r1", &["mock", "mock", "matter"]);
+        activate_topology_room_hubs(&state, "r1");
 
         let room_state = build_room_rhythm_state(&state, "r1").unwrap();
         let json = serde_json::to_value(&room_state).unwrap();
@@ -8671,6 +8707,7 @@ mod tests {
     fn build_node_state_event_includes_hub_types_from_topology() {
         let (state, rt) = setup_state(vec![make_snapshot("r1", false, false)]);
         add_topology_room(&state, "r1", &["matter", "mock"]);
+        activate_topology_room_hubs(&state, "r1");
         let snap =
             rhythm_core::NodeSnapshot::from_room_snapshot(rt.engine_room_snapshot("r1").unwrap());
 
@@ -9583,6 +9620,7 @@ mod tests {
     fn build_rooms_state_includes_hub_types_from_topology() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
         add_topology_room(&state, "r1", &["matter", "mock"]);
+        activate_topology_room_hubs(&state, "r1");
 
         let result = build_rooms_state(&state).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -9690,6 +9728,7 @@ mod tests {
         };
         let state: SharedState = Arc::new(Mutex::new(app));
         add_topology_room(&state, "r1", &["matter", "mock"]);
+        activate_topology_room_hubs(&state, "r1");
 
         let result = build_state_snapshot(&state).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();

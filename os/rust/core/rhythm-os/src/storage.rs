@@ -1360,12 +1360,16 @@ mod tests {
     #[cfg(feature = "desktop")]
     mod file_storage_tests {
         use super::*;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_TEMP_STORAGE_ID: AtomicU64 = AtomicU64::new(0);
 
         fn temp_storage() -> (FileStorage, std::path::PathBuf) {
             let dir = std::env::temp_dir().join(format!("rhythm_test_{}", std::process::id()));
-            // Unique subdirectory per test to avoid conflicts
+            let unique_id = NEXT_TEMP_STORAGE_ID.fetch_add(1, Ordering::Relaxed);
+            // Add a monotonic counter so parallel tests never race on the same path.
             let unique = dir.join(format!(
-                "{}",
+                "{}-{unique_id}",
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
