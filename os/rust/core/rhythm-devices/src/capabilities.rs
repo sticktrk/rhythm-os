@@ -132,6 +132,7 @@ impl LightCapabilities {
 
         let mut supports_dimming = first.supports_dimming();
         let mut supports_color_temp = first.supports_color_temp();
+        let mut supports_hue_saturation = first.supports_hue_saturation();
         let mut supports_xy = first.supports_xy_color();
         let mut min_kelvin = first.min_kelvin;
         let mut max_kelvin = first.max_kelvin;
@@ -142,6 +143,7 @@ impl LightCapabilities {
         for cap in caps {
             supports_dimming &= cap.supports_dimming();
             supports_color_temp &= cap.supports_color_temp();
+            supports_hue_saturation &= cap.supports_hue_saturation();
             supports_xy &= cap.supports_xy_color();
             supports_transition &= cap.supports_transition;
             min_brightness = max_option(min_brightness, cap.min_brightness);
@@ -175,7 +177,7 @@ impl LightCapabilities {
             gamut = None;
         }
 
-        let light_type = if supports_xy {
+        let light_type = if supports_xy || supports_hue_saturation {
             LightType::ExtendedColor
         } else if supports_color_temp {
             LightType::ColorTemperature
@@ -187,7 +189,13 @@ impl LightCapabilities {
 
         let color_modes = match light_type {
             LightType::ExtendedColor => {
-                let mut modes = vec![ColorMode::Xy];
+                let mut modes = Vec::new();
+                if supports_hue_saturation {
+                    modes.push(ColorMode::HueSaturation);
+                }
+                if supports_xy {
+                    modes.push(ColorMode::Xy);
+                }
                 if supports_color_temp {
                     modes.push(ColorMode::ColorTemperature);
                 }
@@ -212,6 +220,11 @@ impl LightCapabilities {
     /// Whether this light supports color temperature control.
     pub fn supports_color_temp(&self) -> bool {
         self.color_modes.contains(&ColorMode::ColorTemperature)
+    }
+
+    /// Whether this light supports hue/saturation color.
+    pub fn supports_hue_saturation(&self) -> bool {
+        self.color_modes.contains(&ColorMode::HueSaturation)
     }
 
     /// Whether this light supports full xy color.

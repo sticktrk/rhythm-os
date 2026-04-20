@@ -6,9 +6,9 @@
 use std::sync::{Arc, Mutex};
 
 use rhythm_core::controller::{LightControlError, LightControlResult};
-use rhythm_core::kelvin_to_xy;
 use rhythm_core::lighting::LightingCommand;
 use rhythm_core::room::Room;
+use rhythm_core::{kelvin_to_xy, Rgb};
 use rhythm_devices::{
     adapt_command, builtin_db, AdaptedCommand, ColorPreference, ColorRequest, LightCapabilities,
     LightType,
@@ -63,7 +63,10 @@ pub fn adapt_lighting_command(
     preference: ColorPreference,
 ) -> AdaptedCommand {
     let color = if command.is_direct_color {
-        ColorRequest::Xy((command.xy.x, command.xy.y))
+        ColorRequest::DirectColor {
+            xy: (command.xy.x, command.xy.y),
+            hue_saturation: rgb_to_matter_hue_saturation(command.rgb),
+        }
     } else {
         let clamped_kelvin = clamp_kelvin(command.kelvin, caps.min_kelvin, caps.max_kelvin);
         let clamped_xy = kelvin_to_xy(clamped_kelvin);
@@ -92,6 +95,37 @@ fn clamp_kelvin(kelvin: u16, min_kelvin: Option<u16>, max_kelvin: Option<u16>) -
         Some(max_kelvin) if kelvin > max_kelvin => max_kelvin,
         _ => kelvin,
     }
+}
+
+fn rgb_to_matter_hue_saturation(rgb: Rgb) -> (u8, u8) {
+    let r = rgb.r as f32 / 255.0;
+    let g = rgb.g as f32 / 255.0;
+    let b = rgb.b as f32 / 255.0;
+
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+
+    let hue_degrees = if delta <= f32::EPSILON {
+        0.0
+    } else if (max - r).abs() <= f32::EPSILON {
+        60.0 * ((g - b) / delta).rem_euclid(6.0)
+    } else if (max - g).abs() <= f32::EPSILON {
+        60.0 * (((b - r) / delta) + 2.0)
+    } else {
+        60.0 * (((r - g) / delta) + 4.0)
+    };
+
+    let saturation = if max <= f32::EPSILON {
+        0.0
+    } else {
+        delta / max
+    };
+
+    let hue = ((hue_degrees / 360.0) * 254.0).round().clamp(0.0, 254.0) as u8;
+    let saturation = (saturation * 254.0).round().clamp(0.0, 254.0) as u8;
+
+    (hue, saturation)
 }
 
 /// Resolve common room capabilities from the canonical registry.
@@ -242,5 +276,31 @@ mod tests {
         assert_eq!(adapted.brightness, Some(77));
         assert_eq!(adapted.kelvin, None);
         assert_eq!(adapted.xy, Some((expected_xy.x, expected_xy.y)));
+        assert_eq!(adapted.hue_saturation, None);
+    }
+
+    #[test]
+    fn adapt_lighting_command_direct_color_includes_hue_saturation() {
+        let caps = LightCapabilities {
+            color_modes: vec![
+                rhythm_devices::ColorMode::HueSaturation,
+                rhythm_devices::ColorMode::Xy,
+            ],
+            ..LightCapabilities::defaults_for(LightType::ExtendedColor)
+        };
+        let command = LightingCommand::from_color(
+            80,
+            rhythm_core::Rgb::new(255, 0, 0),
+            rhythm_core::XyColor { x: 0.64, y: 0.33 },
+            Some(500),
+        );
+
+        let adapted =
+            adapt_lighting_command(&caps, &command, ColorPreference::PreferColorTemperature);
+
+        assert_eq!(adapted.brightness, Some(80));
+        assert_eq!(adapted.kelvin, None);
+        assert_eq!(adapted.xy, None);
+        assert_eq!(adapted.hue_saturation, Some((0, 254)));
     }
 }

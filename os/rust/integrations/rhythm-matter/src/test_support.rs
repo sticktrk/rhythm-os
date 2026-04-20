@@ -36,6 +36,13 @@ pub enum RecordedOperation {
         y: f32,
         transition_ms: Option<u32>,
     },
+    SetHueSaturation {
+        node_id: u64,
+        endpoint: u16,
+        hue: u8,
+        saturation: u8,
+        transition_ms: Option<u32>,
+    },
     ReadOnOff {
         node_id: u64,
         endpoint: u16,
@@ -114,6 +121,17 @@ impl MatterTransport for NoOpTransport {
         _endpoint: u16,
         _x: f32,
         _y: f32,
+        _transition_ms: Option<u32>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn set_hue_saturation(
+        &self,
+        _node_id: u64,
+        _endpoint: u16,
+        _hue: u8,
+        _saturation: u8,
         _transition_ms: Option<u32>,
     ) -> Result<()> {
         Ok(())
@@ -336,6 +354,27 @@ impl MatterTransport for SpyTransport {
             endpoint,
             x,
             y,
+            transition_ms,
+        });
+        Ok(())
+    }
+
+    fn set_hue_saturation(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        hue: u8,
+        saturation: u8,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        if self.should_fail(node_id) {
+            anyhow::bail!("device {} not found in registry", node_id);
+        }
+        self.record(RecordedOperation::SetHueSaturation {
+            node_id,
+            endpoint,
+            hue,
+            saturation,
             transition_ms,
         });
         Ok(())

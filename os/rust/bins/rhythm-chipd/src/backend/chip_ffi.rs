@@ -139,6 +139,32 @@ impl ChipFfiController {
         }
     }
 
+    pub fn set_hue_saturation(
+        &mut self,
+        node_id: u64,
+        endpoint: u16,
+        hue: u8,
+        saturation: u8,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            return ffi_probe::set_hue_saturation(
+                node_id,
+                endpoint,
+                hue,
+                saturation,
+                transition_ms,
+            );
+        }
+
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            let _ = (node_id, endpoint, hue, saturation, transition_ms);
+            Err(self.unsupported("set_hue_saturation"))
+        }
+    }
+
     pub fn read_on_off(&mut self, node_id: u64, endpoint: u16) -> Result<bool> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
@@ -294,6 +320,16 @@ mod ffi_probe {
             endpoint: c_ushort,
             x: f32,
             y: f32,
+            has_transition_ms: bool,
+            transition_ms: u32,
+            error_message: *mut c_char,
+            error_message_size: usize,
+        ) -> bool;
+        fn rhythm_chip_bridge_set_hue_saturation(
+            node_id: u64,
+            endpoint: c_ushort,
+            hue: u8,
+            saturation: u8,
             has_transition_ms: bool,
             transition_ms: u32,
             error_message: *mut c_char,
@@ -527,6 +563,33 @@ mod ffi_probe {
                 endpoint,
                 x,
                 y,
+                transition_ms.is_some(),
+                transition_ms.unwrap_or_default(),
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        };
+        if success {
+            Ok(())
+        } else {
+            Err(read_error_buffer(&error_buffer))
+        }
+    }
+
+    pub fn set_hue_saturation(
+        node_id: u64,
+        endpoint: u16,
+        hue: u8,
+        saturation: u8,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
+        let success = unsafe {
+            rhythm_chip_bridge_set_hue_saturation(
+                node_id,
+                endpoint,
+                hue,
+                saturation,
                 transition_ms.is_some(),
                 transition_ms.unwrap_or_default(),
                 error_buffer.as_mut_ptr(),

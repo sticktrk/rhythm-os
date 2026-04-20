@@ -115,6 +115,23 @@ impl ChipControllerService {
                     .set_xy(node_id, endpoint, x, y, transition_ms)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
+            ChipRpcRequest::SetHueSaturation {
+                node_id,
+                endpoint,
+                hue,
+                saturation,
+                transition_ms,
+            } => {
+                self.require_initialized()?;
+                self.backend.set_hue_saturation(
+                    node_id,
+                    endpoint,
+                    hue,
+                    saturation,
+                    transition_ms,
+                )?;
+                Ok(serde_json::to_value(ChipRpcEmpty::new())?)
+            }
             ChipRpcRequest::ReadOnOff { node_id, endpoint } => {
                 self.require_initialized()?;
                 let on = self.backend.read_on_off(node_id, endpoint)?;

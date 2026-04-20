@@ -71,6 +71,9 @@ bool rhythm_chip_bridge_set_color_temperature(uint64_t node_id, uint16_t endpoin
                                               uint32_t transition_ms, char * error_message, size_t error_message_size);
 bool rhythm_chip_bridge_set_xy(uint64_t node_id, uint16_t endpoint, float x, float y, bool has_transition_ms,
                                uint32_t transition_ms, char * error_message, size_t error_message_size);
+bool rhythm_chip_bridge_set_hue_saturation(uint64_t node_id, uint16_t endpoint, uint8_t hue, uint8_t saturation,
+                                           bool has_transition_ms, uint32_t transition_ms, char * error_message,
+                                           size_t error_message_size);
 bool rhythm_chip_bridge_read_on_off(uint64_t node_id, uint16_t endpoint, bool * out_on, char * error_message,
                                     size_t error_message_size);
 void rhythm_chip_bridge_shutdown(void);

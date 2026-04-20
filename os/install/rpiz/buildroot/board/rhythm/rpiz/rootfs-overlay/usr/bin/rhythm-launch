@@ -3,6 +3,7 @@
 set -eu
 
 LOGFILE=/var/log/rhythm-server.log
+MATTER_LOGFILE_DEFAULT=/var/log/rhythm-matter.log
 DATA_DIR=/data
 DEV_DEFAULTS=/etc/default/rhythm-dev
 
@@ -28,6 +29,11 @@ if [ -r "$DEV_DEFAULTS" ]; then
     # shellcheck disable=SC1090
     . "$DEV_DEFAULTS"
 fi
+
+# Keep raw Matter chipd output separate from the main appliance log by default.
+# Set RHYTHM_MATTER_LOGFILE='' in /etc/default/rhythm-dev to merge it back.
+export RHYTHM_MATTER_LOGFILE="${RHYTHM_MATTER_LOGFILE-$MATTER_LOGFILE_DEFAULT}"
+
 if is_truthy "${RHYTHM_DEV_MODE:-}"; then
     export RHYTHM_DEV_MODE=1
     export RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION="${RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION:-1}"

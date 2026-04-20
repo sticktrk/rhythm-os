@@ -65,4 +65,5 @@ Periodic room-level tick logs should stay below `info`; operators should see one
 
 - `RUST_LOG` controls filtering.
 - `RHYTHM_LOG_FORMAT` supports `full`, `compact`, or `json`.
+- `RHYTHM_MATTER_LOGFILE` redirects raw `rhythm-chipd` stdout/stderr to a separate append-only file. Set it to an empty string to keep chipd output on the main process sink.
 - Native HTTP responses emit request-completion logs with `request_id`, `status`, and `latency_ms`.

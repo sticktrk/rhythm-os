@@ -280,7 +280,26 @@ impl MatterLightController {
                 Self::maybe_throttle(throttle_ms);
             }
 
-            if let Some((x, y)) = adapted.xy {
+            if let Some((hue, saturation)) = adapted.hue_saturation {
+                if let Err(e) = self.transport.set_hue_saturation(
+                    node_id,
+                    endpoint,
+                    hue,
+                    saturation,
+                    adapted.transition_ms,
+                ) {
+                    warn!(
+                        target: "cmd",
+                        "Matter: hue/saturation command failed for node {}: {}",
+                        node_id,
+                        e
+                    );
+                    command_failures += 1;
+                } else {
+                    command_successes += 1;
+                }
+                Self::maybe_throttle(throttle_ms);
+            } else if let Some((x, y)) = adapted.xy {
                 if let Err(e) =
                     self.transport
                         .set_xy(node_id, endpoint, x, y, adapted.transition_ms)
@@ -711,6 +730,7 @@ mod tests {
                 RecordedOperation::SetOnOff { node_id, .. }
                 | RecordedOperation::SetBrightness { node_id, .. }
                 | RecordedOperation::SetColorTemperature { node_id, .. }
+                | RecordedOperation::SetHueSaturation { node_id, .. }
                 | RecordedOperation::SetXy { node_id, .. }
                 | RecordedOperation::ReadOnOff { node_id, .. } => *node_id,
             })
@@ -956,6 +976,65 @@ mod tests {
     }
 
     #[test]
+    fn turn_on_direct_color_prefers_hue_saturation_when_supported() {
+        let spy = Arc::new(SpyTransport::new());
+        let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
+        registry
+            .lock()
+            .unwrap()
+            .upsert_room("r1", "Room", "r1", &["matter-42".to_string()]);
+        registry
+            .lock()
+            .unwrap()
+            .set_area_lights("r1", vec!["matter-42".to_string()]);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let hub_data = Arc::new(crate::hub_state::MatterHubData {
+            #[cfg(feature = "desktop")]
+            transport: std::sync::OnceLock::new(),
+            capture_dir: std::sync::OnceLock::new(),
+            registry,
+            fabric_id: "test".to_string(),
+            commissioned: std::sync::Mutex::new(Vec::new()),
+            next_node_id: std::sync::atomic::AtomicU64::new(100),
+            device_caps: std::sync::Mutex::new(std::collections::HashMap::from([(
+                "matter-42".to_string(),
+                LightCapabilities {
+                    color_modes: vec![
+                        rhythm_devices::ColorMode::HueSaturation,
+                        rhythm_devices::ColorMode::Xy,
+                        rhythm_devices::ColorMode::ColorTemperature,
+                    ],
+                    ..LightCapabilities::defaults_for(LightType::ExtendedColor)
+                },
+            )])),
+            device_quirks: std::sync::Mutex::new(std::collections::HashMap::from([(
+                "matter-42".to_string(),
+                Vec::new(),
+            )])),
+            event_tx: tx,
+        });
+        let controller = MatterLightController::new(spy.clone(), hub_data);
+
+        let command = LightingCommand::from_color(
+            50,
+            rhythm_core::Rgb::new(255, 0, 0),
+            rhythm_core::XyColor { x: 0.64, y: 0.33 },
+            Some(400),
+        );
+        block_on(controller.turn_on("r1", command)).unwrap();
+
+        assert!(spy.operations().iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::SetHueSaturation { node_id: 42, .. }
+        )));
+        assert!(!spy
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::SetXy { node_id: 42, .. })));
+    }
+
+    #[test]
     fn turn_on_quirked_device_sends_explicit_on_before_brightness() {
         let spy = Arc::new(SpyTransport::new());
         let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
@@ -1110,6 +1189,27 @@ mod tests {
                         transition_ms,
                     });
                 anyhow::bail!("xy failed");
+            }
+
+            fn set_hue_saturation(
+                &self,
+                node_id: u64,
+                endpoint: u16,
+                hue: u8,
+                saturation: u8,
+                transition_ms: Option<u32>,
+            ) -> Result<()> {
+                self.operations
+                    .lock()
+                    .unwrap()
+                    .push(RecordedOperation::SetHueSaturation {
+                        node_id,
+                        endpoint,
+                        hue,
+                        saturation,
+                        transition_ms,
+                    });
+                anyhow::bail!("hue/saturation failed");
             }
 
             fn read_on_off(&self, node_id: u64, endpoint: u16) -> Result<bool> {

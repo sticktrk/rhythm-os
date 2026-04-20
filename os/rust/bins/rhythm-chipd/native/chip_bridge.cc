@@ -822,6 +822,18 @@ public:
         return InvokeCommand(nodeId, endpoint, request);
     }
 
+    CHIP_ERROR SetHueSaturation(NodeId nodeId, EndpointId endpoint, uint8_t hue, uint8_t saturation,
+                                std::optional<uint32_t> transitionMs)
+    {
+        ColorControl::Commands::MoveToHueAndSaturation::Type request;
+        request.hue             = hue;
+        request.saturation      = saturation;
+        request.transitionTime  = transitionMs.has_value() ? MillisecondsToTenths(*transitionMs) : 0;
+        request.optionsMask     = chip::BitMask<ColorControl::OptionsBitmap>();
+        request.optionsOverride = chip::BitMask<ColorControl::OptionsBitmap>();
+        return InvokeCommand(nodeId, endpoint, request);
+    }
+
     CHIP_ERROR ReadOnOff(NodeId nodeId, EndpointId endpoint, bool & on)
     {
         return ReadValueAttribute<OnOff::Attributes::OnOff::TypeInfo>(nodeId, endpoint, on);
@@ -1183,6 +1195,15 @@ bool rhythm_chip_bridge_set_xy(uint64_t node_id, uint16_t endpoint, float x, flo
     const std::optional<uint32_t> transition = has_transition_ms ? std::optional<uint32_t>(transition_ms) : std::nullopt;
     return HandleBridgeResult(gContext.SetXy(node_id, endpoint, x, y, transition), error_message, error_message_size,
                               "setting Matter xy color");
+}
+
+bool rhythm_chip_bridge_set_hue_saturation(uint64_t node_id, uint16_t endpoint, uint8_t hue, uint8_t saturation,
+                                           bool has_transition_ms, uint32_t transition_ms, char * error_message,
+                                           size_t error_message_size)
+{
+    const std::optional<uint32_t> transition = has_transition_ms ? std::optional<uint32_t>(transition_ms) : std::nullopt;
+    return HandleBridgeResult(gContext.SetHueSaturation(node_id, endpoint, hue, saturation, transition), error_message,
+                              error_message_size, "setting Matter hue/saturation color");
 }
 
 bool rhythm_chip_bridge_read_on_off(uint64_t node_id, uint16_t endpoint, bool * out_on, char * error_message,

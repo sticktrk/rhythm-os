@@ -44,6 +44,14 @@ pub trait ChipControllerBackend {
         y: f32,
         transition_ms: Option<u32>,
     ) -> Result<()>;
+    fn set_hue_saturation(
+        &mut self,
+        node_id: u64,
+        endpoint: u16,
+        hue: u8,
+        saturation: u8,
+        transition_ms: Option<u32>,
+    ) -> Result<()>;
     fn read_on_off(&mut self, node_id: u64, endpoint: u16) -> Result<bool>;
 }
 
@@ -136,6 +144,19 @@ impl ChipControllerBackend for NativeChipBackend {
     ) -> Result<()> {
         self.controller_mut()
             .and_then(|controller| controller.set_xy(node_id, endpoint, x, y, transition_ms))
+    }
+
+    fn set_hue_saturation(
+        &mut self,
+        node_id: u64,
+        endpoint: u16,
+        hue: u8,
+        saturation: u8,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        self.controller_mut().and_then(|controller| {
+            controller.set_hue_saturation(node_id, endpoint, hue, saturation, transition_ms)
+        })
     }
 
     fn read_on_off(&mut self, node_id: u64, endpoint: u16) -> Result<bool> {
@@ -264,6 +285,18 @@ impl ChipControllerBackend for FakeChipBackend {
         _endpoint: u16,
         _x: f32,
         _y: f32,
+        _transition_ms: Option<u32>,
+    ) -> Result<()> {
+        let _ = self.require_device(node_id)?;
+        Ok(())
+    }
+
+    fn set_hue_saturation(
+        &mut self,
+        node_id: u64,
+        _endpoint: u16,
+        _hue: u8,
+        _saturation: u8,
         _transition_ms: Option<u32>,
     ) -> Result<()> {
         let _ = self.require_device(node_id)?;

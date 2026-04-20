@@ -8,6 +8,7 @@ This target is for a Pi Zero / Zero W without Raspberry Pi OS. The Rust applianc
 - Boots a minimal Buildroot image instead of Raspberry Pi OS
 - Starts Rhythm automatically at boot under BusyBox `init` with `RHYTHM_PLATFORM_TYPE=embedded` and `RHYTHM_PLATFORM_CONTEXT=rpiz`
 - Uses BusyBox `init` `respawn`, not `systemd`, so the appliance always brings `rhythm-server` back if it exits
+- Writes the main appliance log to `/var/log/rhythm-server.log` and raw Matter `rhythm-chipd` output to `/var/log/rhythm-matter.log`
 - Brings up `usb0` at `192.168.7.2/24` for first-boot API testing over the Pi Zero OTG port
 - Optionally embeds Wi-Fi credentials for Pi Zero W / Zero 2 W images
 
@@ -137,3 +138,9 @@ provisioning sidecar on with:
 ```bash
 RHYTHM_BLE_PROVISION_ALWAYS=1 /usr/bin/rhythm-server --data-dir /data --log-level info
 ```
+
+`rpiz` sets `RHYTHM_MATTER_LOGFILE=/var/log/rhythm-matter.log` by default so
+raw CHIP/Matter daemon output (`[DMG]`, `[EM]`, `[CSM]`, `[DIS]`, etc.) stays
+out of `/var/log/rhythm-server.log`. Override that variable, or set it to an
+empty string in `/etc/default/rhythm-dev`, if you want `rhythm-chipd` to use a
+different file or inherit the main appliance log sink again.

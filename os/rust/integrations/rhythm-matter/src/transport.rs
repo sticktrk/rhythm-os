@@ -95,6 +95,16 @@ pub trait MatterTransport: Send + Sync {
         transition_ms: Option<u32>,
     ) -> Result<()>;
 
+    /// Set a hue/saturation color using Matter's 0-254 encoding.
+    fn set_hue_saturation(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        hue: u8,
+        saturation: u8,
+        transition_ms: Option<u32>,
+    ) -> Result<()>;
+
     /// Read the On/Off state from a light endpoint.
     fn read_on_off(&self, node_id: u64, endpoint: u16) -> Result<bool>;
 }

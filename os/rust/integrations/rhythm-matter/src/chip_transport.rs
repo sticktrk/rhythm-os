@@ -1,6 +1,7 @@
 //! Desktop Matter transport backed by a local native CHIP controller daemon.
 
-use std::fs;
+use std::ffi::OsString;
+use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -22,12 +23,14 @@ use crate::transport::{
 
 const SOCKET_NAME: &str = "chip-controller.sock";
 const STORAGE_NAME: &str = "controller-storage.json";
+const CHIPD_LOGFILE_ENV: &str = "RHYTHM_MATTER_LOGFILE";
 const SIDECAR_START_TIMEOUT: Duration = Duration::from_secs(10);
 const RPC_TIMEOUT: Duration = Duration::from_secs(120);
 
 struct SidecarConfig {
     command: PathBuf,
     working_dir: PathBuf,
+    log_path: Option<PathBuf>,
 }
 
 /// Desktop Matter transport backed by a native CHIP daemon over a Unix socket.
@@ -63,6 +66,7 @@ impl ChipTransport {
             sidecar_config: Some(SidecarConfig {
                 command,
                 working_dir: chip_dir.clone(),
+                log_path: sidecar_log_path_from_env(std::env::var_os(CHIPD_LOGFILE_ENV)),
             }),
             initialized: AtomicBool::new(false),
             next_request_id: AtomicU64::new(1),
@@ -224,13 +228,14 @@ impl ChipTransport {
                 let _ = child.wait();
             }
 
+            let (stdout, stderr) = sidecar_stdio(config.log_path.as_deref())?;
             let child = Command::new(&config.command)
                 .arg("--socket")
                 .arg(&self.socket_path)
                 .current_dir(&config.working_dir)
                 .stdin(Stdio::null())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
+                .stdout(stdout)
+                .stderr(stderr)
                 .spawn()
                 .with_context(|| {
                     format!(
@@ -313,6 +318,39 @@ fn resolve_chipd_command() -> Result<PathBuf> {
     }
 
     Ok(PathBuf::from("rhythm-chipd"))
+}
+
+fn sidecar_log_path_from_env(value: Option<OsString>) -> Option<PathBuf> {
+    value.filter(|path| !path.is_empty()).map(PathBuf::from)
+}
+
+fn sidecar_stdio(log_path: Option<&Path>) -> Result<(Stdio, Stdio)> {
+    match log_path {
+        Some(path) => {
+            let stderr = open_sidecar_log_file(path)?;
+            let stdout = stderr
+                .try_clone()
+                .with_context(|| format!("cloning Matter sidecar log file {}", path.display()))?;
+            Ok((Stdio::from(stdout), Stdio::from(stderr)))
+        }
+        None => Ok((Stdio::inherit(), Stdio::inherit())),
+    }
+}
+
+fn open_sidecar_log_file(path: &Path) -> Result<std::fs::File> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating Matter log dir {}", parent.display()))?;
+    }
+
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("opening Matter sidecar log file {}", path.display()))
 }
 
 impl Drop for ChipTransport {
@@ -409,6 +447,24 @@ impl MatterTransport for ChipTransport {
         Ok(())
     }
 
+    fn set_hue_saturation(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        hue: u8,
+        saturation: u8,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        let _: crate::chip_rpc::ChipRpcEmpty = self.call(ChipRpcRequest::SetHueSaturation {
+            node_id,
+            endpoint,
+            hue,
+            saturation,
+            transition_ms,
+        })?;
+        Ok(())
+    }
+
     fn read_on_off(&self, node_id: u64, endpoint: u16) -> Result<bool> {
         let response: ChipRpcReadOnOffResponse =
             self.call(ChipRpcRequest::ReadOnOff { node_id, endpoint })?;
@@ -424,9 +480,14 @@ mod tests {
 
     use crate::chip_rpc::{ChipRpcEmpty, ChipRpcListDevicesResponse, ChipRpcResponseEnvelope};
 
+    fn test_temp_root() -> PathBuf {
+        std::env::var_os("CARGO_TARGET_TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+    }
+
     fn temp_socket_path(name: &str) -> PathBuf {
-        let dir = PathBuf::from("/tmp");
-        dir.join(format!(
+        test_temp_root().join(format!(
             "rct-{}-{}-{}.sock",
             std::process::id(),
             name,
@@ -523,5 +584,69 @@ mod tests {
 
         server.join().unwrap();
         let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn set_hue_saturation_uses_rpc_contract() {
+        let socket_path = temp_socket_path("set-hue-saturation");
+        let server = spawn_fake_server(socket_path.clone(), |request| {
+            assert!(matches!(
+                request.request,
+                ChipRpcRequest::SetHueSaturation {
+                    node_id: 7,
+                    endpoint: 1,
+                    hue: 12,
+                    saturation: 200,
+                    transition_ms: Some(500),
+                }
+            ));
+            ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+        });
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        transport
+            .set_hue_saturation(7, 1, 12, 200, Some(500))
+            .unwrap();
+
+        server.join().unwrap();
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn sidecar_log_path_from_env_ignores_empty_values() {
+        assert_eq!(sidecar_log_path_from_env(None), None);
+        assert_eq!(sidecar_log_path_from_env(Some(OsString::from(""))), None);
+        assert_eq!(
+            sidecar_log_path_from_env(Some(OsString::from("/var/log/rhythm-matter.log"))),
+            Some(PathBuf::from("/var/log/rhythm-matter.log"))
+        );
+    }
+
+    #[test]
+    fn open_sidecar_log_file_creates_parent_dirs_and_appends() {
+        let root = test_temp_root().join(format!(
+            "rhythm-matter-log-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let log_path = root.join("logs").join("chipd.log");
+
+        {
+            let mut first = open_sidecar_log_file(&log_path).unwrap();
+            writeln!(&mut first, "[DMG] first").unwrap();
+        }
+        {
+            let mut second = open_sidecar_log_file(&log_path).unwrap();
+            writeln!(&mut second, "[DMG] second").unwrap();
+        }
+
+        let contents = fs::read_to_string(&log_path).unwrap();
+        assert!(contents.contains("[DMG] first"));
+        assert!(contents.contains("[DMG] second"));
+
+        let _ = fs::remove_dir_all(root);
     }
 }

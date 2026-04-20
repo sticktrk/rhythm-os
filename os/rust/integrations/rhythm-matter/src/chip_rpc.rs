@@ -59,6 +59,14 @@ pub enum ChipRpcRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         transition_ms: Option<u32>,
     },
+    SetHueSaturation {
+        node_id: u64,
+        endpoint: u16,
+        hue: u8,
+        saturation: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transition_ms: Option<u32>,
+    },
     ReadOnOff {
         node_id: u64,
         endpoint: u16,
