@@ -3,7 +3,7 @@
 //! This module defines the `Scheduler` trait which abstracts how the runtime
 //! schedules periodic tasks. Different platforms can implement this differently:
 //! - Tokio-based systems use tokio::time::interval
-//! - ESP32 can use std::thread with sleep
+//! - Blocking runtimes can use std::thread with sleep
 //! - Test environments can use manual triggering
 
 use crate::runtime::error::RuntimeResult;

@@ -13,9 +13,6 @@ members = [
     "rust/bins/rhythm-linux-embedded",
     "rust/bins/rhythm-addon",
 ]
-exclude = [
-    "rust/bins/rhythm-esp32",      # ESP32 builds separately with esp-rs toolchain
-]
 
 [workspace.package]
 version = "0.4.147"

@@ -21,7 +21,8 @@ use crate::transport::HueTransport;
 ///
 /// Caches the device→room mapping built during `discover_rooms()` so that
 /// `discover_devices()` can skip re-fetching the rooms JSON.
-/// On ESP32 this avoids ~30-50KB of peak heap from parsing rooms twice.
+/// On constrained blocking runtimes this avoids ~30-50KB of peak heap from
+/// parsing rooms twice.
 pub struct HueDiscovery<H: HueTransport> {
     transport: Arc<H>,
     username: String,
@@ -244,8 +245,8 @@ impl<H: HueTransport> HueDiscovery<H> {
     /// Shared implementation: fetch devices and extract typed devices.
     ///
     /// Uses the device→room cache if populated by a prior `discover_rooms()` call,
-    /// avoiding a second rooms JSON fetch (~30-50KB saved on ESP32). Falls back
-    /// to fetching rooms if the cache is empty.
+    /// avoiding a second rooms JSON fetch (~30-50KB saved on constrained
+    /// blocking runtimes). Falls back to fetching rooms if the cache is empty.
     fn fetch_devices(&self) -> Result<Vec<DiscoveredDevice>> {
         // Try to use the cached device→room mapping from discover_rooms()
         let device_to_room = {

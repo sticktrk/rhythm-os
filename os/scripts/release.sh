@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Create a server/embedded release tag, and optionally upload the rpiz OTA feed
+# Create a server/appliance release tag, and optionally upload the rpiz OTA feed
 # locally instead of relying on GitHub Actions.
 #
 # Usage:

@@ -75,32 +75,3 @@ To build the Docker image locally:
 ```bash
 ./scripts/build-addon.sh
 ```
-
-## ESP32-C6
-
-### Prerequisites
-
-- ESP-IDF v5.5.2
-- Rust ESP toolchain (`ldproxy`, `espflash`)
-
-```bash
-# One-time setup
-cd ~/esp && git clone --recursive https://github.com/espressif/esp-idf.git
-cd esp-idf && ./install.sh esp32c6
-cargo install ldproxy espflash
-```
-
-### Build and flash
-
-```bash
-./scripts/build-esp32.sh --flash           # Build + flash + monitor
-./scripts/build-esp32.sh --release --flash  # Release build
-./scripts/build-esp32.sh --clean --flash    # Clean rebuild
-```
-
-### WiFi credentials
-
-```bash
-export WIFI_SSID="YourSSID"
-export WIFI_PASS="YourPassword"
-```

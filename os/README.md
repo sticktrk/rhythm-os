@@ -16,7 +16,7 @@
 
 Rhythm OS is a headless, curve-driven lighting engine written in Rust. It continuously evaluates a lighting curve to produce the right **brightness** and **color temperature** for every moment of the day — then pushes those values to your lights. The default curve is a Gaussian shaped by solar position, but the curve engine is pluggable: implement the `LightProfileModule` trait and drop in any shape you want.
 
-The same core runs everywhere: on an **ESP32** microcontroller, a **macOS/Linux** server, or a **Home Assistant** add-on. Hub-agnostic — works with any lighting product that has an integration crate. The entire system is controlled through a REST API. Bring your own frontend, or use the [Rhythm app](https://apps.apple.com/us/app/rhythm-lighting/id6758312802).
+The same core runs as a **macOS/Linux** server, a **Linux appliance** image for Raspberry Pi Zero hardware, or a **Home Assistant** add-on. Hub-agnostic — works with any lighting product that has an integration crate. The entire system is controlled through a REST API. Bring your own frontend, or use the [Rhythm app](https://apps.apple.com/us/app/rhythm-lighting/id6758312802).
 
 ## How it works
 
@@ -35,7 +35,6 @@ Rhythm OS manages your lights through **curves** — continuous functions that d
 | macOS / Linux | `rhythm-server` | CLI server with HTTP API and mDNS discovery. |
 | Raspberry Pi Zero | `rhythm-linux-embedded` (`rpiz` target) | Buildroot appliance image with USB gadget first-boot access. |
 | Home Assistant | `rhythm-addon` | Add-on with ingress support. Auto-configures from HA Supervisor. |
-| ESP32-C6 | `rhythm-esp32` | Standalone controller. WiFi + BLE provisioning, OTA updates. |
 
 ## Quick start
 
@@ -46,9 +45,9 @@ cargo build -p rhythm-server --release
 cargo test
 ```
 
-Release versions for `rhythm-server` and `rhythm-esp32` are derived from Git tags such as `v0.4.0`. Untagged builds use Git-derived prerelease versions. The Home Assistant addon keeps its own separate version flow.
+Workspace Rust binaries derive their build version from Git tags such as `v0.4.0`. Untagged builds use Git-derived prerelease versions. The Home Assistant addon keeps its own separate version flow.
 
-See [install/](install/) for platform-specific setup (macOS, Linux, Raspberry Pi Zero, Home Assistant, ESP32).
+See [install/](install/) for platform-specific setup (macOS, Linux, Raspberry Pi Zero, Home Assistant).
 
 ## REST API
 
@@ -75,7 +74,7 @@ Rhythm is built as a layered crate architecture. Each layer has a single respons
 ```
 ┌─────────────────────────────────────────────────────┐
 │  Binaries (platform I/O)                            │
-│  rhythm-esp32 · rhythm-server · rhythm-addon        │
+│  rhythm-server · rhythm-linux-embedded · rhythm-addon │
 ├─────────────────────────────────────────────────────┤
 │  OS layer (hub-agnostic business logic)             │
 │  rhythm-os                                          │
@@ -93,13 +92,13 @@ Rhythm is built as a layered crate architecture. Each layer has a single respons
 | Crate | Purpose |
 |-------|---------|
 | **rhythm-profile** | Pluggable lighting profile contract. Defines the `LightProfileModule` trait and shared profile types. |
-| **rhythm-core** | Solar calculations, curve engine, color science, runtime orchestration. Pure algorithms with zero I/O — runs on any platform. Feature-gated for `tokio` (async) or `blocking` (embedded). |
+| **rhythm-core** | Solar calculations, curve engine, color science, runtime orchestration. Pure algorithms with zero I/O — runs on any platform. Feature-gated for `tokio` (async) or `blocking` runtimes. |
 | **rhythm-os** | Hub-agnostic business logic: room management, event loop, command handling, persistence. Knows nothing about Hue — dispatches through traits. |
-| **rhythm-hue** | Philips Hue V2 integration. Implements `LightController`, `HubRegistry`, and `HubProvider`. Platform-abstracted via `HueTransport` trait — same logic on ESP32 and desktop. |
+| **rhythm-hue** | Philips Hue V2 integration. Implements `LightController`, `HubRegistry`, and `HubProvider`. Platform-abstracted via `HueTransport` trait — same logic across server, appliance, and add-on builds. |
 | **rhythm-ha** | Home Assistant integration. Implements `LightController`, `HubRegistry`, and `HubProvider` for HA's WebSocket API and ZHA events. |
 | **rhythm-server** | macOS/Linux CLI server. HTTP API + mDNS discovery. Runs the full engine as a native process. |
+| **rhythm-linux-embedded** | Linux appliance runtime for the `rpiz` target. Adds appliance provisioning and recovery behavior on top of the native server stack. |
 | **rhythm-addon** | Home Assistant add-on binary. Connects to HA via WebSocket, serves HTTP API with ingress support. |
-| **rhythm-esp32** | Standalone ESP32-C6 firmware. WiFi, BLE provisioning, NVS persistence, OTA updates. |
 
 ### Dependency graph
 
@@ -112,9 +111,9 @@ rhythm-os    ──→ rhythm-core + rhythm-profile
 rhythm-hue   ──→ rhythm-core + rhythm-os
 rhythm-ha    ──→ rhythm-core + rhythm-os
     ↑
-rhythm-server ──→ rhythm-os + rhythm-hue + rhythm-ha
-rhythm-addon  ──→ rhythm-os + rhythm-hue + rhythm-ha
-rhythm-esp32  ──→ rhythm-os + rhythm-hue
+rhythm-server         ──→ rhythm-os + rhythm-hue + rhythm-ha
+rhythm-linux-embedded ──→ rhythm-server + rhythm-os
+rhythm-addon          ──→ rhythm-os + rhythm-hue + rhythm-ha
 ```
 
 ## Extending: Add a new integration

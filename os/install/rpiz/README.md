@@ -7,7 +7,7 @@ This target is for a Pi Zero / Zero W without Raspberry Pi OS. The Rust applianc
 - Cross-builds `rhythm-server` for `arm-unknown-linux-musleabihf`
 - Boots a minimal Buildroot image instead of Raspberry Pi OS
 - Lays out the SD card as `boot + rootfs_a + rootfs_b + data` so future OTA can write the inactive rootfs slot instead of patching live files
-- Starts Rhythm automatically at boot under BusyBox `init` with `RHYTHM_PLATFORM_TYPE=embedded` and `RHYTHM_PLATFORM_CONTEXT=rpiz`
+- Starts Rhythm automatically at boot under BusyBox `init` with `RHYTHM_PLATFORM_TYPE=appliance` and `RHYTHM_PLATFORM_CONTEXT=rpiz`
 - Uses BusyBox `init` `respawn`, not `systemd`, so the appliance always brings `rhythm-server` back if it exits
 - Mounts `/boot` from the FAT partition and `/data` from the dedicated persistent partition
 - Writes the main appliance log to `/var/log/rhythm-server.log` and raw Matter `rhythm-chipd` output to `/var/log/rhythm-matter.log`
@@ -123,10 +123,11 @@ The `rpiz` appliance now treats image OTA as an A/B rootfs switch:
 
 - The running slot is selected by `root=/dev/mmcblk0p2` (`rootfs_a`) or `root=/dev/mmcblk0p3` (`rootfs_b`) in `/boot/cmdline.txt`
 - `/boot/rhythm-bootstate.env` records the active slot, pending slot, and last update metadata
-- `POST /api/ota/update` on an embedded `rpiz` server prefers a published `rootfs.ext2.gz` or `rootfs.ext2` artifact, writes it to the inactive slot, updates `/boot/cmdline.txt`, and reboots
+- `POST /api/ota/update` on an appliance `rpiz` server prefers a published `rootfs.ext2.gz` or `rootfs.ext2` artifact, writes it to the inactive slot, updates `/boot/cmdline.txt`, and reboots
+- Trial boots automatically roll back to the last-good slot if the candidate image reboots or `rhythm-server` exits before startup is marked healthy
 - `/data` lives on `mmcblk0p4`, so backups, topology, captures, and update staging survive slot switches
 
-This is not a full rollback bootloader yet. The next slot is selected in userspace by rewriting `/boot/cmdline.txt`, and successful boots clear the pending slot marker during init. The published `sdcard.img` remains the factory/master image for fresh cards.
+This is still userspace rollback, not a bootloader-managed A/B system. The next slot is selected by rewriting `/boot/cmdline.txt`, and rollback still requires the candidate image to boot far enough to reach init / `rhythm-launch`. The published `sdcard.img` remains the factory/master image for fresh cards and hard recovery.
 
 ## USB-first smoke test
 

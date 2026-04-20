@@ -5107,7 +5107,8 @@ pub fn do_hub_credentials(
 
     // Auto-sync rooms from the newly configured hub.
     // Uses platform config to decide whether to also discover devices/sensors
-    // (desktop: full sync, ESP32: rooms only — devices arrive via SSE).
+    // (desktop: full sync, constrained blocking path: rooms only — devices
+    // arrive via SSE).
     let discover_devices = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.platform.full_device_discovery

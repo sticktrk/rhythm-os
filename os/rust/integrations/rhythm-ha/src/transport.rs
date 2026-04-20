@@ -10,8 +10,8 @@ use serde_json::Value;
 
 /// Platform-agnostic interface to the Home Assistant REST API.
 ///
-/// Implementors provide the actual HTTP transport. On desktop this uses
-/// `reqwest`; on ESP32 it could use `esp-idf-svc`'s HTTP client.
+/// Implementors provide the actual HTTP transport. On active platforms this
+/// uses reqwest, but the trait is intentionally transport-agnostic.
 pub trait HaTransport: Send + Sync {
     /// Call a Home Assistant service.
     ///

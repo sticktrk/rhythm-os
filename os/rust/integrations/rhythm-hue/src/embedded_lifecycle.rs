@@ -1,4 +1,4 @@
-//! Hue lifecycle for embedded targets (ESP32, etc.).
+//! Hue lifecycle for constrained blocking targets.
 //!
 //! Provides the same lifecycle pattern as `reqwest_lifecycle` but parameterized
 //! over transport and SSE implementations. Platform crates provide:
@@ -68,7 +68,7 @@ where
     // room children (lights + switches). The NVS snapshot only persists button-
     // owning device mappings, so without this, undiscovered switches wouldn't
     // have a device→room entry for on-demand button discovery.
-    // Devices are NOT fetched (false) — too large for ESP32 memory.
+    // Devices are NOT fetched when full device discovery is disabled.
     let discover_devices = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.platform.full_device_discovery

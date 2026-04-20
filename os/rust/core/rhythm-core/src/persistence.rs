@@ -5,7 +5,7 @@
 //!
 //! Implementations:
 //! - Home Assistant addon: File-based JSON storage
-//! - ESP32: Flash/NVS storage (future)
+//! - Future blocking targets: custom persistent storage
 
 use std::collections::BTreeMap;
 
@@ -43,7 +43,7 @@ pub type PersistenceResult<T> = Result<T, PersistenceError>;
 /// This trait abstracts the storage mechanism, allowing different platforms
 /// to implement persistence using their native storage:
 /// - File system (HA addon)
-/// - Flash/NVS (ESP32)
+/// - Custom embedded or appliance storage
 /// - Database (future cloud sync)
 ///
 /// # Example

@@ -1,7 +1,7 @@
 //! Abstract persistence interface for Rhythm OS.
 //!
 //! Platform crates implement this trait to provide concrete storage
-//! (e.g., NVS on ESP32, filesystem on Linux, SQLite on Raspberry Pi).
+//! (e.g., filesystem on Linux, SQLite on Raspberry Pi, or future custom backends).
 
 #[cfg(feature = "desktop")]
 use anyhow::Context;

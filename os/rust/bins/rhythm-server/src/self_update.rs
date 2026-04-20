@@ -192,7 +192,7 @@ impl OtaStatusHandle {
             can_upload: false,
             requires_restart: true,
             rollback: if embedded {
-                "slot_switch"
+                "automatic_slot_switch"
             } else {
                 "backup_files"
             },
@@ -355,6 +355,7 @@ impl UpdateInfo {
             if let Some(image_asset) = self.preferred_embedded_image_asset() {
                 return apply_embedded_image_blocking(
                     image_asset,
+                    &self.current_version,
                     &self.latest_version,
                     self.expected_sha256.as_deref(),
                 );
@@ -841,14 +842,16 @@ fn ensure_mount(path: &str, device: &str, fs_type: &str) -> Result<(), String> {
 fn write_embedded_boot_state(
     current_slot: EmbeddedSlot,
     target_slot: EmbeddedSlot,
-    version: &str,
+    current_version: &str,
+    pending_version: &str,
 ) -> Result<(), String> {
     let body = format!(
-        "RHYTHM_ACTIVE_SLOT={}\nRHYTHM_LAST_GOOD_SLOT={}\nRHYTHM_PENDING_SLOT={}\nRHYTHM_PENDING_VERSION={}\nRHYTHM_LAST_UPDATE_EPOCH_MS={}\n",
+        "RHYTHM_ACTIVE_SLOT={}\nRHYTHM_LAST_GOOD_SLOT={}\nRHYTHM_PENDING_SLOT={}\nRHYTHM_PENDING_VERSION={}\nRHYTHM_ACTIVE_VERSION={}\nRHYTHM_BOOT_STATUS=pending\nRHYTHM_LAST_UPDATE_EPOCH_MS={}\nRHYTHM_LAST_ROLLBACK_SLOT=\nRHYTHM_LAST_ROLLBACK_VERSION=\nRHYTHM_LAST_ROLLBACK_EPOCH_MS=\n",
         current_slot.as_str(),
         current_slot.as_str(),
         target_slot.as_str(),
-        version,
+        pending_version,
+        current_version,
         now_ms()
     );
     fs::write(EMBEDDED_BOOT_STATE_PATH, body)
@@ -933,6 +936,7 @@ fn write_image_artifact_to_device(
 
 fn apply_embedded_image_blocking(
     image_asset: &UpdateImageAsset,
+    current_version: &str,
     latest_version: &str,
     fallback_sha256: Option<&str>,
 ) -> Result<ApplyResult, String> {
@@ -975,7 +979,7 @@ fn apply_embedded_image_blocking(
             artifact_uses_gzip(image_asset),
         )?;
         update_embedded_cmdline_for_slot(target_slot)?;
-        write_embedded_boot_state(current_slot, target_slot, latest_version)?;
+        write_embedded_boot_state(current_slot, target_slot, current_version, latest_version)?;
         Ok::<(), String>(())
     })() {
         remove_if_exists(&download_path);
@@ -1176,12 +1180,7 @@ fn install_target_executable() -> Result<PathBuf, String> {
     let platform_type = std::env::var("RHYTHM_PLATFORM_TYPE").ok();
     let platform_context = std::env::var("RHYTHM_PLATFORM_CONTEXT").ok();
 
-    if platform_type.as_deref() == Some("embedded")
-        && matches!(
-            platform_context.as_deref(),
-            Some("rpiz") | Some("linux-embedded")
-        )
-    {
+    if is_appliance_runtime(platform_type.as_deref(), platform_context.as_deref()) {
         return Ok(PathBuf::from(EMBEDDED_INSTALL_PATH));
     }
 
@@ -1201,15 +1200,20 @@ fn restart_strategy() -> RestartStrategy {
     let platform_type = std::env::var("RHYTHM_PLATFORM_TYPE").ok();
     let platform_context = std::env::var("RHYTHM_PLATFORM_CONTEXT").ok();
 
-    if platform_type.as_deref() == Some("embedded")
-        && matches!(
-            platform_context.as_deref(),
-            Some("rpiz") | Some("linux-embedded")
-        )
-    {
+    if is_appliance_runtime(platform_type.as_deref(), platform_context.as_deref()) {
         RestartStrategy::EmbeddedReboot
     } else {
         RestartStrategy::SupervisorExit
+    }
+}
+
+fn is_appliance_runtime(platform_type: Option<&str>, platform_context: Option<&str>) -> bool {
+    match platform_type {
+        Some("appliance") => true,
+        // Accept the older runtime identity so existing appliance images can
+        // still self-update into the renamed platform without a flag-day.
+        Some("embedded") => matches!(platform_context, Some("rpiz") | Some("linux-embedded")),
+        _ => false,
     }
 }
 
@@ -1795,9 +1799,9 @@ mod tests {
     }
 
     #[test]
-    fn install_target_executable_prefers_embedded_install_path() {
+    fn install_target_executable_prefers_appliance_install_path() {
         let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("RHYTHM_PLATFORM_TYPE", "embedded");
+        std::env::set_var("RHYTHM_PLATFORM_TYPE", "appliance");
         std::env::set_var("RHYTHM_PLATFORM_CONTEXT", "rpiz");
 
         let path = install_target_executable().unwrap();
@@ -1808,9 +1812,9 @@ mod tests {
     }
 
     #[test]
-    fn restart_strategy_uses_embedded_reboot_for_rpiz() {
+    fn restart_strategy_uses_appliance_reboot_for_rpiz() {
         let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("RHYTHM_PLATFORM_TYPE", "embedded");
+        std::env::set_var("RHYTHM_PLATFORM_TYPE", "appliance");
         std::env::set_var("RHYTHM_PLATFORM_CONTEXT", "rpiz");
 
         assert_eq!(restart_strategy(), RestartStrategy::EmbeddedReboot);

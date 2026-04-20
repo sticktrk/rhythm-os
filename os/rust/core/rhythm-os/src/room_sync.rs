@@ -113,9 +113,10 @@ pub fn sync_all_hubs(state: &SharedState) -> Result<SyncReport> {
 
 /// Like [`sync_from_hub`] but allows skipping device discovery.
 ///
-/// On ESP32, the device endpoint response (~79 devices) can OOM the heap
-/// when SSE TLS is already active. Pass `discover_devices: false` to sync
-/// only rooms — the SSE stream will register devices organically.
+/// On constrained blocking runtimes, the device endpoint response (~79
+/// devices) can exceed the available heap when SSE TLS is already active.
+/// Pass `discover_devices: false` to sync only rooms — the SSE stream will
+/// register devices organically.
 pub fn sync_from_hub_with_options(
     state: &SharedState,
     discover_devices: bool,
@@ -162,7 +163,7 @@ pub fn sync_from_hub_for_key(
 
 /// Internal sync implementation that takes a discovery reference directly.
 ///
-/// Interleaved order to minimize peak memory on ESP32:
+/// Interleaved order to minimize peak memory on constrained blocking runtimes:
 /// 1. Discover rooms (builds device→room cache inside discovery impl)
 /// 2. Process rooms (first room triggers runtime creation — TLS deferred on embedded)
 /// 3. Discover devices (uses cached device→room mapping, skips rooms re-fetch)
@@ -295,7 +296,8 @@ fn sync_with_discovery(
     // ========================================================================
     // Phase 3+4: Discover and apply devices (buttons + motion sensors)
     // ========================================================================
-    // Skippable on ESP32 where the device endpoint response can OOM the heap.
+    // Skippable on constrained blocking runtimes where the device endpoint
+    // response can OOM the heap.
     // The SSE stream registers devices organically as button/motion events arrive.
     // Collect which device types were discovered so stale removal
     // only affects types that the hub actually enumerates.
@@ -338,7 +340,8 @@ fn sync_with_discovery(
     // ========================================================================
     // Discover full device identities (names, MAC addresses, manufacturer/model)
     // and resolve each through the canonical registry. Only runs when device
-    // discovery is enabled (desktop only — ESP32 doesn't persist canonical).
+    // discovery is enabled (desktop only — constrained blocking targets do not
+    // persist canonical state).
     if discover_devices {
         let canonical_hub_key = hub_key.clone();
         let (identities, identities_fresh) = match discovery.discover_identities() {
@@ -734,7 +737,8 @@ fn sync_with_discovery(
     commands::persist_state(state);
 
     // Release discovery transport's TLS connection now that sync is complete.
-    // On ESP32 this frees ~12KB of heap before the first periodic tick.
+    // On constrained blocking runtimes this can free ~12KB of heap before the
+    // first periodic tick.
     discovery.release_resources();
 
     info!(target: "room_sync",

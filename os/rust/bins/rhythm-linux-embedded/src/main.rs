@@ -1,4 +1,4 @@
-//! Rhythm OS Linux embedded appliance runtime.
+//! Rhythm OS Linux appliance runtime.
 //!
 //! Reuses the native Linux/macOS server stack, but gives embedded-appliance
 //! targets like rpiz their own binary crate so board-specific provisioning,
@@ -24,7 +24,7 @@ const VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
 };
 const TOKIO_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 
-/// Rhythm OS Linux embedded appliance.
+/// Rhythm OS Linux appliance.
 #[derive(Parser, Debug)]
 #[command(name = "rhythm-linux-embedded", version = VERSION, about)]
 struct Args {
@@ -44,13 +44,13 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
     let platform_type =
-        std::env::var("RHYTHM_PLATFORM_TYPE").unwrap_or_else(|_| "embedded".to_string());
+        std::env::var("RHYTHM_PLATFORM_TYPE").unwrap_or_else(|_| "appliance".to_string());
     let platform_context =
-        std::env::var("RHYTHM_PLATFORM_CONTEXT").unwrap_or_else(|_| "linux-embedded".to_string());
+        std::env::var("RHYTHM_PLATFORM_CONTEXT").unwrap_or_else(|_| "rpiz".to_string());
 
     logging::init_native_logging(&args.log_level)?;
 
-    info!(target: "sys", "Rhythm Linux Embedded v{} starting...", VERSION);
+    info!(target: "sys", "Rhythm Linux Appliance v{} starting...", VERSION);
 
     std::fs::create_dir_all(&args.data_dir)?;
 
@@ -67,7 +67,7 @@ fn main() -> Result<()> {
         s.listen_port = Some(args.port);
         s.data_dir = args.data_dir.clone();
         s.storage = Some(Box::new(file_storage));
-        // Linux embedded is an active platform and should match the other
+        // Linux appliances are active platforms and should match the other
         // desktop/server-class runtimes for bootstrap behavior.
         s.platform = PlatformConfig::desktop();
 
@@ -302,7 +302,7 @@ async fn run_server(
                 addr, e
             )
         });
-    info!(target: "sys", "Rhythm Linux Embedded listening on http://{}", addr);
+    info!(target: "sys", "Rhythm Linux Appliance listening on http://{}", addr);
 
     // Keep the existing server-style mDNS identity for now so the rpiz split
     // does not also change discovery semantics.

@@ -7,7 +7,7 @@
 //!
 //! These functions are used across multiple platforms:
 //! - Home Assistant add-on
-//! - ESP32 firmware
+//! - Linux appliance runtime
 //! - macOS/Linux server
 
 pub mod area;

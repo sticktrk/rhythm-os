@@ -1,4 +1,4 @@
-//! Blocking adapters for std-based platforms (ESP32).
+//! Blocking adapters for std-based platforms.
 //!
 //! This module provides `TimeProvider` and `Scheduler` implementations
 //! that use std::thread for scheduling and std::time for time access.
@@ -114,7 +114,7 @@ pub struct BlockingScheduler {
     /// Thread handles for cleanup.
     handles: Arc<Mutex<HashMap<u64, JoinHandle<()>>>>,
 
-    /// Stack size for spawned threads (bytes). On embedded platforms like ESP32,
+    /// Stack size for spawned threads (bytes). On constrained blocking targets,
     /// the default pthread stack is very small (~3KB usable). Callbacks that
     /// perform TLS, float math, or string formatting need 16KB+.
     stack_size: Option<usize>,

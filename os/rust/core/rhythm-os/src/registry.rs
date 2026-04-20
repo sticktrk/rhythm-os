@@ -58,7 +58,7 @@ pub struct RegistrySnapshot {
     /// button_id -> (device_id, control_id)
     #[serde(rename = "b")]
     pub buttons: HashMap<String, (String, u8)>,
-    /// area_id -> list of light entity_ids (HA-specific, empty on Hue/ESP32)
+    /// area_id -> list of light entity_ids (HA-specific, empty on Hue)
     #[serde(rename = "l", default, skip_serializing_if = "HashMap::is_empty")]
     pub area_lights: HashMap<String, Vec<String>>,
 }

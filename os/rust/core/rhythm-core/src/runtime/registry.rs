@@ -3,7 +3,7 @@
 //! This module defines the `DeviceRegistry` trait which abstracts how devices
 //! (switches, remotes) are mapped to rooms/areas. Different platforms implement this:
 //! - Home Assistant addon uses the HA device registry
-//! - ESP32 uses config-based mapping stored in NVS
+//! - Blocking runtimes can use config-based local mappings
 
 use std::collections::HashMap;
 
@@ -11,7 +11,7 @@ use std::collections::HashMap;
 ///
 /// Implementations handle the device-to-room mapping in platform-specific ways:
 /// - Home Assistant: queries the device registry via WebSocket
-/// - ESP32: uses a simple HashMap persisted to NVS
+/// - Blocking runtimes: can use a simple persisted HashMap
 pub trait DeviceRegistry: Send + Sync {
     /// Get the room ID for a device.
     ///

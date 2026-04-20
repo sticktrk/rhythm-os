@@ -1,7 +1,7 @@
 //! Room state persistence abstraction.
 //!
 //! This module provides a platform-agnostic trait for persisting room state,
-//! allowing both the addon and ESP32 to share the same `RoomManager` type
+//! allowing both async and blocking runtimes to share the same `RoomManager` type
 //! while using different storage backends.
 
 use crate::room::RoomManager;
@@ -35,7 +35,7 @@ pub type StorageResult<T> = Result<T, StorageError>;
 /// Synchronous trait for persisting room state.
 ///
 /// This trait is intentionally synchronous to work on both std and no_std
-/// environments (ESP32 uses blocking I/O anyway).
+/// environments used by blocking runtimes.
 ///
 /// # Example Implementation
 ///

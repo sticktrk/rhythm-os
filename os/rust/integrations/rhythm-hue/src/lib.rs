@@ -1,7 +1,7 @@
 //! Platform-agnostic Hue integration layer.
 //!
 //! Provides device registry, SSE event parsing, button mapping, light controller,
-//! and transport abstraction for Philips Hue bridges. No ESP32 or platform-specific
+//! and transport abstraction for Philips Hue bridges. No target-specific
 //! dependencies — concrete transport implementations live in the platform crate.
 
 pub mod api_types;

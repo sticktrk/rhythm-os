@@ -1,7 +1,7 @@
-//! Linux embedded HTTP router.
+//! Linux appliance HTTP router.
 //!
 //! Wraps the standard server router with platform-specific Wi-Fi recovery
-//! endpoints for embedded appliances.
+//! endpoints for Linux appliances.
 
 use axum::routing::get;
 use axum::Router;

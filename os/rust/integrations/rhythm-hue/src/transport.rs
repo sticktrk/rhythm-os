@@ -2,13 +2,12 @@
 //!
 //! Defines the `HueTransport` trait that platform-specific crates implement
 //! to provide HTTP communication with the Hue bridge. The trait methods
-//! mirror the public API of the ESP32 `HueClient`.
+//! mirror the public HTTP operations required by the integration.
 
 /// Platform-agnostic interface to the Hue bridge HTTP API.
 ///
-/// Implementors provide the actual HTTP/TLS transport. On ESP32 this uses
-/// `esp-idf-svc`'s HTTP client; on other platforms it could use `reqwest`
-/// or any other HTTP library.
+/// Implementors provide the actual HTTP/TLS transport. This can be reqwest,
+/// a blocking native client, or any other HTTP library.
 pub trait HueTransport: Send + Sync {
     /// Test the connection with stored credentials (lightweight check).
     fn test_connection(&self, username: &str) -> anyhow::Result<bool>;

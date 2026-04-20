@@ -2,7 +2,7 @@
 //!
 //! This module provides utilities for bridging async and sync code,
 //! allowing the same runtime logic to work on both tokio (addon) and
-//! blocking (ESP32) platforms.
+//! blocking platforms.
 
 use std::future::Future;
 

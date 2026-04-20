@@ -3,7 +3,7 @@
 //! This module defines the `TimeProvider` trait which abstracts how the runtime
 //! obtains the current time. Different platforms can implement this differently:
 //! - Tokio-based systems can use chrono::Local
-//! - ESP32 can use NTP-synced system time
+//! - Blocking/native systems can use NTP-synced system time
 //! - Test environments can use mock time
 
 /// Trait for providing current time information.

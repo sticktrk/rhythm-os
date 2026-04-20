@@ -20,7 +20,7 @@ How Rhythm OS supports multiple lighting product ecosystems (Hue, LIFX, IKEA, WL
 ```
 +---------------------------------------------------+
 |  Binary targets (platform I/O)                    |
-|  rhythm-esp32, rhythm-server, rhythm-addon        |
+|  rhythm-server, rhythm-linux-embedded, rhythm-addon |
 +---------------------------------------------------+
 |  OS / Business logic                              |
 |  rhythm-os (state, commands, event loop)          |
@@ -51,8 +51,8 @@ rhythm-ikea ---> rhythm-core + rhythm-zigbee
     |
 rhythm-os ---> rhythm-core (+ integration crates via features)
     |
-rhythm-esp32  ---> rhythm-os + rhythm-hue + rhythm-zigbee + ...
-rhythm-server ---> rhythm-os + rhythm-hue + ...
+rhythm-server         ---> rhythm-os + rhythm-hue + ...
+rhythm-linux-embedded ---> rhythm-server + rhythm-os + ...
 ```
 
 ## Integration Contract
@@ -127,7 +127,7 @@ The hub layer in rhythm-os provides the glue between integration crates and the 
 | `HubCredentials` | `rhythm-os/src/hub.rs` | Generic credential storage (hub_type + address + JSON data) |
 | `ActiveHub` | `rhythm-os/src/hub.rs` | Running hub with type-erased runtime + registry |
 | `HubProvider` | `rhythm-os/src/hub.rs` | Trait for hub configuration |
-| `Storage` | `rhythm-os/src/storage.rs` | Persistence trait (NVS, filesystem, etc.) |
+| `Storage` | `rhythm-os/src/storage.rs` | Persistence trait (filesystem today, other backends possible) |
 | `AppState` | `rhythm-os/src/state.rs` | Shared state with `hubs: HashMap<HubKey, ActiveHub>` and per-hub credentials |
 
 ## How rhythm-hue Implements This
@@ -149,7 +149,7 @@ rhythm-hue/
     behavior.rs         -- HueBehaviorTracker for multi-button sequences
     api_types.rs        -- Hue V2 API type definitions
     device_types.rs     -- HueRoom, HueButton, HueSwitchDevice
-    embedded_lifecycle.rs  -- ESP32-specific lifecycle (feature = "embedded")
+    embedded_lifecycle.rs  -- optional blocking wrapper kept behind the legacy `embedded` feature
     reqwest_lifecycle.rs   -- Desktop/server lifecycle (feature = "desktop")
     reqwest_transport.rs   -- reqwest-based HueTransport impl
     reqwest_sse.rs         -- reqwest-based SSE reader
@@ -160,24 +160,16 @@ Feature flags:
 [features]
 default = []
 blocking = ["rhythm-core/blocking", "rhythm-os/blocking"]
-embedded = ["blocking"]
+embedded = ["blocking"] # legacy alias retained for blocking wrappers
 desktop = ["blocking", "dep:reqwest", "dep:reqwest-eventsource", "dep:tokio", "dep:futures"]
 ```
 
 ## Wiring an Integration into a Binary
 
-Each binary crate provides a dispatch table mapping `HubType` to `HubProvider`:
+Each active binary crate provides either a dispatch table or a static integration
+registry mapping `HubType` to the correct provider/lifecycle:
 
 ```rust
-// rhythm-esp32/src/hub.rs
-pub fn get_hub_provider(hub_type: HubType) -> &'static dyn HubProvider {
-    static HUE: crate::platform::hue::HueHubProvider = crate::platform::hue::HueHubProvider;
-    match hub_type.as_str() {
-        HubType::HUE => &HUE,
-        _ => &HUE,
-    }
-}
-
 // rhythm-server/src/hub.rs
 pub static INTEGRATIONS: &[&dyn ExternalLightHubIntegration] = &[
     &rhythm_hue::reqwest_lifecycle::INTEGRATION,
@@ -201,8 +193,8 @@ Each binary provides the concrete transport implementation:
 
 | Binary | Transport | SSE |
 |--------|-----------|-----|
-| rhythm-esp32 | `platform/hue/client.rs` (EspTls HTTP) | `platform/hue/sse.rs` (EspTls SSE) |
 | rhythm-server | `rhythm-hue/src/reqwest_transport.rs` | `rhythm-hue/src/reqwest_sse.rs` |
+| rhythm-linux-embedded | Reuses `rhythm-server`'s reqwest transport stack | Reuses `rhythm-server`'s SSE stack |
 
 The integration crate owns the lifecycle logic; the binary only provides the transport factory.
 
@@ -223,7 +215,7 @@ rhythm-{name}/
     events.rs           -- native events -> HubEvent translation
     buttons.rs          -- native buttons -> ButtonAction mapping (if applicable)
     hub_state.rs        -- integration data stored in ActiveHub::hub_data
-    embedded_lifecycle.rs   -- optional first-party embedded wrapper (feature = "embedded")
+    embedded_lifecycle.rs   -- optional legacy blocking wrapper (feature = "embedded")
     desktop_lifecycle.rs    -- optional first-party desktop wrapper (feature = "desktop")
 ```
 
@@ -232,11 +224,13 @@ Feature flag pattern:
 [features]
 default = []
 blocking = ["rhythm-core/blocking", "rhythm-os/blocking"]
-embedded = ["blocking"]
+embedded = ["blocking"] # legacy alias retained for blocking wrappers
 desktop = ["blocking", "dep:reqwest"]
 ```
 
-The `embedded` feature means the crate remains embeddable and can be linked into an embedded platform crate. Some integrations also provide a first-party `embedded_lifecycle.rs`; others only expose the generic lifecycle plus transport traits until an embedded transport exists.
+The `embedded` feature remains as a legacy blocking alias. It is not an active
+platform target, but some integrations still keep a blocking wrapper behind it
+until the runtime feature surface is simplified.
 
 ## Minimal Integration Checklist
 
@@ -313,7 +307,7 @@ Shared protocol crates abstract radio/transport access for multiple integrations
 
 ### rhythm-zigbee
 - ZCL cluster abstractions: On/Off, Level Control, Color Control, IAS Zone
-- `ZigbeeCoordinator` trait -- platform provides impl (ESP32 radio, USB dongle)
+- `ZigbeeCoordinator` trait -- platform provides impl (USB dongle, appliance sidecar, future hardware bridge)
 - Device profiles: ZLL light, ZHA switch, IAS motion sensor
 - Commission/join logic, event normalization
 
@@ -323,7 +317,7 @@ Shared protocol crates abstract radio/transport access for multiple integrations
 - Used by integrations controlling lights via BLE (some Govee, some IKEA)
 
 ### WiFi/HTTP
-No crate needed -- just std networking (`reqwest` on desktop, `esp-idf-svc` on ESP32). Already handled by feature flags in integration crates.
+No crate needed -- just std networking (`reqwest` on the active server/appliance paths). Already handled by feature flags in integration crates.
 
 ## Multi-Integration Support
 
@@ -390,6 +384,5 @@ Refine the existing multi-hub model only if a future platform needs additional o
 | `rust/core/rhythm-os/src/event_loop.rs` | Generic `HubEvent` processing |
 | `rust/core/rhythm-os/src/storage.rs` | `Storage` persistence trait |
 | `rust/integrations/rhythm-hue/` | Reference integration implementation |
-| `rust/bins/rhythm-esp32/src/hub.rs` | Provider dispatch table (ESP32) |
-| `rust/bins/rhythm-esp32/src/platform/hue/` | Platform-specific transport (ESP32) |
 | `rust/bins/rhythm-server/src/hub.rs` | Provider dispatch table (server) |
+| `rust/bins/rhythm-linux-embedded/src/main.rs` | Appliance runtime wiring on top of the server stack |

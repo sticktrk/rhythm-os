@@ -30,7 +30,8 @@ pub struct HueSseConnectConfig {
 /// Connect to the Hue bridge SSE event stream (generic over transport).
 ///
 /// The `start_event_stream` closure is provided by the platform crate to
-/// handle the actual SSE transport (e.g., EspTls on ESP32, reqwest on Linux).
+/// handle the actual SSE transport (for example a blocking TLS client or
+/// reqwest on Linux).
 ///
 /// Returns `(ActiveHub, Receiver<HubEvent>)`. The runtime inside ActiveHub
 /// is `None` — call the platform's `ensure_runtime()` when the first room arrives.

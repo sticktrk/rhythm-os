@@ -3,7 +3,7 @@
 # Resolve the current version for a shipped Rhythm artifact.
 #
 # Usage:
-#   ./scripts/resolve-version.sh [workspace|server|addon|esp32]
+#   ./scripts/resolve-version.sh [workspace|server|addon]
 
 set -euo pipefail
 
@@ -12,13 +12,12 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 usage() {
     cat <<EOF
-Usage: $0 [workspace|server|addon|esp32]
+Usage: $0 [workspace|server|addon]
 
 Targets:
   workspace  Resolve Git-derived workspace version from release tags
   server     Alias for workspace (workspace crates inherit this version)
   addon      Read version from install/addon/config.yaml
-  esp32      Resolve Git-derived firmware version from release tags
 EOF
 }
 
@@ -122,7 +121,7 @@ resolve_addon_version() {
 TARGET="${1:-workspace}"
 
 case "$TARGET" in
-    workspace|server|esp32)
+    workspace|server)
         VERSION="$(resolve_workspace_version)"
         ;;
     addon)

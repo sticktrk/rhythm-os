@@ -93,7 +93,7 @@ pub struct RoomModeTransition {
 
 /// Platform-specific tuning for stack sizes and resource limits.
 ///
-/// Embedded targets (ESP32) have tight memory and need small stacks.
+/// Constrained blocking targets have tight memory and need small stacks.
 /// Desktop/server targets can use the OS defaults (typically 8MB).
 #[derive(Clone, Debug)]
 pub struct PlatformConfig {
@@ -111,7 +111,7 @@ pub struct PlatformConfig {
     /// creation so the first light command doesn't pay the TLS handshake cost.
     /// When `false` (embedded default), TLS is deferred until the first
     /// periodic tick (~60s), avoiding a third simultaneous TLS session during
-    /// hub sync which would exceed the ESP32's heap budget.
+    /// hub sync which would exceed the constrained runtime's heap budget.
     pub eager_tls_warmup: bool,
     /// Whether `sync_from_hub` should discover devices and sensors.
     ///
@@ -119,12 +119,12 @@ pub struct PlatformConfig {
     /// endpoint to map buttons and motion sensors in one shot.
     /// When `false` (embedded default), only rooms are synced — device/sensor
     /// mappings arrive organically via the SSE event stream, avoiding the
-    /// large device endpoint response that can OOM the ESP32.
+    /// large device endpoint response that can OOM a constrained runtime.
     pub full_device_discovery: bool,
 }
 
 impl PlatformConfig {
-    /// Preset for ESP32 and other embedded targets.
+    /// Preset for constrained blocking targets.
     pub fn embedded() -> Self {
         Self {
             runtime_init_stack: 16 * 1024,
@@ -271,14 +271,14 @@ pub struct AppState {
     // ---- Composite controller ----
     /// The composite controller shared between AppState (for dynamic registration)
     /// and the RhythmEngine (for light control). Both hold Arc refs to the same instance.
-    /// None on ESP32 or before runtime creation.
+    /// None on constrained blocking targets or before runtime creation.
     #[cfg(feature = "desktop")]
     pub composite_controller: Option<Arc<rhythm_core::CompositeController>>,
 
     // ---- Callbacks ----
-    /// Called on hub heartbeat (e.g., ESP32 updates diag vitals).
+    /// Called on hub heartbeat.
     pub on_hub_heartbeat: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// Called on hub disconnect (e.g., ESP32 updates diag state).
+    /// Called on hub disconnect.
     pub on_hub_disconnect: Option<Arc<dyn Fn() + Send + Sync>>,
 
     /// Platform-specific runtime initialization callback.
@@ -354,10 +354,13 @@ pub struct AppState {
     /// Firmware version string (set by the binary crate).
     pub firmware_version: &'static str,
 
-    /// Platform type: "desktop" or "embedded".
+    /// Platform type: "desktop" or "appliance".
+    ///
+    /// Older appliance images may still report `"embedded"` until they are
+    /// updated into the renamed runtime.
     pub platform_type: &'static str,
 
-    /// Deployment context: "ha_addon", "server", "embedded", etc.
+    /// Deployment context: "ha_addon", "server", "rpiz", etc.
     pub platform_context: &'static str,
 
     /// Base data directory for persistence (set by binary crate).

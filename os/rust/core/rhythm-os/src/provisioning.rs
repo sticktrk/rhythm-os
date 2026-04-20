@@ -45,7 +45,7 @@ impl ProvisioningDeviceInfo {
 
 /// Build a stable provisioning device name for a hardware target.
 ///
-/// Format: `rhythm-(rpiz|esp32)-<id>`
+/// Format: `rhythm-<target>-<id>`
 pub fn provisioning_device_name(target: &str, id: &str) -> String {
     let normalized_target: String = target
         .chars()
@@ -335,10 +335,7 @@ mod tests {
     #[test]
     fn provisioning_device_name_uses_stable_format() {
         assert_eq!(provisioning_device_name("rpiz", "abcd"), "rhythm-rpiz-ABCD");
-        assert_eq!(
-            provisioning_device_name("esp32", "12ef"),
-            "rhythm-esp32-12EF"
-        );
+        assert_eq!(provisioning_device_name("", "12ef"), "rhythm-device-12EF");
     }
 
     #[test]

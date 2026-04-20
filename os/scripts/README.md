@@ -174,10 +174,10 @@ local, build the `rpiz` artifact, and upload the OTA feed directly.
 
 Rhythm OS now uses two versioning tracks:
 
-- `rhythm-server` and `rhythm-esp32` derive their build version from Git tags.
+- Workspace Rust binaries derive their build version from Git tags.
 - `rhythm-addon` remains separate and uses `install/addon/config.yaml`.
 
-For server and ESP32:
+For workspace/server/appliance builds:
 
 - Tagged release builds resolve to the exact tag version, for example `v0.4.0` -> `0.4.0`.
 - Untagged builds resolve to a Git-derived prerelease, for example `0.4.0-dev.66.g1b40e459`.

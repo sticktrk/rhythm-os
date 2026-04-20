@@ -1,8 +1,7 @@
 //! Platform-agnostic business logic for Rhythm OS controllers.
 //!
-//! Extracted from the ESP32 firmware so the same hub management, command
-//! handling, state management, and lifecycle logic can be reused on
-//! Raspberry Pi, macOS, Linux server, or any future target.
+//! Shared hub management, command handling, state management, and lifecycle
+//! logic reused by the appliance, server, add-on, and future targets.
 //!
 //! No platform-specific dependencies — concrete storage backends, SSE
 //! transports, and HTTP servers are provided by the consuming binary crate.

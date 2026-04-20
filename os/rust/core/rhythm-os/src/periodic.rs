@@ -1,7 +1,7 @@
 //! Periodic room tick orchestration.
 //!
-//! Extracted from ESP32 main.rs so the same periodic update logic can
-//! be reused across targets (rhythm-server, future Raspberry Pi, etc.).
+//! Shared across platform binaries so the same periodic update logic can be
+//! reused across the server, appliance, and future targets.
 //!
 //! The periodic updater runs on a fixed interval, ticking each room's
 //! engine to update light values based on the current time/solar position.
@@ -373,7 +373,7 @@ fn enqueue_periodic_tick(
 /// 5. Calls `check_solar_midnight()`
 ///
 /// The `on_tick` callback is for platform-specific per-tick actions
-/// (e.g., `led::led_periodic()` on ESP32).
+/// (for example diagnostic hooks or appliance-side helpers).
 pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
     let initial_interval = {
         let Ok(s) = state.lock() else { return };

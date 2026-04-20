@@ -1,10 +1,25 @@
 #!/bin/sh
 
+set -eu
+
 BOOT_MOUNT=/boot
 STATE_FILE="${BOOT_MOUNT}/rhythm-bootstate.env"
 DATA_STATE_DIR=/data/ota
 DATA_STATE_FILE="${DATA_STATE_DIR}/bootstate.env"
 SERVER_BIN=/usr/bin/rhythm-server
+CMDLINE_FILE="${BOOT_MOUNT}/cmdline.txt"
+
+now_ms() {
+    date +%s 2>/dev/null | awk '{ printf "%s000\n", $1 }'
+}
+
+slot_device() {
+    case "$1" in
+        a) printf '/dev/mmcblk0p2\n' ;;
+        b) printf '/dev/mmcblk0p3\n' ;;
+        *) return 1 ;;
+    esac
+}
 
 current_slot() {
     local token
@@ -33,18 +48,36 @@ current_version() {
     "$SERVER_BIN" --version 2>/dev/null | awk 'NR==1 { print $2 }'
 }
 
-write_state() {
-    local slot="$1"
-    local pending_slot="$2"
-    local pending_version="$3"
-    local active_version="$4"
+load_state() {
+    RHYTHM_ACTIVE_SLOT=""
+    RHYTHM_LAST_GOOD_SLOT=""
+    RHYTHM_PENDING_SLOT=""
+    RHYTHM_PENDING_VERSION=""
+    RHYTHM_ACTIVE_VERSION=""
+    RHYTHM_BOOT_STATUS="idle"
+    RHYTHM_LAST_UPDATE_EPOCH_MS=""
+    RHYTHM_LAST_ROLLBACK_SLOT=""
+    RHYTHM_LAST_ROLLBACK_VERSION=""
+    RHYTHM_LAST_ROLLBACK_EPOCH_MS=""
 
+    if [ -r "$STATE_FILE" ]; then
+        # shellcheck disable=SC1090
+        . "$STATE_FILE"
+    fi
+}
+
+write_state() {
     cat > "$STATE_FILE" <<EOF
-RHYTHM_ACTIVE_SLOT=$slot
-RHYTHM_LAST_GOOD_SLOT=$slot
-RHYTHM_PENDING_SLOT=$pending_slot
-RHYTHM_PENDING_VERSION=$pending_version
-RHYTHM_ACTIVE_VERSION=$active_version
+RHYTHM_ACTIVE_SLOT=${RHYTHM_ACTIVE_SLOT:-}
+RHYTHM_LAST_GOOD_SLOT=${RHYTHM_LAST_GOOD_SLOT:-}
+RHYTHM_PENDING_SLOT=${RHYTHM_PENDING_SLOT:-}
+RHYTHM_PENDING_VERSION=${RHYTHM_PENDING_VERSION:-}
+RHYTHM_ACTIVE_VERSION=${RHYTHM_ACTIVE_VERSION:-}
+RHYTHM_BOOT_STATUS=${RHYTHM_BOOT_STATUS:-idle}
+RHYTHM_LAST_UPDATE_EPOCH_MS=${RHYTHM_LAST_UPDATE_EPOCH_MS:-}
+RHYTHM_LAST_ROLLBACK_SLOT=${RHYTHM_LAST_ROLLBACK_SLOT:-}
+RHYTHM_LAST_ROLLBACK_VERSION=${RHYTHM_LAST_ROLLBACK_VERSION:-}
+RHYTHM_LAST_ROLLBACK_EPOCH_MS=${RHYTHM_LAST_ROLLBACK_EPOCH_MS:-}
 EOF
 }
 
@@ -53,36 +86,138 @@ mirror_state() {
     cp -f "$STATE_FILE" "$DATA_STATE_FILE"
 }
 
+rewrite_cmdline_slot() {
+    local target_slot="$1"
+    local target_root current_cmdline rewritten token found_root
+
+    target_root="$(slot_device "$target_slot")"
+    current_cmdline="$(cat "$CMDLINE_FILE" 2>/dev/null || true)"
+    [ -n "$current_cmdline" ] || return 1
+
+    rewritten=""
+    found_root=0
+    for token in $current_cmdline; do
+        case "$token" in
+            root=*)
+                token="root=$target_root"
+                found_root=1
+                ;;
+        esac
+        if [ -n "$rewritten" ]; then
+            rewritten="$rewritten $token"
+        else
+            rewritten="$token"
+        fi
+    done
+
+    [ "$found_root" -eq 1 ] || return 1
+
+    cp -f "$CMDLINE_FILE" "${CMDLINE_FILE}.bak" 2>/dev/null || true
+    printf '%s\n' "$rewritten" > "$CMDLINE_FILE"
+}
+
+reboot_now() {
+    sync
+    /sbin/reboot 2>/dev/null || reboot
+}
+
+rollback_pending_boot() {
+    local slot="$1"
+    local active_version="$2"
+    local rollback_to rollback_version
+
+    rollback_to="${RHYTHM_LAST_GOOD_SLOT:-}"
+    [ -n "$rollback_to" ] || return 0
+    [ "$rollback_to" != "$slot" ] || return 0
+
+    rollback_version="${RHYTHM_PENDING_VERSION:-}"
+    rewrite_cmdline_slot "$rollback_to"
+
+    RHYTHM_ACTIVE_SLOT="$slot"
+    RHYTHM_PENDING_SLOT=""
+    RHYTHM_PENDING_VERSION=""
+    RHYTHM_ACTIVE_VERSION="$active_version"
+    RHYTHM_BOOT_STATUS="idle"
+    RHYTHM_LAST_ROLLBACK_SLOT="$slot"
+    RHYTHM_LAST_ROLLBACK_VERSION="$rollback_version"
+    RHYTHM_LAST_ROLLBACK_EPOCH_MS="$(now_ms)"
+    write_state
+    mirror_state
+    reboot_now
+}
+
 start() {
-    local slot pending_slot pending_version active_version
+    local slot active_version
 
     slot="$(current_slot || true)"
     [ -n "$slot" ] || return 0
 
-    pending_slot=""
-    pending_version=""
-    if [ -r "$STATE_FILE" ]; then
-        # shellcheck disable=SC1090
-        . "$STATE_FILE"
-        pending_slot="${RHYTHM_PENDING_SLOT:-}"
-        pending_version="${RHYTHM_PENDING_VERSION:-}"
+    load_state
+    active_version="$(current_version || true)"
+
+    if [ "${RHYTHM_PENDING_SLOT:-}" = "$slot" ]; then
+        if [ "${RHYTHM_BOOT_STATUS:-idle}" = "booting" ]; then
+            rollback_pending_boot "$slot" "$active_version"
+            return 0
+        fi
+
+        RHYTHM_ACTIVE_SLOT="$slot"
+        [ -n "${RHYTHM_LAST_GOOD_SLOT:-}" ] || RHYTHM_LAST_GOOD_SLOT="$slot"
+        RHYTHM_ACTIVE_VERSION="$active_version"
+        RHYTHM_BOOT_STATUS="booting"
+        write_state
+        mirror_state
+        return 0
     fi
+
+    RHYTHM_ACTIVE_SLOT="$slot"
+    RHYTHM_LAST_GOOD_SLOT="$slot"
+    RHYTHM_PENDING_SLOT=""
+    RHYTHM_PENDING_VERSION=""
+    RHYTHM_ACTIVE_VERSION="$active_version"
+    RHYTHM_BOOT_STATUS="idle"
+    write_state
+    mirror_state
+}
+
+success() {
+    local slot active_version
+
+    slot="$(current_slot || true)"
+    [ -n "$slot" ] || return 0
+
+    load_state
+    [ "${RHYTHM_PENDING_SLOT:-}" = "$slot" ] || return 0
 
     active_version="$(current_version || true)"
-    if [ "$pending_slot" = "$slot" ]; then
-        pending_slot=""
-        pending_version=""
-    fi
-
-    write_state "$slot" "$pending_slot" "$pending_version" "$active_version"
+    RHYTHM_ACTIVE_SLOT="$slot"
+    RHYTHM_LAST_GOOD_SLOT="$slot"
+    RHYTHM_PENDING_SLOT=""
+    RHYTHM_PENDING_VERSION=""
+    RHYTHM_ACTIVE_VERSION="$active_version"
+    RHYTHM_BOOT_STATUS="idle"
+    write_state
     mirror_state
+}
+
+fail() {
+    local slot active_version
+
+    slot="$(current_slot || true)"
+    [ -n "$slot" ] || return 0
+
+    load_state
+    [ "${RHYTHM_PENDING_SLOT:-}" = "$slot" ] || return 0
+
+    active_version="$(current_version || true)"
+    rollback_pending_boot "$slot" "$active_version"
 }
 
 stop() {
     :
 }
 
-case "$1" in
+case "${1:-}" in
     start)
         start
         ;;
@@ -92,5 +227,11 @@ case "$1" in
     restart)
         stop
         start
+        ;;
+    success)
+        success
+        ;;
+    fail)
+        fail
         ;;
 esac

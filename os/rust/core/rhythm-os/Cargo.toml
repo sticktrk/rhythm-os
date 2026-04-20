@@ -6,7 +6,7 @@ license.workspace = true
 description = "Platform-agnostic business logic for Rhythm OS controllers"
 
 # Feature flags:
-#   embedded  - ESP32/resource-constrained: blocking runtime only.
+#   embedded  - Legacy resource-constrained blocking runtime alias.
 #   desktop   - Server binaries: blocking + async + axum + mdns.
 #   blocking  - Blocking runtime (forwarded to rhythm-core/blocking).
 #               Activated by embedded and desktop; also valid standalone

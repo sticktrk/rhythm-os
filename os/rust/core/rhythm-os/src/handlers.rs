@@ -373,12 +373,12 @@ fn perform_unpair_device(
     Ok(result)
 }
 
-fn embedded_delete_unpair_request(
+fn appliance_delete_unpair_request(
     state: &SharedState,
     id: &str,
 ) -> anyhow::Result<Option<crate::pairing::UnpairingRequest>> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    if s.platform_type != "embedded" {
+    if !matches!(s.platform_type, "appliance" | "embedded") {
         return Ok(None);
     }
 
@@ -405,7 +405,7 @@ fn embedded_delete_unpair_request(
 }
 
 pub fn handle_delete_device(state: &SharedState, id: &str) -> ApiResponse {
-    match embedded_delete_unpair_request(state, id) {
+    match appliance_delete_unpair_request(state, id) {
         Ok(Some(request)) => match perform_unpair_device(state, &request) {
             Ok(result) if result.status == crate::pairing::PairingStatus::Complete => {
                 return ApiResponse::no_content();
@@ -1269,7 +1269,7 @@ pub fn handle_put_node_preferences(
 /// Reset all on-rooms back to their current adaptive curve position.
 ///
 /// When `persist` is `true`, persists state after reset.
-/// When `false` (ESP32), the caller is responsible for deferred persistence.
+/// When `false`, the caller is responsible for deferred persistence.
 pub fn handle_fix_my_lights(state: &SharedState, persist: bool) -> ApiResponse {
     match commands::do_fix_my_lights(state, persist) {
         Ok(json) => ApiResponse::json_ok(json),
@@ -2610,14 +2610,14 @@ mod tests {
     }
 
     #[test]
-    fn delete_device_on_embedded_matter_uses_unpairing() {
+    fn delete_device_on_appliance_matter_uses_unpairing() {
         let (state, registry, canonical_id, room_id, hub_key) =
             handler_state_with_canonical_light_for_hub("matter", "matter-100");
         let calls = Arc::new(Mutex::new(Vec::<(String, serde_json::Value)>::new()));
         {
             let calls = calls.clone();
             let mut s = state.lock().unwrap();
-            s.platform_type = "embedded";
+            s.platform_type = "appliance";
             s.platform_context = "rpiz";
             s.start_unpairing_fn = Some(Arc::new(move |_, hub_type, params| {
                 calls

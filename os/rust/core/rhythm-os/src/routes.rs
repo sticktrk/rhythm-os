@@ -6,7 +6,7 @@
 //!
 //! Used by:
 //! - Axum router test to verify all routes are registered
-//! - ESP32 HTTP server to generate CORS OPTIONS handlers
+//! - Platform HTTP servers to generate CORS OPTIONS handlers
 
 /// A shared API route with its path and accepted HTTP methods.
 pub struct SharedRoute {

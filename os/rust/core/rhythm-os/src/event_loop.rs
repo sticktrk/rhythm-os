@@ -1,7 +1,7 @@
 //! Hub event processing and motion timer management.
 //!
-//! Extracted from ESP32 main.rs so the same event loop logic can be
-//! reused across targets (rhythm-server, future Raspberry Pi, etc.).
+//! Shared across platform binaries so the same event loop logic can be reused
+//! across the server, appliance, and future targets.
 //!
 //! The event loop receives [`HubEvent`]s from the SSE stream and
 //! dispatches them to the engine via [`RuntimeHandle`].

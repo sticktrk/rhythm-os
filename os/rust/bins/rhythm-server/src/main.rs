@@ -1,6 +1,6 @@
 //! Rhythm OS — macOS/Linux CLI server.
 //!
-//! Same API surface as the ESP32 firmware, running as a native process.
+//! Native server process exposing the full API surface.
 //! Connects to Hue bridges, Home Assistant, and future hubs via the
 //! integration registry in `hub::INTEGRATIONS`.
 

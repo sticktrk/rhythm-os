@@ -5,14 +5,13 @@ Thanks for your interest in contributing! This guide covers what you need to get
 ## Prerequisites
 
 - [Rust](https://rustup.rs/) stable toolchain (edition 2021)
-- For ESP32 development: ESP-IDF v5.5.2 + ESP-RS toolchain (see [CLAUDE.md](CLAUDE.md#esp32-development))
 
 ## Building
 
 ```bash
 cargo build -p rhythm-server          # Build the macOS/Linux server
+cargo build -p rhythm-linux-embedded  # Build the Linux appliance binary
 cargo build -p rhythm-addon           # Build the HA add-on binary
-./scripts/build-esp32.sh --flash      # Build + flash ESP32 firmware
 ```
 
 ## Testing
@@ -56,7 +55,7 @@ The codebase is a Cargo workspace with layered crates:
 
 - **`rust/core/`** — Foundation libraries (algorithms, traits, business logic)
 - **`rust/integrations/`** — Lighting platform integrations (Hue, Home Assistant)
-- **`rust/bins/`** — Deployable binaries (server, addon, ESP32)
+- **`rust/bins/`** — Deployable binaries (server, appliance, addon)
 
 See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation.
 
@@ -70,7 +69,7 @@ See [INTEGRATIONS.md](INTEGRATIONS.md) for the full specification and a crate te
 
 Use [GitHub Issues](https://github.com/sticktrk/rhythm-os/issues) and include:
 
-- Which platform you're using (server, addon, ESP32)
+- Which platform you're using (server, appliance, addon)
 - Version number
 - Steps to reproduce
 - Relevant logs (`RUST_LOG=debug` for verbose output)
