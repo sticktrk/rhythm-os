@@ -309,8 +309,52 @@ async fn run_server(
     let _mdns = rhythm_os::mdns::register_mdns_service(port, "server", VERSION, "rhythm-server");
 
     spawn_hub_bootstrap(state.clone());
+    spawn_boot_success_marker();
 
     axum::serve(listener, server).await?;
 
     Ok(())
+}
+
+fn spawn_boot_success_marker() {
+    const BOOTSTATE_SCRIPT: &str = "/etc/init.d/S41bootstate";
+    const GRACE_SECS: u64 = 30;
+
+    if !std::path::Path::new(BOOTSTATE_SCRIPT).exists() {
+        return;
+    }
+
+    info!(
+        target: "sys",
+        "Will mark OTA slot as last-good via {} success in {}s",
+        BOOTSTATE_SCRIPT,
+        GRACE_SECS
+    );
+
+    std::thread::Builder::new()
+        .name("boot-success-marker".to_string())
+        .spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(GRACE_SECS));
+            match std::process::Command::new(BOOTSTATE_SCRIPT)
+                .arg("success")
+                .status()
+            {
+                Ok(status) if status.success() => {
+                    info!(target: "sys", "OTA bootstate marked success");
+                }
+                Ok(status) => warn!(
+                    target: "sys",
+                    "{} success exited with {}",
+                    BOOTSTATE_SCRIPT,
+                    status
+                ),
+                Err(e) => warn!(
+                    target: "sys",
+                    "Failed to exec {} success: {}",
+                    BOOTSTATE_SCRIPT,
+                    e
+                ),
+            }
+        })
+        .expect("Failed to spawn boot-success marker thread");
 }
