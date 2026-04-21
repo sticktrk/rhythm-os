@@ -111,13 +111,15 @@ if [ ! -x "$BINARY" ]; then
 fi
 
 echo "Pushing to $SSH_DEST:$REMOTE_PATH ..."
-scp "$BINARY" "$SSH_DEST:/tmp/rhythm-server.new"
+# -O forces legacy SCP protocol (BSD rcp-over-SSH) instead of the modern
+# default SFTP — Dropbear on the rpiz image doesn't ship sftp-server.
+scp -O "$BINARY" "$SSH_DEST:/tmp/rhythm-server.new"
 
 # Atomic swap + restart via BusyBox init respawn. `mv` unlinks the old inode
 # (safe while the running process keeps its mapped pages) and links in the
 # new file; killing the old process lets init respawn with the new binary.
-ssh "$SSH_DEST" bash -s -- "$REMOTE_PATH" <<'REMOTE'
-set -euo pipefail
+ssh "$SSH_DEST" sh -s -- "$REMOTE_PATH" <<'REMOTE'
+set -eu
 DEST="$1"
 chmod +x /tmp/rhythm-server.new
 mv /tmp/rhythm-server.new "$DEST"
