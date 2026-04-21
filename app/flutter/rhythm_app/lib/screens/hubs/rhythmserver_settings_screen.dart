@@ -73,7 +73,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   final OtaService _otaService = OtaService();
 
   bool _isOnline = false;
-  bool _checkingHealth = true;
   bool _isResetting = false;
   bool _isRebooting = false;
   bool _isFactoryResetting = false;
@@ -185,7 +184,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     if (mounted) {
       setState(() {
         _isOnline = online;
-        _checkingHealth = false;
       });
     }
   }
@@ -247,7 +245,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     if (_isRefreshing) return;
     setState(() {
       _isRefreshing = true;
-      _checkingHealth = true;
     });
 
     // Refresh everything in parallel: health, server state, matter devices.
@@ -706,7 +703,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     Text(
                       currentVersion == '0.0.0'
                           ? 'Unknown'
-                          : 'v$currentVersion',
+                          : _formatOtaVersion(currentVersion),
                       style: const TextStyle(
                         color: CelestialColors.textPrimary,
                         fontSize: 14,
@@ -773,6 +770,10 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               _otaService.checkForUpdate(currentVersion);
             },
           ),
+          if (_otaService.isSelfPull)
+            _buildOtaAdvancedPanel(
+              capabilities: _otaService.capabilities,
+            ),
         ];
 
       case OtaState.checking:
@@ -804,6 +805,14 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               ],
             ),
           ),
+          if (_otaService.isSelfPull)
+            _buildOtaAdvancedPanel(
+              capabilities: _otaService.capabilities,
+              checksumVerified: _otaService.checksumVerified,
+              installedTargets: _otaService.installedTargets,
+              installTargets: _otaService.installTargets,
+              imageAssets: _otaService.imageAssets,
+            ),
         ];
 
       case OtaState.available:
@@ -819,14 +828,16 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text(
-                  'Available',
+                  release.updateReason == OtaUpdateReason.componentDrift
+                      ? 'Repair Available'
+                      : 'Available',
                   style: TextStyle(
                     color: CelestialColors.textSecondary.withValues(alpha: 0.8),
                     fontSize: 14,
                   ),
                 ),
                 Text(
-                  'v${release.version}',
+                  _formatOtaVersion(release.version),
                   style: const TextStyle(
                     color: _teal,
                     fontSize: 14,
@@ -837,6 +848,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               ],
             ),
           ),
+          if (_otaService.isSelfPull)
+            _buildOtaReasonSummary(release.updateReason),
           if (release.changelog != null && release.changelog!.isNotEmpty)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -848,8 +861,16 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 ),
               ),
             ),
+          if (_otaService.isSelfPull)
+            _buildOtaAdvancedPanel(
+              capabilities: _otaService.capabilities,
+              installTargets: release.installTargets,
+              imageAssets: release.imageAssets,
+            ),
           _buildOtaButton(
-            label: 'Install Update',
+            label: release.updateReason == OtaUpdateReason.componentDrift
+                ? 'Repair Components'
+                : 'Install Update',
             icon: Icons.download_rounded,
             onTap: () {
               AnalyticsService().logOtaUpdateStarted(
@@ -988,7 +1009,10 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    'Updated to v${_otaService.currentVersion}',
+                    _otaService.statusMessage ??
+                        (_otaService.isBundleRepair
+                            ? 'Bundle repaired on ${_formatOtaVersion(_otaService.currentVersion)}'
+                            : 'Updated to ${_formatOtaVersion(_otaService.currentVersion)}'),
                     style: const TextStyle(
                       color: Color(0xFF22C55E),
                       fontSize: 14,
@@ -999,6 +1023,18 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               ],
             ),
           ),
+          if (_otaService.installedTargets.isNotEmpty)
+            _buildInstalledTargetsSummary(_otaService.installedTargets),
+          if (_otaService.checksumVerified != null)
+            _buildChecksumSummary(_otaService.checksumVerified!),
+          if (_otaService.isSelfPull)
+            _buildOtaAdvancedPanel(
+              capabilities: _otaService.capabilities,
+              checksumVerified: _otaService.checksumVerified,
+              installedTargets: _otaService.installedTargets,
+              installTargets: _otaService.installTargets,
+              imageAssets: _otaService.imageAssets,
+            ),
           _buildOtaButton(
             label: 'Done',
             icon: null,
@@ -1042,6 +1078,366 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
           ),
         ];
     }
+  }
+
+  String _formatOtaVersion(String version) {
+    return version.startsWith('v') || version.startsWith('V')
+        ? version
+        : 'v$version';
+  }
+
+  Widget _buildOtaReasonSummary(OtaUpdateReason reason) {
+    final (icon, title, description) = switch (reason) {
+      OtaUpdateReason.versionMismatch => (
+          Icons.system_update_outlined,
+          'Version mismatch',
+          'A newer server bundle is available.',
+        ),
+      OtaUpdateReason.componentDrift => (
+          Icons.build_circle_outlined,
+          'Component drift',
+          'Bundled components are stale or missing and can be repaired in place.',
+        ),
+      OtaUpdateReason.unknown => (
+          Icons.info_outline_rounded,
+          'Bundle update',
+          'The server reported an available update bundle.',
+        ),
+    };
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: _teal.withValues(alpha: 0.9), size: 18),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: _teal,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  description,
+                  style: TextStyle(
+                    color:
+                        CelestialColors.textSecondary.withValues(alpha: 0.65),
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInstalledTargetsSummary(List<OtaBundleEntry> installedTargets) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Installed Targets',
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.8),
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: installedTargets
+                .map(
+                  (target) => Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF22C55E).withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(
+                        color: const Color(0xFF22C55E).withValues(alpha: 0.25),
+                      ),
+                    ),
+                    child: Text(
+                      target.title,
+                      style: const TextStyle(
+                        color: Color(0xFF22C55E),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                )
+                .toList(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildChecksumSummary(bool checksumVerified) {
+    final color =
+        checksumVerified ? const Color(0xFF22C55E) : const Color(0xFFF59E0B);
+    final icon = checksumVerified
+        ? Icons.verified_outlined
+        : Icons.warning_amber_rounded;
+    final label =
+        checksumVerified ? 'Checksum verified' : 'Checksum not verified';
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      child: Row(
+        children: [
+          Icon(icon, color: color, size: 18),
+          const SizedBox(width: 8),
+          Text(
+            label,
+            style: TextStyle(
+              color: color,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOtaAdvancedPanel({
+    OtaCapabilities? capabilities,
+    bool? checksumVerified,
+    List<OtaBundleEntry> installedTargets = const [],
+    List<OtaBundleEntry> installTargets = const [],
+    List<OtaBundleEntry> imageAssets = const [],
+  }) {
+    if (capabilities == null &&
+        checksumVerified == null &&
+        installedTargets.isEmpty &&
+        installTargets.isEmpty &&
+        imageAssets.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+      child: Container(
+        decoration: BoxDecoration(
+          color: CelestialColors.backgroundDark.withValues(alpha: 0.35),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: CelestialColors.orbitRing.withValues(alpha: 0.35),
+          ),
+        ),
+        child: Theme(
+          data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+          child: ExpansionTile(
+            tilePadding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+            childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            iconColor: CelestialColors.textSecondary.withValues(alpha: 0.7),
+            collapsedIconColor:
+                CelestialColors.textSecondary.withValues(alpha: 0.7),
+            title: Text(
+              'Advanced OTA Details',
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.85),
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            subtitle: Text(
+              _buildOtaAdvancedSummary(
+                capabilities: capabilities,
+                checksumVerified: checksumVerified,
+                installedTargets: installedTargets,
+                installTargets: installTargets,
+                imageAssets: imageAssets,
+              ),
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.55),
+                fontSize: 12,
+              ),
+            ),
+            children: [
+              if (capabilities != null)
+                _buildOtaAdvancedSection(
+                  'Capabilities',
+                  _buildCapabilityEntries(capabilities),
+                ),
+              if (checksumVerified != null)
+                _buildOtaAdvancedSection(
+                  'Update Result',
+                  [
+                    OtaBundleEntry(
+                      title: 'checksum_verified',
+                      detail: checksumVerified ? 'true' : 'false',
+                    ),
+                  ],
+                  accent: checksumVerified
+                      ? const Color(0xFF22C55E)
+                      : const Color(0xFFF59E0B),
+                ),
+              if (installedTargets.isNotEmpty)
+                _buildOtaAdvancedSection(
+                  'Installed Targets',
+                  installedTargets,
+                  accent: const Color(0xFF22C55E),
+                ),
+              if (installTargets.isNotEmpty)
+                _buildOtaAdvancedSection(
+                  'Install Targets',
+                  installTargets,
+                ),
+              if (imageAssets.isNotEmpty)
+                _buildOtaAdvancedSection(
+                  'Image Assets',
+                  imageAssets,
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _buildOtaAdvancedSummary({
+    required OtaCapabilities? capabilities,
+    required bool? checksumVerified,
+    required List<OtaBundleEntry> installedTargets,
+    required List<OtaBundleEntry> installTargets,
+    required List<OtaBundleEntry> imageAssets,
+  }) {
+    final parts = <String>[];
+    if (capabilities != null) {
+      parts.add('capabilities loaded');
+    }
+    if (checksumVerified != null) {
+      parts.add(
+        checksumVerified ? 'checksum verified' : 'checksum pending',
+      );
+    }
+    if (installedTargets.isNotEmpty) {
+      parts.add(
+        '${installedTargets.length} installed target${installedTargets.length == 1 ? '' : 's'}',
+      );
+    }
+    if (installTargets.isNotEmpty) {
+      parts.add(
+        '${installTargets.length} planned target${installTargets.length == 1 ? '' : 's'}',
+      );
+    }
+    if (imageAssets.isNotEmpty) {
+      parts.add(
+        '${imageAssets.length} image asset${imageAssets.length == 1 ? '' : 's'}',
+      );
+    }
+    return parts.join('  ·  ');
+  }
+
+  List<OtaBundleEntry> _buildCapabilityEntries(OtaCapabilities capabilities) {
+    return [
+      OtaBundleEntry(title: 'strategy', detail: capabilities.strategy),
+      OtaBundleEntry(title: 'scope', detail: capabilities.scope),
+      OtaBundleEntry(
+        title: 'can_check',
+        detail: capabilities.canCheck ? 'true' : 'false',
+      ),
+      OtaBundleEntry(
+        title: 'can_update',
+        detail: capabilities.canUpdate ? 'true' : 'false',
+      ),
+      OtaBundleEntry(
+        title: 'can_upload',
+        detail: capabilities.canUpload ? 'true' : 'false',
+      ),
+      OtaBundleEntry(
+        title: 'requires_restart',
+        detail: capabilities.requiresRestart ? 'true' : 'false',
+      ),
+      OtaBundleEntry(title: 'rollback', detail: capabilities.rollback),
+      OtaBundleEntry(
+        title: 'rootfs_image OTA',
+        detail:
+            capabilities.supportsRootfsImageOta ? 'supported' : 'not supported',
+      ),
+    ];
+  }
+
+  Widget _buildOtaAdvancedSection(
+    String title,
+    List<OtaBundleEntry> entries, {
+    Color accent = _teal,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: TextStyle(
+              color: accent,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 8),
+          ...entries.map((entry) => _buildOtaAdvancedEntry(entry, accent)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOtaAdvancedEntry(OtaBundleEntry entry, Color accent) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: accent.withValues(alpha: 0.18),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            entry.title,
+            style: TextStyle(
+              color: CelestialColors.textPrimary.withValues(alpha: 0.92),
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          if (entry.detail != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              entry.detail!,
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.62),
+                fontSize: 12,
+                height: 1.35,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
   }
 
   Widget _buildOtaButton({
@@ -1824,7 +2220,11 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     AnalyticsService().logRhythmServerReset(wasOnline: _isOnline);
     setState(() => _isFactoryResetting = true);
 
-    final success = await _client.factoryReset();
+    final syncProvider = context.read<ServerSyncProvider>();
+    final success = await _client.factoryReset(
+      platformType: syncProvider.serverPlatformType,
+      platformContext: syncProvider.serverPlatformContext,
+    );
     if (!mounted) return;
 
     if (!success) {
@@ -2206,9 +2606,15 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
   Widget _buildProgress() {
     final isDownloading = widget.otaService.state == OtaState.downloading;
     final pct = widget.otaService.progress;
+    final title = widget.otaService.isBundleRepair
+        ? 'Repairing Bundle'
+        : 'Updating Firmware';
     final message = isDownloading
         ? 'Downloading firmware...'
-        : (widget.otaService.statusMessage ?? 'Installing on device...');
+        : (widget.otaService.statusMessage ??
+            (widget.otaService.isBundleRepair
+                ? 'Repairing bundled components...'
+                : 'Installing on device...'));
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -2242,8 +2648,8 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
           },
         ),
         const SizedBox(height: 32),
-        const Text(
-          'Updating Firmware',
+        Text(
+          title,
           style: TextStyle(
             color: CelestialColors.textPrimary,
             fontSize: 22,
@@ -2304,6 +2710,10 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
   }
 
   Widget _buildFlashing() {
+    final title = widget.otaService.isBundleRepair
+        ? 'Repairing Bundle'
+        : 'Updating Firmware';
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -2339,8 +2749,8 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
           },
         ),
         const SizedBox(height: 32),
-        const Text(
-          'Updating Firmware',
+        Text(
+          title,
           style: TextStyle(
             color: CelestialColors.textPrimary,
             fontSize: 22,
@@ -2456,6 +2866,15 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
 
   Widget _buildComplete() {
     final version = widget.otaService.currentVersion;
+    final installedTargets = widget.otaService.installedTargets;
+    final checksumVerified = widget.otaService.checksumVerified;
+    final title = widget.otaService.isBundleRepair
+        ? 'Repair Complete'
+        : 'Update Complete';
+    final message = widget.otaService.statusMessage ??
+        (widget.otaService.isBundleRepair
+            ? 'Bundle repaired on ${_formatOtaVersion(version)}'
+            : 'Updated to ${_formatOtaVersion(version)}');
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -2481,8 +2900,8 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
           ),
         ),
         const SizedBox(height: 32),
-        const Text(
-          'Update Complete',
+        Text(
+          title,
           style: TextStyle(
             color: CelestialColors.textPrimary,
             fontSize: 22,
@@ -2491,13 +2910,24 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
         ),
         const SizedBox(height: 8),
         Text(
-          'Updated to v$version',
+          message,
           style: const TextStyle(
             color: Color(0xFF22C55E),
             fontSize: 15,
             fontWeight: FontWeight.w500,
           ),
         ),
+        if (installedTargets.isNotEmpty) ...[
+          const SizedBox(height: 24),
+          _buildInstalledTargetsCard(
+            installedTargets,
+            checksumVerified: checksumVerified,
+          ),
+        ],
+        if (installedTargets.isEmpty && checksumVerified != null) ...[
+          const SizedBox(height: 24),
+          _buildChecksumCard(checksumVerified),
+        ],
         const SizedBox(height: 40),
         GestureDetector(
           onTap: _dismiss,
@@ -2520,6 +2950,132 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
                 fontWeight: FontWeight.w600,
               ),
             ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _formatOtaVersion(String version) {
+    return version.startsWith('v') || version.startsWith('V')
+        ? version
+        : 'v$version';
+  }
+
+  Widget _buildInstalledTargetsCard(
+    List<OtaBundleEntry> installedTargets, {
+    bool? checksumVerified,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF22C55E).withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: const Color(0xFF22C55E).withValues(alpha: 0.18),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Installed Targets',
+            style: TextStyle(
+              color: Color(0xFF22C55E),
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          if (checksumVerified != null) ...[
+            const SizedBox(height: 6),
+            _buildChecksumLine(checksumVerified),
+          ],
+          const SizedBox(height: 10),
+          ...installedTargets.map(
+            (target) => Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.only(top: 2),
+                    child: Icon(
+                      Icons.check_circle,
+                      color: Color(0xFF22C55E),
+                      size: 16,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          target.title,
+                          style: const TextStyle(
+                            color: CelestialColors.textPrimary,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        if (target.detail != null)
+                          Text(
+                            target.detail!,
+                            style: TextStyle(
+                              color: CelestialColors.textSecondary
+                                  .withValues(alpha: 0.72),
+                              fontSize: 12,
+                              height: 1.35,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildChecksumCard(bool checksumVerified) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF22C55E).withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: const Color(0xFF22C55E).withValues(alpha: 0.18),
+        ),
+      ),
+      child: _buildChecksumLine(checksumVerified),
+    );
+  }
+
+  Widget _buildChecksumLine(bool checksumVerified) {
+    final color =
+        checksumVerified ? const Color(0xFF22C55E) : const Color(0xFFF59E0B);
+    final icon = checksumVerified
+        ? Icons.verified_outlined
+        : Icons.warning_amber_rounded;
+    final label = checksumVerified
+        ? 'checksum_verified: true'
+        : 'checksum_verified: false';
+
+    return Row(
+      children: [
+        Icon(icon, color: color, size: 16),
+        const SizedBox(width: 8),
+        Text(
+          label,
+          style: TextStyle(
+            color: color,
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
           ),
         ),
       ],
@@ -4011,7 +4567,11 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: () => DeviceDetailSheet.show(context, device, roomId),
+      onTap: () async {
+        await DeviceDetailSheet.show(context, device, roomId);
+        if (!mounted) return;
+        await _fetchCanonicalDevices();
+      },
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
         child: Row(

@@ -19,6 +19,8 @@ import '../backend/auth/auth_user.dart';
 import '../services/cloud_backed_server_api.dart';
 import '../services/cloud_backup_service.dart';
 import '../services/auth_service.dart';
+import '../services/demo_server_api.dart';
+import '../services/hue/demo_hue_bridge_service.dart';
 import '../services/hue/hue_service_locator.dart';
 import 'home_provider.dart';
 import 'room_provider.dart';
@@ -55,6 +57,7 @@ class ServerSyncProvider extends ChangeNotifier {
   StreamSubscription<Map<String, dynamic>>? _triageChangedSub;
   StreamSubscription<RhythmConnectionState>? _connectionStateSub;
   StreamSubscription<AuthUser?>? _authStateSub;
+  StreamSubscription<void>? _demoChangeSub;
 
   /// Suppresses push-back when receiving rhythm_state from server.
   bool _receivingFromServer = false;
@@ -140,14 +143,16 @@ class ServerSyncProvider extends ChangeNotifier {
   int _triagePendingRooms = 0;
 
   /// Whether we're currently connected and synced.
-  bool get synced => _connection.connected;
+  bool get synced => _connection.connected || HueServiceLocator.isDemoMode;
 
   /// Whether the server can dispatch room actions.
   bool get canDispatchActions =>
       _connection.connected || HueServiceLocator.isDemoMode;
 
   /// Connection state of the underlying connection.
-  RhythmConnectionState get connectionState => _connection.connectionState;
+  RhythmConnectionState get connectionState => HueServiceLocator.isDemoMode
+      ? RhythmConnectionState.connected
+      : _connection.connectionState;
 
   /// The server entry currently selected for the active connection.
   Hub? get connectedServerHub => _serverHub;
@@ -461,7 +466,9 @@ class ServerSyncProvider extends ChangeNotifier {
   ///
   /// Mutating methods schedule a debounced cloud snapshot for signed-in users.
   CloudBackedServerApi get api => CloudBackedServerApi(
-        delegate: _connection.api,
+        delegate: HueServiceLocator.isDemoMode
+            ? DemoServerApi.instance
+            : _connection.api,
         scheduleCloudCapture: _scheduleCloudBackupCapture,
       );
 
@@ -493,6 +500,10 @@ class ServerSyncProvider extends ChangeNotifier {
     // schedule the initial cloud snapshot immediately instead of waiting for
     // the next hello or settings mutation.
     _authStateSub = AuthService().authStateChanges.listen(_onAuthStateChanged);
+    _demoChangeSub = DemoServerApi.instance.changes.listen((_) {
+      if (!HueServiceLocator.isDemoMode) return;
+      unawaited(_refreshDemoState());
+    });
   }
 
   /// Connect to server if a hub is available.
@@ -506,9 +517,13 @@ class ServerSyncProvider extends ChangeNotifier {
     if (HueServiceLocator.isDemoMode) {
       final hubs = _homeProvider.currentHomeHubs;
       final serverHub = hubs.where((h) => h.type == HubType.server).firstOrNull;
-      if (serverHub != null && _serverHub?.id != serverHub.id) {
+      if (serverHub != null) {
+        final hubChanged = _serverHub?.id != serverHub.id;
         _serverHub = serverHub;
-        notifyListeners();
+        if (hubChanged) {
+          notifyListeners();
+        }
+        unawaited(_refreshDemoState());
       }
       return;
     }
@@ -550,6 +565,10 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Skips if called within 2 seconds of the last refresh to protect the server
   /// from rapid pull-refreshes.
   Future<void> fullRefresh() async {
+    if (HueServiceLocator.isDemoMode) {
+      await _refreshDemoState();
+      return;
+    }
     final now = DateTime.now();
     if (now.difference(_lastPollTime).inSeconds < 2) return;
     _lastPollTime = now;
@@ -558,6 +577,10 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Trigger an immediate lightweight poll (rooms/state only).
   Future<void> pollNow() async {
+    if (HueServiceLocator.isDemoMode) {
+      await _refreshDemoState();
+      return;
+    }
     final now = DateTime.now();
     if (now.difference(_lastPollTime).inSeconds < 2) return;
     _lastPollTime = now;
@@ -889,6 +912,10 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   void _onConnectionStateChanged(RhythmConnectionState current) {
+    if (HueServiceLocator.isDemoMode) {
+      notifyListeners();
+      return;
+    }
     final previous = _previousConnectionState;
     _previousConnectionState = current;
 
@@ -970,6 +997,12 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Returns true if dispatched to server, false if not connected.
   bool dispatchNodeBrightness(String nodeId, int brightness) {
     if (HueServiceLocator.isDemoMode) {
+      DemoServerApi.instance.updateRoomLightState(
+        nodeId,
+        on: true,
+        brightness: brightness,
+        kelvin: _roomProvider.getKelvin(nodeId),
+      );
       _roomProvider.applyServerNodeState(
         nodeId,
         rhythmEnabled: _roomProvider.getNode(nodeId)?.rhythmEnabled ?? true,
@@ -1041,6 +1074,12 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Per-node equivalent of [dispatchFixMyLights].
   void dispatchResetNode(String nodeId) {
     if (HueServiceLocator.isDemoMode) {
+      DemoServerApi.instance.updateRoomLightState(
+        nodeId,
+        on: true,
+        brightness: 75,
+        kelvin: _roomProvider.getKelvin(nodeId) ?? 3200,
+      );
       _roomProvider.applyServerNodeState(
         nodeId,
         rhythmEnabled: _roomProvider.getNode(nodeId)?.rhythmEnabled ?? true,
@@ -1073,6 +1112,12 @@ class ServerSyncProvider extends ChangeNotifier {
       // Reset all on-rooms locally
       for (final room in _roomProvider.rooms) {
         if (room.lightsOn) {
+          DemoServerApi.instance.updateRoomLightState(
+            room.id,
+            on: true,
+            brightness: 75,
+            kelvin: 3200,
+          );
           await _roomProvider.applyServerNodeState(
             room.id,
             rhythmEnabled: true,
@@ -1113,6 +1158,12 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Set the active global mode on the server.
   Future<void> dispatchSetActiveMode(RhythmMode mode) async {
+    if (HueServiceLocator.isDemoMode) {
+      _activeMode = mode;
+      await DemoServerApi.instance.setActiveMode(mode);
+      notifyListeners();
+      return;
+    }
     if (!_connection.connected) return;
     _activeMode = mode;
     notifyListeners();
@@ -1165,6 +1216,10 @@ class ServerSyncProvider extends ChangeNotifier {
   ///
   /// After sync completes, does a full refresh to pick up new rooms/devices.
   Future<void> triggerServerSync() async {
+    if (HueServiceLocator.isDemoMode) {
+      await _refreshDemoState();
+      return;
+    }
     if (!_connection.connected) return;
     debugPrint('ServerSync: Triggering server-side sync');
     await api.triggerSync();
@@ -1178,6 +1233,7 @@ class ServerSyncProvider extends ChangeNotifier {
     double? utcOffset,
     String? timezoneName,
   }) {
+    if (HueServiceLocator.isDemoMode) return;
     if (!_connection.connected) return;
     api.locationSet(
       lat: lat,
@@ -1397,6 +1453,10 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   void _refreshTopologyNodes() {
+    if (HueServiceLocator.isDemoMode) {
+      unawaited(_refreshDemoState());
+      return;
+    }
     if (!_connection.connected) return;
     unawaited(() async {
       final topologyNodes = await api.getTopologyNodes();
@@ -1413,7 +1473,7 @@ class ServerSyncProvider extends ChangeNotifier {
     required String controlKind,
     required String? targetNodeId,
   }) async {
-    if (!_connection.connected) return false;
+    if (!HueServiceLocator.isDemoMode && !_connection.connected) return false;
     final success = await api.setTopologyNodeControlTarget(
       nodeId: sourceNodeId,
       controlKind: controlKind,
@@ -1423,6 +1483,43 @@ class ServerSyncProvider extends ChangeNotifier {
       _refreshTopologyNodes();
     }
     return success;
+  }
+
+  Future<void> _refreshDemoState() async {
+    DemoServerApi.instance.ensureSeeded();
+    final snapshot = DemoServerApi.instance.snapshot();
+    final roomDtos = DemoServerApi.instance.buildRoomDtos();
+    final settings = await DemoServerApi.instance.getSettings();
+    final mode = await DemoServerApi.instance.getMode();
+
+    _firmwareVersion = DemoServerApi.firmwareVersion;
+    _serverPlatformType = DemoServerApi.serverPlatformType;
+    _serverPlatformContext = DemoServerApi.serverPlatformContext;
+    _powerSave = settings?.powerSave ?? false;
+    _activeMode = mode?.active;
+    _activeProfileId = null;
+    _modeTransitions = const [];
+    _modeConfigs = const [];
+    _profiles = const [];
+    _rhythmIntervalSecs = 60;
+    _effectiveFadeMs = 1800;
+    _effectiveMotionTimeoutSecs = 120;
+    _lastHubInfos = snapshot.hubInfos;
+    _capabilities = null;
+    _helloNodes = snapshot.helloNodes;
+    _topologyNodes = snapshot.topologyNodes;
+    _triagePendingCount = snapshot.triagePendingCount;
+    _triagePendingDevices = snapshot.triagePendingDevices;
+    _triagePendingRooms = snapshot.triagePendingRooms;
+
+    DemoHueBridgeService.instance.seedRooms(roomDtos);
+    _acceptServerNodes(_helloNodes);
+    _helloRooms = _buildRoomSummaries();
+    _roomProvider.setMotionSensorNodes(_sensorTargetNodeIds());
+
+    if (hasListeners) {
+      notifyListeners();
+    }
   }
 
   List<RhythmRoom> _buildRoomSummaries() {
@@ -1642,6 +1739,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _triageChangedSub?.cancel();
     _connectionStateSub?.cancel();
     _authStateSub?.cancel();
+    _demoChangeSub?.cancel();
     super.dispose();
   }
 }

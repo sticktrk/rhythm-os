@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../services/analytics_service.dart';
+import '../widgets/room_picker_sheet.dart';
 import '../widgets/solar_orbit.dart'; // For CelestialColors
 
 enum _TriageFilter { all, devices, rooms }
@@ -509,72 +510,24 @@ class _TriageScreenState extends State<TriageScreen> {
 
   Future<String?> _selectRoomId() async {
     final rooms = context.read<RoomProvider>().rooms;
-    final selection = await showModalBottomSheet<String>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (sheetContext) => Container(
-        decoration: const BoxDecoration(
-          color: CelestialColors.backgroundCard,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Padding(
-              padding: EdgeInsets.all(16),
-              child: Text(
-                'Assign to Room',
-                style: TextStyle(
-                  color: CelestialColors.textPrimary,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-            if (rooms.isEmpty)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                child: Text(
-                  'No rooms exist yet. Create one now to finish assigning this device.',
-                  style: TextStyle(
-                    color: CelestialColors.textSecondary.withValues(alpha: 0.7),
-                    fontSize: 13,
-                  ),
-                ),
-              ),
-            for (final room in rooms)
-              ListTile(
-                leading: const Icon(
-                  Icons.meeting_room_rounded,
-                  color: CelestialColors.sunWarm,
-                ),
-                title: Text(
-                  room.name,
-                  style: const TextStyle(color: CelestialColors.textPrimary),
-                ),
-                onTap: () => Navigator.of(sheetContext).pop(room.id),
-              ),
-            ListTile(
-              leading: const Icon(
-                Icons.add_circle_outline,
-                color: Color(0xFF81C784),
-              ),
-              title: const Text(
-                'Create New Room',
-                style: TextStyle(color: CelestialColors.textPrimary),
-              ),
-              onTap: () => Navigator.of(sheetContext).pop('__create_room__'),
-            ),
-            SizedBox(height: MediaQuery.of(sheetContext).padding.bottom + 16),
-          ],
-        ),
-      ),
+    return showRoomPickerSheet(
+      context,
+      title: 'Assign to Room',
+      rooms: [
+        for (final room in rooms)
+          RoomPickerOption(
+            id: room.id,
+            name: room.name,
+            subtitle: context
+                .read<ServerSyncProvider>()
+                .deviceSummaryForRoom(room.id),
+          ),
+      ],
+      allowCreateRoom: true,
+      emptyMessage:
+          'No rooms exist yet. Create one now to finish assigning this device.',
+      onCreateRoom: _createRoomForAssignment,
     );
-
-    if (selection == '__create_room__') {
-      return _createRoomForAssignment();
-    }
-    return selection;
   }
 
   Future<String?> _createRoomForAssignment() async {

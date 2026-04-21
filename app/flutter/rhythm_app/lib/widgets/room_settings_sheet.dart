@@ -38,6 +38,7 @@ enum _SheetTab { rhythm, devices, settings }
 
 class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
   _SheetTab _selectedTab = _SheetTab.rhythm;
+  bool _deletingRoom = false;
 
   RoomDto get room => widget.room;
 
@@ -262,10 +263,12 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
   }
 
   Widget _buildSettingsContent(BuildContext context) {
+    final syncProvider = context.watch<ServerSyncProvider>();
     final renameLabel = room.kind.isRoom ? 'Name' : 'Node Name';
     final hideLabel = room.kind == RoomNodeKind.lightDevice
         ? 'Hide this light'
         : 'Hide this room';
+    final canDeleteRoom = _canDeleteRoom(syncProvider);
     return ListView(
       key: const ValueKey('settings'),
       padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -328,6 +331,33 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
             },
           ),
         ]),
+        if (canDeleteRoom) ...[
+          const SizedBox(height: 16),
+          _buildSettingsGroup('Danger', [
+            _SettingsRow(
+              icon: Icons.delete_outline,
+              label: _deletingRoom ? 'Deleting Room...' : 'Delete Room',
+              trailing: _deletingRoom
+                  ? SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.red.shade300,
+                      ),
+                    )
+                  : Text(
+                      'Delete',
+                      style: TextStyle(
+                        color: Colors.red.shade300,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+              onTap: _deletingRoom ? null : () => _confirmDeleteRoom(context),
+            ),
+          ]),
+        ],
       ],
     );
   }
@@ -404,6 +434,87 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
       // Trigger re-sync so the name updates
       http.triggerSync();
     }
+  }
+
+  bool _canDeleteRoom(ServerSyncProvider syncProvider) {
+    if (!room.kind.isRoom) return false;
+    final roomSummary =
+        syncProvider.helloRooms.where((r) => r.id == room.id).firstOrNull;
+    if (roomSummary == null) return false;
+    final hasProtectedHubBulbs = roomSummary.lightCount > 0 &&
+        roomSummary.hubTypes.any(_isProtectedLightHubType);
+    return !hasProtectedHubBulbs;
+  }
+
+  bool _isProtectedLightHubType(String hubType) {
+    return switch (hubType) {
+      'hue' || 'homeassistant' || 'home_assistant' || 'ha' => true,
+      _ => false,
+    };
+  }
+
+  Future<void> _confirmDeleteRoom(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: CelestialColors.backgroundCard,
+        title: const Text(
+          'Delete Room?',
+          style: TextStyle(color: CelestialColors.textPrimary),
+        ),
+        content: Text(
+          'Delete "${room.name}" from the topology? Any remaining devices in this room will become unassigned.',
+          style: const TextStyle(color: CelestialColors.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(
+              'Cancel',
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.8),
+              ),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(
+              'Delete',
+              style: TextStyle(color: Colors.red.shade300),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !context.mounted) return;
+    await _deleteRoom(context);
+  }
+
+  Future<void> _deleteRoom(BuildContext context) async {
+    final syncProvider = context.read<ServerSyncProvider>();
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() => _deletingRoom = true);
+
+    final success = await syncProvider.api.topologyDeleteRoom(room.id);
+
+    if (!mounted) return;
+
+    if (!success) {
+      setState(() => _deletingRoom = false);
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Room deletion failed')),
+      );
+      return;
+    }
+
+    await syncProvider.fullRefresh();
+    if (!mounted) return;
+
+    Navigator.of(context).pop();
+    messenger.showSnackBar(
+      SnackBar(content: Text('Deleted ${room.name}')),
+    );
   }
 
   Widget _buildDevicesSection(BuildContext context) {

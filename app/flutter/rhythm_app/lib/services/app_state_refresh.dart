@@ -8,6 +8,7 @@ import '../providers/home_provider.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../providers/hub_connection_provider.dart';
+import 'demo_server_api.dart';
 import 'hue/hue_service_locator.dart';
 import 'hue/demo_hue_bridge_service.dart';
 
@@ -243,22 +244,28 @@ class AppStateRefresh {
       debugPrint('AppStateRefresh: Created fake demo server hub');
     }
 
-    // Fetch mock rooms
-    final rooms = await DemoHueBridgeService.instance.fetchRooms();
+    DemoServerApi.instance.ensureSeeded();
+    final nodesById = {
+      for (final node in DemoServerApi.instance.lightAddressableNodes)
+        node.id: node,
+    };
+    final rooms = DemoServerApi.instance.buildRoomDtos();
     if (rooms.isEmpty) return 0;
+    DemoHueBridgeService.instance.seedRooms(rooms);
     await roomProvider.addRoomsFromSource(RoomSourceDto.hue, rooms);
 
     // Apply initial "on" state so rooms appear alive
     for (final room in rooms) {
+      final node = nodesById[room.id];
       await roomProvider.applyServerNodeState(
         room.id,
-        rhythmEnabled: true,
-        timeOffset: 0,
-        brightnessOffset: 0,
-        state: sdk.RoomModeState.active,
-        lightsOn: true,
-        brightness: 75,
-        kelvin: 3200,
+        rhythmEnabled: node?.rhythmEnabled ?? true,
+        timeOffset: node?.timeOffset ?? 0,
+        brightnessOffset: node?.brightnessOffset ?? 0,
+        state: node?.state ?? sdk.RoomModeState.active,
+        lightsOn: node?.lightsOn ?? true,
+        brightness: node?.brightness ?? 75,
+        kelvin: node?.kelvin ?? 3200,
       );
     }
 

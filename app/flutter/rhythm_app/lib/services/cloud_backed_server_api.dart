@@ -455,6 +455,15 @@ class CloudBackedServerApi {
     return success;
   }
 
+  Future<bool> topologyDeleteRoom(String roomId) async {
+    final success = await _delegate.topologyDeleteRoom(roomId);
+    if (success) {
+      _scheduleCloudCapture(
+          reason: 'topology_delete_room', delay: _defaultDelay);
+    }
+    return success;
+  }
+
   Future<bool> topologyMoveDevice({
     required String deviceId,
     required String fromRoomId,

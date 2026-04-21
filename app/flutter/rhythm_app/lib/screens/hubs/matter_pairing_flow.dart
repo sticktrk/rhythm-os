@@ -59,6 +59,7 @@ Future<void> startMatterPairingFlow(
     context,
     device: resolved.device,
     currentParentNodeId: resolved.parentNodeId,
+    allowNoRoom: syncProvider.supportsMatterRoomlessDevices,
   );
 }
 

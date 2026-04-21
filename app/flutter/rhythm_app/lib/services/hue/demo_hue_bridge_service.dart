@@ -6,6 +6,7 @@ library;
 
 import 'package:rhythm_core/rhythm_core.dart';
 
+import '../demo_server_api.dart';
 import 'hue_bridge_service.dart';
 
 /// Demo implementation of [HueBridgeService].
@@ -32,58 +33,6 @@ class DemoHueBridgeService implements HueBridgeService {
     username: _demoAppKey,
   );
 
-  /// Mock rooms simulating a typical Hue setup.
-  static const _mockRooms = [
-    RoomDto(
-      id: 'hue_demo_1',
-      name: 'Living Room',
-      source: RoomSourceDto.hue,
-      deviceIds: ['1', '2', '3'],
-      rhythmEnabled: true,
-      disabled: false,
-      lightsOn: true,
-      timeOffsetMinutes: 0.0,
-      brightnessOffset: 0.0,
-      curveConfig: null,
-    ),
-    RoomDto(
-      id: 'hue_demo_2',
-      name: 'Bedroom',
-      source: RoomSourceDto.hue,
-      deviceIds: ['4', '5'],
-      rhythmEnabled: true,
-      disabled: false,
-      lightsOn: true,
-      timeOffsetMinutes: 0.0,
-      brightnessOffset: 0.0,
-      curveConfig: null,
-    ),
-    RoomDto(
-      id: 'hue_demo_3',
-      name: 'Kitchen',
-      source: RoomSourceDto.hue,
-      deviceIds: ['6', '7'],
-      rhythmEnabled: true,
-      disabled: false,
-      lightsOn: true,
-      timeOffsetMinutes: 0.0,
-      brightnessOffset: 0.0,
-      curveConfig: null,
-    ),
-    RoomDto(
-      id: 'hue_demo_4',
-      name: 'Office',
-      source: RoomSourceDto.hue,
-      deviceIds: ['8'],
-      rhythmEnabled: true,
-      disabled: false,
-      lightsOn: true,
-      timeOffsetMinutes: 0.0,
-      brightnessOffset: 0.0,
-      curveConfig: null,
-    ),
-  ];
-
   @override
   HueConfig? get config => _demoConfig;
 
@@ -95,6 +44,14 @@ class DemoHueBridgeService implements HueBridgeService {
   @override
   void reset() {
     _roomStates.clear();
+  }
+
+  void seedRooms(Iterable<RoomDto> rooms) {
+    final validIds = rooms.map((room) => room.id).toSet();
+    _roomStates.removeWhere((roomId, _) => !validIds.contains(roomId));
+    for (final room in rooms) {
+      _roomStates.putIfAbsent(room.id, () => room.lightsOn);
+    }
   }
 
   // ============================================================================
@@ -122,19 +79,32 @@ class DemoHueBridgeService implements HueBridgeService {
   @override
   Future<List<RoomDto>> fetchRooms() async {
     await Future.delayed(const Duration(milliseconds: 500));
-    return _mockRooms;
+    final rooms = DemoServerApi.instance.buildRoomDtos();
+    seedRooms(rooms);
+    return rooms;
   }
 
   @override
   Future<bool> isRoomOn(String roomId) async {
+    if (_roomStates.containsKey(roomId)) {
+      return _roomStates[roomId] ?? false;
+    }
+    final rooms = DemoServerApi.instance.buildRoomDtos();
+    seedRooms(rooms);
     return _roomStates[roomId] ?? false;
   }
 
   @override
   Future<bool> toggleRoom(String roomId, {int? brightness, int? mireds}) async {
     await Future.delayed(const Duration(milliseconds: 200));
-    final newState = !(_roomStates[roomId] ?? false);
+    final newState = !(await isRoomOn(roomId));
     _roomStates[roomId] = newState;
+    DemoServerApi.instance.updateRoomLightState(
+      roomId,
+      on: newState,
+      brightness: brightness,
+      kelvin: mireds != null && mireds > 0 ? (1000000 ~/ mireds) : null,
+    );
     return newState;
   }
 
@@ -147,12 +117,20 @@ class DemoHueBridgeService implements HueBridgeService {
   }) async {
     await Future.delayed(const Duration(milliseconds: 200));
     _roomStates[roomId] = on;
+    DemoServerApi.instance.updateRoomLightState(
+      roomId,
+      on: on,
+      brightness: brightness,
+      kelvin: mireds != null && mireds > 0 ? (1000000 ~/ mireds) : null,
+    );
   }
 
   @override
   Future<Map<String, bool>> fetchAllRoomStates() async {
+    final rooms = DemoServerApi.instance.buildRoomDtos();
+    seedRooms(rooms);
     final states = <String, bool>{};
-    for (final room in _mockRooms) {
+    for (final room in rooms) {
       states[room.id] = _roomStates[room.id] ?? false;
     }
     return states;

@@ -1,82 +1,104 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmDevice, RhythmDeviceType, RhythmRoom;
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType;
 import '../providers/server_sync_provider.dart';
+import 'room_picker_sheet.dart';
 import 'solar_orbit.dart'; // For CelestialColors
 
 Future<bool> showDeviceNodeAssignmentFlow(
   BuildContext context, {
   required RhythmDevice device,
   required String currentParentNodeId,
+  bool allowNoRoom = false,
 }) async {
   final syncProvider = context.read<ServerSyncProvider>();
-  final rooms = syncProvider.helloRooms
-      .where((r) => r.id != currentParentNodeId)
+  final normalizedCurrentParentNodeId =
+      currentParentNodeId.isEmpty ? null : currentParentNodeId;
+  final roomSummariesById = {
+    for (final room in syncProvider.helloRooms) room.id: room,
+  };
+  final topologyRooms = syncProvider.topologyNodes
+      .where((node) => node.isRoom && node.id.isNotEmpty)
+      .map(
+        (node) => RoomPickerOption(
+          id: node.id,
+          name: node.name,
+          subtitle: roomSummariesById[node.id]?.deviceSummary,
+        ),
+      )
       .toList();
+  final rooms = (topologyRooms.isNotEmpty
+          ? topologyRooms
+          : syncProvider.helloRooms.map(
+              (room) => RoomPickerOption(
+                id: room.id,
+                name: room.name,
+                subtitle: room.deviceSummary,
+              ),
+            ))
+      .where((room) => room.id != normalizedCurrentParentNodeId)
+      .toList()
+    ..sort(
+      (left, right) => left.name.toLowerCase().compareTo(
+            right.name.toLowerCase(),
+          ),
+    );
 
-  if (rooms.isEmpty) {
+  if (rooms.isEmpty && !allowNoRoom) {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('No other rooms available')),
     );
     return false;
   }
 
-  final isUnassigned = currentParentNodeId.isEmpty;
+  final isUnassigned = normalizedCurrentParentNodeId == null;
   final title = isUnassigned ? 'Assign to Room' : 'Move to Room';
 
-  final targetRoom = await showModalBottomSheet<RhythmRoom>(
-    context: context,
-    backgroundColor: Colors.transparent,
-    builder: (ctx) => Container(
-      decoration: const BoxDecoration(
-        color: CelestialColors.backgroundCard,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Text(
-              title,
-              style: TextStyle(
-                color: CelestialColors.textPrimary,
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-          for (final room in rooms)
-            ListTile(
-              leading: const Icon(
-                Icons.meeting_room_rounded,
-                color: Color(0xFFFFC107),
-              ),
-              title: Text(
-                room.name,
-                style: const TextStyle(color: CelestialColors.textPrimary),
-              ),
-              subtitle: Text(
-                room.deviceSummary,
-                style: TextStyle(
-                  color: CelestialColors.textSecondary.withValues(alpha: 0.7),
-                  fontSize: 12,
-                ),
-              ),
-              onTap: () => Navigator.of(ctx).pop(room),
-            ),
-          SizedBox(height: MediaQuery.of(ctx).padding.bottom + 16),
-        ],
-      ),
-    ),
+  final targetRoomId = await showRoomPickerSheet(
+    context,
+    title: title,
+    currentRoomId: normalizedCurrentParentNodeId,
+    rooms: rooms,
+    allowUnassigned: allowNoRoom,
+    unassignedLabel: 'Unassigned',
+    unassignedSubtitle: isUnassigned
+        ? 'Keep this device unassigned.'
+        : 'Remove this device from its current room.',
+    noOptionsMessage: 'No other rooms available',
   );
 
-  if (targetRoom == null || !context.mounted) return false;
+  if (targetRoomId == null || !context.mounted) return false;
+  final targetParentNodeId = targetRoomId.isEmpty ? null : targetRoomId;
+  final selectedIsUnassigned = targetParentNodeId == null;
+  var selectedLabel = 'Unassigned';
+  if (targetParentNodeId != null) {
+    selectedLabel = 'selected room';
+    for (final room in rooms) {
+      if (room.id == targetParentNodeId) {
+        selectedLabel = room.name;
+        break;
+      }
+    }
+    selectedLabel =
+        roomSummariesById[targetParentNodeId]?.name ?? selectedLabel;
+  }
+
+  if (targetParentNodeId == normalizedCurrentParentNodeId) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          selectedIsUnassigned
+              ? '${device.displayName} has no room assignment'
+              : '${device.displayName} is already in $selectedLabel',
+        ),
+      ),
+    );
+    return true;
+  }
 
   final success =
-      await syncProvider.api.assignDeviceParent(device.id, targetRoom.id);
+      await syncProvider.api.assignDeviceParent(device.id, targetParentNodeId);
 
   if (!context.mounted) return false;
 
@@ -99,9 +121,11 @@ Future<bool> showDeviceNodeAssignmentFlow(
   ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(
       content: Text(
-        isUnassigned
-            ? 'Assigned ${device.displayName} to ${targetRoom.name}'
-            : 'Moved ${device.displayName} to ${targetRoom.name}',
+        selectedIsUnassigned
+            ? 'Removed ${device.displayName} from its room'
+            : isUnassigned
+                ? 'Assigned ${device.displayName} to $selectedLabel'
+                : 'Moved ${device.displayName} to $selectedLabel',
       ),
     ),
   );
@@ -112,11 +136,13 @@ Future<bool> showDeviceRoomAssignmentFlow(
   BuildContext context, {
   required RhythmDevice device,
   required String currentRoomId,
+  bool allowNoRoom = false,
 }) {
   return showDeviceNodeAssignmentFlow(
     context,
     device: device,
     currentParentNodeId: currentRoomId,
+    allowNoRoom: allowNoRoom,
   );
 }
 
@@ -511,11 +537,12 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
 
     final status = result?['status'] as String?;
     if (status == 'complete') {
+      await syncProvider.connection.reconnect();
+      if (!context.mounted) return;
       Navigator.of(context).pop();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Removed ${widget.device.displayName}')),
       );
-      syncProvider.connection.reconnect();
     } else {
       final error = result?['error'] as String? ?? 'Unknown error';
       setState(() => _removing = false);
@@ -553,10 +580,13 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   }
 
   Future<void> _showMoveDialog(BuildContext context) async {
+    final syncProvider = context.read<ServerSyncProvider>();
     final success = await showDeviceNodeAssignmentFlow(
       context,
       device: widget.device,
       currentParentNodeId: widget.roomId,
+      allowNoRoom:
+          _matterNativeId != null && syncProvider.supportsMatterRoomlessDevices,
     );
 
     if (success && context.mounted) {

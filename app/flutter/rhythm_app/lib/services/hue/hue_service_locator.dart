@@ -4,6 +4,7 @@
 /// whether demo mode is active.
 library;
 
+import '../demo_server_api.dart';
 import 'demo_hue_bridge_service.dart';
 import 'hue_bridge_service.dart';
 import 'real_hue_bridge_service.dart';
@@ -39,8 +40,12 @@ class HueServiceLocator {
   /// Call with `false` when user signs out or signs in with real credentials.
   static void setDemoMode(bool enabled) {
     _isDemoMode = enabled;
+    if (enabled) {
+      DemoServerApi.instance.ensureSeeded();
+    }
     if (!enabled) {
       // Clear demo state when exiting demo mode
+      DemoServerApi.instance.reset();
       DemoHueBridgeService.instance.reset();
     }
   }

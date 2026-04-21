@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -47,12 +46,76 @@ void main() {
       expect(service!.statusMessage, 'Updated to v1.1.0');
     });
 
-    test('accepts v-prefixed versions when verifying restart', () async {
+    test('uses update_available as the source of truth for bundle OTA',
+        () async {
+      server = await _FakeOtaServer.start(
+        initialVersion: '1.0.0',
+        latestVersion: '1.1.0',
+        scenario: _FakeOtaScenario.idleAfterRestart,
+        initialUpdateAvailable: false,
+        otaScope: 'bundle',
+      );
+      service = OtaService();
+
+      await service!.initialize(
+        host: InternetAddress.loopbackIPv4.address,
+        port: server!.port,
+      );
+
+      expect(service!.isSelfPull, isTrue);
+      expect(service!.state, OtaState.upToDate);
+      expect(service!.availableRelease, isNull);
+    });
+
+    test('surfaces component drift metadata from server bundle checks',
+        () async {
+      server = await _FakeOtaServer.start(
+        initialVersion: '1.1.0',
+        latestVersion: '1.1.0',
+        scenario: _FakeOtaScenario.idleAfterRestart,
+        updateReason: 'component_drift',
+        otaScope: 'bundle',
+        installTargets: const [
+          {'name': 'rhythm-server', 'path': '/usr/local/bin/rhythm-server'},
+          {'name': 'rhythm-chipd', 'path': '/usr/local/bin/rhythm-chipd'},
+        ],
+        imageAssets: const [
+          {
+            'name': 'server.img.zst',
+            'url': 'https://example.invalid/server.img.zst',
+          },
+        ],
+      );
+      service = OtaService();
+
+      await service!.initialize(
+        host: InternetAddress.loopbackIPv4.address,
+        port: server!.port,
+      );
+
+      expect(service!.isSelfPull, isTrue);
+      expect(service!.state, OtaState.available);
+      expect(service!.isBundleRepair, isTrue);
+      expect(service!.updateReason, OtaUpdateReason.componentDrift);
+      expect(service!.capabilities?.supportsRootfsImageOta, isTrue);
+      expect(service!.availableRelease?.version, '1.1.0');
+      expect(
+        service!.installTargets.map((entry) => entry.title).toList(),
+        ['rhythm-server', 'rhythm-chipd'],
+      );
+      expect(
+        service!.imageAssets.map((entry) => entry.title).toList(),
+        ['server.img.zst'],
+      );
+    });
+
+    test('accepts v-prefixed versions when status reports the updated version',
+        () async {
       server = await _FakeOtaServer.start(
         initialVersion: '1.0.0',
         latestVersion: '1.1.0',
         stateVersionAfterUpdate: 'v1.1.0',
-        scenario: _FakeOtaScenario.restartingThenStateVersion,
+        scenario: _FakeOtaScenario.restartingThenStatusVersion,
       );
       service = OtaService();
 
@@ -71,10 +134,94 @@ void main() {
 
       await _waitFor(
         () => service!.state == OtaState.complete,
-        description: 'self-pull update to complete from /api/state version',
+        description: 'self-pull update to complete from /api/ota/status',
       );
 
       expect(service!.currentVersion, 'v1.1.0');
+    });
+
+    test('captures installed targets for component drift repairs', () async {
+      server = await _FakeOtaServer.start(
+        initialVersion: '1.1.0',
+        latestVersion: '1.1.0',
+        scenario: _FakeOtaScenario.idleAfterRestart,
+        updateReason: 'component_drift',
+        otaScope: 'bundle',
+        installTargets: const [
+          {'name': 'rhythm-chipd', 'path': '/usr/local/bin/rhythm-chipd'},
+        ],
+        installedTargetsResponse: const [
+          'rhythm-chipd',
+          {'name': 'rhythm-server', 'path': '/usr/local/bin/rhythm-server'},
+        ],
+        checksumVerified: true,
+      );
+      service = OtaService();
+
+      await service!.initialize(
+        host: InternetAddress.loopbackIPv4.address,
+        port: server!.port,
+      );
+
+      expect(service!.state, OtaState.available);
+      expect(service!.isBundleRepair, isTrue);
+
+      await service!.startUpdate(
+        InternetAddress.loopbackIPv4.address,
+        port: server!.port,
+      );
+
+      await _waitFor(
+        () => service!.state == OtaState.complete,
+        description: 'component drift repair to complete',
+      );
+
+      expect(service!.currentVersion, '1.1.0');
+      expect(service!.statusMessage, 'Bundle repaired on v1.1.0');
+      expect(service!.checksumVerified, isTrue);
+      expect(
+        service!.installedTargets.map((entry) => entry.title).toList(),
+        ['rhythm-chipd', 'rhythm-server'],
+      );
+    });
+
+    test(
+        'recovers when the start request times out after the device begins updating',
+        () async {
+      server = await _FakeOtaServer.start(
+        initialVersion: '1.0.0',
+        latestVersion: '1.1.0',
+        scenario: _FakeOtaScenario.idleAfterRestart,
+        startResponseDelay: const Duration(milliseconds: 200),
+      );
+      service = OtaService(
+        startUpdateReceiveTimeout: const Duration(milliseconds: 50),
+        startUpdateRecoveryWindow: const Duration(seconds: 1),
+        selfPullPollInterval: const Duration(milliseconds: 20),
+      );
+
+      await service!.initialize(
+        host: InternetAddress.loopbackIPv4.address,
+        port: server!.port,
+      );
+
+      expect(service!.isSelfPull, isTrue);
+      expect(service!.state, OtaState.available);
+
+      await service!.startUpdate(
+        InternetAddress.loopbackIPv4.address,
+        port: server!.port,
+      );
+
+      await _waitFor(
+        () => service!.state == OtaState.complete,
+        description:
+            'self-pull update to recover from a delayed start response',
+        timeout: const Duration(seconds: 3),
+      );
+
+      expect(service!.currentVersion, '1.1.0');
+      expect(service!.errorMessage, isNull);
     });
   });
 }
@@ -96,7 +243,7 @@ Future<void> _waitFor(
 
 enum _FakeOtaScenario {
   idleAfterRestart,
-  restartingThenStateVersion,
+  restartingThenStatusVersion,
 }
 
 class _FakeOtaServer {
@@ -105,6 +252,15 @@ class _FakeOtaServer {
   final String latestVersion;
   final String stateVersionAfterUpdate;
   final _FakeOtaScenario scenario;
+  final Duration startResponseDelay;
+  final bool initialUpdateAvailable;
+  final String? updateReason;
+  final String otaScope;
+  final List<Object?> installTargets;
+  final List<Object?> imageAssets;
+  final List<Object?> installedTargetsResponse;
+  final bool? checksumVerified;
+  final bool? supportsRootfsImage;
 
   bool _updateStarted = false;
   int _statusCallsAfterUpdate = 0;
@@ -115,6 +271,15 @@ class _FakeOtaServer {
     required this.latestVersion,
     required this.stateVersionAfterUpdate,
     required this.scenario,
+    required this.startResponseDelay,
+    required this.initialUpdateAvailable,
+    required this.updateReason,
+    required this.otaScope,
+    required this.installTargets,
+    required this.imageAssets,
+    required this.installedTargetsResponse,
+    required this.checksumVerified,
+    required this.supportsRootfsImage,
   }) : _server = server;
 
   int get port => _server.port;
@@ -124,14 +289,32 @@ class _FakeOtaServer {
     required String latestVersion,
     required _FakeOtaScenario scenario,
     String? stateVersionAfterUpdate,
+    Duration startResponseDelay = Duration.zero,
+    bool initialUpdateAvailable = true,
+    String? updateReason,
+    String otaScope = 'binary',
+    List<Object?> installTargets = const [],
+    List<Object?> imageAssets = const [],
+    List<Object?> installedTargetsResponse = const [],
+    bool? checksumVerified,
+    bool? supportsRootfsImage = true,
   }) async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final fake = _FakeOtaServer._(
       server: server,
       initialVersion: initialVersion,
       latestVersion: latestVersion,
-      stateVersionAfterUpdate: stateVersionAfterUpdate ?? initialVersion,
+      stateVersionAfterUpdate: stateVersionAfterUpdate ?? latestVersion,
       scenario: scenario,
+      startResponseDelay: startResponseDelay,
+      initialUpdateAvailable: initialUpdateAvailable,
+      updateReason: updateReason,
+      otaScope: otaScope,
+      installTargets: installTargets,
+      imageAssets: imageAssets,
+      installedTargetsResponse: installedTargetsResponse,
+      checksumVerified: checksumVerified,
+      supportsRootfsImage: supportsRootfsImage,
     );
     server.listen(fake._handleRequest);
     return fake;
@@ -159,12 +342,14 @@ class _FakeOtaServer {
         request.response,
         <String, dynamic>{
           'strategy': 'self_pull',
-          'scope': 'binary',
+          'scope': otaScope,
           'can_check': true,
           'can_update': true,
           'can_upload': false,
           'requires_restart': true,
           'rollback': 'unsupported',
+          if (supportsRootfsImage != null)
+            'supports_rootfs_image': supportsRootfsImage,
         },
       );
       return;
@@ -178,11 +363,12 @@ class _FakeOtaServer {
     if (request.method == 'GET' && path == '/api/ota/check') {
       await _writeJson(
         request.response,
-        <String, dynamic>{
-          'current_version': initialVersion,
-          'latest_version': latestVersion,
-          'update_available': true,
-        },
+        _otaPayload(
+          state: 'ready',
+          currentVersion: initialVersion,
+          latestVersion: latestVersion,
+          updateAvailable: initialUpdateAvailable,
+        ),
       );
       return;
     }
@@ -190,7 +376,25 @@ class _FakeOtaServer {
     if (request.method == 'POST' && path == '/api/ota/update') {
       _updateStarted = true;
       _statusCallsAfterUpdate = 0;
-      await _writeJson(request.response, <String, dynamic>{'status': 'ok'});
+      if (startResponseDelay > Duration.zero) {
+        await Future<void>.delayed(startResponseDelay);
+      }
+      try {
+        await _writeJson(
+          request.response,
+          <String, dynamic>{
+            'status': 'ok',
+            if (installedTargetsResponse.isNotEmpty)
+              'installed_targets': installedTargetsResponse,
+            if (checksumVerified != null) 'checksum_verified': checksumVerified,
+          },
+        );
+      } on HttpException {
+        // The client may time out and close the connection after the device
+        // has already accepted the update request.
+      } on SocketException {
+        // Ignore disconnects from the timed-out client in this test server.
+      }
       return;
     }
 
@@ -200,39 +404,63 @@ class _FakeOtaServer {
 
   Map<String, dynamic> _statusPayload() {
     if (!_updateStarted) {
-      return <String, dynamic>{
-        'state': 'ready',
-        'current_version': initialVersion,
-        'latest_version': latestVersion,
-        'target_version': latestVersion,
-        'update_available': true,
-      };
+      return _otaPayload(
+        state: 'ready',
+        currentVersion: initialVersion,
+        latestVersion: latestVersion,
+        updateAvailable: initialUpdateAvailable,
+      );
     }
 
     _statusCallsAfterUpdate++;
 
     return switch (scenario) {
       _FakeOtaScenario.idleAfterRestart => _statusCallsAfterUpdate == 1
-          ? <String, dynamic>{
-              'state': 'restarting',
-              'current_version': initialVersion,
-              'latest_version': latestVersion,
-              'target_version': latestVersion,
-              'update_available': true,
-            }
-          : <String, dynamic>{
-              'state': 'idle',
-              'current_version': initialVersion,
-              'latest_version': latestVersion,
-              'update_available': false,
-            },
-      _FakeOtaScenario.restartingThenStateVersion => <String, dynamic>{
-          'state': 'restarting',
-          'current_version': initialVersion,
-          'latest_version': latestVersion,
-          'target_version': latestVersion,
-          'update_available': true,
-        },
+          ? _otaPayload(
+              state: 'restarting',
+              currentVersion: initialVersion,
+              latestVersion: latestVersion,
+              updateAvailable: initialUpdateAvailable,
+            )
+          : _otaPayload(
+              state: 'idle',
+              currentVersion: stateVersionAfterUpdate,
+              latestVersion: latestVersion,
+              updateAvailable: false,
+            ),
+      _FakeOtaScenario.restartingThenStatusVersion =>
+        _statusCallsAfterUpdate == 1
+            ? _otaPayload(
+                state: 'restarting',
+                currentVersion: initialVersion,
+                latestVersion: latestVersion,
+                updateAvailable: initialUpdateAvailable,
+              )
+            : _otaPayload(
+                state: 'idle',
+                currentVersion: stateVersionAfterUpdate,
+                latestVersion: latestVersion,
+                updateAvailable: false,
+              ),
+    };
+  }
+
+  Map<String, dynamic> _otaPayload({
+    required String state,
+    required String currentVersion,
+    required String latestVersion,
+    required bool updateAvailable,
+  }) {
+    return <String, dynamic>{
+      'state': state,
+      'current_version': currentVersion,
+      'latest_version': latestVersion,
+      if (updateAvailable) 'target_version': latestVersion,
+      'update_available': updateAvailable,
+      if (updateReason != null) 'update_reason': updateReason,
+      if (installTargets.isNotEmpty) 'install_targets': installTargets,
+      if (imageAssets.isNotEmpty) 'image_assets': imageAssets,
+      if (checksumVerified != null) 'checksum_verified': checksumVerified,
     };
   }
 

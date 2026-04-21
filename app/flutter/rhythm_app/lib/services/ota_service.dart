@@ -32,19 +32,169 @@ enum _OtaStrategy {
   selfPull,
 }
 
+enum OtaUpdateReason {
+  versionMismatch,
+  componentDrift,
+  unknown,
+}
+
+OtaUpdateReason? _tryParseOtaUpdateReason(Object? value) {
+  final raw = value?.toString().trim();
+  if (raw == null || raw.isEmpty) return null;
+
+  return switch (raw) {
+    'version_mismatch' => OtaUpdateReason.versionMismatch,
+    'component_drift' => OtaUpdateReason.componentDrift,
+    _ => OtaUpdateReason.unknown,
+  };
+}
+
+bool? _tryParseBool(Object? value) {
+  if (value is bool) return value;
+
+  final raw = value?.toString().trim().toLowerCase();
+  if (raw == null || raw.isEmpty) return null;
+  if (raw == 'true' || raw == '1' || raw == 'yes') return true;
+  if (raw == 'false' || raw == '0' || raw == 'no') return false;
+  return null;
+}
+
+class OtaBundleEntry {
+  final String title;
+  final String? detail;
+
+  const OtaBundleEntry({
+    required this.title,
+    this.detail,
+  });
+
+  factory OtaBundleEntry.fromJsonValue(Object? value) {
+    if (value is Map) {
+      final map = value.map(
+        (key, entryValue) => MapEntry(key.toString(), entryValue),
+      );
+      final titleKey = _pickTitleKey(map);
+      final title = titleKey != null
+          ? _normalizeText(map[titleKey]) ?? titleKey
+          : _firstNonEmptyText(map.values) ?? 'Unknown';
+      final details = <String>[];
+
+      for (final entry in map.entries) {
+        if (entry.key == titleKey) continue;
+        final text = _describeValue(entry.value);
+        if (text == null) continue;
+        details.add('${entry.key}: $text');
+      }
+
+      return OtaBundleEntry(
+        title: title,
+        detail: details.isEmpty ? null : details.join('  ·  '),
+      );
+    }
+
+    if (value is Iterable) {
+      final parts = value.map(_describeValue).whereType<String>().toList();
+      if (parts.isNotEmpty) {
+        return OtaBundleEntry(title: parts.join(', '));
+      }
+    }
+
+    return OtaBundleEntry(
+      title: _normalizeText(value) ?? 'Unknown',
+    );
+  }
+
+  static List<OtaBundleEntry> listFromJson(Object? value) {
+    if (value == null) return const [];
+    if (value is List) {
+      return List<OtaBundleEntry>.unmodifiable(
+        value.map(OtaBundleEntry.fromJsonValue),
+      );
+    }
+    if (value is Iterable) {
+      return List<OtaBundleEntry>.unmodifiable(
+        value.map(OtaBundleEntry.fromJsonValue),
+      );
+    }
+    return List<OtaBundleEntry>.unmodifiable([
+      OtaBundleEntry.fromJsonValue(value),
+    ]);
+  }
+
+  static String? _pickTitleKey(Map<String, dynamic> map) {
+    for (final key in const [
+      'target',
+      'name',
+      'component',
+      'id',
+      'asset',
+      'path',
+      'url',
+    ]) {
+      if (_normalizeText(map[key]) != null) {
+        return key;
+      }
+    }
+    return null;
+  }
+
+  static String? _firstNonEmptyText(Iterable<Object?> values) {
+    for (final value in values) {
+      final text = _normalizeText(value);
+      if (text != null) return text;
+    }
+    return null;
+  }
+
+  static String? _describeValue(Object? value) {
+    if (value is Map) {
+      final parts = value.entries
+          .map((entry) {
+            final text = _normalizeText(entry.value);
+            return text == null ? null : '${entry.key}: $text';
+          })
+          .whereType<String>()
+          .toList();
+      return parts.isEmpty ? null : '{${parts.join(', ')}}';
+    }
+
+    if (value is Iterable) {
+      final parts = value.map(_normalizeText).whereType<String>().toList();
+      return parts.isEmpty ? null : '[${parts.join(', ')}]';
+    }
+
+    return _normalizeText(value);
+  }
+
+  static String? _normalizeText(Object? value) {
+    final text = value?.toString().trim();
+    if (text == null || text.isEmpty || text == 'null') {
+      return null;
+    }
+    return text;
+  }
+}
+
 /// Firmware release metadata from an update check.
 class FirmwareRelease {
   final String version;
   final String url;
   final int? size;
   final String? changelog;
+  final OtaUpdateReason updateReason;
+  final List<OtaBundleEntry> installTargets;
+  final List<OtaBundleEntry> imageAssets;
 
-  const FirmwareRelease({
+  FirmwareRelease({
     required this.version,
     this.url = '',
     this.size,
     this.changelog,
-  });
+    this.updateReason = OtaUpdateReason.unknown,
+    List<OtaBundleEntry> installTargets = const [],
+    List<OtaBundleEntry> imageAssets = const [],
+  })  : installTargets = List<OtaBundleEntry>.unmodifiable(installTargets),
+        imageAssets = List<OtaBundleEntry>.unmodifiable(imageAssets);
 
   factory FirmwareRelease._fromSdk(sdk.RhythmFirmwareRelease r) =>
       FirmwareRelease(
@@ -63,6 +213,7 @@ class OtaCapabilities {
   final bool canUpload;
   final bool requiresRestart;
   final String rollback;
+  final bool? supportsRootfsImage;
 
   const OtaCapabilities({
     required this.strategy,
@@ -72,6 +223,7 @@ class OtaCapabilities {
     required this.canUpload,
     required this.requiresRestart,
     required this.rollback,
+    required this.supportsRootfsImage,
   });
 
   factory OtaCapabilities.fromJson(Map<String, dynamic> json) {
@@ -83,12 +235,21 @@ class OtaCapabilities {
       canUpload: json['can_upload'] == true,
       requiresRestart: json['requires_restart'] == true,
       rollback: json['rollback']?.toString() ?? 'unknown',
+      supportsRootfsImage: _tryParseBool(
+        json['supports_rootfs_image'] ??
+            json['supports_rootfs_image_ota'] ??
+            json['rootfs_image_ota'] ??
+            json['rootfs_image'],
+      ),
     );
   }
 
-  bool get supportsSelfPullBinaryUpdate =>
+  bool get supportsRootfsImageOta =>
+      supportsRootfsImage ?? scope == 'rootfs_image';
+
+  bool get supportsSelfPullUpdate =>
       strategy == 'self_pull' &&
-      scope == 'binary' &&
+      (scope == 'binary' || scope == 'bundle' || scope == 'rootfs_image') &&
       canCheck &&
       canUpdate &&
       !canUpload;
@@ -102,6 +263,11 @@ class _OtaStatusPayload {
   final bool updateAvailable;
   final String? message;
   final String? lastError;
+  final OtaUpdateReason? updateReason;
+  final List<OtaBundleEntry>? installTargets;
+  final List<OtaBundleEntry>? imageAssets;
+  final List<OtaBundleEntry>? installedTargets;
+  final bool? checksumVerified;
 
   const _OtaStatusPayload({
     required this.state,
@@ -111,6 +277,11 @@ class _OtaStatusPayload {
     required this.updateAvailable,
     required this.message,
     required this.lastError,
+    required this.updateReason,
+    required this.installTargets,
+    required this.imageAssets,
+    required this.installedTargets,
+    required this.checksumVerified,
   });
 
   factory _OtaStatusPayload.fromJson(Map<String, dynamic> json) {
@@ -122,13 +293,39 @@ class _OtaStatusPayload {
       updateAvailable: json['update_available'] == true,
       message: json['message']?.toString(),
       lastError: json['last_error']?.toString(),
+      updateReason: json.containsKey('update_reason')
+          ? _tryParseOtaUpdateReason(json['update_reason'])
+          : null,
+      installTargets: json.containsKey('install_targets')
+          ? OtaBundleEntry.listFromJson(json['install_targets'])
+          : null,
+      imageAssets: json.containsKey('image_assets')
+          ? OtaBundleEntry.listFromJson(json['image_assets'])
+          : null,
+      installedTargets: json.containsKey('installed_targets')
+          ? OtaBundleEntry.listFromJson(json['installed_targets'])
+          : null,
+      checksumVerified: json.containsKey('checksum_verified')
+          ? _tryParseBool(json['checksum_verified'])
+          : null,
     );
   }
 }
 
 /// ChangeNotifier wrapper for OTA state used by the settings UI.
 class OtaService extends ChangeNotifier {
+  OtaService({
+    Duration startUpdateReceiveTimeout = const Duration(minutes: 2),
+    Duration startUpdateRecoveryWindow = const Duration(seconds: 20),
+    Duration selfPullPollInterval = const Duration(seconds: 2),
+  })  : _startUpdateReceiveTimeout = startUpdateReceiveTimeout,
+        _startUpdateRecoveryWindow = startUpdateRecoveryWindow,
+        _selfPullPollInterval = selfPullPollInterval;
+
   final sdk.RhythmOtaApi _legacyApi = sdk.RhythmOtaApi();
+  final Duration _startUpdateReceiveTimeout;
+  final Duration _startUpdateRecoveryWindow;
+  final Duration _selfPullPollInterval;
 
   Dio? _dio;
   String? _host;
@@ -145,7 +342,11 @@ class OtaService extends ChangeNotifier {
   String _currentVersion = '0.0.0';
   String? _latestVersion;
   String? _targetVersion;
-  String? _preUpdateVersion;
+  OtaUpdateReason _updateReason = OtaUpdateReason.unknown;
+  List<OtaBundleEntry> _installTargets = const [];
+  List<OtaBundleEntry> _imageAssets = const [];
+  List<OtaBundleEntry> _installedTargets = const [];
+  bool? _checksumVerified;
   bool _isLoadingSupport = false;
 
   StreamSubscription<sdk.RhythmOtaProgress>? _updateSub;
@@ -160,6 +361,14 @@ class OtaService extends ChangeNotifier {
   String get currentVersion => _currentVersion;
   String? get latestVersion => _latestVersion;
   OtaCapabilities? get capabilities => _capabilities;
+  OtaUpdateReason get updateReason => _updateReason;
+  List<OtaBundleEntry> get installTargets =>
+      List<OtaBundleEntry>.unmodifiable(_installTargets);
+  List<OtaBundleEntry> get imageAssets =>
+      List<OtaBundleEntry>.unmodifiable(_imageAssets);
+  List<OtaBundleEntry> get installedTargets =>
+      List<OtaBundleEntry>.unmodifiable(_installedTargets);
+  bool? get checksumVerified => _checksumVerified;
   bool get isLoadingSupport => _isLoadingSupport;
   bool get showUpdateUi =>
       _strategy == _OtaStrategy.legacyUpload ||
@@ -167,6 +376,7 @@ class OtaService extends ChangeNotifier {
   bool get isSelfPull => _strategy == _OtaStrategy.selfPull;
   bool get isLegacyUpload => _strategy == _OtaStrategy.legacyUpload;
   bool get isProgressIndeterminate => _progress == null;
+  bool get isBundleRepair => _updateReason == OtaUpdateReason.componentDrift;
 
   Future<void> initialize({
     required String host,
@@ -184,7 +394,7 @@ class OtaService extends ChangeNotifier {
 
     _isLoadingSupport = true;
     _errorMessage = null;
-    notifyListeners();
+    _notifyListeners();
 
     String? platformType = fallbackPlatformType;
     String? platformContext = fallbackPlatformContext;
@@ -204,9 +414,13 @@ class OtaService extends ChangeNotifier {
       final capsJson = await _getJson('api/ota/capabilities');
       final capabilities = OtaCapabilities.fromJson(capsJson);
       _capabilities = capabilities;
-      _strategy = capabilities.supportsSelfPullBinaryUpdate
+      final isEmbedded = _looksLikeLegacyEmbedded(
+        platformType: platformType,
+        platformContext: platformContext,
+      );
+      _strategy = capabilities.supportsSelfPullUpdate && !isEmbedded
           ? _OtaStrategy.selfPull
-          : _OtaStrategy.unsupported;
+          : (isEmbedded ? _OtaStrategy.legacyUpload : _OtaStrategy.unsupported);
     } catch (_) {
       _capabilities = null;
       _strategy = _looksLikeLegacyEmbedded(
@@ -226,10 +440,15 @@ class OtaService extends ChangeNotifier {
       _availableRelease = null;
       _latestVersion = null;
       _targetVersion = null;
+      _updateReason = OtaUpdateReason.unknown;
+      _installTargets = const [];
+      _imageAssets = const [];
+      _installedTargets = const [];
+      _checksumVerified = null;
     }
 
     _isLoadingSupport = false;
-    notifyListeners();
+    _notifyListeners();
   }
 
   /// Check for an available update.
@@ -249,7 +468,12 @@ class OtaService extends ChangeNotifier {
     _state = OtaState.checking;
     _errorMessage = null;
     _statusMessage = null;
-    notifyListeners();
+    _updateReason = OtaUpdateReason.unknown;
+    _installTargets = const [];
+    _imageAssets = const [];
+    _installedTargets = const [];
+    _checksumVerified = null;
+    _notifyListeners();
 
     try {
       final release = await _legacyApi.checkForUpdate(_currentVersion);
@@ -271,7 +495,7 @@ class OtaService extends ChangeNotifier {
       _errorMessage = 'Failed to check for updates: $e';
     }
 
-    notifyListeners();
+    _notifyListeners();
   }
 
   /// Start the selected update flow.
@@ -288,8 +512,7 @@ class OtaService extends ChangeNotifier {
     _progress = 0;
     _errorMessage = null;
     _statusMessage = null;
-    _preUpdateVersion = _currentVersion;
-    notifyListeners();
+    _notifyListeners();
 
     _updateSub?.cancel();
     _updateSub = _legacyApi
@@ -300,7 +523,7 @@ class OtaService extends ChangeNotifier {
         _state = OtaState.error;
         _errorMessage = error.toString();
         _progress = null;
-        notifyListeners();
+        _notifyListeners();
       },
     );
   }
@@ -310,7 +533,12 @@ class OtaService extends ChangeNotifier {
     _errorMessage = null;
     _statusMessage = null;
     _progress = null;
-    notifyListeners();
+    _updateReason = OtaUpdateReason.unknown;
+    _installTargets = const [];
+    _imageAssets = const [];
+    _installedTargets = const [];
+    _checksumVerified = null;
+    _notifyListeners();
 
     try {
       final response = await _getJson('api/ota/check');
@@ -325,9 +553,10 @@ class OtaService extends ChangeNotifier {
       _currentVersion = currentVersion;
       _latestVersion = latestVersion;
       _targetVersion = updateAvailable ? latestVersion : null;
+      _applySelfPullMetadataFromJson(response);
 
       if (updateAvailable) {
-        _availableRelease = FirmwareRelease(version: latestVersion);
+        _availableRelease = _buildSelfPullRelease(latestVersion);
         _state = OtaState.available;
       } else {
         _availableRelease = null;
@@ -338,7 +567,7 @@ class OtaService extends ChangeNotifier {
       _errorMessage = _formatError('Failed to check for updates', e);
     }
 
-    notifyListeners();
+    _notifyListeners();
   }
 
   Future<void> _startSelfPullUpdate() async {
@@ -347,19 +576,38 @@ class OtaService extends ChangeNotifier {
     _errorMessage = null;
     _statusMessage = 'Starting update...';
     _progress = null;
-    _preUpdateVersion = _currentVersion;
+    _installedTargets = const [];
+    _checksumVerified = null;
     _state = OtaState.uploading;
-    notifyListeners();
+    _notifyListeners();
 
     try {
-      final response = await _dio!.post('api/ota/update');
+      final response = await _dio!.post(
+        'api/ota/update',
+        options: Options(receiveTimeout: _startUpdateReceiveTimeout),
+      );
       if ((response.statusCode ?? 500) != 200) {
         throw StateError('Unexpected response: ${response.statusCode}');
       }
+      final data = response.data;
+      if (data is Map) {
+        _applySelfPullMetadataFromJson(
+          data.map((key, value) => MapEntry(key.toString(), value)),
+        );
+      }
     } catch (e) {
+      final recovered = await _recoverSelfPullStartAfterError(e);
+      if (recovered) {
+        if (_isTerminalState(_state)) {
+          return;
+        }
+        unawaited(_pollSelfPullStatusUntilComplete());
+        return;
+      }
+
       _state = OtaState.error;
       _errorMessage = _formatError('Failed to start update', e);
-      notifyListeners();
+      _notifyListeners();
       return;
     }
 
@@ -381,7 +629,6 @@ class OtaService extends ChangeNotifier {
   Future<void> _pollSelfPullStatusUntilComplete() async {
     final token = ++_selfPullPollToken;
     final deadline = DateTime.now().add(const Duration(minutes: 3));
-    var expectingReconnect = false;
 
     while (!_disposed &&
         token == _selfPullPollToken &&
@@ -394,44 +641,26 @@ class OtaService extends ChangeNotifier {
           return;
         }
 
-        if (_isUpdatedVersion(status.currentVersion)) {
-          _markComplete(status.currentVersion);
-          return;
-        }
-
-        if (_shouldInferCompletedRestart(
-          status,
-          expectingReconnect: expectingReconnect,
-        )) {
+        if (_statusShowsCompletedUpdate(status)) {
           _markComplete(_completedVersionForStatus(status));
           return;
         }
-
-        if (status.state == 'restarting') {
-          expectingReconnect = true;
-        }
       } catch (e) {
         if (_shouldTreatStatusPollErrorAsTransitional(e)) {
-          expectingReconnect = true;
           _state = OtaState.rebooting;
           _statusMessage = 'Device restarting';
           _progress = null;
-          notifyListeners();
+          _notifyListeners();
         } else {
           _state = OtaState.error;
           _errorMessage = _formatError('Failed to poll update status', e);
           _statusMessage = null;
-          notifyListeners();
+          _notifyListeners();
           return;
         }
       }
 
-      if (expectingReconnect) {
-        final verified = await _verifyVersionFromState();
-        if (verified) return;
-      }
-
-      await Future.delayed(const Duration(seconds: 2));
+      await Future.delayed(_selfPullPollInterval);
     }
 
     if (!_disposed &&
@@ -440,7 +669,7 @@ class OtaService extends ChangeNotifier {
       _state = OtaState.error;
       _errorMessage = 'Device did not come back online after update';
       _statusMessage = null;
-      notifyListeners();
+      _notifyListeners();
     }
   }
 
@@ -449,21 +678,39 @@ class OtaService extends ChangeNotifier {
     return _OtaStatusPayload.fromJson(json);
   }
 
-  Future<bool> _verifyVersionFromState() async {
-    try {
-      final stateJson = await _getJson('api/state');
-      final currentVersion =
-          _normalizeVersion(stateJson['version']?.toString()) ??
-              _currentVersion;
-      _currentVersion = currentVersion;
-      notifyListeners();
+  Future<bool> _recoverSelfPullStartAfterError(Object error) async {
+    if (!_shouldProbeStartProgressAfterRequestError(error)) {
+      return false;
+    }
 
-      if (_isUpdatedVersion(currentVersion)) {
-        _markComplete(currentVersion);
-        return true;
+    final deadline = DateTime.now().add(_startUpdateRecoveryWindow);
+    _statusMessage = 'Waiting for device to begin update...';
+    _notifyListeners();
+
+    while (!_disposed && DateTime.now().isBefore(deadline)) {
+      try {
+        final status = await _fetchSelfPullStatus();
+
+        if (_statusShowsAcceptedUpdateRequest(status)) {
+          _applySelfPullStatus(status, allowIdleReset: false);
+          return true;
+        }
+
+        if (_statusShowsCompletedUpdate(status)) {
+          _markComplete(_completedVersionForStatus(status));
+          return true;
+        }
+      } catch (statusError) {
+        if (_shouldTreatStatusPollErrorAsTransitional(statusError)) {
+          _state = OtaState.rebooting;
+          _statusMessage = 'Device restarting';
+          _progress = null;
+          _notifyListeners();
+          return true;
+        }
       }
-    } catch (_) {
-      // Device is still restarting.
+
+      await Future.delayed(_selfPullPollInterval);
     }
 
     return false;
@@ -477,19 +724,35 @@ class OtaService extends ChangeNotifier {
         _normalizeVersion(status.currentVersion) ?? _currentVersion;
     _latestVersion = _normalizeVersion(status.latestVersion) ?? _latestVersion;
     _targetVersion = _normalizeVersion(status.targetVersion) ?? _targetVersion;
-    _availableRelease = status.updateAvailable && _latestVersion != null
-        ? FirmwareRelease(version: _latestVersion!)
-        : _availableRelease;
+    if (status.updateReason != null) {
+      _updateReason = status.updateReason!;
+    }
+    if (status.installTargets != null) {
+      _installTargets = status.installTargets!;
+    }
+    if (status.imageAssets != null) {
+      _imageAssets = status.imageAssets!;
+    }
+    if (status.installedTargets != null) {
+      _installedTargets = status.installedTargets!;
+    }
+    if (status.checksumVerified != null) {
+      _checksumVerified = status.checksumVerified;
+    }
+    _availableRelease = status.updateAvailable
+        ? _buildSelfPullRelease(_latestVersion ?? _currentVersion)
+        : null;
     _statusMessage = status.message;
     _progress = null;
 
     if (status.state == 'checking') {
       _state = OtaState.checking;
     } else if (status.state == 'ready') {
-      if (status.updateAvailable && _latestVersion != null) {
-        _availableRelease = FirmwareRelease(version: _latestVersion!);
+      if (status.updateAvailable) {
+        _state = OtaState.available;
+      } else {
+        _state = OtaState.upToDate;
       }
-      _state = OtaState.available;
     } else if (status.state == 'updating') {
       _state = OtaState.uploading;
       _statusMessage ??= 'Installing update...';
@@ -500,23 +763,17 @@ class OtaService extends ChangeNotifier {
       _state = OtaState.error;
       _errorMessage = status.lastError ?? status.message ?? 'Update failed';
     } else if (status.state == 'idle') {
-      if (_isUpdatedVersion(status.currentVersion)) {
-        _markComplete(status.currentVersion);
-        return;
-      }
-
       if (allowIdleReset) {
-        if (status.updateAvailable && _latestVersion != null) {
-          _availableRelease = FirmwareRelease(version: _latestVersion!);
+        if (status.updateAvailable) {
           _state = OtaState.available;
         } else {
           _availableRelease = null;
-          _state = OtaState.idle;
+          _state = OtaState.upToDate;
         }
       }
     }
 
-    notifyListeners();
+    _notifyListeners();
   }
 
   void _onLegacyProgress(sdk.RhythmOtaProgress event) {
@@ -527,7 +784,7 @@ class OtaService extends ChangeNotifier {
     if (_state == OtaState.complete && _latestVersion != null) {
       _currentVersion = _latestVersion!;
     }
-    notifyListeners();
+    _notifyListeners();
   }
 
   OtaState _mapLegacyState(sdk.RhythmOtaState state) => switch (state) {
@@ -547,12 +804,43 @@ class OtaService extends ChangeNotifier {
     _currentVersion = _normalizeVersion(updatedVersion) ?? updatedVersion;
     _latestVersion = _currentVersion;
     _targetVersion = _currentVersion;
-    _availableRelease = FirmwareRelease(version: _currentVersion);
-    _statusMessage = 'Updated to v$_currentVersion';
+    _availableRelease = null;
+    _statusMessage = _updateReason == OtaUpdateReason.componentDrift
+        ? 'Bundle repaired on ${_formatVersionForDisplay(_currentVersion)}'
+        : 'Updated to ${_formatVersionForDisplay(_currentVersion)}';
     _errorMessage = null;
     _progress = 100;
     _state = OtaState.complete;
-    notifyListeners();
+    _notifyListeners();
+  }
+
+  FirmwareRelease _buildSelfPullRelease(String version) {
+    return FirmwareRelease(
+      version: version,
+      updateReason: _updateReason,
+      installTargets: _installTargets,
+      imageAssets: _imageAssets,
+    );
+  }
+
+  void _applySelfPullMetadataFromJson(Map<String, dynamic> json) {
+    final updateReason = _tryParseOtaUpdateReason(json['update_reason']);
+    if (updateReason != null) {
+      _updateReason = updateReason;
+    }
+    if (json.containsKey('install_targets')) {
+      _installTargets = OtaBundleEntry.listFromJson(json['install_targets']);
+    }
+    if (json.containsKey('image_assets')) {
+      _imageAssets = OtaBundleEntry.listFromJson(json['image_assets']);
+    }
+    if (json.containsKey('installed_targets')) {
+      _installedTargets =
+          OtaBundleEntry.listFromJson(json['installed_targets']);
+    }
+    if (json.containsKey('checksum_verified')) {
+      _checksumVerified = _tryParseBool(json['checksum_verified']);
+    }
   }
 
   void _configureClient(String host, int port) {
@@ -586,37 +874,28 @@ class OtaService extends ChangeNotifier {
         platformContext == 'esp32';
   }
 
-  bool _isUpdatedVersion(String version) {
-    final normalized = _canonicalizeVersion(version);
-    if (normalized == null) return false;
-
-    final expected = _canonicalizeVersion(_targetVersion) ??
-        _canonicalizeVersion(_latestVersion);
-    if (expected != null && normalized == expected) {
-      return true;
-    }
-
-    final previous = _canonicalizeVersion(_preUpdateVersion);
-    return previous != null && normalized != previous;
-  }
-
-  bool _shouldInferCompletedRestart(
-    _OtaStatusPayload status, {
-    required bool expectingReconnect,
-  }) {
-    if (!expectingReconnect) return false;
+  bool _statusShowsCompletedUpdate(_OtaStatusPayload status) {
     if (status.state != 'idle' && status.state != 'ready') return false;
     if (status.updateAvailable) return false;
 
     final lastError = status.lastError?.trim();
     if (lastError != null && lastError.isNotEmpty) return false;
 
-    return true;
+    if (_updateReason == OtaUpdateReason.componentDrift) {
+      return true;
+    }
+
+    final current = _canonicalizeVersion(status.currentVersion);
+    final expected = _canonicalizeVersion(status.targetVersion) ??
+        _canonicalizeVersion(_targetVersion) ??
+        _canonicalizeVersion(status.latestVersion) ??
+        _canonicalizeVersion(_latestVersion);
+    return current != null && expected != null && current == expected;
   }
 
   String _completedVersionForStatus(_OtaStatusPayload status) {
     final current = _normalizeVersion(status.currentVersion);
-    if (_isUpdatedVersion(status.currentVersion) && current != null) {
+    if (_statusShowsCompletedUpdate(status) && current != null) {
       return current;
     }
 
@@ -634,6 +913,12 @@ class OtaService extends ChangeNotifier {
       state == OtaState.uploading ||
       state == OtaState.flashing ||
       state == OtaState.rebooting;
+
+  bool _statusShowsAcceptedUpdateRequest(_OtaStatusPayload status) =>
+      status.state == 'checking' ||
+      status.state == 'updating' ||
+      status.state == 'restarting' ||
+      status.state == 'error';
 
   bool _shouldTreatStatusPollErrorAsTransitional(Object error) {
     if (_state != OtaState.uploading && _state != OtaState.rebooting) {
@@ -659,8 +944,29 @@ class OtaService extends ChangeNotifier {
     return _looksLikeExpectedRestartDisconnect(error.toString().toLowerCase());
   }
 
+  bool _shouldProbeStartProgressAfterRequestError(Object error) {
+    if (error is DioException) {
+      if (error.type == DioExceptionType.connectionTimeout ||
+          error.type == DioExceptionType.receiveTimeout) {
+        return true;
+      }
+
+      final dioMessage = [
+        error.message,
+        error.error?.toString(),
+      ].whereType<String>().join(' ').toLowerCase();
+      if (_looksLikeExpectedRestartDisconnect(dioMessage)) {
+        return true;
+      }
+    }
+
+    return _looksLikeExpectedRestartDisconnect(error.toString().toLowerCase());
+  }
+
   bool _looksLikeExpectedRestartDisconnect(String message) {
     return message.contains('connection refused') ||
+        message.contains('connection reset') ||
+        message.contains('connection closed') ||
         message.contains('timed out') ||
         message.contains('timeout');
   }
@@ -703,6 +1009,17 @@ class OtaService extends ChangeNotifier {
     return canonical;
   }
 
+  String _formatVersionForDisplay(String version) {
+    return version.startsWith('v') || version.startsWith('V')
+        ? version
+        : 'v$version';
+  }
+
+  void _notifyListeners() {
+    if (_disposed) return;
+    notifyListeners();
+  }
+
   /// Reset the OTA UI back to idle.
   void reset() {
     _selfPullPollToken++;
@@ -715,11 +1032,15 @@ class OtaService extends ChangeNotifier {
     _errorMessage = null;
     _statusMessage = null;
     _targetVersion = null;
-    _preUpdateVersion = null;
+    _updateReason = OtaUpdateReason.unknown;
+    _installTargets = const [];
+    _imageAssets = const [];
+    _installedTargets = const [];
+    _checksumVerified = null;
     if (_strategy == _OtaStrategy.selfPull) {
       _latestVersion = _currentVersion;
     }
-    notifyListeners();
+    _notifyListeners();
   }
 
   @override
