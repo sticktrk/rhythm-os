@@ -294,7 +294,16 @@ pub fn handle_get_factory_default_configuration() -> ApiResponse {
 
 pub fn handle_post_configuration_reset(state: &SharedState) -> ApiResponse {
     match commands::do_configuration_reset(state) {
-        Ok(json) => ApiResponse::json_ok(json),
+        Ok(json) => {
+            if let Some(callback) = state
+                .lock()
+                .ok()
+                .and_then(|state| state.after_factory_reset_fn.clone())
+            {
+                callback(state);
+            }
+            ApiResponse::json_ok(json)
+        }
         Err(e) => ApiResponse::bad_request(&e.to_string()),
     }
 }
@@ -1634,6 +1643,7 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2267,6 +2277,22 @@ mod tests {
             factory_default.configuration.mode_transitions
         );
         assert_eq!(parsed_profiles, expected_profiles);
+    }
+
+    #[test]
+    fn post_configuration_reset_invokes_platform_follow_up() {
+        let state = handler_state_with_runtime();
+        let invoked = Arc::new(AtomicBool::new(false));
+        state.lock().unwrap().after_factory_reset_fn = Some({
+            let invoked = invoked.clone();
+            Arc::new(move |_| {
+                invoked.store(true, Ordering::SeqCst);
+            })
+        });
+
+        let r = handle_post_configuration_reset(&state);
+        assert_eq!(r.status, 200);
+        assert!(invoked.load(Ordering::SeqCst));
     }
 
     #[test]

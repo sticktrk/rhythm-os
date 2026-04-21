@@ -454,6 +454,18 @@ impl Storage for FileStorage {
             }
         }
 
+        for dir in ["matter"] {
+            let path = self.dir.join(dir);
+            match std::fs::remove_dir_all(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(anyhow::anyhow!(e))
+                        .with_context(|| format!("removing {}", path.display()));
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -1367,6 +1379,20 @@ mod tests {
                     password: "secret".into(),
                 })
                 .unwrap();
+            std::fs::create_dir_all(path.join("matter").join("captures")).unwrap();
+            std::fs::create_dir_all(path.join("matter").join("chip")).unwrap();
+            std::fs::write(
+                path.join("matter").join("captures").join("device-1.json"),
+                "{}",
+            )
+            .unwrap();
+            std::fs::write(
+                path.join("matter")
+                    .join("chip")
+                    .join("controller-storage.json"),
+                "{}",
+            )
+            .unwrap();
 
             storage.clear_factory_reset_state().unwrap();
 
@@ -1383,6 +1409,10 @@ mod tests {
             ] {
                 assert!(!path.join(name).exists(), "{} should be removed", name);
             }
+            assert!(
+                !path.join("matter").exists(),
+                "integration runtime state should be removed"
+            );
 
             cleanup(&path);
         }

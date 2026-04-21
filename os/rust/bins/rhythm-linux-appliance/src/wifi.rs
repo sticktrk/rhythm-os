@@ -72,6 +72,10 @@ pub fn clear_credentials_and_restart() -> Result<()> {
     restart_wifi()
 }
 
+pub fn clear_credentials() -> Result<()> {
+    clear_wifi_credentials()
+}
+
 fn write_wifi_credentials(creds: &WifiCredentials) -> Result<()> {
     let country = existing_country().unwrap_or_else(|| DEFAULT_COUNTRY.to_string());
     let mut body = String::new();

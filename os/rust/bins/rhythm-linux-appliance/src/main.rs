@@ -8,6 +8,7 @@ mod ble_provision;
 mod http_server;
 mod wifi;
 
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -83,6 +84,7 @@ fn main() -> Result<()> {
             hub::INTEGRATIONS,
         ));
     }
+    install_factory_reset_hook(&state)?;
 
     let (work_tx, work_rx) = std::sync::mpsc::sync_channel::<WorkItem>(64);
     let (periodic_tx, periodic_rx) = std::sync::mpsc::sync_channel::<WorkItem>(64);
@@ -168,6 +170,50 @@ fn main() -> Result<()> {
         .thread_name("rhythm-main-rt")
         .build()?
         .block_on(run_server(state, args.port, provisioning))
+}
+
+fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
+    let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    state.after_factory_reset_fn = Some(Arc::new(|_| {
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+
+            if let Err(error) = wifi::clear_credentials() {
+                warn!(
+                    target: "sys",
+                    "Failed to clear appliance Wi-Fi credentials during factory reset: {:#}",
+                    error
+                );
+            }
+
+            info!(target: "sys", "Rebooting appliance after factory reset...");
+
+            let reboot_result = Command::new("/sbin/reboot")
+                .status()
+                .or_else(|_| Command::new("reboot").status());
+
+            match reboot_result {
+                Ok(status) if status.success() => {}
+                Ok(status) => {
+                    warn!(
+                        target: "sys",
+                        "Appliance reboot after factory reset exited with status {:?}; falling back to process exit",
+                        status.code()
+                    );
+                    std::process::exit(1);
+                }
+                Err(error) => {
+                    warn!(
+                        target: "sys",
+                        "Failed to reboot appliance after factory reset: {:#}; falling back to process exit",
+                        error
+                    );
+                    std::process::exit(1);
+                }
+            }
+        });
+    }));
+    Ok(())
 }
 
 fn spawn_hub_bootstrap(state: SharedState) {

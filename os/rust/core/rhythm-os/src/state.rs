@@ -318,6 +318,13 @@ pub struct AppState {
         >,
     >,
 
+    /// Optional platform-owned follow-up for a full factory reset.
+    ///
+    /// Shared reset logic clears in-memory and persisted Rhythm state, then
+    /// delegates lifecycle/platform cleanup (restart, reboot, Wi-Fi reset) to
+    /// the active binary crate through this callback.
+    pub after_factory_reset_fn: Option<Arc<dyn Fn(&SharedState) + Send + Sync>>,
+
     /// Firmware version string (set by the binary crate).
     pub firmware_version: &'static str,
 
@@ -397,6 +404,7 @@ impl Default for AppState {
             start_pairing_fn: None,
             start_unpairing_fn: None,
             hub_credentials_interceptor: None,
+            after_factory_reset_fn: None,
             firmware_version: "0.0.0",
             platform_type: "desktop",
             platform_context: "server",

@@ -77,6 +77,7 @@ fn main() -> Result<()> {
             hub::INTEGRATIONS,
         ));
     }
+    install_factory_reset_hook(&state)?;
 
     let (work_tx, work_rx) = std::sync::mpsc::sync_channel::<WorkItem>(64);
     let (periodic_tx, periodic_rx) = std::sync::mpsc::sync_channel::<WorkItem>(64);
@@ -155,6 +156,18 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?
         .block_on(run_server(state, port))
+}
+
+fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
+    let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    state.after_factory_reset_fn = Some(Arc::new(|_| {
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            info!(target: "sys", "Exiting after factory reset so the add-on supervisor can restart Rhythm");
+            std::process::exit(1);
+        });
+    }));
+    Ok(())
 }
 
 async fn run_server(state: SharedState, port: u16) -> Result<()> {
