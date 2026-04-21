@@ -30,10 +30,32 @@ fn scenario_pair_queues_unassigned_device() {
         .canonical_registry
         .find_by_native_id(&hub_key, "matter-100")
         .expect("paired Matter device should be in canonical registry");
+    let canonical_id = canonical.id.clone();
 
     assert!(canonical.room_id.is_none());
+    assert_eq!(
+        canonical
+            .endpoint_by_native_id("matter-100")
+            .and_then(|endpoint| endpoint.source_room_name.as_deref()),
+        None
+    );
+    assert_eq!(state.canonical_registry.triage().pending_room_count(), 0);
     assert_eq!(
         state.canonical_registry.triage().pending_unassigned_count(),
         1
     );
+    let topology_node = state
+        .topology
+        .get_device_node(&canonical_id)
+        .expect("paired roomless Matter device should exist in topology immediately");
+    assert_eq!(topology_node.parent_id, None);
+    let runtime = state
+        .hub_runtime()
+        .expect("pairing a roomless Matter device should bootstrap the runtime");
+    drop(state);
+
+    let runtime_node = runtime
+        .engine_node_snapshot(&canonical_id)
+        .expect("paired roomless Matter device should exist in the runtime");
+    assert_eq!(runtime_node.parent_id, None);
 }

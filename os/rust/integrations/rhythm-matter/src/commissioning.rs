@@ -212,7 +212,7 @@ fn build_success_session(
         );
     }
     register_canonical_identity(state, &hub_key, &device, &device_id, &device_name)?;
-    queue_unassigned_canonical_device(state, &hub_key, &device_id)?;
+    materialize_unassigned_canonical_device(state, &hub_key, &device_id)?;
 
     let _ = hub_data.event_tx.send(
         crate::events::device_paired_event(
@@ -286,8 +286,8 @@ fn register_canonical_identity(
 
     let identity = rhythm_os::canonical::identity::DiscoveredIdentity {
         native_id: device_id.to_string(),
-        room_id: device_id.to_string(),
-        room_name: device_name.to_string(),
+        room_id: String::new(),
+        room_name: String::new(),
         name: device_name.to_string(),
         device_type: DeviceType::Light,
         hardware_ids: vec![HardwareId::matter(&device.node_id.to_string())],
@@ -300,18 +300,13 @@ fn register_canonical_identity(
     Ok(())
 }
 
-fn queue_unassigned_canonical_device(
+fn materialize_unassigned_canonical_device(
     state: &SharedState,
     hub_key: &HubKey,
     device_id: &str,
 ) -> Result<()> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    let (canonical_id, already_assigned) = state
+    let state_guard = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let (canonical_id, already_assigned) = state_guard
         .canonical_registry
         .find_by_native_id(hub_key, device_id)
         .map(|device| (device.id.clone(), device.room_id.is_some()))
@@ -322,10 +317,10 @@ fn queue_unassigned_canonical_device(
             )
         })?;
 
+    drop(state_guard);
+
     if !already_assigned {
-        state
-            .canonical_registry
-            .queue_unassigned(&canonical_id, now);
+        rhythm_os::commands::do_canonical_assign_room(state, &canonical_id, None)?;
     }
 
     Ok(())
