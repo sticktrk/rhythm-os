@@ -13,12 +13,19 @@ This directory contains all build and deployment scripts for Rhythm OS.
 ./scripts/build-rust.sh                 # Build Rust addon
 ./scripts/build-rpiz-image.sh           # Build Pi Zero SD image
 
+# Refresh the rpiz CI/local builder image (content-addressed; no-op if unchanged)
+./scripts/build/refresh-builder-image.sh --push
+
 # Deploy
 ./scripts/deploy-addon.sh               # Push addon to Docker Hub
 ./scripts/deploy-addon.sh --local       # Deploy to local HA for testing
 ./scripts/release.sh                    # Tag and push the next GitHub release
 ./scripts/release.sh --upload           # Build + upload the rpiz OTA feed locally
 ```
+
+Anything under `scripts/build/` deals with producing the prebuilt Docker
+*builder* image (`dtconcepts/rhythm-rpiz-builder`) that the rpiz flow and its
+CI workflow share. See [`scripts/build/README.md`](build/README.md).
 
 ---
 
@@ -129,6 +136,45 @@ Build a Raspberry Pi Zero SD-card image using the Buildroot external tree in `in
 With `--docker` and no explicit `--output-dir`, the default becomes `out/rpiz-docker/images/sdcard.img`.
 By default, rpiz image builds include the bring-up extras: Dropbear SSH, root password `rhythm`, and Matter device attestation bypass. Use `--prod` or `RHYTHM_DEV_MODE=0` to turn those off.
 
+`--docker` pulls `dtconcepts/rhythm-rpiz-builder:latest` from Docker Hub and
+runs the full cross-compile + image packaging inside it. Override the image
+ref with `--docker-image <ref>`; skip the pull with `--no-pull`. To refresh
+the image when its baked inputs change, see
+[`scripts/build/`](build/README.md).
+
+### build/refresh-builder-image.sh
+
+Hashes the slow-path inputs (CHIP prebuilts, ARMv6 musl toolchain, Buildroot
+checkout + external tree, Dockerfile, packaging script) into a content tag
+like `v1-aa91843f7d73`, checks Docker Hub for it, and only builds+pushes when
+that tag is missing. Updates `install/rpiz/builder-image.lock`, which is what
+both your local `--docker` runs and `.github/workflows/rpiz-image.yml` pull.
+
+```bash
+./scripts/build/refresh-builder-image.sh            # dry-check: report if push needed
+./scripts/build/refresh-builder-image.sh --push     # build + push iff the tag is missing
+./scripts/build/refresh-builder-image.sh --force    # force a rebuild even when tag exists
+```
+
+`./scripts/release.sh` runs this with `--push` before tagging so normal release
+cycles are a no-op unless CHIP/Buildroot/defconfig actually changed.
+
+### build/build-rpiz-builder-image.sh
+
+Low-level packaging script invoked by `refresh-builder-image.sh`. Stages the
+current host's chip source (with pruning), `out/rpiz-arm-musl/` prebuilts,
+`~/x-tools/arm-unknown-linux-musleabihf` toolchain, `buildroot/` checkout, and
+full `out/rpiz/` Buildroot output into a clean Docker build context, then runs
+`docker build` (+ optional `docker push`). Must run on Linux. Useful to drive
+by hand when experimenting with the Dockerfile:
+
+```bash
+./scripts/build/build-rpiz-builder-image.sh --image-tag dtconcepts/rhythm-rpiz-builder:dev
+```
+
+See [`scripts/build/README.md`](build/README.md) for the full flow, the hashed
+inputs, and the `third_party/` pruning knobs used to keep image size down.
+
 ---
 
 ## Deployment Scripts
@@ -136,13 +182,27 @@ By default, rpiz image builds include the bring-up extras: Dropbear SSH, root pa
 ### release.sh
 
 Create a Git release tag. By default this pushes the release so the GitHub
-workflow can build and publish the assets. Use `--upload` to keep the release
-local, build the `rpiz` artifact, and upload the OTA feed directly.
+workflows can build and publish the assets.
+
+There are two release modes:
+
+- **Binary release (default)** — mac/linux server binaries (`release.yml`) and
+  the rpiz OTA tarball via cross-compile in the builder image
+  (`rpiz-binary.yml`). Fast, ~5 min of CI. This is the normal cadence for
+  appliance code changes.
+- **Full image release (`--with-image`)** — everything above *plus* dispatches
+  `rpiz-image.yml`, which re-runs Buildroot end-to-end and attaches
+  `sdcard.img` + `rootfs.ext2.gz` to the release. Use this when you bumped
+  CHIP, Buildroot, or the defconfig.
+
+Use `--upload` to keep the release local, build the `rpiz` artifact, and
+upload the OTA feed directly instead of going through GitHub Actions.
 
 ```bash
-./scripts/release.sh                    # Tags and pushes the next patch release
-./scripts/release.sh --minor            # Tags and pushes the next minor release
+./scripts/release.sh                    # Tags and pushes the next patch release (binary-only)
+./scripts/release.sh --minor            # Tags and pushes the next minor release (binary-only)
 ./scripts/release.sh --version 0.4.1    # Tags and pushes an explicit version
+./scripts/release.sh --with-image       # Binary release + dispatch rpiz-image.yml for full SD card
 ./scripts/release.sh --upload           # Builds and uploads only the rpiz OTA feed locally
 ./scripts/release.sh --version 0.4.101  # Explicit high patch version is valid semver
 ./scripts/release.sh --dry-run          # Preview without creating the tag
@@ -155,6 +215,8 @@ local, build the `rpiz` artifact, and upload the OTA feed directly.
 | `--major` | Bump the latest release tag to the next major version |
 | `--minor` | Bump the latest release tag to the next minor version |
 | `--patch` | Bump the latest release tag to the next patch version (default) |
+| `--with-image` | After pushing, dispatch `rpiz-image.yml` to rebuild the SD-card image and attach it to the release |
+| `--skip-builder-refresh` | Skip the builder-image hash check / refresh step (non-Linux hosts, or when you know the lock is right) |
 | `--upload` | Build/package/upload the `rpiz` OTA feed locally; implies `--no-push` |
 | `--message <text>` | Custom annotated tag message |
 | `--remote <name>` | Git remote to push to, default `origin` |

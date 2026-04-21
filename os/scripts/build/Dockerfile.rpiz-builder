@@ -1,0 +1,89 @@
+# dtconcepts/rhythm-rpiz-builder
+#
+# Builder image that bakes in every prerequisite for assembling the rpiz
+# SD-card image: the ARMv6 musl cross toolchain, the connectedhomeip source
+# and its rpiz-arm-musl prebuilt output, a pinned Buildroot checkout, and the
+# Buildroot host/sysroot tree that rhythm-chipd links against.
+#
+# Refreshed via scripts/build/build-rpiz-builder-image.sh on a Linux host, then
+# consumed by scripts/build-rpiz-image.sh --docker and by the CI workflow at
+# .github/workflows/rpiz-image.yml.
+
+# Base must carry glibc >= the host glibc the ARMv6 cross toolchain was built
+# against. The toolchain is a dynamically-linked x86_64 binary, so if the base
+# image's glibc is older than the build host's, arm-unknown-linux-musleabihf-gcc
+# fails to load. Ubuntu 24.04 (glibc 2.39) matches GH Actions ubuntu-latest and
+# current Ubuntu dev hosts.
+FROM ubuntu:24.04 AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    bc \
+    bison \
+    build-essential \
+    bzip2 \
+    ca-certificates \
+    cpio \
+    curl \
+    diffutils \
+    file \
+    findutils \
+    flex \
+    gawk \
+    git \
+    libncurses-dev \
+    libssl-dev \
+    make \
+    patch \
+    perl \
+    pkg-config \
+    python3 \
+    rsync \
+    sed \
+    tar \
+    unzip \
+    wget \
+    which \
+    xz-utils \
+    zstd \
+    && rm -rf /var/lib/apt/lists/*
+
+FROM base AS builder
+
+# ARMv6 musl cross toolchain (ABI-matched with libCHIP.a in chip out dir).
+COPY x-tools/arm-unknown-linux-musleabihf /opt/x-tools/arm-unknown-linux-musleabihf
+ENV PATH=/opt/x-tools/arm-unknown-linux-musleabihf/bin:$PATH
+
+# connectedhomeip source pruned to what rhythm-chipd/build.rs references, with
+# the BLEManagerImpl.cpp patch applied; out/rpiz-arm-musl is the prebuilt lib.
+COPY connectedhomeip /opt/connectedhomeip
+ENV RHYTHM_CHIP_OUT_DIR=/opt/connectedhomeip/out/rpiz-arm-musl
+
+# Buildroot source checkout at the pinned commit.
+COPY buildroot /opt/buildroot
+ENV RHYTHM_BUILDROOT_DIR=/opt/buildroot
+
+# Pre-warmed Buildroot output (build/ + host/ + target/ + staging symlink) so
+# Buildroot resumes from a populated state on the first CI pass instead of
+# rebuilding its toolchain and every package. /output is seeded from this by
+# scripts/build-rpiz-image.sh when run inside the container and /output is
+# empty.
+COPY rpiz-out /opt/rpiz-out
+ENV RHYTHM_CHIP_SYSROOT=/opt/rpiz-out/host/arm-buildroot-linux-musleabi/sysroot
+
+# Rust toolchain with the rpiz target preinstalled. Install into world-readable
+# /usr/local paths so the image works when docker run is invoked with --user
+# <host-uid> (which is how scripts/build-rpiz-image.sh mounts the workspace).
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
+ && rustup target add arm-unknown-linux-musleabihf \
+ && chmod -R a+rwX /usr/local/cargo /usr/local/rustup
+
+WORKDIR /workspace

@@ -20,8 +20,11 @@ BUMP_KIND="patch"
 PUSH=true
 DRY_RUN=false
 UPLOAD=false
+SKIP_BUILDER_REFRESH=false
+WITH_IMAGE=false
 MESSAGE=""
-WORKSPACE_VERSION_FILES=("Cargo.toml" "Cargo.lock")
+WORKSPACE_VERSION_FILES=("Cargo.toml" "Cargo.lock" "install/rpiz/builder-image.lock")
+BUILDER_LOCK_FILE="install/rpiz/builder-image.lock"
 WORKSPACE_PACKAGES=(
     rhythm-addon
     rhythm-core
@@ -54,6 +57,15 @@ Options:
   --remote NAME     Remote to push to (default: origin)
   --no-push         Create the local tag but do not push branch or tag
   --dry-run         Print the planned tag/push actions without changing git state
+  --skip-builder-refresh
+                    Do not invoke scripts/build/refresh-builder-image.sh. Use
+                    this when cutting a release from a non-Linux machine or
+                    when you know the lock file is already correct.
+  --with-image      After pushing the tag, dispatch the rpiz-image workflow
+                    to rebuild the full SD-card image (sdcard.img +
+                    rootfs.ext2.gz) and attach it to the GH Release. Use
+                    this for CHIP/Buildroot/defconfig bumps; normal
+                    appliance binary releases don't need it.
   -h, --help        Show this help
 
 Examples:
@@ -102,6 +114,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --dry-run)
             DRY_RUN=true
+            shift
+            ;;
+        --skip-builder-refresh)
+            SKIP_BUILDER_REFRESH=true
+            shift
+            ;;
+        --with-image)
+            WITH_IMAGE=true
             shift
             ;;
         -h|--help)
@@ -478,16 +498,32 @@ echo "  Message: $MESSAGE"
 if [ "$CURRENT_WORKSPACE_VERSION" != "$VERSION" ]; then
     echo "  Workspace version: $CURRENT_WORKSPACE_VERSION -> $VERSION"
 fi
+if [ "$SKIP_BUILDER_REFRESH" = true ]; then
+    echo "  Builder image: refresh skipped (--skip-builder-refresh)"
+elif [ "$(uname -s)" != "Linux" ]; then
+    echo "  Builder image: refresh skipped (not on Linux; image packaging needs it)"
+    SKIP_BUILDER_REFRESH=true
+else
+    echo "  Builder image: will refresh dtconcepts/rhythm-rpiz-builder if inputs changed"
+fi
+if [ "$WITH_IMAGE" = true ]; then
+    echo "  rpiz image: will dispatch rpiz-image.yml after tag push (Buildroot SD-card rebuild)"
+else
+    echo "  rpiz image: binary-only release (skip SD-card rebuild)"
+fi
 if [ "$UPLOAD" = true ]; then
     echo "  Upload: rpiz OTA feed -> $RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST:$RHYTHM_UPDATES_BASE_DIR"
 fi
 echo ""
 
 if [ "$DRY_RUN" = true ]; then
+    if [ "$SKIP_BUILDER_REFRESH" = false ]; then
+        echo "[dry-run] Would run: scripts/build/refresh-builder-image.sh --push"
+    fi
     if [ "$CURRENT_WORKSPACE_VERSION" != "$VERSION" ]; then
         echo "[dry-run] Would update workspace version files: Cargo.toml, Cargo.lock"
-        echo "[dry-run] Would create release commit: git commit -m \"Release $TAG\""
     fi
+    echo "[dry-run] Would commit any changes to: ${WORKSPACE_VERSION_FILES[*]}"
     echo "[dry-run] Would create annotated tag: git tag -a $TAG -m \"$MESSAGE\""
     if [ "$UPLOAD" = true ]; then
         echo "[dry-run] Would build rpiz release binary: ./scripts/build-server.sh --release --target rpiz"
@@ -498,7 +534,15 @@ if [ "$DRY_RUN" = true ]; then
         echo "[dry-run] Would push branch: git push $REMOTE HEAD:refs/heads/$CURRENT_BRANCH"
         echo "[dry-run] Would push tag:    git push $REMOTE refs/tags/$TAG"
     fi
+    if [ "$WITH_IMAGE" = true ]; then
+        echo "[dry-run] Would dispatch: gh workflow run rpiz-image.yml -f tag=$TAG"
+    fi
     exit 0
+fi
+
+if [ "$SKIP_BUILDER_REFRESH" = false ]; then
+    echo "Refreshing builder image ..."
+    "$SCRIPT_DIR/build/refresh-builder-image.sh" --push
 fi
 
 update_workspace_version_files "$VERSION" "$CURRENT_WORKSPACE_VERSION"
@@ -539,4 +583,27 @@ else
     echo "Tag created locally only. Push it when ready:"
     echo "  git push $REMOTE HEAD:refs/heads/$CURRENT_BRANCH"
     echo "  git push $REMOTE refs/tags/$TAG"
+fi
+
+if [ "$WITH_IMAGE" = true ]; then
+    if [ "$PUSH" != true ]; then
+        echo ""
+        echo "Warning: --with-image is a no-op without a remote push. Dispatch manually once the tag is up:" >&2
+        echo "  gh workflow run rpiz-image.yml -f tag=$TAG" >&2
+    elif ! command -v gh >/dev/null 2>&1; then
+        echo ""
+        echo "Warning: gh CLI not found. Dispatch the rpiz image workflow manually:" >&2
+        echo "  gh workflow run rpiz-image.yml -f tag=$TAG" >&2
+    else
+        echo ""
+        echo "Dispatching rpiz-image workflow for $TAG ..."
+        if gh workflow run rpiz-image.yml -f tag="$TAG"; then
+            if [ -n "$REPO_URL" ]; then
+                echo "  Follow progress at $REPO_URL/actions/workflows/rpiz-image.yml"
+            fi
+        else
+            echo "Warning: gh workflow run failed. You can retry manually:" >&2
+            echo "  gh workflow run rpiz-image.yml -f tag=$TAG" >&2
+        fi
+    fi
 fi

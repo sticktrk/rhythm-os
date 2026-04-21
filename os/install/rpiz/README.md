@@ -80,14 +80,20 @@ Buildroot still produces a raw `rootfs.ext2` internally while assembling
 
 ### Docker-backed image build
 
-If your host is macOS, or you just want the Linux image build isolated, use Docker:
+For a reproducible build (and the same flow CI runs), use `--docker`:
 
 ```bash
 ./scripts/build-rpiz-image.sh --release --docker
 ```
 
-That flow still builds the `rhythm-linux-appliance` appliance on the host, writes the compatibility binary to `dist/bin/rpiz/rhythm-server`, then runs the Buildroot image step in a Debian-based Docker container defined by `install/rpiz/docker/Dockerfile`.
-By default, the Docker flow writes images to `out/rpiz-docker` so it does not reuse macOS-generated Buildroot host artifacts from `out/rpiz`.
+That pulls the exact builder image tag pinned in `install/rpiz/builder-image.lock` (something like `dtconcepts/rhythm-rpiz-builder:v1-<hash>`) from Docker Hub and runs the full cross-compile + Buildroot image step inside it. The image carries the ARMv6 musl toolchain, the `connectedhomeip` source + `out/rpiz-arm-musl/` prebuilts, a pinned Buildroot checkout, the full `out/rpiz/` Buildroot output so `make` resumes instead of rebuilding, and a Rust toolchain with the `arm-unknown-linux-musleabihf` target preinstalled, so nothing on the host besides Docker is required.
+
+By default, the Docker flow writes images to `out/rpiz-docker` so it does not reuse non-Docker Buildroot host artifacts from `out/rpiz`.
+
+Flags relevant to the Docker flow:
+
+- `--docker-image <ref>` — override the image ref (default `dtconcepts/rhythm-rpiz-builder:latest`).
+- `--no-pull` — skip `docker pull` and reuse the locally cached image.
 
 To embed Wi-Fi credentials for a Pi Zero W / Zero 2 W image:
 
@@ -102,7 +108,42 @@ To embed Wi-Fi credentials for a Pi Zero W / Zero 2 W image:
 
 The default country is `US`. Credentials are written into `/etc/wpa_supplicant.conf` during the image build and are not committed back into the repo.
 
-If you want to use a non-default Buildroot checkout, pass `--buildroot-dir /path/to/buildroot`. The script only auto-clones the default `./buildroot` path.
+If you want to use a non-default Buildroot checkout in the non-Docker flow, pass `--buildroot-dir /path/to/buildroot`. (Under `--docker`, Buildroot is provided by the image at `/opt/buildroot` and this flag is ignored.) The script only auto-clones the default `./buildroot` path.
+
+### Release modes
+
+The rpiz release flow has two modes that map to two workflows:
+
+| Mode | How you trigger it | What you get | CI time |
+|------|--------------------|--------------|---------|
+| **Binary release** (default) | `./scripts/release.sh` (any variant without `--with-image`) | rhythm-linux-appliance binary tarball for OTA (`rpiz-binary.yml`) + mac/linux binaries (`release.yml`) | ~5 min |
+| **Full image release** | `./scripts/release.sh --with-image` | Everything above *plus* sdcard.img + rootfs.ext2.gz attached to the release (`rpiz-image.yml` dispatched via `gh`) | ~5 min + one full Buildroot pass |
+
+Use the binary mode for normal appliance code / Rust-level changes — your Pi Zeros update via OTA against the tarball without needing a new SD card. Use `--with-image` when you've bumped CHIP, Buildroot, the defconfig, or the kernel config (anything that forces a new rootfs). You can also dispatch `rpiz-image.yml` manually at any time:
+
+```bash
+gh workflow run rpiz-image.yml -f tag=v0.5.0   # attaches to an existing release
+gh workflow run rpiz-image.yml                 # artifact-only rebuild from current branch
+```
+
+### Refreshing the builder image
+
+The `dtconcepts/rhythm-rpiz-builder` image is content-addressed: its tag is a hash of the baked inputs (CHIP source + prebuilts, ARMv6 musl toolchain, Buildroot checkout + defconfig/fragments/overlays, Dockerfile, packaging script). Most app-code changes don't touch any of those, so most releases don't rebuild the image.
+
+On your Linux host, after a successful local `./scripts/build-rpiz-image.sh --release --prod`:
+
+```bash
+# Check whether the hash matches what's already on Docker Hub.
+./scripts/build/refresh-builder-image.sh
+
+# Build + push iff the hash has shifted and that tag is missing.
+docker login                                      # dtconcepts account
+./scripts/build/refresh-builder-image.sh --push
+```
+
+`./scripts/release.sh` invokes this script before tagging; the lock file bump is automatically included in the release commit when an image push was needed. Pass `--skip-builder-refresh` to `release.sh` only when you're cutting a release from a non-Linux machine and you know the lock file already points at a published tag.
+
+See `scripts/build/README.md` for the hash inputs and the refresh mechanics.
 
 ## Flash the SD card
 
