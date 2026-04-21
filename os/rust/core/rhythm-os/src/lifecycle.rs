@@ -125,8 +125,8 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
 ) -> Result<()> {
     use rhythm_core::solar::SolarTime;
     use rhythm_core::{
-        DeviceRegistry, HubRegistry, RhythmRuntime, RuntimeConfig, RuntimeHandle,
-        SystemTimeProvider, ThreadScheduler, TimeProvider,
+        ThreadScheduler, SystemTimeProvider, DeviceRegistry, HubRegistry, RhythmRuntime,
+        RuntimeConfig, RuntimeHandle, TimeProvider,
     };
 
     let (
@@ -471,8 +471,8 @@ pub fn ensure_composite_runtime(
 ) -> Result<()> {
     use rhythm_core::solar::SolarTime;
     use rhythm_core::{
-        CompositeController, DeviceRegistry, HubRegistry, RhythmRuntime, RuntimeConfig,
-        RuntimeHandle, SimpleDeviceRegistry, SystemTimeProvider, ThreadScheduler, TimeProvider,
+        ThreadScheduler, SystemTimeProvider, CompositeController, DeviceRegistry, HubRegistry,
+        RhythmRuntime, RuntimeConfig, RuntimeHandle, SimpleDeviceRegistry, TimeProvider,
     };
 
     let (

@@ -26,7 +26,6 @@ fi
 export RHYTHM_PLATFORM_TYPE=appliance
 export RHYTHM_PLATFORM_CONTEXT=rpiz
 export RHYTHM_MATTER_CHIPD=/usr/bin/rhythm-chipd
-export DBUS_SYSTEM_BUS_ADDRESS="${DBUS_SYSTEM_BUS_ADDRESS:-unix:path=/run/dbus/system_bus_socket}"
 
 if [ -r "$DEV_DEFAULTS" ]; then
     # shellcheck disable=SC1090

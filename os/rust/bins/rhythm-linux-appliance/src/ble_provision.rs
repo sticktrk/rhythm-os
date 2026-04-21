@@ -25,8 +25,6 @@ use rhythm_os::state::SharedState;
 use crate::wifi;
 
 const FORCE_ENV: &str = "RHYTHM_BLE_PROVISION_ALWAYS";
-const START_RETRY_DELAY: Duration = Duration::from_secs(5);
-const START_RETRY_ATTEMPTS: usize = 12;
 
 #[derive(Clone)]
 pub struct ProvisioningManager {
@@ -79,7 +77,7 @@ impl ProvisioningManager {
                     reason
                 );
 
-                let result = run_service_with_retries(&manager, &reason);
+                let result = run_service(&manager.inner.version);
                 match result {
                     Ok(creds) => {
                         persist_commissioning_wifi_credentials(&manager.inner.state, &creds);
@@ -148,42 +146,6 @@ fn run_service(version: &str) -> Result<WifiCredentials> {
     let config = ProvisioningSessionConfig::default();
 
     run_provisioning_session(&mut frontend, &mut backend, &identity, &config)
-}
-
-fn run_service_with_retries(
-    manager: &ProvisioningManager,
-    reason: &str,
-) -> Result<WifiCredentials> {
-    let mut attempts = 0usize;
-
-    loop {
-        attempts += 1;
-        match run_service(&manager.inner.version) {
-            Ok(creds) => return Ok(creds),
-            Err(error) => {
-                let should_retry =
-                    attempts < START_RETRY_ATTEMPTS && provisioning_still_needed(manager);
-                if !should_retry {
-                    return Err(error);
-                }
-
-                warn!(
-                    target: "sys",
-                    "BLE provisioning startup failed (reason={}, attempt={}/{}): {:#}; retrying in {}s",
-                    reason,
-                    attempts,
-                    START_RETRY_ATTEMPTS,
-                    error,
-                    START_RETRY_DELAY.as_secs()
-                );
-                thread::sleep(START_RETRY_DELAY);
-            }
-        }
-    }
-}
-
-fn provisioning_still_needed(manager: &ProvisioningManager) -> bool {
-    manager.force_enabled() || !wifi::has_active_connection()
 }
 
 fn build_identity(version: &str) -> ProvisioningDeviceInfo {
@@ -295,9 +257,6 @@ impl ProvisioningBackend for LinuxWifiBackend {
 
 #[cfg(target_os = "linux")]
 mod bluez {
-    use std::future::Future;
-    use std::path::Path;
-    use std::process::Command;
     use std::sync::mpsc::{Receiver, RecvTimeoutError};
     use std::time::Duration;
 
@@ -313,7 +272,6 @@ mod bluez {
     use log::{info, warn};
     use tokio::runtime::Runtime;
     use tokio::sync::watch;
-    use tokio::time::Instant;
     use uuid::Uuid;
 
     use super::{
@@ -321,12 +279,6 @@ mod bluez {
         Sender as StdSender, PROVISIONING_DEVICE_INFO_UUID, PROVISIONING_SERVICE_UUID,
         PROVISIONING_STATUS_UUID, PROVISIONING_WIFI_CMD_UUID,
     };
-
-    const BLUEZ_STEP_TIMEOUT: Duration = Duration::from_secs(15);
-    const BLUEZ_POWER_TIMEOUT: Duration = Duration::from_secs(30);
-    const ADAPTER_POWER_POLL_INTERVAL: Duration = Duration::from_secs(1);
-    const ADAPTER_POWER_WAIT: Duration = Duration::from_secs(10);
-
     pub(super) struct BluezFrontend {
         runtime: Runtime,
         event_tx: StdSender<ProvisioningEvent>,
@@ -403,46 +355,33 @@ mod bluez {
         }
     }
 
-    async fn bluez_step<T, E, Fut>(label: &str, fut: Fut) -> Result<T>
-    where
-        Fut: Future<Output = std::result::Result<T, E>>,
-        E: std::error::Error + Send + Sync + 'static,
-    {
-        bluez_step_with_timeout(label, BLUEZ_STEP_TIMEOUT, fut).await
-    }
-
-    async fn bluez_step_with_timeout<T, E, Fut>(
-        label: &str,
-        timeout: Duration,
-        fut: Fut,
-    ) -> Result<T>
-    where
-        Fut: Future<Output = std::result::Result<T, E>>,
-        E: std::error::Error + Send + Sync + 'static,
-    {
-        info!(target: "sys", "BLE BlueZ step: {}", label);
-        tokio::time::timeout(timeout, fut)
-            .await
-            .map_err(|_| anyhow::anyhow!("timed out while {}", label))?
-            .with_context(|| label.to_string())
-    }
-
     async fn start_bluez(
         mut info: ProvisioningDeviceInfo,
         event_tx: StdSender<ProvisioningEvent>,
         status_tx: watch::Sender<Vec<u8>>,
     ) -> Result<BluezHandles> {
-        let session = bluez_step("opening BlueZ session", Session::new()).await?;
-        let adapter = open_adapter(&session)?;
+        let session = Session::new().await.context("opening BlueZ session")?;
+        let adapter = session
+            .default_adapter()
+            .await
+            .context("finding default Bluetooth adapter")?;
 
-        ensure_adapter_powered(&adapter).await?;
-        bluez_step("disabling pairable mode", adapter.set_pairable(false)).await?;
-        let previous_alias = bluez_step("reading Bluetooth adapter alias", adapter.alias()).await?;
-        bluez_step(
-            "setting Bluetooth adapter alias",
-            adapter.set_alias(info.name.clone()),
-        )
-        .await?;
+        adapter
+            .set_powered(true)
+            .await
+            .context("powering Bluetooth adapter")?;
+        adapter
+            .set_pairable(false)
+            .await
+            .context("disabling pairable mode")?;
+        let previous_alias = adapter
+            .alias()
+            .await
+            .context("reading Bluetooth adapter alias")?;
+        adapter
+            .set_alias(info.name.clone())
+            .await
+            .context("setting Bluetooth adapter alias")?;
 
         if info.mac.is_none() {
             info.mac = adapter.address().await.ok().map(|addr| addr.to_string());
@@ -558,11 +497,10 @@ mod bluez {
             ..Default::default()
         };
 
-        let app_handle = bluez_step(
-            "registering GATT application",
-            adapter.serve_gatt_application(app),
-        )
-        .await?;
+        let app_handle = adapter
+            .serve_gatt_application(app)
+            .await
+            .context("registering GATT application")?;
 
         let advertisement = Advertisement {
             advertisement_type: bluer::adv::Type::Peripheral,
@@ -571,11 +509,10 @@ mod bluez {
             local_name: Some(info.name.clone()),
             ..Default::default()
         };
-        let adv_handle = bluez_step(
-            "starting BLE advertisement",
-            adapter.advertise(advertisement),
-        )
-        .await?;
+        let adv_handle = adapter
+            .advertise(advertisement)
+            .await
+            .context("starting BLE advertisement")?;
 
         let adapter_addr = adapter.address().await.ok();
         info!(
@@ -594,132 +531,6 @@ mod bluez {
             app: app_handle,
             adv: adv_handle,
         })
-    }
-
-    fn open_adapter(session: &Session) -> Result<Adapter> {
-        const APPLIANCE_ADAPTER: &str = "hci0";
-
-        info!(
-            target: "sys",
-            "BLE BlueZ step: opening Bluetooth adapter {}",
-            APPLIANCE_ADAPTER
-        );
-        session
-            .adapter(APPLIANCE_ADAPTER)
-            .with_context(|| format!("opening Bluetooth adapter {}", APPLIANCE_ADAPTER))
-    }
-
-    async fn ensure_adapter_powered(adapter: &Adapter) -> Result<()> {
-        let adapter_name = adapter.name().to_string();
-
-        if adapter_is_powered(adapter).await? {
-            info!(
-                target: "sys",
-                "Bluetooth adapter {} already reports powered",
-                adapter_name
-            );
-            return Ok(());
-        }
-
-        if bring_adapter_up_with_hciconfig(&adapter_name).await?
-            && wait_for_adapter_powered(adapter, ADAPTER_POWER_WAIT).await?
-        {
-            info!(
-                target: "sys",
-                "Bluetooth adapter {} reported powered after hciconfig up",
-                adapter_name
-            );
-            return Ok(());
-        }
-
-        bluez_step_with_timeout(
-            "powering Bluetooth adapter",
-            BLUEZ_POWER_TIMEOUT,
-            adapter.set_powered(true),
-        )
-        .await?;
-
-        if wait_for_adapter_powered(adapter, Duration::from_secs(5)).await? {
-            return Ok(());
-        }
-
-        anyhow::bail!(
-            "Bluetooth adapter {} did not report powered after power-on request",
-            adapter_name
-        );
-    }
-
-    async fn adapter_is_powered(adapter: &Adapter) -> Result<bool> {
-        tokio::time::timeout(Duration::from_secs(5), adapter.is_powered())
-            .await
-            .map_err(|_| anyhow::anyhow!("timed out while checking Bluetooth adapter power state"))?
-            .context("checking Bluetooth adapter power state")
-    }
-
-    async fn wait_for_adapter_powered(adapter: &Adapter, timeout: Duration) -> Result<bool> {
-        let deadline = Instant::now() + timeout;
-
-        loop {
-            if adapter_is_powered(adapter).await? {
-                return Ok(true);
-            }
-            if Instant::now() >= deadline {
-                return Ok(false);
-            }
-            tokio::time::sleep(ADAPTER_POWER_POLL_INTERVAL).await;
-        }
-    }
-
-    async fn bring_adapter_up_with_hciconfig(adapter_name: &str) -> Result<bool> {
-        let adapter_name = adapter_name.to_string();
-        info!(
-            target: "sys",
-            "BLE BlueZ step: bringing Bluetooth adapter {} up with hciconfig",
-            adapter_name
-        );
-
-        tokio::task::spawn_blocking(move || {
-            const HCICONFIG: &str = "/usr/bin/hciconfig";
-
-            if !Path::new(HCICONFIG).is_file() {
-                warn!(
-                    target: "sys",
-                    "hciconfig is unavailable at {}; continuing with BlueZ power-on",
-                    HCICONFIG
-                );
-                return false;
-            }
-
-            match Command::new(HCICONFIG)
-                .arg(&adapter_name)
-                .arg("up")
-                .output()
-            {
-                Ok(output) if output.status.success() => true,
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    warn!(
-                        target: "sys",
-                        "hciconfig {} up exited with status {}: {}",
-                        adapter_name,
-                        output.status,
-                        stderr.trim()
-                    );
-                    false
-                }
-                Err(error) => {
-                    warn!(
-                        target: "sys",
-                        "failed to run hciconfig {} up: {}",
-                        adapter_name,
-                        error
-                    );
-                    false
-                }
-            }
-        })
-        .await
-        .context("waiting for hciconfig adapter power-up")
     }
 
     async fn stop_bluez(handles: BluezHandles) -> Result<()> {

@@ -9,7 +9,6 @@ WIFI_SSID="${RHYTHM_WIFI_SSID:-}"
 WIFI_PSK="${RHYTHM_WIFI_PSK:-}"
 WIFI_COUNTRY="${RHYTHM_WIFI_COUNTRY:-US}"
 WIFI_COUNTRY="$(printf '%s' "$WIFI_COUNTRY" | tr '[:lower:]' '[:upper:]')"
-BLE_PROVISION_ALWAYS="${RHYTHM_BLE_PROVISION_ALWAYS:-}"
 BOARD_FIRMWARE_DIR="${SCRIPT_DIR}/firmware"
 FIRMWARE_ROOT_DIR="${TARGET_DIR}/lib/firmware"
 FIRMWARE_DIR="${TARGET_DIR}/lib/firmware/brcm"
@@ -147,14 +146,9 @@ fi
 
 mkdir -p "$RHYTHM_DEFAULTS_DIR"
 rm -f "$RHYTHM_DEV_DEFAULTS"
-if is_truthy "${RHYTHM_DEV_MODE:-}" || is_truthy "$BLE_PROVISION_ALWAYS"; then
-    {
-        if is_truthy "${RHYTHM_DEV_MODE:-}"; then
-            printf 'RHYTHM_DEV_MODE=1\n'
-            printf 'RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION=1\n'
-        fi
-        if is_truthy "$BLE_PROVISION_ALWAYS"; then
-            printf 'RHYTHM_BLE_PROVISION_ALWAYS=1\n'
-        fi
-    } > "$RHYTHM_DEV_DEFAULTS"
+if is_truthy "${RHYTHM_DEV_MODE:-}"; then
+    cat > "$RHYTHM_DEV_DEFAULTS" <<'EOF'
+RHYTHM_DEV_MODE=1
+RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION=1
+EOF
 fi

@@ -3,10 +3,7 @@
 LOGFILE=/var/log/bluetooth.log
 HCIATTACH="${HCIATTACH:-/usr/bin/hciattach}"
 HCICONFIG="${HCICONFIG:-/usr/bin/hciconfig}"
-DBUS_SOCKET=/run/dbus/system_bus_socket
-DBUS_INIT=/etc/init.d/S30dbus-daemon
 BLUETOOTHD_INIT=/etc/init.d/S40bluetoothd
-HCI_WAIT_SECS="${HCI_WAIT_SECS:-15}"
 
 log() {
     local msg="bluetooth: $*"
@@ -99,29 +96,8 @@ attach_controller() {
 
 bring_hci_up() {
     if [ -x "$HCICONFIG" ] && "$HCICONFIG" hci0 >/dev/null 2>&1; then
-        log "bringing hci0 up"
         "$HCICONFIG" hci0 up >/dev/null 2>&1 || true
     fi
-}
-
-wait_for_hci() {
-    local remaining="$HCI_WAIT_SECS"
-
-    if [ ! -x "$HCICONFIG" ]; then
-        return 1
-    fi
-
-    while [ "$remaining" -gt 0 ]; do
-        if "$HCICONFIG" hci0 >/dev/null 2>&1; then
-            log "hci0 is available"
-            return 0
-        fi
-        sleep 1
-        remaining=$((remaining - 1))
-    done
-
-    log "timed out waiting for hci0"
-    return 1
 }
 
 restart_bluetoothd() {
@@ -130,37 +106,15 @@ restart_bluetoothd() {
     fi
 }
 
-ensure_dbus() {
-    if [ -S "$DBUS_SOCKET" ]; then
-        return 0
-    fi
-
-    log "system D-Bus socket missing, restarting dbus-daemon"
-    if [ -x "$DBUS_INIT" ]; then
-        "$DBUS_INIT" restart >>"$LOGFILE" 2>&1 || "$DBUS_INIT" start >>"$LOGFILE" 2>&1 || true
-    fi
-
-    if [ -S "$DBUS_SOCKET" ]; then
-        log "system D-Bus is ready at $DBUS_SOCKET"
-        return 0
-    fi
-
-    log "system D-Bus is still unavailable at $DBUS_SOCKET"
-    return 1
-}
-
 start() {
-    ensure_dbus || true
     log "loading bluetooth modules"
     modprobe bluetooth 2>/dev/null || true
     modprobe hci_uart 2>/dev/null || true
     sleep 1
     attach_controller || true
-    wait_for_hci || true
+    sleep 1
     bring_hci_up
     restart_bluetoothd
-    wait_for_hci || true
-    bring_hci_up
     log_kernel_excerpt
 }
 

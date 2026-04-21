@@ -93,7 +93,7 @@ RHYTHM_CHIP_OUT_DIR=/path/to/connectedhomeip/out/rpiz ./scripts/build-server.sh 
 
 **Output:** `dist/bin/{target}/{rhythm-server,rhythm-cli}`
 For `rpiz`, the build comes from the `rhythm-linux-appliance` crate and writes both `dist/bin/rpiz/rhythm-linux-appliance` and the compatibility appliance binary `dist/bin/rpiz/rhythm-server`.
-For `rpiz`, the helper always builds `rhythm-chipd` with `--features chip-ffi` and requires CHIP artifacts. Set `RHYTHM_CHIP_OUT_DIR` to the target-specific connectedhomeip out dir (for example `connectedhomeip/out/rpiz-arm-musl`) or set `RHYTHM_CHIP_LIB_DIR` to a lib dir containing `libCHIP.a`. If neither is set, the helper auto-detects `connectedhomeip/out/rpiz-arm-musl` when present. For native builds, `RHYTHM_CHIP_ROOT`, `RHYTHM_CHIP_OUT_DIR`, or `RHYTHM_CHIP_LIB_DIR` still opt into the direct bridge.
+If `RHYTHM_CHIP_OUT_DIR` or `RHYTHM_CHIP_LIB_DIR` is set, the helper automatically builds `rhythm-chipd` with `--features chip-ffi`. For native builds, `RHYTHM_CHIP_ROOT` also enables the direct bridge.
 The native Matter bridge also accepts `RHYTHM_MATTER_CONTROLLER_VENDOR_ID` to override the controller vendor ID used by `rhythm-chipd`. It defaults to `0xFFF1` for development and accepts either hex (`0xFFF1`) or decimal.
 For bring-up only, `RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION=1` makes `rhythm-chipd` skip Matter DAC/PAA verification. Leave it unset for normal builds and any image you intend to ship.
 
@@ -107,7 +107,6 @@ Build a Raspberry Pi Zero SD-card image using the Buildroot external tree in `in
 ./scripts/build-rpiz-image.sh --skip-server-build
 ./scripts/build-rpiz-image.sh --release --docker
 ./scripts/build-rpiz-image.sh --release --wifi-ssid "MyNet" --wifi-psk "secretpass"
-RHYTHM_BLE_PROVISION_ALWAYS=1 ./scripts/build-rpiz-image.sh --release --wifi-ssid "MyNet" --wifi-psk "secretpass"
 ```
 
 **Options:**
@@ -129,7 +128,6 @@ RHYTHM_BLE_PROVISION_ALWAYS=1 ./scripts/build-rpiz-image.sh --release --wifi-ssi
 **Output:** `out/rpiz/images/sdcard.img`
 With `--docker` and no explicit `--output-dir`, the default becomes `out/rpiz-docker/images/sdcard.img`.
 By default, rpiz image builds include the bring-up extras: Dropbear SSH, root password `rhythm`, and Matter device attestation bypass. Use `--prod` or `RHYTHM_DEV_MODE=0` to turn those off.
-Set `RHYTHM_BLE_PROVISION_ALWAYS=1` when building the image to bake `RHYTHM_BLE_PROVISION_ALWAYS=1` into `/etc/default/rhythm-dev`, which forces BLE provisioning to start even if the appliance already connects to the bundled Wi-Fi credentials.
 
 ---
 

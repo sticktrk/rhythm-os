@@ -19,7 +19,6 @@ WIFI_SSID="${RHYTHM_WIFI_SSID:-}"
 WIFI_PSK="${RHYTHM_WIFI_PSK:-}"
 WIFI_COUNTRY="${RHYTHM_WIFI_COUNTRY:-US}"
 DEV_MODE="${RHYTHM_DEV_MODE:-1}"
-BLE_PROVISION_ALWAYS="${RHYTHM_BLE_PROVISION_ALWAYS:-}"
 DOCKER_BUILD=false
 DOCKER_IMAGE="rhythm-rpiz-builder:local"
 BUILDROOT_GIT_URL="${RHYTHM_BUILDROOT_GIT_URL:-https://git.buildroot.net/buildroot}"
@@ -98,7 +97,6 @@ while [[ $# -gt 0 ]]; do
             echo "  --wifi-country <code>   Wi-Fi regulatory country (default: $WIFI_COUNTRY)"
             echo "Environment:"
             echo "  RHYTHM_DEV_MODE=0       Disable rpiz bring-up mode; default is dev (Dropbear + known root password + Matter attestation bypass)"
-            echo "  RHYTHM_BLE_PROVISION_ALWAYS=1  Force BLE provisioning to start even when appliance Wi-Fi is already connected"
             echo "  --docker                Run the Buildroot image step inside Docker"
             echo "  --docker-image <name>   Docker image tag to build/use (default: $DOCKER_IMAGE)"
             echo "  -h, --help              Show this help"
@@ -224,9 +222,6 @@ run_in_docker() {
         )
     fi
     docker_args+=(-e "RHYTHM_DEV_MODE=$DEV_MODE")
-    if is_truthy "$BLE_PROVISION_ALWAYS"; then
-        docker_args+=(-e "RHYTHM_BLE_PROVISION_ALWAYS=1")
-    fi
 
     inner_args=("--buildroot-dir" "/buildroot" "--output-dir" "/output" "--skip-server-build")
     if [ "$BUILD_MODE" = "release" ]; then

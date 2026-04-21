@@ -49,16 +49,20 @@ fn main() {
                 build.include(include_dir);
             }
             if let Err(error) = add_platform_include_deps(&artifacts.target, &mut build) {
-                fail_chip_ffi(format!("Linux system headers are unavailable: {error}"));
+                println!(
+                    "cargo:warning=chip-ffi requested, but Linux system headers are unavailable: {error}"
+                );
+                return;
             }
             build.define("RHYTHM_CHIP_BRIDGE_NATIVE_LIBCHIP", "1");
 
             build.compile("rhythm_chip_bridge");
 
             if let Err(error) = emit_native_chip_link_inputs(&artifacts) {
-                fail_chip_ffi(format!(
-                    "native CHIP controller data-model objects are unavailable: {error}"
-                ));
+                println!(
+                    "cargo:warning=chip-ffi requested, but native CHIP controller data-model objects are unavailable: {error}"
+                );
+                return;
             }
 
             println!("cargo:rustc-link-arg={}", artifacts.link_path.display());
@@ -77,13 +81,11 @@ fn main() {
             println!("cargo:rustc-cfg=rhythm_chipd_chip_ffi");
         }
         Err(error) => {
-            fail_chip_ffi(format!("direct CHIP bridge is unavailable: {error}"));
+            println!(
+                "cargo:warning=chip-ffi requested, but direct CHIP bridge is disabled: {error}"
+            );
         }
     }
-}
-
-fn fail_chip_ffi(message: String) -> ! {
-    panic!("chip-ffi requested, but {message}");
 }
 
 fn emit_platform_link_args(target: &str) {

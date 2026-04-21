@@ -22,6 +22,7 @@ const VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
 };
+const TOKIO_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 /// Rhythm OS Linux appliance.
 #[derive(Parser, Debug)]
@@ -48,7 +49,6 @@ fn main() -> Result<()> {
         std::env::var("RHYTHM_PLATFORM_CONTEXT").unwrap_or_else(|_| "rpiz".to_string());
 
     logging::init_native_logging(&args.log_level)?;
-    configure_linux_system_bus();
 
     info!(target: "sys", "Rhythm Linux Appliance v{} starting...", VERSION);
 
@@ -164,29 +164,19 @@ fn main() -> Result<()> {
         );
     }
 
+    info!(
+        target: "sys",
+        "Starting async runtime with {} MiB worker stacks",
+        TOKIO_WORKER_STACK_SIZE / (1024 * 1024)
+    );
+
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("rhythm-main-rt")
+        .thread_stack_size(TOKIO_WORKER_STACK_SIZE)
         .build()?
         .block_on(run_server(state, args.port, provisioning))
 }
-
-#[cfg(target_os = "linux")]
-fn configure_linux_system_bus() {
-    const SYSTEM_BUS_ADDRESS: &str = "unix:path=/run/dbus/system_bus_socket";
-
-    if std::env::var_os("DBUS_SYSTEM_BUS_ADDRESS").is_none() {
-        std::env::set_var("DBUS_SYSTEM_BUS_ADDRESS", SYSTEM_BUS_ADDRESS);
-        info!(
-            target: "sys",
-            "DBus system bus address defaulted to {}",
-            SYSTEM_BUS_ADDRESS
-        );
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn configure_linux_system_bus() {}
 
 fn spawn_hub_bootstrap(state: SharedState) {
     info!(
