@@ -415,11 +415,7 @@ mod bluez {
         status_tx: watch::Sender<Vec<u8>>,
     ) -> Result<BluezHandles> {
         let session = bluez_step("opening BlueZ session", Session::new()).await?;
-        let adapter = bluez_step(
-            "finding default Bluetooth adapter",
-            session.default_adapter(),
-        )
-        .await?;
+        let adapter = open_adapter(&session)?;
 
         bluez_step("powering Bluetooth adapter", adapter.set_powered(true)).await?;
         bluez_step("disabling pairable mode", adapter.set_pairable(false)).await?;
@@ -580,6 +576,19 @@ mod bluez {
             app: app_handle,
             adv: adv_handle,
         })
+    }
+
+    fn open_adapter(session: &Session) -> Result<Adapter> {
+        const APPLIANCE_ADAPTER: &str = "hci0";
+
+        info!(
+            target: "sys",
+            "BLE BlueZ step: opening Bluetooth adapter {}",
+            APPLIANCE_ADAPTER
+        );
+        session
+            .adapter(APPLIANCE_ADAPTER)
+            .with_context(|| format!("opening Bluetooth adapter {}", APPLIANCE_ADAPTER))
     }
 
     async fn stop_bluez(handles: BluezHandles) -> Result<()> {
