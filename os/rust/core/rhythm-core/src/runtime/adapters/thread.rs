@@ -113,29 +113,14 @@ pub struct ThreadScheduler {
 
     /// Thread handles for cleanup.
     handles: Arc<Mutex<HashMap<u64, JoinHandle<()>>>>,
-
-    /// Stack size for spawned threads (bytes). On constrained appliance targets,
-    /// the default pthread stack is very small (~3KB usable). Callbacks that
-    /// perform TLS, float math, or string formatting need 16KB+.
-    stack_size: Option<usize>,
 }
 
 impl ThreadScheduler {
-    /// Create a new ThreadScheduler with default thread stack size.
     pub fn new() -> Self {
         Self {
             next_id: AtomicU32::new(1),
             tasks: Arc::new(Mutex::new(HashMap::new())),
             handles: Arc::new(Mutex::new(HashMap::new())),
-            stack_size: None,
-        }
-    }
-
-    /// Create a new ThreadScheduler with a specific thread stack size.
-    pub fn with_stack_size(stack_size: usize) -> Self {
-        Self {
-            stack_size: Some(stack_size),
-            ..Self::new()
         }
     }
 }
@@ -173,11 +158,8 @@ impl Scheduler for ThreadScheduler {
         let interval = Duration::from_secs(interval_secs);
 
         // Spawn the periodic thread
-        let mut builder = thread::Builder::new().name(format!("sched-{}", task_name));
-        if let Some(size) = self.stack_size {
-            builder = builder.stack_size(size);
-        }
-        let handle = builder
+        let handle = thread::Builder::new()
+            .name(format!("sched-{}", task_name))
             .spawn(move || {
                 debug!(
                     "Periodic task '{}' started with {}s interval",

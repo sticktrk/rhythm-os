@@ -137,7 +137,6 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
         utc_offset,
         latitude,
         longitude,
-        scheduler_stack,
         eager_warmup,
         timezone_name,
     ) = {
@@ -162,7 +161,6 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
             s.utc_offset_hours,
             s.latitude,
             s.longitude,
-            s.platform.scheduler_stack,
             s.platform.eager_tls_warmup,
             s.timezone_name.clone(),
         )
@@ -226,15 +224,10 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
         .with_location(lat as f64, lon as f64)
         .with_utc_offset(utc_offset);
 
-    let scheduler = match scheduler_stack {
-        Some(size) => ThreadScheduler::with_stack_size(size),
-        None => ThreadScheduler::new(),
-    };
-
     let runtime = RhythmRuntime::new(
         Arc::new(controller),
         time_provider,
-        scheduler,
+        ThreadScheduler::new(),
         {
             let reg = registry
                 .lock()
@@ -411,17 +404,12 @@ pub fn start_event_translator<E: Send + 'static>(
     translate: impl Fn(&E) -> Vec<HubEvent> + Send + 'static,
     shutdown: Arc<AtomicBool>,
     thread_name: &str,
-    stack_size: Option<usize>,
     on_activity: Option<Arc<dyn Fn() + Send + Sync>>,
 ) -> Receiver<HubEvent> {
     let (hub_tx, hub_rx) = std::sync::mpsc::sync_channel::<HubEvent>(32);
 
-    let mut builder = std::thread::Builder::new().name(thread_name.to_string());
-    if let Some(size) = stack_size {
-        builder = builder.stack_size(size);
-    }
-
-    builder
+    std::thread::Builder::new()
+        .name(thread_name.to_string())
         .spawn(move || {
             while let Ok(raw_event) = raw_rx.recv() {
                 if shutdown.load(Ordering::Relaxed) {
@@ -483,7 +471,6 @@ pub fn ensure_composite_runtime(
         utc_offset,
         latitude,
         longitude,
-        scheduler_stack,
         timezone_name,
     ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -505,7 +492,6 @@ pub fn ensure_composite_runtime(
             s.utc_offset_hours,
             s.latitude,
             s.longitude,
-            s.platform.scheduler_stack,
             s.timezone_name.clone(),
         )
     };
@@ -607,17 +593,12 @@ pub fn ensure_composite_runtime(
         .with_location(lat as f64, lon as f64)
         .with_utc_offset(utc_offset);
 
-    let scheduler = match scheduler_stack {
-        Some(size) => ThreadScheduler::with_stack_size(size),
-        None => ThreadScheduler::new(),
-    };
-
     // Create the shared runtime with the composite controller.
     // Arc::clone gives the runtime a shared ref; AppState holds another for dynamic registration.
     let runtime = RhythmRuntime::new(
         composite.clone(),
         time_provider,
-        scheduler,
+        ThreadScheduler::new(),
         merged_registry,
         new_runtime_config.clone(),
     );

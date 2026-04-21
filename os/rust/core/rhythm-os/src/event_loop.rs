@@ -326,13 +326,6 @@ pub fn turn_on_node_inline(state: &SharedState, node_id: &str) -> bool {
     }
 }
 
-fn ingress_thread_stack_size(state: &SharedState) -> Option<usize> {
-    state
-        .lock()
-        .ok()
-        .and_then(|s| s.platform.event_thread_stack)
-}
-
 fn run_button_ingress_action(
     state: &SharedState,
     node_id: &str,
@@ -374,10 +367,7 @@ fn spawn_button_ingress_action(
     command_id: String,
     persist_after: bool,
 ) {
-    let mut builder = std::thread::Builder::new().name("evt-button".to_string());
-    if let Some(stack_size) = ingress_thread_stack_size(state) {
-        builder = builder.stack_size(stack_size);
-    }
+    let builder = std::thread::Builder::new().name("evt-button".to_string());
 
     let state_clone = state.clone();
     let node_id_clone = node_id.clone();
@@ -415,10 +405,7 @@ fn run_motion_turn_on_action(state: &SharedState, node_id: &str) {
 }
 
 fn spawn_motion_turn_on_action(state: &SharedState, node_id: String) {
-    let mut builder = std::thread::Builder::new().name("evt-motion".to_string());
-    if let Some(stack_size) = ingress_thread_stack_size(state) {
-        builder = builder.stack_size(stack_size);
-    }
+    let builder = std::thread::Builder::new().name("evt-motion".to_string());
 
     let state_clone = state.clone();
     let node_id_clone = node_id.clone();

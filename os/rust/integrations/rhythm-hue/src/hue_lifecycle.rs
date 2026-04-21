@@ -100,7 +100,6 @@ where
 pub fn ensure_hue_runtime<H: crate::transport::HueTransport + 'static>(
     state: &SharedState,
     transport: H,
-    _scheduler_stack_size: Option<usize>,
 ) -> Result<()> {
     use crate::controller::HueLightController;
     use log::warn;

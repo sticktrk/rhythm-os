@@ -5501,10 +5501,9 @@ pub fn ensure_runtime(state: &SharedState) {
 
 /// Call the platform's ensure_runtime callback and surface bootstrap failures.
 pub fn try_ensure_runtime(state: &SharedState) -> Result<()> {
-    // Clone the Arc + platform config out of the lock so we can call without holding it
-    let (ensure_fn, stack_size) = {
+    let ensure_fn = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        (s.ensure_runtime_fn.clone(), s.platform.runtime_init_stack)
+        s.ensure_runtime_fn.clone()
     };
 
     let Some(ensure_fn) = ensure_fn else {
@@ -5514,7 +5513,6 @@ pub fn try_ensure_runtime(state: &SharedState) -> Result<()> {
     let rt_state = state.clone();
     let rt_result = std::thread::Builder::new()
         .name("rt-init".to_string())
-        .stack_size(stack_size)
         .spawn(move || ensure_fn(&rt_state))
         .and_then(|handle| handle.join().map_err(|_| std::io::Error::other("panicked")));
 

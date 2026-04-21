@@ -95,13 +95,8 @@ pub fn ensure_runtime(state: &SharedState) -> Result<()> {
         crate::provider::config_from_credentials(&ha_creds.address, ha_creds)?
     };
 
-    let scheduler_stack = {
-        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.platform.scheduler_stack
-    };
-
     let transport = ReqwestHaTransport::new(config)?;
-    crate::ha_lifecycle::ensure_ha_runtime(state, transport, scheduler_stack)
+    crate::ha_lifecycle::ensure_ha_runtime(state, transport)
 }
 
 // ============================================================================
@@ -399,6 +394,5 @@ fn start_event_stream(
         None,
         Some(on_unknown_button),
         Some(on_unknown_motion),
-        None,
     )
 }

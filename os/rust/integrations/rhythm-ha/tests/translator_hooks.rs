@@ -51,7 +51,6 @@ fn translator_uses_raw_button_hook_for_unknown_hue_event() {
         None,
         Some(on_unknown_button),
         None,
-        None,
     );
 
     ws_tx
@@ -109,7 +108,6 @@ fn translator_uses_motion_hook_for_unknown_state_changed_motion() {
         None,
         None,
         Some(on_unknown_motion),
-        None,
     );
 
     ws_tx

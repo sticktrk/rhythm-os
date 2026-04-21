@@ -153,7 +153,6 @@ pub fn start_event_translator(
     on_activity: Option<Arc<dyn Fn() + Send + Sync>>,
     on_unknown_button: Option<Arc<dyn Fn(&RawButtonEvent) + Send + Sync>>,
     on_unknown_motion: Option<Arc<dyn Fn(&str) + Send + Sync>>,
-    stack_size: Option<usize>,
 ) -> Receiver<HubEvent> {
     rhythm_os::lifecycle::start_event_translator(
         sse_rx,
@@ -176,7 +175,6 @@ pub fn start_event_translator(
         },
         shutdown,
         "hue-evt",
-        stack_size,
         None, // on_activity is handled inside the translate closure
     )
 }

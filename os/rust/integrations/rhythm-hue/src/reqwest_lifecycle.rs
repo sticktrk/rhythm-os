@@ -83,13 +83,8 @@ pub fn ensure_runtime(state: &SharedState) -> Result<()> {
             .unwrap_or_default()
     };
 
-    let scheduler_stack = {
-        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.platform.scheduler_stack
-    };
-
     let transport = ReqwestHueTransport::new(&bridge_ip)?;
-    crate::hue_lifecycle::ensure_hue_runtime(state, transport, scheduler_stack)
+    crate::hue_lifecycle::ensure_hue_runtime(state, transport)
 }
 
 // ============================================================================
@@ -254,5 +249,5 @@ fn start_event_stream(
 
     let sse_rx = start_reqwest_sse(sse_config, shutdown.clone());
 
-    crate::events::start_event_translator(sse_rx, registry, shutdown, None, None, None, None)
+    crate::events::start_event_translator(sse_rx, registry, shutdown, None, None, None)
 }

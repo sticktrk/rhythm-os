@@ -91,19 +91,9 @@ pub struct RoomModeTransition {
     pub periodic_resume_at: Instant,
 }
 
-/// Platform-specific tuning for stack sizes and resource limits.
-///
-/// Active server-class targets can use the OS defaults (typically 8MB).
+/// Platform-specific tuning for startup and sync behavior.
 #[derive(Clone, Debug)]
 pub struct PlatformConfig {
-    /// Stack size for the runtime-init thread (creates TLS clients, serde, etc.).
-    pub runtime_init_stack: usize,
-    /// Stack size for scheduler periodic threads (Hue HTTPS calls).
-    /// `None` = OS default.
-    pub scheduler_stack: Option<usize>,
-    /// Stack size for SSE event translator threads.
-    /// `None` = OS default.
-    pub event_thread_stack: Option<usize>,
     /// Whether to eagerly establish the runtime's TLS connection at startup.
     ///
     /// When `true`, `warmup_tls()` is called during runtime creation so the
@@ -120,9 +110,6 @@ impl PlatformConfig {
     /// Preset for desktop/server targets (macOS, Linux, Windows).
     pub fn desktop() -> Self {
         Self {
-            runtime_init_stack: 2 * 1024 * 1024,
-            scheduler_stack: None,
-            event_thread_stack: None,
             eager_tls_warmup: true,
             full_device_discovery: true,
         }
@@ -808,7 +795,6 @@ mod tests {
     fn platform_config_desktop_defaults_match_active_targets() {
         let desktop = PlatformConfig::desktop();
 
-        assert!(desktop.scheduler_stack.is_none());
         assert!(desktop.eager_tls_warmup);
         assert!(desktop.full_device_discovery);
     }
@@ -817,8 +803,8 @@ mod tests {
     fn platform_config_default_is_desktop() {
         let default = PlatformConfig::default();
         let desktop = PlatformConfig::desktop();
-        assert_eq!(default.runtime_init_stack, desktop.runtime_init_stack);
-        assert!(default.eager_tls_warmup);
+        assert_eq!(default.eager_tls_warmup, desktop.eager_tls_warmup);
+        assert_eq!(default.full_device_discovery, desktop.full_device_discovery);
     }
 
     #[test]

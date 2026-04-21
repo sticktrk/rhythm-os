@@ -92,7 +92,6 @@ where
 pub fn ensure_ha_runtime<H: crate::transport::HaTransport + 'static>(
     state: &SharedState,
     transport: H,
-    _scheduler_stack_size: Option<usize>,
 ) -> Result<()> {
     use crate::controller::HaLightController;
 
@@ -131,7 +130,6 @@ pub fn start_event_translator(
     on_activity: Option<Arc<dyn Fn() + Send + Sync>>,
     on_unknown_button: Option<Arc<dyn Fn(&RawButtonEvent) + Send + Sync>>,
     on_unknown_motion: Option<Arc<dyn Fn(&str) + Send + Sync>>,
-    stack_size: Option<usize>,
 ) -> Receiver<HubEvent> {
     rhythm_os::lifecycle::start_event_translator(
         ws_rx,
@@ -166,7 +164,6 @@ pub fn start_event_translator(
         },
         shutdown,
         "ha-evt",
-        stack_size,
         None, // activity is handled inside the translate closure
     )
 }

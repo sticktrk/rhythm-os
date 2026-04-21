@@ -48,7 +48,6 @@ fn translator_uses_raw_button_hook_for_unknown_button() {
         None,
         Some(on_unknown_button),
         None,
-        None,
     );
 
     sse_tx
