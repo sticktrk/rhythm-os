@@ -46,14 +46,35 @@ void main() {
       expect(service!.statusMessage, 'Updated to v1.1.0');
     });
 
-    test('uses update_available as the source of truth for bundle OTA',
+    test('falls back to version mismatch when update_available is false',
         () async {
       server = await _FakeOtaServer.start(
         initialVersion: '1.0.0',
         latestVersion: '1.1.0',
         scenario: _FakeOtaScenario.idleAfterRestart,
         initialUpdateAvailable: false,
-        otaScope: 'bundle',
+        otaScope: 'component_bundle',
+      );
+      service = OtaService();
+
+      await service!.initialize(
+        host: InternetAddress.loopbackIPv4.address,
+        port: server!.port,
+      );
+
+      expect(service!.isSelfPull, isTrue);
+      expect(service!.state, OtaState.available);
+      expect(service!.availableRelease?.version, '1.1.0');
+    });
+
+    test('stays up to date when versions match and update_available is false',
+        () async {
+      server = await _FakeOtaServer.start(
+        initialVersion: '1.1.0',
+        latestVersion: '1.1.0',
+        scenario: _FakeOtaScenario.idleAfterRestart,
+        initialUpdateAvailable: false,
+        otaScope: 'component_bundle',
       );
       service = OtaService();
 
@@ -67,6 +88,25 @@ void main() {
       expect(service!.availableRelease, isNull);
     });
 
+    test('stays idle before any self-pull check has run', () async {
+      server = await _FakeOtaServer.start(
+        initialVersion: '1.0.0',
+        latestVersion: '1.1.0',
+        scenario: _FakeOtaScenario.idleAfterRestart,
+        statusHasPreviousCheck: false,
+      );
+      service = OtaService();
+
+      await service!.initialize(
+        host: InternetAddress.loopbackIPv4.address,
+        port: server!.port,
+      );
+
+      expect(service!.isSelfPull, isTrue);
+      expect(service!.state, OtaState.idle);
+      expect(service!.availableRelease, isNull);
+    });
+
     test('surfaces component drift metadata from server bundle checks',
         () async {
       server = await _FakeOtaServer.start(
@@ -74,7 +114,7 @@ void main() {
         latestVersion: '1.1.0',
         scenario: _FakeOtaScenario.idleAfterRestart,
         updateReason: 'component_drift',
-        otaScope: 'bundle',
+        otaScope: 'component_bundle',
         installTargets: const [
           {'name': 'rhythm-server', 'path': '/usr/local/bin/rhythm-server'},
           {'name': 'rhythm-chipd', 'path': '/usr/local/bin/rhythm-chipd'},
@@ -97,7 +137,7 @@ void main() {
       expect(service!.state, OtaState.available);
       expect(service!.isBundleRepair, isTrue);
       expect(service!.updateReason, OtaUpdateReason.componentDrift);
-      expect(service!.capabilities?.supportsRootfsImageOta, isTrue);
+      expect(service!.capabilities?.supportsRootfsImageOta, isFalse);
       expect(service!.availableRelease?.version, '1.1.0');
       expect(
         service!.installTargets.map((entry) => entry.title).toList(),
@@ -146,7 +186,7 @@ void main() {
         latestVersion: '1.1.0',
         scenario: _FakeOtaScenario.idleAfterRestart,
         updateReason: 'component_drift',
-        otaScope: 'bundle',
+        otaScope: 'component_bundle',
         installTargets: const [
           {'name': 'rhythm-chipd', 'path': '/usr/local/bin/rhythm-chipd'},
         ],
@@ -183,6 +223,26 @@ void main() {
         service!.installedTargets.map((entry) => entry.title).toList(),
         ['rhythm-chipd', 'rhythm-server'],
       );
+    });
+
+    test('accepts rootfs_slot appliance capabilities', () async {
+      server = await _FakeOtaServer.start(
+        initialVersion: '1.0.0',
+        latestVersion: '1.1.0',
+        scenario: _FakeOtaScenario.idleAfterRestart,
+        otaScope: 'rootfs_slot',
+        capabilityPayloads: const ['archive_bundle', 'rootfs_image'],
+      );
+      service = OtaService();
+
+      await service!.initialize(
+        host: InternetAddress.loopbackIPv4.address,
+        port: server!.port,
+      );
+
+      expect(service!.isSelfPull, isTrue);
+      expect(service!.capabilities?.supportsRootfsImageOta, isTrue);
+      expect(service!.state, OtaState.available);
     });
 
     test(
@@ -260,7 +320,9 @@ class _FakeOtaServer {
   final List<Object?> imageAssets;
   final List<Object?> installedTargetsResponse;
   final bool? checksumVerified;
+  final List<String> capabilityPayloads;
   final bool? supportsRootfsImage;
+  final bool statusHasPreviousCheck;
 
   bool _updateStarted = false;
   int _statusCallsAfterUpdate = 0;
@@ -279,7 +341,9 @@ class _FakeOtaServer {
     required this.imageAssets,
     required this.installedTargetsResponse,
     required this.checksumVerified,
+    required this.capabilityPayloads,
     required this.supportsRootfsImage,
+    required this.statusHasPreviousCheck,
   }) : _server = server;
 
   int get port => _server.port;
@@ -292,12 +356,14 @@ class _FakeOtaServer {
     Duration startResponseDelay = Duration.zero,
     bool initialUpdateAvailable = true,
     String? updateReason,
-    String otaScope = 'binary',
+    String otaScope = 'component_bundle',
     List<Object?> installTargets = const [],
     List<Object?> imageAssets = const [],
     List<Object?> installedTargetsResponse = const [],
     bool? checksumVerified,
-    bool? supportsRootfsImage = true,
+    List<String>? capabilityPayloads,
+    bool? supportsRootfsImage,
+    bool statusHasPreviousCheck = true,
   }) async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final fake = _FakeOtaServer._(
@@ -314,7 +380,10 @@ class _FakeOtaServer {
       imageAssets: imageAssets,
       installedTargetsResponse: installedTargetsResponse,
       checksumVerified: checksumVerified,
+      capabilityPayloads:
+          capabilityPayloads ?? _defaultCapabilityPayloadsForScope(otaScope),
       supportsRootfsImage: supportsRootfsImage,
+      statusHasPreviousCheck: statusHasPreviousCheck,
     );
     server.listen(fake._handleRequest);
     return fake;
@@ -348,6 +417,7 @@ class _FakeOtaServer {
           'can_upload': false,
           'requires_restart': true,
           'rollback': 'unsupported',
+          'payloads': capabilityPayloads,
           if (supportsRootfsImage != null)
             'supports_rootfs_image': supportsRootfsImage,
         },
@@ -402,8 +472,25 @@ class _FakeOtaServer {
     await request.response.close();
   }
 
+  static List<String> _defaultCapabilityPayloadsForScope(String scope) {
+    return switch (scope) {
+      'rootfs_slot' => const ['archive_bundle', 'rootfs_image'],
+      'component_bundle' => const ['archive_bundle'],
+      'bundle' => const ['archive_bundle'],
+      'rootfs_image' => const ['rootfs_image'],
+      _ => const <String>[],
+    };
+  }
+
   Map<String, dynamic> _statusPayload() {
     if (!_updateStarted) {
+      if (!statusHasPreviousCheck) {
+        return <String, dynamic>{
+          'state': 'idle',
+          'current_version': initialVersion,
+        };
+      }
+
       return _otaPayload(
         state: 'ready',
         currentVersion: initialVersion,
@@ -421,12 +508,14 @@ class _FakeOtaServer {
               currentVersion: initialVersion,
               latestVersion: latestVersion,
               updateAvailable: initialUpdateAvailable,
+              includeUpdateReason: false,
             )
           : _otaPayload(
               state: 'idle',
               currentVersion: stateVersionAfterUpdate,
               latestVersion: latestVersion,
               updateAvailable: false,
+              includeUpdateReason: false,
             ),
       _FakeOtaScenario.restartingThenStatusVersion =>
         _statusCallsAfterUpdate == 1
@@ -435,12 +524,14 @@ class _FakeOtaServer {
                 currentVersion: initialVersion,
                 latestVersion: latestVersion,
                 updateAvailable: initialUpdateAvailable,
+                includeUpdateReason: false,
               )
             : _otaPayload(
                 state: 'idle',
                 currentVersion: stateVersionAfterUpdate,
                 latestVersion: latestVersion,
                 updateAvailable: false,
+                includeUpdateReason: false,
               ),
     };
   }
@@ -450,6 +541,7 @@ class _FakeOtaServer {
     required String currentVersion,
     required String latestVersion,
     required bool updateAvailable,
+    bool includeUpdateReason = true,
   }) {
     return <String, dynamic>{
       'state': state,
@@ -457,7 +549,7 @@ class _FakeOtaServer {
       'latest_version': latestVersion,
       if (updateAvailable) 'target_version': latestVersion,
       'update_available': updateAvailable,
-      if (updateReason != null) 'update_reason': updateReason,
+      if (includeUpdateReason && updateReason != null) 'update_reason': updateReason,
       if (installTargets.isNotEmpty) 'install_targets': installTargets,
       if (imageAssets.isNotEmpty) 'image_assets': imageAssets,
       if (checksumVerified != null) 'checksum_verified': checksumVerified,

@@ -59,6 +59,49 @@ bool? _tryParseBool(Object? value) {
   return null;
 }
 
+String? _normalizeOtaVersion(String? version) {
+  if (version == null) return null;
+  final trimmed = version.trim();
+  return trimmed.isEmpty ? null : trimmed;
+}
+
+String? _canonicalizeOtaVersion(String? version) {
+  final normalized = _normalizeOtaVersion(version);
+  if (normalized == null) return null;
+
+  var canonical = normalized;
+  if (canonical.startsWith('v') || canonical.startsWith('V')) {
+    canonical = canonical.substring(1);
+  }
+
+  final metadataIndex = canonical.indexOf('+');
+  if (metadataIndex >= 0) {
+    canonical = canonical.substring(0, metadataIndex);
+  }
+
+  return canonical;
+}
+
+bool _inferUpdateAvailable({
+  required Object? updateAvailableValue,
+  required String? currentVersion,
+  required String? latestVersion,
+  required OtaUpdateReason? updateReason,
+}) {
+  if (updateAvailableValue == true) {
+    return true;
+  }
+
+  if (updateReason == OtaUpdateReason.versionMismatch ||
+      updateReason == OtaUpdateReason.componentDrift) {
+    return true;
+  }
+
+  final current = _canonicalizeOtaVersion(currentVersion);
+  final latest = _canonicalizeOtaVersion(latestVersion);
+  return current != null && latest != null && current != latest;
+}
+
 class OtaBundleEntry {
   final String title;
   final String? detail;
@@ -213,6 +256,7 @@ class OtaCapabilities {
   final bool canUpload;
   final bool requiresRestart;
   final String rollback;
+  final List<String> payloads;
   final bool? supportsRootfsImage;
 
   const OtaCapabilities({
@@ -223,10 +267,18 @@ class OtaCapabilities {
     required this.canUpload,
     required this.requiresRestart,
     required this.rollback,
+    required this.payloads,
     required this.supportsRootfsImage,
   });
 
   factory OtaCapabilities.fromJson(Map<String, dynamic> json) {
+    final payloads = (json['payloads'] as Iterable?)
+            ?.map((value) => value?.toString().trim())
+            .whereType<String>()
+            .where((value) => value.isNotEmpty)
+            .toList(growable: false) ??
+        const <String>[];
+
     return OtaCapabilities(
       strategy: json['strategy']?.toString() ?? 'unknown',
       scope: json['scope']?.toString() ?? 'unknown',
@@ -235,6 +287,7 @@ class OtaCapabilities {
       canUpload: json['can_upload'] == true,
       requiresRestart: json['requires_restart'] == true,
       rollback: json['rollback']?.toString() ?? 'unknown',
+      payloads: payloads,
       supportsRootfsImage: _tryParseBool(
         json['supports_rootfs_image'] ??
             json['supports_rootfs_image_ota'] ??
@@ -245,14 +298,27 @@ class OtaCapabilities {
   }
 
   bool get supportsRootfsImageOta =>
-      supportsRootfsImage ?? scope == 'rootfs_image';
+      supportsRootfsImage ??
+      payloads.contains('rootfs_image') ||
+          scope == 'rootfs_image' ||
+          scope == 'rootfs_slot';
 
   bool get supportsSelfPullUpdate =>
       strategy == 'self_pull' &&
-      (scope == 'binary' || scope == 'bundle' || scope == 'rootfs_image') &&
+      (_isSupportedScope || _hasSupportedPayloads) &&
       canCheck &&
       canUpdate &&
       !canUpload;
+
+  bool get _isSupportedScope =>
+      scope == 'binary' ||
+      scope == 'bundle' ||
+      scope == 'rootfs_image' ||
+      scope == 'component_bundle' ||
+      scope == 'rootfs_slot';
+
+  bool get _hasSupportedPayloads =>
+      payloads.contains('archive_bundle') || payloads.contains('rootfs_image');
 }
 
 class _OtaStatusPayload {
@@ -261,6 +327,7 @@ class _OtaStatusPayload {
   final String latestVersion;
   final String? targetVersion;
   final bool updateAvailable;
+  final bool hasCheckResult;
   final String? message;
   final String? lastError;
   final OtaUpdateReason? updateReason;
@@ -275,6 +342,7 @@ class _OtaStatusPayload {
     required this.latestVersion,
     required this.targetVersion,
     required this.updateAvailable,
+    required this.hasCheckResult,
     required this.message,
     required this.lastError,
     required this.updateReason,
@@ -285,17 +353,31 @@ class _OtaStatusPayload {
   });
 
   factory _OtaStatusPayload.fromJson(Map<String, dynamic> json) {
+    final currentVersion = json['current_version']?.toString() ?? '0.0.0';
+    final latestVersion = json['latest_version']?.toString();
+    final updateReason = json.containsKey('update_reason')
+        ? _tryParseOtaUpdateReason(json['update_reason'])
+        : null;
+    final hasCheckResult = json.containsKey('checked_at_epoch_ms') ||
+        json.containsKey('latest_version') ||
+        json.containsKey('update_available') ||
+        json.containsKey('update_reason');
+
     return _OtaStatusPayload(
       state: json['state']?.toString() ?? 'idle',
-      currentVersion: json['current_version']?.toString() ?? '0.0.0',
-      latestVersion: json['latest_version']?.toString() ?? '0.0.0',
+      currentVersion: currentVersion,
+      latestVersion: latestVersion ?? '0.0.0',
       targetVersion: json['target_version']?.toString(),
-      updateAvailable: json['update_available'] == true,
+      updateAvailable: _inferUpdateAvailable(
+        updateAvailableValue: json['update_available'],
+        currentVersion: currentVersion,
+        latestVersion: latestVersion,
+        updateReason: updateReason,
+      ),
+      hasCheckResult: hasCheckResult,
       message: json['message']?.toString(),
       lastError: json['last_error']?.toString(),
-      updateReason: json.containsKey('update_reason')
-          ? _tryParseOtaUpdateReason(json['update_reason'])
-          : null,
+      updateReason: updateReason,
       installTargets: json.containsKey('install_targets')
           ? OtaBundleEntry.listFromJson(json['install_targets'])
           : null,
@@ -548,7 +630,15 @@ class OtaService extends ChangeNotifier {
       final latestVersion =
           _normalizeVersion(response['latest_version']?.toString()) ??
               currentVersion;
-      final updateAvailable = response['update_available'] == true;
+      final updateReason = response.containsKey('update_reason')
+          ? _tryParseOtaUpdateReason(response['update_reason'])
+          : null;
+      final updateAvailable = _inferUpdateAvailable(
+        updateAvailableValue: response['update_available'],
+        currentVersion: currentVersion,
+        latestVersion: latestVersion,
+        updateReason: updateReason,
+      );
 
       _currentVersion = currentVersion;
       _latestVersion = latestVersion;
@@ -766,6 +856,9 @@ class OtaService extends ChangeNotifier {
       if (allowIdleReset) {
         if (status.updateAvailable) {
           _state = OtaState.available;
+        } else if (!status.hasCheckResult) {
+          _availableRelease = null;
+          _state = OtaState.idle;
         } else {
           _availableRelease = null;
           _state = OtaState.upToDate;

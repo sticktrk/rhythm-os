@@ -770,10 +770,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               _otaService.checkForUpdate(currentVersion);
             },
           ),
-          if (_otaService.isSelfPull)
-            _buildOtaAdvancedPanel(
-              capabilities: _otaService.capabilities,
-            ),
         ];
 
       case OtaState.checking:
@@ -805,14 +801,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               ],
             ),
           ),
-          if (_otaService.isSelfPull)
-            _buildOtaAdvancedPanel(
-              capabilities: _otaService.capabilities,
-              checksumVerified: _otaService.checksumVerified,
-              installedTargets: _otaService.installedTargets,
-              installTargets: _otaService.installTargets,
-              imageAssets: _otaService.imageAssets,
-            ),
         ];
 
       case OtaState.available:
@@ -860,12 +848,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                   fontSize: 13,
                 ),
               ),
-            ),
-          if (_otaService.isSelfPull)
-            _buildOtaAdvancedPanel(
-              capabilities: _otaService.capabilities,
-              installTargets: release.installTargets,
-              imageAssets: release.imageAssets,
             ),
           _buildOtaButton(
             label: release.updateReason == OtaUpdateReason.componentDrift
@@ -1027,14 +1009,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
             _buildInstalledTargetsSummary(_otaService.installedTargets),
           if (_otaService.checksumVerified != null)
             _buildChecksumSummary(_otaService.checksumVerified!),
-          if (_otaService.isSelfPull)
-            _buildOtaAdvancedPanel(
-              capabilities: _otaService.capabilities,
-              checksumVerified: _otaService.checksumVerified,
-              installedTargets: _otaService.installedTargets,
-              installTargets: _otaService.installTargets,
-              imageAssets: _otaService.imageAssets,
-            ),
           _buildOtaButton(
             label: 'Done',
             icon: null,
@@ -1211,230 +1185,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               fontWeight: FontWeight.w600,
             ),
           ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildOtaAdvancedPanel({
-    OtaCapabilities? capabilities,
-    bool? checksumVerified,
-    List<OtaBundleEntry> installedTargets = const [],
-    List<OtaBundleEntry> installTargets = const [],
-    List<OtaBundleEntry> imageAssets = const [],
-  }) {
-    if (capabilities == null &&
-        checksumVerified == null &&
-        installedTargets.isEmpty &&
-        installTargets.isEmpty &&
-        imageAssets.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-      child: Container(
-        decoration: BoxDecoration(
-          color: CelestialColors.backgroundDark.withValues(alpha: 0.35),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: CelestialColors.orbitRing.withValues(alpha: 0.35),
-          ),
-        ),
-        child: Theme(
-          data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-          child: ExpansionTile(
-            tilePadding:
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
-            childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-            iconColor: CelestialColors.textSecondary.withValues(alpha: 0.7),
-            collapsedIconColor:
-                CelestialColors.textSecondary.withValues(alpha: 0.7),
-            title: Text(
-              'Advanced OTA Details',
-              style: TextStyle(
-                color: CelestialColors.textSecondary.withValues(alpha: 0.85),
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            subtitle: Text(
-              _buildOtaAdvancedSummary(
-                capabilities: capabilities,
-                checksumVerified: checksumVerified,
-                installedTargets: installedTargets,
-                installTargets: installTargets,
-                imageAssets: imageAssets,
-              ),
-              style: TextStyle(
-                color: CelestialColors.textSecondary.withValues(alpha: 0.55),
-                fontSize: 12,
-              ),
-            ),
-            children: [
-              if (capabilities != null)
-                _buildOtaAdvancedSection(
-                  'Capabilities',
-                  _buildCapabilityEntries(capabilities),
-                ),
-              if (checksumVerified != null)
-                _buildOtaAdvancedSection(
-                  'Update Result',
-                  [
-                    OtaBundleEntry(
-                      title: 'checksum_verified',
-                      detail: checksumVerified ? 'true' : 'false',
-                    ),
-                  ],
-                  accent: checksumVerified
-                      ? const Color(0xFF22C55E)
-                      : const Color(0xFFF59E0B),
-                ),
-              if (installedTargets.isNotEmpty)
-                _buildOtaAdvancedSection(
-                  'Installed Targets',
-                  installedTargets,
-                  accent: const Color(0xFF22C55E),
-                ),
-              if (installTargets.isNotEmpty)
-                _buildOtaAdvancedSection(
-                  'Install Targets',
-                  installTargets,
-                ),
-              if (imageAssets.isNotEmpty)
-                _buildOtaAdvancedSection(
-                  'Image Assets',
-                  imageAssets,
-                ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  String _buildOtaAdvancedSummary({
-    required OtaCapabilities? capabilities,
-    required bool? checksumVerified,
-    required List<OtaBundleEntry> installedTargets,
-    required List<OtaBundleEntry> installTargets,
-    required List<OtaBundleEntry> imageAssets,
-  }) {
-    final parts = <String>[];
-    if (capabilities != null) {
-      parts.add('capabilities loaded');
-    }
-    if (checksumVerified != null) {
-      parts.add(
-        checksumVerified ? 'checksum verified' : 'checksum pending',
-      );
-    }
-    if (installedTargets.isNotEmpty) {
-      parts.add(
-        '${installedTargets.length} installed target${installedTargets.length == 1 ? '' : 's'}',
-      );
-    }
-    if (installTargets.isNotEmpty) {
-      parts.add(
-        '${installTargets.length} planned target${installTargets.length == 1 ? '' : 's'}',
-      );
-    }
-    if (imageAssets.isNotEmpty) {
-      parts.add(
-        '${imageAssets.length} image asset${imageAssets.length == 1 ? '' : 's'}',
-      );
-    }
-    return parts.join('  ·  ');
-  }
-
-  List<OtaBundleEntry> _buildCapabilityEntries(OtaCapabilities capabilities) {
-    return [
-      OtaBundleEntry(title: 'strategy', detail: capabilities.strategy),
-      OtaBundleEntry(title: 'scope', detail: capabilities.scope),
-      OtaBundleEntry(
-        title: 'can_check',
-        detail: capabilities.canCheck ? 'true' : 'false',
-      ),
-      OtaBundleEntry(
-        title: 'can_update',
-        detail: capabilities.canUpdate ? 'true' : 'false',
-      ),
-      OtaBundleEntry(
-        title: 'can_upload',
-        detail: capabilities.canUpload ? 'true' : 'false',
-      ),
-      OtaBundleEntry(
-        title: 'requires_restart',
-        detail: capabilities.requiresRestart ? 'true' : 'false',
-      ),
-      OtaBundleEntry(title: 'rollback', detail: capabilities.rollback),
-      OtaBundleEntry(
-        title: 'rootfs_image OTA',
-        detail:
-            capabilities.supportsRootfsImageOta ? 'supported' : 'not supported',
-      ),
-    ];
-  }
-
-  Widget _buildOtaAdvancedSection(
-    String title,
-    List<OtaBundleEntry> entries, {
-    Color accent = _teal,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            title,
-            style: TextStyle(
-              color: accent,
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 8),
-          ...entries.map((entry) => _buildOtaAdvancedEntry(entry, accent)),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildOtaAdvancedEntry(OtaBundleEntry entry, Color accent) {
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: accent.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: accent.withValues(alpha: 0.18),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            entry.title,
-            style: TextStyle(
-              color: CelestialColors.textPrimary.withValues(alpha: 0.92),
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          if (entry.detail != null) ...[
-            const SizedBox(height: 4),
-            Text(
-              entry.detail!,
-              style: TextStyle(
-                color: CelestialColors.textSecondary.withValues(alpha: 0.62),
-                fontSize: 12,
-                height: 1.35,
-              ),
-            ),
-          ],
         ],
       ),
     );
