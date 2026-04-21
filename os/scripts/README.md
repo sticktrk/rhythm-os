@@ -107,6 +107,7 @@ Build a Raspberry Pi Zero SD-card image using the Buildroot external tree in `in
 ./scripts/build-rpiz-image.sh --skip-server-build
 ./scripts/build-rpiz-image.sh --release --docker
 ./scripts/build-rpiz-image.sh --release --wifi-ssid "MyNet" --wifi-psk "secretpass"
+RHYTHM_BLE_PROVISION_ALWAYS=1 ./scripts/build-rpiz-image.sh --release --wifi-ssid "MyNet" --wifi-psk "secretpass"
 ```
 
 **Options:**
@@ -128,6 +129,7 @@ Build a Raspberry Pi Zero SD-card image using the Buildroot external tree in `in
 **Output:** `out/rpiz/images/sdcard.img`
 With `--docker` and no explicit `--output-dir`, the default becomes `out/rpiz-docker/images/sdcard.img`.
 By default, rpiz image builds include the bring-up extras: Dropbear SSH, root password `rhythm`, and Matter device attestation bypass. Use `--prod` or `RHYTHM_DEV_MODE=0` to turn those off.
+Set `RHYTHM_BLE_PROVISION_ALWAYS=1` when building the image to bake `RHYTHM_BLE_PROVISION_ALWAYS=1` into `/etc/default/rhythm-dev`, which forces BLE provisioning to start even if the appliance already connects to the bundled Wi-Fi credentials.
 
 ---
 
