@@ -296,6 +296,8 @@ impl ProvisioningBackend for LinuxWifiBackend {
 #[cfg(target_os = "linux")]
 mod bluez {
     use std::future::Future;
+    use std::path::Path;
+    use std::process::Command;
     use std::sync::mpsc::{Receiver, RecvTimeoutError};
     use std::time::Duration;
 
@@ -311,6 +313,7 @@ mod bluez {
     use log::{info, warn};
     use tokio::runtime::Runtime;
     use tokio::sync::watch;
+    use tokio::time::Instant;
     use uuid::Uuid;
 
     use super::{
@@ -320,6 +323,9 @@ mod bluez {
     };
 
     const BLUEZ_STEP_TIMEOUT: Duration = Duration::from_secs(15);
+    const BLUEZ_POWER_TIMEOUT: Duration = Duration::from_secs(30);
+    const ADAPTER_POWER_POLL_INTERVAL: Duration = Duration::from_secs(1);
+    const ADAPTER_POWER_WAIT: Duration = Duration::from_secs(10);
 
     pub(super) struct BluezFrontend {
         runtime: Runtime,
@@ -402,8 +408,20 @@ mod bluez {
         Fut: Future<Output = std::result::Result<T, E>>,
         E: std::error::Error + Send + Sync + 'static,
     {
+        bluez_step_with_timeout(label, BLUEZ_STEP_TIMEOUT, fut).await
+    }
+
+    async fn bluez_step_with_timeout<T, E, Fut>(
+        label: &str,
+        timeout: Duration,
+        fut: Fut,
+    ) -> Result<T>
+    where
+        Fut: Future<Output = std::result::Result<T, E>>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
         info!(target: "sys", "BLE BlueZ step: {}", label);
-        tokio::time::timeout(BLUEZ_STEP_TIMEOUT, fut)
+        tokio::time::timeout(timeout, fut)
             .await
             .map_err(|_| anyhow::anyhow!("timed out while {}", label))?
             .with_context(|| label.to_string())
@@ -417,7 +435,7 @@ mod bluez {
         let session = bluez_step("opening BlueZ session", Session::new()).await?;
         let adapter = open_adapter(&session)?;
 
-        bluez_step("powering Bluetooth adapter", adapter.set_powered(true)).await?;
+        ensure_adapter_powered(&adapter).await?;
         bluez_step("disabling pairable mode", adapter.set_pairable(false)).await?;
         let previous_alias = bluez_step("reading Bluetooth adapter alias", adapter.alias()).await?;
         bluez_step(
@@ -589,6 +607,119 @@ mod bluez {
         session
             .adapter(APPLIANCE_ADAPTER)
             .with_context(|| format!("opening Bluetooth adapter {}", APPLIANCE_ADAPTER))
+    }
+
+    async fn ensure_adapter_powered(adapter: &Adapter) -> Result<()> {
+        let adapter_name = adapter.name().to_string();
+
+        if adapter_is_powered(adapter).await? {
+            info!(
+                target: "sys",
+                "Bluetooth adapter {} already reports powered",
+                adapter_name
+            );
+            return Ok(());
+        }
+
+        if bring_adapter_up_with_hciconfig(&adapter_name).await?
+            && wait_for_adapter_powered(adapter, ADAPTER_POWER_WAIT).await?
+        {
+            info!(
+                target: "sys",
+                "Bluetooth adapter {} reported powered after hciconfig up",
+                adapter_name
+            );
+            return Ok(());
+        }
+
+        bluez_step_with_timeout(
+            "powering Bluetooth adapter",
+            BLUEZ_POWER_TIMEOUT,
+            adapter.set_powered(true),
+        )
+        .await?;
+
+        if wait_for_adapter_powered(adapter, Duration::from_secs(5)).await? {
+            return Ok(());
+        }
+
+        anyhow::bail!(
+            "Bluetooth adapter {} did not report powered after power-on request",
+            adapter_name
+        );
+    }
+
+    async fn adapter_is_powered(adapter: &Adapter) -> Result<bool> {
+        tokio::time::timeout(Duration::from_secs(5), adapter.is_powered())
+            .await
+            .map_err(|_| anyhow::anyhow!("timed out while checking Bluetooth adapter power state"))?
+            .context("checking Bluetooth adapter power state")
+    }
+
+    async fn wait_for_adapter_powered(adapter: &Adapter, timeout: Duration) -> Result<bool> {
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            if adapter_is_powered(adapter).await? {
+                return Ok(true);
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            tokio::time::sleep(ADAPTER_POWER_POLL_INTERVAL).await;
+        }
+    }
+
+    async fn bring_adapter_up_with_hciconfig(adapter_name: &str) -> Result<bool> {
+        let adapter_name = adapter_name.to_string();
+        info!(
+            target: "sys",
+            "BLE BlueZ step: bringing Bluetooth adapter {} up with hciconfig",
+            adapter_name
+        );
+
+        tokio::task::spawn_blocking(move || {
+            const HCICONFIG: &str = "/usr/bin/hciconfig";
+
+            if !Path::new(HCICONFIG).is_file() {
+                warn!(
+                    target: "sys",
+                    "hciconfig is unavailable at {}; continuing with BlueZ power-on",
+                    HCICONFIG
+                );
+                return false;
+            }
+
+            match Command::new(HCICONFIG)
+                .arg(&adapter_name)
+                .arg("up")
+                .output()
+            {
+                Ok(output) if output.status.success() => true,
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    warn!(
+                        target: "sys",
+                        "hciconfig {} up exited with status {}: {}",
+                        adapter_name,
+                        output.status,
+                        stderr.trim()
+                    );
+                    false
+                }
+                Err(error) => {
+                    warn!(
+                        target: "sys",
+                        "failed to run hciconfig {} up: {}",
+                        adapter_name,
+                        error
+                    );
+                    false
+                }
+            }
+        })
+        .await
+        .context("waiting for hciconfig adapter power-up")
     }
 
     async fn stop_bluez(handles: BluezHandles) -> Result<()> {

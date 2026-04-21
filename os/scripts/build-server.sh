@@ -235,6 +235,10 @@ CHIPD_FEATURE_ARGS=()
 should_enable_chip_ffi() {
     local target="$1"
 
+    if [ "$target" = "rpiz" ]; then
+        return 0
+    fi
+
     if [ -n "${RHYTHM_CHIPD_FEATURES:-}" ]; then
         return 0
     fi
@@ -247,13 +251,61 @@ should_enable_chip_ffi() {
     [ -n "${RHYTHM_CHIP_OUT_DIR:-}" ] || [ -n "${RHYTHM_CHIP_LIB_DIR:-}" ]
 }
 
+infer_rpiz_chip_out_dir() {
+    local candidate
+    for candidate in \
+        "$PROJECT_ROOT/connectedhomeip/out/rpiz-arm-musl" \
+        "$PROJECT_ROOT/connectedhomeip/out/rpiz"
+    do
+        if [ -f "$candidate/lib/libCHIP.a" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+ensure_required_chip_artifacts() {
+    local target="$1"
+
+    if [ "$target" != "rpiz" ]; then
+        return 0
+    fi
+
+    if [ -z "${RHYTHM_CHIP_OUT_DIR:-}" ] && [ -z "${RHYTHM_CHIP_LIB_DIR:-}" ]; then
+        local inferred_out_dir
+        if inferred_out_dir="$(infer_rpiz_chip_out_dir)"; then
+            export RHYTHM_CHIP_OUT_DIR="$inferred_out_dir"
+            echo "Using inferred RHYTHM_CHIP_OUT_DIR=$RHYTHM_CHIP_OUT_DIR"
+        else
+            echo "Error: rpiz builds require CHIP artifacts." >&2
+            echo "Set RHYTHM_CHIP_OUT_DIR to a connectedhomeip out dir with lib/libCHIP.a," >&2
+            echo "or set RHYTHM_CHIP_LIB_DIR to a lib dir containing libCHIP.a." >&2
+            exit 1
+        fi
+    fi
+
+    if [ -n "${RHYTHM_CHIP_LIB_DIR:-}" ]; then
+        if [ ! -f "$RHYTHM_CHIP_LIB_DIR/libCHIP.a" ]; then
+            echo "Error: RHYTHM_CHIP_LIB_DIR=$RHYTHM_CHIP_LIB_DIR is missing libCHIP.a" >&2
+            exit 1
+        fi
+        return 0
+    fi
+
+    if [ ! -f "$RHYTHM_CHIP_OUT_DIR/lib/libCHIP.a" ]; then
+        echo "Error: RHYTHM_CHIP_OUT_DIR=$RHYTHM_CHIP_OUT_DIR is missing lib/libCHIP.a" >&2
+        exit 1
+    fi
+}
+
 collect_chipd_feature_args() {
     local target="$1"
     CHIPD_FEATURE_ARGS=()
 
     if [ -n "${RHYTHM_CHIPD_FEATURES:-}" ]; then
         CHIPD_FEATURE_ARGS+=(--features "$RHYTHM_CHIPD_FEATURES")
-        return
     fi
 
     if should_enable_chip_ffi "$target"; then
@@ -291,6 +343,8 @@ build_for_target() {
     fi
 
     echo "Building for $target ($rust_target)..."
+
+    ensure_required_chip_artifacts "$target"
 
     # Prefer direct cargo+linker cross-compilation on macOS, where `cross`
     # can select an incompatible Linux host toolchain for ARMv6 targets.

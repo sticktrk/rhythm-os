@@ -6,6 +6,7 @@ HCICONFIG="${HCICONFIG:-/usr/bin/hciconfig}"
 DBUS_SOCKET=/run/dbus/system_bus_socket
 DBUS_INIT=/etc/init.d/S30dbus-daemon
 BLUETOOTHD_INIT=/etc/init.d/S40bluetoothd
+HCI_WAIT_SECS="${HCI_WAIT_SECS:-15}"
 
 log() {
     local msg="bluetooth: $*"
@@ -98,8 +99,29 @@ attach_controller() {
 
 bring_hci_up() {
     if [ -x "$HCICONFIG" ] && "$HCICONFIG" hci0 >/dev/null 2>&1; then
+        log "bringing hci0 up"
         "$HCICONFIG" hci0 up >/dev/null 2>&1 || true
     fi
+}
+
+wait_for_hci() {
+    local remaining="$HCI_WAIT_SECS"
+
+    if [ ! -x "$HCICONFIG" ]; then
+        return 1
+    fi
+
+    while [ "$remaining" -gt 0 ]; do
+        if "$HCICONFIG" hci0 >/dev/null 2>&1; then
+            log "hci0 is available"
+            return 0
+        fi
+        sleep 1
+        remaining=$((remaining - 1))
+    done
+
+    log "timed out waiting for hci0"
+    return 1
 }
 
 restart_bluetoothd() {
@@ -134,9 +156,11 @@ start() {
     modprobe hci_uart 2>/dev/null || true
     sleep 1
     attach_controller || true
-    sleep 1
+    wait_for_hci || true
     bring_hci_up
     restart_bluetoothd
+    wait_for_hci || true
+    bring_hci_up
     log_kernel_excerpt
 }
 
