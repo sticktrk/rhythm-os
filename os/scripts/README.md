@@ -187,9 +187,8 @@ workflows can build and publish the assets.
 There are two release modes:
 
 - **Binary release (default)** — mac/linux server binaries (`release.yml`) and
-  the rpiz OTA tarball via cross-compile in the builder image
-  (`rpiz-binary.yml`). Fast, ~5 min of CI. This is the normal cadence for
-  appliance code changes.
+  the rpiz OTA tarball via the tag-driven `rpiz Binary` job in `ci.yml`.
+  Fast, ~5 min of CI. This is the normal cadence for appliance code changes.
 - **Full image release (`--with-image`)** — everything above *plus* dispatches
   `rpiz-image.yml`, which re-runs Buildroot end-to-end and attaches
   `sdcard.img` + `rootfs.ext2.gz` to the release. Use this when you bumped

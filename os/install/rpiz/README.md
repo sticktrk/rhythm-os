@@ -115,7 +115,7 @@ The rpiz release flow has two modes that map to two workflows:
 
 | Mode | How you trigger it | What you get | CI time |
 |------|--------------------|--------------|---------|
-| **Binary release** (default) | `./scripts/release.sh` (any variant without `--with-image`) | rhythm-server rpiz tarball for OTA (`rpiz-binary.yml`) + mac/linux binaries (`release.yml`) | ~5 min |
+| **Binary release** (default) | `./scripts/release.sh` (any variant without `--with-image`) | rhythm-server rpiz tarball for OTA (tag-driven `rpiz Binary` job in `ci.yml`) + mac/linux binaries (`release.yml`) | ~5 min |
 | **Full image release** | `./scripts/release.sh --with-image` | Everything above *plus* sdcard.img + rootfs.ext2.gz attached to the release (`rpiz-image.yml` dispatched via `gh`) | ~5 min + one full Buildroot pass |
 
 Use the binary mode for normal appliance code / Rust-level changes — your Pi Zeros update via OTA against the tarball without needing a new SD card. Use `--with-image` when you've bumped CHIP, Buildroot, the defconfig, or the kernel config (anything that forces a new rootfs). You can also dispatch `rpiz-image.yml` manually at any time:
