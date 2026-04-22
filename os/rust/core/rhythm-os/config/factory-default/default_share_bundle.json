@@ -1,11 +1,10 @@
 {
   "schema_version": 1,
-  "kind": "configuration_bundle",
+  "kind": "share_bundle",
   "name": "Factory Default",
-  "description": "Developer-owned factory-default Rhythm lighting configuration.",
-  "configuration": {
+  "description": "Developer-owned factory-default Rhythm lighting share bundle.",
+  "share": {
     "power_save": false,
-    "active_mode": "day",
     "profiles": [
       {
         "id": "rhythm",
@@ -110,16 +109,6 @@
         }
       }
     ],
-    "mode_configs": [
-      {
-        "mode": "day",
-        "active_profile_id": "rhythm"
-      },
-      {
-        "mode": "sleep",
-        "active_profile_id": "sleep"
-      }
-    ],
     "mode_transitions": [
       {
         "id": "sleep_to_day",
@@ -149,7 +138,6 @@
         },
         "preserve_hard_off": true
       }
-    ],
-    "rooms": []
+    ]
   }
 }

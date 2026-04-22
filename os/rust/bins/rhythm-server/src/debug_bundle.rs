@@ -1,7 +1,7 @@
 //! On-demand debug bundle generation for native server/appliance builds.
 //!
 //! Builds a `tar.gz` bundle in memory so clients can immediately download
-//! recent logs plus redacted runtime/configuration snapshots.
+//! recent logs plus redacted runtime/share-bundle snapshots.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -77,8 +77,8 @@ pub fn build_debug_bundle(state: &SharedState) -> Result<DebugBundle> {
     let created_at = Utc::now();
 
     let state_json = commands::build_state_snapshot(state).context("building state snapshot")?;
-    let configuration_json =
-        commands::build_configuration_bundle(state).context("building configuration bundle")?;
+    let share_bundle_json =
+        commands::build_share_bundle(state).context("building share bundle")?;
 
     let searched_log_dirs = discover_log_dirs(&runtime);
     let log_artifacts = discover_log_artifacts(&searched_log_dirs)?;
@@ -89,8 +89,8 @@ pub fn build_debug_bundle(state: &SharedState) -> Result<DebugBundle> {
     append_bytes(&mut builder, "state.json", state_json.as_bytes(), 0o644)?;
     append_bytes(
         &mut builder,
-        "configuration.json",
-        configuration_json.as_bytes(),
+        "share_bundle.json",
+        share_bundle_json.as_bytes(),
         0o644,
     )?;
 
@@ -130,8 +130,8 @@ pub fn build_debug_bundle(state: &SharedState) -> Result<DebugBundle> {
                 bytes: state_json.len(),
             },
             GeneratedFileEntry {
-                archive_path: "configuration.json".to_string(),
-                bytes: configuration_json.len(),
+                archive_path: "share_bundle.json".to_string(),
+                bytes: share_bundle_json.len(),
             },
         ],
         notes,
@@ -368,7 +368,7 @@ mod tests {
             Some(b"matter-log".as_slice())
         );
         assert!(files.contains_key("state.json"));
-        assert!(files.contains_key("configuration.json"));
+        assert!(files.contains_key("share_bundle.json"));
         assert!(files.contains_key("manifest.json"));
 
         let manifest: Value = serde_json::from_slice(files.get("manifest.json").unwrap()).unwrap();

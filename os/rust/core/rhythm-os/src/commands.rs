@@ -29,13 +29,15 @@ use crate::api_types::{
 };
 use crate::bundle::{
     BackupBundle, BackupHubCredentials, BackupHubRegistry, BackupInstallation, BackupRuntimeState,
-    ConfigurationBundle, ConfigurationImportPayload, ConfigurationRoom, PortableConfiguration,
-    BUNDLE_SCHEMA_VERSION,
+    BackupConfiguration, BackupConfigurationRoom, ShareBundle, ShareConfiguration,
+    ShareImportPayload, BUNDLE_SCHEMA_VERSION,
 };
 use crate::canonical::identity::HubKey;
 use crate::factory_default_config::{
-    factory_default_active_profile_config_for_mode, factory_default_configuration_bundle,
+    factory_default_active_mode, factory_default_active_profile_config_for_mode,
     factory_default_idle_profile_config_for_mode, factory_default_light_profile_config_map,
+    factory_default_mode_config_map, factory_default_mode_transition_configs,
+    factory_default_power_save, factory_default_share_bundle,
 };
 use crate::state::{rooms_from_engine, AppState, SharedState};
 use crate::storage::StoredLocation;
@@ -2173,18 +2175,26 @@ fn room_manager_for_export(state: &SharedState) -> rhythm_core::RoomManager {
     merged
 }
 
-fn portable_configuration_from_parts(
+fn share_configuration_from_state(s: &AppState) -> ShareConfiguration {
+    ShareConfiguration {
+        power_save: s.power_save,
+        profiles: s.light_profile_configs.values().cloned().collect(),
+        mode_transitions: s.mode_transition_configs(),
+    }
+}
+
+fn backup_configuration_from_parts(
     s: &AppState,
     room_manager: &rhythm_core::RoomManager,
-) -> PortableConfiguration {
+) -> BackupConfiguration {
     let mut rooms: Vec<_> = room_manager
         .iter()
         .filter(|room| room.kind.is_room())
-        .map(ConfigurationRoom::from)
+        .map(BackupConfigurationRoom::from)
         .collect();
     rooms.sort_by(|left, right| left.id.cmp(&right.id).then(left.name.cmp(&right.name)));
 
-    PortableConfiguration {
+    BackupConfiguration {
         power_save: s.power_save,
         active_mode: s.active_mode,
         profiles: s.light_profile_configs.values().cloned().collect(),
@@ -2218,35 +2228,34 @@ fn backup_hub_credentials_from_state(
     }
 }
 
-pub fn build_configuration_bundle_dto(state: &SharedState) -> Result<ConfigurationBundle> {
-    let room_manager = source_room_manager_for_export(state);
+pub fn build_share_bundle_dto(state: &SharedState) -> Result<ShareBundle> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
-    Ok(ConfigurationBundle {
+    Ok(ShareBundle {
         schema_version: BUNDLE_SCHEMA_VERSION,
-        kind: crate::bundle::BundleKind::ConfigurationBundle,
+        kind: crate::bundle::BundleKind::ShareBundle,
         name: None,
         description: None,
-        configuration: portable_configuration_from_parts(&s, &room_manager),
+        share: share_configuration_from_state(&s),
     })
 }
 
-pub fn build_configuration_bundle(state: &SharedState) -> Result<String> {
-    let bundle = build_configuration_bundle_dto(state)?;
-    serialize_configuration_bundle(&bundle)
+pub fn build_share_bundle(state: &SharedState) -> Result<String> {
+    let bundle = build_share_bundle_dto(state)?;
+    serialize_share_bundle(&bundle)
 }
 
-fn serialize_configuration_bundle(bundle: &ConfigurationBundle) -> Result<String> {
+fn serialize_share_bundle(bundle: &ShareBundle) -> Result<String> {
     serde_json::to_string_pretty(bundle)
-        .map_err(|e| anyhow::anyhow!("serialize configuration bundle: {}", e))
+        .map_err(|e| anyhow::anyhow!("serialize share bundle: {}", e))
 }
 
-pub fn build_factory_default_configuration_bundle_dto() -> ConfigurationBundle {
-    factory_default_configuration_bundle()
+pub fn build_factory_default_share_bundle_dto() -> ShareBundle {
+    factory_default_share_bundle()
 }
 
-pub fn build_factory_default_configuration_bundle() -> Result<String> {
-    serialize_configuration_bundle(&build_factory_default_configuration_bundle_dto())
+pub fn build_factory_default_share_bundle() -> Result<String> {
+    serialize_share_bundle(&build_factory_default_share_bundle_dto())
 }
 
 fn clear_factory_reset_storage(state: &SharedState) -> Result<()> {
@@ -2278,7 +2287,20 @@ fn clear_factory_reset_ephemeral_state(state: &SharedState) -> Result<()> {
     Ok(())
 }
 
-pub fn do_configuration_reset(state: &SharedState) -> Result<String> {
+fn factory_default_backup_configuration() -> BackupConfiguration {
+    BackupConfiguration {
+        power_save: factory_default_power_save(),
+        active_mode: factory_default_active_mode(),
+        profiles: factory_default_light_profile_config_map()
+            .into_values()
+            .collect(),
+        mode_configs: factory_default_mode_config_map().into_values().collect(),
+        mode_transitions: factory_default_mode_transition_configs(),
+        rooms: Vec::new(),
+    }
+}
+
+pub fn do_factory_reset(state: &SharedState) -> Result<String> {
     do_hub_disconnect(state)?;
     clear_factory_reset_storage(state)?;
     clear_factory_reset_ephemeral_state(state)?;
@@ -2295,10 +2317,14 @@ pub fn do_configuration_reset(state: &SharedState) -> Result<String> {
     restore_backup_room_manager(state, &installation.rooms)?;
     restore_backup_location(state, None)?;
 
-    do_configuration_import(
-        state,
-        ConfigurationImportPayload::Bundle(factory_default_configuration_bundle()),
-    )
+    apply_backup_configuration(state, factory_default_backup_configuration())?;
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
+
+    build_share_bundle(state)
+}
+
+pub fn do_share_bundle_reset(state: &SharedState) -> Result<String> {
+    do_share_bundle_import(state, ShareImportPayload::Bundle(factory_default_share_bundle()))
 }
 
 pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Result<BackupBundle> {
@@ -2313,7 +2339,7 @@ pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Re
         hub_registries,
     ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        let configuration = portable_configuration_from_parts(&s, &room_manager);
+        let configuration = backup_configuration_from_parts(&s, &room_manager);
         let mut hub_credentials: Vec<_> = s
             .hub_credentials
             .values()
@@ -3646,10 +3672,10 @@ pub fn do_transitions_set(
     build_transitions(state)
 }
 
-fn validate_imported_configuration(configuration: &PortableConfiguration) -> Result<()> {
+fn validate_imported_backup_configuration(configuration: &BackupConfiguration) -> Result<()> {
     validate_mode_configs(&configuration.mode_configs)?;
 
-    let valid_profile_ids = valid_import_profile_ids(configuration);
+    let valid_profile_ids = valid_import_profile_ids(&configuration.profiles);
 
     for room in &configuration.rooms {
         room_flags_for_target_state(room.state)?;
@@ -3659,15 +3685,10 @@ fn validate_imported_configuration(configuration: &PortableConfiguration) -> Res
     Ok(())
 }
 
-fn valid_import_profile_ids(configuration: &PortableConfiguration) -> HashSet<String> {
+fn valid_import_profile_ids(profiles: &[LightProfileConfig]) -> HashSet<String> {
     factory_default_light_profile_config_map()
         .into_keys()
-        .chain(
-            configuration
-                .profiles
-                .iter()
-                .map(|config| config.id.clone()),
-        )
+        .chain(profiles.iter().map(|config| config.id.clone()))
         .collect()
 }
 
@@ -3696,7 +3717,7 @@ fn validate_room_profile_settings(
     Ok(())
 }
 
-fn imported_room_profile_patch(room: &ConfigurationRoom) -> RoomProfileSettingsPatch {
+fn imported_room_profile_patch(room: &BackupConfigurationRoom) -> RoomProfileSettingsPatch {
     RoomProfileSettingsPatch {
         clear_all: false,
         profile_id: Some(room.room_profile.profile_id.clone()),
@@ -3705,10 +3726,10 @@ fn imported_room_profile_patch(room: &ConfigurationRoom) -> RoomProfileSettingsP
     }
 }
 
-fn configuration_room_target_id(
+fn backup_configuration_room_target_id(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
-    imported: &ConfigurationRoom,
+    imported: &BackupConfigurationRoom,
 ) -> Option<String> {
     let resolved_id = resolve_node_id(state, &imported.id);
     if runtime.engine_room_snapshot(&resolved_id).is_some() {
@@ -3725,9 +3746,9 @@ fn configuration_room_target_id(
         .map(|snapshot| snapshot.id)
 }
 
-fn apply_configuration_room_preferences(
+fn apply_backup_configuration_room_preferences(
     state: &SharedState,
-    imported_rooms: &[ConfigurationRoom],
+    imported_rooms: &[BackupConfigurationRoom],
 ) -> (usize, usize) {
     let runtime = state.lock().ok().and_then(|s| s.hub_runtime());
     let mut applied_rooms = 0usize;
@@ -3735,11 +3756,12 @@ fn apply_configuration_room_preferences(
 
     if let Some(runtime) = runtime {
         for imported_room in imported_rooms {
-            let Some(room_id) = configuration_room_target_id(state, &runtime, imported_room) else {
+            let Some(room_id) = backup_configuration_room_target_id(state, &runtime, imported_room)
+            else {
                 skipped_rooms += 1;
                 info!(
                     target: "cmd",
-                    "configuration_import: skipped room '{}' ({}) because no local match was found",
+                    "backup_configuration_import: skipped room '{}' ({}) because no local match was found",
                     imported_room.name,
                     imported_room.id
                 );
@@ -3759,7 +3781,7 @@ fn apply_configuration_room_preferences(
                 skipped_rooms += 1;
                 warn!(
                     target: "cmd",
-                    "configuration_import: failed to apply room '{}' to '{}': {}",
+                    "backup_configuration_import: failed to apply room '{}' to '{}': {}",
                     imported_room.id,
                     room_id,
                     e
@@ -3779,20 +3801,81 @@ fn apply_configuration_room_preferences(
     (applied_rooms, skipped_rooms)
 }
 
-pub fn do_configuration_import(
+pub fn do_share_bundle_import(
     state: &SharedState,
-    payload: ConfigurationImportPayload,
+    payload: ShareImportPayload,
 ) -> Result<String> {
     let bundle = payload.into_bundle();
     if bundle.schema_version != BUNDLE_SCHEMA_VERSION {
         return Err(anyhow::anyhow!(
-            "Unsupported configuration schema version: {}",
+            "Unsupported share bundle schema version: {}",
             bundle.schema_version
         ));
     }
 
-    let configuration = bundle.configuration;
-    validate_imported_configuration(&configuration)?;
+    let share = bundle.share;
+
+    let imported_profiles = share.profiles;
+    let imported_power_save = share.power_save;
+    let imported_mode_transitions = share.mode_transitions;
+
+    let (profiles_to_apply, runtimes) = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.replace_light_profile_configs(imported_profiles);
+        persist_light_profiles_locked(&s);
+        (
+            s.light_profile_configs
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
+            s.hubs
+                .values()
+                .filter_map(|hub| hub.runtime.clone())
+                .collect::<Vec<_>>(),
+        )
+    };
+
+    for runtime in &runtimes {
+        for profile in &profiles_to_apply {
+            if let Err(e) = runtime.set_light_profile_config(profile.clone()) {
+                warn!(
+                    target: "cmd",
+                    "share_bundle_import: failed to update runtime profile '{}': {}",
+                    profile.id,
+                    e
+                );
+            }
+        }
+    }
+
+    do_settings_set_internal(
+        state,
+        Some(imported_power_save),
+        None,
+        None,
+        Some(imported_mode_transitions),
+        None,
+        false,
+    )?;
+
+    info!(
+        target: "cmd",
+        "share_bundle_import: profiles={} transitions={}",
+        profiles_to_apply.len(),
+        state
+            .lock()
+            .ok()
+            .map(|s| s.mode_transition_configs().len())
+            .unwrap_or(0)
+    );
+
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
+
+    build_share_bundle(state)
+}
+
+fn apply_backup_configuration(state: &SharedState, configuration: BackupConfiguration) -> Result<()> {
+    validate_imported_backup_configuration(&configuration)?;
 
     let imported_profiles = configuration.profiles;
     let imported_power_save = configuration.power_save;
@@ -3822,7 +3905,7 @@ pub fn do_configuration_import(
             if let Err(e) = runtime.set_light_profile_config(profile.clone()) {
                 warn!(
                     target: "cmd",
-                    "configuration_import: failed to update runtime profile '{}': {}",
+                    "backup_configuration_import: failed to update runtime profile '{}': {}",
                     profile.id,
                     e
                 );
@@ -3841,11 +3924,11 @@ pub fn do_configuration_import(
     )?;
 
     let (applied_rooms, skipped_rooms) =
-        apply_configuration_room_preferences(state, &imported_rooms);
+        apply_backup_configuration_room_preferences(state, &imported_rooms);
 
     info!(
         target: "cmd",
-        "configuration_import: profiles={} modes={} transitions={} rooms_applied={} rooms_skipped={}",
+        "backup_configuration_import: profiles={} modes={} transitions={} rooms_applied={} rooms_skipped={}",
         profiles_to_apply.len(),
         state.lock().ok().map(|s| s.mode_configs().len()).unwrap_or(0),
         state
@@ -3857,9 +3940,7 @@ pub fn do_configuration_import(
         skipped_rooms
     );
 
-    crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
-
-    build_configuration_bundle(state)
+    Ok(())
 }
 
 pub fn do_backup_restore(state: &SharedState, bundle: BackupBundle) -> Result<String> {
@@ -3875,8 +3956,8 @@ pub fn do_backup_restore(state: &SharedState, bundle: BackupBundle) -> Result<St
         ));
     }
 
-    validate_imported_configuration(&bundle.configuration)?;
-    let valid_profile_ids = valid_import_profile_ids(&bundle.configuration);
+    validate_imported_backup_configuration(&bundle.configuration)?;
+    let valid_profile_ids = valid_import_profile_ids(&bundle.configuration.profiles);
     for room in bundle.installation.rooms.iter() {
         validate_room_profile_settings(&room.id, &room.profile_settings, &valid_profile_ids)?;
     }
@@ -3886,16 +3967,7 @@ pub fn do_backup_restore(state: &SharedState, bundle: BackupBundle) -> Result<St
 
     let mut configuration = bundle.configuration.clone();
     configuration.active_mode = bundle.runtime_state.active_mode;
-    do_configuration_import(
-        state,
-        ConfigurationImportPayload::Bundle(ConfigurationBundle {
-            schema_version: bundle.schema_version,
-            kind: crate::bundle::BundleKind::ConfigurationBundle,
-            name: None,
-            description: None,
-            configuration,
-        }),
-    )?;
+    apply_backup_configuration(state, configuration)?;
 
     restore_backup_location(state, bundle.installation.location.clone())?;
     restore_backup_hub_credentials(state, &bundle.installation.hub_credentials)?;
@@ -7134,12 +7206,12 @@ mod tests {
     use super::*;
     use crate::bundle::{
         BackupBundle, BackupHubCredentials, BackupInstallation, BackupRuntimeState, BundleKind,
-        ConfigurationBundle, ConfigurationImportPayload, ConfigurationRoom, PortableConfiguration,
+        BackupConfiguration, ShareBundle, ShareConfiguration, ShareImportPayload,
     };
     use crate::factory_default_config::{
-        factory_default_active_mode, factory_default_configuration_bundle,
-        factory_default_light_profile_config, factory_default_mode_transition_configs,
-        factory_default_power_save,
+        factory_default_active_mode, factory_default_light_profile_config,
+        factory_default_mode_transition_configs, factory_default_power_save,
+        factory_default_share_bundle,
     };
     use crate::hub::{ActiveHub, HubCredentials, HubProvider, HubType};
     use crate::state::{AppState, MotionSnapshot};
@@ -8737,73 +8809,47 @@ mod tests {
     }
 
     #[test]
-    fn build_configuration_bundle_dto_exports_fresh_state_defaults() {
+    fn build_share_bundle_dto_exports_fresh_state_defaults() {
         let (state, _rt) = setup_state(vec![]);
 
-        let bundle = build_configuration_bundle_dto(&state).unwrap();
+        let bundle = build_share_bundle_dto(&state).unwrap();
         let s = state.lock().unwrap();
 
         assert_eq!(bundle.schema_version, BUNDLE_SCHEMA_VERSION);
-        assert_eq!(bundle.kind, BundleKind::ConfigurationBundle);
+        assert_eq!(bundle.kind, BundleKind::ShareBundle);
+        assert_eq!(bundle.share.power_save, factory_default_power_save());
         assert_eq!(
-            bundle.configuration.power_save,
-            factory_default_power_save()
-        );
-        assert_eq!(
-            bundle.configuration.active_mode,
-            factory_default_active_mode()
-        );
-        assert_eq!(
-            bundle.configuration.profiles,
+            bundle.share.profiles,
             s.light_profile_configs
                 .values()
                 .cloned()
                 .collect::<Vec<_>>()
         );
-        assert_eq!(bundle.configuration.mode_configs, s.mode_configs());
         assert_eq!(
-            bundle.configuration.mode_transitions,
+            bundle.share.mode_transitions,
             factory_default_mode_transition_configs()
         );
-        assert!(bundle.configuration.rooms.is_empty());
     }
 
     #[test]
-    fn build_factory_default_configuration_bundle_matches_factory_default_source() {
-        let bundle = build_factory_default_configuration_bundle_dto();
-        let expected = factory_default_configuration_bundle();
+    fn build_factory_default_share_bundle_matches_factory_default_source() {
+        let bundle = build_factory_default_share_bundle_dto();
+        let expected = factory_default_share_bundle();
         assert_eq!(bundle.schema_version, expected.schema_version);
         assert_eq!(bundle.kind, expected.kind);
         assert_eq!(bundle.name, expected.name);
         assert_eq!(bundle.description, expected.description);
+        assert_eq!(bundle.share.power_save, expected.share.power_save);
+        assert_eq!(bundle.share.profiles, expected.share.profiles);
         assert_eq!(
-            bundle.configuration.power_save,
-            expected.configuration.power_save
+            bundle.share.mode_transitions,
+            expected.share.mode_transitions
         );
-        assert_eq!(
-            bundle.configuration.active_mode,
-            expected.configuration.active_mode
-        );
-        assert_eq!(
-            bundle.configuration.profiles,
-            expected.configuration.profiles
-        );
-        assert_eq!(
-            bundle.configuration.mode_configs,
-            expected.configuration.mode_configs
-        );
-        assert_eq!(
-            bundle.configuration.mode_transitions,
-            expected.configuration.mode_transitions
-        );
-        assert_eq!(bundle.configuration.rooms.len(), 0);
     }
 
     #[test]
-    fn configuration_import_applies_profiles_settings_and_room_preferences_by_name() {
-        let mut snapshot = make_snapshot("local-office", false, false);
-        snapshot.name = "Office".into();
-        let (state, runtime) = setup_state(vec![snapshot]);
+    fn share_bundle_import_applies_profiles_power_save_and_transitions() {
+        let (state, runtime) = setup_state(vec![make_snapshot("local-office", false, false)]);
         let focus = make_focus_profile();
         let transition =
             rhythm_core::ModeTransitionConfig::new(RhythmMode::Day, RhythmMode::Sleep, 4_321)
@@ -8811,76 +8857,28 @@ mod tests {
                 .with_label("Custom Day to Sleep")
                 .with_trigger(ModeTransitionTrigger::Sunset);
 
-        let payload = ConfigurationImportPayload::Bundle(ConfigurationBundle {
+        let payload = ShareImportPayload::Bundle(ShareBundle {
             schema_version: BUNDLE_SCHEMA_VERSION,
-            kind: BundleKind::ConfigurationBundle,
+            kind: BundleKind::ShareBundle,
             name: Some("Shared Setup".into()),
-            description: Some("Portable config".into()),
-            configuration: PortableConfiguration {
+            description: Some("Portable share bundle".into()),
+            share: ShareConfiguration {
                 power_save: true,
-                active_mode: RhythmMode::Day,
                 profiles: vec![focus.clone()],
-                mode_configs: vec![
-                    ModeConfig {
-                        mode: RhythmMode::Day,
-                        active_profile_id: Some("focus".into()),
-                        idle_profile_id: None,
-                        wake_profile_id: None,
-                        warning_profile_id: None,
-                        room_defaults: vec![],
-                    },
-                    ModeConfig::default_for_mode(RhythmMode::Sleep),
-                ],
                 mode_transitions: vec![transition.clone()],
-                rooms: vec![ConfigurationRoom {
-                    id: "shared-office".into(),
-                    name: "Office".into(),
-                    rhythm_enabled: true,
-                    disabled: true,
-                    state: RoomModeState::Idle,
-                    room_profile: rhythm_core::RoomProfileSettings {
-                        profile_id: Some("focus".into()),
-                        fade_ms: Some(TimerSetting::Fixed { value: 3_210 }),
-                        motion_timeout_secs: Some(TimerSetting::Fixed { value: 654 }),
-                    },
-                }],
             },
         });
 
-        let json = do_configuration_import(&state, payload).unwrap();
-        let exported: ConfigurationBundle = serde_json::from_str(&json).unwrap();
+        let json = do_share_bundle_import(&state, payload).unwrap();
+        let exported: ShareBundle = serde_json::from_str(&json).unwrap();
         let s = state.lock().unwrap();
 
         assert!(s.power_save);
-        assert_eq!(s.active_mode, RhythmMode::Day);
-        assert_eq!(
-            s.mode_configs()
-                .iter()
-                .find(|config| config.mode == RhythmMode::Day)
-                .and_then(|config| config.active_profile_id.as_deref()),
-            Some("focus")
-        );
+        assert_eq!(s.active_mode, factory_default_active_mode());
         assert_eq!(s.mode_transition_configs(), vec![transition.clone()]);
         assert_eq!(s.light_profile_config("focus"), Some(&focus));
         drop(s);
 
-        let applied = runtime.engine_room_snapshot("local-office").unwrap();
-        assert!(applied.rhythm_enabled);
-        assert!(applied.disabled);
-        assert!(applied.soft_off);
-        assert!(!applied.hard_off);
-        assert_eq!(
-            applied.profile_settings.profile_id.as_deref(),
-            Some("focus")
-        );
-        assert_eq!(
-            applied.profile_settings.fade_ms,
-            Some(TimerSetting::Fixed { value: 3_210 })
-        );
-        assert_eq!(
-            applied.profile_settings.motion_timeout_secs,
-            Some(TimerSetting::Fixed { value: 654 })
-        );
         assert!(
             runtime
                 .config_updates()
@@ -8889,53 +8887,39 @@ mod tests {
             "runtime should receive imported custom profile config"
         );
 
-        assert_eq!(exported.kind, BundleKind::ConfigurationBundle);
-        assert!(exported.configuration.power_save);
-        assert_eq!(exported.configuration.active_mode, RhythmMode::Day);
-        assert_eq!(exported.configuration.rooms.len(), 1);
-        assert_eq!(exported.configuration.rooms[0].id, "local-office");
-        assert_eq!(exported.configuration.rooms[0].name, "Office");
-        assert_eq!(exported.configuration.rooms[0].state, RoomModeState::Idle);
-        assert_eq!(
-            exported.configuration.rooms[0]
-                .room_profile
-                .profile_id
-                .as_deref(),
-            Some("focus")
-        );
+        assert_eq!(exported.kind, BundleKind::ShareBundle);
+        assert!(exported.share.power_save);
+        assert_eq!(exported.share.mode_transitions, vec![transition]);
+        assert_eq!(exported.share.profiles.len(), 5);
+        assert!(exported.share.profiles.iter().any(|profile| profile.id == "focus"));
     }
 
     #[test]
-    fn configuration_import_rejects_unknown_room_profile_reference() {
+    fn share_bundle_import_accepts_legacy_configuration_payload_shape() {
         let (state, _rt) = setup_state(vec![]);
+        let focus = make_focus_profile();
 
-        let err = do_configuration_import(
+        let json = do_share_bundle_import(
             &state,
-            ConfigurationImportPayload::Configuration(PortableConfiguration {
-                power_save: false,
-                active_mode: RhythmMode::Day,
-                profiles: vec![],
-                mode_configs: vec![],
-                mode_transitions: vec![],
-                rooms: vec![ConfigurationRoom {
-                    id: "office".into(),
-                    name: "Office".into(),
-                    rhythm_enabled: true,
-                    disabled: false,
-                    state: RoomModeState::Active,
-                    room_profile: rhythm_core::RoomProfileSettings {
-                        profile_id: Some("missing_profile".into()),
-                        fade_ms: None,
-                        motion_timeout_secs: None,
-                    },
-                }],
-            }),
+            serde_json::from_value::<ShareImportPayload>(serde_json::json!({
+                "schema_version": BUNDLE_SCHEMA_VERSION,
+                "kind": "configuration_bundle",
+                "name": "Legacy",
+                "configuration": {
+                    "power_save": true,
+                    "active_mode": "sleep",
+                    "profiles": [focus],
+                    "mode_configs": [],
+                    "mode_transitions": []
+                }
+            }))
+            .unwrap(),
         )
-        .unwrap_err();
+        .unwrap();
+        let exported: ShareBundle = serde_json::from_str(&json).unwrap();
 
-        assert!(err
-            .to_string()
-            .contains("unknown light profile 'missing_profile'"));
+        assert!(exported.share.power_save);
+        assert!(exported.share.profiles.iter().any(|profile| profile.id == "focus"));
     }
 
     #[test]
@@ -9097,7 +9081,7 @@ mod tests {
             kind: BundleKind::BackupBundle,
             created_at: "2026-04-16T00:00:00Z".into(),
             secrets_included: true,
-            configuration: PortableConfiguration {
+            configuration: BackupConfiguration {
                 power_save: true,
                 active_mode: RhythmMode::Sleep,
                 profiles: vec![focus.clone()],
@@ -9627,7 +9611,7 @@ mod tests {
             kind: BundleKind::BackupBundle,
             created_at: "2026-04-16T00:00:00Z".into(),
             secrets_included: false,
-            configuration: PortableConfiguration {
+            configuration: BackupConfiguration {
                 power_save: false,
                 active_mode: RhythmMode::Sleep,
                 profiles: vec![],
@@ -9727,7 +9711,7 @@ mod tests {
                 kind: BundleKind::BackupBundle,
                 created_at: "2026-04-16T00:00:00Z".into(),
                 secrets_included: false,
-                configuration: PortableConfiguration {
+                configuration: BackupConfiguration {
                     power_save: false,
                     active_mode: RhythmMode::Day,
                     profiles: vec![],
@@ -9779,7 +9763,7 @@ mod tests {
             kind: BundleKind::BackupBundle,
             created_at: "2026-04-16T00:00:00Z".into(),
             secrets_included: false,
-            configuration: PortableConfiguration::default(),
+            configuration: BackupConfiguration::default(),
             installation: BackupInstallation {
                 location: None,
                 rooms: rhythm_core::RoomManager::new(),
@@ -9831,7 +9815,7 @@ mod tests {
             kind: BundleKind::BackupBundle,
             created_at: "2026-04-16T00:00:00Z".into(),
             secrets_included: false,
-            configuration: PortableConfiguration::default(),
+            configuration: BackupConfiguration::default(),
             installation: BackupInstallation {
                 location: None,
                 rooms: rhythm_core::RoomManager::new(),
@@ -9871,58 +9855,37 @@ mod tests {
     }
 
     #[test]
-    fn configuration_reset_restores_factory_default_configuration() {
+    fn share_bundle_reset_restores_factory_default_share_bundle() {
         let (state, _rt) = setup_state(vec![]);
         let focus = make_focus_profile();
-        do_configuration_import(
+        do_share_bundle_import(
             &state,
-            ConfigurationImportPayload::Configuration(PortableConfiguration {
+            ShareImportPayload::Share(ShareConfiguration {
                 power_save: true,
-                active_mode: RhythmMode::Day,
                 profiles: vec![focus],
-                mode_configs: vec![ModeConfig {
-                    mode: RhythmMode::Day,
-                    active_profile_id: Some("focus".into()),
-                    idle_profile_id: None,
-                    wake_profile_id: None,
-                    warning_profile_id: None,
-                    room_defaults: vec![],
-                }],
                 mode_transitions: vec![],
-                rooms: vec![],
             }),
         )
         .unwrap();
 
-        let json = do_configuration_reset(&state).unwrap();
-        let reset_bundle: ConfigurationBundle = serde_json::from_str(&json).unwrap();
-        let expected = factory_default_configuration_bundle();
-        let mut reset_profiles = reset_bundle.configuration.profiles.clone();
+        let json = do_share_bundle_reset(&state).unwrap();
+        let reset_bundle: ShareBundle = serde_json::from_str(&json).unwrap();
+        let expected = factory_default_share_bundle();
+        let mut reset_profiles = reset_bundle.share.profiles.clone();
         reset_profiles.sort_by(|left, right| left.id.cmp(&right.id));
-        let mut expected_profiles = expected.configuration.profiles.clone();
+        let mut expected_profiles = expected.share.profiles.clone();
         expected_profiles.sort_by(|left, right| left.id.cmp(&right.id));
 
-        assert_eq!(
-            reset_bundle.configuration.power_save,
-            expected.configuration.power_save
-        );
-        assert_eq!(
-            reset_bundle.configuration.active_mode,
-            expected.configuration.active_mode
-        );
+        assert_eq!(reset_bundle.share.power_save, expected.share.power_save);
         assert_eq!(reset_profiles, expected_profiles);
         assert_eq!(
-            reset_bundle.configuration.mode_configs,
-            expected.configuration.mode_configs
-        );
-        assert_eq!(
-            reset_bundle.configuration.mode_transitions,
-            expected.configuration.mode_transitions
+            reset_bundle.share.mode_transitions,
+            expected.share.mode_transitions
         );
     }
 
     #[test]
-    fn configuration_reset_clears_installation_state_and_stale_storage() {
+    fn factory_reset_clears_installation_state_and_stale_storage() {
         let (state, _rt) = setup_state_with_registry(vec![make_snapshot("r1", false, false)]);
         let storage = TestStorage::default();
         let hub_key = state.lock().unwrap().hubs.keys().next().cloned().unwrap();
@@ -9983,9 +9946,9 @@ mod tests {
             persist_topology(&s);
         }
 
-        let json = do_configuration_reset(&state).unwrap();
-        let reset_bundle: ConfigurationBundle = serde_json::from_str(&json).unwrap();
-        assert!(reset_bundle.configuration.rooms.is_empty());
+        let json = do_factory_reset(&state).unwrap();
+        let reset_bundle: ShareBundle = serde_json::from_str(&json).unwrap();
+        assert!(reset_bundle.share.profiles.iter().any(|profile| profile.id == "rhythm"));
 
         let s = state.lock().unwrap();
         assert!(s.hubs.is_empty());

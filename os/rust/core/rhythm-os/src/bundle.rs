@@ -1,8 +1,8 @@
-//! Shareable configuration and backup bundle schemas.
+//! Share-bundle and backup bundle schemas.
 //!
-//! `ConfigurationBundle` is the portable format for sharing a lighting setup.
-//! `BackupBundle` wraps that same portable configuration with installation-
-//! specific data that can be used for restore workflows later.
+//! `ShareBundle` is the portable format for sharing lighting behavior with
+//! other users.
+//! `BackupBundle` captures installation-specific state for restore workflows.
 
 use rhythm_core::{
     LightProfileConfig, ModeChangeCause, ModeConfig, ModeTransitionConfig, RhythmMode, Room,
@@ -26,21 +26,71 @@ fn default_schema_version() -> u32 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BundleKind {
-    ConfigurationBundle,
+    #[serde(alias = "configuration_bundle")]
+    ShareBundle,
     BackupBundle,
 }
 
-fn default_configuration_bundle_kind() -> BundleKind {
-    BundleKind::ConfigurationBundle
+fn default_share_bundle_kind() -> BundleKind {
+    BundleKind::ShareBundle
 }
 
 fn default_backup_bundle_kind() -> BundleKind {
     BundleKind::BackupBundle
 }
 
-/// Portable per-room preferences included in shareable configurations.
+/// Portable lighting behavior that can be shared across installations.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ShareConfiguration {
+    #[serde(default)]
+    pub power_save: bool,
+    #[serde(default)]
+    pub profiles: Vec<LightProfileConfig>,
+    #[serde(default)]
+    pub mode_transitions: Vec<ModeTransitionConfig>,
+}
+
+/// Shareable top-level bundle.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ConfigurationRoom {
+pub struct ShareBundle {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    #[serde(default = "default_share_bundle_kind")]
+    pub kind: BundleKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(alias = "configuration")]
+    pub share: ShareConfiguration,
+}
+
+/// Import accepts either a full share bundle or a bare share payload.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ShareImportPayload {
+    Bundle(ShareBundle),
+    Share(ShareConfiguration),
+}
+
+impl ShareImportPayload {
+    pub fn into_bundle(self) -> ShareBundle {
+        match self {
+            Self::Bundle(bundle) => bundle,
+            Self::Share(share) => ShareBundle {
+                schema_version: BUNDLE_SCHEMA_VERSION,
+                kind: BundleKind::ShareBundle,
+                name: None,
+                description: None,
+                share,
+            },
+        }
+    }
+}
+
+/// Portable per-room preferences included in backup configuration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BackupConfigurationRoom {
     pub id: String,
     pub name: String,
     pub rhythm_enabled: bool,
@@ -54,7 +104,7 @@ pub struct ConfigurationRoom {
     pub room_profile: RoomProfileSettings,
 }
 
-impl From<&Room> for ConfigurationRoom {
+impl From<&Room> for BackupConfigurationRoom {
     fn from(room: &Room) -> Self {
         Self {
             id: room.id.clone(),
@@ -67,9 +117,9 @@ impl From<&Room> for ConfigurationRoom {
     }
 }
 
-/// Portable lighting behavior that can be shared across installations.
+/// Backed-up lighting and room behavior stored with installation restores.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct PortableConfiguration {
+pub struct BackupConfiguration {
     #[serde(default)]
     pub power_save: bool,
     #[serde(default)]
@@ -81,44 +131,7 @@ pub struct PortableConfiguration {
     #[serde(default)]
     pub mode_transitions: Vec<ModeTransitionConfig>,
     #[serde(default)]
-    pub rooms: Vec<ConfigurationRoom>,
-}
-
-/// Shareable top-level bundle.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ConfigurationBundle {
-    #[serde(default = "default_schema_version")]
-    pub schema_version: u32,
-    #[serde(default = "default_configuration_bundle_kind")]
-    pub kind: BundleKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub configuration: PortableConfiguration,
-}
-
-/// Import accepts either a full bundle or a bare configuration payload.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
-pub enum ConfigurationImportPayload {
-    Bundle(ConfigurationBundle),
-    Configuration(PortableConfiguration),
-}
-
-impl ConfigurationImportPayload {
-    pub fn into_bundle(self) -> ConfigurationBundle {
-        match self {
-            Self::Bundle(bundle) => bundle,
-            Self::Configuration(configuration) => ConfigurationBundle {
-                schema_version: BUNDLE_SCHEMA_VERSION,
-                kind: BundleKind::ConfigurationBundle,
-                name: None,
-                description: None,
-                configuration,
-            },
-        }
-    }
+    pub rooms: Vec<BackupConfigurationRoom>,
 }
 
 /// Backup copy of per-hub credentials.
@@ -181,7 +194,7 @@ pub struct BackupBundle {
     pub created_at: String,
     #[serde(default)]
     pub secrets_included: bool,
-    pub configuration: PortableConfiguration,
+    pub configuration: BackupConfiguration,
     pub installation: BackupInstallation,
     pub runtime_state: BackupRuntimeState,
 }

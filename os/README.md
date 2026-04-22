@@ -57,7 +57,9 @@ Rhythm OS exposes a complete REST API for managing lights, rooms, and curves. Al
 |----------|-----------|-------------|
 | **State** | `GET /api/state`, `GET /api/nodes/state` | Full snapshot or lightweight node state |
 | **Events** | `GET /api/events` | SSE stream (room state, motion, hub status, config changes) |
-| **Backup** | `GET /api/configuration`, `PUT /api/configuration`, `GET /api/backup`, `PUT /api/backup` | Portable configuration import/export plus full installation backup/restore |
+| **Share Bundle** | `GET /api/share-bundle`, `PUT /api/share-bundle`, `GET /api/share-bundle/factory-default`, `POST /api/share-bundle/reset` | Share day/sleep profiles, transitions, and other non-house-specific lighting behavior |
+| **Backup** | `GET /api/backup`, `PUT /api/backup` | Full installation backup/restore including topology and installation metadata |
+| **Factory Reset** | `POST /api/factory-reset` | Clear installation state and restore shipped defaults |
 | **Nodes** | `PUT /api/nodes/action`, `PUT /api/nodes/brightness`, `PUT /api/nodes/offset`, `PUT /api/nodes/preferences`, `POST /api/nodes/fix` | Control live nodes and room/device preferences |
 | **Topology** | `GET/POST /api/topology/rooms`, `PUT /api/topology/rooms/:id`, `PUT /api/topology/rooms/:id/merge`, `PUT /api/topology/rooms/:id/devices/move` | Manage user-facing room/device graph |
 | **Canonical & Triage** | `GET /api/devices/canonical`, `PUT /api/devices/canonical/:id/room`, `PUT /api/devices/canonical/:id/parent`, `GET /api/triage` | Review normalized devices and resolve merge/binding decisions |

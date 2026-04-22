@@ -60,14 +60,15 @@ fn shared_routes() -> Router<SharedState> {
         .route("/health", get(health))
         .route("/api/state", get(get_state))
         .route(
-            "/api/configuration",
-            get(get_configuration).put(put_configuration),
+            "/api/share-bundle",
+            get(get_share_bundle).put(put_share_bundle),
         )
         .route(
-            "/api/configuration/factory-default",
-            get(get_factory_default_configuration),
+            "/api/share-bundle/factory-default",
+            get(get_factory_default_share_bundle),
         )
-        .route("/api/configuration/reset", post(post_configuration_reset))
+        .route("/api/share-bundle/reset", post(post_share_bundle_reset))
+        .route("/api/factory-reset", post(post_factory_reset))
         .route("/api/backup", get(get_backup).put(put_backup))
         .route("/api/nodes/state", get(get_nodes_state))
         .route("/api/events", get(sse_events))
@@ -154,23 +155,27 @@ async fn get_state(State(state): State<SharedState>) -> ApiResponse {
     handlers::handle_get_state(&state)
 }
 
-async fn get_configuration(State(state): State<SharedState>) -> ApiResponse {
-    handlers::handle_get_configuration(&state)
+async fn get_share_bundle(State(state): State<SharedState>) -> ApiResponse {
+    handlers::handle_get_share_bundle(&state)
 }
 
-async fn put_configuration(
+async fn put_share_bundle(
     State(state): State<SharedState>,
     Json(body): Json<Value>,
 ) -> ApiResponse {
-    run_blocking(move || handlers::handle_put_configuration(&state, &body)).await
+    run_blocking(move || handlers::handle_put_share_bundle(&state, &body)).await
 }
 
-async fn get_factory_default_configuration() -> ApiResponse {
-    handlers::handle_get_factory_default_configuration()
+async fn get_factory_default_share_bundle() -> ApiResponse {
+    handlers::handle_get_factory_default_share_bundle()
 }
 
-async fn post_configuration_reset(State(state): State<SharedState>) -> ApiResponse {
-    run_blocking(move || handlers::handle_post_configuration_reset(&state)).await
+async fn post_share_bundle_reset(State(state): State<SharedState>) -> ApiResponse {
+    run_blocking(move || handlers::handle_post_share_bundle_reset(&state)).await
+}
+
+async fn post_factory_reset(State(state): State<SharedState>) -> ApiResponse {
+    run_blocking(move || handlers::handle_post_factory_reset(&state)).await
 }
 
 async fn get_backup(

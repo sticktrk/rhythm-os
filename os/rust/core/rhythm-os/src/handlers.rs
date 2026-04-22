@@ -263,37 +263,44 @@ pub fn handle_get_state(state: &SharedState) -> ApiResponse {
     }
 }
 
-pub fn handle_get_configuration(state: &SharedState) -> ApiResponse {
-    match commands::build_configuration_bundle(state) {
+pub fn handle_get_share_bundle(state: &SharedState) -> ApiResponse {
+    match commands::build_share_bundle(state) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
     }
 }
 
-pub fn handle_put_configuration(state: &SharedState, body: &Value) -> ApiResponse {
-    let payload: crate::bundle::ConfigurationImportPayload =
+pub fn handle_put_share_bundle(state: &SharedState, body: &Value) -> ApiResponse {
+    let payload: crate::bundle::ShareImportPayload =
         match serde_json::from_value(body.clone()) {
             Ok(payload) => payload,
             Err(e) => {
-                return ApiResponse::bad_request(&format!("Invalid configuration bundle: {}", e));
+                return ApiResponse::bad_request(&format!("Invalid share bundle: {}", e));
             }
         };
 
-    match commands::do_configuration_import(state, payload) {
+    match commands::do_share_bundle_import(state, payload) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::bad_request(&e.to_string()),
     }
 }
 
-pub fn handle_get_factory_default_configuration() -> ApiResponse {
-    match commands::build_factory_default_configuration_bundle() {
+pub fn handle_get_factory_default_share_bundle() -> ApiResponse {
+    match commands::build_factory_default_share_bundle() {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
     }
 }
 
-pub fn handle_post_configuration_reset(state: &SharedState) -> ApiResponse {
-    match commands::do_configuration_reset(state) {
+pub fn handle_post_share_bundle_reset(state: &SharedState) -> ApiResponse {
+    match commands::do_share_bundle_reset(state) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::bad_request(&e.to_string()),
+    }
+}
+
+pub fn handle_post_factory_reset(state: &SharedState) -> ApiResponse {
+    match commands::do_factory_reset(state) {
         Ok(json) => {
             if let Some(callback) = state
                 .lock()
@@ -1632,7 +1639,7 @@ mod tests {
     use crate::canonical::identity::{DiscoveredIdentity, HardwareId, HubKey};
     use crate::canonical::registry::ResolveResult;
     use crate::factory_default_config::{
-        factory_default_configuration_bundle, factory_default_light_profile_config,
+        factory_default_light_profile_config, factory_default_share_bundle,
     };
     use crate::hub::{ActiveHub, HubType};
     use crate::pairing::{PairingStatus, UnpairingRequest, UnpairingResult};
@@ -2202,36 +2209,28 @@ mod tests {
     }
 
     #[test]
-    fn get_factory_default_configuration_returns_factory_default_bundle() {
-        let r = handle_get_factory_default_configuration();
+    fn get_factory_default_share_bundle_returns_factory_default_bundle() {
+        let r = handle_get_factory_default_share_bundle();
         assert_eq!(r.status, 200);
-        let parsed: crate::bundle::ConfigurationBundle = serde_json::from_str(&r.body).unwrap();
+        let parsed: crate::bundle::ShareBundle = serde_json::from_str(&r.body).unwrap();
         assert_eq!(
             parsed.name.as_deref(),
-            Some(
-                factory_default_configuration_bundle()
-                    .name
-                    .as_deref()
-                    .unwrap_or("")
-            )
+            Some(factory_default_share_bundle().name.as_deref().unwrap_or(""))
         );
         assert_eq!(
-            parsed.configuration.profiles,
-            factory_default_configuration_bundle()
-                .configuration
-                .profiles
+            parsed.share.profiles,
+            factory_default_share_bundle().share.profiles
         );
     }
 
     #[test]
-    fn post_configuration_reset_restores_factory_default_bundle() {
+    fn post_share_bundle_reset_restores_factory_default_bundle() {
         let state = handler_state_with_runtime();
-        let _ = handle_put_configuration(
+        let _ = handle_put_share_bundle(
             &state,
             &json!({
-                "configuration": {
+                "share": {
                     "power_save": true,
-                    "active_mode": "day",
                     "profiles": [{
                         "id": "focus",
                         "name": "Focus",
@@ -2242,45 +2241,29 @@ mod tests {
                         "max_color_temp": 4000,
                         "max_dim_steps": 4
                     }],
-                    "mode_configs": [{
-                        "mode": "day",
-                        "active_profile_id": "focus"
-                    }],
-                    "mode_transitions": [],
-                    "rooms": []
+                    "mode_transitions": []
                 }
             }),
         );
 
-        let r = handle_post_configuration_reset(&state);
+        let r = handle_post_share_bundle_reset(&state);
         assert_eq!(r.status, 200);
-        let parsed: crate::bundle::ConfigurationBundle = serde_json::from_str(&r.body).unwrap();
-        let factory_default = factory_default_configuration_bundle();
-        let mut parsed_profiles = parsed.configuration.profiles.clone();
+        let parsed: crate::bundle::ShareBundle = serde_json::from_str(&r.body).unwrap();
+        let factory_default = factory_default_share_bundle();
+        let mut parsed_profiles = parsed.share.profiles.clone();
         parsed_profiles.sort_by(|left, right| left.id.cmp(&right.id));
-        let mut expected_profiles = factory_default.configuration.profiles.clone();
+        let mut expected_profiles = factory_default.share.profiles.clone();
         expected_profiles.sort_by(|left, right| left.id.cmp(&right.id));
+        assert_eq!(parsed.share.power_save, factory_default.share.power_save);
         assert_eq!(
-            parsed.configuration.power_save,
-            factory_default.configuration.power_save
-        );
-        assert_eq!(
-            parsed.configuration.active_mode,
-            factory_default.configuration.active_mode
-        );
-        assert_eq!(
-            parsed.configuration.mode_configs,
-            factory_default.configuration.mode_configs
-        );
-        assert_eq!(
-            parsed.configuration.mode_transitions,
-            factory_default.configuration.mode_transitions
+            parsed.share.mode_transitions,
+            factory_default.share.mode_transitions
         );
         assert_eq!(parsed_profiles, expected_profiles);
     }
 
     #[test]
-    fn post_configuration_reset_invokes_platform_follow_up() {
+    fn post_factory_reset_invokes_platform_follow_up() {
         let state = handler_state_with_runtime();
         let invoked = Arc::new(AtomicBool::new(false));
         state.lock().unwrap().after_factory_reset_fn = Some({
@@ -2290,7 +2273,7 @@ mod tests {
             })
         });
 
-        let r = handle_post_configuration_reset(&state);
+        let r = handle_post_factory_reset(&state);
         assert_eq!(r.status, 200);
         assert!(invoked.load(Ordering::SeqCst));
     }

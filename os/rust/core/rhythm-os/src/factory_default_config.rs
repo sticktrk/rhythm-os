@@ -1,11 +1,11 @@
-//! Factory-default developer-owned configuration bundle.
+//! Factory-default developer-owned share bundle.
 //!
-//! The server factory defaults live in a checked-in JSON bundle so developers
+//! The server defaults live in a checked-in JSON bundle so developers
 //! can tune shipped lighting behavior without editing Rust code. Runtime and
 //! storage code clone from this module when they need the baseline profile,
-//! mode, or transition configuration.
+//! power-save, or transition configuration.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use anyhow::{anyhow, Context, Result};
@@ -15,40 +15,40 @@ use rhythm_core::{
     RhythmMode, DAY_IDLE_PROFILE_ID, RHYTHM_PROFILE_ID, SLEEP_IDLE_PROFILE_ID, SLEEP_PROFILE_ID,
 };
 
-use crate::bundle::{BundleKind, ConfigurationBundle, BUNDLE_SCHEMA_VERSION};
+use crate::bundle::{BundleKind, ShareBundle, BUNDLE_SCHEMA_VERSION};
 
-const FACTORY_DEFAULT_CONFIGURATION_JSON: &str =
-    include_str!("../config/factory-default/default_configuration.json");
+const FACTORY_DEFAULT_SHARE_JSON: &str =
+    include_str!("../config/factory-default/default_share_bundle.json");
 
-static FACTORY_DEFAULT_CONFIGURATION_BUNDLE: OnceLock<ConfigurationBundle> = OnceLock::new();
+static FACTORY_DEFAULT_SHARE_BUNDLE: OnceLock<ShareBundle> = OnceLock::new();
 static FACTORY_DEFAULT_LIGHT_PROFILE_CONFIGS: OnceLock<BTreeMap<String, LightProfileConfig>> =
     OnceLock::new();
 static FACTORY_DEFAULT_MODE_CONFIGS: OnceLock<BTreeMap<RhythmMode, ModeConfig>> = OnceLock::new();
 static FACTORY_DEFAULT_MODE_TRANSITIONS: OnceLock<Vec<ModeTransitionConfig>> = OnceLock::new();
 
-fn parse_factory_default_configuration_bundle() -> Result<ConfigurationBundle> {
-    let bundle: ConfigurationBundle = serde_json::from_str(FACTORY_DEFAULT_CONFIGURATION_JSON)
-        .context("failed to parse factory-default configuration JSON")?;
+fn parse_factory_default_share_bundle() -> Result<ShareBundle> {
+    let bundle: ShareBundle = serde_json::from_str(FACTORY_DEFAULT_SHARE_JSON)
+        .context("failed to parse factory-default share bundle JSON")?;
 
     if bundle.schema_version != BUNDLE_SCHEMA_VERSION {
         return Err(anyhow!(
-            "factory-default configuration schema_version {} does not match supported schema {}",
+            "factory-default share bundle schema_version {} does not match supported schema {}",
             bundle.schema_version,
             BUNDLE_SCHEMA_VERSION
         ));
     }
 
-    if bundle.kind != BundleKind::ConfigurationBundle {
+    if bundle.kind != BundleKind::ShareBundle {
         return Err(anyhow!(
-            "factory-default configuration must use kind=configuration_bundle"
+            "factory-default share bundle must use kind=share_bundle"
         ));
     }
 
-    let mut seen_ids = HashSet::new();
-    for profile in &bundle.configuration.profiles {
+    let mut seen_ids = std::collections::HashSet::new();
+    for profile in &bundle.share.profiles {
         if !seen_ids.insert(profile.id.clone()) {
             return Err(anyhow!(
-                "factory-default configuration defines duplicate profile id '{}'",
+                "factory-default share bundle defines duplicate profile id '{}'",
                 profile.id
             ));
         }
@@ -62,7 +62,7 @@ fn parse_factory_default_configuration_bundle() -> Result<ConfigurationBundle> {
     ] {
         if !seen_ids.contains(required_id) {
             return Err(anyhow!(
-                "factory-default configuration is missing required profile '{}'",
+                "factory-default share bundle is missing required profile '{}'",
                 required_id
             ));
         }
@@ -71,10 +71,10 @@ fn parse_factory_default_configuration_bundle() -> Result<ConfigurationBundle> {
     Ok(bundle)
 }
 
-fn factory_default_configuration_bundle_ref() -> &'static ConfigurationBundle {
-    FACTORY_DEFAULT_CONFIGURATION_BUNDLE.get_or_init(|| {
-        parse_factory_default_configuration_bundle().unwrap_or_else(|e| {
-            panic!("invalid factory-default configuration: {e:#}");
+fn factory_default_share_bundle_ref() -> &'static ShareBundle {
+    FACTORY_DEFAULT_SHARE_BUNDLE.get_or_init(|| {
+        parse_factory_default_share_bundle().unwrap_or_else(|e| {
+            panic!("invalid factory-default share bundle: {e:#}");
         })
     })
 }
@@ -82,11 +82,7 @@ fn factory_default_configuration_bundle_ref() -> &'static ConfigurationBundle {
 fn factory_default_light_profile_configs_ref() -> &'static BTreeMap<String, LightProfileConfig> {
     FACTORY_DEFAULT_LIGHT_PROFILE_CONFIGS.get_or_init(|| {
         let mut configs = BTreeMap::new();
-        for mut profile in factory_default_configuration_bundle_ref()
-            .configuration
-            .profiles
-            .clone()
-        {
+        for mut profile in factory_default_share_bundle_ref().share.profiles.clone() {
             normalize_builtin_state_profile_config(&mut profile);
             configs.insert(profile.id.clone(), profile);
         }
@@ -96,21 +92,10 @@ fn factory_default_light_profile_configs_ref() -> &'static BTreeMap<String, Ligh
 
 fn factory_default_mode_config_map_ref() -> &'static BTreeMap<RhythmMode, ModeConfig> {
     FACTORY_DEFAULT_MODE_CONFIGS.get_or_init(|| {
-        let mut configs: BTreeMap<_, _> = RhythmMode::ALL
+        RhythmMode::ALL
             .into_iter()
             .map(|mode| (mode, ModeConfig::default_for_mode(mode)))
-            .collect();
-
-        for mut config in factory_default_configuration_bundle_ref()
-            .configuration
-            .mode_configs
-            .clone()
-        {
-            config.normalize_profile_ids();
-            configs.insert(config.mode, config);
-        }
-
-        configs
+            .collect()
     })
 }
 
@@ -129,20 +114,16 @@ fn factory_default_resolved_active_profile_id_for_mode(mode: RhythmMode) -> Stri
     }
 }
 
-pub fn factory_default_configuration_bundle() -> ConfigurationBundle {
-    factory_default_configuration_bundle_ref().clone()
+pub fn factory_default_share_bundle() -> ShareBundle {
+    factory_default_share_bundle_ref().clone()
 }
 
 pub fn factory_default_power_save() -> bool {
-    factory_default_configuration_bundle_ref()
-        .configuration
-        .power_save
+    factory_default_share_bundle_ref().share.power_save
 }
 
 pub fn factory_default_active_mode() -> RhythmMode {
-    factory_default_configuration_bundle_ref()
-        .configuration
-        .active_mode
+    RhythmMode::Day
 }
 
 pub fn factory_default_light_profile_config_map() -> BTreeMap<String, LightProfileConfig> {
@@ -161,10 +142,7 @@ pub fn factory_default_mode_transition_configs() -> Vec<ModeTransitionConfig> {
     FACTORY_DEFAULT_MODE_TRANSITIONS
         .get_or_init(|| {
             normalize_mode_transition_configs(
-                factory_default_configuration_bundle_ref()
-                    .configuration
-                    .mode_transitions
-                    .clone(),
+                factory_default_share_bundle_ref().share.mode_transitions.clone(),
             )
         })
         .clone()
@@ -199,11 +177,11 @@ mod tests {
     use rhythm_core::{ModeTransitionTrigger, TimerSetting};
 
     #[test]
-    fn factory_default_configuration_exposes_expected_defaults() {
+    fn factory_default_share_bundle_exposes_expected_defaults() {
         assert_eq!(factory_default_active_mode(), RhythmMode::Day);
         assert!(!factory_default_power_save());
 
-        let bundle = factory_default_configuration_bundle();
+        let bundle = factory_default_share_bundle();
         assert_eq!(bundle.name.as_deref(), Some("Factory Default"));
 
         let profiles = factory_default_light_profile_config_map();
@@ -263,6 +241,11 @@ mod tests {
                 .get(&RhythmMode::Sleep)
                 .and_then(|config| config.active_profile_id.as_deref()),
             Some(SLEEP_PROFILE_ID)
+        );
+        assert!(
+            mode_configs
+                .values()
+                .all(|config| config.room_defaults.is_empty())
         );
 
         let transitions = factory_default_mode_transition_configs();

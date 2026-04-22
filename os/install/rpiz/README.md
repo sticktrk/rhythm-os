@@ -264,7 +264,7 @@ The archive currently includes:
 
 - `manifest.json` with bundle metadata and the exact log files captured
 - `state.json` from the normal redacted state snapshot
-- `configuration.json` from the normal configuration export
+- `share_bundle.json` from the normal share-bundle export
 - matching files from `/data/log`, including rotated variants for:
 - `rhythm-server.log`, `rhythm-server.log.1`, ...
 - `rhythm-matter.log`, `rhythm-matter.log.1`, ...
