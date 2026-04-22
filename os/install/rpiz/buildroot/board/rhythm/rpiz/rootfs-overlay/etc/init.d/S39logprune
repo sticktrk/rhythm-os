@@ -1,0 +1,61 @@
+#!/bin/sh
+
+set -eu
+
+PIDFILE=/var/run/rhythm-log-prune.pid
+PRUNE_CMD=/usr/bin/rhythm-log-prune
+DEV_DEFAULTS=/etc/default/rhythm-dev
+DEFAULT_INTERVAL=300
+
+load_config() {
+    if [ -r "$DEV_DEFAULTS" ]; then
+        # shellcheck disable=SC1090
+        . "$DEV_DEFAULTS"
+    fi
+
+    : "${RHYTHM_LOG_PRUNE_INTERVAL_SECS:=$DEFAULT_INTERVAL}"
+}
+
+pid_is_running() {
+    [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+}
+
+start() {
+    load_config
+    mkdir -p /var/run
+
+    "$PRUNE_CMD" run >/dev/null 2>&1 || true
+
+    if pid_is_running; then
+        return 0
+    fi
+
+    interval="$RHYTHM_LOG_PRUNE_INTERVAL_SECS"
+    (
+        while :; do
+            "$PRUNE_CMD" run >/dev/null 2>&1 || true
+            sleep "$interval" || sleep "$DEFAULT_INTERVAL"
+        done
+    ) &
+    echo "$!" > "$PIDFILE"
+}
+
+stop() {
+    if pid_is_running; then
+        kill "$(cat "$PIDFILE")" 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE"
+}
+
+case "${1:-}" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop
+        start
+        ;;
+esac

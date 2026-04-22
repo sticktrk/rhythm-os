@@ -10,7 +10,8 @@ This target is for a Pi Zero / Zero W without Raspberry Pi OS. The Rust applianc
 - Starts Rhythm automatically at boot under BusyBox `init` with `RHYTHM_PLATFORM_TYPE=appliance` and `RHYTHM_PLATFORM_CONTEXT=rpiz`
 - Uses BusyBox `init` `respawn`, not `systemd`, so the appliance always brings `rhythm-server` back if it exits
 - Mounts `/boot` from the FAT partition and `/data` from the dedicated persistent partition
-- Writes the main appliance log to `/var/log/rhythm-server.log` and raw Matter `rhythm-chipd` output to `/var/log/rhythm-matter.log`
+- Writes the main appliance log to `/data/log/rhythm-server.log` and raw Matter `rhythm-chipd` output to `/data/log/rhythm-matter.log`
+- Prunes appliance logs in place on a background loop so the long-running append-only file descriptors stay bounded
 - Brings up `usb0` at `192.168.7.2/24` for first-boot API testing over the Pi Zero OTG port
 - Optionally embeds Wi-Fi credentials for Pi Zero W / Zero 2 W images
 
@@ -203,8 +204,38 @@ provisioning sidecar on with:
 RHYTHM_BLE_PROVISION_ALWAYS=1 /usr/bin/rhythm-server --data-dir /data --log-level info
 ```
 
-`rpiz` sets `RHYTHM_MATTER_LOGFILE=/var/log/rhythm-matter.log` by default so
+## Appliance log pruning
+
+`rpiz` keeps appliance-owned logs under `/data/log` and rotates them in place
+every 5 minutes by default. The active files are truncated after the tail is
+copied into numbered rotations, which keeps the logs bounded without requiring
+`rhythm-server` or `rhythm-chipd` to reopen their file descriptors.
+
+Default limits:
+
+- `rhythm-server.log`: 4 MiB, keep 5 rotations
+- `rhythm-matter.log`: 8 MiB, keep 3 rotations
+- `wifi.log`: 256 KiB, keep 2 rotations
+- `bluetooth.log`: 256 KiB, keep 2 rotations
+
+Override the log directory, prune interval, or size limits in
+`/etc/default/rhythm-dev` with:
+
+```sh
+RHYTHM_LOG_DIR=/data/log
+RHYTHM_LOG_PRUNE_INTERVAL_SECS=300
+RHYTHM_SERVER_LOG_MAX_BYTES=4194304
+RHYTHM_SERVER_LOG_KEEP=5
+RHYTHM_MATTER_LOG_MAX_BYTES=8388608
+RHYTHM_MATTER_LOG_KEEP=3
+RHYTHM_WIFI_LOG_MAX_BYTES=262144
+RHYTHM_WIFI_LOG_KEEP=2
+RHYTHM_BLUETOOTH_LOG_MAX_BYTES=262144
+RHYTHM_BLUETOOTH_LOG_KEEP=2
+```
+
+`rpiz` sets `RHYTHM_MATTER_LOGFILE=/data/log/rhythm-matter.log` by default so
 raw CHIP/Matter daemon output (`[DMG]`, `[EM]`, `[CSM]`, `[DIS]`, etc.) stays
-out of `/var/log/rhythm-server.log`. Override that variable, or set it to an
+out of `/data/log/rhythm-server.log`. Override that variable, or set it to an
 empty string in `/etc/default/rhythm-dev`, if you want `rhythm-chipd` to use a
 different file or inherit the main appliance log sink again.

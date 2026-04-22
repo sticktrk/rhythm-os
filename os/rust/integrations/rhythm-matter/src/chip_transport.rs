@@ -617,8 +617,8 @@ mod tests {
         assert_eq!(sidecar_log_path_from_env(None), None);
         assert_eq!(sidecar_log_path_from_env(Some(OsString::from(""))), None);
         assert_eq!(
-            sidecar_log_path_from_env(Some(OsString::from("/var/log/rhythm-matter.log"))),
-            Some(PathBuf::from("/var/log/rhythm-matter.log"))
+            sidecar_log_path_from_env(Some(OsString::from("/tmp/rhythm-matter.log"))),
+            Some(PathBuf::from("/tmp/rhythm-matter.log"))
         );
     }
 

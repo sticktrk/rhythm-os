@@ -1,7 +1,29 @@
 #!/bin/sh
 
 WPA_CONF=/etc/wpa_supplicant.conf
-LOGFILE=/var/log/wifi.log
+DEV_DEFAULTS=/etc/default/rhythm-dev
+LOG_DIR_DEFAULT=/data/log
+LOG_DIR_FALLBACK=/var/log
+
+resolve_log_dir() {
+    if [ -n "${RHYTHM_LOG_DIR:-}" ]; then
+        printf '%s\n' "$RHYTHM_LOG_DIR"
+        return 0
+    fi
+
+    if grep -qs '[[:space:]]/data[[:space:]]' /proc/mounts 2>/dev/null; then
+        printf '%s\n' "$LOG_DIR_DEFAULT"
+    else
+        printf '%s\n' "$LOG_DIR_FALLBACK"
+    fi
+}
+
+if [ -r "$DEV_DEFAULTS" ]; then
+    # shellcheck disable=SC1090
+    . "$DEV_DEFAULTS"
+fi
+
+LOGFILE="$(resolve_log_dir)/wifi.log"
 
 log() {
     local msg="wifi: $*"

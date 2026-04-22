@@ -2,10 +2,10 @@
 
 set -eu
 
-LOGFILE=/var/log/rhythm-server.log
-MATTER_LOGFILE_DEFAULT=/var/log/rhythm-matter.log
 DATA_DIR=/data
 DEV_DEFAULTS=/etc/default/rhythm-dev
+LOG_DIR_DEFAULT=/data/log
+LOG_DIR_FALLBACK=/var/log
 
 is_truthy() {
     case "${1:-}" in
@@ -14,12 +14,18 @@ is_truthy() {
     esac
 }
 
-mkdir -p "$(dirname "$LOGFILE")" "$DATA_DIR"
+resolve_log_dir() {
+    if [ -n "${RHYTHM_LOG_DIR:-}" ]; then
+        printf '%s\n' "$RHYTHM_LOG_DIR"
+        return 0
+    fi
 
-printf 'rhythm-launch: system time %s\n' "$(date -Iseconds 2>/dev/null || date)" >>"$LOGFILE"
-if [ -w /dev/console ]; then
-    printf 'rhythm-launch: system time %s\n' "$(date -Iseconds 2>/dev/null || date)" > /dev/console
-fi
+    if grep -qs '[[:space:]]/data[[:space:]]' /proc/mounts 2>/dev/null; then
+        printf '%s\n' "$LOG_DIR_DEFAULT"
+    else
+        printf '%s\n' "$LOG_DIR_FALLBACK"
+    fi
+}
 
 export RHYTHM_PLATFORM_TYPE=appliance
 export RHYTHM_PLATFORM_CONTEXT=rpiz
@@ -28,6 +34,19 @@ export RHYTHM_MATTER_CHIPD=/usr/bin/rhythm-chipd
 if [ -r "$DEV_DEFAULTS" ]; then
     # shellcheck disable=SC1090
     . "$DEV_DEFAULTS"
+fi
+
+LOG_DIR="$(resolve_log_dir)"
+LOGFILE="${LOG_DIR}/rhythm-server.log"
+MATTER_LOGFILE_DEFAULT="${LOG_DIR}/rhythm-matter.log"
+
+mkdir -p "$(dirname "$LOGFILE")" "$DATA_DIR"
+
+/usr/bin/rhythm-log-prune run >/dev/null 2>&1 || true
+
+printf 'rhythm-launch: system time %s\n' "$(date -Iseconds 2>/dev/null || date)" >>"$LOGFILE"
+if [ -w /dev/console ]; then
+    printf 'rhythm-launch: system time %s\n' "$(date -Iseconds 2>/dev/null || date)" > /dev/console
 fi
 
 export RHYTHM_MATTER_LOGFILE="${RHYTHM_MATTER_LOGFILE-$MATTER_LOGFILE_DEFAULT}"
