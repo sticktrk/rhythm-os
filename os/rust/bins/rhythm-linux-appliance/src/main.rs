@@ -10,6 +10,7 @@ mod wifi;
 
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
@@ -23,6 +24,7 @@ const VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
 };
+const STARTUP_WIFI_RESTORE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Rhythm OS Linux appliance.
 #[derive(Parser, Debug)]
@@ -85,6 +87,7 @@ fn main() -> Result<()> {
         ));
     }
     install_factory_reset_hook(&state)?;
+    hydrate_persisted_wifi_credentials(&state);
 
     let (work_tx, work_rx) = std::sync::mpsc::sync_channel::<WorkItem>(64);
     let (periodic_tx, periodic_rx) = std::sync::mpsc::sync_channel::<WorkItem>(64);
@@ -216,6 +219,85 @@ fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartupWifiRestoreAction {
+    SkipNoStoredCredentials,
+    SkipAlreadyConnected,
+    RestorePersistedCredentials,
+}
+
+fn startup_wifi_restore_action(
+    has_stored_credentials: bool,
+    has_active_connection: bool,
+) -> StartupWifiRestoreAction {
+    if !has_stored_credentials {
+        StartupWifiRestoreAction::SkipNoStoredCredentials
+    } else if has_active_connection {
+        StartupWifiRestoreAction::SkipAlreadyConnected
+    } else {
+        StartupWifiRestoreAction::RestorePersistedCredentials
+    }
+}
+
+fn hydrate_persisted_wifi_credentials(state: &SharedState) {
+    let stored_credentials = match state.lock() {
+        Ok(state) => match state
+            .storage
+            .as_ref()
+            .map(|storage| storage.load_commissioning_wifi_credentials())
+        {
+            Some(Ok(creds)) => creds,
+            Some(Err(error)) => {
+                warn!(
+                    target: "sys",
+                    "Failed to load persisted appliance Wi-Fi credentials at startup: {:#}",
+                    error
+                );
+                return;
+            }
+            None => return,
+        },
+        Err(_) => {
+            warn!(
+                target: "sys",
+                "Skipping appliance Wi-Fi hydration at startup: state lock poisoned"
+            );
+            return;
+        }
+    };
+
+    match startup_wifi_restore_action(stored_credentials.is_some(), wifi::has_active_connection()) {
+        StartupWifiRestoreAction::SkipNoStoredCredentials
+        | StartupWifiRestoreAction::SkipAlreadyConnected => return,
+        StartupWifiRestoreAction::RestorePersistedCredentials => {}
+    }
+
+    let Some(creds) = stored_credentials else {
+        return;
+    };
+
+    info!(
+        target: "sys",
+        "No active Wi-Fi IP detected at startup; restoring persisted appliance Wi-Fi credentials for SSID '{}'",
+        creds.ssid
+    );
+
+    match wifi::connect_with_credentials(&creds, STARTUP_WIFI_RESTORE_TIMEOUT) {
+        Ok(ip) => info!(
+            target: "sys",
+            "Restored appliance Wi-Fi connectivity from persisted credentials (SSID='{}', ip={})",
+            creds.ssid,
+            ip
+        ),
+        Err(error) => warn!(
+            target: "sys",
+            "Failed to restore appliance Wi-Fi from persisted credentials for SSID '{}': {:#}",
+            creds.ssid,
+            error
+        ),
+    }
+}
+
 fn spawn_hub_bootstrap(state: SharedState) {
     info!(
         target: "sys",
@@ -226,6 +308,38 @@ fn spawn_hub_bootstrap(state: SharedState) {
         .name("hub-bootstrap".to_string())
         .spawn(move || bootstrap_hubs(&state))
         .expect("Failed to spawn hub bootstrap thread");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        startup_wifi_restore_action, StartupWifiRestoreAction, STARTUP_WIFI_RESTORE_TIMEOUT,
+    };
+
+    #[test]
+    fn startup_wifi_restore_skips_when_no_credentials_are_stored() {
+        assert_eq!(
+            startup_wifi_restore_action(false, false),
+            StartupWifiRestoreAction::SkipNoStoredCredentials
+        );
+    }
+
+    #[test]
+    fn startup_wifi_restore_skips_when_wifi_is_already_connected() {
+        assert_eq!(
+            startup_wifi_restore_action(true, true),
+            StartupWifiRestoreAction::SkipAlreadyConnected
+        );
+    }
+
+    #[test]
+    fn startup_wifi_restore_uses_persisted_credentials_when_disconnected() {
+        assert_eq!(
+            startup_wifi_restore_action(true, false),
+            StartupWifiRestoreAction::RestorePersistedCredentials
+        );
+        assert_eq!(STARTUP_WIFI_RESTORE_TIMEOUT.as_secs(), 30);
+    }
 }
 
 fn bootstrap_hubs(state: &SharedState) {
