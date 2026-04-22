@@ -239,3 +239,37 @@ raw CHIP/Matter daemon output (`[DMG]`, `[EM]`, `[CSM]`, `[DIS]`, etc.) stays
 out of `/data/log/rhythm-server.log`. Override that variable, or set it to an
 empty string in `/etc/default/rhythm-dev`, if you want `rhythm-chipd` to use a
 different file or inherit the main appliance log sink again.
+
+## Debug bundle
+
+`rpiz` also exposes an on-demand debug export:
+
+```http
+POST /api/diag/debug-bundle
+```
+
+The response body is a `tar.gz` attachment. It is meant for support/debugging
+workflows where the app or a local client wants one bounded snapshot of the
+appliance state without SSH access.
+
+Example:
+
+```bash
+curl -X POST \
+  http://192.168.7.2:54448/api/diag/debug-bundle \
+  --output rhythm-debug-bundle.tar.gz
+```
+
+The archive currently includes:
+
+- `manifest.json` with bundle metadata and the exact log files captured
+- `state.json` from the normal redacted state snapshot
+- `configuration.json` from the normal configuration export
+- matching files from `/data/log`, including rotated variants for:
+- `rhythm-server.log`, `rhythm-server.log.1`, ...
+- `rhythm-matter.log`, `rhythm-matter.log.1`, ...
+- `wifi.log`, `wifi.log.1`, ...
+- `bluetooth.log`, `bluetooth.log.1`, ...
+
+The endpoint only bundles file-backed appliance logs. It does not include hub
+credentials, Wi-Fi passwords, or a secrets-included backup bundle.

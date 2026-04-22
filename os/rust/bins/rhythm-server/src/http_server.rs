@@ -1,8 +1,10 @@
 //! Axum HTTP server — uses shared routes from rhythm-os plus server-specific endpoints.
 
+use axum::body::Body;
 use axum::http::StatusCode;
 use std::net::IpAddr;
 
+use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -20,6 +22,7 @@ pub fn create_router(state: SharedState) -> Router {
         rhythm_os::axum_router::api_routes()
             // Server-specific endpoints
             .route("/api/discover", get(discover))
+            .route("/api/diag/debug-bundle", post(debug_bundle))
             .route(
                 "/api/ota/capabilities",
                 get({
@@ -84,9 +87,30 @@ fn err_409(message: impl Into<String>) -> Response {
     )
 }
 
+fn tar_gz_attachment(filename: &str, body: Vec<u8>) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/gzip")
+        .header(
+            "content-disposition",
+            format!("attachment; filename=\"{}\"", filename),
+        )
+        .body(Body::from(body))
+        .unwrap_or_else(|e| ApiResponse::server_error(e).into_response())
+}
+
 // ---------------------------------------------------------------------------
 // Server-specific handlers
 // ---------------------------------------------------------------------------
+
+async fn debug_bundle(State(state): State<SharedState>) -> Response {
+    match tokio::task::spawn_blocking(move || crate::debug_bundle::build_debug_bundle(&state)).await
+    {
+        Ok(Ok(bundle)) => tar_gz_attachment(&bundle.file_name, bundle.bytes),
+        Ok(Err(e)) => err_500(e),
+        Err(e) => err_500(e),
+    }
+}
 
 async fn check_update(ota_status: crate::self_update::OtaStatusHandle) -> Response {
     let version = crate::BUILD_VERSION;
