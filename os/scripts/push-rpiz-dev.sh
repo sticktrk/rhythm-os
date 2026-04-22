@@ -97,9 +97,11 @@ HINT
     exit 1
 fi
 
-echo "Cross-compiling rhythm-linux-appliance for $RUST_TARGET (linker: $linker)"
+BUILD_VERSION="$("$SCRIPT_DIR/resolve-version.sh" server)"
+echo "Cross-compiling rhythm-linux-appliance v$BUILD_VERSION for $RUST_TARGET (linker: $linker)"
 export CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_LINKER="$linker"
 export CC_arm_unknown_linux_musleabihf="$linker"
+export RHYTHM_BUILD_VERSION="$BUILD_VERSION"
 
 cd "$PROJECT_ROOT"
 cargo build --release -p rhythm-linux-appliance --target "$RUST_TARGET"
