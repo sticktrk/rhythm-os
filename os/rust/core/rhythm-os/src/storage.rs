@@ -34,6 +34,9 @@ pub trait Storage: Send + Sync {
     fn save_all_hub_credentials(&self, creds: &[HubCredentials]) -> Result<()>;
     fn load_hub_registry_for(&self, key: &HubKey) -> Result<Option<Value>>;
     fn save_hub_registry_for(&self, key: &HubKey, data: &Value) -> Result<()>;
+    fn clear_hub_registries(&self) -> Result<()> {
+        Ok(())
+    }
 
     /// Load the canonical device registry. Default: returns None (not persisted).
     fn load_canonical_registry(&self) -> Result<Option<Value>> {
@@ -237,6 +240,31 @@ impl FileStorage {
             }
         }
     }
+
+    fn clear_hub_registry_files(&self) -> Result<()> {
+        self.remove_if_exists("hub_registry.json")?;
+
+        for entry in std::fs::read_dir(&self.dir)
+            .with_context(|| format!("reading {}", self.dir.display()))?
+        {
+            let entry = entry?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if name.starts_with("hub_registry_") && name.ends_with(".json") {
+                match std::fs::remove_file(entry.path()) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(e))
+                            .with_context(|| format!("removing {}", entry.path().display()));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Storage for FileStorage {
@@ -319,6 +347,10 @@ impl Storage for FileStorage {
         let filename = format!("hub_registry_{}.json", sanitize_hub_key(key));
         let json = serde_json::to_string_pretty(data)?;
         self.write_atomic(&filename, json.as_bytes())
+    }
+
+    fn clear_hub_registries(&self) -> Result<()> {
+        self.clear_hub_registry_files()
     }
 
     fn load_canonical_registry(&self) -> Result<Option<serde_json::Value>> {
@@ -427,32 +459,13 @@ impl Storage for FileStorage {
             "location.json",
             "settings.json",
             "hub_credentials.json",
-            "hub_registry.json",
             "canonical_registry.json",
             "topology.json",
             "commissioning_wifi.json",
         ] {
             self.remove_if_exists(name)?;
         }
-
-        for entry in std::fs::read_dir(&self.dir)
-            .with_context(|| format!("reading {}", self.dir.display()))?
-        {
-            let entry = entry?;
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            if name.starts_with("hub_registry_") && name.ends_with(".json") {
-                match std::fs::remove_file(entry.path()) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => {
-                        return Err(anyhow::anyhow!(e))
-                            .with_context(|| format!("removing {}", entry.path().display()));
-                    }
-                }
-            }
-        }
+        self.clear_hub_registry_files()?;
 
         for dir in ["matter"] {
             let path = self.dir.join(dir);

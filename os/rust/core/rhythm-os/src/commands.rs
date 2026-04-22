@@ -2466,6 +2466,11 @@ fn restore_backup_installation_metadata(
     topology.rebuild_indices();
     let mut canonical_registry = installation.canonical_registry.clone();
     canonical_registry.rebuild_indices();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    canonical_registry.backfill_unassigned_triage(now);
 
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -2571,6 +2576,9 @@ fn save_backup_hub_registries_to_storage(
     let Some(storage) = s.storage.as_ref() else {
         return Ok(());
     };
+    storage
+        .clear_hub_registries()
+        .map_err(|e| anyhow::anyhow!("Failed to clear persisted hub registries: {}", e))?;
 
     for registry in registries {
         if let Err(e) = storage.save_hub_registry_for(&registry.hub_key, &registry.snapshot) {
@@ -7864,6 +7872,11 @@ mod tests {
             Ok(())
         }
 
+        fn clear_hub_registries(&self) -> Result<()> {
+            self.inner.lock().unwrap().hub_registries.clear();
+            Ok(())
+        }
+
         fn load_canonical_registry(&self) -> Result<Option<Value>> {
             Ok(self.inner.lock().unwrap().canonical_registry.clone())
         }
@@ -9743,6 +9756,118 @@ mod tests {
         assert!(err
             .to_string()
             .contains("unknown light profile 'missing_profile'"));
+    }
+
+    #[test]
+    fn backup_restore_replaces_stale_persisted_hub_registries() {
+        let storage = TestStorage::default();
+        storage
+            .save_hub_registry_for(
+                &HubKey::new(HubType::new("mock"), "stale.local"),
+                &serde_json::json!({ "rooms": [{"id": "stale-room"}] }),
+            )
+            .unwrap();
+
+        let state = Arc::new(Mutex::new(AppState {
+            storage: Some(Box::new(storage.clone())),
+            ..Default::default()
+        }));
+
+        let restored_key = HubKey::new(HubType::new("mock"), "restored.local");
+        let bundle = BackupBundle {
+            schema_version: BUNDLE_SCHEMA_VERSION,
+            kind: BundleKind::BackupBundle,
+            created_at: "2026-04-16T00:00:00Z".into(),
+            secrets_included: false,
+            configuration: PortableConfiguration::default(),
+            installation: BackupInstallation {
+                location: None,
+                rooms: rhythm_core::RoomManager::new(),
+                topology: crate::topology::RoomTopologyStore::new(),
+                canonical_registry: crate::canonical::registry::CanonicalRegistry::new(),
+                hub_credentials: vec![],
+                hub_registries: vec![crate::bundle::BackupHubRegistry {
+                    hub_key: restored_key.clone(),
+                    snapshot: serde_json::json!({ "rooms": [{"id": "restored-room"}] }),
+                }],
+            },
+            runtime_state: BackupRuntimeState {
+                active_mode: RhythmMode::Day,
+                last_change_cause: ModeChangeCause::Manual,
+                last_change_transition_id: None,
+                last_change_epoch_ms: None,
+            },
+        };
+
+        do_backup_restore(&state, bundle).unwrap();
+
+        let saved = storage.inner.lock().unwrap();
+        assert_eq!(saved.hub_registries.len(), 1);
+        assert!(!saved.hub_registries.contains_key("mock://stale.local"));
+        assert_eq!(
+            saved.hub_registries.get(&restored_key.to_string()),
+            Some(&serde_json::json!({ "rooms": [{"id": "restored-room"}] }))
+        );
+    }
+
+    #[test]
+    fn backup_restore_backfills_unassigned_triage_for_roomless_devices() {
+        let state = Arc::new(Mutex::new(AppState::default()));
+        let device_id = insert_canonical_device(
+            &state,
+            HubKey::new(HubType::new("matter"), "local"),
+            "matter-device-1",
+            "Desk Lamp",
+            "",
+            "",
+        );
+
+        let canonical_registry = state.lock().unwrap().canonical_registry.clone();
+        assert_eq!(canonical_registry.triage().pending_unassigned_count(), 0);
+
+        let restored = Arc::new(Mutex::new(AppState::default()));
+        let bundle = BackupBundle {
+            schema_version: BUNDLE_SCHEMA_VERSION,
+            kind: BundleKind::BackupBundle,
+            created_at: "2026-04-16T00:00:00Z".into(),
+            secrets_included: false,
+            configuration: PortableConfiguration::default(),
+            installation: BackupInstallation {
+                location: None,
+                rooms: rhythm_core::RoomManager::new(),
+                topology: crate::topology::RoomTopologyStore::new(),
+                canonical_registry,
+                hub_credentials: vec![],
+                hub_registries: vec![],
+            },
+            runtime_state: BackupRuntimeState {
+                active_mode: RhythmMode::Day,
+                last_change_cause: ModeChangeCause::Manual,
+                last_change_transition_id: None,
+                last_change_epoch_ms: None,
+            },
+        };
+
+        do_backup_restore(&restored, bundle).unwrap();
+
+        let restored_state = restored.lock().unwrap();
+        assert!(restored_state.canonical_registry.get(&device_id).is_some());
+        assert_eq!(
+            restored_state
+                .canonical_registry
+                .triage()
+                .pending_unassigned_count(),
+            1
+        );
+        assert_eq!(
+            restored_state
+                .canonical_registry
+                .triage()
+                .pending_by_kind(crate::canonical::triage::TriageKind::UnassignedDevice)[0]
+                .canonical_id
+                .as_deref(),
+            Some(device_id.as_str())
+        );
     }
 
     #[test]
