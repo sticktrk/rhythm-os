@@ -26,7 +26,7 @@ const VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
 
 /// Rhythm OS Linux appliance.
 #[derive(Parser, Debug)]
-#[command(name = "rhythm-linux-appliance", version = VERSION, about)]
+#[command(name = "rhythm-server", version = VERSION, about)]
 struct Args {
     /// HTTP server port.
     #[arg(short, long, default_value_t = 54448)]

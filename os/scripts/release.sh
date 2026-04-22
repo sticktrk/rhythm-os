@@ -48,12 +48,12 @@ the release local, builds the rpiz artifact, packages the OTA feed, and uploads
 it directly using credentials loaded from .env.
 
 Options:
-  --version X.Y.Z   Use an explicit version instead of auto-bumping
+  --version X.Y.Z   Use an explicit base version instead of auto-bumping
   --major           Bump the latest vX.Y.Z tag to the next major version
   --minor           Bump the latest vX.Y.Z tag to the next minor version
   --patch           Bump the latest vX.Y.Z tag to the next patch version (default)
   --upload          Build/package/upload the rpiz OTA feed locally; implies --no-push
-  --message TEXT    Annotated tag message (default: "Release vX.Y.Z")
+  --message TEXT    Annotated tag message (default: "Release vX.Y.Z-beta")
   --remote NAME     Remote to push to (default: origin)
   --no-push         Create the local tag but do not push branch or tag
   --dry-run         Print the planned tag/push actions without changing git state
@@ -209,19 +209,21 @@ read_workspace_version() {
     ' "$PROJECT_ROOT/Cargo.toml"
 }
 
-normalize_version() {
+normalize_release_version() {
     local value="$1"
     value="${value#v}"
-    if ! printf '%s' "$value" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-        echo "Error: Version must be semver X.Y.Z or vX.Y.Z" >&2
+    if ! printf '%s' "$value" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-beta)?$'; then
+        echo "Error: Version must be semver X.Y.Z, X.Y.Z-beta, vX.Y.Z, or vX.Y.Z-beta" >&2
         exit 1
     fi
-    echo "$value"
+    "$SCRIPT_DIR/resolve-version.sh" release "$value"
 }
 
 split_version() {
     local version="$1"
     local major minor patch
+
+    version="$("$SCRIPT_DIR/resolve-version.sh" core "$version")"
 
     IFS=. read -r major minor patch <<EOF
 $version
@@ -457,11 +459,11 @@ if [ -n "$LATEST_TAG" ]; then
 fi
 
 if [ -n "$VERSION" ]; then
-    VERSION="$(normalize_version "$VERSION")"
+    VERSION="$(normalize_release_version "$VERSION")"
 elif [ -n "$LATEST_VERSION" ]; then
-    VERSION="$(bump_version "$LATEST_VERSION" "$BUMP_KIND")"
+    VERSION="$(normalize_release_version "$(bump_version "$LATEST_VERSION" "$BUMP_KIND")")"
 else
-    VERSION="0.1.0"
+    VERSION="$(normalize_release_version "0.1.0")"
 fi
 
 TAG="v$VERSION"

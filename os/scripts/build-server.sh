@@ -356,10 +356,9 @@ build_for_target() {
     local output_dir="$PROJECT_ROOT/dist/bin/$target"
     mkdir -p "$output_dir"
     if [ "$target" = "rpiz" ]; then
-        cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-linux-appliance" "$output_dir/"
         cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-linux-appliance" "$output_dir/rhythm-server"
         cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-chipd" "$output_dir/"
-        echo "Output: dist/bin/$target/{rhythm-linux-appliance,rhythm-server,rhythm-chipd}"
+        echo "Output: dist/bin/$target/{rhythm-server,rhythm-chipd}"
     else
         cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-server" "$output_dir/"
         cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-cli" "$output_dir/"

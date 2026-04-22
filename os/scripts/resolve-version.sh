@@ -12,13 +12,34 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 usage() {
     cat <<EOF
-Usage: $0 [workspace|server|addon]
+Usage: $0 [workspace|server|addon|core|release] [version]
 
 Targets:
   workspace  Resolve Git-derived workspace version from release tags
   server     Alias for workspace (workspace crates inherit this version)
   addon      Read version from install/addon/config.yaml
+  core       Strip prerelease/build metadata from a semver-like version
+  release    Normalize a version onto the current release channel
 EOF
+}
+
+semver_core() {
+    local value="${1#v}"
+    value="${value%%+*}"
+    value="${value%%-*}"
+
+    if ! printf '%s' "$value" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+        echo "Error: Version core must be semver X.Y.Z (got '$1')" >&2
+        exit 1
+    fi
+
+    echo "$value"
+}
+
+release_version() {
+    local core
+    core="$(semver_core "$1")"
+    echo "${core}-beta"
 }
 
 read_workspace_version() {
@@ -30,7 +51,7 @@ read_workspace_version() {
 }
 
 resolve_workspace_version() {
-    local exact_tag latest_tag latest_tag_version next_tag_version base_version commit_count sha describe_output
+    local exact_tag latest_tag latest_tag_core next_tag_version base_version base_core commit_count sha describe_output
 
     exact_tag="$(git -C "$PROJECT_ROOT" describe --tags --exact-match --match 'v[0-9]*' HEAD 2>/dev/null || true)"
     if [ -n "$exact_tag" ]; then
@@ -38,13 +59,14 @@ resolve_workspace_version() {
         return
     fi
 
-    base_version="$(read_workspace_version)"
+    base_version="$(release_version "$(read_workspace_version)")"
+    base_core="$(semver_core "$base_version")"
     latest_tag="$(git -C "$PROJECT_ROOT" describe --tags --abbrev=0 --match 'v[0-9]*' HEAD 2>/dev/null || true)"
     if [ -n "$latest_tag" ]; then
-        latest_tag_version="${latest_tag#v}"
-        next_tag_version="$(bump_patch "$latest_tag_version")"
-        if semver_gte "$next_tag_version" "$base_version"; then
-            base_version="$next_tag_version"
+        latest_tag_core="$(semver_core "${latest_tag#v}")"
+        next_tag_version="$(bump_patch "$latest_tag_core")"
+        if semver_gte "$next_tag_version" "$base_core"; then
+            base_version="$(release_version "$next_tag_version")"
         fi
         commit_count="$(git -C "$PROJECT_ROOT" rev-list --count "${latest_tag}..HEAD")"
     else
@@ -54,7 +76,7 @@ resolve_workspace_version() {
     sha="$(git -C "$PROJECT_ROOT" rev-parse --short=8 HEAD)"
     describe_output="$(git -C "$PROJECT_ROOT" describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || true)"
 
-    VERSION="${base_version}-dev.${commit_count}.g${sha}"
+    VERSION="${base_version}-beta.dev.${commit_count}.g${sha}"
     if [[ "$describe_output" == *-dirty ]]; then
         VERSION="${VERSION}.dirty"
     fi
@@ -126,6 +148,22 @@ case "$TARGET" in
         ;;
     addon)
         VERSION="$(resolve_addon_version)"
+        ;;
+    core)
+        if [ $# -lt 2 ]; then
+            echo "Error: core target requires a version argument" >&2
+            usage >&2
+            exit 1
+        fi
+        VERSION="$(semver_core "$2")"
+        ;;
+    release)
+        if [ $# -lt 2 ]; then
+            echo "Error: release target requires a version argument" >&2
+            usage >&2
+            exit 1
+        fi
+        VERSION="$(release_version "$2")"
         ;;
     -h|--help)
         usage
