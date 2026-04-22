@@ -372,11 +372,16 @@ make -C "$BUILDROOT_DIR" BR2_EXTERNAL="$EXTERNAL_DIR" O="$OUTPUT_DIR"
 rm -f "$OUTPUT_DIR/images/rootfs.ext2.gz" "$OUTPUT_DIR/images/sdcard.img.gz"
 if command -v gzip >/dev/null 2>&1; then
     gzip -c -n "$OUTPUT_DIR/images/rootfs.ext2" > "$OUTPUT_DIR/images/rootfs.ext2.gz"
+    gzip -c -n "$OUTPUT_DIR/images/sdcard.img" > "$OUTPUT_DIR/images/sdcard.img.gz"
 fi
 
 echo ""
 echo "RPi Zero image build complete"
-echo "  Image: $OUTPUT_DIR/images/sdcard.img"
+if [ -f "$OUTPUT_DIR/images/sdcard.img.gz" ]; then
+    echo "  Image: $OUTPUT_DIR/images/sdcard.img.gz"
+else
+    echo "  Image: $OUTPUT_DIR/images/sdcard.img"
+fi
 if [ -f "$OUTPUT_DIR/images/rootfs.ext2.gz" ]; then
     echo "  Rootfs OTA: $OUTPUT_DIR/images/rootfs.ext2.gz"
 elif [ -f "$OUTPUT_DIR/images/rootfs.ext2" ]; then

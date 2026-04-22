@@ -4,7 +4,7 @@
 # Output layout:
 #   <output>/<target>/manifest.json
 #   <output>/<target>/v<version>/rhythm-server-<target>.tar.gz
-#   <output>/<target>/v<version>/sdcard.img        (optional rpiz factory image)
+#   <output>/<target>/v<version>/sdcard.img.gz     (optional rpiz factory image, falls back to sdcard.img)
 #   <output>/<target>/v<version>/rootfs.ext2.gz    (optional rpiz OTA image, falls back to rootfs.ext2)
 
 set -euo pipefail
@@ -125,7 +125,11 @@ for target in $TARGETS; do
     manifest_path="$OUTPUT_DIR/$target/manifest.json"
     image_candidates=()
     if [ "$target" = "rpiz" ] && [ -n "$IMAGE_ROOT" ]; then
-        [ -f "$IMAGE_ROOT/sdcard.img" ] && image_candidates+=("sdcard.img")
+        if [ -f "$IMAGE_ROOT/sdcard.img.gz" ]; then
+            image_candidates+=("sdcard.img.gz")
+        elif [ -f "$IMAGE_ROOT/sdcard.img" ]; then
+            image_candidates+=("sdcard.img")
+        fi
         if [ -f "$IMAGE_ROOT/rootfs.ext2.gz" ]; then
             image_candidates+=("rootfs.ext2.gz")
         elif [ -f "$IMAGE_ROOT/rootfs.ext2" ]; then
