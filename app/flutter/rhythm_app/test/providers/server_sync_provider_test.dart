@@ -10,6 +10,7 @@ import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/services/demo_server_api.dart';
 import 'package:rhythm_app/services/hue/hue_service_locator.dart';
 import 'package:rhythm_app/widgets/device_detail_sheet.dart';
+import 'package:rhythm_app/widgets/hub_picker_screen.dart';
 import 'package:rhythm_app/widgets/room_settings_sheet.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
@@ -520,6 +521,71 @@ void main() {
         contains('light-1'),
       );
     });
+  });
+
+  testWidgets(
+      'Hub picker always shows Matter and marks connected Hue and HA hubs',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'rooms': const <Map<String, dynamic>>[],
+        'location': const <String, dynamic>{},
+        'hubs': [
+          {
+            'type': 'hue',
+            'connected': true,
+          },
+          {
+            'type': 'homeassistant',
+            'connected': true,
+          },
+        ],
+        'capabilities': {
+          'hubs': [
+            {
+              'type': 'hue',
+              'configurable': true,
+              'device_onboarding_methods': const <String>[],
+              'supports_unpairing': false,
+              'supports_roomless_devices': false,
+            },
+          ],
+        },
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(provider.canAddMatterDevice, isFalse);
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: HubPickerScreen(
+          onSettingsTap: () {},
+          onSunPositionTap: () {},
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(find.text('Add Hubs'), findsOneWidget);
+    expect(find.text('Home Assistant'), findsOneWidget);
+    expect(find.text('Philips Hue'), findsOneWidget);
+    expect(find.text('Matter'), findsOneWidget);
+    expect(find.byIcon(Icons.check_circle_rounded), findsNWidgets(2));
   });
 
   group('ServerSyncProvider demo mode', () {

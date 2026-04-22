@@ -466,6 +466,7 @@ class OtaService extends ChangeNotifier {
     String? fallbackCurrentVersion,
     String? fallbackPlatformType,
     String? fallbackPlatformContext,
+    bool resetCheckStateOnInitialize = false,
   }) async {
     _configureClient(host, port);
 
@@ -527,6 +528,10 @@ class OtaService extends ChangeNotifier {
       _imageAssets = const [];
       _installedTargets = const [];
       _checksumVerified = null;
+    }
+
+    if (resetCheckStateOnInitialize) {
+      _resetRestoredCheckState();
     }
 
     _isLoadingSupport = false;
@@ -1006,6 +1011,18 @@ class OtaService extends ChangeNotifier {
       state == OtaState.uploading ||
       state == OtaState.flashing ||
       state == OtaState.rebooting;
+
+  void _resetRestoredCheckState() {
+    if (_isUpdateInProgress(_state) || _state == OtaState.checking) {
+      return;
+    }
+
+    if (_state == OtaState.available ||
+        _state == OtaState.upToDate ||
+        _state == OtaState.complete) {
+      reset();
+    }
+  }
 
   bool _statusShowsAcceptedUpdateRequest(_OtaStatusPayload status) =>
       status.state == 'checking' ||

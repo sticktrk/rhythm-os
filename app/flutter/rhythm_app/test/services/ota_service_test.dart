@@ -88,6 +88,29 @@ void main() {
       expect(service!.availableRelease, isNull);
     });
 
+    test('resets restored self-pull check results on initialize when requested',
+        () async {
+      server = await _FakeOtaServer.start(
+        initialVersion: '1.1.0',
+        latestVersion: '1.1.0',
+        scenario: _FakeOtaScenario.idleAfterRestart,
+        initialUpdateAvailable: false,
+        otaScope: 'component_bundle',
+      );
+      service = OtaService();
+
+      await service!.initialize(
+        host: InternetAddress.loopbackIPv4.address,
+        port: server!.port,
+        resetCheckStateOnInitialize: true,
+      );
+
+      expect(service!.isSelfPull, isTrue);
+      expect(service!.state, OtaState.idle);
+      expect(service!.availableRelease, isNull);
+      expect(service!.latestVersion, '1.1.0');
+    });
+
     test('stays idle before any self-pull check has run', () async {
       server = await _FakeOtaServer.start(
         initialVersion: '1.0.0',
@@ -549,7 +572,8 @@ class _FakeOtaServer {
       'latest_version': latestVersion,
       if (updateAvailable) 'target_version': latestVersion,
       'update_available': updateAvailable,
-      if (includeUpdateReason && updateReason != null) 'update_reason': updateReason,
+      if (includeUpdateReason && updateReason != null)
+        'update_reason': updateReason,
       if (installTargets.isNotEmpty) 'install_targets': installTargets,
       if (imageAssets.isNotEmpty) 'image_assets': imageAssets,
       if (checksumVerified != null) 'checksum_verified': checksumVerified,

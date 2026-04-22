@@ -75,6 +75,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   List<sdk.RhythmModeConfig> _modeConfigs = const [];
   sdk.RhythmMode? _serverActiveMode;
   Timer? _roomDefaultsDebounce;
+  Timer? _curvePreviewRefreshTimer;
 
   // Light transition duration (from selected profile config).
   double _fadeMs = 500;
@@ -128,6 +129,9 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   double _sliderFraction = 0.5; // raw 0..1 position on the track
   bool _isDraggingTime = false;
   bool _timeOffsetApplied = false; // true after user taps Apply
+  bool _curvePreviewRefreshQueued = false;
+  bool _curvePreviewRefreshInFlight = false;
+  int _curvePreviewRequestId = 0;
 
   /// Compressed position mapping: 97 entries (0..96) mapping 15-min intervals
   /// to non-linear positions (0.0..1.0). Regions with rapid kelvin/brightness
@@ -169,6 +173,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   @override
   void dispose() {
     _roomDefaultsDebounce?.cancel();
+    _curvePreviewRefreshTimer?.cancel();
     _glowController.dispose();
     _rebuildNotifier.dispose();
     super.dispose();
@@ -368,6 +373,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       {sdk.RhythmCurveConfig? config, String? profileId}) async {
     try {
       final id = profileId ?? _selectedProfileId;
+      final requestId = ++_curvePreviewRequestId;
       final preview = await context.read<ServerSyncProvider>().api.getCurveData(
             id: id,
             overrides: config,
@@ -399,7 +405,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
               : null,
         ),
       );
-      if (mounted) {
+      if (mounted && requestId == _curvePreviewRequestId) {
         setState(() {
           _curveData = data;
           _compressedPositions = _computeCompressedMapping(data);
@@ -414,6 +420,37 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     setState(() {
       update();
       _curveConfigDirty = true;
+    });
+  }
+
+  void _onPreviewRangeChanged(void Function() update) {
+    _onCurveChanged(update);
+    _queueDraftCurvePreviewRefresh();
+  }
+
+  void _queueDraftCurvePreviewRefresh() {
+    if (_selectedProfileConfig == null || _isSleepProfile) return;
+    _curvePreviewRefreshQueued = true;
+    if (_curvePreviewRefreshInFlight ||
+        (_curvePreviewRefreshTimer?.isActive ?? false)) {
+      return;
+    }
+
+    _curvePreviewRefreshTimer =
+        Timer(const Duration(milliseconds: 90), () async {
+      _curvePreviewRefreshTimer = null;
+      if (!_curvePreviewRefreshQueued || !mounted) return;
+
+      _curvePreviewRefreshQueued = false;
+      _curvePreviewRefreshInFlight = true;
+      try {
+        await _loadCurveData(config: _buildDraftConfig());
+      } finally {
+        _curvePreviewRefreshInFlight = false;
+        if (mounted && _curvePreviewRefreshQueued) {
+          _queueDraftCurvePreviewRefresh();
+        }
+      }
     });
   }
 
@@ -1006,10 +1043,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
             const SizedBox(height: 16),
             _buildSleepBrightnessCard(),
           ] else ...[
-            _buildBrightnessRangeCard(),
-            const SizedBox(height: 14),
-            _buildColorTempRangeCard(),
-            const SizedBox(height: 14),
             _buildAdvancedColorEditorItem(),
           ],
           const SizedBox(height: 24),
@@ -1153,7 +1186,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                     const SizedBox(width: 12),
                     const Expanded(
                       child: Text(
-                        'When Standby',
+                        'Standby Settings',
                         style: TextStyle(
                           color: _Palette.textPrimary,
                           fontSize: 15,
@@ -1828,8 +1861,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                             divisions: 49,
                             format: (v) => '${v.round()}%',
                             color: color.withValues(alpha: 0.5),
-                            onChanged: (v) =>
-                                _onCurveChanged(() => _minBrightness = v),
+                            onChanged: (v) => _onPreviewRangeChanged(
+                                () => _minBrightness = v),
                           ),
                           _buildInlineSlider(
                             label: 'Max',
@@ -1839,8 +1872,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                             divisions: 80,
                             format: (v) => '${v.round()}%',
                             color: color,
-                            onChanged: (v) =>
-                                _onCurveChanged(() => _maxBrightness = v),
+                            onChanged: (v) => _onPreviewRangeChanged(
+                                () => _maxBrightness = v),
                           ),
                         ],
                       ),
@@ -2000,7 +2033,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                             format: (v) => '${v.round()}K',
                             color: warmColor,
                             onChanged: (v) =>
-                                _onCurveChanged(() => _minColorTemp = v),
+                                _onPreviewRangeChanged(() => _minColorTemp = v),
                           ),
                           _buildInlineSlider(
                             label: 'Max',
@@ -2011,7 +2044,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                             format: (v) => '${v.round()}K',
                             color: coolColor,
                             onChanged: (v) =>
-                                _onCurveChanged(() => _maxColorTemp = v),
+                                _onPreviewRangeChanged(() => _maxColorTemp = v),
                           ),
                         ],
                       ),
@@ -2293,7 +2326,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   // ---------------------------------------------------------------------------
-  // Advanced Color Editor — nav item + screen
+  // Light Tuning — nav item + screen
   // ---------------------------------------------------------------------------
 
   Widget _buildAdvancedColorEditorItem() {
@@ -2321,7 +2354,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
             const SizedBox(width: 12),
             const Expanded(
               child: Text(
-                'Advanced Color Editor',
+                'Light Tuning',
                 style: TextStyle(
                   color: _Palette.textPrimary,
                   fontSize: 15,
@@ -2916,140 +2949,149 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   Widget _buildRoomDefaultsSection() {
-    final rooms = context.read<RoomProvider>().rooms;
-    if (rooms.isEmpty) return const SizedBox.shrink();
+    return Selector<RoomProvider, List<RoomDto>>(
+      selector: (_, provider) => provider.rooms,
+      builder: (context, rooms, child) {
+        if (rooms.isEmpty) return const SizedBox.shrink();
 
-    final defaults = _roomDefaultsForCurrentMode();
-    final expanded = _roomDefaultsExpanded;
-    final hasOverrides = defaults.isNotEmpty;
-    const color = _Palette.blue;
+        final defaults = _roomDefaultsForCurrentMode();
+        final roomIds = rooms.map((room) => room.id).toSet();
+        final visibleOverrideCount =
+            defaults.keys.where((roomId) => roomIds.contains(roomId)).length;
+        final expanded = _roomDefaultsExpanded;
+        final hasOverrides = visibleOverrideCount > 0;
+        const color = _Palette.blue;
 
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOutCubic,
-      padding: EdgeInsets.fromLTRB(18, 18, 18, expanded ? 14 : 18),
-      decoration: BoxDecoration(
-        color: _Palette.card,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(
-          color: expanded ? color.withValues(alpha: 0.25) : _Palette.border,
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Header — tappable to expand/collapse.
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: () =>
-                setState(() => _roomDefaultsExpanded = !_roomDefaultsExpanded),
-            child: Row(
-              children: [
-                Container(
-                  width: 36,
-                  height: 36,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: color.withValues(alpha: 0.12),
-                  ),
-                  child: Icon(
-                    Icons.meeting_room_rounded,
-                    color: color.withValues(alpha: 0.7),
-                    size: 18,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                const Expanded(
-                  child: Text(
-                    'Room Defaults',
-                    style: TextStyle(
-                      color: _Palette.textPrimary,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: -0.1,
-                    ),
-                  ),
-                ),
-                if (!expanded && hasOverrides)
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: color.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: color.withValues(alpha: 0.2)),
-                    ),
-                    child: Text(
-                      '${defaults.length} set',
-                      style: TextStyle(
-                        color: color.withValues(alpha: 0.8),
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        fontFeatures: const [FontFeature.tabularFigures()],
-                      ),
-                    ),
-                  ),
-                if (!expanded && !hasOverrides)
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: color.withValues(alpha: 0.06),
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: Text(
-                      'None',
-                      style: TextStyle(
-                        color: color.withValues(alpha: 0.4),
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                const SizedBox(width: 6),
-                AnimatedRotation(
-                  turns: expanded ? 0.5 : 0,
-                  duration: const Duration(milliseconds: 250),
-                  curve: Curves.easeOutCubic,
-                  child: Icon(
-                    Icons.keyboard_arrow_down_rounded,
-                    color: _Palette.textSecondary.withValues(alpha: 0.3),
-                    size: 20,
-                  ),
-                ),
-              ],
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOutCubic,
+          padding: EdgeInsets.fromLTRB(18, 18, 18, expanded ? 14 : 18),
+          decoration: BoxDecoration(
+            color: _Palette.card,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(
+              color: expanded ? color.withValues(alpha: 0.25) : _Palette.border,
             ),
           ),
-          AnimatedSize(
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeOutCubic,
-            alignment: Alignment.topCenter,
-            child: expanded
-                ? Padding(
-                    padding: const EdgeInsets.only(top: 16),
-                    child: GridView.count(
-                      crossAxisCount: 2,
-                      crossAxisSpacing: 10,
-                      mainAxisSpacing: 10,
-                      childAspectRatio: 1.55,
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      children: [
-                        for (final room in rooms)
-                          _RoomDefaultCard(
-                            roomId: room.id,
-                            roomName: room.name,
-                            state: defaults[room.id],
-                            onStateChanged: (newState) =>
-                                _onRoomDefaultChanged(room.id, newState),
-                          ),
-                      ],
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Header — tappable to expand/collapse.
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => setState(
+                    () => _roomDefaultsExpanded = !_roomDefaultsExpanded),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 36,
+                      height: 36,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: color.withValues(alpha: 0.12),
+                      ),
+                      child: Icon(
+                        Icons.meeting_room_rounded,
+                        color: color.withValues(alpha: 0.7),
+                        size: 18,
+                      ),
                     ),
-                  )
-                : const SizedBox.shrink(),
+                    const SizedBox(width: 12),
+                    const Expanded(
+                      child: Text(
+                        'Room Defaults',
+                        style: TextStyle(
+                          color: _Palette.textPrimary,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: -0.1,
+                        ),
+                      ),
+                    ),
+                    if (!expanded && hasOverrides)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: color.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(6),
+                          border:
+                              Border.all(color: color.withValues(alpha: 0.2)),
+                        ),
+                        child: Text(
+                          '$visibleOverrideCount set',
+                          style: TextStyle(
+                            color: color.withValues(alpha: 0.8),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            fontFeatures: const [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                      ),
+                    if (!expanded && !hasOverrides)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: color.withValues(alpha: 0.06),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          'None',
+                          style: TextStyle(
+                            color: color.withValues(alpha: 0.4),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    const SizedBox(width: 6),
+                    AnimatedRotation(
+                      turns: expanded ? 0.5 : 0,
+                      duration: const Duration(milliseconds: 250),
+                      curve: Curves.easeOutCubic,
+                      child: Icon(
+                        Icons.keyboard_arrow_down_rounded,
+                        color: _Palette.textSecondary.withValues(alpha: 0.3),
+                        size: 20,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              AnimatedSize(
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeOutCubic,
+                alignment: Alignment.topCenter,
+                child: expanded
+                    ? Padding(
+                        padding: const EdgeInsets.only(top: 16),
+                        child: GridView.count(
+                          crossAxisCount: 2,
+                          crossAxisSpacing: 10,
+                          mainAxisSpacing: 10,
+                          childAspectRatio: 1.55,
+                          shrinkWrap: true,
+                          physics: const NeverScrollableScrollPhysics(),
+                          children: [
+                            for (final room in rooms)
+                              _RoomDefaultCard(
+                                key: ValueKey(room.id),
+                                roomId: room.id,
+                                roomName: room.name,
+                                state: defaults[room.id],
+                                onStateChanged: (newState) =>
+                                    _onRoomDefaultChanged(room.id, newState),
+                              ),
+                          ],
+                        ),
+                      )
+                    : const SizedBox.shrink(),
+              ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -3557,6 +3599,7 @@ class _RoomDefaultCard extends StatelessWidget {
   final ValueChanged<String?> onStateChanged;
 
   const _RoomDefaultCard({
+    super.key,
     required this.roomId,
     required this.roomName,
     required this.state,
@@ -4019,7 +4062,7 @@ class _DefaultStateToggle extends StatelessWidget {
 // -----------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Advanced Color Editor — full-screen overlay
+// Light Tuning — full-screen overlay
 // ---------------------------------------------------------------------------
 
 class _AdvancedColorEditorScreen extends StatefulWidget {
@@ -4054,6 +4097,12 @@ class _AdvancedColorEditorScreenState
                       children: [
                         _parent._buildHeroIcon(),
                         const SizedBox(height: 24),
+                        if (!_parent._isSleepProfile) ...[
+                          _parent._buildBrightnessRangeCard(),
+                          const SizedBox(height: 14),
+                          _parent._buildColorTempRangeCard(),
+                          const SizedBox(height: 24),
+                        ],
                         _parent._buildTimeSimulator(),
                         if (_parent._curveConfigDirty) ...[
                           const SizedBox(height: 24),
@@ -4094,7 +4143,7 @@ class _AdvancedColorEditorScreenState
           ),
           const Expanded(
             child: Text(
-              'Advanced Color Editor',
+              'Light Tuning',
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: _Palette.textPrimary,

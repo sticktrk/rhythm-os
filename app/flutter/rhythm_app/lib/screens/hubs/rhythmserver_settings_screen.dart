@@ -176,6 +176,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       fallbackCurrentVersion: syncProvider.firmwareVersion,
       fallbackPlatformType: syncProvider.serverPlatformType,
       fallbackPlatformContext: syncProvider.serverPlatformContext,
+      resetCheckStateOnInitialize: true,
     );
   }
 

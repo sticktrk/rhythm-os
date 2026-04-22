@@ -239,20 +239,17 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
           // ── Server connected ────────────────────────────────────
           if (state == RhythmConnectionState.connected) {
-            // Server explicitly reports no hub configured — show hub picker.
-            if (serverSync.hasNoHubConfigured) {
-              return HubPickerScreen(
-                onSettingsTap: _openSettings,
-                onSunPositionTap: _openSunPosition,
-              );
-            }
-
             if (roomProvider.hasRooms) {
               return _buildRoomGrid(roomProvider);
             }
 
-            // Connected but rooms still syncing from server.
-            return _buildServerConnectingState();
+            // With a connected server but no synced rooms yet, keep the user on
+            // the hub picker so they can add Matter devices immediately and see
+            // which upstream hubs are already connected.
+            return HubPickerScreen(
+              onSettingsTap: _openSettings,
+              onSunPositionTap: _openSunPosition,
+            );
           }
 
           // ── First connection attempt (connecting / initial disconnected) ─

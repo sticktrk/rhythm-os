@@ -6,6 +6,7 @@ import 'package:rhythm_core/rhythm_core.dart';
 import '../providers/server_sync_provider.dart';
 import '../screens/hubs/ha_configurator_screen.dart';
 import '../screens/hubs/hue_configurator_screen.dart';
+import '../screens/hubs/matter_add_method.dart';
 import '../screens/hubs/matter_pairing_flow.dart';
 import 'solar_orbit.dart';
 import 'bottom_nav_overlay.dart';
@@ -87,22 +88,30 @@ class _HubPickerScreenState extends State<HubPickerScreen>
 
   Future<void> _configureMatter() async {
     HapticFeedback.mediumImpact();
-    await startMatterPairingFlow(context);
+    await startMatterPairingFlow(
+      context,
+      preferredMethod: MatterAddMethod.automatic,
+    );
   }
 
   String _matterSubtitle(ServerSyncProvider serverSync) {
     final onNetwork = serverSync.canAddMatterOnNetworkDevice;
     final bleWifi = serverSync.canCommissionMatterBleWifi;
-    return switch ((
-      onNetwork,
-      bleWifi,
-      serverSync.hasExplicitMatterCapabilities
-    )) {
-      (true, true, _) => 'Add on-network devices or commission new ones',
-      (true, false, _) => 'Add an on-network device with a setup code or QR',
-      (false, true, _) => 'Commission a new device over BLE',
-      (_, _, true) => 'Matter add is not available on this host',
-      _ => 'Add a Matter device directly with Rhythm',
+    return switch ((onNetwork, bleWifi)) {
+      (true, true) => 'Scan a QR code or enter a setup code to add a bulb',
+      (true, false) => 'Scan a QR code or enter a setup code to add a bulb',
+      (false, true) =>
+        'Scan a QR code or enter a setup code to commission a bulb',
+      _ => 'Scan a QR code or enter a setup code to add a bulb',
+    };
+  }
+
+  bool _isHubConnected(ServerSyncProvider serverSync, String hubType) {
+    final connectedHubTypes = serverSync.connectedHubTypes;
+    return switch (hubType) {
+      'homeassistant' => connectedHubTypes.contains('homeassistant') ||
+          connectedHubTypes.contains('home_assistant'),
+      _ => connectedHubTypes.contains(hubType),
     };
   }
 
@@ -110,7 +119,8 @@ class _HubPickerScreenState extends State<HubPickerScreen>
   Widget build(BuildContext context) {
     final serverSync = context.watch<ServerSyncProvider>();
     final isAddon = serverSync.serverPlatformContext == 'ha_addon';
-    final canAddMatter = serverSync.canAddMatterDevice;
+    final homeAssistantConnected = _isHubConnected(serverSync, 'homeassistant');
+    final hueConnected = _isHubConnected(serverSync, 'hue');
 
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,
@@ -132,7 +142,7 @@ class _HubPickerScreenState extends State<HubPickerScreen>
                         const SizedBox(height: 32),
                         // Title
                         Text(
-                          'Choose Your Lights',
+                          'Add Hubs',
                           style: TextStyle(
                             color: CelestialColors.textPrimary,
                             fontSize: 24,
@@ -142,7 +152,7 @@ class _HubPickerScreenState extends State<HubPickerScreen>
                         ),
                         const SizedBox(height: 10),
                         Text(
-                          'Connect a lighting system\nto use with Rhythm',
+                          'Connect Hue or Home Assistant,\nor scan a Matter bulb',
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             color: CelestialColors.textSecondary
@@ -159,6 +169,7 @@ class _HubPickerScreenState extends State<HubPickerScreen>
                             title: 'Home Assistant',
                             subtitle: 'Use your existing HA areas and lights',
                             color: const Color(0xFF42A5F5),
+                            isConnected: homeAssistantConnected,
                             isLoading: _isConfiguringHa,
                             onTap: _isConfiguringHa ? null : _configureHa,
                           ),
@@ -169,6 +180,7 @@ class _HubPickerScreenState extends State<HubPickerScreen>
                             title: 'Home Assistant',
                             subtitle: 'Connect with a long-lived access token',
                             color: const Color(0xFF42A5F5),
+                            isConnected: homeAssistantConnected,
                             onTap: _configureHaManual,
                           ),
                           const SizedBox(height: 12),
@@ -179,17 +191,17 @@ class _HubPickerScreenState extends State<HubPickerScreen>
                           title: 'Philips Hue',
                           subtitle: 'Connect via push-link pairing',
                           color: const Color(0xFFFFB900),
+                          isConnected: hueConnected,
                           onTap: _configureHue,
                         ),
                         const SizedBox(height: 12),
-                        if (canAddMatter)
-                          _buildHubCard(
-                            icon: Icons.memory_outlined,
-                            title: 'Matter',
-                            subtitle: _matterSubtitle(serverSync),
-                            color: const Color(0xFF26A69A),
-                            onTap: _configureMatter,
-                          ),
+                        _buildHubCard(
+                          icon: Icons.memory_outlined,
+                          title: 'Matter',
+                          subtitle: _matterSubtitle(serverSync),
+                          color: const Color(0xFF26A69A),
+                          onTap: _configureMatter,
+                        ),
                         // Space for bottom nav
                         const SizedBox(height: 100),
                       ],
@@ -260,6 +272,7 @@ class _HubPickerScreenState extends State<HubPickerScreen>
     required String title,
     required String subtitle,
     required Color color,
+    bool isConnected = false,
     bool isLoading = false,
     VoidCallback? onTap,
   }) {
@@ -324,12 +337,21 @@ class _HubPickerScreenState extends State<HubPickerScreen>
                   color: color.withValues(alpha: 0.7),
                 ),
               )
-            else
+            else ...[
+              if (isConnected) ...[
+                const Icon(
+                  Icons.check_circle_rounded,
+                  color: Color(0xFF22C55E),
+                  size: 20,
+                ),
+                const SizedBox(width: 8),
+              ],
               Icon(
                 Icons.chevron_right,
                 color: CelestialColors.textSecondary.withValues(alpha: 0.4),
                 size: 22,
               ),
+            ],
           ],
         ),
       ),
