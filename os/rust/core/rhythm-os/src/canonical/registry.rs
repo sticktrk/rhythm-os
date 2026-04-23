@@ -427,12 +427,42 @@ impl CanonicalRegistry {
             None => return None,
         };
 
+        let native_key = (hub_key.to_string(), entry.discovered.native_id.clone());
+        if let Some(existing_id) = self.native_index.get(&native_key).cloned() {
+            if let Some(device) = self.devices.get_mut(&existing_id) {
+                if !device.is_removed() {
+                    let source_room = if entry.discovered.room_name.is_empty() {
+                        None
+                    } else {
+                        Some(entry.discovered.room_name.clone())
+                    };
+                    device.name = entry.discovered.name.clone();
+                    if device.manufacturer.is_none() {
+                        device.manufacturer = entry.discovered.manufacturer.clone();
+                    }
+                    if device.model.is_none() {
+                        device.model = entry.discovered.model.clone();
+                    }
+                    device.upsert_endpoint(
+                        hub_key.clone(),
+                        entry.discovered.native_id.clone(),
+                        now,
+                        source_room,
+                    );
+                    self.triage.resolve_new(triage_entry_id, now);
+                    return Some(existing_id);
+                }
+            }
+        }
+
         let mut device = CanonicalDevice::new(
             entry.discovered.name.clone(),
             entry.discovered.device_type.clone(),
             vec![],
             now,
         );
+        device.manufacturer = entry.discovered.manufacturer.clone();
+        device.model = entry.discovered.model.clone();
         let source_room = if entry.discovered.room_name.is_empty() {
             None
         } else {

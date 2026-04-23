@@ -278,6 +278,12 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
             Ok(()) => {
                 info!(target: "sys", "Matter: decommissioned node {}", node_id);
                 hub_data.remove_device(node_id);
+                let matter_hub_key = HubKey::new(HubType::new("matter"), "local");
+                rhythm_os::commands::do_device_hard_remove(
+                    state,
+                    &device_id,
+                    Some(&matter_hub_key),
+                )?;
 
                 Ok(UnpairingResult {
                     hub_type: "matter".to_string(),

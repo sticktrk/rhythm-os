@@ -24,7 +24,8 @@ use serde_json::Value;
 use crate::api_types::{
     ActiveProfileDto, ActiveProfileEffectiveDto, ApiCapabilitiesDto, FixResponse, HubCapabilityDto,
     HubDto, HubStartupRetryDto, LocationDto, ModeLastChangeDto, ModeSettingsDto,
-    ModeTransitionsDto, NodeStateDto, NodesPollResponse, ProfilesDto, RoomPollState,
+    ModeTransitionsDto, NodeStateDto, NodesPollResponse, PreferredEndpointDto, ProfilesDto,
+    ReviewCountsDto, ReviewEntryDto, ReviewHubDto, ReviewSummaryDto, RoomPollState,
     RoomRhythmState, RoomsPollResponse, SettingsDto, StateSnapshot, TopologyNodeControlDto,
     TopologyNodeDto,
 };
@@ -1343,6 +1344,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         periodic_ctx,
         update_interval,
         power_save,
+        review_dto,
     ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
@@ -1469,6 +1471,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             periodic_ctx,
             Duration::from_secs(s.runtime_config.update_interval_secs),
             s.power_save,
+            build_review_summary_dto(&s),
         )
     };
 
@@ -1555,9 +1558,184 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         mode: mode_dto,
         transitions: transitions_dto.transitions,
         profiles: profiles_dto.profiles,
+        review: review_dto,
         nodes,
     };
     serde_json::to_string(&snapshot).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+}
+
+fn build_review_summary_dto(s: &AppState) -> ReviewSummaryDto {
+    use crate::canonical::triage::{TriageKind, TriageStatus};
+
+    let triage = s.canonical_registry.triage();
+
+    let pending = ReviewCountsDto {
+        devices: triage.pending_device_count(),
+        rooms: triage.pending_room_count(),
+        unassigned: triage.pending_unassigned_count(),
+        hub_configured: triage.pending_hub_configured_count(),
+        total: triage.pending_count(),
+    };
+
+    let mut disconnected_hubs: Vec<ReviewHubDto> = s
+        .hub_credentials
+        .iter()
+        .filter(|(key, _)| !s.hub_is_connected(key))
+        .map(|(_, creds)| ReviewHubDto {
+            hub_type: creds
+                .hub_type
+                .as_ref()
+                .map(|hub_type| hub_type.as_str().to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            address: creds.address.clone(),
+        })
+        .collect();
+    disconnected_hubs.sort_by(|left, right| {
+        left.hub_type
+            .cmp(&right.hub_type)
+            .then_with(|| left.address.cmp(&right.address))
+    });
+
+    let mut preferred_endpoints: Vec<PreferredEndpointDto> = s
+        .canonical_registry
+        .devices()
+        .filter(|device| device.endpoints.len() > 1)
+        .filter_map(|device| {
+            let preferred = device.preferred_endpoint()?;
+            Some(PreferredEndpointDto {
+                canonical_id: device.id.clone(),
+                name: device.name.clone(),
+                hub_type: preferred.hub_key.hub_type.as_str().to_string(),
+                hub_address: preferred.hub_key.address.clone(),
+                native_id: preferred.native_id.clone(),
+                endpoint_count: device.endpoints.len(),
+            })
+        })
+        .collect();
+    preferred_endpoints.sort_by(|left, right| left.canonical_id.cmp(&right.canonical_id));
+
+    let mut triage_entries: Vec<ReviewEntryDto> = triage
+        .all()
+        .iter()
+        .map(|entry| ReviewEntryDto {
+            id: entry.id.clone(),
+            kind: entry.kind.clone(),
+            status: entry.status.clone(),
+            hub_type: entry.hub_key.hub_type.as_str().to_string(),
+            hub_address: entry.hub_key.address.clone(),
+            native_id: entry.discovered.native_id.clone(),
+            name: entry.discovered.name.clone(),
+            created_at: entry.created_at,
+            resolved_at: entry.resolved_at,
+            resolved_by: entry.resolved_by.clone(),
+            summary: triage_entry_summary(entry.kind.clone(), entry.status.clone()),
+            guidance: triage_entry_guidance(entry.kind.clone(), entry.status.clone()),
+        })
+        .collect();
+    triage_entries.sort_by(|left, right| {
+        let left_pending = left.status == TriageStatus::Pending;
+        let right_pending = right.status == TriageStatus::Pending;
+        right_pending
+            .cmp(&left_pending)
+            .then_with(|| right.created_at.cmp(&left.created_at))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    triage_entries.truncate(50);
+
+    let hub_configured_conflicts = triage_entries
+        .iter()
+        .filter(|entry| {
+            entry.kind == TriageKind::HubConfigured && entry.status == TriageStatus::Pending
+        })
+        .cloned()
+        .collect();
+
+    ReviewSummaryDto {
+        pending,
+        disconnected_hubs,
+        preferred_endpoints,
+        hub_configured_conflicts,
+        triage_entries,
+    }
+}
+
+fn triage_entry_summary(
+    kind: crate::canonical::triage::TriageKind,
+    status: crate::canonical::triage::TriageStatus,
+) -> String {
+    use crate::canonical::triage::{TriageKind, TriageStatus};
+
+    match (kind, status) {
+        (TriageKind::DeviceMerge, TriageStatus::Pending) => {
+            "Review whether these endpoints represent the same physical device".to_string()
+        }
+        (TriageKind::DeviceMerge, TriageStatus::Confirmed) => "Device merge confirmed".to_string(),
+        (TriageKind::DeviceMerge, TriageStatus::NewDevice) => {
+            "Kept as a separate device".to_string()
+        }
+        (TriageKind::DeviceMerge, TriageStatus::Dismissed) => {
+            "Device merge proposal dismissed".to_string()
+        }
+        (TriageKind::RoomBinding, TriageStatus::Pending) => {
+            "Review whether this hub room should merge into an existing Rhythm room".to_string()
+        }
+        (TriageKind::RoomBinding, TriageStatus::Confirmed) => "Room binding confirmed".to_string(),
+        (TriageKind::RoomBinding, TriageStatus::KeptSeparate)
+        | (TriageKind::RoomBinding, TriageStatus::NewDevice) => {
+            "Kept as a separate room".to_string()
+        }
+        (TriageKind::RoomBinding, TriageStatus::Dismissed) => {
+            "Room binding proposal dismissed".to_string()
+        }
+        (TriageKind::UnassignedDevice, TriageStatus::Pending) => {
+            "Assign this device to a Rhythm room".to_string()
+        }
+        (TriageKind::UnassignedDevice, TriageStatus::Confirmed) => {
+            "Room assignment resolved".to_string()
+        }
+        (TriageKind::UnassignedDevice, TriageStatus::Dismissed) => {
+            "Unassigned-device review dismissed".to_string()
+        }
+        (TriageKind::HubConfigured, TriageStatus::Pending) => {
+            "Native hub automation is still configured for this device".to_string()
+        }
+        (TriageKind::HubConfigured, TriageStatus::Confirmed) => {
+            "Native hub automation was cleared".to_string()
+        }
+        (TriageKind::HubConfigured, TriageStatus::Dismissed) => {
+            "Hub-configured conflict dismissed".to_string()
+        }
+        (_, TriageStatus::AutoResolved) => "Resolved automatically".to_string(),
+        (_, TriageStatus::NewDevice) => "Kept separate".to_string(),
+        (_, TriageStatus::KeptSeparate) => "Kept separate".to_string(),
+    }
+}
+
+fn triage_entry_guidance(
+    kind: crate::canonical::triage::TriageKind,
+    status: crate::canonical::triage::TriageStatus,
+) -> Option<String> {
+    use crate::canonical::triage::{TriageKind, TriageStatus};
+
+    match (kind, status) {
+        (TriageKind::DeviceMerge, TriageStatus::Pending) => Some(
+            "Confirm the merge only if both endpoints represent the same physical device."
+                .to_string(),
+        ),
+        (TriageKind::RoomBinding, TriageStatus::Pending) => Some(
+            "Bind the rooms only if they should act as one Rhythm room across hubs."
+                .to_string(),
+        ),
+        (TriageKind::UnassignedDevice, TriageStatus::Pending) => Some(
+            "Assign the device to a room so automations, topology, and control routing stay stable."
+                .to_string(),
+        ),
+        (TriageKind::HubConfigured, TriageStatus::Pending) => Some(
+            "Remove the native hub automation for this device in the hub app so Rhythm can control it predictably."
+                .to_string(),
+        ),
+        _ => None,
+    }
 }
 
 fn build_hub_startup_retry_dto(retry: &crate::state::HubStartupRetryState) -> HubStartupRetryDto {
@@ -10347,6 +10525,110 @@ mod tests {
         assert!(parsed["mode"].is_object());
         assert!(parsed["mode"].get("transitions").is_none());
         assert!(parsed["transitions"].is_array());
+    }
+
+    #[test]
+    fn build_state_snapshot_review_surfaces_restore_and_triage_context() {
+        let (state, _rt) = setup_state(vec![]);
+        let primary_key = HubKey::new(HubType::new("mock"), "mock");
+        let secondary_key = HubKey::new(HubType::new("ha"), "192.168.1.200");
+        let canonical_id =
+            insert_canonical_device(&state, primary_key.clone(), "light-1", "Desk Lamp", "", "");
+
+        {
+            let mut s = state.lock().unwrap();
+            s.hub_credentials.insert(
+                secondary_key.clone(),
+                HubCredentials::new("ha", "192.168.1.200", serde_json::json!({ "token": "x" })),
+            );
+            let device = s.canonical_registry.get_mut(&canonical_id).unwrap();
+            device.upsert_endpoint(
+                secondary_key.clone(),
+                "light.desk".to_string(),
+                2000,
+                Some("Desk".to_string()),
+            );
+            s.canonical_registry.set_preferred_endpoint(
+                &canonical_id,
+                &secondary_key,
+                "light.desk",
+            );
+            s.canonical_registry
+                .triage_mut()
+                .add(crate::canonical::triage::TriageEntry {
+                    id: "hc1".to_string(),
+                    kind: crate::canonical::triage::TriageKind::HubConfigured,
+                    discovered: crate::canonical::triage::TriageDiscoveredDevice {
+                        native_id: "light.desk".to_string(),
+                        name: "Desk Lamp".to_string(),
+                        device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+                        room_id: String::new(),
+                        room_name: String::new(),
+                        manufacturer: None,
+                        model: None,
+                    },
+                    hub_key: secondary_key.clone(),
+                    candidate_matches: vec![],
+                    room_binding: None,
+                    confidence: 0,
+                    status: crate::canonical::triage::TriageStatus::Pending,
+                    resolved_by: None,
+                    created_at: 1000,
+                    resolved_at: None,
+                    canonical_id: None,
+                });
+            s.canonical_registry
+                .triage_mut()
+                .add(crate::canonical::triage::TriageEntry {
+                    id: "dm1".to_string(),
+                    kind: crate::canonical::triage::TriageKind::DeviceMerge,
+                    discovered: crate::canonical::triage::TriageDiscoveredDevice {
+                        native_id: "light.alt".to_string(),
+                        name: "Desk Lamp".to_string(),
+                        device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+                        room_id: String::new(),
+                        room_name: String::new(),
+                        manufacturer: None,
+                        model: None,
+                    },
+                    hub_key: secondary_key,
+                    candidate_matches: vec![],
+                    room_binding: None,
+                    confidence: 0,
+                    status: crate::canonical::triage::TriageStatus::NewDevice,
+                    resolved_by: Some("api".to_string()),
+                    created_at: 900,
+                    resolved_at: Some(950),
+                    canonical_id: None,
+                });
+        }
+
+        let result = build_state_snapshot(&state).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["review"]["pending"]["hub_configured"], 1);
+        assert_eq!(parsed["review"]["pending"]["total"], 1);
+        assert_eq!(parsed["review"]["disconnected_hubs"][0]["type"], "ha");
+        assert_eq!(
+            parsed["review"]["preferred_endpoints"][0]["canonical_id"],
+            canonical_id
+        );
+        assert_eq!(
+            parsed["review"]["preferred_endpoints"][0]["native_id"],
+            "light.desk"
+        );
+        assert_eq!(
+            parsed["review"]["hub_configured_conflicts"][0]["guidance"],
+            "Remove the native hub automation for this device in the hub app so Rhythm can control it predictably."
+        );
+        assert_eq!(
+            parsed["review"]["triage_entries"][0]["summary"],
+            "Native hub automation is still configured for this device"
+        );
+        assert_eq!(
+            parsed["review"]["triage_entries"][1]["summary"],
+            "Kept as a separate device"
+        );
     }
 
     #[test]

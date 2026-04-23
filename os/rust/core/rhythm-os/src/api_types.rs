@@ -10,6 +10,7 @@ use rhythm_core::{
 };
 use serde::Serialize;
 
+use crate::canonical::triage::{TriageKind, TriageStatus};
 use crate::topology::{DevicePlacement, HubRoomBinding, NodeControlKind};
 
 // ---------------------------------------------------------------------------
@@ -108,7 +109,70 @@ pub struct StateSnapshot {
     pub mode: ModeSettingsDto,
     pub transitions: Vec<ModeTransitionConfig>,
     pub profiles: Vec<LightProfileConfig>,
+    pub review: ReviewSummaryDto,
     pub nodes: Vec<NodeStateDto>,
+}
+
+/// Review-focused metadata for restore/triage/admin workflows.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ReviewSummaryDto {
+    pub pending: ReviewCountsDto,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disconnected_hubs: Vec<ReviewHubDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preferred_endpoints: Vec<PreferredEndpointDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hub_configured_conflicts: Vec<ReviewEntryDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triage_entries: Vec<ReviewEntryDto>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ReviewCountsDto {
+    pub devices: usize,
+    pub rooms: usize,
+    pub unassigned: usize,
+    pub hub_configured: usize,
+    pub total: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ReviewHubDto {
+    #[serde(rename = "type")]
+    pub hub_type: String,
+    pub address: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PreferredEndpointDto {
+    pub canonical_id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub hub_type: String,
+    pub hub_address: String,
+    pub native_id: String,
+    pub endpoint_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ReviewEntryDto {
+    pub id: String,
+    pub kind: TriageKind,
+    pub status: TriageStatus,
+    #[serde(rename = "type")]
+    pub hub_type: String,
+    pub hub_address: String,
+    pub native_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    pub created_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<String>,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guidance: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1011,6 +1075,7 @@ mod tests {
                 rhythm_core::default_rhythm_profile(),
                 rhythm_core::default_sleep_profile(),
             ],
+            review: ReviewSummaryDto::default(),
             nodes: vec![],
             last_tick_epoch_ms: 1700000000000,
         };
@@ -1034,6 +1099,7 @@ mod tests {
         assert_eq!(json["location"]["solar_midnight_local_time"], "00:00:00");
         assert_eq!(json["location"]["current_solar_time"], 18.0);
         assert_eq!(json["transitions"].as_array().unwrap().len(), 2);
+        assert!(json["review"].is_object());
     }
 
     #[test]
@@ -1112,6 +1178,7 @@ mod tests {
                 rhythm_core::default_rhythm_profile(),
                 rhythm_core::default_sleep_profile(),
             ],
+            review: ReviewSummaryDto::default(),
             nodes: vec![sample_node_state()],
             last_tick_epoch_ms: 1700000000000,
         };

@@ -565,7 +565,7 @@ fn sync_with_discovery(
         // behavior_instances). These conflict with Rhythm and should
         // be surfaced as triage items.
         match discovery.discover_configured_devices() {
-            Ok(mappings) if !mappings.is_empty() => {
+            Ok(mappings) => {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -654,7 +654,6 @@ fn sync_with_discovery(
                     commands::persist_canonical(&s);
                 }
             }
-            Ok(_) => {} // no configured devices
             Err(e) => {
                 warn!(target: "room_sync",
                     "Behavior instance discovery failed (non-fatal): {}", e);
