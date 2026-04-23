@@ -600,7 +600,7 @@ impl RoomTopologyStore {
 
     fn sync_hub_default_device_for_room(&mut self, room_id: &str, canonical_device_id: &str) {
         match self.device_nodes.get_mut(canonical_device_id) {
-            Some(node) if node.placement != DevicePlacement::HubDefault => {}
+            Some(node) if node.placement == DevicePlacement::UserOverride => {}
             Some(node) => {
                 node.parent_id = Some(room_id.to_string());
                 node.placement = DevicePlacement::HubDefault;
@@ -618,6 +618,8 @@ impl RoomTopologyStore {
     fn detach_hub_default_devices_for_room(
         &mut self,
         room_id: &str,
+        hub_key: &HubKey,
+        canonical_registry: &crate::canonical::registry::CanonicalRegistry,
         keep_device_ids: &HashSet<String>,
     ) {
         for node in self.device_nodes.values_mut() {
@@ -630,9 +632,33 @@ impl RoomTopologyStore {
             if keep_device_ids.contains(&node.canonical_device_id) {
                 continue;
             }
+            let Some(device) = canonical_registry.get(&node.canonical_device_id) else {
+                continue;
+            };
+            let (has_current_hub_endpoint, has_other_hub_endpoint) = device
+                .active_endpoints()
+                .fold((false, false), |(current, other), endpoint| {
+                    if &endpoint.hub_key == hub_key {
+                        (true, other)
+                    } else {
+                        (current, true)
+                    }
+                });
+            if !has_current_hub_endpoint || has_other_hub_endpoint {
+                continue;
+            }
             node.parent_id = None;
             node.placement = DevicePlacement::Standalone;
         }
+    }
+
+    pub fn sync_hub_room(
+        &mut self,
+        hub_key: &HubKey,
+        discovered: &DiscoveredTopologyRoom,
+    ) -> SyncAction {
+        let empty_registry = crate::canonical::registry::CanonicalRegistry::new();
+        self.sync_hub_room_with_registry(hub_key, discovered, &empty_registry)
     }
 
     /// Sync a discovered hub room into the topology.
@@ -644,10 +670,11 @@ impl RoomTopologyStore {
     ///    b. No approval → create separate room + return `CreatedWithProposal`
     /// 3. No match → create new Rhythm room
     /// 4. (Stale removal done separately via `remove_stale_bindings`)
-    pub fn sync_hub_room(
+    pub fn sync_hub_room_with_registry(
         &mut self,
         hub_key: &HubKey,
         discovered: &DiscoveredTopologyRoom,
+        canonical_registry: &crate::canonical::registry::CanonicalRegistry,
     ) -> SyncAction {
         let index_key = (hub_key.to_string(), discovered.hub_room_id.clone());
 
@@ -701,7 +728,12 @@ impl RoomTopologyStore {
                             });
                             let keep_device_ids: HashSet<String> =
                                 discovered.canonical_device_ids.iter().cloned().collect();
-                            self.detach_hub_default_devices_for_room(&target_id, &keep_device_ids);
+                            self.detach_hub_default_devices_for_room(
+                                &target_id,
+                                hub_key,
+                                canonical_registry,
+                                &keep_device_ids,
+                            );
                             for dev_id in &discovered.canonical_device_ids {
                                 self.sync_hub_default_device_for_room(&target_id, dev_id);
                             }
@@ -733,7 +765,12 @@ impl RoomTopologyStore {
                     }
                     let keep_device_ids: HashSet<String> =
                         discovered.canonical_device_ids.iter().cloned().collect();
-                    self.detach_hub_default_devices_for_room(&rhythm_room_id, &keep_device_ids);
+                    self.detach_hub_default_devices_for_room(
+                        &rhythm_room_id,
+                        hub_key,
+                        canonical_registry,
+                        &keep_device_ids,
+                    );
                     for dev_id in &discovered.canonical_device_ids {
                         self.sync_hub_default_device_for_room(&rhythm_room_id, dev_id);
                     }
@@ -769,7 +806,12 @@ impl RoomTopologyStore {
             }
             let keep_device_ids: HashSet<String> =
                 discovered.canonical_device_ids.iter().cloned().collect();
-            self.detach_hub_default_devices_for_room(&rhythm_room_id, &keep_device_ids);
+            self.detach_hub_default_devices_for_room(
+                &rhythm_room_id,
+                hub_key,
+                canonical_registry,
+                &keep_device_ids,
+            );
             for dev_id in &discovered.canonical_device_ids {
                 self.sync_hub_default_device_for_room(&rhythm_room_id, dev_id);
             }
@@ -817,7 +859,12 @@ impl RoomTopologyStore {
                     let _ = room;
                     let keep_device_ids: HashSet<String> =
                         discovered.canonical_device_ids.iter().cloned().collect();
-                    self.detach_hub_default_devices_for_room(&target_id, &keep_device_ids);
+                    self.detach_hub_default_devices_for_room(
+                        &target_id,
+                        hub_key,
+                        canonical_registry,
+                        &keep_device_ids,
+                    );
                     for dev_id in &discovered.canonical_device_ids {
                         self.sync_hub_default_device_for_room(&target_id, dev_id);
                     }
@@ -1875,9 +1922,43 @@ mod tests {
     #[test]
     fn sync_preserves_user_override_devices() {
         let mut store = RoomTopologyStore::new();
+        let mut registry = CanonicalRegistry::new();
+        let dev1 = register_identity(
+            &mut registry,
+            &hue_key(),
+            make_identity(
+                "hue-dev-1",
+                "hue-room-1",
+                "Kitchen",
+                "Lamp 1",
+                DeviceType::Light,
+            ),
+        );
+        let dev2 = register_identity(
+            &mut registry,
+            &hue_key(),
+            make_identity(
+                "hue-dev-2",
+                "hue-room-1",
+                "Kitchen",
+                "Lamp 2",
+                DeviceType::Light,
+            ),
+        );
+        let dev4 = register_identity(
+            &mut registry,
+            &hue_key(),
+            make_identity(
+                "hue-dev-4",
+                "hue-room-1",
+                "Kitchen",
+                "Lamp 4",
+                DeviceType::Light,
+            ),
+        );
         let mut discovered = make_discovered("hue-room-1", "Kitchen", "gl-1");
-        discovered.canonical_device_ids = vec!["dev-1".to_string(), "dev-2".to_string()];
-        let action = store.sync_hub_room(&hue_key(), &discovered);
+        discovered.canonical_device_ids = vec![dev1.clone(), dev2.clone()];
+        let action = store.sync_hub_room_with_registry(&hue_key(), &discovered, &registry);
         let room_id = action.rhythm_room_id().to_string();
 
         // User moves dev-3 here
@@ -1885,15 +1966,15 @@ mod tests {
 
         // Re-sync removes dev-2, adds dev-4
         let mut rediscovered = make_discovered("hue-room-1", "Kitchen", "gl-1");
-        rediscovered.canonical_device_ids = vec!["dev-1".to_string(), "dev-4".to_string()];
-        store.sync_hub_room(&hue_key(), &rediscovered);
+        rediscovered.canonical_device_ids = vec![dev1.clone(), dev4.clone()];
+        store.sync_hub_room_with_registry(&hue_key(), &rediscovered, &registry);
 
         let room = store.get(&room_id).unwrap();
         let device_ids: Vec<&str> = room.devices.iter().map(|d| d.device_id.as_str()).collect();
-        assert!(device_ids.contains(&"dev-1")); // kept
-        assert!(!device_ids.contains(&"dev-2")); // removed (HubDefault, not in new list)
+        assert!(device_ids.contains(&dev1.as_str())); // kept
+        assert!(!device_ids.contains(&dev2.as_str())); // removed (HubDefault, not in new list)
         assert!(device_ids.contains(&"dev-3")); // kept (UserOverride)
-        assert!(device_ids.contains(&"dev-4")); // added
+        assert!(device_ids.contains(&dev4.as_str())); // added
     }
 
     #[test]
@@ -2554,5 +2635,81 @@ mod tests {
         };
         let action = store.sync_hub_room(&hue_key(), &discovered);
         assert!(matches!(action, SyncAction::Updated { .. }));
+    }
+
+    #[test]
+    fn sync_hub_room_with_registry_preserves_other_hub_defaults_in_bound_room() {
+        let mut store = RoomTopologyStore::new();
+        let mut registry = CanonicalRegistry::new();
+
+        let office_id = store.translate_or_create(&ha_key(), "office", "Office", "office", &[]);
+        let ha_light_id = register_identity(
+            &mut registry,
+            &ha_key(),
+            make_identity(
+                "light.office_bloom",
+                "office",
+                "Office",
+                "Bloom",
+                DeviceType::Light,
+            ),
+        );
+        let hue_light_id = register_identity(
+            &mut registry,
+            &hue_key(),
+            make_identity(
+                "hue-office-1",
+                "hue-office",
+                "Office",
+                "Hue Lamp",
+                DeviceType::Light,
+            ),
+        );
+        assert!(store.attach_device_hub_default(&office_id, &ha_light_id));
+        assert!(store.attach_device_hub_default(&office_id, &hue_light_id));
+
+        store.approve_binding(hue_key(), "hue-office".to_string(), office_id.clone(), 1000);
+        let bound_id =
+            store.translate_or_create(&hue_key(), "hue-office", "Office", "gl-office", &[]);
+        assert_eq!(bound_id, office_id);
+
+        let hue_discovered = DiscoveredTopologyRoom {
+            hub_room_id: "hue-office".to_string(),
+            name: "Office".to_string(),
+            control_id: "gl-office".to_string(),
+            light_device_ids: vec!["hue-office-1".to_string()],
+            canonical_device_ids: vec![hue_light_id.clone()],
+        };
+        store.sync_hub_room_with_registry(&hue_key(), &hue_discovered, &registry);
+
+        assert_eq!(
+            store.device_parent_room_id(&ha_light_id),
+            Some(office_id.as_str()),
+            "syncing Hue should not detach HA defaults from a bound room"
+        );
+        assert_eq!(
+            store.device_parent_room_id(&hue_light_id),
+            Some(office_id.as_str()),
+        );
+
+        let ha_discovered = DiscoveredTopologyRoom {
+            hub_room_id: "office".to_string(),
+            name: "Office".to_string(),
+            control_id: "office".to_string(),
+            light_device_ids: vec!["light.office_bloom".to_string()],
+            canonical_device_ids: vec![ha_light_id.clone()],
+        };
+        store.sync_hub_room_with_registry(&ha_key(), &ha_discovered, &registry);
+
+        assert_eq!(
+            store.device_parent_room_id(&ha_light_id),
+            Some(office_id.as_str()),
+            "syncing HA should keep its own defaults attached"
+        );
+        assert_eq!(
+            store.device_parent_room_id(&hue_light_id),
+            Some(office_id.as_str()),
+            "syncing HA should not strip Hue defaults from a bound room"
+        );
     }
 }

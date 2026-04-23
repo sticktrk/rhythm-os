@@ -113,6 +113,39 @@ fn backup_restore_then_first_sync_keeps_room_binding_approved_without_duplicate_
         2,
         "first sync should not create duplicate canonical devices"
     );
+
+    let primary_device = state
+        .canonical_registry
+        .find_by_native_id(&restored.hub_key, "lamp-1")
+        .expect("primary hub endpoint should survive first sync");
+    let secondary_device = state
+        .canonical_registry
+        .find_by_native_id(&ha_key, "lamp-1")
+        .expect("secondary hub endpoint should survive first sync");
+    assert_ne!(
+        primary_device.id, secondary_device.id,
+        "unresolved merge should still have two canonical devices"
+    );
+    assert_eq!(
+        state
+            .topology
+            .get_device_node(&primary_device.id)
+            .expect("primary topology device should exist")
+            .parent_id
+            .as_deref(),
+        Some(merged_room_id.as_str()),
+        "primary hub light should stay inside the merged room after restore + first sync"
+    );
+    assert_eq!(
+        state
+            .topology
+            .get_device_node(&secondary_device.id)
+            .expect("secondary topology device should exist")
+            .parent_id
+            .as_deref(),
+        Some(merged_room_id.as_str()),
+        "secondary hub light should stay inside the merged room after restore + first sync"
+    );
 }
 
 #[test]

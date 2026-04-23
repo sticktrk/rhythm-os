@@ -6771,6 +6771,16 @@ pub fn do_triage_bind_room_to(
         .ok_or_else(|| {
             anyhow::anyhow!("Silo room not found for hub room: {}", binding.hub_room_id)
         })?;
+    let source_device_ids: Vec<String> = s
+        .topology
+        .get(&source_id)
+        .map(|room| {
+            room.devices
+                .iter()
+                .map(|device| device.device_id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Merge the silo room into the target room
     if !s.topology.merge_rooms(&target_id, &source_id) {
@@ -6779,6 +6789,10 @@ pub fn do_triage_bind_room_to(
             source_id,
             target_id
         ));
+    }
+    for device_id in &source_device_ids {
+        s.canonical_registry
+            .assign_room(device_id, Some(&target_id));
     }
 
     // Record the approved binding so it re-applies on re-sync
@@ -7070,7 +7084,21 @@ pub fn do_topology_merge_rooms(
     if s.topology.get(target_id).is_none() {
         return Err(anyhow::anyhow!("Target room not found"));
     }
+    let source_device_ids: Vec<String> = s
+        .topology
+        .get(source_id)
+        .map(|room| {
+            room.devices
+                .iter()
+                .map(|device| device.device_id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     if s.topology.merge_rooms(target_id, source_id) {
+        for device_id in &source_device_ids {
+            s.canonical_registry.assign_room(device_id, Some(target_id));
+        }
+        persist_canonical(&s);
         persist_topology(&s);
         drop(s);
         reconcile_runtime_from_state(state)?;
@@ -12211,6 +12239,14 @@ mod tests {
                 .as_deref(),
             Some(target_id.as_str())
         );
+        assert_eq!(
+            s.canonical_registry
+                .get(&device_id)
+                .expect("merged device should remain in canonical state")
+                .room_id
+                .as_deref(),
+            Some(target_id.as_str())
+        );
         drop(s);
 
         assert!(
@@ -12486,6 +12522,14 @@ mod tests {
                 .get_device_node(&device_id)
                 .unwrap()
                 .parent_id
+                .as_deref(),
+            Some(target_id.as_str())
+        );
+        assert_eq!(
+            s.canonical_registry
+                .get(&device_id)
+                .unwrap()
+                .room_id
                 .as_deref(),
             Some(target_id.as_str())
         );

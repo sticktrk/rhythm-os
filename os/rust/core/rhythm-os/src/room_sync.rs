@@ -453,7 +453,12 @@ fn sync_with_discovery(
                         light_device_ids: room.device_ids.clone(),
                         canonical_device_ids: canonical_device_ids.clone(),
                     };
-                    let action = s.topology.sync_hub_room(&canonical_hub_key, &topo_room);
+                    let canonical_registry = s.canonical_registry.clone();
+                    let action = s.topology.sync_hub_room_with_registry(
+                        &canonical_hub_key,
+                        &topo_room,
+                        &canonical_registry,
+                    );
                     let rhythm_room_id = action.rhythm_room_id().to_string();
                     let canonical_room_assignments: Vec<(String, String)> = canonical_device_ids
                         .iter()
