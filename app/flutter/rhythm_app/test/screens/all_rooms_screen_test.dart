@@ -142,6 +142,58 @@ const _bulb2 = RoomDto(
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  testWidgets('idle compact bulb cards do not show the standby pill',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    final homeProvider = _FakeHomeProvider();
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    final roomPageProvider = RoomPageProvider(
+      layoutStore: _MemoryRoomPageLayoutStore(),
+    );
+
+    addTearDown(roomProvider.dispose);
+    addTearDown(homeProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(roomPageProvider.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await roomProvider.addRoom(_bulb1);
+    roomProvider.setRoomStateLocal(_bulb1.id, RoomModeState.idle);
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<HomeProvider>.value(value: homeProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+          ChangeNotifierProvider<RoomPageProvider>.value(
+              value: roomPageProvider),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: AllRoomsScreen(
+              rooms: const [_bulb1],
+              globalConfig: defaultCurveConfig,
+              pageController: PageController(),
+              onPageChanged: (_) {},
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Bulb 1'), findsOneWidget);
+    expect(find.text('Standby'), findsNothing);
+  });
+
   testWidgets(
       'compact bulb cards stay compact when long-press enters edit mode',
       (tester) async {

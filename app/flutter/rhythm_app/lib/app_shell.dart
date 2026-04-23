@@ -143,13 +143,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   }
 
   void _handleServerHubLifecycle({required bool hasServerHub}) {
-    if (hasServerHub) {
-      _hadServerHub = true;
-      _serverRemovalCleanupPending = false;
-      return;
-    }
+    final serverRemoved = _hadServerHub && !hasServerHub;
+    _hadServerHub = hasServerHub;
 
-    if (!_hadServerHub || _serverRemovalCleanupPending) return;
+    if (!serverRemoved || _serverRemovalCleanupPending) return;
     _serverRemovalCleanupPending = true;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
