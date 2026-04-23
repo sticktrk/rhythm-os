@@ -28,7 +28,6 @@ import '../../widgets/beta_badge.dart';
 import '../../widgets/device_detail_sheet.dart';
 import 'ha_configurator_screen.dart';
 import 'hue_configurator_screen.dart';
-import 'matter_add_method.dart';
 import 'matter_pairing_flow.dart';
 
 /// Settings screen for a connected server hub (ESP32, standalone, HA addon).
@@ -36,17 +35,33 @@ import 'matter_pairing_flow.dart';
 /// Adapts visible sections based on the server's platform context.
 class RhythmServerSettingsScreen extends StatefulWidget {
   final Hub hub;
+  final String? headerTitleOverride;
+  final bool useBackButton;
 
-  const RhythmServerSettingsScreen({super.key, required this.hub});
+  const RhythmServerSettingsScreen({
+    super.key,
+    required this.hub,
+    this.headerTitleOverride,
+    this.useBackButton = false,
+  });
 
   /// Show as a full-screen modal with slide-up transition.
-  static Future<void> show(BuildContext context, {required Hub hub}) {
+  static Future<void> show(
+    BuildContext context, {
+    required Hub hub,
+    String? headerTitleOverride,
+    bool useBackButton = false,
+  }) {
     return Navigator.of(context).push(
       PageRouteBuilder(
         opaque: false,
         barrierColor: Colors.black54,
         pageBuilder: (context, animation, secondaryAnimation) {
-          return RhythmServerSettingsScreen(hub: hub);
+          return RhythmServerSettingsScreen(
+            hub: hub,
+            headerTitleOverride: headerTitleOverride,
+            useBackButton: useBackButton,
+          );
         },
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
           final curve = CurvedAnimation(
@@ -83,13 +98,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   bool _isRebooting = false;
   bool _isFactoryResetting = false;
   bool _isRefreshing = false;
-  bool _isConfiguringHub = false;
   bool _isSubmittingDebugBundle = false;
   OtaState? _lastHandledOtaState;
-
-  // Per-hub-type device summaries from /api/devices/canonical
-  Map<String, String> _hubSummaries = {};
-  bool _hubSummariesLoaded = false;
 
   late AnimationController _glowController;
   late Animation<double> _glowAnimation;
@@ -106,10 +116,12 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   bool get _isHaAddon => _serverContext == 'ha_addon';
   bool get _supportsDebugBundle => !_isEmbedded;
 
-  String get _headerTitle => switch (_serverContext) {
+  String get _headerTitle =>
+      widget.headerTitleOverride ??
+      switch (_serverContext) {
         'ha_addon' => 'Rhythm Add-on',
-        'server' => 'Rhythm Server',
-        _ => 'RhythmServer',
+        'server' => 'RhythmOS Server',
+        _ => 'LightBox',
       };
 
   IconData get _heroIcon => switch (_serverContext) {
@@ -135,7 +147,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
     _otaService.addListener(_onOtaStateChanged);
     _checkHealth();
-    _fetchHubSummaries();
     unawaited(_loadOtaSupport());
 
     AnalyticsService().logScreenView('rhythmserver_settings');
@@ -197,59 +208,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     }
   }
 
-  Future<void> _fetchHubSummaries() async {
-    final http = context.read<RhythmConnection>();
-    final devices = await http.api.getCanonicalDevices();
-    if (!mounted) return;
-    if (devices == null) return;
-
-    // Count devices per hub type from canonical endpoints.
-    final counts = <String, _DeviceCounts>{};
-    for (final d in devices) {
-      final dtype = d['device_type'] as String? ?? 'light';
-      final endpoints = d['endpoints'] as List<dynamic>? ?? [];
-      final hubTypes = <String>{};
-      for (final ep in endpoints) {
-        final hubKey =
-            (ep as Map<String, dynamic>)['hub_key'] as Map<String, dynamic>? ??
-                {};
-        final ht = hubKey['hub_type']?.toString();
-        if (ht != null) hubTypes.add(ht);
-      }
-      for (final ht in hubTypes) {
-        final c = counts[ht] ??= _DeviceCounts();
-        if (dtype == 'light') {
-          c.lights++;
-        } else if (dtype == 'button') {
-          c.buttons++;
-        } else if (dtype == 'motion') {
-          c.motion++;
-        }
-      }
-    }
-
-    final summaries = <String, String>{};
-    for (final entry in counts.entries) {
-      final c = entry.value;
-      final parts = <String>[];
-      if (c.lights > 0) {
-        parts.add('${c.lights} light${c.lights > 1 ? 's' : ''}');
-      }
-      if (c.buttons > 0) {
-        parts.add('${c.buttons} button${c.buttons > 1 ? 's' : ''}');
-      }
-      if (c.motion > 0) {
-        parts.add('${c.motion} sensor${c.motion > 1 ? 's' : ''}');
-      }
-      summaries[entry.key] = parts.isEmpty ? 'No devices' : parts.join(', ');
-    }
-
-    setState(() {
-      _hubSummaries = summaries;
-      _hubSummariesLoaded = true;
-    });
-  }
-
   Future<void> _handleRefresh() async {
     if (_isRefreshing) return;
     setState(() {
@@ -259,7 +217,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     // Refresh everything in parallel: health, server state, matter devices.
     await Future.wait([
       _checkHealth(),
-      _fetchHubSummaries(),
       _loadOtaSupport(),
       () async {
         // Force SSE reconnect to re-fetch /api/state (rooms, hubs, settings).
@@ -393,9 +350,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                       const SizedBox(height: 8),
                       _buildHeroSection(http),
                       const SizedBox(height: 24),
-                      ..._buildPerHubSections(http),
-                      _buildHubPairingSuggestions(),
-                      const SizedBox(height: 16),
                       _buildVersionSection(),
                       if (_supportsDebugBundle) ...[
                         const SizedBox(height: 16),
@@ -441,10 +395,10 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                   width: 1,
                 ),
               ),
-              child: const Icon(
-                Icons.close,
+              child: Icon(
+                widget.useBackButton ? Icons.chevron_left : Icons.close,
                 color: _teal,
-                size: 20,
+                size: widget.useBackButton ? 24 : 20,
               ),
             ),
           ),
@@ -1055,48 +1009,31 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
             color: CelestialColors.orbitRing.withValues(alpha: 0.3),
           ),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  release.updateReason == OtaUpdateReason.componentDrift
-                      ? 'Repair Available'
-                      : 'Available',
+                  'Update available',
                   style: TextStyle(
-                    color: CelestialColors.textSecondary.withValues(alpha: 0.8),
-                    fontSize: 14,
-                  ),
-                ),
-                Text(
-                  _formatOtaVersion(release.version),
-                  style: const TextStyle(
-                    color: _teal,
+                    color: CelestialColors.textPrimary,
                     fontSize: 14,
                     fontWeight: FontWeight.w600,
-                    fontFamily: 'monospace',
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'A new update is ready to install.',
+                  style: TextStyle(
+                    color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+                    fontSize: 13,
                   ),
                 ),
               ],
             ),
           ),
-          if (_otaService.isSelfPull)
-            _buildOtaReasonSummary(release.updateReason),
-          if (release.changelog != null && release.changelog!.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-              child: Text(
-                release.changelog!,
-                style: TextStyle(
-                  color: CelestialColors.textSecondary.withValues(alpha: 0.6),
-                  fontSize: 13,
-                ),
-              ),
-            ),
           _buildOtaButton(
-            label: release.updateReason == OtaUpdateReason.componentDrift
-                ? 'Repair Components'
-                : 'Install Update',
+            label: 'Install Update',
             icon: Icons.download_rounded,
             onTap: () {
               AnalyticsService().logOtaUpdateStarted(
@@ -1114,8 +1051,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       case OtaState.uploading:
         final pct = _otaService.progress;
         final label = _otaService.state == OtaState.downloading
-            ? 'Downloading firmware...'
-            : (_otaService.statusMessage ?? 'Installing update...');
+            ? 'Downloading update...'
+            : 'Installing update...';
         return [
           Divider(
             height: 1,
@@ -1169,7 +1106,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
             child: Text(
-              'Writing firmware to device...',
+              'Installing update...',
               style: TextStyle(
                 color: CelestialColors.textSecondary.withValues(alpha: 0.8),
                 fontSize: 14,
@@ -1209,7 +1146,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 ),
                 const SizedBox(width: 12),
                 Text(
-                  _otaService.statusMessage ?? 'Device restarting',
+                  'Restarting device...',
                   style: TextStyle(
                     color: CelestialColors.textSecondary.withValues(alpha: 0.8),
                     fontSize: 14,
@@ -1234,12 +1171,9 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     color: Color(0xFF22C55E), size: 20),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: Text(
-                    _otaService.statusMessage ??
-                        (_otaService.isBundleRepair
-                            ? 'Bundle repaired on ${_formatOtaVersion(_otaService.currentVersion)}'
-                            : 'Updated to ${_formatOtaVersion(_otaService.currentVersion)}'),
-                    style: const TextStyle(
+                  child: const Text(
+                    'Update completed successfully.',
+                    style: TextStyle(
                       color: Color(0xFF22C55E),
                       fontSize: 14,
                       fontWeight: FontWeight.w500,
@@ -1249,10 +1183,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               ],
             ),
           ),
-          if (_otaService.installedTargets.isNotEmpty)
-            _buildInstalledTargetsSummary(_otaService.installedTargets),
-          if (_otaService.checksumVerified != null)
-            _buildChecksumSummary(_otaService.checksumVerified!),
           _buildOtaButton(
             label: 'Done',
             icon: null,
@@ -1275,7 +1205,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    _otaService.errorMessage ?? 'Update failed',
+                    'The update did not finish. Please try again.',
                     style: TextStyle(
                       color: Colors.red.shade400,
                       fontSize: 13,
@@ -1302,136 +1232,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     return version.startsWith('v') || version.startsWith('V')
         ? version
         : 'v$version';
-  }
-
-  Widget _buildOtaReasonSummary(OtaUpdateReason reason) {
-    final (icon, title, description) = switch (reason) {
-      OtaUpdateReason.versionMismatch => (
-          Icons.system_update_outlined,
-          'Version mismatch',
-          'A newer server bundle is available.',
-        ),
-      OtaUpdateReason.componentDrift => (
-          Icons.build_circle_outlined,
-          'Component drift',
-          'Bundled components are stale or missing and can be repaired in place.',
-        ),
-      OtaUpdateReason.unknown => (
-          Icons.info_outline_rounded,
-          'Bundle update',
-          'The server reported an available update bundle.',
-        ),
-    };
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, color: _teal.withValues(alpha: 0.9), size: 18),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    color: _teal,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  description,
-                  style: TextStyle(
-                    color:
-                        CelestialColors.textSecondary.withValues(alpha: 0.65),
-                    fontSize: 13,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildInstalledTargetsSummary(List<OtaBundleEntry> installedTargets) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Installed Targets',
-            style: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.8),
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: installedTargets
-                .map(
-                  (target) => Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF22C55E).withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(999),
-                      border: Border.all(
-                        color: const Color(0xFF22C55E).withValues(alpha: 0.25),
-                      ),
-                    ),
-                    child: Text(
-                      target.title,
-                      style: const TextStyle(
-                        color: Color(0xFF22C55E),
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                )
-                .toList(),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildChecksumSummary(bool checksumVerified) {
-    final color =
-        checksumVerified ? const Color(0xFF22C55E) : const Color(0xFFF59E0B);
-    final icon = checksumVerified
-        ? Icons.verified_outlined
-        : Icons.warning_amber_rounded;
-    final label =
-        checksumVerified ? 'Checksum verified' : 'Checksum not verified';
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-      child: Row(
-        children: [
-          Icon(icon, color: color, size: 18),
-          const SizedBox(width: 8),
-          Text(
-            label,
-            style: TextStyle(
-              color: color,
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
-      ),
-    );
   }
 
   Widget _buildOtaButton({
@@ -1474,200 +1274,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 fontSize: 14,
                 fontWeight: FontWeight.w500,
               ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildConnectionRow({
-    required String label,
-    required String statusText,
-    required Color statusColor,
-    bool isPulsing = false,
-    bool isSpinning = false,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 80,
-            child: Text(
-              label,
-              style: TextStyle(
-                color: CelestialColors.textSecondary.withValues(alpha: 0.8),
-                fontSize: 14,
-              ),
-            ),
-          ),
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: statusColor,
-              boxShadow: isPulsing
-                  ? [
-                      BoxShadow(
-                        color: statusColor.withValues(alpha: 0.6),
-                        blurRadius: 6,
-                        spreadRadius: 1,
-                      ),
-                    ]
-                  : null,
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              statusText,
-              style: TextStyle(
-                color: statusColor,
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-          if (isSpinning)
-            SizedBox(
-              width: 14,
-              height: 14,
-              child: CircularProgressIndicator(
-                strokeWidth: 1.5,
-                valueColor: AlwaysStoppedAnimation(
-                  CelestialColors.textSecondary.withValues(alpha: 0.5),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  // ─── Per-Hub Sections ──────────────────────────────────────
-
-  List<Widget> _buildPerHubSections(RhythmConnection http) {
-    final syncProvider = context.watch<ServerSyncProvider>();
-    final configuredHubs = syncProvider.serverHubInfos
-        .where((h) => h['type'] != null && h['type'] != 'none')
-        .toList();
-
-    if (configuredHubs.isEmpty) return [];
-
-    return [
-      _buildSection(
-        title: configuredHubs.length > 1 ? 'LIGHT HUBS' : 'LIGHT HUB',
-        children: [
-          Container(
-            decoration: BoxDecoration(
-              color: CelestialColors.backgroundCard,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(
-                color: CelestialColors.orbitRing.withValues(alpha: 0.5),
-              ),
-            ),
-            child: Column(
-              children: [
-                for (final (index, hub) in configuredHubs.indexed) ...[
-                  if (index > 0)
-                    Divider(
-                        height: 1,
-                        color:
-                            CelestialColors.orbitRing.withValues(alpha: 0.3)),
-                  _buildHubRow(hub),
-                ],
-              ],
-            ),
-          ),
-        ],
-      ),
-      const SizedBox(height: 16),
-    ];
-  }
-
-  Widget _buildHubRow(Map<String, dynamic> hubInfo) {
-    final type = hubInfo['type'] as String;
-    final label = _hubLabel(type);
-    final hubColor = _hubColor(type);
-    final connected = hubInfo['connected'] as bool? ?? false;
-    final statusColor = _hubConnectionColor(hubInfo);
-    final deviceSummary = _hubSummaries[type] ??
-        (_hubSummariesLoaded
-            ? (connected ? 'Connected · no devices' : 'No devices')
-            : 'Loading…');
-    final subtitle = _hubRowSubtitle(hubInfo, deviceSummary);
-
-    return GestureDetector(
-      onTap: () => _HubDetailScreen.show(context, hubInfo: hubInfo),
-      behavior: HitTestBehavior.opaque,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        child: Row(
-          children: [
-            Icon(
-              _hubIcon(type),
-              color: hubColor.withValues(alpha: connected ? 1.0 : 0.5),
-              size: 20,
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (_hubHasBetaBadge(type))
-                    BetaLabel(
-                      label: label,
-                      style: TextStyle(
-                        color: CelestialColors.textPrimary,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    )
-                  else
-                    Text(
-                      label,
-                      style: const TextStyle(
-                        color: CelestialColors.textPrimary,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  const SizedBox(height: 2),
-                  Text(
-                    subtitle,
-                    style: TextStyle(
-                      color:
-                          CelestialColors.textSecondary.withValues(alpha: 0.6),
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Container(
-              width: 8,
-              height: 8,
-              margin: const EdgeInsets.only(right: 8),
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: statusColor,
-                boxShadow: !connected
-                    ? [
-                        BoxShadow(
-                          color: statusColor.withValues(alpha: 0.6),
-                          blurRadius: 6,
-                          spreadRadius: 1,
-                        ),
-                      ]
-                    : null,
-              ),
-            ),
-            Icon(
-              Icons.chevron_right,
-              color: CelestialColors.textSecondary.withValues(alpha: 0.4),
-              size: 20,
             ),
           ],
         ),
@@ -1769,261 +1375,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     if (remaining.inMinutes < 1) return 'in ${remaining.inSeconds}s';
     if (remaining.inHours < 1) return 'in ${remaining.inMinutes}m';
     return 'in ${remaining.inHours}h';
-  }
-
-  Future<void> _startMatterAddFlow({
-    MatterAddMethod? preferredMethod,
-  }) async {
-    await startMatterPairingFlow(
-      context,
-      preferredMethod: preferredMethod,
-    );
-    if (!mounted) return;
-    await _fetchHubSummaries();
-  }
-
-  List<Widget> _buildMatterAddOptionRows(ServerSyncProvider syncProvider) {
-    if (!syncProvider.canAddMatterDevice) return const [];
-    return [
-      _buildHubOptionRow(
-        icon: Icons.memory_outlined,
-        label: 'Add Matter Device',
-        color: const Color(0xFF26A69A),
-        showBetaBadge: true,
-        onTap: () => _startMatterAddFlow(),
-      ),
-    ];
-  }
-
-  // ─── Hub Pairing Suggestions ─────────────────────────────
-
-  Widget _buildHubPairingSuggestions() {
-    final syncProvider = context.watch<ServerSyncProvider>();
-    final configuredTypes = syncProvider.configuredHubTypes;
-    final configuredHubs = syncProvider.serverHubInfos
-        .where((h) => h['type'] != null && h['type'] != 'none')
-        .toList();
-    final hasAnyHub = configuredHubs.isNotEmpty;
-
-    final haConfigured = configuredTypes.contains('homeassistant') ||
-        configuredTypes.contains('home_assistant');
-    final showHa =
-        syncProvider.canConfigureHub('homeassistant') && !haConfigured;
-    final showHue =
-        syncProvider.canConfigureHub('hue') && !configuredTypes.contains('hue');
-    final matterOptions = _buildMatterAddOptionRows(syncProvider);
-    final hasMatterOptions = matterOptions.isNotEmpty;
-
-    if (!showHa && !showHue && !hasMatterOptions && !hasAnyHub) {
-      return const SizedBox.shrink();
-    }
-
-    // If no hubs configured at all, show as "LIGHT HUB" section
-    if (!hasAnyHub) {
-      return _buildSection(
-        title: 'LIGHT HUB',
-        children: [
-          Container(
-            decoration: BoxDecoration(
-              color: CelestialColors.backgroundCard,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(
-                color: CelestialColors.orbitRing.withValues(alpha: 0.5),
-              ),
-            ),
-            child: Column(
-              children: [
-                _buildConnectionRow(
-                  label: 'Status',
-                  statusText: 'Not paired',
-                  statusColor: CelestialColors.textSecondary,
-                ),
-                if (showHa) ...[
-                  Divider(
-                      height: 1,
-                      color: CelestialColors.orbitRing.withValues(alpha: 0.3)),
-                  _buildHubOptionRow(
-                    icon: Icons.home_outlined,
-                    label: 'Home Assistant',
-                    color: const Color(0xFF42A5F5),
-                    isLoading: _isConfiguringHub,
-                    showBetaBadge: true,
-                    onTap:
-                        _isConfiguringHub ? null : () => _pairHa(syncProvider),
-                  ),
-                ],
-                if (showHue) ...[
-                  Divider(
-                      height: 1,
-                      color: CelestialColors.orbitRing.withValues(alpha: 0.3)),
-                  _buildHubOptionRow(
-                    icon: Icons.lightbulb_outline,
-                    label: 'Philips Hue',
-                    color: const Color(0xFFFFB900),
-                    onTap: () => HueConfiguratorScreen.show(context),
-                  ),
-                ],
-                if (hasMatterOptions) ...[
-                  Divider(
-                      height: 1,
-                      color: CelestialColors.orbitRing.withValues(alpha: 0.3)),
-                  ...matterOptions,
-                ],
-              ],
-            ),
-          ),
-        ],
-      );
-    }
-
-    // Hubs exist — show add options + disconnect all (if multiple)
-    final children = <Widget>[];
-    if (showHa || showHue || hasMatterOptions) {
-      final options = <Widget>[];
-      if (showHa) {
-        options.add(_buildHubOptionRow(
-          icon: Icons.home_outlined,
-          label: 'Add Home Assistant',
-          color: const Color(0xFF42A5F5),
-          isLoading: _isConfiguringHub,
-          showBetaBadge: true,
-          onTap: _isConfiguringHub ? null : () => _pairHa(syncProvider),
-        ));
-      }
-      if (showHue) {
-        if (options.isNotEmpty) {
-          options.add(Divider(
-              height: 1,
-              color: CelestialColors.orbitRing.withValues(alpha: 0.3)));
-        }
-        options.add(_buildHubOptionRow(
-          icon: Icons.lightbulb_outline,
-          label: 'Add Philips Hue',
-          color: const Color(0xFFFFB900),
-          onTap: () => HueConfiguratorScreen.show(context),
-        ));
-      }
-      if (hasMatterOptions) {
-        if (options.isNotEmpty) {
-          options.add(Divider(
-              height: 1,
-              color: CelestialColors.orbitRing.withValues(alpha: 0.3)));
-        }
-        options.addAll(matterOptions);
-      }
-      children.add(
-        Container(
-          decoration: BoxDecoration(
-            color: CelestialColors.backgroundCard,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: CelestialColors.orbitRing.withValues(alpha: 0.5),
-            ),
-          ),
-          child: Column(children: options),
-        ),
-      );
-    }
-
-    if (children.isEmpty) return const SizedBox.shrink();
-
-    return _buildSection(
-      title: 'ADD HUB',
-      children: children,
-    );
-  }
-
-  Future<void> _pairHa(ServerSyncProvider syncProvider) async {
-    if (_isHaAddon) {
-      setState(() => _isConfiguringHub = true);
-      try {
-        await syncProvider.configureAddonHaHub();
-      } finally {
-        if (mounted) setState(() => _isConfiguringHub = false);
-      }
-    } else {
-      final result = await HAConfiguratorScreen.show(context);
-      if (result == true && mounted) {
-        await syncProvider.pushHubCredentials(RoomSourceDto.homeAssistant);
-      }
-    }
-  }
-
-  Widget _buildHubOptionRow({
-    required IconData icon,
-    required String label,
-    required Color color,
-    bool isActive = false,
-    bool isLoading = false,
-    bool showBetaBadge = false,
-    VoidCallback? onTap,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        child: Row(
-          children: [
-            Icon(
-              icon,
-              color: isActive ? color : color.withValues(alpha: 0.6),
-              size: 20,
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: showBetaBadge
-                  ? BetaLabel(
-                      label: label,
-                      style: TextStyle(
-                        color: CelestialColors.textPrimary,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    )
-                  : Text(
-                      label,
-                      style: const TextStyle(
-                        color: CelestialColors.textPrimary,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-            ),
-            if (isLoading)
-              SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  valueColor: AlwaysStoppedAnimation(color),
-                ),
-              )
-            else if (isActive)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(6),
-                  color: const Color(0xFF22C55E).withValues(alpha: 0.15),
-                ),
-                child: const Text(
-                  'Active',
-                  style: TextStyle(
-                    color: Color(0xFF22C55E),
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              )
-            else if (onTap != null)
-              Icon(
-                Icons.chevron_right,
-                color: CelestialColors.textSecondary.withValues(alpha: 0.4),
-                size: 20,
-              ),
-          ],
-        ),
-      ),
-    );
   }
 
   Widget _buildDiagnosticsButton() {
@@ -2585,6 +1936,605 @@ class _DeviceCounts {
   int motion = 0;
 }
 
+class RhythmServerHubManagementSection extends StatefulWidget {
+  const RhythmServerHubManagementSection({super.key});
+
+  @override
+  State<RhythmServerHubManagementSection> createState() =>
+      _RhythmServerHubManagementSectionState();
+}
+
+class _RhythmServerHubManagementSectionState
+    extends State<RhythmServerHubManagementSection> {
+  bool _isConfiguringHub = false;
+  bool _isFetchingSummaries = false;
+  bool _hubSummariesLoaded = false;
+  Map<String, String> _hubSummaries = {};
+
+  bool get _isHaAddon =>
+      context.read<ServerSyncProvider>().serverPlatformContext == 'ha_addon';
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_fetchHubSummaries());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final syncProvider = context.watch<ServerSyncProvider>();
+    final configuredHubs = syncProvider.serverHubInfos
+        .where((h) => h['type'] != null && h['type'] != 'none')
+        .toList();
+    final shouldRefreshSummaries =
+        syncProvider.connectionState == RhythmConnectionState.connected &&
+            configuredHubs.any((hub) {
+              final type = hub['type'] as String?;
+              return type != null && !_hubSummaries.containsKey(type);
+            });
+
+    if (shouldRefreshSummaries && !_isFetchingSummaries) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          unawaited(_fetchHubSummaries());
+        }
+      });
+    }
+
+    final sections = <Widget>[];
+    final configuredSection = _buildConfiguredHubsSection(configuredHubs);
+    if (configuredSection != null) {
+      sections.add(configuredSection);
+    }
+
+    final addHubSection =
+        _buildHubPairingSuggestions(syncProvider, configuredHubs);
+    if (addHubSection != null) {
+      if (sections.isNotEmpty) {
+        sections.add(const SizedBox(height: 12));
+      }
+      sections.add(addHubSection);
+    }
+
+    if (sections.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: sections,
+    );
+  }
+
+  Future<void> _fetchHubSummaries() async {
+    if (_isFetchingSummaries) return;
+    _isFetchingSummaries = true;
+    try {
+      final http = context.read<RhythmConnection>();
+      final devices = await http.api.getCanonicalDevices();
+      if (!mounted) return;
+
+      if (devices == null) {
+        setState(() => _hubSummariesLoaded = true);
+        return;
+      }
+
+      final counts = <String, _DeviceCounts>{};
+      for (final d in devices) {
+        final dtype = d['device_type'] as String? ?? 'light';
+        final endpoints = d['endpoints'] as List<dynamic>? ?? [];
+        final hubTypes = <String>{};
+        for (final ep in endpoints) {
+          final hubKey = (ep as Map<String, dynamic>)['hub_key']
+                  as Map<String, dynamic>? ??
+              {};
+          final ht = hubKey['hub_type']?.toString();
+          if (ht != null) hubTypes.add(ht);
+        }
+        for (final ht in hubTypes) {
+          final countsForHub = counts[ht] ??= _DeviceCounts();
+          if (dtype == 'light') {
+            countsForHub.lights++;
+          } else if (dtype == 'button') {
+            countsForHub.buttons++;
+          } else if (dtype == 'motion') {
+            countsForHub.motion++;
+          }
+        }
+      }
+
+      final summaries = <String, String>{};
+      for (final entry in counts.entries) {
+        final countsForHub = entry.value;
+        final parts = <String>[];
+        if (countsForHub.lights > 0) {
+          parts.add(
+              '${countsForHub.lights} light${countsForHub.lights > 1 ? 's' : ''}');
+        }
+        if (countsForHub.buttons > 0) {
+          parts.add(
+              '${countsForHub.buttons} button${countsForHub.buttons > 1 ? 's' : ''}');
+        }
+        if (countsForHub.motion > 0) {
+          parts.add(
+              '${countsForHub.motion} sensor${countsForHub.motion > 1 ? 's' : ''}');
+        }
+        summaries[entry.key] = parts.isEmpty ? 'No devices' : parts.join(', ');
+      }
+
+      setState(() {
+        _hubSummaries = summaries;
+        _hubSummariesLoaded = true;
+      });
+    } finally {
+      _isFetchingSummaries = false;
+    }
+  }
+
+  Widget? _buildConfiguredHubsSection(
+      List<Map<String, dynamic>> configuredHubs) {
+    if (configuredHubs.isEmpty) return null;
+
+    return _buildSection(
+      title: configuredHubs.length > 1 ? 'LIGHT HUBS' : 'LIGHT HUB',
+      children: [
+        Container(
+          decoration: BoxDecoration(
+            color: CelestialColors.backgroundCard,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+            ),
+          ),
+          child: Column(
+            children: [
+              for (final (index, hub) in configuredHubs.indexed) ...[
+                if (index > 0)
+                  Divider(
+                    height: 1,
+                    color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+                  ),
+                _buildHubRow(hub),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget? _buildHubPairingSuggestions(
+    ServerSyncProvider syncProvider,
+    List<Map<String, dynamic>> configuredHubs,
+  ) {
+    final configuredTypes = syncProvider.configuredHubTypes;
+    final hasAnyHub = configuredHubs.isNotEmpty;
+    final haConfigured = configuredTypes.contains('homeassistant') ||
+        configuredTypes.contains('home_assistant');
+    final showHa =
+        syncProvider.canConfigureHub('homeassistant') && !haConfigured;
+    final showHue =
+        syncProvider.canConfigureHub('hue') && !configuredTypes.contains('hue');
+    final matterOptions = _buildMatterAddOptionRows(syncProvider);
+    final hasMatterOptions = matterOptions.isNotEmpty;
+
+    if (!showHa && !showHue && !hasMatterOptions && !hasAnyHub) {
+      return null;
+    }
+
+    if (!hasAnyHub) {
+      return _buildSection(
+        title: 'LIGHT HUB',
+        children: [
+          Container(
+            decoration: BoxDecoration(
+              color: CelestialColors.backgroundCard,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+              ),
+            ),
+            child: Column(
+              children: [
+                _buildConnectionRow(
+                  label: 'Status',
+                  statusText: 'Not paired',
+                  statusColor: CelestialColors.textSecondary,
+                ),
+                if (showHa) ...[
+                  Divider(
+                    height: 1,
+                    color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+                  ),
+                  _buildHubOptionRow(
+                    icon: Icons.home_outlined,
+                    label: 'Home Assistant',
+                    color: const Color(0xFF42A5F5),
+                    isLoading: _isConfiguringHub,
+                    showBetaBadge: true,
+                    onTap:
+                        _isConfiguringHub ? null : () => _pairHa(syncProvider),
+                  ),
+                ],
+                if (showHue) ...[
+                  Divider(
+                    height: 1,
+                    color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+                  ),
+                  _buildHubOptionRow(
+                    icon: Icons.lightbulb_outline,
+                    label: 'Philips Hue',
+                    color: const Color(0xFFFFB900),
+                    onTap: () => HueConfiguratorScreen.show(context),
+                  ),
+                ],
+                if (hasMatterOptions) ...[
+                  Divider(
+                    height: 1,
+                    color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+                  ),
+                  ...matterOptions,
+                ],
+              ],
+            ),
+          ),
+        ],
+      );
+    }
+
+    final options = <Widget>[];
+    if (showHa) {
+      options.add(
+        _buildHubOptionRow(
+          icon: Icons.home_outlined,
+          label: 'Add Home Assistant',
+          color: const Color(0xFF42A5F5),
+          isLoading: _isConfiguringHub,
+          showBetaBadge: true,
+          onTap: _isConfiguringHub ? null : () => _pairHa(syncProvider),
+        ),
+      );
+    }
+    if (showHue) {
+      if (options.isNotEmpty) {
+        options.add(
+          Divider(
+            height: 1,
+            color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+          ),
+        );
+      }
+      options.add(
+        _buildHubOptionRow(
+          icon: Icons.lightbulb_outline,
+          label: 'Add Philips Hue',
+          color: const Color(0xFFFFB900),
+          onTap: () => HueConfiguratorScreen.show(context),
+        ),
+      );
+    }
+    if (hasMatterOptions) {
+      if (options.isNotEmpty) {
+        options.add(
+          Divider(
+            height: 1,
+            color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+          ),
+        );
+      }
+      options.addAll(matterOptions);
+    }
+
+    if (options.isEmpty) return null;
+
+    return _buildSection(
+      title: 'ADD HUB',
+      children: [
+        Container(
+          decoration: BoxDecoration(
+            color: CelestialColors.backgroundCard,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+            ),
+          ),
+          child: Column(children: options),
+        ),
+      ],
+    );
+  }
+
+  List<Widget> _buildMatterAddOptionRows(ServerSyncProvider syncProvider) {
+    if (!syncProvider.canAddMatterDevice) return const [];
+    return [
+      _buildHubOptionRow(
+        icon: Icons.memory_outlined,
+        label: 'Add Matter Device',
+        color: const Color(0xFF26A69A),
+        showBetaBadge: true,
+        onTap: () => _startMatterAddFlow(),
+      ),
+    ];
+  }
+
+  Future<void> _startMatterAddFlow() async {
+    await startMatterPairingFlow(context);
+    if (!mounted) return;
+    await _fetchHubSummaries();
+  }
+
+  Future<void> _pairHa(ServerSyncProvider syncProvider) async {
+    if (_isHaAddon) {
+      setState(() => _isConfiguringHub = true);
+      try {
+        await syncProvider.configureAddonHaHub();
+      } finally {
+        if (mounted) setState(() => _isConfiguringHub = false);
+      }
+      return;
+    }
+
+    final result = await HAConfiguratorScreen.show(context);
+    if (result == true && mounted) {
+      await syncProvider.pushHubCredentials(RoomSourceDto.homeAssistant);
+    }
+  }
+
+  Widget _buildHubRow(Map<String, dynamic> hubInfo) {
+    final type = hubInfo['type'] as String;
+    final label = _RhythmServerSettingsScreenState._hubLabel(type);
+    final hubColor = _RhythmServerSettingsScreenState._hubColor(type);
+    final connected = hubInfo['connected'] as bool? ?? false;
+    final statusColor =
+        _RhythmServerSettingsScreenState._hubConnectionColor(hubInfo);
+    final deviceSummary = _hubSummaries[type] ??
+        (_hubSummariesLoaded
+            ? (connected ? 'Connected · no devices' : 'No devices')
+            : 'Loading...');
+    final subtitle = _RhythmServerSettingsScreenState._hubRowSubtitle(
+        hubInfo, deviceSummary);
+
+    return GestureDetector(
+      onTap: () => _HubDetailScreen.show(context, hubInfo: hubInfo),
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            Icon(
+              _RhythmServerSettingsScreenState._hubIcon(type),
+              color: hubColor.withValues(alpha: connected ? 1.0 : 0.5),
+              size: 20,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (_RhythmServerSettingsScreenState._hubHasBetaBadge(type))
+                    BetaLabel(
+                      label: label,
+                      style: const TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    )
+                  else
+                    Text(
+                      label,
+                      style: const TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      color:
+                          CelestialColors.textSecondary.withValues(alpha: 0.6),
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Container(
+              width: 8,
+              height: 8,
+              margin: const EdgeInsets.only(right: 8),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: statusColor,
+                boxShadow: !connected
+                    ? [
+                        BoxShadow(
+                          color: statusColor.withValues(alpha: 0.6),
+                          blurRadius: 6,
+                          spreadRadius: 1,
+                        ),
+                      ]
+                    : null,
+              ),
+            ),
+            Icon(
+              Icons.chevron_right,
+              color: CelestialColors.textSecondary.withValues(alpha: 0.4),
+              size: 20,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildConnectionRow({
+    required String label,
+    required String statusText,
+    required Color statusColor,
+    bool isPulsing = false,
+    bool isSpinning = false,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 80,
+            child: Text(
+              label,
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.8),
+                fontSize: 14,
+              ),
+            ),
+          ),
+          Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: statusColor,
+              boxShadow: isPulsing
+                  ? [
+                      BoxShadow(
+                        color: statusColor.withValues(alpha: 0.6),
+                        blurRadius: 6,
+                        spreadRadius: 1,
+                      ),
+                    ]
+                  : null,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              statusText,
+              style: TextStyle(
+                color: statusColor,
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          if (isSpinning)
+            SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(
+                strokeWidth: 1.5,
+                valueColor: AlwaysStoppedAnimation(
+                  CelestialColors.textSecondary.withValues(alpha: 0.5),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHubOptionRow({
+    required IconData icon,
+    required String label,
+    required Color color,
+    bool isActive = false,
+    bool isLoading = false,
+    bool showBetaBadge = false,
+    VoidCallback? onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            Icon(
+              icon,
+              color: isActive ? color : color.withValues(alpha: 0.6),
+              size: 20,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: showBetaBadge
+                  ? BetaLabel(
+                      label: label,
+                      style: const TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    )
+                  : Text(
+                      label,
+                      style: const TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+            ),
+            if (isLoading)
+              SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation(color),
+                ),
+              )
+            else if (isActive)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(6),
+                  color: const Color(0xFF22C55E).withValues(alpha: 0.15),
+                ),
+                child: const Text(
+                  'Active',
+                  style: TextStyle(
+                    color: Color(0xFF22C55E),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              )
+            else if (onTap != null)
+              Icon(
+                Icons.chevron_right,
+                color: CelestialColors.textSecondary.withValues(alpha: 0.4),
+                size: 20,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSection({
+    required String title,
+    required List<Widget> children,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 4, bottom: 10),
+          child: Text(
+            title,
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+              letterSpacing: 0.8,
+            ),
+          ),
+        ),
+        ...children,
+      ],
+    );
+  }
+}
+
 class _DebugBundlePromptDialog extends StatefulWidget {
   const _DebugBundlePromptDialog();
 
@@ -2800,15 +2750,9 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
   Widget _buildProgress() {
     final isDownloading = widget.otaService.state == OtaState.downloading;
     final pct = widget.otaService.progress;
-    final title = widget.otaService.isBundleRepair
-        ? 'Repairing Bundle'
-        : 'Updating Firmware';
-    final message = isDownloading
-        ? 'Downloading firmware...'
-        : (widget.otaService.statusMessage ??
-            (widget.otaService.isBundleRepair
-                ? 'Repairing bundled components...'
-                : 'Installing on device...'));
+    const title = 'Updating Device';
+    final message =
+        isDownloading ? 'Downloading update...' : 'Installing update...';
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -2904,10 +2848,6 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
   }
 
   Widget _buildFlashing() {
-    final title = widget.otaService.isBundleRepair
-        ? 'Repairing Bundle'
-        : 'Updating Firmware';
-
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -2943,8 +2883,8 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
           },
         ),
         const SizedBox(height: 32),
-        Text(
-          title,
+        const Text(
+          'Updating Device',
           style: TextStyle(
             color: CelestialColors.textPrimary,
             fontSize: 22,
@@ -2953,7 +2893,7 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
         ),
         const SizedBox(height: 8),
         const Text(
-          'Writing firmware to device...',
+          'Installing update...',
           style: TextStyle(
             color: CelestialColors.textSecondary,
             fontSize: 15,
@@ -3026,10 +2966,9 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
           ),
         ),
         const SizedBox(height: 8),
-        Text(
-          widget.otaService.statusMessage ??
-              'Waiting for the device to come back online...',
-          style: const TextStyle(
+        const Text(
+          'Restarting your device...',
+          style: TextStyle(
             color: CelestialColors.textSecondary,
             fontSize: 15,
           ),
@@ -3059,17 +2998,6 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
   }
 
   Widget _buildComplete() {
-    final version = widget.otaService.currentVersion;
-    final installedTargets = widget.otaService.installedTargets;
-    final checksumVerified = widget.otaService.checksumVerified;
-    final title = widget.otaService.isBundleRepair
-        ? 'Repair Complete'
-        : 'Update Complete';
-    final message = widget.otaService.statusMessage ??
-        (widget.otaService.isBundleRepair
-            ? 'Bundle repaired on ${_formatOtaVersion(version)}'
-            : 'Updated to ${_formatOtaVersion(version)}');
-
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -3094,8 +3022,8 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
           ),
         ),
         const SizedBox(height: 32),
-        Text(
-          title,
+        const Text(
+          'Update Complete',
           style: TextStyle(
             color: CelestialColors.textPrimary,
             fontSize: 22,
@@ -3103,25 +3031,14 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
           ),
         ),
         const SizedBox(height: 8),
-        Text(
-          message,
-          style: const TextStyle(
+        const Text(
+          'Your device is up to date.',
+          style: TextStyle(
             color: Color(0xFF22C55E),
             fontSize: 15,
             fontWeight: FontWeight.w500,
           ),
         ),
-        if (installedTargets.isNotEmpty) ...[
-          const SizedBox(height: 24),
-          _buildInstalledTargetsCard(
-            installedTargets,
-            checksumVerified: checksumVerified,
-          ),
-        ],
-        if (installedTargets.isEmpty && checksumVerified != null) ...[
-          const SizedBox(height: 24),
-          _buildChecksumCard(checksumVerified),
-        ],
         const SizedBox(height: 40),
         GestureDetector(
           onTap: _dismiss,
@@ -3150,135 +3067,7 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
     );
   }
 
-  String _formatOtaVersion(String version) {
-    return version.startsWith('v') || version.startsWith('V')
-        ? version
-        : 'v$version';
-  }
-
-  Widget _buildInstalledTargetsCard(
-    List<OtaBundleEntry> installedTargets, {
-    bool? checksumVerified,
-  }) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF22C55E).withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: const Color(0xFF22C55E).withValues(alpha: 0.18),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Installed Targets',
-            style: TextStyle(
-              color: Color(0xFF22C55E),
-              fontSize: 13,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          if (checksumVerified != null) ...[
-            const SizedBox(height: 6),
-            _buildChecksumLine(checksumVerified),
-          ],
-          const SizedBox(height: 10),
-          ...installedTargets.map(
-            (target) => Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Padding(
-                    padding: EdgeInsets.only(top: 2),
-                    child: Icon(
-                      Icons.check_circle,
-                      color: Color(0xFF22C55E),
-                      size: 16,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          target.title,
-                          style: const TextStyle(
-                            color: CelestialColors.textPrimary,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        if (target.detail != null)
-                          Text(
-                            target.detail!,
-                            style: TextStyle(
-                              color: CelestialColors.textSecondary
-                                  .withValues(alpha: 0.72),
-                              fontSize: 12,
-                              height: 1.35,
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildChecksumCard(bool checksumVerified) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF22C55E).withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: const Color(0xFF22C55E).withValues(alpha: 0.18),
-        ),
-      ),
-      child: _buildChecksumLine(checksumVerified),
-    );
-  }
-
-  Widget _buildChecksumLine(bool checksumVerified) {
-    final color =
-        checksumVerified ? const Color(0xFF22C55E) : const Color(0xFFF59E0B);
-    final icon = checksumVerified
-        ? Icons.verified_outlined
-        : Icons.warning_amber_rounded;
-    final label = checksumVerified
-        ? 'checksum_verified: true'
-        : 'checksum_verified: false';
-
-    return Row(
-      children: [
-        Icon(icon, color: color, size: 16),
-        const SizedBox(width: 8),
-        Text(
-          label,
-          style: TextStyle(
-            color: color,
-            fontSize: 13,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ],
-    );
-  }
-
   Widget _buildError() {
-    final message = widget.otaService.errorMessage ?? 'Update failed';
-
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -3306,7 +3095,7 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
         ),
         const SizedBox(height: 8),
         Text(
-          message,
+          'The update did not finish. Please try again.',
           textAlign: TextAlign.center,
           style: TextStyle(
             color: Colors.red.shade400,

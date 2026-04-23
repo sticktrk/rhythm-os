@@ -1,18 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnectionState;
+import '../../../providers/home_provider.dart';
+import '../../../services/analytics_service.dart';
+import '../../../widgets/connect_hub_screen.dart';
 import '../../../widgets/settings_row.dart';
 import '../../../widgets/solar_orbit.dart';
-import '../../../providers/home_provider.dart';
-import '../../../providers/server_sync_provider.dart';
-import '../../../services/analytics_service.dart';
 import '../../hubs/rhythmserver_settings_screen.dart';
-import '../../triage_screen.dart';
-import '../../power_usage_screen.dart';
-import '../../../widgets/connect_hub_screen.dart';
 
-/// Detail screen for the Rhythm Server settings group.
+/// Detail screen for the RhythmOS Server settings group.
 class RhythmServerDetailScreen extends StatelessWidget {
   const RhythmServerDetailScreen({super.key});
 
@@ -25,6 +21,18 @@ class RhythmServerDetailScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final esp32Hub = context.watch<HomeProvider>().getFirstHubOfType(
+          HubType.server,
+        );
+
+    if (esp32Hub != null) {
+      return RhythmServerSettingsScreen(
+        hub: esp32Hub,
+        headerTitleOverride: 'RhythmOS Server',
+        useBackButton: true,
+      );
+    }
+
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,
       body: SafeArea(
@@ -34,158 +42,25 @@ class RhythmServerDetailScreen extends StatelessWidget {
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.symmetric(horizontal: 20),
-                child: Consumer2<HomeProvider, ServerSyncProvider>(
-                  builder: (context, homeProvider, serverSync, child) {
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const SizedBox(height: 8),
+                    SettingsGroup(
                       children: [
-                        const SizedBox(height: 8),
-                        // ── RhythmServer ──
-                        SettingsGroup(
-                          children: [
-                            Builder(
-                              builder: (context) {
-                                final esp32Hub = homeProvider
-                                    .getFirstHubOfType(HubType.server);
-                                final serverState = serverSync.connectionState;
-                                final isOnline = serverState ==
-                                    RhythmConnectionState.connected;
-                                final isConnecting = serverState ==
-                                        RhythmConnectionState.connecting ||
-                                    serverState ==
-                                        RhythmConnectionState.reconnecting;
-
-                                String? statusText;
-                                Color? statusColor;
-                                if (esp32Hub != null) {
-                                  if (isOnline) {
-                                    statusText = 'Online';
-                                    statusColor = const Color(0xFF22C55E);
-                                  } else if (isConnecting) {
-                                    statusText = 'Connecting...';
-                                    statusColor = const Color(0xFFE8A54B);
-                                  } else {
-                                    statusText = 'Offline';
-                                    statusColor = Colors.red.shade400;
-                                  }
-                                }
-
-                                return SettingsRow(
-                                  icon: Icons.developer_board,
-                                  iconColor: const Color(0xFF00BCD4),
-                                  label: 'RhythmServer',
-                                  trailing: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      if (esp32Hub != null &&
-                                          statusText != null) ...[
-                                        Container(
-                                          width: 8,
-                                          height: 8,
-                                          decoration: BoxDecoration(
-                                            shape: BoxShape.circle,
-                                            color: statusColor,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 6),
-                                        Text(
-                                          statusText,
-                                          style: TextStyle(
-                                            color: statusColor,
-                                            fontSize: 13,
-                                            fontWeight: FontWeight.w500,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 8),
-                                      ],
-                                      Icon(
-                                        Icons.chevron_right,
-                                        color: CelestialColors.textSecondary
-                                            .withValues(alpha: 0.7),
-                                        size: 24,
-                                      ),
-                                    ],
-                                  ),
-                                  showChevron: false,
-                                  onTap: esp32Hub != null
-                                      ? () => RhythmServerSettingsScreen.show(
-                                          context,
-                                          hub: esp32Hub)
-                                      : () => ConnectHubScreen.show(context,
-                                          mode: ConnectHubMode.rhythmServer),
-                                );
-                              },
-                            ),
-                          ],
+                        SettingsRow(
+                          icon: Icons.developer_board,
+                          iconColor: const Color(0xFF00BCD4),
+                          label: 'LightBox',
+                          onTap: () => ConnectHubScreen.show(
+                            context,
+                            mode: ConnectHubMode.rhythmServer,
+                          ),
                         ),
-                        const SizedBox(height: 12),
-                        // ── Device Review ──
-                        SettingsGroup(
-                          children: [
-                            SettingsRow(
-                              icon: Icons.devices_other,
-                              iconColor: const Color(0xFFFF9800),
-                              label: 'Device Review',
-                              value: serverSync
-                                      .hubConfiguredConflicts.isNotEmpty
-                                  ? '${serverSync.hubConfiguredConflicts.length} conflict${serverSync.hubConfiguredConflicts.length == 1 ? '' : 's'}'
-                                  : serverSync.triagePendingCount > 0
-                                      ? '${serverSync.triagePendingCount} pending'
-                                      : 'Clear',
-                              trailing: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  if (serverSync.triagePendingCount > 0)
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 7, vertical: 2),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFFFF9800),
-                                        borderRadius: BorderRadius.circular(10),
-                                      ),
-                                      child: Text(
-                                        '${serverSync.triagePendingCount}',
-                                        style: const TextStyle(
-                                          color: Color(0xFF1A1A1A),
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w700,
-                                        ),
-                                      ),
-                                    ),
-                                  if (serverSync.triagePendingCount > 0)
-                                    const SizedBox(width: 8),
-                                  Icon(
-                                    Icons.chevron_right,
-                                    color: CelestialColors.textSecondary
-                                        .withValues(alpha: 0.5),
-                                    size: 22,
-                                  ),
-                                ],
-                              ),
-                              showChevron: false,
-                              onTap: () => Navigator.of(context).push(
-                                MaterialPageRoute(
-                                    builder: (_) => const TriageScreen()),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 12),
-                        // ── Power Usage ──
-                        SettingsGroup(
-                          children: [
-                            SettingsRow(
-                              icon: Icons.bolt_rounded,
-                              iconColor: const Color(0xFF4ADE80),
-                              label: 'Power Usage',
-                              onTap: () => PowerUsageScreen.show(context),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 40),
                       ],
-                    );
-                  },
+                    ),
+                    const SizedBox(height: 40),
+                  ],
                 ),
               ),
             ),
@@ -218,7 +93,7 @@ class RhythmServerDetailScreen extends StatelessWidget {
           ),
           const Expanded(
             child: Text(
-              'Rhythm Server',
+              'RhythmOS Server',
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: CelestialColors.textPrimary,

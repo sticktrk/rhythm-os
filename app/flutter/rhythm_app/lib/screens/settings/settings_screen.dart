@@ -1,16 +1,21 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:rhythm_core/rhythm_core.dart' show HubType;
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnectionState;
 import '../../config/platform_capabilities.dart';
+import '../../providers/server_sync_provider.dart';
 import '../../widgets/solar_orbit.dart'; // For CelestialColors
 import '../../providers/settings_provider.dart';
 import '../../providers/home_provider.dart';
 import '../../services/analytics_service.dart';
 import '../../services/auth_service.dart';
 import '../../widgets/settings_row.dart';
+import '../power_usage_screen.dart';
 import 'sections/account_section.dart';
 // import 'sections/sleep_section.dart'; // TODO: Re-enable when sleep schedule is implemented
 import 'sections/preferences_section.dart';
 import 'sections/transitions_section.dart';
+import 'sections/lights_devices_section.dart';
 import 'sections/rhythm_server_section.dart';
 import 'sections/rhythm_app_section.dart';
 
@@ -83,21 +88,35 @@ class SettingsScreen extends StatelessWidget {
                           children: [
                             const PreferencesSection(),
                             const TransitionsSection(),
-                            const SettingsSectionHeader(title: 'Settings'),
+                            const SettingsSectionHeader(title: 'DEVICES'),
                             SettingsGroup(
                               children: [
                                 SettingsRow(
-                                  icon: Icons.developer_board,
-                                  iconColor: const Color(0xFF00BCD4),
-                                  label: 'Rhythm Server',
-                                  onTap: () => RhythmServerDetailScreen.show(context),
+                                  icon: Icons.lightbulb_outline,
+                                  iconColor: const Color(0xFFFFB900),
+                                  label: 'Lights & Devices',
+                                  onTap: () =>
+                                      LightsDevicesDetailScreen.show(context),
                                 ),
+                              ],
+                            ),
+                            const SettingsSectionHeader(title: 'SETTINGS'),
+                            SettingsGroup(
+                              children: [
+                                _buildRhythmOsServerRow(),
                                 SettingsRow(
                                   icon: Icons.apps_rounded,
                                   iconColor: CelestialColors.accentBlue,
-                                  label: 'Rhythm App',
-                                  onTap: () => RhythmAppDetailScreen.show(context),
+                                  label: 'RhythmLighting App',
+                                  onTap: () =>
+                                      RhythmAppDetailScreen.show(context),
                                 ),
+                              ],
+                            ),
+                            const SettingsSectionHeader(title: 'STATS'),
+                            SettingsGroup(
+                              children: [
+                                _buildPowerUsageRow(context),
                               ],
                             ),
                             const SizedBox(height: 40),
@@ -119,21 +138,36 @@ class SettingsScreen extends StatelessWidget {
                               // SleepSection(), // TODO: Re-enable when sleep schedule is implemented
                               const PreferencesSection(),
                               const TransitionsSection(),
-                              const SettingsSectionHeader(title: 'Settings'),
+                              const SettingsSectionHeader(title: 'DEVICES'),
                               SettingsGroup(
                                 children: [
                                   SettingsRow(
-                                    icon: Icons.developer_board,
-                                    iconColor: const Color(0xFF00BCD4),
-                                    label: 'Rhythm Server',
-                                    onTap: () => RhythmServerDetailScreen.show(context),
+                                    icon: Icons.lightbulb_outline,
+                                    iconColor: const Color(0xFFFFB900),
+                                    label: 'Lights & Devices',
+                                    onTap: () => LightsDevicesDetailScreen.show(
+                                      context,
+                                    ),
                                   ),
+                                ],
+                              ),
+                              const SettingsSectionHeader(title: 'SETTINGS'),
+                              SettingsGroup(
+                                children: [
+                                  _buildRhythmOsServerRow(),
                                   SettingsRow(
                                     icon: Icons.apps_rounded,
                                     iconColor: CelestialColors.accentBlue,
-                                    label: 'Rhythm App',
-                                    onTap: () => RhythmAppDetailScreen.show(context),
+                                    label: 'RhythmLighting App',
+                                    onTap: () =>
+                                        RhythmAppDetailScreen.show(context),
                                   ),
+                                ],
+                              ),
+                              const SettingsSectionHeader(title: 'STATS'),
+                              SettingsGroup(
+                                children: [
+                                  _buildPowerUsageRow(context),
                                 ],
                               ),
                               // Show Account at bottom for signed-in users
@@ -151,6 +185,82 @@ class SettingsScreen extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildRhythmOsServerRow() {
+    return Consumer2<HomeProvider, ServerSyncProvider>(
+      builder: (context, homeProvider, serverSync, child) {
+        final serverHub = homeProvider.getFirstHubOfType(HubType.server);
+        final serverState = serverSync.connectionState;
+        final isOnline = serverState == RhythmConnectionState.connected;
+        final isConnecting = serverState == RhythmConnectionState.connecting ||
+            serverState == RhythmConnectionState.reconnecting;
+
+        String? statusText;
+        Color? statusColor;
+        if (serverHub != null) {
+          if (isOnline) {
+            statusText = 'Online';
+            statusColor = const Color(0xFF22C55E);
+          } else if (isConnecting) {
+            statusText = 'Connecting...';
+            statusColor = const Color(0xFFE8A54B);
+          } else {
+            statusText = 'Offline';
+            statusColor = Colors.red.shade400;
+          }
+        }
+
+        return SettingsRow(
+          icon: Icons.developer_board,
+          iconColor: const Color(0xFF00BCD4),
+          label: 'RhythmOS Server',
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (serverHub != null &&
+                  statusText != null &&
+                  statusColor != null) ...[
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: statusColor,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  statusText,
+                  style: TextStyle(
+                    color: statusColor,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(width: 8),
+              ],
+              Icon(
+                Icons.chevron_right,
+                color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+                size: 24,
+              ),
+            ],
+          ),
+          showChevron: false,
+          onTap: () => RhythmServerDetailScreen.show(context),
+        );
+      },
+    );
+  }
+
+  Widget _buildPowerUsageRow(BuildContext context) {
+    return SettingsRow(
+      icon: Icons.bolt_rounded,
+      iconColor: const Color(0xFF4ADE80),
+      label: 'Power Usage',
+      onTap: () => PowerUsageScreen.show(context),
     );
   }
 

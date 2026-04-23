@@ -11,6 +11,7 @@
 #   --testflight       Build IPA and upload to TestFlight (implies --clean --release --no-run)
 #   --dmg              Create DMG for macOS distribution (implies --macos --release --no-run)
 #   --sign             Sign and notarize the DMG (implies --dmg)
+#   --build-number N   Override the Flutter build number
 #   --no-run           Build only, don't run on device
 #   --codegen          Regenerate FRB bindings and sync FFI code (then exit)
 #   --clean            Clean build artifacts before building
@@ -55,6 +56,47 @@ find_flutter() {
     echo "$FLUTTER_CMD"
 }
 
+resolve_release_build_number() {
+    if [ -n "$BUILD_NUMBER_OVERRIDE" ]; then
+        BUILD_NUMBER_SOURCE="command line"
+        RESOLVED_BUILD_NUMBER="$BUILD_NUMBER_OVERRIDE"
+        return 0
+    fi
+
+    if [ -n "${RHYTHM_BUILD_NUMBER:-}" ]; then
+        BUILD_NUMBER_SOURCE="RHYTHM_BUILD_NUMBER"
+        RESOLVED_BUILD_NUMBER="$RHYTHM_BUILD_NUMBER"
+        return 0
+    fi
+
+    if [ -n "${GITHUB_RUN_NUMBER:-}" ]; then
+        BUILD_NUMBER_SOURCE="GITHUB_RUN_NUMBER"
+        RESOLVED_BUILD_NUMBER="$GITHUB_RUN_NUMBER"
+        return 0
+    fi
+
+    if [ -n "${BITRISE_BUILD_NUMBER:-}" ]; then
+        BUILD_NUMBER_SOURCE="BITRISE_BUILD_NUMBER"
+        RESOLVED_BUILD_NUMBER="$BITRISE_BUILD_NUMBER"
+        return 0
+    fi
+
+    if [ -n "${CI_PIPELINE_IID:-}" ]; then
+        BUILD_NUMBER_SOURCE="CI_PIPELINE_IID"
+        RESOLVED_BUILD_NUMBER="$CI_PIPELINE_IID"
+        return 0
+    fi
+
+    if [ -n "${BUILD_NUMBER:-}" ]; then
+        BUILD_NUMBER_SOURCE="BUILD_NUMBER"
+        RESOLVED_BUILD_NUMBER="$BUILD_NUMBER"
+        return 0
+    fi
+
+    BUILD_NUMBER_SOURCE="current Unix timestamp"
+    RESOLVED_BUILD_NUMBER="$(date -u +%s)"
+}
+
 # macOS signing configuration
 APPLE_ID="${APPLE_ID:-}"
 TEAM_ID="${TEAM_ID:-}"
@@ -77,6 +119,10 @@ SETUP_TESTFLIGHT=false
 RUN_APP=true
 RUN_CODEGEN=false
 CLEAN=false
+BUILD_NUMBER_OVERRIDE=""
+BUILD_NUMBER_SOURCE=""
+RESOLVED_BUILD_NUMBER=""
+BUILD_METADATA_ARGS=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -132,6 +178,14 @@ while [[ $# -gt 0 ]]; do
             PLATFORM="macos"
             shift
             ;;
+        --build-number)
+            if [ -z "${2:-}" ] || [[ "${2:-}" == --* ]]; then
+                echo "Error: --build-number requires a numeric value."
+                exit 1
+            fi
+            BUILD_NUMBER_OVERRIDE="$2"
+            shift 2
+            ;;
         --setup-signing)
             SETUP_SIGNING=true
             shift
@@ -170,6 +224,20 @@ fi
 
 echo "Building for: $PLATFORM"
 echo ""
+
+if [ -n "$BUILD_NUMBER_OVERRIDE" ] || [ -n "$RELEASE" ]; then
+    resolve_release_build_number
+fi
+
+if [ -n "$RESOLVED_BUILD_NUMBER" ]; then
+    if ! [[ "$RESOLVED_BUILD_NUMBER" =~ ^[0-9]+$ ]]; then
+        echo "Error: build number must be numeric, got '$RESOLVED_BUILD_NUMBER'."
+        exit 1
+    fi
+    BUILD_METADATA_ARGS="--build-number=$RESOLVED_BUILD_NUMBER"
+    echo "Using build number: $RESOLVED_BUILD_NUMBER ($BUILD_NUMBER_SOURCE)"
+    echo ""
+fi
 
 # Setup signing credentials in keychain
 if [ "$SETUP_SIGNING" = true ]; then
@@ -301,15 +369,15 @@ echo ""
 if [ "$RUN_APP" = true ]; then
     echo "Building and running on $PLATFORM..."
     if [ "$PLATFORM" = "macos" ]; then
-        flutter run -d macos $RELEASE $DART_DEFINES
+        flutter run -d macos $RELEASE $DART_DEFINES $BUILD_METADATA_ARGS
     else
-        flutter run $RELEASE $DART_DEFINES
+        flutter run $RELEASE $DART_DEFINES $BUILD_METADATA_ARGS
     fi
 else
     echo "Building for $PLATFORM..."
     if [ "$BUILD_IPA" = true ]; then
         echo "Building IPA for TestFlight..."
-        flutter build ipa $RELEASE $DART_DEFINES
+        flutter build ipa $RELEASE $DART_DEFINES $BUILD_METADATA_ARGS
         echo ""
         echo "IPA created at: build/ios/ipa/"
 
@@ -363,9 +431,9 @@ else
             echo "  - Transporter app from Mac App Store"
         fi
     elif [ "$PLATFORM" = "ios" ]; then
-        flutter build ios $RELEASE $DART_DEFINES
+        flutter build ios $RELEASE $DART_DEFINES $BUILD_METADATA_ARGS
     elif [ "$PLATFORM" = "macos" ]; then
-        flutter build macos $RELEASE $DART_DEFINES
+        flutter build macos $RELEASE $DART_DEFINES $BUILD_METADATA_ARGS
 
         # Create DMG if requested
         if [ "$BUILD_DMG" = true ]; then
@@ -482,7 +550,7 @@ else
             fi
         fi
     else
-        flutter build apk $RELEASE $DART_DEFINES
+        flutter build apk $RELEASE $DART_DEFINES $BUILD_METADATA_ARGS
     fi
     echo ""
     echo "Build complete."

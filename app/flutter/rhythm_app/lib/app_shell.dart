@@ -440,7 +440,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
             bottom: false,
             child: ConnectHubScreen(mode: mode),
           ),
-          // Bottom overlay (gear + wave button, no dots)
+          // Bottom overlay (gear + sun button, no dots)
           Positioned(
             bottom: 0,
             left: 0,

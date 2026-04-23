@@ -45,15 +45,9 @@ Future<bool> showDeviceNodeAssignmentFlow(
           ),
     );
 
-  if (rooms.isEmpty && !allowNoRoom) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('No other rooms available')),
-    );
-    return false;
-  }
-
   final isUnassigned = normalizedCurrentParentNodeId == null;
   final title = isUnassigned ? 'Assign to Room' : 'Move to Room';
+  RoomPickerOption? createdRoom;
 
   final targetRoomId = await showRoomPickerSheet(
     context,
@@ -61,27 +55,32 @@ Future<bool> showDeviceNodeAssignmentFlow(
     currentRoomId: normalizedCurrentParentNodeId,
     rooms: rooms,
     allowUnassigned: allowNoRoom,
+    allowCreateRoom: true,
     unassignedLabel: 'Unassigned',
     unassignedSubtitle: isUnassigned
         ? 'Keep this device unassigned.'
         : 'Remove this device from its current room.',
+    emptyMessage:
+        'No rooms exist yet. Create one now to place this device in a room.',
+    onCreateRoom: () async {
+      createdRoom = await createTopologyRoomOptionFromPrompt(context);
+      return createdRoom?.id;
+    },
     noOptionsMessage: 'No other rooms available',
   );
 
   if (targetRoomId == null || !context.mounted) return false;
   final targetParentNodeId = targetRoomId.isEmpty ? null : targetRoomId;
   final selectedIsUnassigned = targetParentNodeId == null;
+  final roomNamesById = {
+    for (final room in rooms) room.id: room.name,
+    if (createdRoom != null) createdRoom!.id: createdRoom!.name,
+  };
   var selectedLabel = 'Unassigned';
   if (targetParentNodeId != null) {
-    selectedLabel = 'selected room';
-    for (final room in rooms) {
-      if (room.id == targetParentNodeId) {
-        selectedLabel = room.name;
-        break;
-      }
-    }
-    selectedLabel =
-        roomSummariesById[targetParentNodeId]?.name ?? selectedLabel;
+    selectedLabel = roomNamesById[targetParentNodeId] ??
+        roomSummariesById[targetParentNodeId]?.name ??
+        'selected room';
   }
 
   if (targetParentNodeId == normalizedCurrentParentNodeId) {
@@ -242,7 +241,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
             ),
             // Device icon + name
             Padding(
-              padding: const EdgeInsets.symmetric(vertical: 16),
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
               child: Column(
                 children: [
                   Container(
@@ -261,6 +260,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                   const SizedBox(height: 12),
                   Text(
                     device.displayName,
+                    textAlign: TextAlign.center,
                     style: const TextStyle(
                       color: CelestialColors.textPrimary,
                       fontSize: 18,
@@ -272,6 +272,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                       padding: const EdgeInsets.only(top: 4),
                       child: Text(
                         device.productInfo!,
+                        textAlign: TextAlign.center,
                         style: TextStyle(
                           color: CelestialColors.textSecondary
                               .withValues(alpha: 0.7),

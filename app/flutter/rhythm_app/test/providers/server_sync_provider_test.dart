@@ -45,6 +45,8 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   String? lastAssignedDeviceId;
   String? lastAssignedParentId;
   bool assignDeviceParentResult = true;
+  int createTopologyRoomCalls = 0;
+  String? lastCreatedRoomName;
   int topologyDeleteRoomCalls = 0;
   String? lastDeletedRoomId;
   bool topologyDeleteRoomResult = true;
@@ -85,6 +87,24 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     lastAssignedDeviceId = deviceId;
     lastAssignedParentId = parentId;
     return assignDeviceParentResult;
+  }
+
+  @override
+  Future<Map<String, dynamic>?> createTopologyRoom(String name) async {
+    createTopologyRoomCalls++;
+    lastCreatedRoomName = name;
+    topologyNodes = [
+      ...topologyNodes,
+      RhythmTopologyNode.fromJson({
+        'id': 'room-created',
+        'name': name,
+        'kind': 'room',
+      }),
+    ];
+    return {
+      'id': 'room-created',
+      'name': name,
+    };
   }
 
   @override
@@ -926,6 +946,110 @@ void main() {
     expect(api.lastAssignedParentId, 'room-20');
     expect(connection.reconnectCalls, 1);
     expect(find.text('Moved Desk Lamp to Room 20'), findsOneWidget);
+  });
+
+  testWidgets('device assignment can create a room inline', (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final assignmentResult = Completer<bool>();
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider<ServerSyncProvider>.value(
+        value: provider,
+        child: MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (context) {
+                return TextButton(
+                  onPressed: () async {
+                    assignmentResult.complete(
+                      await showDeviceNodeAssignmentFlow(
+                        context,
+                        device: const RhythmDevice(
+                          id: 'light-1',
+                          type: RhythmDeviceType.light,
+                          name: 'Desk Lamp',
+                        ),
+                        currentParentNodeId: '',
+                      ),
+                    );
+                  },
+                  child: const Text('Open'),
+                );
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Create New Room'), findsOneWidget);
+
+    await tester.tap(find.text('Create New Room'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'Office');
+    await tester.tap(find.text('Create'));
+    await tester.pumpAndSettle();
+
+    expect(await assignmentResult.future, isTrue);
+    expect(api.createTopologyRoomCalls, 1);
+    expect(api.lastCreatedRoomName, 'Office');
+    expect(api.assignDeviceParentCalls, 1);
+    expect(api.lastAssignedDeviceId, 'light-1');
+    expect(api.lastAssignedParentId, 'room-created');
+    expect(connection.reconnectCalls, 1);
+    expect(find.text('Assigned Desk Lamp to Office'), findsOneWidget);
+  });
+
+  testWidgets('device detail header centers long device names', (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+
+    const deviceName = 'GE Lighting, a Savant company Cync Full Color A19';
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const DeviceDetailSheet(
+          device: RhythmDevice(
+            id: 'light-1',
+            type: RhythmDeviceType.light,
+            name: deviceName,
+          ),
+          roomId: '',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final headerText = tester.widget<Text>(find.text(deviceName));
+    expect(headerText.textAlign, TextAlign.center);
   });
 
   testWidgets('Room card device flow offers Unassigned for Matter bulbs',

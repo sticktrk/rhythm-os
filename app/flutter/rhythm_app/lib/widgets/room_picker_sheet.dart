@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
+import '../providers/server_sync_provider.dart';
 import 'solar_orbit.dart';
 
 const _createRoomSelection = '__create_room__';
@@ -15,6 +17,78 @@ class RoomPickerOption {
   final String id;
   final String name;
   final String? subtitle;
+}
+
+Future<RoomPickerOption?> createTopologyRoomOptionFromPrompt(
+  BuildContext context,
+) async {
+  final roomName = await promptForRoomName(context);
+  final trimmedName = roomName?.trim() ?? '';
+  if (trimmedName.isEmpty || !context.mounted) return null;
+
+  final result = await context
+      .read<ServerSyncProvider>()
+      .api
+      .createTopologyRoom(trimmedName);
+  final roomId = result?['id'] as String?;
+  if (roomId != null && roomId.isNotEmpty) {
+    return RoomPickerOption(
+      id: roomId,
+      name: result?['name'] as String? ?? trimmedName,
+    );
+  }
+
+  if (context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Room creation failed')),
+    );
+  }
+  return null;
+}
+
+Future<String?> promptForRoomName(BuildContext context) async {
+  final controller = TextEditingController();
+  return showDialog<String>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      backgroundColor: CelestialColors.backgroundCard,
+      title: const Text(
+        'Create Room',
+        style: TextStyle(color: CelestialColors.textPrimary),
+      ),
+      content: TextField(
+        controller: controller,
+        autofocus: true,
+        style: const TextStyle(color: CelestialColors.textPrimary),
+        decoration: InputDecoration(
+          hintText: 'Room name',
+          hintStyle: TextStyle(
+            color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+          ),
+        ),
+        onSubmitted: (value) => Navigator.of(dialogContext).pop(value.trim()),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(),
+          child: Text(
+            'Cancel',
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.8),
+            ),
+          ),
+        ),
+        TextButton(
+          onPressed: () =>
+              Navigator.of(dialogContext).pop(controller.text.trim()),
+          child: const Text(
+            'Create',
+            style: TextStyle(color: CelestialColors.sunWarm),
+          ),
+        ),
+      ],
+    ),
+  );
 }
 
 Future<String?> showRoomPickerSheet(

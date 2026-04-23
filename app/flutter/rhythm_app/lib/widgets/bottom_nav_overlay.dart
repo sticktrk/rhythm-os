@@ -31,25 +31,36 @@ class _FanItemAnimations {
   });
 }
 
-/// Bottom navigation overlay with gear fan-out menu.
+/// Bottom navigation overlay with direct settings/sun controls.
 ///
 /// Floats over page content with transparent background.
-/// - Gear fan menu (left): Expands to show settings + power usage icons
-/// - Fix My Lights pill (right): Quick-action to reset all lights
+/// - Default mode shows a settings gear on the left and sun screen on the right
+/// - Fan-out menus remain available behind [useFanOutMenus] for later reuse
 class BottomNavOverlay extends StatefulWidget {
   final int currentPage;
   final int totalPages;
   final bool editMode;
   final VoidCallback onSettingsTap;
   final PageController? pageController;
+
   /// Sun position callback routed to gear fan menu.
   final VoidCallback? onSunPositionTap;
+
   /// Notifies parent when the gear fan menu expands/collapses (settings mode).
   final ValueChanged<bool>? onSettingsModeChanged;
+
   /// Callback to reset all on-lights to current adaptive values.
+  ///
+  /// Used only when [useFanOutMenus] is enabled.
   final VoidCallback? onFixMyLights;
+
   /// Whether the fix-my-lights operation is in progress.
+  ///
+  /// Used only when [useFanOutMenus] is enabled.
   final bool isFixing;
+
+  /// Preserves the existing fan-out implementations for future reuse.
+  final bool useFanOutMenus;
   const BottomNavOverlay({
     super.key,
     required this.currentPage,
@@ -61,6 +72,7 @@ class BottomNavOverlay extends StatefulWidget {
     this.onSettingsModeChanged,
     this.onFixMyLights,
     this.isFixing = false,
+    this.useFanOutMenus = false,
   });
 
   @override
@@ -76,7 +88,7 @@ class _BottomNavOverlayState extends State<BottomNavOverlay> {
   @override
   void didUpdateWidget(covariant BottomNavOverlay oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.editMode && !oldWidget.editMode) {
+    if (widget.useFanOutMenus && widget.editMode && !oldWidget.editMode) {
       _collapseAllFanMenus();
     }
   }
@@ -103,11 +115,13 @@ class _BottomNavOverlayState extends State<BottomNavOverlay> {
 
   @override
   Widget build(BuildContext context) {
+    final showFanOutMenus = widget.useFanOutMenus;
+
     return Stack(
       clipBehavior: Clip.none,
       children: [
         // Dismiss barrier
-        if (!widget.editMode)
+        if (!widget.editMode && showFanOutMenus)
           _FanMenuBarrier(
             isVisible: _fanExpanded || _actionFanExpanded,
             onTap: _collapseAllFanMenus,
@@ -117,14 +131,19 @@ class _BottomNavOverlayState extends State<BottomNavOverlay> {
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
           child: Row(
             children: [
-              // Gear fan menu (left)
+              // Left action
               if (!widget.editMode)
-                _GearFanMenu(
-                  key: _fanMenuKey,
-                  onSettingsTap: widget.onSettingsTap,
-                  onSunPositionTap: widget.onSunPositionTap,
-                  onExpandedChanged: _onGearExpandedChanged,
-                ),
+                showFanOutMenus
+                    ? _GearFanMenu(
+                        key: _fanMenuKey,
+                        onSettingsTap: widget.onSettingsTap,
+                        onSunPositionTap: widget.onSunPositionTap,
+                        onExpandedChanged: _onGearExpandedChanged,
+                      )
+                    : _OverlayActionButton(
+                        icon: Icons.settings,
+                        onTap: widget.onSettingsTap,
+                      ),
               // Center spacer (with optional page dots)
               Expanded(
                 child: widget.totalPages > 1
@@ -137,18 +156,69 @@ class _BottomNavOverlayState extends State<BottomNavOverlay> {
                       )
                     : const SizedBox.shrink(),
               ),
-              // Action fan menu (right)
-              if (!widget.editMode && widget.onFixMyLights != null)
-                _ActionFanMenu(
-                  key: _actionFanMenuKey,
-                  onFixMyLights: widget.onFixMyLights!,
-                  isFixing: widget.isFixing,
-                  onExpandedChanged: _onActionExpandedChanged,
-                ),
+              // Right action
+              if (!widget.editMode)
+                showFanOutMenus
+                    ? (widget.onFixMyLights != null
+                        ? _ActionFanMenu(
+                            key: _actionFanMenuKey,
+                            onFixMyLights: widget.onFixMyLights!,
+                            isFixing: widget.isFixing,
+                            onExpandedChanged: _onActionExpandedChanged,
+                          )
+                        : const SizedBox.shrink())
+                    : (widget.onSunPositionTap != null
+                        ? _OverlayActionButton(
+                            icon: Icons.wb_sunny_rounded,
+                            onTap: widget.onSunPositionTap!,
+                          )
+                        : const SizedBox.shrink()),
             ],
           ),
         ),
       ],
+    );
+  }
+}
+
+class _OverlayActionButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+  final Color? iconColor;
+  final Color? borderColor;
+
+  const _OverlayActionButton({
+    required this.icon,
+    required this.onTap,
+    this.iconColor,
+    this.borderColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () {
+        HapticFeedback.selectionClick();
+        onTap();
+      },
+      child: Container(
+        width: 44,
+        height: 44,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: CelestialColors.backgroundCard.withValues(alpha: 0.8),
+          border: Border.all(
+            color:
+                borderColor ?? CelestialColors.orbitRing.withValues(alpha: 0.5),
+            width: 1,
+          ),
+        ),
+        child: Icon(
+          icon,
+          color: iconColor ?? CelestialColors.textSecondary,
+          size: 22,
+        ),
+      ),
     );
   }
 }
@@ -237,7 +307,8 @@ class _GearFanMenuState extends State<_GearFanMenu>
         opacity: Tween<double>(begin: 0.0, end: 1.0).animate(
           CurvedAnimation(
             parent: _controller,
-            curve: Interval(start, math.min(start + 0.3, 1.0), curve: Curves.easeOut),
+            curve: Interval(start, math.min(start + 0.3, 1.0),
+                curve: Curves.easeOut),
           ),
         ),
         sizeReveal: Tween<double>(begin: 0.0, end: 1.0).animate(
@@ -286,7 +357,9 @@ class _GearFanMenuState extends State<_GearFanMenu>
   List<_FanMenuEntry> _buildEntries() {
     return [
       _FanMenuEntry(icon: Icons.settings, onTap: widget.onSettingsTap),
-      _FanMenuEntry(icon: Icons.wb_sunny_rounded, onTap: widget.onSunPositionTap ?? () {}),
+      _FanMenuEntry(
+          icon: Icons.wb_sunny_rounded,
+          onTap: widget.onSunPositionTap ?? () {}),
     ];
   }
 
@@ -310,7 +383,8 @@ class _GearFanMenuState extends State<_GearFanMenu>
                   height: 44,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: CelestialColors.backgroundCard.withValues(alpha: 0.8),
+                    color:
+                        CelestialColors.backgroundCard.withValues(alpha: 0.8),
                     border: Border.all(
                       color: CelestialColors.orbitRing.withValues(alpha: 0.5),
                       width: 1,
@@ -555,8 +629,7 @@ class _ActionFanMenuState extends State<_ActionFanMenu>
     );
   }
 
-  Widget _buildVerticalFanItem(
-      _FanMenuEntry entry, _FanItemAnimations anims) {
+  Widget _buildVerticalFanItem(_FanMenuEntry entry, _FanItemAnimations anims) {
     return Align(
       alignment: Alignment.bottomCenter,
       heightFactor: anims.sizeReveal.value,

@@ -759,74 +759,8 @@ class _TriageScreenState extends State<TriageScreen> {
       allowCreateRoom: true,
       emptyMessage:
           'No rooms exist yet. Create one now to finish assigning this device.',
-      onCreateRoom: _createRoomForAssignment,
-    );
-  }
-
-  Future<String?> _createRoomForAssignment() async {
-    final roomName = await _promptForRoomName();
-    final trimmedName = roomName?.trim() ?? '';
-    if (trimmedName.isEmpty || !mounted) return null;
-
-    final result =
-        await context.read<ServerSyncProvider>().api.createTopologyRoom(
-              trimmedName,
-            );
-    final roomId = result?['id'] as String?;
-    if (roomId != null && roomId.isNotEmpty) {
-      return roomId;
-    }
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Room creation failed')),
-      );
-    }
-    return null;
-  }
-
-  Future<String?> _promptForRoomName() async {
-    final controller = TextEditingController();
-    return showDialog<String>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: CelestialColors.backgroundCard,
-        title: const Text(
-          'Create Room',
-          style: TextStyle(color: CelestialColors.textPrimary),
-        ),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          style: const TextStyle(color: CelestialColors.textPrimary),
-          decoration: InputDecoration(
-            hintText: 'Room name',
-            hintStyle: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.6),
-            ),
-          ),
-          onSubmitted: (value) => Navigator.of(dialogContext).pop(value.trim()),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: Text(
-              'Cancel',
-              style: TextStyle(
-                color: CelestialColors.textSecondary.withValues(alpha: 0.8),
-              ),
-            ),
-          ),
-          TextButton(
-            onPressed: () =>
-                Navigator.of(dialogContext).pop(controller.text.trim()),
-            child: const Text(
-              'Create',
-              style: TextStyle(color: CelestialColors.sunWarm),
-            ),
-          ),
-        ],
-      ),
+      onCreateRoom: () async =>
+          (await createTopologyRoomOptionFromPrompt(context))?.id,
     );
   }
 
