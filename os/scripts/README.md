@@ -240,8 +240,10 @@ Rhythm OS now uses two versioning tracks:
 
 For workspace/server/appliance builds:
 
-- Tagged release builds resolve to the exact tag version, for example `v0.4.0` -> `0.4.0`.
+- Tagged release builds resolve to the exact tag version only when the tracked worktree is clean, for example `v0.4.0` -> `0.4.0`.
+- Dirty tagged builds append `.dirty`, for example `v0.4.0` with local edits -> `0.4.0.dirty`.
 - Untagged builds resolve to a Git-derived prerelease, for example `0.4.0-beta.dev.66.g1b40e459`.
+- Dirty untagged builds append `.dirty`, for example `0.4.0-beta.dev.66.g1b40e459.dirty`.
 - After a release tag exists, untagged builds move to the next patch line automatically. After `v0.4.0`, the next dev builds become `0.4.1-beta.dev.N.g<sha>`.
 
 For the addon:

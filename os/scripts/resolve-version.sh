@@ -51,11 +51,17 @@ read_workspace_version() {
 }
 
 resolve_workspace_version() {
-    local exact_tag latest_tag latest_tag_core next_tag_version base_version base_core commit_count sha describe_output
+    local exact_tag latest_tag latest_tag_core next_tag_version base_version base_core commit_count sha describe_output dirty_suffix
+
+    describe_output="$(git -C "$PROJECT_ROOT" describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || true)"
+    dirty_suffix=""
+    if [[ "$describe_output" == *-dirty ]]; then
+        dirty_suffix=".dirty"
+    fi
 
     exact_tag="$(git -C "$PROJECT_ROOT" describe --tags --exact-match --match 'v[0-9]*' HEAD 2>/dev/null || true)"
     if [ -n "$exact_tag" ]; then
-        echo "${exact_tag#v}"
+        echo "${exact_tag#v}${dirty_suffix}"
         return
     fi
 
@@ -74,12 +80,9 @@ resolve_workspace_version() {
     fi
 
     sha="$(git -C "$PROJECT_ROOT" rev-parse --short=8 HEAD)"
-    describe_output="$(git -C "$PROJECT_ROOT" describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || true)"
 
     VERSION="${base_version}.dev.${commit_count}.g${sha}"
-    if [[ "$describe_output" == *-dirty ]]; then
-        VERSION="${VERSION}.dirty"
-    fi
+    VERSION="${VERSION}${dirty_suffix}"
 
     echo "$VERSION"
 }
