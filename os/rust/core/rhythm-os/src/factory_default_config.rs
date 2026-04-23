@@ -142,7 +142,10 @@ pub fn factory_default_mode_transition_configs() -> Vec<ModeTransitionConfig> {
     FACTORY_DEFAULT_MODE_TRANSITIONS
         .get_or_init(|| {
             normalize_mode_transition_configs(
-                factory_default_share_bundle_ref().share.mode_transitions.clone(),
+                factory_default_share_bundle_ref()
+                    .share
+                    .mode_transitions
+                    .clone(),
             )
         })
         .clone()
@@ -242,11 +245,9 @@ mod tests {
                 .and_then(|config| config.active_profile_id.as_deref()),
             Some(SLEEP_PROFILE_ID)
         );
-        assert!(
-            mode_configs
-                .values()
-                .all(|config| config.room_defaults.is_empty())
-        );
+        assert!(mode_configs
+            .values()
+            .all(|config| config.room_defaults.is_empty()));
 
         let transitions = factory_default_mode_transition_configs();
         assert_eq!(transitions.len(), 2);

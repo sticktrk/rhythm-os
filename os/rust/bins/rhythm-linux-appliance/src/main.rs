@@ -298,18 +298,6 @@ fn hydrate_persisted_wifi_credentials(state: &SharedState) {
     }
 }
 
-fn spawn_hub_bootstrap(state: SharedState) {
-    info!(
-        target: "sys",
-        "Starting hub bootstrap in background; HTTP startup will not wait for hub sync"
-    );
-
-    std::thread::Builder::new()
-        .name("hub-bootstrap".to_string())
-        .spawn(move || bootstrap_hubs(&state))
-        .expect("Failed to spawn hub bootstrap thread");
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -342,101 +330,6 @@ mod tests {
     }
 }
 
-fn bootstrap_hubs(state: &SharedState) {
-    let all_creds: Vec<(rhythm_os::canonical::identity::HubKey, String)> = match state.lock() {
-        Ok(s) => s
-            .hub_credentials
-            .iter()
-            .filter_map(|(key, creds)| {
-                (creds.can_connect())
-                    .then_some(creds.hub_type.as_ref())
-                    .flatten()
-                    .map(|ht| (key.clone(), ht.as_str().to_string()))
-            })
-            .collect(),
-        Err(_) => {
-            warn!(target: "sys", "Hub bootstrap aborted: state lock poisoned");
-            return;
-        }
-    };
-
-    if all_creds.is_empty() {
-        info!(
-            target: "sys",
-            "No connectable hub credentials loaded, waiting for credential push"
-        );
-        return;
-    }
-
-    for (key, hub_type_str) in &all_creds {
-        if let Some(integration) = hub::find_integration(hub::INTEGRATIONS, hub_type_str) {
-            integration.refresh_credentials(state, key);
-        }
-    }
-
-    for (key, hub_type_str) in &all_creds {
-        if let Some(integration) = hub::find_integration(hub::INTEGRATIONS, hub_type_str) {
-            info!(target: "sys", "Connecting hub {} (type={})...", key, hub_type_str);
-            match integration.connect_and_start(state.clone(), key) {
-                Ok(rx) => {
-                    if let Ok(mut s) = state.lock() {
-                        s.pending_hub_event_rxs.push(rx);
-                    } else {
-                        warn!(
-                            target: "sys",
-                            "Connected hub {} but failed to register its event stream",
-                            key
-                        );
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        target: "sys",
-                        "Failed to connect hub {}: {} (will retry on credential push)",
-                        key,
-                        e
-                    );
-                }
-            }
-        } else {
-            warn!(
-                target: "sys",
-                "No integration for hub type '{}', skipping {}",
-                hub_type_str,
-                key
-            );
-        }
-    }
-
-    let has_hub = state.lock().map(|s| s.has_any_hub()).unwrap_or(false);
-    if !has_hub {
-        return;
-    }
-
-    if let Err(e) = rhythm_os::room_sync::sync_all_hubs(state) {
-        warn!(target: "sys", "Initial room sync failed: {}", e);
-    }
-    rhythm_os::room_sync::poll_initial_light_state(state);
-
-    let hub_entries: Vec<(String, rhythm_os::canonical::identity::HubKey)> = match state.lock() {
-        Ok(s) => s
-            .hubs
-            .iter()
-            .map(|(key, hub)| (hub.hub_type.as_str().to_string(), key.clone()))
-            .collect(),
-        Err(_) => {
-            warn!(target: "sys", "Skipping post-connect hooks: state lock poisoned");
-            return;
-        }
-    };
-
-    for (hub_type_str, key) in &hub_entries {
-        if let Some(integration) = hub::find_integration(hub::INTEGRATIONS, hub_type_str) {
-            integration.post_connect(state, key);
-        }
-    }
-}
-
 async fn run_server(
     state: SharedState,
     port: u16,
@@ -460,7 +353,7 @@ async fn run_server(
     // does not also change discovery semantics.
     let _mdns = rhythm_os::mdns::register_mdns_service(port, "server", VERSION, "rhythm-server");
 
-    spawn_hub_bootstrap(state.clone());
+    rhythm_os::hub::spawn_stored_hub_bootstrap(state.clone(), hub::INTEGRATIONS);
     spawn_boot_success_marker();
 
     axum::serve(listener, server).await?;

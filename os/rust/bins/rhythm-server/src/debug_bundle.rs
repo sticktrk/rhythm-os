@@ -77,8 +77,7 @@ pub fn build_debug_bundle(state: &SharedState) -> Result<DebugBundle> {
     let created_at = Utc::now();
 
     let state_json = commands::build_state_snapshot(state).context("building state snapshot")?;
-    let share_bundle_json =
-        commands::build_share_bundle(state).context("building share bundle")?;
+    let share_bundle_json = commands::build_share_bundle(state).context("building share bundle")?;
 
     let searched_log_dirs = discover_log_dirs(&runtime);
     let log_artifacts = discover_log_artifacts(&searched_log_dirs)?;

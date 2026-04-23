@@ -12,8 +12,10 @@ use std::any::Any;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
+use log::{info, warn};
 use rhythm_core::{ButtonAction, HubRegistry, RuntimeHandle};
 use serde::{Deserialize, Serialize};
 
@@ -446,6 +448,237 @@ pub fn combined_credentials_interceptor(
     })
 }
 
+const STORED_HUB_BOOTSTRAP_RETRY_INTERVAL: Duration = Duration::from_secs(15);
+
+struct StoredHubBootstrapCandidate<'a> {
+    key: HubKey,
+    integration: &'a dyn ExternalLightHubIntegration,
+}
+
+struct StoredHubBootstrapScan<'a> {
+    connectable_credential_count: usize,
+    missing_supported: Vec<StoredHubBootstrapCandidate<'a>>,
+    unsupported_missing: Vec<(HubKey, String)>,
+}
+
+/// Spawn a background worker that connects hubs from stored credentials and
+/// keeps retrying failed startup connects until each supported configured hub
+/// leaves an active hub object behind in state.
+pub fn spawn_stored_hub_bootstrap(
+    state: SharedState,
+    integrations: &'static [&'static dyn ExternalLightHubIntegration],
+) {
+    info!(
+        target: "sys",
+        "Starting hub bootstrap in background; HTTP startup will not wait for hub sync"
+    );
+
+    std::thread::Builder::new()
+        .name("hub-bootstrap".to_string())
+        .spawn(move || {
+            bootstrap_stored_hubs_until_settled(&state, integrations, std::thread::sleep);
+        })
+        .expect("Failed to spawn hub bootstrap thread");
+}
+
+fn bootstrap_stored_hubs_until_settled<'a, F>(
+    state: &SharedState,
+    integrations: &'a [&'a dyn ExternalLightHubIntegration],
+    mut sleep_retry: F,
+) where
+    F: FnMut(Duration),
+{
+    loop {
+        let retry_needed = bootstrap_stored_hubs_once(state, integrations);
+        if !retry_needed {
+            return;
+        }
+
+        let remaining = scan_stored_hub_bootstrap_candidates(state, integrations)
+            .map(|scan| scan.missing_supported.len())
+            .unwrap_or_default();
+        info!(
+            target: "sys",
+            "Hub bootstrap still waiting on {} stored hub(s); retrying in {}s",
+            remaining,
+            STORED_HUB_BOOTSTRAP_RETRY_INTERVAL.as_secs()
+        );
+        sleep_retry(STORED_HUB_BOOTSTRAP_RETRY_INTERVAL);
+    }
+}
+
+fn bootstrap_stored_hubs_once<'a>(
+    state: &SharedState,
+    integrations: &'a [&'a dyn ExternalLightHubIntegration],
+) -> bool {
+    let scan = match scan_stored_hub_bootstrap_candidates(state, integrations) {
+        Ok(scan) => scan,
+        Err(_) => {
+            warn!(target: "sys", "Hub bootstrap aborted: state lock poisoned");
+            return false;
+        }
+    };
+
+    if scan.connectable_credential_count == 0 {
+        info!(
+            target: "sys",
+            "No connectable hub credentials loaded, waiting for credential push"
+        );
+        return false;
+    }
+
+    for (key, hub_type_str) in &scan.unsupported_missing {
+        warn!(
+            target: "sys",
+            "No integration for hub type '{}', skipping stored hub {}",
+            hub_type_str,
+            key
+        );
+    }
+
+    if scan.missing_supported.is_empty() {
+        return false;
+    }
+
+    let mut newly_connected: Vec<StoredHubBootstrapCandidate<'a>> = Vec::new();
+
+    for candidate in scan.missing_supported {
+        candidate
+            .integration
+            .refresh_credentials(state, &candidate.key);
+        info!(
+            target: "sys",
+            "Connecting stored hub {} (type={})...",
+            candidate.key,
+            candidate.integration.hub_type()
+        );
+
+        match candidate
+            .integration
+            .connect_and_start(state.clone(), &candidate.key)
+        {
+            Ok(event_rx) => {
+                let registered = match state.lock() {
+                    Ok(mut s) => {
+                        let registered = s.hubs.contains_key(&candidate.key);
+                        if registered {
+                            s.pending_hub_event_rxs.push(event_rx);
+                        }
+                        registered
+                    }
+                    Err(_) => {
+                        warn!(
+                            target: "sys",
+                            "Connected stored hub {} but failed to register its event stream",
+                            candidate.key
+                        );
+                        false
+                    }
+                };
+
+                if registered {
+                    newly_connected.push(candidate);
+                } else {
+                    warn!(
+                        target: "sys",
+                        "Stored hub {} connected but did not leave an active hub behind; will retry",
+                        candidate.key
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(
+                    target: "sys",
+                    "Failed to connect stored hub {}: {}",
+                    candidate.key,
+                    error
+                );
+            }
+        }
+    }
+
+    finish_bootstrapped_hubs(state, &newly_connected);
+
+    scan_stored_hub_bootstrap_candidates(state, integrations)
+        .map(|scan| !scan.missing_supported.is_empty())
+        .unwrap_or(false)
+}
+
+fn finish_bootstrapped_hubs<'a>(
+    state: &SharedState,
+    newly_connected: &[StoredHubBootstrapCandidate<'a>],
+) {
+    if newly_connected.is_empty() {
+        return;
+    }
+
+    let discover_devices = state
+        .lock()
+        .map(|s| s.platform.full_device_discovery)
+        .unwrap_or(true);
+
+    for candidate in newly_connected {
+        if let Err(error) =
+            crate::room_sync::sync_from_hub_for_key(state, &candidate.key, discover_devices)
+        {
+            warn!(
+                target: "sys",
+                "Startup sync failed for hub {}: {}",
+                candidate.key,
+                error
+            );
+        }
+    }
+
+    crate::room_sync::poll_initial_light_state(state);
+
+    for candidate in newly_connected {
+        candidate.integration.post_connect(state, &candidate.key);
+    }
+}
+
+fn scan_stored_hub_bootstrap_candidates<'a>(
+    state: &SharedState,
+    integrations: &'a [&'a dyn ExternalLightHubIntegration],
+) -> Result<StoredHubBootstrapScan<'a>> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+
+    let mut connectable_credential_count = 0usize;
+    let mut missing_supported = Vec::new();
+    let mut unsupported_missing = Vec::new();
+
+    for (key, creds) in &s.hub_credentials {
+        if !creds.can_connect() {
+            continue;
+        }
+
+        connectable_credential_count += 1;
+
+        if s.hubs.contains_key(key) {
+            continue;
+        }
+
+        let Some(hub_type) = creds.hub_type.as_ref() else {
+            continue;
+        };
+
+        if let Some(integration) = find_integration(integrations, hub_type.as_str()) {
+            missing_supported.push(StoredHubBootstrapCandidate {
+                key: key.clone(),
+                integration,
+            });
+        } else {
+            unsupported_missing.push((key.clone(), hub_type.as_str().to_string()));
+        }
+    }
+
+    Ok(StoredHubBootstrapScan {
+        connectable_credential_count,
+        missing_supported,
+        unsupported_missing,
+    })
+}
+
 /// Callback set returned by [`integration_callbacks`].
 #[allow(clippy::type_complexity)]
 pub struct IntegrationCallbacks {
@@ -557,6 +790,9 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicU32;
     use std::sync::mpsc;
+    use std::sync::Arc;
+
+    use crate::discovery::{DiscoveredDevice, DiscoveredRoom, HubDiscovery};
 
     // ── Mock integration for testing ──────────────────────────────────
 
@@ -640,6 +876,90 @@ mod tests {
     static MOCK_HA: MockIntegration = MockIntegration::new("homeassistant");
 
     static TEST_INTEGRATIONS: &[&dyn ExternalLightHubIntegration] = &[&MOCK_HUE, &MOCK_HA];
+
+    struct EmptyDiscovery;
+
+    impl HubDiscovery for EmptyDiscovery {
+        fn discover_rooms(&self) -> Result<Vec<DiscoveredRoom>> {
+            Ok(Vec::new())
+        }
+
+        fn discover_devices(&self) -> Result<Vec<DiscoveredDevice>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct BootstrapTestIntegration {
+        failures_before_success: AtomicU32,
+        connect_attempts: AtomicU32,
+        post_connect_count: AtomicU32,
+    }
+
+    impl BootstrapTestIntegration {
+        fn new(failures_before_success: u32) -> Self {
+            Self {
+                failures_before_success: AtomicU32::new(failures_before_success),
+                connect_attempts: AtomicU32::new(0),
+                post_connect_count: AtomicU32::new(0),
+            }
+        }
+
+        fn connect_attempts(&self) -> u32 {
+            self.connect_attempts.load(Ordering::Relaxed)
+        }
+
+        fn post_connect_calls(&self) -> u32 {
+            self.post_connect_count.load(Ordering::Relaxed)
+        }
+    }
+
+    impl ExternalLightHubIntegration for BootstrapTestIntegration {
+        fn hub_type(&self) -> &'static str {
+            "hue"
+        }
+
+        fn provider(&self) -> &'static dyn HubProvider {
+            &MOCK_HUE_PROVIDER
+        }
+
+        fn connect_and_start(
+            &self,
+            state: SharedState,
+            key: &HubKey,
+        ) -> Result<Receiver<HubEvent>> {
+            self.connect_attempts.fetch_add(1, Ordering::Relaxed);
+
+            if self.failures_before_success.load(Ordering::Relaxed) > 0 {
+                self.failures_before_success.fetch_sub(1, Ordering::Relaxed);
+                return Err(anyhow::anyhow!("temporary startup failure"));
+            }
+
+            let (_tx, rx) = mpsc::channel();
+            let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            s.hubs.insert(
+                key.clone(),
+                ActiveHub {
+                    hub_type: HubType::new("hue"),
+                    hub_key: key.clone(),
+                    runtime: None,
+                    hub_data: Box::new(()),
+                    registry: None,
+                    discovery: Some(Arc::new(EmptyDiscovery)),
+                    shutdown: Arc::new(AtomicBool::new(false)),
+                },
+            );
+            s.set_hub_connected(key, false);
+            Ok(rx)
+        }
+
+        fn ensure_runtime(&self, _state: &SharedState) -> Result<()> {
+            Ok(())
+        }
+
+        fn post_connect(&self, _state: &SharedState, _key: &HubKey) {
+            self.post_connect_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 
     // ── find_integration tests ────────────────────────────────────────
 
@@ -738,6 +1058,65 @@ mod tests {
         let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
         let key = HubKey::new(HubType::new("test"), "127.0.0.1");
         integration.post_connect(&state, &key); // should not panic
+    }
+
+    #[test]
+    fn stored_hub_bootstrap_retries_until_connect_succeeds() {
+        let integration = BootstrapTestIntegration::new(1);
+        let integrations: &[&dyn ExternalLightHubIntegration] = &[&integration];
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        let key = HubKey::new(HubType::new("hue"), "192.168.1.5");
+
+        state.lock().unwrap().hub_credentials.insert(
+            key.clone(),
+            HubCredentials::new("hue", "192.168.1.5", serde_json::json!({"username": "abc"})),
+        );
+
+        let sleep_calls = AtomicU32::new(0);
+        bootstrap_stored_hubs_until_settled(&state, integrations, |_| {
+            sleep_calls.fetch_add(1, Ordering::Relaxed);
+        });
+
+        let s = state.lock().unwrap();
+        assert!(s.hubs.contains_key(&key));
+        assert_eq!(s.pending_hub_event_rxs.len(), 1);
+        assert_eq!(integration.connect_attempts(), 2);
+        assert_eq!(integration.post_connect_calls(), 1);
+        assert_eq!(sleep_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn stored_hub_bootstrap_skips_hubs_that_are_already_active() {
+        let integration = BootstrapTestIntegration::new(0);
+        let integrations: &[&dyn ExternalLightHubIntegration] = &[&integration];
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        let key = HubKey::new(HubType::new("hue"), "192.168.1.5");
+
+        {
+            let mut s = state.lock().unwrap();
+            s.hub_credentials.insert(
+                key.clone(),
+                HubCredentials::new("hue", "192.168.1.5", serde_json::json!({"username": "abc"})),
+            );
+            s.hubs.insert(
+                key.clone(),
+                ActiveHub {
+                    hub_type: HubType::new("hue"),
+                    hub_key: key.clone(),
+                    runtime: None,
+                    hub_data: Box::new(()),
+                    registry: None,
+                    discovery: Some(Arc::new(EmptyDiscovery)),
+                    shutdown: Arc::new(AtomicBool::new(false)),
+                },
+            );
+        }
+
+        bootstrap_stored_hubs_until_settled(&state, integrations, |_| {});
+
+        assert_eq!(integration.connect_attempts(), 0);
+        assert_eq!(integration.post_connect_calls(), 0);
+        assert_eq!(state.lock().unwrap().pending_hub_event_rxs.len(), 0);
     }
 
     // ── HubCredentials / HubKey ───────────────────────────────────────

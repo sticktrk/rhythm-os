@@ -28,8 +28,8 @@ use crate::api_types::{
     StateSnapshot, TopologyNodeControlDto, TopologyNodeDto,
 };
 use crate::bundle::{
-    BackupBundle, BackupHubCredentials, BackupHubRegistry, BackupInstallation, BackupRuntimeState,
-    BackupConfiguration, BackupConfigurationRoom, ShareBundle, ShareConfiguration,
+    BackupBundle, BackupConfiguration, BackupConfigurationRoom, BackupHubCredentials,
+    BackupHubRegistry, BackupInstallation, BackupRuntimeState, ShareBundle, ShareConfiguration,
     ShareImportPayload, BUNDLE_SCHEMA_VERSION,
 };
 use crate::canonical::identity::HubKey;
@@ -2324,7 +2324,10 @@ pub fn do_factory_reset(state: &SharedState) -> Result<String> {
 }
 
 pub fn do_share_bundle_reset(state: &SharedState) -> Result<String> {
-    do_share_bundle_import(state, ShareImportPayload::Bundle(factory_default_share_bundle()))
+    do_share_bundle_import(
+        state,
+        ShareImportPayload::Bundle(factory_default_share_bundle()),
+    )
 }
 
 pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Result<BackupBundle> {
@@ -3801,10 +3804,7 @@ fn apply_backup_configuration_room_preferences(
     (applied_rooms, skipped_rooms)
 }
 
-pub fn do_share_bundle_import(
-    state: &SharedState,
-    payload: ShareImportPayload,
-) -> Result<String> {
+pub fn do_share_bundle_import(state: &SharedState, payload: ShareImportPayload) -> Result<String> {
     let bundle = payload.into_bundle();
     if bundle.schema_version != BUNDLE_SCHEMA_VERSION {
         return Err(anyhow::anyhow!(
@@ -3874,7 +3874,10 @@ pub fn do_share_bundle_import(
     build_share_bundle(state)
 }
 
-fn apply_backup_configuration(state: &SharedState, configuration: BackupConfiguration) -> Result<()> {
+fn apply_backup_configuration(
+    state: &SharedState,
+    configuration: BackupConfiguration,
+) -> Result<()> {
     validate_imported_backup_configuration(&configuration)?;
 
     let imported_profiles = configuration.profiles;
@@ -7205,8 +7208,8 @@ pub fn build_curve_solar(state: &SharedState, date: Option<&str>) -> Result<Stri
 mod tests {
     use super::*;
     use crate::bundle::{
-        BackupBundle, BackupHubCredentials, BackupInstallation, BackupRuntimeState, BundleKind,
-        BackupConfiguration, ShareBundle, ShareConfiguration, ShareImportPayload,
+        BackupBundle, BackupConfiguration, BackupHubCredentials, BackupInstallation,
+        BackupRuntimeState, BundleKind, ShareBundle, ShareConfiguration, ShareImportPayload,
     };
     use crate::factory_default_config::{
         factory_default_active_mode, factory_default_light_profile_config,
@@ -8891,7 +8894,11 @@ mod tests {
         assert!(exported.share.power_save);
         assert_eq!(exported.share.mode_transitions, vec![transition]);
         assert_eq!(exported.share.profiles.len(), 5);
-        assert!(exported.share.profiles.iter().any(|profile| profile.id == "focus"));
+        assert!(exported
+            .share
+            .profiles
+            .iter()
+            .any(|profile| profile.id == "focus"));
     }
 
     #[test]
@@ -8919,7 +8926,11 @@ mod tests {
         let exported: ShareBundle = serde_json::from_str(&json).unwrap();
 
         assert!(exported.share.power_save);
-        assert!(exported.share.profiles.iter().any(|profile| profile.id == "focus"));
+        assert!(exported
+            .share
+            .profiles
+            .iter()
+            .any(|profile| profile.id == "focus"));
     }
 
     #[test]
@@ -9948,7 +9959,11 @@ mod tests {
 
         let json = do_factory_reset(&state).unwrap();
         let reset_bundle: ShareBundle = serde_json::from_str(&json).unwrap();
-        assert!(reset_bundle.share.profiles.iter().any(|profile| profile.id == "rhythm"));
+        assert!(reset_bundle
+            .share
+            .profiles
+            .iter()
+            .any(|profile| profile.id == "rhythm"));
 
         let s = state.lock().unwrap();
         assert!(s.hubs.is_empty());

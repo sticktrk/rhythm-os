@@ -271,13 +271,12 @@ pub fn handle_get_share_bundle(state: &SharedState) -> ApiResponse {
 }
 
 pub fn handle_put_share_bundle(state: &SharedState, body: &Value) -> ApiResponse {
-    let payload: crate::bundle::ShareImportPayload =
-        match serde_json::from_value(body.clone()) {
-            Ok(payload) => payload,
-            Err(e) => {
-                return ApiResponse::bad_request(&format!("Invalid share bundle: {}", e));
-            }
-        };
+    let payload: crate::bundle::ShareImportPayload = match serde_json::from_value(body.clone()) {
+        Ok(payload) => payload,
+        Err(e) => {
+            return ApiResponse::bad_request(&format!("Invalid share bundle: {}", e));
+        }
+    };
 
     match commands::do_share_bundle_import(state, payload) {
         Ok(json) => ApiResponse::json_ok(json),
