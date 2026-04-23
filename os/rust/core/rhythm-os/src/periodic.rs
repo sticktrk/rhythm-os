@@ -118,19 +118,40 @@ fn last_periodic_node_index_by_emit_target(
     indices
 }
 
+fn periodic_settings_node_id<'a>(
+    snapshot: &'a rhythm_core::NodeSnapshot,
+    collapse_attached_light_nodes: bool,
+) -> &'a str {
+    if collapse_attached_light_nodes {
+        snapshot.parent_id.as_deref().unwrap_or(&snapshot.id)
+    } else {
+        &snapshot.id
+    }
+}
+
+fn periodic_settings_node_kind(
+    snapshot: &rhythm_core::NodeSnapshot,
+    collapse_attached_light_nodes: bool,
+) -> rhythm_core::LightNodeKind {
+    if collapse_attached_light_nodes && snapshot.parent_id.is_some() {
+        rhythm_core::LightNodeKind::Room
+    } else {
+        snapshot.kind
+    }
+}
+
 fn periodic_dispatch_nodes_from_state(
     state: &AppState,
     room_snapshots: &[rhythm_core::NodeSnapshot],
 ) -> Vec<PeriodicDispatchNode> {
+    let has_composite_controller = state.composite_controller.is_some();
     let mut eligible_room_ids: Vec<String> = room_snapshots
         .iter()
         .filter(|node| node.kind.is_light_addressable())
-        .map(|node| node.id.clone())
+        .map(|node| periodic_settings_node_id(node, has_composite_controller).to_string())
         .collect();
     eligible_room_ids.sort();
     eligible_room_ids.dedup();
-
-    let has_composite_controller = state.composite_controller.is_some();
 
     if !has_composite_controller {
         return eligible_room_ids
@@ -186,11 +207,28 @@ fn periodic_dispatch_nodes_from_state(
 fn summarize_periodic_dispatch(
     node_snapshots: &[rhythm_core::NodeSnapshot],
     dispatch_nodes: &[PeriodicDispatchNode],
+    collapse_attached_light_nodes: bool,
 ) -> PeriodicDispatchSummary {
-    let eligible_node_count = node_snapshots.len();
-    let eligible_room_count = node_snapshots
+    let mut eligible_settings_node_kinds: HashMap<&str, rhythm_core::LightNodeKind> =
+        HashMap::new();
+    for node in node_snapshots
         .iter()
-        .filter(|node| node.kind.is_room())
+        .filter(|node| node.kind.is_light_addressable())
+    {
+        eligible_settings_node_kinds
+            .entry(periodic_settings_node_id(
+                node,
+                collapse_attached_light_nodes,
+            ))
+            .or_insert_with(|| {
+                periodic_settings_node_kind(node, collapse_attached_light_nodes)
+            });
+    }
+
+    let eligible_node_count = eligible_settings_node_kinds.len();
+    let eligible_room_count = eligible_settings_node_kinds
+        .values()
+        .filter(|kind| kind.is_room())
         .count();
     let eligible_device_count = eligible_node_count.saturating_sub(eligible_room_count);
 
@@ -198,10 +236,9 @@ fn summarize_periodic_dispatch(
         .iter()
         .map(|node| node.settings_node_id.as_str())
         .collect();
-    let dispatched_settings_node_count = dispatched_settings_node_ids.len();
-    let no_dispatch_node_count = node_snapshots
-        .iter()
-        .filter(|node| !dispatched_settings_node_ids.contains(node.id.as_str()))
+    let no_dispatch_node_count = eligible_settings_node_kinds
+        .keys()
+        .filter(|node_id| !dispatched_settings_node_ids.contains(**node_id))
         .count();
 
     PeriodicDispatchSummary {
@@ -209,7 +246,7 @@ fn summarize_periodic_dispatch(
         eligible_room_count,
         eligible_device_count,
         dispatch_node_count: dispatch_nodes.len(),
-        dispatched_settings_node_count,
+        dispatched_settings_node_count: dispatched_settings_node_ids.len(),
         no_dispatch_node_count,
     }
 }
@@ -485,6 +522,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
         let (
             mut room_snapshots,
             mut periodic_nodes,
+            has_composite_controller,
             warning_skipped,
             transition_skipped,
             rhythm_disabled_skipped,
@@ -546,6 +584,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             (
                 rooms,
                 periodic_nodes,
+                s.composite_controller.is_some(),
                 warning_skipped,
                 transition_skipped,
                 rhythm_disabled_skipped,
@@ -558,7 +597,11 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
 
         room_snapshots.sort_by_key(|room| stable_room_phase_key(&room.id));
         periodic_nodes.sort_by_key(|node| stable_room_phase_key(&node.node_id));
-        let dispatch_summary = summarize_periodic_dispatch(&room_snapshots, &periodic_nodes);
+        let dispatch_summary = summarize_periodic_dispatch(
+            &room_snapshots,
+            &periodic_nodes,
+            has_composite_controller,
+        );
         let last_node_index_by_emit_target =
             last_periodic_node_index_by_emit_target(&periodic_nodes);
         let cycle_duration = effective_cycle_duration(
@@ -1807,6 +1850,51 @@ mod tests {
     }
 
     #[test]
+    fn periodic_dispatch_nodes_collapse_attached_light_snapshots_with_composite() {
+        let mut state = crate::state::AppState {
+            composite_controller: Some(Arc::new(CompositeController::new())),
+            ..Default::default()
+        };
+
+        let room_id = state.topology.create_room("Kitchen");
+        state
+            .topology
+            .get_mut(&room_id)
+            .unwrap()
+            .upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                hub_key: crate::canonical::identity::HubKey::new(
+                    crate::hub::HubType::new("hue"),
+                    "192.168.1.10",
+                ),
+                hub_room_id: "hue-room-1".to_string(),
+                control_id: "gl-1".to_string(),
+                light_device_ids: vec!["hue-light-1".to_string()],
+            });
+
+        let snapshots = vec![
+            make_room(&room_id, 0.0),
+            make_node(
+                "attached-light-1",
+                rhythm_core::LightNodeKind::LightDevice,
+                Some(&room_id),
+            ),
+        ];
+        let expected = state
+            .topology
+            .periodic_light_nodes(&state.canonical_registry);
+        assert_eq!(expected.len(), 1);
+
+        assert_eq!(
+            periodic_dispatch_nodes_from_state(&state, &snapshots),
+            vec![PeriodicDispatchNode {
+                node_id: expected[0].id.clone(),
+                settings_node_id: room_id,
+                emit_node_id: expected[0].emit_node_id.clone(),
+            }]
+        );
+    }
+
+    #[test]
     fn summarize_periodic_dispatch_counts_rooms_devices_and_missing_routes() {
         let node_snapshots = vec![
             make_node("room-a", rhythm_core::LightNodeKind::Room, None),
@@ -1831,13 +1919,43 @@ mod tests {
         ];
 
         assert_eq!(
-            summarize_periodic_dispatch(&node_snapshots, &dispatch_nodes),
+            summarize_periodic_dispatch(&node_snapshots, &dispatch_nodes, false),
             PeriodicDispatchSummary {
                 eligible_node_count: 3,
                 eligible_room_count: 2,
                 eligible_device_count: 1,
                 dispatch_node_count: 2,
                 dispatched_settings_node_count: 2,
+                no_dispatch_node_count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn summarize_periodic_dispatch_collapses_attached_lights_in_composite_mode() {
+        let node_snapshots = vec![
+            make_node("room-a", rhythm_core::LightNodeKind::Room, None),
+            make_node(
+                "light-a",
+                rhythm_core::LightNodeKind::LightDevice,
+                Some("room-a"),
+            ),
+            make_node("room-b", rhythm_core::LightNodeKind::Room, None),
+        ];
+        let dispatch_nodes = vec![PeriodicDispatchNode {
+            node_id: "dispatch-room-a".to_string(),
+            settings_node_id: "room-a".to_string(),
+            emit_node_id: "room-a".to_string(),
+        }];
+
+        assert_eq!(
+            summarize_periodic_dispatch(&node_snapshots, &dispatch_nodes, true),
+            PeriodicDispatchSummary {
+                eligible_node_count: 2,
+                eligible_room_count: 2,
+                eligible_device_count: 0,
+                dispatch_node_count: 1,
+                dispatched_settings_node_count: 1,
                 no_dispatch_node_count: 1,
             }
         );
