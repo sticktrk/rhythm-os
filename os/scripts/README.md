@@ -148,7 +148,7 @@ Hashes the slow-path inputs (CHIP prebuilts, ARMv6 musl toolchain, Buildroot
 checkout + external tree, Dockerfile, packaging script) into a content tag
 like `v1-aa91843f7d73`, checks Docker Hub for it, and only builds+pushes when
 that tag is missing. Updates `install/rpiz/builder-image.lock`, which is what
-both your local `--docker` runs and `.github/workflows/rpiz-image.yml` pull.
+both your local `--docker` runs and `.github/workflows/rpiz-sd-image.yml` pull.
 
 ```bash
 ./scripts/build/refresh-builder-image.sh            # dry-check: report if push needed
@@ -186,11 +186,11 @@ workflows can build and publish the assets.
 
 There are two release modes:
 
-- **Binary release (default)** — mac/linux server binaries (`release.yml`) and
-  the rpiz OTA tarball via the tag-driven `rpiz Binary` job in `ci.yml`.
-  Fast, ~5 min of CI. This is the normal cadence for appliance code changes.
+- **Binary release (default)** — the rpiz OTA tarball via the tag-driven
+  `rpiz Binary` job in `ci.yml`. Fast, ~5 min of CI. This is the normal
+  cadence for appliance code changes.
 - **Full image release (`--with-image`)** — everything above *plus* dispatches
-  `rpiz-image.yml`, which re-runs Buildroot end-to-end and attaches
+  `rpiz-sd-image.yml`, which re-runs Buildroot end-to-end and attaches
   `sdcard.img` + `rootfs.ext2.gz` to the release. Use this when you bumped
   CHIP, Buildroot, or the defconfig.
 
@@ -201,7 +201,7 @@ upload the OTA feed directly instead of going through GitHub Actions.
 ./scripts/release.sh                    # Tags and pushes the next patch release (binary-only)
 ./scripts/release.sh --minor            # Tags and pushes the next minor release (binary-only)
 ./scripts/release.sh --version 0.4.1    # Tags and pushes an explicit version
-./scripts/release.sh --with-image       # Binary release + dispatch rpiz-image.yml for full SD card
+./scripts/release.sh --with-image       # Binary release + dispatch rpiz-sd-image.yml for full SD card
 ./scripts/release.sh --upload           # Builds and uploads only the rpiz OTA feed locally
 ./scripts/release.sh --version 0.4.101  # Explicit high patch version is valid semver
 ./scripts/release.sh --dry-run          # Preview without creating the tag
@@ -214,7 +214,7 @@ upload the OTA feed directly instead of going through GitHub Actions.
 | `--major` | Bump the latest release tag to the next major version |
 | `--minor` | Bump the latest release tag to the next minor version |
 | `--patch` | Bump the latest release tag to the next patch version (default) |
-| `--with-image` | After pushing, dispatch `rpiz-image.yml` to rebuild the SD-card image and attach it to the release |
+| `--with-image` | After pushing, dispatch `rpiz-sd-image.yml` to rebuild the SD-card image and attach it to the release |
 | `--skip-builder-refresh` | Skip the builder-image hash check / refresh step (non-Linux hosts, or when you know the lock is right) |
 | `--upload` | Build/package/upload the `rpiz` OTA feed locally; implies `--no-push` |
 | `--message <text>` | Custom annotated tag message |
@@ -227,7 +227,7 @@ upload the OTA feed directly instead of going through GitHub Actions.
 - Updates the workspace version in `Cargo.toml` before tagging. It does not rewrite `Cargo.lock`, which avoids unrelated `rhythm-chipd` lockfile churn on macOS release hosts.
 - Creates the release commit automatically when those version files change.
 - Pushes the current branch and the new tag to `origin` by default.
-- The GitHub Actions release workflow turns that tag into the GitHub release with the platform binary tarballs.
+- The GitHub Actions CI workflow turns that tag into the GitHub release with the rpiz OTA tarball.
 - `--upload` is local-only for now: it loads `.env`, builds only `rpiz`, packages only the `rpiz` OTA feed, uploads it over SSH, and leaves the branch/tag unpushed.
 - `--upload` accepts either `RHYTHM_UPDATES_SSH_KEY_FILE` or `RHYTHM_UPDATES_SSH_KEY` for the SSH key material.
 

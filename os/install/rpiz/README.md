@@ -116,17 +116,17 @@ The rpiz release flow has two modes that map to two workflows:
 
 | Mode | How you trigger it | What you get | CI time |
 |------|--------------------|--------------|---------|
-| **Binary release** (default) | `./scripts/release.sh` (any variant without `--with-image`) | rhythm-server rpiz tarball for OTA (tag-driven `rpiz Binary` job in `ci.yml`) + mac/linux binaries (`release.yml`) | ~5 min |
-| **Full image release** | `./scripts/release.sh --with-image` | Everything above *plus* sdcard.img + rootfs.ext2.gz attached to the release (`rpiz-image.yml` dispatched via `gh`) | ~5 min + one full Buildroot pass |
+| **Binary release** (default) | `./scripts/release.sh` (any variant without `--with-image`) | rhythm-server rpiz tarball for OTA (tag-driven `rpiz Binary` job in `ci.yml`) | ~5 min |
+| **Full image release** | `./scripts/release.sh --with-image` | Everything above *plus* sdcard.img + rootfs.ext2.gz attached to the release (`rpiz-sd-image.yml` dispatched via `gh`) | ~5 min + one full Buildroot pass |
 
-Use the binary mode for normal appliance code / Rust-level changes — your Pi Zeros update via OTA against the tarball without needing a new SD card. Use `--with-image` when you've bumped CHIP, Buildroot, the defconfig, or the kernel config (anything that forces a new rootfs). You can also dispatch `rpiz-image.yml` manually at any time:
+Use the binary mode for normal appliance code / Rust-level changes — your Pi Zeros update via OTA against the tarball without needing a new SD card. Use `--with-image` when you've bumped CHIP, Buildroot, the defconfig, or the kernel config (anything that forces a new rootfs). You can also dispatch `rpiz-sd-image.yml` manually at any time:
 
 ```bash
-gh workflow run rpiz-image.yml -f tag=v0.5.0   # attaches to an existing release
-gh workflow run rpiz-image.yml                 # artifact-only rebuild from current branch
+gh workflow run rpiz-sd-image.yml -f tag=v0.5.0   # attaches to an existing release
+gh workflow run rpiz-sd-image.yml                 # artifact-only rebuild from current branch
 ```
 
-`rpiz-image.yml` now matches the tag flavor when it builds the rootfs: `*-beta`
+`rpiz-sd-image.yml` now matches the tag flavor when it builds the rootfs: `*-beta`
 tags keep the bring-up image defaults (`RHYTHM_DEV_MODE=1`, Matter device
 attestation bypass enabled), while stable tags build the production image.
 

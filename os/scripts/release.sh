@@ -51,10 +51,10 @@ Options:
   -h, --help        Show this help
 
 Full SD-card image builds (sdcard.img + rootfs.ext2.gz) are trigger-only via
-the rpiz-image.yml workflow — this script never dispatches them. For a CHIP/
+the rpiz-sd-image.yml workflow — this script never dispatches them. For a CHIP/
 Buildroot/defconfig bump, run the workflow manually after the tag is up:
 
-  gh workflow run rpiz-image.yml -f tag=vX.Y.Z
+  gh workflow run rpiz-sd-image.yml -f tag=vX.Y.Z
   # …or with --publish_full_image_ota=true to also push the rootfs to OTA.
 
 Examples:
@@ -486,7 +486,7 @@ elif [ "$(uname -s)" != "Linux" ]; then
 else
     echo "  Builder image: will refresh dtconcepts/rhythm-rpiz-builder if inputs changed"
 fi
-echo "  rpiz image: binary-only (run rpiz-image.yml manually for a full SD-card rebuild)"
+echo "  rpiz sd image: binary-only (run rpiz-sd-image.yml manually for a full SD-card rebuild)"
 if [ "$UPLOAD" = true ]; then
     echo "  Upload: rpiz OTA feed -> $RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST:$RHYTHM_UPDATES_BASE_DIR"
 fi
@@ -545,8 +545,9 @@ echo "Created $TAG at $(git -C "$PROJECT_ROOT" rev-parse --short HEAD)"
 if [ "$PUSH" = true ]; then
     echo "Pushed branch and tag to $REMOTE."
     if [ -n "$REPO_URL" ]; then
-        echo "GitHub Actions will publish the release assets after the release workflow finishes:"
-        echo "  Actions:  $REPO_URL/actions/workflows/release.yml"
+        echo "GitHub Actions will publish the rpiz binary release assets after the CI workflow finishes:"
+        echo "  CI:       $REPO_URL/actions/workflows/ci.yml"
+        echo "  SD image: $REPO_URL/actions/workflows/rpiz-sd-image.yml"
         echo "  Release:  $REPO_URL/releases/tag/$TAG"
     fi
 elif [ "$UPLOAD" = true ]; then
