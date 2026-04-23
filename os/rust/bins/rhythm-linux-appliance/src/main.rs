@@ -25,7 +25,10 @@ const VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
 };
+const RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV: &str =
+    "RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION";
 const STARTUP_WIFI_RESTORE_TIMEOUT: Duration = Duration::from_secs(30);
+const PERIODIC_WIFI_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Rhythm OS Linux appliance.
 #[derive(Parser, Debug)]
@@ -44,8 +47,31 @@ struct Args {
     log_level: String,
 }
 
+fn beta_build_enables_matter_attestation_bypass(version: &str) -> bool {
+    version.contains("-beta")
+}
+
+fn set_env_default(name: &str, value: &str) -> bool {
+    match std::env::var_os(name) {
+        Some(existing) if !existing.is_empty() => false,
+        _ => {
+            std::env::set_var(name, value);
+            true
+        }
+    }
+}
+
+fn apply_beta_build_defaults() -> bool {
+    if !beta_build_enables_matter_attestation_bypass(VERSION) {
+        return false;
+    }
+
+    set_env_default(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV, "1")
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
+    let beta_defaults_applied = apply_beta_build_defaults();
     let platform_type =
         std::env::var("RHYTHM_PLATFORM_TYPE").unwrap_or_else(|_| "appliance".to_string());
     let platform_context =
@@ -54,6 +80,12 @@ fn main() -> Result<()> {
     logging::init_native_logging(&args.log_level)?;
 
     info!(target: "sys", "Rhythm Linux Appliance v{} starting...", VERSION);
+    if beta_defaults_applied {
+        info!(
+            target: "sys",
+            "Applied beta appliance defaults: Matter device attestation bypass enabled"
+        );
+    }
 
     std::fs::create_dir_all(&args.data_dir)?;
 
@@ -165,7 +197,7 @@ fn main() -> Result<()> {
         std::thread::Builder::new()
             .name("periodic".to_string())
             .spawn(move || {
-                rhythm_os::periodic::run_periodic_loop(periodic_state, None::<fn()>);
+                run_periodic_when_wifi_ready(periodic_state);
             })
             .expect("Failed to spawn periodic thread");
     }
@@ -254,6 +286,12 @@ enum StartupWifiRestoreAction {
     RestorePersistedCredentials,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PeriodicStartupAction {
+    StartImmediately,
+    WaitForWifi,
+}
+
 fn startup_wifi_restore_action(
     has_stored_credentials: bool,
     has_active_connection: bool,
@@ -265,6 +303,36 @@ fn startup_wifi_restore_action(
     } else {
         StartupWifiRestoreAction::RestorePersistedCredentials
     }
+}
+
+fn periodic_startup_action(has_active_connection: bool) -> PeriodicStartupAction {
+    if has_active_connection {
+        PeriodicStartupAction::StartImmediately
+    } else {
+        PeriodicStartupAction::WaitForWifi
+    }
+}
+
+fn run_periodic_when_wifi_ready(state: SharedState) {
+    if periodic_startup_action(wifi::has_active_connection()) == PeriodicStartupAction::WaitForWifi
+    {
+        info!(
+            target: "sys",
+            "Delaying periodic loop start until appliance has an active Wi-Fi IP"
+        );
+        loop {
+            if wifi::has_active_connection() {
+                info!(
+                    target: "sys",
+                    "Active Wi-Fi IP detected; starting periodic loop"
+                );
+                break;
+            }
+            std::thread::sleep(PERIODIC_WIFI_WAIT_POLL_INTERVAL);
+        }
+    }
+
+    rhythm_os::periodic::run_periodic_loop(state, None::<fn()>);
 }
 
 fn hydrate_persisted_wifi_credentials(state: &SharedState) {
@@ -432,8 +500,9 @@ fn extract_serial_suffix(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_serial_suffix, startup_wifi_restore_action, StartupWifiRestoreAction,
-        STARTUP_WIFI_RESTORE_TIMEOUT,
+        beta_build_enables_matter_attestation_bypass, extract_serial_suffix,
+        periodic_startup_action, startup_wifi_restore_action, PeriodicStartupAction,
+        StartupWifiRestoreAction, STARTUP_WIFI_RESTORE_TIMEOUT,
     };
 
     #[test]
@@ -499,5 +568,34 @@ mod tests {
             StartupWifiRestoreAction::RestorePersistedCredentials
         );
         assert_eq!(STARTUP_WIFI_RESTORE_TIMEOUT.as_secs(), 30);
+    }
+
+    #[test]
+    fn periodic_startup_starts_immediately_when_wifi_is_connected() {
+        assert_eq!(
+            periodic_startup_action(true),
+            PeriodicStartupAction::StartImmediately
+        );
+    }
+
+    #[test]
+    fn periodic_startup_waits_for_wifi_when_disconnected() {
+        assert_eq!(
+            periodic_startup_action(false),
+            PeriodicStartupAction::WaitForWifi
+        );
+    }
+
+    #[test]
+    fn beta_builds_enable_matter_attestation_bypass_defaults() {
+        assert!(beta_build_enables_matter_attestation_bypass("0.4.160-beta"));
+        assert!(beta_build_enables_matter_attestation_bypass(
+            "0.4.160-beta.dev.5.gabcdef"
+        ));
+    }
+
+    #[test]
+    fn stable_builds_do_not_enable_matter_attestation_bypass_defaults() {
+        assert!(!beta_build_enables_matter_attestation_bypass("0.4.160"));
     }
 }

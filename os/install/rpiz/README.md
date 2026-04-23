@@ -126,6 +126,10 @@ gh workflow run rpiz-image.yml -f tag=v0.5.0   # attaches to an existing release
 gh workflow run rpiz-image.yml                 # artifact-only rebuild from current branch
 ```
 
+`rpiz-image.yml` now matches the tag flavor when it builds the rootfs: `*-beta`
+tags keep the bring-up image defaults (`RHYTHM_DEV_MODE=1`, Matter device
+attestation bypass enabled), while stable tags build the production image.
+
 ### Refreshing the builder image
 
 The `dtconcepts/rhythm-rpiz-builder` image is content-addressed: its tag is a hash of the baked inputs (CHIP source + prebuilts, ARMv6 musl toolchain, Buildroot checkout + defconfig/fragments/overlays, Dockerfile, packaging script). Most app-code changes don't touch any of those, so most releases don't rebuild the image.
