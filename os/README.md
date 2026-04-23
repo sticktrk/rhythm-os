@@ -57,7 +57,7 @@ Rhythm OS exposes a complete REST API for managing lights, rooms, and curves. Al
 |----------|-----------|-------------|
 | **State** | `GET /api/state`, `GET /api/nodes/state` | Full snapshot or lightweight node state |
 | **Events** | `GET /api/events` | SSE stream (room state, motion, hub status, config changes) |
-| **Share Bundle** | `GET /api/share-bundle`, `PUT /api/share-bundle`, `GET /api/share-bundle/factory-default`, `POST /api/share-bundle/reset` | Share day/sleep profiles, transitions, and other non-house-specific lighting behavior |
+| **Profile Bundle** | `GET /api/profile-bundle`, `PUT /api/profile-bundle`, `GET /api/profile-bundle/factory-default`, `POST /api/profile-bundle/reset` | Export/import the current portable profile bundle: profiles, transitions, and power-save |
 | **Backup** | `GET /api/backup`, `PUT /api/backup` | Full installation backup/restore including topology and installation metadata |
 | **Factory Reset** | `POST /api/factory-reset` | Clear installation state and restore shipped defaults |
 | **Nodes** | `PUT /api/nodes/action`, `PUT /api/nodes/brightness`, `PUT /api/nodes/offset`, `PUT /api/nodes/preferences`, `POST /api/nodes/fix` | Control live nodes and room/device preferences |

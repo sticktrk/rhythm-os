@@ -1,7 +1,7 @@
-//! Share-bundle and backup bundle schemas.
+//! Profile-bundle and backup bundle schemas.
 //!
-//! `ShareBundle` is the portable format for sharing lighting behavior with
-//! other users.
+//! `ProfileBundle` is the portable format for a user's active portable profile
+//! settings.
 //! `BackupBundle` captures installation-specific state for restore workflows.
 
 use rhythm_core::{
@@ -26,22 +26,22 @@ fn default_schema_version() -> u32 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BundleKind {
-    #[serde(alias = "configuration_bundle")]
-    ShareBundle,
+    #[serde(alias = "share_bundle", alias = "configuration_bundle")]
+    ProfileBundle,
     BackupBundle,
 }
 
-fn default_share_bundle_kind() -> BundleKind {
-    BundleKind::ShareBundle
+fn default_profile_bundle_kind() -> BundleKind {
+    BundleKind::ProfileBundle
 }
 
 fn default_backup_bundle_kind() -> BundleKind {
     BundleKind::BackupBundle
 }
 
-/// Portable lighting behavior that can be shared across installations.
+/// Portable lighting behavior captured in the profile bundle.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ShareConfiguration {
+pub struct ProfileBundleData {
     #[serde(default)]
     pub power_save: bool,
     #[serde(default)]
@@ -50,39 +50,39 @@ pub struct ShareConfiguration {
     pub mode_transitions: Vec<ModeTransitionConfig>,
 }
 
-/// Shareable top-level bundle.
+/// Portable top-level profile bundle.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ShareBundle {
+pub struct ProfileBundle {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
-    #[serde(default = "default_share_bundle_kind")]
+    #[serde(default = "default_profile_bundle_kind")]
     pub kind: BundleKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(alias = "configuration")]
-    pub share: ShareConfiguration,
+    #[serde(alias = "share", alias = "configuration")]
+    pub profile: ProfileBundleData,
 }
 
-/// Import accepts either a full share bundle or a bare share payload.
+/// Import accepts either a full profile bundle or a bare profile payload.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
-pub enum ShareImportPayload {
-    Bundle(ShareBundle),
-    Share(ShareConfiguration),
+pub enum ProfileBundleImportPayload {
+    Bundle(ProfileBundle),
+    Profile(ProfileBundleData),
 }
 
-impl ShareImportPayload {
-    pub fn into_bundle(self) -> ShareBundle {
+impl ProfileBundleImportPayload {
+    pub fn into_bundle(self) -> ProfileBundle {
         match self {
             Self::Bundle(bundle) => bundle,
-            Self::Share(share) => ShareBundle {
+            Self::Profile(profile) => ProfileBundle {
                 schema_version: BUNDLE_SCHEMA_VERSION,
-                kind: BundleKind::ShareBundle,
+                kind: BundleKind::ProfileBundle,
                 name: None,
                 description: None,
-                share,
+                profile,
             },
         }
     }

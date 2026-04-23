@@ -1,4 +1,4 @@
-//! Factory-default developer-owned share bundle.
+//! Factory-default developer-owned profile bundle.
 //!
 //! The server defaults live in a checked-in JSON bundle so developers
 //! can tune shipped lighting behavior without editing Rust code. Runtime and
@@ -15,40 +15,40 @@ use rhythm_core::{
     RhythmMode, DAY_IDLE_PROFILE_ID, RHYTHM_PROFILE_ID, SLEEP_IDLE_PROFILE_ID, SLEEP_PROFILE_ID,
 };
 
-use crate::bundle::{BundleKind, ShareBundle, BUNDLE_SCHEMA_VERSION};
+use crate::bundle::{BundleKind, ProfileBundle, BUNDLE_SCHEMA_VERSION};
 
-const FACTORY_DEFAULT_SHARE_JSON: &str =
-    include_str!("../config/factory-default/default_share_bundle.json");
+const FACTORY_DEFAULT_PROFILE_BUNDLE_JSON: &str =
+    include_str!("../config/factory-default/default_profile_bundle.json");
 
-static FACTORY_DEFAULT_SHARE_BUNDLE: OnceLock<ShareBundle> = OnceLock::new();
+static FACTORY_DEFAULT_PROFILE_BUNDLE: OnceLock<ProfileBundle> = OnceLock::new();
 static FACTORY_DEFAULT_LIGHT_PROFILE_CONFIGS: OnceLock<BTreeMap<String, LightProfileConfig>> =
     OnceLock::new();
 static FACTORY_DEFAULT_MODE_CONFIGS: OnceLock<BTreeMap<RhythmMode, ModeConfig>> = OnceLock::new();
 static FACTORY_DEFAULT_MODE_TRANSITIONS: OnceLock<Vec<ModeTransitionConfig>> = OnceLock::new();
 
-fn parse_factory_default_share_bundle() -> Result<ShareBundle> {
-    let bundle: ShareBundle = serde_json::from_str(FACTORY_DEFAULT_SHARE_JSON)
-        .context("failed to parse factory-default share bundle JSON")?;
+fn parse_factory_default_profile_bundle() -> Result<ProfileBundle> {
+    let bundle: ProfileBundle = serde_json::from_str(FACTORY_DEFAULT_PROFILE_BUNDLE_JSON)
+        .context("failed to parse factory-default profile bundle JSON")?;
 
     if bundle.schema_version != BUNDLE_SCHEMA_VERSION {
         return Err(anyhow!(
-            "factory-default share bundle schema_version {} does not match supported schema {}",
+            "factory-default profile bundle schema_version {} does not match supported schema {}",
             bundle.schema_version,
             BUNDLE_SCHEMA_VERSION
         ));
     }
 
-    if bundle.kind != BundleKind::ShareBundle {
+    if bundle.kind != BundleKind::ProfileBundle {
         return Err(anyhow!(
-            "factory-default share bundle must use kind=share_bundle"
+            "factory-default profile bundle must use kind=profile_bundle"
         ));
     }
 
     let mut seen_ids = std::collections::HashSet::new();
-    for profile in &bundle.share.profiles {
+    for profile in &bundle.profile.profiles {
         if !seen_ids.insert(profile.id.clone()) {
             return Err(anyhow!(
-                "factory-default share bundle defines duplicate profile id '{}'",
+                "factory-default profile bundle defines duplicate profile id '{}'",
                 profile.id
             ));
         }
@@ -62,7 +62,7 @@ fn parse_factory_default_share_bundle() -> Result<ShareBundle> {
     ] {
         if !seen_ids.contains(required_id) {
             return Err(anyhow!(
-                "factory-default share bundle is missing required profile '{}'",
+                "factory-default profile bundle is missing required profile '{}'",
                 required_id
             ));
         }
@@ -71,10 +71,10 @@ fn parse_factory_default_share_bundle() -> Result<ShareBundle> {
     Ok(bundle)
 }
 
-fn factory_default_share_bundle_ref() -> &'static ShareBundle {
-    FACTORY_DEFAULT_SHARE_BUNDLE.get_or_init(|| {
-        parse_factory_default_share_bundle().unwrap_or_else(|e| {
-            panic!("invalid factory-default share bundle: {e:#}");
+fn factory_default_profile_bundle_ref() -> &'static ProfileBundle {
+    FACTORY_DEFAULT_PROFILE_BUNDLE.get_or_init(|| {
+        parse_factory_default_profile_bundle().unwrap_or_else(|e| {
+            panic!("invalid factory-default profile bundle: {e:#}");
         })
     })
 }
@@ -82,7 +82,11 @@ fn factory_default_share_bundle_ref() -> &'static ShareBundle {
 fn factory_default_light_profile_configs_ref() -> &'static BTreeMap<String, LightProfileConfig> {
     FACTORY_DEFAULT_LIGHT_PROFILE_CONFIGS.get_or_init(|| {
         let mut configs = BTreeMap::new();
-        for mut profile in factory_default_share_bundle_ref().share.profiles.clone() {
+        for mut profile in factory_default_profile_bundle_ref()
+            .profile
+            .profiles
+            .clone()
+        {
             normalize_builtin_state_profile_config(&mut profile);
             configs.insert(profile.id.clone(), profile);
         }
@@ -114,12 +118,12 @@ fn factory_default_resolved_active_profile_id_for_mode(mode: RhythmMode) -> Stri
     }
 }
 
-pub fn factory_default_share_bundle() -> ShareBundle {
-    factory_default_share_bundle_ref().clone()
+pub fn factory_default_profile_bundle() -> ProfileBundle {
+    factory_default_profile_bundle_ref().clone()
 }
 
 pub fn factory_default_power_save() -> bool {
-    factory_default_share_bundle_ref().share.power_save
+    factory_default_profile_bundle_ref().profile.power_save
 }
 
 pub fn factory_default_active_mode() -> RhythmMode {
@@ -142,8 +146,8 @@ pub fn factory_default_mode_transition_configs() -> Vec<ModeTransitionConfig> {
     FACTORY_DEFAULT_MODE_TRANSITIONS
         .get_or_init(|| {
             normalize_mode_transition_configs(
-                factory_default_share_bundle_ref()
-                    .share
+                factory_default_profile_bundle_ref()
+                    .profile
                     .mode_transitions
                     .clone(),
             )
@@ -180,11 +184,11 @@ mod tests {
     use rhythm_core::{ModeTransitionTrigger, TimerSetting};
 
     #[test]
-    fn factory_default_share_bundle_exposes_expected_defaults() {
+    fn factory_default_profile_bundle_exposes_expected_defaults() {
         assert_eq!(factory_default_active_mode(), RhythmMode::Day);
         assert!(!factory_default_power_save());
 
-        let bundle = factory_default_share_bundle();
+        let bundle = factory_default_profile_bundle();
         assert_eq!(bundle.name.as_deref(), Some("Factory Default"));
 
         let profiles = factory_default_light_profile_config_map();

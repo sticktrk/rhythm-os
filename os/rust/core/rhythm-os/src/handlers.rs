@@ -263,36 +263,37 @@ pub fn handle_get_state(state: &SharedState) -> ApiResponse {
     }
 }
 
-pub fn handle_get_share_bundle(state: &SharedState) -> ApiResponse {
-    match commands::build_share_bundle(state) {
+pub fn handle_get_profile_bundle(state: &SharedState) -> ApiResponse {
+    match commands::build_profile_bundle(state) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
     }
 }
 
-pub fn handle_put_share_bundle(state: &SharedState, body: &Value) -> ApiResponse {
-    let payload: crate::bundle::ShareImportPayload = match serde_json::from_value(body.clone()) {
-        Ok(payload) => payload,
-        Err(e) => {
-            return ApiResponse::bad_request(&format!("Invalid share bundle: {}", e));
-        }
-    };
+pub fn handle_put_profile_bundle(state: &SharedState, body: &Value) -> ApiResponse {
+    let payload: crate::bundle::ProfileBundleImportPayload =
+        match serde_json::from_value(body.clone()) {
+            Ok(payload) => payload,
+            Err(e) => {
+                return ApiResponse::bad_request(&format!("Invalid profile bundle: {}", e));
+            }
+        };
 
-    match commands::do_share_bundle_import(state, payload) {
+    match commands::do_profile_bundle_import(state, payload) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::bad_request(&e.to_string()),
     }
 }
 
-pub fn handle_get_factory_default_share_bundle() -> ApiResponse {
-    match commands::build_factory_default_share_bundle() {
+pub fn handle_get_factory_default_profile_bundle() -> ApiResponse {
+    match commands::build_factory_default_profile_bundle() {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
     }
 }
 
-pub fn handle_post_share_bundle_reset(state: &SharedState) -> ApiResponse {
-    match commands::do_share_bundle_reset(state) {
+pub fn handle_post_profile_bundle_reset(state: &SharedState) -> ApiResponse {
+    match commands::do_profile_bundle_reset(state) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::bad_request(&e.to_string()),
     }
@@ -1662,7 +1663,7 @@ mod tests {
     use crate::canonical::identity::{DiscoveredIdentity, HardwareId, HubKey};
     use crate::canonical::registry::ResolveResult;
     use crate::factory_default_config::{
-        factory_default_light_profile_config, factory_default_share_bundle,
+        factory_default_light_profile_config, factory_default_profile_bundle,
     };
     use crate::hub::{ActiveHub, HubType};
     use crate::pairing::{PairingStatus, UnpairingRequest, UnpairingResult};
@@ -2232,27 +2233,32 @@ mod tests {
     }
 
     #[test]
-    fn get_factory_default_share_bundle_returns_factory_default_bundle() {
-        let r = handle_get_factory_default_share_bundle();
+    fn get_factory_default_profile_bundle_returns_factory_default_bundle() {
+        let r = handle_get_factory_default_profile_bundle();
         assert_eq!(r.status, 200);
-        let parsed: crate::bundle::ShareBundle = serde_json::from_str(&r.body).unwrap();
+        let parsed: crate::bundle::ProfileBundle = serde_json::from_str(&r.body).unwrap();
         assert_eq!(
             parsed.name.as_deref(),
-            Some(factory_default_share_bundle().name.as_deref().unwrap_or(""))
+            Some(
+                factory_default_profile_bundle()
+                    .name
+                    .as_deref()
+                    .unwrap_or("")
+            )
         );
         assert_eq!(
-            parsed.share.profiles,
-            factory_default_share_bundle().share.profiles
+            parsed.profile.profiles,
+            factory_default_profile_bundle().profile.profiles
         );
     }
 
     #[test]
-    fn post_share_bundle_reset_restores_factory_default_bundle() {
+    fn post_profile_bundle_reset_restores_factory_default_bundle() {
         let state = handler_state_with_runtime();
-        let _ = handle_put_share_bundle(
+        let _ = handle_put_profile_bundle(
             &state,
             &json!({
-                "share": {
+                "profile": {
                     "power_save": true,
                     "profiles": [{
                         "id": "focus",
@@ -2269,18 +2275,21 @@ mod tests {
             }),
         );
 
-        let r = handle_post_share_bundle_reset(&state);
+        let r = handle_post_profile_bundle_reset(&state);
         assert_eq!(r.status, 200);
-        let parsed: crate::bundle::ShareBundle = serde_json::from_str(&r.body).unwrap();
-        let factory_default = factory_default_share_bundle();
-        let mut parsed_profiles = parsed.share.profiles.clone();
+        let parsed: crate::bundle::ProfileBundle = serde_json::from_str(&r.body).unwrap();
+        let factory_default = factory_default_profile_bundle();
+        let mut parsed_profiles = parsed.profile.profiles.clone();
         parsed_profiles.sort_by(|left, right| left.id.cmp(&right.id));
-        let mut expected_profiles = factory_default.share.profiles.clone();
+        let mut expected_profiles = factory_default.profile.profiles.clone();
         expected_profiles.sort_by(|left, right| left.id.cmp(&right.id));
-        assert_eq!(parsed.share.power_save, factory_default.share.power_save);
         assert_eq!(
-            parsed.share.mode_transitions,
-            factory_default.share.mode_transitions
+            parsed.profile.power_save,
+            factory_default.profile.power_save
+        );
+        assert_eq!(
+            parsed.profile.mode_transitions,
+            factory_default.profile.mode_transitions
         );
         assert_eq!(parsed_profiles, expected_profiles);
     }

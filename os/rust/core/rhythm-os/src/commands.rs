@@ -30,15 +30,15 @@ use crate::api_types::{
 };
 use crate::bundle::{
     BackupBundle, BackupConfiguration, BackupConfigurationRoom, BackupHubCredentials,
-    BackupHubRegistry, BackupInstallation, BackupRuntimeState, ShareBundle, ShareConfiguration,
-    ShareImportPayload, BUNDLE_SCHEMA_VERSION,
+    BackupHubRegistry, BackupInstallation, BackupRuntimeState, ProfileBundle, ProfileBundleData,
+    ProfileBundleImportPayload, BUNDLE_SCHEMA_VERSION,
 };
 use crate::canonical::identity::HubKey;
 use crate::factory_default_config::{
     factory_default_active_mode, factory_default_active_profile_config_for_mode,
     factory_default_idle_profile_config_for_mode, factory_default_light_profile_config_map,
     factory_default_mode_config_map, factory_default_mode_transition_configs,
-    factory_default_power_save, factory_default_share_bundle,
+    factory_default_power_save, factory_default_profile_bundle,
 };
 use crate::state::{rooms_from_engine, AppState, SharedState};
 use crate::storage::StoredLocation;
@@ -2192,8 +2192,8 @@ fn room_manager_for_export(state: &SharedState) -> rhythm_core::RoomManager {
     merged
 }
 
-fn share_configuration_from_state(s: &AppState) -> ShareConfiguration {
-    ShareConfiguration {
+fn profile_bundle_data_from_state(s: &AppState) -> ProfileBundleData {
+    ProfileBundleData {
         power_save: s.power_save,
         profiles: s.light_profile_configs.values().cloned().collect(),
         mode_transitions: s.mode_transition_configs(),
@@ -2245,34 +2245,34 @@ fn backup_hub_credentials_from_state(
     }
 }
 
-pub fn build_share_bundle_dto(state: &SharedState) -> Result<ShareBundle> {
+pub fn build_profile_bundle_dto(state: &SharedState) -> Result<ProfileBundle> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
-    Ok(ShareBundle {
+    Ok(ProfileBundle {
         schema_version: BUNDLE_SCHEMA_VERSION,
-        kind: crate::bundle::BundleKind::ShareBundle,
+        kind: crate::bundle::BundleKind::ProfileBundle,
         name: None,
         description: None,
-        share: share_configuration_from_state(&s),
+        profile: profile_bundle_data_from_state(&s),
     })
 }
 
-pub fn build_share_bundle(state: &SharedState) -> Result<String> {
-    let bundle = build_share_bundle_dto(state)?;
-    serialize_share_bundle(&bundle)
+pub fn build_profile_bundle(state: &SharedState) -> Result<String> {
+    let bundle = build_profile_bundle_dto(state)?;
+    serialize_profile_bundle(&bundle)
 }
 
-fn serialize_share_bundle(bundle: &ShareBundle) -> Result<String> {
+fn serialize_profile_bundle(bundle: &ProfileBundle) -> Result<String> {
     serde_json::to_string_pretty(bundle)
-        .map_err(|e| anyhow::anyhow!("serialize share bundle: {}", e))
+        .map_err(|e| anyhow::anyhow!("serialize profile bundle: {}", e))
 }
 
-pub fn build_factory_default_share_bundle_dto() -> ShareBundle {
-    factory_default_share_bundle()
+pub fn build_factory_default_profile_bundle_dto() -> ProfileBundle {
+    factory_default_profile_bundle()
 }
 
-pub fn build_factory_default_share_bundle() -> Result<String> {
-    serialize_share_bundle(&build_factory_default_share_bundle_dto())
+pub fn build_factory_default_profile_bundle() -> Result<String> {
+    serialize_profile_bundle(&build_factory_default_profile_bundle_dto())
 }
 
 fn clear_factory_reset_storage(state: &SharedState) -> Result<()> {
@@ -2337,13 +2337,13 @@ pub fn do_factory_reset(state: &SharedState) -> Result<String> {
     apply_backup_configuration(state, factory_default_backup_configuration())?;
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
 
-    build_share_bundle(state)
+    build_profile_bundle(state)
 }
 
-pub fn do_share_bundle_reset(state: &SharedState) -> Result<String> {
-    do_share_bundle_import(
+pub fn do_profile_bundle_reset(state: &SharedState) -> Result<String> {
+    do_profile_bundle_import(
         state,
-        ShareImportPayload::Bundle(factory_default_share_bundle()),
+        ProfileBundleImportPayload::Bundle(factory_default_profile_bundle()),
     )
 }
 
@@ -3821,20 +3821,23 @@ fn apply_backup_configuration_room_preferences(
     (applied_rooms, skipped_rooms)
 }
 
-pub fn do_share_bundle_import(state: &SharedState, payload: ShareImportPayload) -> Result<String> {
+pub fn do_profile_bundle_import(
+    state: &SharedState,
+    payload: ProfileBundleImportPayload,
+) -> Result<String> {
     let bundle = payload.into_bundle();
     if bundle.schema_version != BUNDLE_SCHEMA_VERSION {
         return Err(anyhow::anyhow!(
-            "Unsupported share bundle schema version: {}",
+            "Unsupported profile bundle schema version: {}",
             bundle.schema_version
         ));
     }
 
-    let share = bundle.share;
+    let profile = bundle.profile;
 
-    let imported_profiles = share.profiles;
-    let imported_power_save = share.power_save;
-    let imported_mode_transitions = share.mode_transitions;
+    let imported_profiles = profile.profiles;
+    let imported_power_save = profile.power_save;
+    let imported_mode_transitions = profile.mode_transitions;
 
     let (profiles_to_apply, runtimes) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -3857,7 +3860,7 @@ pub fn do_share_bundle_import(state: &SharedState, payload: ShareImportPayload) 
             if let Err(e) = runtime.set_light_profile_config(profile.clone()) {
                 warn!(
                     target: "cmd",
-                    "share_bundle_import: failed to update runtime profile '{}': {}",
+                    "profile_bundle_import: failed to update runtime profile '{}': {}",
                     profile.id,
                     e
                 );
@@ -3877,7 +3880,7 @@ pub fn do_share_bundle_import(state: &SharedState, payload: ShareImportPayload) 
 
     info!(
         target: "cmd",
-        "share_bundle_import: profiles={} transitions={}",
+        "profile_bundle_import: profiles={} transitions={}",
         profiles_to_apply.len(),
         state
             .lock()
@@ -3888,7 +3891,7 @@ pub fn do_share_bundle_import(state: &SharedState, payload: ShareImportPayload) 
 
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
 
-    build_share_bundle(state)
+    build_profile_bundle(state)
 }
 
 fn apply_backup_configuration(
@@ -7283,12 +7286,13 @@ mod tests {
     use super::*;
     use crate::bundle::{
         BackupBundle, BackupConfiguration, BackupHubCredentials, BackupInstallation,
-        BackupRuntimeState, BundleKind, ShareBundle, ShareConfiguration, ShareImportPayload,
+        BackupRuntimeState, BundleKind, ProfileBundle, ProfileBundleData,
+        ProfileBundleImportPayload,
     };
     use crate::factory_default_config::{
         factory_default_active_mode, factory_default_light_profile_config,
         factory_default_mode_transition_configs, factory_default_power_save,
-        factory_default_share_bundle,
+        factory_default_profile_bundle,
     };
     use crate::hub::{ActiveHub, HubCredentials, HubProvider, HubType};
     use crate::state::{AppState, MotionSnapshot};
@@ -8886,46 +8890,46 @@ mod tests {
     }
 
     #[test]
-    fn build_share_bundle_dto_exports_fresh_state_defaults() {
+    fn build_profile_bundle_dto_exports_fresh_state_defaults() {
         let (state, _rt) = setup_state(vec![]);
 
-        let bundle = build_share_bundle_dto(&state).unwrap();
+        let bundle = build_profile_bundle_dto(&state).unwrap();
         let s = state.lock().unwrap();
 
         assert_eq!(bundle.schema_version, BUNDLE_SCHEMA_VERSION);
-        assert_eq!(bundle.kind, BundleKind::ShareBundle);
-        assert_eq!(bundle.share.power_save, factory_default_power_save());
+        assert_eq!(bundle.kind, BundleKind::ProfileBundle);
+        assert_eq!(bundle.profile.power_save, factory_default_power_save());
         assert_eq!(
-            bundle.share.profiles,
+            bundle.profile.profiles,
             s.light_profile_configs
                 .values()
                 .cloned()
                 .collect::<Vec<_>>()
         );
         assert_eq!(
-            bundle.share.mode_transitions,
+            bundle.profile.mode_transitions,
             factory_default_mode_transition_configs()
         );
     }
 
     #[test]
-    fn build_factory_default_share_bundle_matches_factory_default_source() {
-        let bundle = build_factory_default_share_bundle_dto();
-        let expected = factory_default_share_bundle();
+    fn build_factory_default_profile_bundle_matches_factory_default_source() {
+        let bundle = build_factory_default_profile_bundle_dto();
+        let expected = factory_default_profile_bundle();
         assert_eq!(bundle.schema_version, expected.schema_version);
         assert_eq!(bundle.kind, expected.kind);
         assert_eq!(bundle.name, expected.name);
         assert_eq!(bundle.description, expected.description);
-        assert_eq!(bundle.share.power_save, expected.share.power_save);
-        assert_eq!(bundle.share.profiles, expected.share.profiles);
+        assert_eq!(bundle.profile.power_save, expected.profile.power_save);
+        assert_eq!(bundle.profile.profiles, expected.profile.profiles);
         assert_eq!(
-            bundle.share.mode_transitions,
-            expected.share.mode_transitions
+            bundle.profile.mode_transitions,
+            expected.profile.mode_transitions
         );
     }
 
     #[test]
-    fn share_bundle_import_applies_profiles_power_save_and_transitions() {
+    fn profile_bundle_import_applies_profiles_power_save_and_transitions() {
         let (state, runtime) = setup_state(vec![make_snapshot("local-office", false, false)]);
         let focus = make_focus_profile();
         let transition =
@@ -8934,20 +8938,20 @@ mod tests {
                 .with_label("Custom Day to Sleep")
                 .with_trigger(ModeTransitionTrigger::Sunset);
 
-        let payload = ShareImportPayload::Bundle(ShareBundle {
+        let payload = ProfileBundleImportPayload::Bundle(ProfileBundle {
             schema_version: BUNDLE_SCHEMA_VERSION,
-            kind: BundleKind::ShareBundle,
-            name: Some("Shared Setup".into()),
-            description: Some("Portable share bundle".into()),
-            share: ShareConfiguration {
+            kind: BundleKind::ProfileBundle,
+            name: Some("Current Profiles".into()),
+            description: Some("Portable profile bundle".into()),
+            profile: ProfileBundleData {
                 power_save: true,
                 profiles: vec![focus.clone()],
                 mode_transitions: vec![transition.clone()],
             },
         });
 
-        let json = do_share_bundle_import(&state, payload).unwrap();
-        let exported: ShareBundle = serde_json::from_str(&json).unwrap();
+        let json = do_profile_bundle_import(&state, payload).unwrap();
+        let exported: ProfileBundle = serde_json::from_str(&json).unwrap();
         let s = state.lock().unwrap();
 
         assert!(s.power_save);
@@ -8964,25 +8968,25 @@ mod tests {
             "runtime should receive imported custom profile config"
         );
 
-        assert_eq!(exported.kind, BundleKind::ShareBundle);
-        assert!(exported.share.power_save);
-        assert_eq!(exported.share.mode_transitions, vec![transition]);
-        assert_eq!(exported.share.profiles.len(), 5);
+        assert_eq!(exported.kind, BundleKind::ProfileBundle);
+        assert!(exported.profile.power_save);
+        assert_eq!(exported.profile.mode_transitions, vec![transition]);
+        assert_eq!(exported.profile.profiles.len(), 5);
         assert!(exported
-            .share
+            .profile
             .profiles
             .iter()
             .any(|profile| profile.id == "focus"));
     }
 
     #[test]
-    fn share_bundle_import_accepts_legacy_configuration_payload_shape() {
+    fn profile_bundle_import_accepts_legacy_bundle_shapes() {
         let (state, _rt) = setup_state(vec![]);
         let focus = make_focus_profile();
 
-        let json = do_share_bundle_import(
+        let json = do_profile_bundle_import(
             &state,
-            serde_json::from_value::<ShareImportPayload>(serde_json::json!({
+            serde_json::from_value::<ProfileBundleImportPayload>(serde_json::json!({
                 "schema_version": BUNDLE_SCHEMA_VERSION,
                 "kind": "configuration_bundle",
                 "name": "Legacy",
@@ -8997,11 +9001,11 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let exported: ShareBundle = serde_json::from_str(&json).unwrap();
+        let exported: ProfileBundle = serde_json::from_str(&json).unwrap();
 
-        assert!(exported.share.power_save);
+        assert!(exported.profile.power_save);
         assert!(exported
-            .share
+            .profile
             .profiles
             .iter()
             .any(|profile| profile.id == "focus"));
@@ -9940,12 +9944,12 @@ mod tests {
     }
 
     #[test]
-    fn share_bundle_reset_restores_factory_default_share_bundle() {
+    fn profile_bundle_reset_restores_factory_default_profile_bundle() {
         let (state, _rt) = setup_state(vec![]);
         let focus = make_focus_profile();
-        do_share_bundle_import(
+        do_profile_bundle_import(
             &state,
-            ShareImportPayload::Share(ShareConfiguration {
+            ProfileBundleImportPayload::Profile(ProfileBundleData {
                 power_save: true,
                 profiles: vec![focus],
                 mode_transitions: vec![],
@@ -9953,19 +9957,19 @@ mod tests {
         )
         .unwrap();
 
-        let json = do_share_bundle_reset(&state).unwrap();
-        let reset_bundle: ShareBundle = serde_json::from_str(&json).unwrap();
-        let expected = factory_default_share_bundle();
-        let mut reset_profiles = reset_bundle.share.profiles.clone();
+        let json = do_profile_bundle_reset(&state).unwrap();
+        let reset_bundle: ProfileBundle = serde_json::from_str(&json).unwrap();
+        let expected = factory_default_profile_bundle();
+        let mut reset_profiles = reset_bundle.profile.profiles.clone();
         reset_profiles.sort_by(|left, right| left.id.cmp(&right.id));
-        let mut expected_profiles = expected.share.profiles.clone();
+        let mut expected_profiles = expected.profile.profiles.clone();
         expected_profiles.sort_by(|left, right| left.id.cmp(&right.id));
 
-        assert_eq!(reset_bundle.share.power_save, expected.share.power_save);
+        assert_eq!(reset_bundle.profile.power_save, expected.profile.power_save);
         assert_eq!(reset_profiles, expected_profiles);
         assert_eq!(
-            reset_bundle.share.mode_transitions,
-            expected.share.mode_transitions
+            reset_bundle.profile.mode_transitions,
+            expected.profile.mode_transitions
         );
     }
 
@@ -10032,9 +10036,9 @@ mod tests {
         }
 
         let json = do_factory_reset(&state).unwrap();
-        let reset_bundle: ShareBundle = serde_json::from_str(&json).unwrap();
+        let reset_bundle: ProfileBundle = serde_json::from_str(&json).unwrap();
         assert!(reset_bundle
-            .share
+            .profile
             .profiles
             .iter()
             .any(|profile| profile.id == "rhythm"));
