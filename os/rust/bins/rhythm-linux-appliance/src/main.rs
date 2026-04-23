@@ -25,8 +25,7 @@ const VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
 };
-const RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV: &str =
-    "RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION";
+const RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV: &str = "RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION";
 const STARTUP_WIFI_RESTORE_TIMEOUT: Duration = Duration::from_secs(30);
 const PERIODIC_WIFI_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 

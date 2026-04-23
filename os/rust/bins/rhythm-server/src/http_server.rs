@@ -104,11 +104,37 @@ fn tar_gz_attachment(filename: &str, body: Vec<u8>) -> Response {
 // ---------------------------------------------------------------------------
 
 async fn debug_bundle(State(state): State<SharedState>) -> Response {
+    let started_at = std::time::Instant::now();
     match tokio::task::spawn_blocking(move || crate::debug_bundle::build_debug_bundle(&state)).await
     {
-        Ok(Ok(bundle)) => tar_gz_attachment(&bundle.file_name, bundle.bytes),
-        Ok(Err(e)) => err_500(e),
-        Err(e) => err_500(e),
+        Ok(Ok(bundle)) => {
+            log::info!(
+                target: "http",
+                "Generated debug bundle {} ({} bytes) in {} ms",
+                bundle.file_name,
+                bundle.bytes.len(),
+                started_at.elapsed().as_millis()
+            );
+            tar_gz_attachment(&bundle.file_name, bundle.bytes)
+        }
+        Ok(Err(e)) => {
+            log::error!(
+                target: "http",
+                "Debug bundle generation failed after {} ms: {}",
+                started_at.elapsed().as_millis(),
+                e
+            );
+            err_500(e)
+        }
+        Err(e) => {
+            log::error!(
+                target: "http",
+                "Debug bundle worker join failed after {} ms: {}",
+                started_at.elapsed().as_millis(),
+                e
+            );
+            err_500(e)
+        }
     }
 }
 
