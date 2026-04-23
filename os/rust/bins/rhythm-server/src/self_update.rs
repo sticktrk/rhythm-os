@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tar::Archive;
 
+use crate::bootstate;
+
 const DEFAULT_UPDATE_BASE_URL: &str = "https://dl.rhythm.lighting/server";
 const APPLIANCE_INSTALL_PATH: &str = "/usr/bin/rhythm-server";
 const APPLIANCE_BOOT_MOUNT: &str = "/boot";
@@ -27,6 +29,7 @@ const APPLIANCE_OTA_STAGING_DIR: &str = "/data/ota";
 const APPLIANCE_CMDLINE_PATH: &str = "/boot/cmdline.txt";
 const APPLIANCE_CMDLINE_BACKUP_PATH: &str = "/boot/cmdline.txt.bak";
 const APPLIANCE_BOOT_STATE_PATH: &str = "/boot/rhythm-bootstate.env";
+const APPLIANCE_BOOT_STATE_BACKUP_PATH: &str = "/boot/rhythm-bootstate.env.bak";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RestartStrategy {
@@ -854,20 +857,37 @@ fn write_appliance_boot_state(
         current_version,
         now_ms()
     );
-    fs::write(APPLIANCE_BOOT_STATE_PATH, body)
-        .map_err(|e| format!("Failed to write {}: {}", APPLIANCE_BOOT_STATE_PATH, e))
+    bootstate::write_with_backup(
+        Path::new(APPLIANCE_BOOT_STATE_PATH),
+        Path::new(APPLIANCE_BOOT_STATE_BACKUP_PATH),
+        &body,
+    )
 }
 
 fn update_appliance_cmdline_for_slot(slot: ApplianceSlot) -> Result<(), String> {
     ensure_mount(APPLIANCE_BOOT_MOUNT, APPLIANCE_BOOT_DEVICE, "vfat")?;
+    rewrite_cmdline_file(
+        Path::new(APPLIANCE_CMDLINE_PATH),
+        Path::new(APPLIANCE_CMDLINE_BACKUP_PATH),
+        slot,
+    )
+}
 
-    let current_cmdline = fs::read_to_string(APPLIANCE_CMDLINE_PATH)
-        .map_err(|e| format!("Failed to read {}: {}", APPLIANCE_CMDLINE_PATH, e))?;
+fn rewrite_cmdline_file(
+    cmdline_path: &Path,
+    backup_path: &Path,
+    slot: ApplianceSlot,
+) -> Result<(), String> {
+    let current_cmdline = fs::read_to_string(cmdline_path)
+        .map_err(|e| format!("Failed to read {}: {}", cmdline_path.display(), e))?;
     let rewritten = rewrite_cmdline_root_device(&current_cmdline, slot)?;
+    let new_contents = format!("{}\n", rewritten);
 
-    let _ = fs::copy(APPLIANCE_CMDLINE_PATH, APPLIANCE_CMDLINE_BACKUP_PATH);
-    fs::write(APPLIANCE_CMDLINE_PATH, format!("{}\n", rewritten))
-        .map_err(|e| format!("Failed to write {}: {}", APPLIANCE_CMDLINE_PATH, e))
+    // Sync the backup before touching the primary so a power loss mid-rewrite
+    // leaves a recoverable copy on /boot.
+    bootstate::atomic_write_with_sync(backup_path, current_cmdline.as_bytes())?;
+    bootstate::atomic_write_with_sync(cmdline_path, new_contents.as_bytes())?;
+    Ok(())
 }
 
 fn artifact_uses_gzip(asset: &UpdateImageAsset) -> bool {
@@ -1152,7 +1172,13 @@ fn apply_payload_blocking(
     })
 }
 
-fn download_release(
+/// Download `download_url` to `destination` durably.
+///
+/// Streams to a sibling `.tmp` file, fsyncs, then atomically renames into
+/// place so a partial file can never be mistaken for a complete one. On any
+/// error (HTTP failure or stream interruption) the `.tmp` is cleaned up and
+/// the destination is left untouched.
+pub fn download_release(
     client: &reqwest::blocking::Client,
     download_url: &str,
     destination: &Path,
@@ -1166,13 +1192,61 @@ fn download_release(
         return Err(format!("Download returned {}", resp.status()));
     }
 
-    let mut file =
-        File::create(destination).map_err(|e| format!("Failed to create download: {}", e))?;
-    std::io::copy(&mut resp, &mut file).map_err(|e| format!("Failed to write download: {}", e))?;
-    file.flush()
-        .map_err(|e| format!("Failed to flush download: {}", e))?;
+    let tmp = bootstate::tmp_sibling_path(destination);
+    // Remove any stale .tmp from a prior crashed download before streaming.
+    remove_if_exists(&tmp);
+
+    {
+        let mut file =
+            File::create(&tmp).map_err(|e| format!("Failed to create {}: {}", tmp.display(), e))?;
+        if let Err(e) = std::io::copy(&mut resp, &mut file) {
+            drop(file);
+            remove_if_exists(&tmp);
+            return Err(format!("Failed to write download: {}", e));
+        }
+        file.flush()
+            .map_err(|e| format!("Failed to flush {}: {}", tmp.display(), e))?;
+        file.sync_all()
+            .map_err(|e| format!("Failed to sync {}: {}", tmp.display(), e))?;
+    }
+
+    if let Err(e) = fs::rename(&tmp, destination) {
+        remove_if_exists(&tmp);
+        return Err(format!(
+            "Failed to promote {} -> {}: {}",
+            tmp.display(),
+            destination.display(),
+            e
+        ));
+    }
+
     Ok(())
 }
+
+/// Sweep incomplete download artefacts from the staging dir before starting a
+/// fresh OTA check. Removes any `*.download.tmp` left behind by a crashed
+/// download and any stale `*.download` from a prior run that didn't flash.
+///
+/// Safe to call at startup (idempotent, logs and swallows per-file errors).
+pub fn cleanup_stale_downloads(staging_dir: &Path) {
+    let entries = match fs::read_dir(staging_dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if name.ends_with(".download") || name.ends_with(".download.tmp") {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Appliance-default staging directory for OTA artifacts. Exposed so the
+/// appliance binary can call [`cleanup_stale_downloads`] at boot without
+/// duplicating the path.
+pub const APPLIANCE_OTA_STAGING_DIR_PATH: &str = APPLIANCE_OTA_STAGING_DIR;
 
 fn install_target_executable() -> Result<PathBuf, String> {
     let platform_type = std::env::var("RHYTHM_PLATFORM_TYPE").ok();
@@ -1538,6 +1612,111 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_cmdline_file_updates_primary_and_preserves_backup() {
+        let dir = unique_test_dir("cmdline-rewrite");
+        let cmdline = dir.join("cmdline.txt");
+        let backup = dir.join("cmdline.txt.bak");
+        fs::write(&cmdline, "console=tty1 root=/dev/mmcblk0p2 rootwait rw\n").unwrap();
+
+        rewrite_cmdline_file(&cmdline, &backup, ApplianceSlot::B).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&cmdline).unwrap(),
+            "console=tty1 root=/dev/mmcblk0p3 rootwait rw\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&backup).unwrap(),
+            "console=tty1 root=/dev/mmcblk0p2 rootwait rw\n",
+            "backup should contain the pre-rewrite cmdline so a mid-rewrite power loss is recoverable"
+        );
+        assert!(
+            !bootstate::tmp_sibling_path(&cmdline).exists(),
+            "temp for primary should be cleaned up"
+        );
+        assert!(
+            !bootstate::tmp_sibling_path(&backup).exists(),
+            "temp for backup should be cleaned up"
+        );
+    }
+
+    #[test]
+    fn rewrite_cmdline_file_errors_when_no_root_arg() {
+        let dir = unique_test_dir("cmdline-no-root");
+        let cmdline = dir.join("cmdline.txt");
+        let backup = dir.join("cmdline.txt.bak");
+        fs::write(&cmdline, "console=tty1 rootwait rw\n").unwrap();
+
+        let result = rewrite_cmdline_file(&cmdline, &backup, ApplianceSlot::B);
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(&cmdline).unwrap(),
+            "console=tty1 rootwait rw\n",
+            "primary must be unchanged when rewrite validation fails"
+        );
+        assert!(
+            !backup.exists(),
+            "backup should not be written when validation fails before any write"
+        );
+    }
+
+    #[test]
+    fn rewrite_cmdline_file_is_idempotent_when_slot_matches() {
+        let dir = unique_test_dir("cmdline-idempotent");
+        let cmdline = dir.join("cmdline.txt");
+        let backup = dir.join("cmdline.txt.bak");
+        let initial = "console=tty1 root=/dev/mmcblk0p2 rootwait rw\n";
+        fs::write(&cmdline, initial).unwrap();
+
+        rewrite_cmdline_file(&cmdline, &backup, ApplianceSlot::A).unwrap();
+
+        assert_eq!(fs::read_to_string(&cmdline).unwrap(), initial);
+        assert_eq!(fs::read_to_string(&backup).unwrap(), initial);
+    }
+
+    #[test]
+    fn cleanup_stale_downloads_removes_download_and_tmp_files() {
+        let dir = unique_test_dir("ota-cleanup");
+        fs::write(dir.join("rootfs.ext2.gz.download"), "partial").unwrap();
+        fs::write(dir.join("rootfs.ext2.gz.download.tmp"), "partial-tmp").unwrap();
+        fs::write(dir.join("bundle.tar.gz.download"), "other partial").unwrap();
+        fs::write(dir.join("manifest.json"), "{\"keep\":true}").unwrap();
+        fs::write(dir.join("random.txt"), "unrelated").unwrap();
+
+        cleanup_stale_downloads(&dir);
+
+        assert!(!dir.join("rootfs.ext2.gz.download").exists());
+        assert!(!dir.join("rootfs.ext2.gz.download.tmp").exists());
+        assert!(!dir.join("bundle.tar.gz.download").exists());
+        assert!(
+            dir.join("manifest.json").exists(),
+            "cleanup must not touch files outside the download-staging convention"
+        );
+        assert!(dir.join("random.txt").exists());
+    }
+
+    #[test]
+    fn cleanup_stale_downloads_noop_when_directory_missing() {
+        let dir = unique_test_dir("ota-cleanup-missing");
+        let missing = dir.join("nonexistent");
+        cleanup_stale_downloads(&missing);
+        // Must not panic or error.
+    }
+
+    #[test]
+    fn artifact_staging_path_sanitizes_asset_name() {
+        let unsafe_name = "rootfs.ext2.gz?version=1&token=abc";
+        let path = artifact_staging_path(unsafe_name);
+        let file = path.file_name().and_then(|n| n.to_str()).unwrap();
+        assert!(
+            file.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')),
+            "staging filename must not contain URL-unsafe characters, got {}",
+            file
+        );
+        assert!(file.ends_with(".download"));
+    }
+
+    #[test]
     fn appliance_update_prefers_gzip_rootfs_asset() {
         let info = UpdateInfo {
             current_version: "0.4.146".to_string(),
@@ -1716,6 +1895,207 @@ mod tests {
         ));
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage_archive_rejects_when_required_entry_missing() {
+        let dir = unique_test_dir("stage-archive-missing");
+        let archive_path = dir.join("release.tar.gz");
+        let install_targets = vec![
+            InstallTarget {
+                archive_path: "rhythm-server".to_string(),
+                destination: dir.join("rhythm-server"),
+                required: true,
+            },
+            InstallTarget {
+                archive_path: "rhythm-chipd".to_string(),
+                destination: dir.join("rhythm-chipd"),
+                required: true,
+            },
+        ];
+
+        // Build an archive that only contains rhythm-server — required chipd
+        // entry is missing, which must surface as an error.
+        {
+            let tar_gz = File::create(&archive_path).unwrap();
+            let encoder = flate2::write::GzEncoder::new(tar_gz, flate2::Compression::default());
+            let mut builder = tar::Builder::new(encoder);
+            let payload = b"fake-rhythm-server";
+            let mut header = tar::Header::new_gnu();
+            header.set_path("rhythm-server").unwrap();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder.append(&header, payload.as_slice()).unwrap();
+            builder.finish().unwrap();
+        }
+
+        let result =
+            stage_install_targets(&archive_path, "rhythm-server-rpiz.tar.gz", &install_targets);
+        assert!(result.is_err(), "missing required entry must error");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("rhythm-chipd"),
+            "error should mention the missing payload, got {}",
+            msg
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage_archive_tolerates_extra_entries() {
+        let dir = unique_test_dir("stage-archive-extra");
+        let archive_path = dir.join("release.tar.gz");
+        let install_targets = vec![InstallTarget {
+            archive_path: "rhythm-server".to_string(),
+            destination: dir.join("rhythm-server"),
+            required: true,
+        }];
+
+        {
+            let tar_gz = File::create(&archive_path).unwrap();
+            let encoder = flate2::write::GzEncoder::new(tar_gz, flate2::Compression::default());
+            let mut builder = tar::Builder::new(encoder);
+            for (name, payload) in [
+                ("rhythm-server", b"fake-server".as_slice()),
+                ("README.txt", b"ship notes".as_slice()),
+                ("CHANGELOG.md", b"v1\n".as_slice()),
+            ] {
+                let mut header = tar::Header::new_gnu();
+                header.set_path(name).unwrap();
+                header.set_size(payload.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder.append(&header, payload).unwrap();
+            }
+            builder.finish().unwrap();
+        }
+
+        let staged =
+            stage_install_targets(&archive_path, "rhythm-server-rpiz.tar.gz", &install_targets)
+                .expect("extra entries must not fail extraction");
+        assert_eq!(
+            fs::read(dir.join("rhythm-server.new")).unwrap(),
+            b"fake-server"
+        );
+        cleanup_staged_files(&staged);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage_archive_rejects_corrupt_gzip() {
+        let dir = unique_test_dir("stage-archive-corrupt");
+        let archive_path = dir.join("release.tar.gz");
+        fs::write(&archive_path, b"this is not a gzipped tar").unwrap();
+
+        let install_targets = vec![InstallTarget {
+            archive_path: "rhythm-server".to_string(),
+            destination: dir.join("rhythm-server"),
+            required: true,
+        }];
+
+        let result =
+            stage_install_targets(&archive_path, "rhythm-server-rpiz.tar.gz", &install_targets);
+        assert!(result.is_err(), "corrupt archive must surface as an error");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn manifest_parses_minimal_package_json() {
+        let json = r#"{
+            "version": "0.4.200",
+            "package": {
+                "name": "rhythm-server-rpiz.tar.gz",
+                "url": "https://example.test/rhythm-server-rpiz.tar.gz",
+                "sha256": "deadbeef",
+                "size": 12345,
+                "kind": "archive_bundle",
+                "install": [
+                    {"archive_path": "rhythm-server", "slot": "self", "required": true},
+                    {"archive_path": "rhythm-chipd", "slot": "sibling", "path": "rhythm-chipd"}
+                ]
+            }
+        }"#;
+        let manifest: UpdateManifest = serde_json::from_str(json).expect("valid manifest parses");
+        assert_eq!(manifest.version, "0.4.200");
+        let pkg = manifest.package.expect("package present");
+        assert_eq!(pkg.name, "rhythm-server-rpiz.tar.gz");
+        assert_eq!(pkg.sha256.as_deref(), Some("deadbeef"));
+        assert_eq!(pkg.install.len(), 2);
+        assert_eq!(pkg.install[0].slot, InstallSlot::Current);
+        assert_eq!(pkg.install[1].slot, InstallSlot::Sibling);
+    }
+
+    #[test]
+    fn manifest_parse_rejects_missing_version() {
+        let json = r#"{ "package": { "name": "x", "url": "http://x/y" } }"#;
+        let result: Result<UpdateManifest, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "manifest without version must not parse");
+    }
+
+    #[test]
+    fn manifest_parse_rejects_invalid_json() {
+        let result: Result<UpdateManifest, _> = serde_json::from_str("{ not valid json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn manifest_parses_empty_images_and_package_optional() {
+        // Server-only manifest (no appliance image). `package` must be present
+        // for a download to be offered, but parsing a manifest with only
+        // `version` must still succeed so a client can observe the version and
+        // fall back to "no update available".
+        let json = r#"{ "version": "0.4.161-beta" }"#;
+        let manifest: UpdateManifest = serde_json::from_str(json).expect("parses");
+        assert_eq!(manifest.version, "0.4.161-beta");
+        assert!(manifest.package.is_none());
+        assert!(manifest.images.is_empty());
+    }
+
+    #[test]
+    fn manifest_parses_multi_image_appliance_payload() {
+        let json = r#"{
+            "version": "0.4.200",
+            "images": [
+                {
+                    "name": "rootfs.ext2",
+                    "url": "https://example.test/rootfs.ext2",
+                    "kind": "rootfs_image"
+                },
+                {
+                    "name": "rootfs.ext2.gz",
+                    "url": "https://example.test/rootfs.ext2.gz",
+                    "kind": "rootfs_image",
+                    "compression": "gzip",
+                    "sha256": "abc123"
+                }
+            ]
+        }"#;
+        let manifest: UpdateManifest = serde_json::from_str(json).expect("parses");
+        assert_eq!(manifest.images.len(), 2);
+        assert_eq!(
+            manifest.images[1].kind,
+            Some(ReleaseArtifactKind::RootfsImage)
+        );
+        assert_eq!(manifest.images[1].compression.as_deref(), Some("gzip"));
+    }
+
+    #[test]
+    fn sha256_of_known_input_produces_stable_hex() {
+        // Sanity-check the hex encoding used for downloaded artifact checksums:
+        // the same input must produce a 64-char lowercase hex digest regardless
+        // of platform, and identical inputs must match.
+        let digest = Sha256::digest(b"rhythm");
+        let hex = hex_string(&digest);
+        assert_eq!(hex.len(), 64);
+        assert!(hex
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        let digest2 = Sha256::digest(b"rhythm");
+        assert_eq!(hex, hex_string(&digest2));
+        let digest_other = Sha256::digest(b"rhythm-");
+        assert_ne!(hex, hex_string(&digest_other));
     }
 
     #[test]

@@ -56,12 +56,28 @@ pub fn register_mdns_service(
     version: &str,
     device_type: &str,
 ) -> Option<MdnsRegistrationHandle> {
+    register_mdns_service_with_id(port, device_suffix, None, version, device_type)
+}
+
+/// Register an mDNS service with a stable device identifier (e.g., a serial
+/// number or MAC). When provided, the identifier is mixed into the advertised
+/// hostname so two units on the same LAN don't collide on the IP-derived
+/// suffix alone. Use this from platform binaries that can obtain a stable
+/// per-unit ID at startup.
+pub fn register_mdns_service_with_id(
+    port: u16,
+    device_suffix: &str,
+    device_id: Option<&str>,
+    version: &str,
+    device_type: &str,
+) -> Option<MdnsRegistrationHandle> {
     use log::warn;
     use std::sync::mpsc;
 
     let config = MdnsRegistrationConfig {
         port,
         device_suffix: device_suffix.to_string(),
+        device_id: device_id.map(str::to_string),
         version: version.to_string(),
         device_type: device_type.to_string(),
     };
@@ -87,6 +103,7 @@ pub fn register_mdns_service(
 struct MdnsRegistrationConfig {
     port: u16,
     device_suffix: String,
+    device_id: Option<String>,
     version: String,
     device_type: String,
 }
@@ -138,6 +155,7 @@ fn run_mdns_registration_loop(
                 match register_mdns_service_for_ip(
                     config.port,
                     &config.device_suffix,
+                    config.device_id.as_deref(),
                     &config.version,
                     &config.device_type,
                     detected_ip,
@@ -182,6 +200,7 @@ fn run_mdns_registration_loop(
 fn register_mdns_service_for_ip(
     port: u16,
     device_suffix: &str,
+    device_id: Option<&str>,
     version: &str,
     device_type: &str,
     local_ip: std::net::Ipv4Addr,
@@ -189,7 +208,7 @@ fn register_mdns_service_for_ip(
     use log::{info, warn};
 
     let service_type = format!("{}.{}.local.", MDNS_SERVICE_TYPE, MDNS_SERVICE_PROTO);
-    let hostname = mdns_hostname(device_suffix, local_ip);
+    let hostname = mdns_hostname_with_id(device_suffix, device_id, local_ip);
     let instance_name = format!("{} ({})", MDNS_INSTANCE_NAME, hostname);
 
     let daemon = match mdns_sd::ServiceDaemon::new() {
@@ -232,24 +251,124 @@ fn register_mdns_service_for_ip(
     Some(daemon)
 }
 
-fn mdns_hostname(device_suffix: &str, local_ip: std::net::Ipv4Addr) -> String {
-    let octets = local_ip.octets();
-    format!(
-        "{}{}-{:02x}{:02x}",
-        MDNS_HOSTNAME_PREFIX, device_suffix, octets[2], octets[3]
-    )
+/// Compose the mDNS hostname. When a stable `device_id` is provided
+/// (sanitized serial / MAC), it is preferred — the resulting hostname stays
+/// unique across reboots and DHCP churn even if two units land on the same
+/// /24 subnet. When no `device_id` is available, the IP-derived suffix is
+/// used as a legacy fallback (pre-P1.12 behavior).
+pub fn mdns_hostname_with_id(
+    device_suffix: &str,
+    device_id: Option<&str>,
+    local_ip: std::net::Ipv4Addr,
+) -> String {
+    match device_id
+        .map(sanitize_device_id_component)
+        .filter(|s| !s.is_empty())
+    {
+        Some(id) => format!("{}{}-{}", MDNS_HOSTNAME_PREFIX, device_suffix, id),
+        None => {
+            let octets = local_ip.octets();
+            format!(
+                "{}{}-{:02x}{:02x}",
+                MDNS_HOSTNAME_PREFIX, device_suffix, octets[2], octets[3]
+            )
+        }
+    }
+}
+
+/// Produce a hostname-safe lowercase component by keeping ASCII alphanumerics
+/// and collapsing everything else. Ensures the result fits mDNS hostname
+/// rules (letters, digits, hyphens only) and doesn't accidentally include
+/// characters that break DNS or mDNS parsing.
+fn sanitize_device_id_component(raw: &str) -> String {
+    let trimmed: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(16)
+        .collect();
+    trimmed.to_ascii_lowercase()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::mdns_hostname;
+    use super::*;
     use std::net::Ipv4Addr;
 
     #[test]
     fn mdns_hostname_uses_suffix_and_last_two_octets() {
         assert_eq!(
-            mdns_hostname("server", Ipv4Addr::new(192, 168, 4, 27)),
+            mdns_hostname_with_id("server", None, Ipv4Addr::new(192, 168, 4, 27)),
             "rhythm-server-041b"
         );
+    }
+
+    #[test]
+    fn mdns_hostname_prefers_device_id_over_ip_suffix() {
+        assert_eq!(
+            mdns_hostname_with_id("server", Some("ABC12345"), Ipv4Addr::new(192, 168, 4, 27)),
+            "rhythm-server-abc12345",
+            "a stable device_id must be used instead of the IP-derived suffix"
+        );
+    }
+
+    #[test]
+    fn mdns_hostname_falls_back_to_ip_when_device_id_empty() {
+        assert_eq!(
+            mdns_hostname_with_id("server", Some(""), Ipv4Addr::new(192, 168, 4, 27)),
+            "rhythm-server-041b"
+        );
+    }
+
+    #[test]
+    fn mdns_hostname_sanitizes_non_alphanumeric_characters_in_device_id() {
+        assert_eq!(
+            mdns_hostname_with_id(
+                "appliance",
+                Some("AA:BB:CC:DD:EE:FF"),
+                Ipv4Addr::new(10, 0, 0, 1)
+            ),
+            "rhythm-appliance-aabbccddeeff",
+            "colons in MAC addresses must be stripped"
+        );
+        assert_eq!(
+            mdns_hostname_with_id(
+                "appliance",
+                Some("rpiz/serial\0\u{0}"),
+                Ipv4Addr::new(10, 0, 0, 1)
+            ),
+            "rhythm-appliance-rpizserial",
+            "slash, null, and control chars must be stripped"
+        );
+    }
+
+    #[test]
+    fn mdns_hostname_truncates_long_device_ids() {
+        let long = "0123456789ABCDEF0123456789ABCDEF";
+        let host = mdns_hostname_with_id("appliance", Some(long), Ipv4Addr::new(10, 0, 0, 1));
+        assert!(
+            host.len() <= "rhythm-appliance-".len() + 16,
+            "device_id must be truncated to prevent overlong hostnames, got {}",
+            host
+        );
+    }
+
+    #[test]
+    fn two_units_with_different_device_ids_get_distinct_hostnames() {
+        let ip = Ipv4Addr::new(192, 168, 1, 100);
+        let a = mdns_hostname_with_id("appliance", Some("UNIT-0001"), ip);
+        let b = mdns_hostname_with_id("appliance", Some("UNIT-0002"), ip);
+        assert_ne!(a, b, "distinct device IDs must produce distinct hostnames");
+    }
+
+    #[test]
+    fn sanitize_device_id_accepts_hex_and_alphanumeric() {
+        assert_eq!(sanitize_device_id_component("abc123"), "abc123");
+        assert_eq!(sanitize_device_id_component("ABCDEF"), "abcdef");
+    }
+
+    #[test]
+    fn sanitize_device_id_drops_empty_after_cleaning() {
+        assert_eq!(sanitize_device_id_component(":::"), "");
+        assert_eq!(sanitize_device_id_component(""), "");
     }
 }

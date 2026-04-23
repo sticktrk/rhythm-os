@@ -57,6 +57,13 @@ fn main() -> Result<()> {
 
     std::fs::create_dir_all(&args.data_dir)?;
 
+    // Sweep partial OTA artefacts left behind by a crashed prior run before
+    // anything else touches the OTA staging directory. Safe to call even when
+    // the directory doesn't exist yet.
+    rhythm_server::self_update::cleanup_stale_downloads(std::path::Path::new(
+        rhythm_server::self_update::APPLIANCE_OTA_STAGING_DIR_PATH,
+    ));
+
     let file_storage = FileStorage::new(&args.data_dir)?;
 
     let (event_tx, _) = tokio::sync::broadcast::channel(64);
@@ -319,38 +326,6 @@ fn hydrate_persisted_wifi_credentials(state: &SharedState) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{
-        startup_wifi_restore_action, StartupWifiRestoreAction, STARTUP_WIFI_RESTORE_TIMEOUT,
-    };
-
-    #[test]
-    fn startup_wifi_restore_skips_when_no_credentials_are_stored() {
-        assert_eq!(
-            startup_wifi_restore_action(false, false),
-            StartupWifiRestoreAction::SkipNoStoredCredentials
-        );
-    }
-
-    #[test]
-    fn startup_wifi_restore_skips_when_wifi_is_already_connected() {
-        assert_eq!(
-            startup_wifi_restore_action(true, true),
-            StartupWifiRestoreAction::SkipAlreadyConnected
-        );
-    }
-
-    #[test]
-    fn startup_wifi_restore_uses_persisted_credentials_when_disconnected() {
-        assert_eq!(
-            startup_wifi_restore_action(true, false),
-            StartupWifiRestoreAction::RestorePersistedCredentials
-        );
-        assert_eq!(STARTUP_WIFI_RESTORE_TIMEOUT.as_secs(), 30);
-    }
-}
-
 async fn run_server(
     state: SharedState,
     port: u16,
@@ -370,9 +345,17 @@ async fn run_server(
         });
     info!(target: "sys", "Rhythm Linux Appliance listening on http://{}", addr);
 
-    // Keep the existing server-style mDNS identity for now so the rpiz split
-    // does not also change discovery semantics.
-    let _mdns = rhythm_os::mdns::register_mdns_service(port, "server", VERSION, "rhythm-server");
+    // Keep the existing server-style mDNS identity but tack on the rpiz serial
+    // number so two units on the same LAN never collide on the IP-derived
+    // suffix.
+    let device_id = read_rpiz_serial_suffix();
+    let _mdns = rhythm_os::mdns::register_mdns_service_with_id(
+        port,
+        "server",
+        device_id.as_deref(),
+        VERSION,
+        "rhythm-server",
+    );
 
     rhythm_os::hub::spawn_stored_hub_bootstrap(state.clone(), hub::INTEGRATIONS);
     spawn_boot_success_marker();
@@ -423,4 +406,98 @@ fn spawn_boot_success_marker() {
             }
         })
         .expect("Failed to spawn boot-success marker thread");
+}
+
+/// Read the rpiz board serial number and extract a short alphanumeric suffix
+/// suitable for mDNS hostnames. `None` if the serial file is missing or
+/// yields an empty / non-ASCII result — callers should fall back to the
+/// IP-derived suffix in that case.
+fn read_rpiz_serial_suffix() -> Option<String> {
+    let raw = std::fs::read_to_string("/proc/device-tree/serial-number").ok()?;
+    extract_serial_suffix(&raw)
+}
+
+fn extract_serial_suffix(raw: &str) -> Option<String> {
+    let cleaned: String = raw.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if cleaned.len() < 4 {
+        return None;
+    }
+    // Use the last 8 hex chars — short enough to keep the hostname readable,
+    // long enough that collisions are astronomically unlikely for units
+    // shipped with distinct Pi serials.
+    let tail = &cleaned[cleaned.len().saturating_sub(8)..];
+    Some(tail.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        extract_serial_suffix, startup_wifi_restore_action, StartupWifiRestoreAction,
+        STARTUP_WIFI_RESTORE_TIMEOUT,
+    };
+
+    #[test]
+    fn extract_serial_suffix_takes_last_eight_hex_chars() {
+        assert_eq!(
+            extract_serial_suffix("10000000abcdef01\0").as_deref(),
+            Some("abcdef01")
+        );
+    }
+
+    #[test]
+    fn extract_serial_suffix_strips_nulls_and_whitespace() {
+        assert_eq!(
+            extract_serial_suffix("  1000000012345678\n\0").as_deref(),
+            Some("12345678")
+        );
+    }
+
+    #[test]
+    fn extract_serial_suffix_returns_none_when_too_short() {
+        assert_eq!(extract_serial_suffix(""), None);
+        assert_eq!(extract_serial_suffix("abc"), None);
+        assert_eq!(extract_serial_suffix("\0\0\0"), None);
+    }
+
+    #[test]
+    fn extract_serial_suffix_handles_short_but_valid_serial() {
+        assert_eq!(extract_serial_suffix("abcd").as_deref(), Some("abcd"));
+        assert_eq!(extract_serial_suffix("abcdef").as_deref(), Some("abcdef"));
+    }
+
+    #[test]
+    fn extract_serial_suffix_ignores_non_ascii_characters() {
+        // Non-ASCII (`ç`, `é`) is dropped before length check; the remaining
+        // ASCII chars are "a123456789f" (11 chars), so the last-8 suffix is
+        // "3456789f".
+        assert_eq!(
+            extract_serial_suffix("ça123456789fé"),
+            Some("3456789f".to_string())
+        );
+    }
+
+    #[test]
+    fn startup_wifi_restore_skips_when_no_credentials_are_stored() {
+        assert_eq!(
+            startup_wifi_restore_action(false, false),
+            StartupWifiRestoreAction::SkipNoStoredCredentials
+        );
+    }
+
+    #[test]
+    fn startup_wifi_restore_skips_when_wifi_is_already_connected() {
+        assert_eq!(
+            startup_wifi_restore_action(true, true),
+            StartupWifiRestoreAction::SkipAlreadyConnected
+        );
+    }
+
+    #[test]
+    fn startup_wifi_restore_uses_persisted_credentials_when_disconnected() {
+        assert_eq!(
+            startup_wifi_restore_action(true, false),
+            StartupWifiRestoreAction::RestorePersistedCredentials
+        );
+        assert_eq!(STARTUP_WIFI_RESTORE_TIMEOUT.as_secs(), 30);
+    }
 }

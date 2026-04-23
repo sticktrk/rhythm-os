@@ -78,6 +78,13 @@ pub fn clear_credentials() -> Result<()> {
 
 fn write_wifi_credentials(creds: &WifiCredentials) -> Result<()> {
     let country = existing_country().unwrap_or_else(|| DEFAULT_COUNTRY.to_string());
+    let body = render_wpa_conf(creds, &country);
+    write_wpa_conf(&body)
+}
+
+/// Render a `wpa_supplicant.conf` body for the given credentials + country.
+/// Extracted so it can be tested without touching the filesystem.
+fn render_wpa_conf(creds: &WifiCredentials, country: &str) -> String {
     let mut body = String::new();
     body.push_str("ctrl_interface=/var/run/wpa_supplicant\n");
     body.push_str("update_config=0\n");
@@ -89,7 +96,7 @@ fn write_wifi_credentials(creds: &WifiCredentials) -> Result<()> {
         escape_wpa_value(&creds.password)
     ));
     body.push_str("}\n");
-    write_wpa_conf(&body)
+    body
 }
 
 fn clear_wifi_credentials() -> Result<()> {
@@ -213,4 +220,99 @@ fn wpa_status_field(iface: &str, field: &str) -> Option<String> {
 
 fn escape_wpa_value(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_wpa_value_doubles_backslashes_and_escapes_quotes() {
+        assert_eq!(escape_wpa_value("plain"), "plain");
+        assert_eq!(escape_wpa_value("has\"quote"), "has\\\"quote");
+        assert_eq!(escape_wpa_value("back\\slash"), "back\\\\slash");
+        assert_eq!(
+            escape_wpa_value("mix\\of\"both"),
+            "mix\\\\of\\\"both",
+            "both quote and backslash must be escaped in a single value"
+        );
+    }
+
+    #[test]
+    fn escape_wpa_value_preserves_spaces_and_unicode() {
+        assert_eq!(
+            escape_wpa_value("My Wi-Fi"),
+            "My Wi-Fi",
+            "spaces are legal inside the quoted wpa value"
+        );
+        assert_eq!(escape_wpa_value("café 2.4GHz"), "café 2.4GHz");
+    }
+
+    #[test]
+    fn render_wpa_conf_writes_exactly_one_network_block() {
+        let creds = WifiCredentials {
+            ssid: "Home".into(),
+            password: "s3cret".into(),
+        };
+        let body = render_wpa_conf(&creds, "US");
+        let count = body.matches("network={").count();
+        assert_eq!(count, 1, "exactly one network block must be rendered");
+        assert!(body.contains("ssid=\"Home\""));
+        assert!(body.contains("psk=\"s3cret\""));
+        assert!(body.contains("country=US\n"));
+        assert!(body.contains("ctrl_interface=/var/run/wpa_supplicant\n"));
+    }
+
+    #[test]
+    fn render_wpa_conf_escapes_password_with_quote() {
+        let creds = WifiCredentials {
+            ssid: "net".into(),
+            password: "pa\"ss".into(),
+        };
+        let body = render_wpa_conf(&creds, "US");
+        assert!(
+            body.contains("psk=\"pa\\\"ss\""),
+            "password with a quote must be escaped in the rendered config, got:\n{}",
+            body
+        );
+        assert!(
+            !body.contains("psk=\"pa\"ss\""),
+            "un-escaped quote would break parsing"
+        );
+    }
+
+    #[test]
+    fn render_wpa_conf_uses_provided_country_code() {
+        let creds = WifiCredentials {
+            ssid: "net".into(),
+            password: "p".into(),
+        };
+        assert!(render_wpa_conf(&creds, "DE").contains("country=DE\n"));
+        assert!(render_wpa_conf(&creds, "JP").contains("country=JP\n"));
+    }
+
+    #[test]
+    fn render_wpa_conf_is_roundtrippable_through_simple_parser() {
+        // Sanity check: every network-block line has balanced quotes.
+        let creds = WifiCredentials {
+            ssid: "Guest Wi-Fi".into(),
+            password: "hunter2".into(),
+        };
+        let body = render_wpa_conf(&creds, "US");
+        let in_network = body
+            .lines()
+            .skip_while(|line| !line.trim_start().starts_with("network={"))
+            .skip(1)
+            .take_while(|line| !line.trim_start().starts_with('}'));
+        for line in in_network {
+            let quote_count = line.matches('"').count();
+            let escaped_quote_count = line.matches("\\\"").count();
+            let effective_quotes = quote_count - escaped_quote_count;
+            assert!(
+                effective_quotes % 2 == 0,
+                "line has unbalanced quotes: {}",
+                line
+            );
+        }
+    }
 }

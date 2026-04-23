@@ -5,7 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use log::info;
+use log::{info, warn};
 use rhythm_core::ButtonAction;
 
 use crate::hub::HubEvent;
@@ -45,7 +45,15 @@ pub fn resolve_button_event(
     let mut known = {
         let reg = match registry.lock() {
             Ok(r) => r,
-            Err(_) => return Vec::new(),
+            Err(_) => {
+                warn!(
+                    target: "evt",
+                    "Button {}: registry mutex poisoned during fast-path lookup; dropping event. \
+                     A prior thread panicked while holding the registry lock.",
+                    event.button_id
+                );
+                return Vec::new();
+            }
         };
         reg.get_device_for_button(event.button_id).is_some()
     };
@@ -55,10 +63,17 @@ pub fn resolve_button_event(
         if let Some(discover) = on_unknown {
             discover(event);
             // Re-check after discovery
-            known = registry
-                .lock()
-                .map(|r| r.get_device_for_button(event.button_id).is_some())
-                .unwrap_or(false);
+            known = match registry.lock() {
+                Ok(r) => r.get_device_for_button(event.button_id).is_some(),
+                Err(_) => {
+                    warn!(
+                        target: "evt",
+                        "Button {}: registry mutex poisoned during post-discovery re-check; dropping event",
+                        event.button_id
+                    );
+                    return Vec::new();
+                }
+            };
         }
 
         if !known {
@@ -74,12 +89,29 @@ pub fn resolve_button_event(
     // 3. Read device_id, control_id, room_id from registry
     let reg = match registry.lock() {
         Ok(r) => r,
-        Err(_) => return Vec::new(),
+        Err(_) => {
+            warn!(
+                target: "evt",
+                "Button {}: registry mutex poisoned during device lookup; dropping event",
+                event.button_id
+            );
+            return Vec::new();
+        }
     };
 
     let device_id = match reg.get_device_for_button(event.button_id) {
         Some(id) => id,
-        None => return Vec::new(),
+        None => {
+            // Race window: button was registered between the fast-path check
+            // (step 1) and now. Treat as a transient miss rather than a
+            // silent drop so we get a log line.
+            info!(
+                target: "evt",
+                "Button {}: registered during fast path but absent at lookup time, ignoring",
+                event.button_id
+            );
+            return Vec::new();
+        }
     };
 
     // Use registry control_id, fall back to event's fallback
@@ -372,5 +404,139 @@ mod tests {
             }
             _ => panic!("Expected Button event"),
         }
+    }
+
+    // ========================================================================
+    // Concurrency / lock-contention tests
+    // ========================================================================
+
+    #[test]
+    fn test_concurrent_resolves_all_succeed() {
+        // 64 threads resolving the same known button against a shared
+        // registry must all return the same Button event without any
+        // dropped (empty) results.
+        let registry = make_registry();
+        let mut handles = Vec::new();
+        for _ in 0..64 {
+            let registry = registry.clone();
+            handles.push(std::thread::spawn(move || {
+                let event = RawButtonEvent {
+                    button_id: "button-1",
+                    event_type: "initial_press",
+                    fallback_control_id: None,
+                    device_hint: None,
+                };
+                resolve_button_event(
+                    &registry,
+                    &event,
+                    None,
+                    &crate::hue_buttons::map_hue_button_str,
+                )
+            }));
+        }
+
+        let mut button_events = 0;
+        for h in handles {
+            let results = h.join().unwrap();
+            assert_eq!(
+                results.len(),
+                1,
+                "every concurrent call must produce exactly one event"
+            );
+            if matches!(&results[0], HubEvent::Button { .. }) {
+                button_events += 1;
+            }
+        }
+        assert_eq!(
+            button_events, 64,
+            "all 64 concurrent resolutions must produce a Button event"
+        );
+    }
+
+    #[test]
+    fn test_resolve_during_concurrent_registry_mutation_does_not_panic() {
+        // One thread continuously upserts devices while another resolves
+        // buttons. No panic, no deadlock; results are either a valid Button
+        // event or an UnroutableButton (during the brief windows when the
+        // button-of-interest hasn't been re-registered yet).
+        let registry = make_registry();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let writer = {
+            let registry = registry.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut version = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    version = version.wrapping_add(1);
+                    if let Ok(mut reg) = registry.lock() {
+                        reg.upsert_device(
+                            "device-1",
+                            "room-1",
+                            &[
+                                ("button-1".to_string(), 1),
+                                ("button-4".to_string(), 4),
+                                (format!("button-extra-{}", version), 2),
+                            ],
+                            DeviceType::Button,
+                        );
+                    }
+                }
+            })
+        };
+
+        for _ in 0..200 {
+            let event = RawButtonEvent {
+                button_id: "button-1",
+                event_type: "initial_press",
+                fallback_control_id: None,
+                device_hint: None,
+            };
+            let _ = resolve_button_event(
+                &registry,
+                &event,
+                None,
+                &crate::hue_buttons::map_hue_button_str,
+            );
+        }
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn test_poisoned_registry_drops_event_without_panic() {
+        // Simulate a prior thread panic that poisoned the lock. The button
+        // resolver must surface this as an empty Vec (not panic), so the
+        // caller can choose to log/restart.
+        let registry = make_registry();
+        let registry_for_poison = registry.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = registry_for_poison.lock().unwrap();
+            panic!("intentional poisoning panic");
+        })
+        .join();
+
+        assert!(
+            registry.is_poisoned(),
+            "test setup: registry mutex must be poisoned"
+        );
+
+        let event = RawButtonEvent {
+            button_id: "button-1",
+            event_type: "initial_press",
+            fallback_control_id: None,
+            device_hint: None,
+        };
+        let results = resolve_button_event(
+            &registry,
+            &event,
+            None,
+            &crate::hue_buttons::map_hue_button_str,
+        );
+        assert!(
+            results.is_empty(),
+            "poisoned-lock resolution must return empty Vec, not panic"
+        );
     }
 }

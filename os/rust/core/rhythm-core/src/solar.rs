@@ -768,4 +768,127 @@ mod tests {
         assert!(times.dawn.civil.is_none());
         assert!(times.dusk.civil.is_none());
     }
+
+    // ========================================================================
+    // Edge-case regression tests
+    // ========================================================================
+
+    #[test]
+    fn solar_noon_is_finite_at_arctic_circle_winter() {
+        // 70°N on the winter solstice — above the Arctic circle the sun may
+        // not rise, but solar noon itself is always a well-defined clock
+        // time. The calculation must return a finite value (no NaN / inf).
+        let tz = Timezone::new("Europe/Oslo");
+        let noon = calculate_solar_noon(15.0, 2026, 12, 21, &tz);
+        assert!(
+            noon.is_finite(),
+            "polar-winter solar noon must be finite, got {}",
+            noon
+        );
+        assert!(
+            (0.0..=24.0).contains(&noon),
+            "solar noon must be within 0..24h, got {}",
+            noon
+        );
+    }
+
+    #[test]
+    fn solar_noon_is_finite_at_antarctic_summer() {
+        // 70°S on the summer solstice (for southern hemisphere).
+        let tz = Timezone::new("Antarctica/McMurdo");
+        let noon = calculate_solar_noon(166.6, 2026, 12, 21, &tz);
+        assert!(noon.is_finite());
+        assert!((0.0..=24.0).contains(&noon));
+    }
+
+    #[test]
+    fn solar_noon_across_dst_spring_forward_matches_standard_day() {
+        // On the DST transition day (US spring-forward), solar noon should
+        // jump by ~1 hour vs. the day before because local clock time
+        // advances but the sun doesn't. No NaN, no negatives.
+        let tz = Timezone::new("America/New_York");
+        let noon_before = calculate_solar_noon(-74.0, 2026, 3, 7, &tz); // Sat before DST
+        let noon_after = calculate_solar_noon(-74.0, 2026, 3, 8, &tz); // DST Sunday
+        assert!(noon_before.is_finite() && noon_after.is_finite());
+        // After DST, wall-clock solar noon is ~1h later than before.
+        let delta = noon_after - noon_before;
+        assert!(
+            (0.5..=1.5).contains(&delta),
+            "DST spring-forward should shift solar noon by ~1h, got {}",
+            delta
+        );
+    }
+
+    #[test]
+    fn solar_noon_across_dst_fall_back_matches_standard_day() {
+        let tz = Timezone::new("America/New_York");
+        let noon_before = calculate_solar_noon(-74.0, 2026, 10, 31, &tz); // Sat before DST end
+        let noon_after = calculate_solar_noon(-74.0, 2026, 11, 1, &tz); // DST end Sunday
+        assert!(noon_before.is_finite() && noon_after.is_finite());
+        let delta = noon_before - noon_after;
+        assert!(
+            (0.5..=1.5).contains(&delta),
+            "DST fall-back should shift solar noon by ~-1h, got {}",
+            delta
+        );
+    }
+
+    #[test]
+    fn solar_noon_offset_variant_is_finite_at_polar_latitudes() {
+        // The offset-based (timezone-free) variant must also stay finite when
+        // pointed at a polar longitude.
+        let day_of_year = 355u32;
+        let noon = calculate_solar_noon_from_offset(15.0, 1.0, day_of_year);
+        assert!(noon.is_finite());
+    }
+
+    #[test]
+    fn sun_times_do_not_return_nan_at_equator_on_equinox() {
+        // Equator on equinox is the canonical easy case. Sanity check that
+        // neither sunrise, sunset, nor day_length produce NaN.
+        let tz = Timezone::new("Pacific/Galapagos");
+        let times = calculate_sun_times(0.0, -90.0, 2026, 3, 20, &tz);
+        assert!(times.sunrise.is_finite());
+        assert!(times.sunset.is_finite());
+        assert!(times.day_length.is_finite());
+        assert!(
+            times.day_length >= 0.0 && times.day_length <= 24.0,
+            "day_length must be sane, got {}",
+            times.day_length
+        );
+    }
+
+    #[test]
+    fn sun_times_polar_night_returns_finite_numbers_or_zero_length() {
+        // 72°N on winter solstice — polar night. Sunrise/sunset may not
+        // exist; the calculation must not crash or return NaN.
+        let tz = Timezone::new("Europe/Oslo");
+        let times = calculate_sun_times(72.0, 15.0, 2026, 12, 21, &tz);
+        assert!(
+            times.sunrise.is_finite() || times.day_length == 0.0,
+            "polar night must yield either finite sunrise or zero day_length"
+        );
+        assert!(
+            !times.day_length.is_nan(),
+            "day_length must never be NaN, got {}",
+            times.day_length
+        );
+    }
+
+    #[test]
+    fn solar_noon_consistent_across_year_bounds() {
+        // Dec 31 → Jan 1 transition must not produce a discontinuity. Both
+        // should be finite and differ by less than ~1 minute (same
+        // longitude, consecutive days).
+        let tz = Timezone::new("America/New_York");
+        let dec31 = calculate_solar_noon(-74.0, 2026, 12, 31, &tz);
+        let jan01 = calculate_solar_noon(-74.0, 2027, 1, 1, &tz);
+        assert!(dec31.is_finite() && jan01.is_finite());
+        let delta = (dec31 - jan01).abs();
+        assert!(
+            delta < 0.05,
+            "year boundary should not cause a solar-noon jump, got delta {}",
+            delta
+        );
+    }
 }

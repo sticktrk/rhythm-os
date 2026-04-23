@@ -345,6 +345,7 @@ pub struct AppState {
     ///
     /// Used when the app manually nudges a configured hub after automatic
     /// startup retries have been exhausted.
+    #[allow(clippy::type_complexity)]
     pub request_hub_bootstrap_fn: Option<Arc<dyn Fn(&SharedState) + Send + Sync>>,
 
     /// Optional platform-owned follow-up for a full factory reset.
@@ -352,6 +353,7 @@ pub struct AppState {
     /// Shared reset logic clears in-memory and persisted Rhythm state, then
     /// delegates lifecycle/platform cleanup (restart, reboot, Wi-Fi reset) to
     /// the active binary crate through this callback.
+    #[allow(clippy::type_complexity)]
     pub after_factory_reset_fn: Option<Arc<dyn Fn(&SharedState) + Send + Sync>>,
 
     /// Firmware version string (set by the binary crate).

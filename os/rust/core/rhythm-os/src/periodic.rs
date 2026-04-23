@@ -46,6 +46,32 @@ pub(crate) fn dispatch_spacing(cycle_duration: Duration, room_count: usize) -> D
     }
 }
 
+/// Threshold above which a single periodic tick is considered "slow" and
+/// warrants a warning log. A periodic tick that exceeds this on the rpiz
+/// (single-core 1 GHz ARM) is the leading indicator that a hub controller
+/// is hung — once enough ticks pile up, the periodic queue fills and
+/// downstream rooms stop refreshing.
+pub const SLOW_TICK_WARNING_THRESHOLD: Duration = Duration::from_secs(5);
+
+/// Classify the outcome of a single periodic tick by elapsed time. Pure so
+/// the latency-watchdog logic can be tested without a real engine call.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TickLatencyOutcome {
+    /// Completed under the threshold — no log.
+    OnTime,
+    /// Exceeded the threshold — emit a warning.
+    Slow,
+}
+
+/// Classify a tick's elapsed duration against [`SLOW_TICK_WARNING_THRESHOLD`].
+pub fn classify_tick_latency(elapsed: Duration) -> TickLatencyOutcome {
+    if elapsed >= SLOW_TICK_WARNING_THRESHOLD {
+        TickLatencyOutcome::Slow
+    } else {
+        TickLatencyOutcome::OnTime
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PeriodicDispatchNode {
     node_id: String,
@@ -1312,6 +1338,71 @@ mod tests {
 
     fn make_state() -> SharedState {
         Arc::new(Mutex::new(crate::state::AppState::default()))
+    }
+
+    // ========================================================================
+    // dispatch_spacing edge cases
+    // ========================================================================
+
+    #[test]
+    fn dispatch_spacing_handles_more_rooms_than_seconds() {
+        // 60 rooms in a 1-second cycle: spacing collapses to ~16ms each.
+        let cycle = Duration::from_secs(1);
+        let spacing = dispatch_spacing(cycle, 60);
+        assert!(spacing.as_millis() <= 17 && spacing.as_millis() >= 16);
+    }
+
+    // ========================================================================
+    // Tick latency classifier
+    // ========================================================================
+
+    #[test]
+    fn classify_tick_latency_below_threshold_is_on_time() {
+        assert_eq!(
+            classify_tick_latency(Duration::from_millis(100)),
+            TickLatencyOutcome::OnTime
+        );
+        assert_eq!(
+            classify_tick_latency(Duration::from_secs(1)),
+            TickLatencyOutcome::OnTime
+        );
+        // Just under the threshold.
+        assert_eq!(
+            classify_tick_latency(SLOW_TICK_WARNING_THRESHOLD - Duration::from_millis(1)),
+            TickLatencyOutcome::OnTime
+        );
+    }
+
+    #[test]
+    fn classify_tick_latency_at_or_above_threshold_is_slow() {
+        assert_eq!(
+            classify_tick_latency(SLOW_TICK_WARNING_THRESHOLD),
+            TickLatencyOutcome::Slow
+        );
+        assert_eq!(
+            classify_tick_latency(SLOW_TICK_WARNING_THRESHOLD + Duration::from_millis(1)),
+            TickLatencyOutcome::Slow
+        );
+        assert_eq!(
+            classify_tick_latency(Duration::from_secs(60)),
+            TickLatencyOutcome::Slow
+        );
+    }
+
+    #[test]
+    fn slow_tick_threshold_is_finite_and_reasonable() {
+        // Anchor: the warning threshold must stay well below the default
+        // periodic cycle so we get warnings before queue saturation kicks
+        // in. 5 seconds matches the engineering intent at the time of
+        // writing; if it changes, this test should be updated alongside.
+        assert!(SLOW_TICK_WARNING_THRESHOLD >= Duration::from_secs(1));
+        assert!(SLOW_TICK_WARNING_THRESHOLD <= Duration::from_secs(30));
+    }
+
+    #[test]
+    fn stable_room_phase_key_handles_empty_string() {
+        let _ = stable_room_phase_key("");
+        // Should not panic; value not asserted (FNV offset basis is fine).
     }
 
     fn make_room(id: &str, time_offset_minutes: f32) -> rhythm_core::NodeSnapshot {

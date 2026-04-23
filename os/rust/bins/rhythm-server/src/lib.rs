@@ -5,6 +5,7 @@ pub const BUILD_VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 
+pub mod bootstate;
 pub mod debug_bundle;
 pub mod http_server;
 pub mod hub;

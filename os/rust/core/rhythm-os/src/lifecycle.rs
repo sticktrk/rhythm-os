@@ -80,6 +80,31 @@ where
     Ok((hub, event_rx))
 }
 
+/// Detect the fingerprint of a corrupted persisted-rooms file: every room at
+/// its factory-default state (rhythm disabled, no offsets, not soft-off).
+/// This is the signature of the historical `do_room_set` bug that dropped
+/// params during runtime creation, and on detection the caller should fall
+/// back to seeding rooms with `rhythm_enabled=true` rather than trusting the
+/// broken payload.
+///
+/// Returns `false` for an empty list — a genuinely empty rooms file (first
+/// boot) must not be treated as corruption.
+pub(crate) fn persisted_rooms_look_corrupted(rooms: &rhythm_core::room::RoomManager) -> bool {
+    let mut any = false;
+    for room in rooms.iter() {
+        any = true;
+        if room.rhythm_enabled
+            || room.disabled
+            || room.time_offset_minutes != 0.0
+            || room.brightness_offset != 0.0
+            || room.soft_off
+        {
+            return false;
+        }
+    }
+    any
+}
+
 fn tag_hub_events(raw_rx: Receiver<HubEvent>, hub_key: HubKey) -> Receiver<HubEvent> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<HubEvent>(32);
 
@@ -290,14 +315,7 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
                     // Detect corrupted persistence: all rooms at default values
                     // (rhythm_enabled=false, no offsets) is the fingerprint of the
                     // do_room_set bug that dropped params during runtime creation.
-                    let all_defaults = !persisted.is_empty()
-                        && persisted.iter().all(|r| {
-                            !r.rhythm_enabled
-                                && !r.disabled
-                                && r.time_offset_minutes == 0.0
-                                && r.brightness_offset == 0.0
-                                && !r.soft_off
-                        });
+                    let all_defaults = persisted_rooms_look_corrupted(&persisted);
 
                     if all_defaults {
                         warn!(target: "sys",
@@ -848,4 +866,96 @@ where
         "Hub configured (transport starting, runtime deferred)"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rhythm_core::room::{Room, RoomManager};
+
+    fn default_room(id: &str) -> Room {
+        Room::new(id, id)
+    }
+
+    #[test]
+    fn empty_persistence_is_not_flagged_as_corrupted() {
+        // First boot has no rooms persisted — that's legitimate, not corruption.
+        let rooms = RoomManager::new();
+        assert!(!persisted_rooms_look_corrupted(&rooms));
+    }
+
+    #[test]
+    fn single_room_all_defaults_is_corrupted() {
+        let mut rooms = RoomManager::new();
+        rooms.add_room(default_room("kitchen"));
+        assert!(persisted_rooms_look_corrupted(&rooms));
+    }
+
+    #[test]
+    fn rhythm_enabled_room_is_not_corrupted() {
+        let mut rooms = RoomManager::new();
+        let mut room = default_room("kitchen");
+        room.rhythm_enabled = true;
+        rooms.add_room(room);
+        assert!(!persisted_rooms_look_corrupted(&rooms));
+    }
+
+    #[test]
+    fn any_nondefault_field_saves_persistence_from_corruption_flag() {
+        // Non-zero time_offset, brightness_offset, disabled, or soft_off all
+        // prove the persistence layer is writing real data.
+        for mutator in [
+            |r: &mut Room| r.time_offset_minutes = 10.0,
+            |r: &mut Room| r.brightness_offset = -0.3,
+            |r: &mut Room| r.disabled = true,
+            |r: &mut Room| r.soft_off = true,
+            |r: &mut Room| r.rhythm_enabled = true,
+        ] {
+            let mut rooms = RoomManager::new();
+            let mut room = default_room("kitchen");
+            mutator(&mut room);
+            rooms.add_room(room);
+            assert!(
+                !persisted_rooms_look_corrupted(&rooms),
+                "non-default field should prove non-corruption"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_rooms_only_corrupted_when_all_defaults() {
+        // If any room has a non-default field, the persistence is trusted.
+        let mut rooms = RoomManager::new();
+        rooms.add_room(default_room("kitchen"));
+        let mut bedroom = default_room("bedroom");
+        bedroom.rhythm_enabled = true;
+        rooms.add_room(bedroom);
+        assert!(
+            !persisted_rooms_look_corrupted(&rooms),
+            "presence of one enabled room disproves corruption"
+        );
+    }
+
+    #[test]
+    fn many_default_rooms_still_flagged() {
+        let mut rooms = RoomManager::new();
+        for i in 0..10 {
+            rooms.add_room(default_room(&format!("room-{}", i)));
+        }
+        assert!(persisted_rooms_look_corrupted(&rooms));
+    }
+
+    #[test]
+    fn hard_off_only_room_is_still_corrupted_signature() {
+        // `hard_off` is intentionally NOT part of the corruption check (hard
+        // off is a valid user state even on an otherwise-defaulted room).
+        let mut rooms = RoomManager::new();
+        let mut room = default_room("kitchen");
+        room.hard_off = true;
+        rooms.add_room(room);
+        assert!(
+            persisted_rooms_look_corrupted(&rooms),
+            "hard_off alone does not prove non-corruption"
+        );
+    }
 }

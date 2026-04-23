@@ -55,7 +55,18 @@ pub struct MotionTimerState {
     pub motion_owned: HashSet<String>,
     /// Targets currently in warning dim state (dimmed to 50% before timeout).
     pub warning_active: HashSet<String>,
+    /// Last-dispatch time per (node_id, ButtonAction, device_id) used to drop
+    /// hardware bounces. Device ID is included when available so two distinct
+    /// controllers targeting the same room do not suppress each other.
+    pub button_debounce: HashMap<(String, ButtonAction, Option<String>), Instant>,
 }
+
+/// Debounce window for repeated identical button presses on the same node.
+/// 150ms is comfortably above realistic hardware-bounce intervals while
+/// staying below the threshold a human would notice when intentionally
+/// double-tapping a button (which is normally measured against a separate
+/// short_release / long_release boundary, not raw event arrivals).
+pub const BUTTON_DEBOUNCE_WINDOW: Duration = Duration::from_millis(150);
 
 impl Default for MotionTimerState {
     fn default() -> Self {
@@ -69,7 +80,53 @@ impl MotionTimerState {
             sensors: HashMap::new(),
             motion_owned: HashSet::new(),
             warning_active: HashSet::new(),
+            button_debounce: HashMap::new(),
         }
+    }
+
+    /// Record a button dispatch for the given node + action. Returns `true`
+    /// if the event should be dispatched, `false` if it falls inside the
+    /// debounce window of a prior identical press from the same source.
+    ///
+    /// On a true return, the table is updated with the current instant. On a
+    /// false return, the existing entry is preserved (so a stream of bounces
+    /// continues to be suppressed without resetting the window).
+    pub fn admit_button(
+        &mut self,
+        node_id: &str,
+        action: ButtonAction,
+        device_id: Option<&str>,
+    ) -> bool {
+        self.admit_button_at(node_id, action, device_id, Instant::now())
+    }
+
+    /// Test-friendly variant of [`admit_button`] that takes an explicit
+    /// `now` so debounce semantics can be exercised deterministically.
+    pub fn admit_button_at(
+        &mut self,
+        node_id: &str,
+        action: ButtonAction,
+        device_id: Option<&str>,
+        now: Instant,
+    ) -> bool {
+        let key = (
+            node_id.to_string(),
+            action,
+            device_id.map(std::string::ToString::to_string),
+        );
+        if let Some(prev) = self.button_debounce.get(&key) {
+            if now.duration_since(*prev) < BUTTON_DEBOUNCE_WINDOW {
+                return false;
+            }
+        }
+        self.button_debounce.insert(key, now);
+        // Garbage-collect entries older than 10× the window so the table
+        // doesn't grow unboundedly on a unit running for weeks.
+        let cutoff = now.checked_sub(BUTTON_DEBOUNCE_WINDOW * 10);
+        if let Some(cutoff) = cutoff {
+            self.button_debounce.retain(|_, ts| *ts >= cutoff);
+        }
+        true
     }
 
     /// Check if any motion source for this target is currently tracked.
@@ -608,6 +665,19 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 hub_present = hub_key.is_some(),
                 "Button event received"
             );
+            if !motion.admit_button(&node_id, action, device_id.as_deref()) {
+                tracing::info!(
+                    target: "evt",
+                    event = "button_debounced",
+                    command_id = %command_id,
+                    action = ?action,
+                    node_id = %node_id,
+                    device_id = ?device_id.as_deref(),
+                    debounce_ms = BUTTON_DEBOUNCE_WINDOW.as_millis() as u64,
+                    "Dropping bounce-duplicate button event"
+                );
+                return;
+            }
             motion.motion_owned.remove(&node_id);
             motion.warning_active.remove(&node_id);
             motion
@@ -1254,7 +1324,10 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                 return;
             }
 
-            if let Err(e) = runtime.periodic_tick_node(&node_id, &settings_node_id, current_hour) {
+            let tick_started = Instant::now();
+            let tick_result = runtime.periodic_tick_node(&node_id, &settings_node_id, current_hour);
+            let elapsed = tick_started.elapsed();
+            if let Err(e) = tick_result {
                 tracing::warn!(
                     target: "sys",
                     event = "periodic_node_tick_failed",
@@ -1262,8 +1335,24 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                     node_id = %node_id,
                     settings_node_id = %settings_node_id,
                     current_hour,
+                    elapsed_ms = elapsed.as_millis() as u64,
                     error = %e,
                     "Periodic node tick failed"
+                );
+            }
+            if matches!(
+                crate::periodic::classify_tick_latency(elapsed),
+                crate::periodic::TickLatencyOutcome::Slow
+            ) {
+                tracing::warn!(
+                    target: "sys",
+                    event = "periodic_node_tick_slow",
+                    command_id = %command_id,
+                    node_id = %node_id,
+                    settings_node_id = %settings_node_id,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    threshold_ms = crate::periodic::SLOW_TICK_WARNING_THRESHOLD.as_millis() as u64,
+                    "Periodic node tick exceeded slow-tick threshold (controller may be stalled)"
                 );
             }
 
@@ -2157,6 +2246,219 @@ mod tests {
         assert!(
             light_poll_calls.load(Ordering::SeqCst) > first_light_poll_calls,
             "rapid reconnect should still refresh light state"
+        );
+    }
+
+    #[test]
+    fn disconnect_storm_does_not_leak_resync_invocations() {
+        // Simulate a flapping hub connection: many disconnect/connect pairs
+        // within the cooldown window. The resync machinery must stay bounded
+        // — a single resync on the first reconnect, then no extra full
+        // resyncs until the cooldown elapses. Light state polls may continue
+        // firing (that's the point of the fast path) but the expensive
+        // discover-rooms call must be rate-limited.
+        let state = make_state();
+        let hub_type = HubType::new("test");
+        let hub_key = HubKey::new(hub_type.clone(), "hub.local");
+        let discover_rooms_calls = Arc::new(AtomicUsize::new(0));
+        let light_poll_calls = Arc::new(AtomicUsize::new(0));
+
+        let mut registry = crate::registry::HubDeviceRegistry::new();
+        registry.restore_from_snapshot(RegistrySnapshot {
+            rooms: vec![SnapshotRoom {
+                id: "room_a".into(),
+                name: "Room A".into(),
+                grouped_light_id: "gl_room_a".into(),
+            }],
+            devices: vec![],
+            buttons: HashMap::new(),
+            area_lights: HashMap::new(),
+        });
+        let registry: Arc<Mutex<dyn HubRegistry>> = Arc::new(Mutex::new(registry));
+
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(MotionTestRuntime {
+            snapshots: vec![RoomSnapshot {
+                id: "room_a".into(),
+                name: "Room A".into(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                hard_off: false,
+                profile_settings: RoomProfileSettings::default(),
+            }],
+            any_lights_on_calls: Some(light_poll_calls.clone()),
+        });
+
+        {
+            let mut s = state.lock().unwrap();
+            s.hubs.insert(
+                hub_key.clone(),
+                ActiveHub {
+                    hub_type,
+                    hub_key: hub_key.clone(),
+                    runtime: Some(runtime),
+                    hub_data: Box::new(()),
+                    registry: Some(registry),
+                    discovery: Some(Arc::new(CountingReconnectDiscovery {
+                        discover_rooms_calls: discover_rooms_calls.clone(),
+                    })),
+                    shutdown: Arc::new(AtomicBool::new(false)),
+                },
+            );
+            s.set_hub_connected(&hub_key, false);
+        }
+
+        // Initial connect: no resync.
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Connected {
+                hub_key: Some(hub_key.clone()),
+            },
+            &mut MotionTimerState::new(),
+        );
+
+        // Storm: 20 rapid disconnect/connect cycles within the cooldown.
+        for _ in 0..20 {
+            handle_hub_event(
+                &state,
+                crate::hub::HubEvent::Disconnected {
+                    hub_key: Some(hub_key.clone()),
+                    reason: "SSE dropped".into(),
+                },
+                &mut MotionTimerState::new(),
+            );
+            handle_hub_event(
+                &state,
+                crate::hub::HubEvent::Connected {
+                    hub_key: Some(hub_key.clone()),
+                },
+                &mut MotionTimerState::new(),
+            );
+        }
+
+        // Give spawned resync threads time to finish.
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Full discover-rooms resync should have fired at most once during
+        // the whole storm — everything after that is suppressed by the
+        // RECONNECT_RESYNC_COOLDOWN rate-limiter.
+        let discover = discover_rooms_calls.load(Ordering::SeqCst);
+        assert!(
+            discover <= 1,
+            "disconnect storm should trigger at most 1 full resync within cooldown, got {}",
+            discover
+        );
+
+        // Hub should end up marked connected.
+        let s = state.lock().unwrap();
+        assert!(
+            s.hub_is_connected(&hub_key),
+            "after storm settles, hub must be marked connected"
+        );
+    }
+
+    // ========================================================================
+    // Button-debounce tests
+    // ========================================================================
+
+    #[test]
+    fn admit_button_lets_first_press_through() {
+        let mut motion = MotionTimerState::new();
+        assert!(motion.admit_button("room_a", ButtonAction::OnPress, None));
+    }
+
+    #[test]
+    fn admit_button_drops_repeat_within_window() {
+        let mut motion = MotionTimerState::new();
+        let t0 = Instant::now();
+        assert!(motion.admit_button_at("room_a", ButtonAction::OnPress, None, t0));
+        // 50ms later — well inside the 150ms window — must be dropped.
+        let t1 = t0 + Duration::from_millis(50);
+        assert!(!motion.admit_button_at("room_a", ButtonAction::OnPress, None, t1));
+    }
+
+    #[test]
+    fn admit_button_passes_after_window_elapses() {
+        let mut motion = MotionTimerState::new();
+        let t0 = Instant::now();
+        assert!(motion.admit_button_at("room_a", ButtonAction::OnPress, None, t0));
+        let t1 = t0 + BUTTON_DEBOUNCE_WINDOW + Duration::from_millis(5);
+        assert!(motion.admit_button_at("room_a", ButtonAction::OnPress, None, t1));
+    }
+
+    #[test]
+    fn admit_button_distinguishes_actions_on_same_node() {
+        // Real Hue Dimmer: OnPress immediately followed by OffPress is a valid
+        // user action on different physical buttons. The debounce must NOT
+        // collapse them.
+        let mut motion = MotionTimerState::new();
+        let t0 = Instant::now();
+        assert!(motion.admit_button_at("room_a", ButtonAction::OnPress, None, t0));
+        let t1 = t0 + Duration::from_millis(20);
+        assert!(motion.admit_button_at("room_a", ButtonAction::OffPress, None, t1));
+    }
+
+    #[test]
+    fn admit_button_distinguishes_nodes_for_same_action() {
+        // Two physical buttons in different rooms pressed within 20ms (e.g.,
+        // "all on" scene) must each dispatch.
+        let mut motion = MotionTimerState::new();
+        let t0 = Instant::now();
+        assert!(motion.admit_button_at("room_a", ButtonAction::OnPress, None, t0));
+        let t1 = t0 + Duration::from_millis(20);
+        assert!(motion.admit_button_at("room_b", ButtonAction::OnPress, None, t1));
+    }
+
+    #[test]
+    fn admit_button_distinguishes_devices_on_same_node_and_action() {
+        // Two controllers bound to the same room must not suppress each
+        // other just because they trigger the same action close together.
+        let mut motion = MotionTimerState::new();
+        let t0 = Instant::now();
+        assert!(motion.admit_button_at("room_a", ButtonAction::OnPress, Some("device-a"), t0));
+        let t1 = t0 + Duration::from_millis(20);
+        assert!(motion.admit_button_at("room_a", ButtonAction::OnPress, Some("device-b"), t1));
+    }
+
+    #[test]
+    fn admit_button_continues_to_drop_during_sustained_bounces() {
+        // Bounce stream: 4 events at 30ms spacing should produce one dispatch.
+        let mut motion = MotionTimerState::new();
+        let t0 = Instant::now();
+        let mut admitted = 0;
+        for i in 0..4 {
+            let t = t0 + Duration::from_millis(i * 30);
+            if motion.admit_button_at("room_a", ButtonAction::OnPress, None, t) {
+                admitted += 1;
+            }
+        }
+        assert_eq!(
+            admitted, 1,
+            "only the first of four bouncing events should pass"
+        );
+    }
+
+    #[test]
+    fn admit_button_garbage_collects_old_entries() {
+        // Many distinct (node, action) pairs over a long timespan should not
+        // grow the table unboundedly — the GC pass keeps it bounded.
+        let mut motion = MotionTimerState::new();
+        let t0 = Instant::now();
+        for i in 0..200 {
+            let node = format!("room-{}", i);
+            // Spread far apart so each call advances time enough to GC the
+            // previous entries.
+            let t = t0 + BUTTON_DEBOUNCE_WINDOW * 20 * (i as u32 + 1);
+            motion.admit_button_at(&node, ButtonAction::OnPress, None, t);
+        }
+        assert!(
+            motion.button_debounce.len() < 50,
+            "GC should keep debounce table bounded, got {}",
+            motion.button_debounce.len()
         );
     }
 

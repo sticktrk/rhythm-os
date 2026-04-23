@@ -784,4 +784,118 @@ mod tests {
             other => panic!("Expected ButtonEvent (no timestamps), got {:?}", other),
         }
     }
+
+    // ========================================================================
+    // Reconnect / stream-interruption tests
+    // ========================================================================
+
+    #[test]
+    fn drain_preserves_partial_line_at_end_of_buffer() {
+        let (tx, rx) = mpsc::sync_channel::<HueSseEvent>(16);
+        let mut state = SseParseState::new();
+        let mut buf = Vec::new();
+
+        // A heartbeat line followed by a partial `data:` prefix.
+        buf.extend_from_slice(b": hi\ndata: [{\"da");
+        drain_sse_lines(&mut buf, &tx, &mut state);
+
+        assert!(matches!(rx.try_recv(), Ok(HueSseEvent::Heartbeat)));
+        assert!(
+            rx.try_recv().is_err(),
+            "partial line must not be dispatched"
+        );
+        assert_eq!(
+            std::str::from_utf8(&buf).unwrap(),
+            "data: [{\"da",
+            "partial line must be retained in buf for the next decode()"
+        );
+    }
+
+    #[test]
+    fn drain_assembles_line_across_two_chunks() {
+        let (tx, rx) = mpsc::sync_channel::<HueSseEvent>(16);
+        let mut state = SseParseState::new();
+        let mut buf = Vec::new();
+
+        // First chunk: partial heartbeat line.
+        buf.extend_from_slice(b": hi");
+        drain_sse_lines(&mut buf, &tx, &mut state);
+        assert!(rx.try_recv().is_err());
+
+        // Second chunk completes the line.
+        buf.extend_from_slice(b"\n");
+        drain_sse_lines(&mut buf, &tx, &mut state);
+        assert!(matches!(rx.try_recv(), Ok(HueSseEvent::Heartbeat)));
+    }
+
+    #[test]
+    fn reset_parse_state_simulating_reconnect_allows_same_button_through() {
+        let (tx, rx) = mpsc::sync_channel::<HueSseEvent>(16);
+        let fresh = format_utc(now_epoch_secs().saturating_sub(1));
+        let line = format!(
+            r#"data: [{{"data":[{{"id":"btn1","type":"button","button":{{"button_report":{{"event":"initial_press","updated":"{}"}},"last_event":"initial_press"}}}}]}}]"#,
+            fresh
+        );
+
+        // First connection: event passes, then deduped.
+        let mut state = SseParseState::new();
+        process_sse_line(&line, &tx, &mut state);
+        assert!(rx.try_recv().is_ok());
+        process_sse_line(&line, &tx, &mut state);
+        assert!(
+            rx.try_recv().is_err(),
+            "duplicate within a session is deduped"
+        );
+
+        // Simulate SSE reconnect: the production loop creates a fresh
+        // `SseParseState` per run_sse_loop invocation (reset on reconnect is
+        // baked in). A replay of the same button after reconnect must NOT be
+        // silently swallowed, because it's a new user interaction.
+        let mut fresh_state = SseParseState::new();
+        process_sse_line(&line, &tx, &mut fresh_state);
+        assert!(
+            rx.try_recv().is_ok(),
+            "after reconnect (new SseParseState), the same event must dispatch"
+        );
+    }
+
+    #[test]
+    fn mid_stream_drop_does_not_leave_partial_event_partially_dispatched() {
+        let (tx, rx) = mpsc::sync_channel::<HueSseEvent>(16);
+        let mut state = SseParseState::new();
+        let mut buf = Vec::new();
+
+        // Simulate a drop in the middle of a data line (no trailing '\n').
+        buf.extend_from_slice(
+            br#"data: [{"data":[{"id":"btn1","type":"button","button":{"button_report":{"event":"initial_press","updated":"2099-01-01T00:00:00Z"}}}]}]"#,
+        );
+        drain_sse_lines(&mut buf, &tx, &mut state);
+
+        // No terminator, so the line must not have been dispatched.
+        assert!(
+            rx.try_recv().is_err(),
+            "incomplete data line must not produce an event before its terminator arrives"
+        );
+        assert!(
+            !buf.is_empty(),
+            "buffer must retain the partial line for retry after reconnect"
+        );
+    }
+
+    #[test]
+    fn multiple_complete_lines_in_one_chunk_dispatch_in_order() {
+        let (tx, rx) = mpsc::sync_channel::<HueSseEvent>(16);
+        let mut state = SseParseState::new();
+        let mut buf = Vec::new();
+
+        buf.extend_from_slice(b": hi\n: hi\n: hi\n");
+        drain_sse_lines(&mut buf, &tx, &mut state);
+
+        let mut count = 0;
+        while let Ok(HueSseEvent::Heartbeat) = rx.try_recv() {
+            count += 1;
+        }
+        assert_eq!(count, 3, "all three heartbeat lines must dispatch");
+        assert!(buf.is_empty(), "fully-consumed buffer must be empty");
+    }
 }

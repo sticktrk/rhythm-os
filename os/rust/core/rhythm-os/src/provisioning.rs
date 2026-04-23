@@ -164,6 +164,13 @@ pub struct ProvisioningSessionConfig {
     pub poll_interval: Duration,
     pub connect_timeout: Duration,
     pub success_grace_period: Duration,
+    /// Upper bound on the full provisioning session. If `Some(d)`, the loop
+    /// aborts after `d` of wall-clock time and returns an error. A malformed
+    /// BLE stream or stuck Wi-Fi driver can otherwise keep the appliance
+    /// stuck in provisioning mode indefinitely. `None` disables the cap
+    /// (kept only for tests that want to assert the no-cap behavior
+    /// explicitly).
+    pub session_timeout: Option<Duration>,
 }
 
 impl Default for ProvisioningSessionConfig {
@@ -172,6 +179,11 @@ impl Default for ProvisioningSessionConfig {
             poll_interval: Duration::from_millis(100),
             connect_timeout: Duration::from_secs(30),
             success_grace_period: Duration::from_secs(2),
+            // 30 minutes is generous — a real user typically completes
+            // onboarding in under 60s — but short enough that a unit stuck
+            // in provisioning mode will eventually exit and retry from a
+            // clean state instead of draining battery or blocking HTTP.
+            session_timeout: Some(Duration::from_secs(30 * 60)),
         }
     }
 }
@@ -198,8 +210,18 @@ where
         frontend.publish_status(&ProvisioningStatus::Waiting)?;
 
         let mut pending: Option<PendingConnect> = None;
+        let session_deadline = config.session_timeout.map(|d| Instant::now() + d);
 
         loop {
+            if let Some(deadline) = session_deadline {
+                if Instant::now() >= deadline {
+                    let error = "Provisioning session timed out".to_string();
+                    let _ = frontend.publish_status(&ProvisioningStatus::Failed {
+                        error: error.clone(),
+                    });
+                    anyhow::bail!("{}", error);
+                }
+            }
             if let Some(event) = frontend.poll_event(config.poll_interval)? {
                 match event {
                     ProvisioningEvent::Credentials(creds) => {
@@ -369,6 +391,76 @@ mod tests {
                     ip: "192.168.1.10".to_string(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn provisioning_session_aborts_when_session_timeout_elapses() {
+        // No events, no results — a malformed BLE stream that never completes.
+        // With a tiny session_timeout the loop must exit with an error rather
+        // than blocking forever.
+        let mut frontend = FakeFrontend::new(Vec::new());
+        let mut backend = FakeBackend::new(Vec::new());
+
+        let config = ProvisioningSessionConfig {
+            poll_interval: Duration::from_millis(10),
+            connect_timeout: Duration::from_secs(1),
+            success_grace_period: Duration::from_millis(0),
+            session_timeout: Some(Duration::from_millis(50)),
+        };
+
+        let start = std::time::Instant::now();
+        let result = run_provisioning_session(&mut frontend, &mut backend, &device_info(), &config);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "timeout must surface as an error");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "session must exit promptly near the timeout, got {:?}",
+            elapsed
+        );
+        assert!(
+            frontend.statuses.iter().any(|s| matches!(
+                s,
+                ProvisioningStatus::Failed { error } if error.contains("timed out")
+            )),
+            "session timeout must publish a Failed status, got {:?}",
+            frontend.statuses
+        );
+        assert!(frontend.stopped, "frontend must be stopped on timeout");
+    }
+
+    #[test]
+    fn provisioning_session_completes_before_timeout_does_not_abort() {
+        // Healthy session that completes within the session_timeout must
+        // not be aborted by the deadline.
+        let creds = WifiCredentials {
+            ssid: "w".into(),
+            password: "p".into(),
+        };
+        let mut frontend = FakeFrontend::new(vec![ProvisioningEvent::Credentials(creds.clone())]);
+        let mut backend = FakeBackend::new(vec![Some(ProvisioningConnectResult::Connected {
+            ip: "10.0.0.1".into(),
+        })]);
+
+        let config = ProvisioningSessionConfig {
+            success_grace_period: Duration::from_millis(0),
+            session_timeout: Some(Duration::from_secs(5)),
+            ..Default::default()
+        };
+
+        let result = run_provisioning_session(&mut frontend, &mut backend, &device_info(), &config)
+            .expect("healthy session must succeed");
+        assert_eq!(result, creds);
+    }
+
+    #[test]
+    fn default_config_has_finite_session_timeout() {
+        // Guards against a regression that accidentally removes the cap.
+        let config = ProvisioningSessionConfig::default();
+        assert!(
+            config.session_timeout.is_some(),
+            "default session_timeout must not be None to prevent indefinite provisioning"
         );
     }
 

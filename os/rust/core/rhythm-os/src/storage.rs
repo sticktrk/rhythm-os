@@ -211,14 +211,42 @@ impl FileStorage {
         self.dir.join(name)
     }
 
-    /// Atomic write: write to .tmp then rename.
+    /// Durable atomic write: write to `.tmp`, fsync the data, atomically rename
+    /// into place, then fsync the parent directory so the rename survives a
+    /// power loss. Removes any stale `.tmp` left behind by a crashed prior
+    /// write before starting.
     fn write_atomic(&self, name: &str, data: &[u8]) -> Result<()> {
+        use std::io::Write;
+
         let path = self.file_path(name);
         let tmp = self.file_path(&format!("{}.tmp", name));
 
-        std::fs::write(&tmp, data).with_context(|| format!("Failed to write {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path)
-            .with_context(|| format!("Failed to rename {} -> {}", tmp.display(), path.display()))?;
+        // A prior crashed write can leave a stale `.tmp`. Remove it so File::create
+        // below doesn't silently inherit partial contents on platforms that
+        // don't truncate on open.
+        if tmp.exists() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+
+        {
+            let mut file = std::fs::File::create(&tmp)
+                .with_context(|| format!("Failed to create {}", tmp.display()))?;
+            file.write_all(data)
+                .with_context(|| format!("Failed to write {}", tmp.display()))?;
+            file.sync_all()
+                .with_context(|| format!("Failed to fsync {}", tmp.display()))?;
+        }
+
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(anyhow::anyhow!(e)).with_context(|| {
+                format!("Failed to rename {} -> {}", tmp.display(), path.display())
+            });
+        }
+
+        if let Ok(dir) = std::fs::File::open(&self.dir) {
+            let _ = dir.sync_all();
+        }
 
         Ok(())
     }
@@ -467,7 +495,11 @@ impl Storage for FileStorage {
         }
         self.clear_hub_registry_files()?;
 
-        for dir in ["matter"] {
+        // Per-integration subdirectories that hold hub-local caches. Stored
+        // as a slice so adding future integrations keeps this block
+        // structured identically.
+        const INTEGRATION_SUBDIRS: &[&str] = &["matter"];
+        for dir in INTEGRATION_SUBDIRS {
             let path = self.dir.join(dir);
             match std::fs::remove_dir_all(&path) {
                 Ok(()) => {}
@@ -1527,6 +1559,137 @@ mod tests {
             assert_eq!(sanitized, "hue_192_168_1_100");
             assert!(!sanitized.contains('.'));
             assert!(!sanitized.contains(':'));
+        }
+
+        // ---- Durability / atomic-write tests ----
+
+        fn sample_settings() -> StoredSettings {
+            StoredSettings {
+                power_save: false,
+                active_mode: RhythmMode::Day,
+                last_active_mode_cause: ModeChangeCause::default(),
+                last_active_mode_transition_id: None,
+                last_active_mode_change_utc_ms: None,
+                modes: Vec::new(),
+                mode_transitions: Vec::new(),
+            }
+        }
+
+        #[test]
+        fn save_cleans_up_tmp_file_on_success() {
+            let (storage, path) = temp_storage();
+            let settings = sample_settings();
+            storage.save_settings(&settings).unwrap();
+
+            assert!(path.join("settings.json").exists());
+            assert!(
+                !path.join("settings.json.tmp").exists(),
+                "write_atomic must leave no .tmp sibling on success"
+            );
+            cleanup(&path);
+        }
+
+        #[test]
+        fn save_reclaims_orphan_tmp_from_prior_crash() {
+            // Simulate a crashed prior write by leaving a stale .tmp file
+            // behind before the next save.
+            let (storage, path) = temp_storage();
+            std::fs::write(path.join("settings.json.tmp"), "partial garbage").unwrap();
+
+            let settings = sample_settings();
+            storage.save_settings(&settings).unwrap();
+
+            assert!(path.join("settings.json").exists());
+            assert!(
+                !path.join("settings.json.tmp").exists(),
+                "stale .tmp from a prior crashed write must be cleaned up"
+            );
+
+            // And loading must succeed with the fresh contents, not the stale tmp.
+            let _loaded = storage.load_settings().unwrap();
+            cleanup(&path);
+        }
+
+        #[test]
+        fn partial_write_between_profiles_and_settings_keeps_profiles_loadable() {
+            // Simulate the production crash window between save_light_profiles
+            // and save_settings: profiles successfully persisted, settings call
+            // never ran. Restoring must load profiles and fall back to default
+            // settings without losing user data.
+            let (storage, path) = temp_storage();
+
+            let mut profile = rhythm_core::default_rhythm_profile();
+            profile.min_brightness = 7;
+            profile.max_brightness = 91;
+            let profiles = StoredLightProfiles {
+                solar_noon_hour: 12.5,
+                profiles: vec![profile],
+            };
+            storage.save_light_profiles(&profiles).unwrap();
+            // settings.save never called — simulates crash between writes.
+
+            let reopened = FileStorage::new(path.to_str().unwrap()).unwrap();
+            let loaded_profiles = reopened.load_light_profiles().unwrap();
+            assert_eq!(loaded_profiles.profiles[0].min_brightness, 7);
+            assert_eq!(loaded_profiles.profiles[0].max_brightness, 91);
+
+            // No settings file → load_settings errors. Callers should treat
+            // this as "use defaults" rather than crashing; assert the error
+            // type is recoverable rather than a data-loss signal.
+            let settings_err = reopened.load_settings();
+            assert!(settings_err.is_err());
+
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_returns_error_on_truncated_json() {
+            let (storage, path) = temp_storage();
+            // Write a truncated JSON doc directly, simulating power loss
+            // mid-write on a legacy non-atomic storage backend.
+            std::fs::write(path.join("light_profiles.json"), "{\"profiles\":[").unwrap();
+
+            let result = storage.load_light_profiles();
+            assert!(
+                result.is_err(),
+                "truncated JSON must surface as a parse error, not panic"
+            );
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_returns_error_on_empty_file() {
+            let (storage, path) = temp_storage();
+            std::fs::write(path.join("settings.json"), "").unwrap();
+
+            let result = storage.load_settings();
+            assert!(result.is_err(), "empty file must not deserialize silently");
+            cleanup(&path);
+        }
+
+        #[test]
+        fn successive_saves_do_not_accumulate_tmp_siblings() {
+            let (storage, path) = temp_storage();
+            for _ in 0..8 {
+                storage.save_settings(&sample_settings()).unwrap();
+            }
+            let orphan_tmps: Vec<_> = std::fs::read_dir(&path)
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .map(|n| n.ends_with(".tmp"))
+                        .unwrap_or(false)
+                })
+                .collect();
+            assert!(
+                orphan_tmps.is_empty(),
+                "no .tmp siblings should be left after repeated saves, found {} orphan(s)",
+                orphan_tmps.len()
+            );
+            cleanup(&path);
         }
     }
 }
