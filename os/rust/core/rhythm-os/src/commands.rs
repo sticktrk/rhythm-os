@@ -2471,6 +2471,8 @@ fn clear_factory_reset_ephemeral_state(state: &SharedState) -> Result<()> {
     s.motion_snapshots.clear();
     s.room_mode_transitions.clear();
     s.last_check_hour = None;
+    s.last_check_instant = None;
+    s.last_check_utc_offset_hours = None;
     s.pending_periodic_ticks.clear();
     s.pending_hub_event_rxs.clear();
     s.pending_motion_clear.clear();

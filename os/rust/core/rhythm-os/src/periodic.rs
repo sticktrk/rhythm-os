@@ -53,6 +53,12 @@ pub(crate) fn dispatch_spacing(cycle_duration: Duration, room_count: usize) -> D
 /// downstream rooms stop refreshing.
 pub const SLOW_TICK_WARNING_THRESHOLD: Duration = Duration::from_secs(5);
 
+/// Tolerance for reconciling wall-clock movement against monotonic elapsed time.
+///
+/// This intentionally allows civil-time adjustments like DST while still
+/// rejecting large discontinuities from cold-boot clocks or manual time steps.
+const PERIODIC_TIME_DISCONTINUITY_TOLERANCE: Duration = Duration::from_secs(20 * 60);
+
 /// Classify the outcome of a single periodic tick by elapsed time. Pure so
 /// the latency-watchdog logic can be tested without a real engine call.
 #[derive(Debug, PartialEq, Eq)]
@@ -70,6 +76,19 @@ pub fn classify_tick_latency(elapsed: Duration) -> TickLatencyOutcome {
     } else {
         TickLatencyOutcome::OnTime
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PeriodicTimeCheckResult {
+    Seeded,
+    Continuous {
+        last_hour: f32,
+    },
+    Discontinuous {
+        last_hour: f32,
+        adjusted_delta_hours: f32,
+        expected_delta_hours: f32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -741,14 +760,14 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             }
         }
 
-        // Read last_check_hour before check_solar_midnight updates it
-        let last_hour = state.lock().ok().and_then(|s| s.last_check_hour);
         let current_hour = SystemTimeProvider::new(utc_offset).current_hour();
-        check_solar_midnight(&state, current_hour);
-        if let Some(last) = last_hour {
-            check_mode_transitions(&state, last, current_hour);
-        } else {
-            replay_missed_mode_transitions(&state);
+        match check_solar_midnight_at(&state, current_hour, utc_offset, Instant::now()) {
+            PeriodicTimeCheckResult::Continuous { last_hour } => {
+                check_mode_transitions(&state, last_hour, current_hour);
+            }
+            PeriodicTimeCheckResult::Seeded | PeriodicTimeCheckResult::Discontinuous { .. } => {
+                replay_missed_mode_transitions(&state);
+            }
         }
 
         let elapsed = cycle_started.elapsed();
@@ -779,34 +798,87 @@ pub fn post_tick_node(state: &SharedState, runtime: &Arc<dyn RuntimeHandle>, nod
     let _ = (&state, &snap);
 }
 
-/// Check for solar midnight crossing and reset room offsets.
-///
-/// Solar midnight is when the sun is at its lowest point (opposite of solar noon).
-/// At this crossing, per-room time and brightness offsets are reset to zero,
-/// giving each day a clean start.
-pub fn check_solar_midnight(state: &SharedState, current_hour: f32) {
-    let (crossed, runtime) = {
-        let Ok(mut s) = state.lock() else { return };
+/// Choose the modulo-24 local-hour delta that best matches expected wall-clock movement.
+fn adjusted_local_hour_delta(last_hour: f32, current_hour: f32, expected_delta_hours: f32) -> f32 {
+    let raw_delta = current_hour - last_hour;
+    let mut best_delta = raw_delta;
+    let mut best_diff = (raw_delta - expected_delta_hours).abs();
 
-        let solar_midnight = s.solar_midnight_hour();
-        let last_hour = s.last_check_hour;
-        s.last_check_hour = Some(current_hour);
+    for candidate in [raw_delta - 24.0, raw_delta + 24.0] {
+        let diff = (candidate - expected_delta_hours).abs();
+        if diff < best_diff {
+            best_delta = candidate;
+            best_diff = diff;
+        }
+    }
 
-        let Some(last) = last_hour else {
-            debug!(
-                target: "sys",
-                "Solar midnight check seeded at local_hour {:.2}",
-                current_hour
-            );
-            return;
+    best_delta
+}
+
+fn advance_periodic_time_check(
+    state: &SharedState,
+    current_hour: f32,
+    current_utc_offset_hours: f32,
+    observed_at: Instant,
+) -> PeriodicTimeCheckResult {
+    let (last_hour, last_check_instant, last_utc_offset_hours) = {
+        let Ok(mut s) = state.lock() else {
+            return PeriodicTimeCheckResult::Seeded;
         };
 
-        let crossed = rhythm_core::crossed_solar_midnight(last, current_hour, solar_midnight);
+        let last_hour = s.last_check_hour;
+        let last_check_instant = s.last_check_instant;
+        let last_utc_offset_hours = s.last_check_utc_offset_hours;
+
+        s.last_check_hour = Some(current_hour);
+        s.last_check_instant = Some(observed_at);
+        s.last_check_utc_offset_hours = Some(current_utc_offset_hours);
+
+        (last_hour, last_check_instant, last_utc_offset_hours)
+    };
+
+    let (Some(last_hour), Some(last_check_instant), Some(last_utc_offset_hours)) =
+        (last_hour, last_check_instant, last_utc_offset_hours)
+    else {
+        debug!(
+            target: "sys",
+            "Solar midnight check seeded at local_hour {:.2}",
+            current_hour
+        );
+        return PeriodicTimeCheckResult::Seeded;
+    };
+
+    let elapsed_hours = observed_at
+        .saturating_duration_since(last_check_instant)
+        .as_secs_f32()
+        / 3600.0;
+    let expected_delta_hours = elapsed_hours + (current_utc_offset_hours - last_utc_offset_hours);
+    let adjusted_delta_hours =
+        adjusted_local_hour_delta(last_hour, current_hour, expected_delta_hours);
+    let tolerance_hours = PERIODIC_TIME_DISCONTINUITY_TOLERANCE.as_secs_f32() / 3600.0;
+
+    if (adjusted_delta_hours - expected_delta_hours).abs() > tolerance_hours {
+        return PeriodicTimeCheckResult::Discontinuous {
+            last_hour,
+            adjusted_delta_hours,
+            expected_delta_hours,
+        };
+    }
+
+    PeriodicTimeCheckResult::Continuous { last_hour }
+}
+
+fn maybe_reset_on_solar_midnight(state: &SharedState, last_hour: f32, current_hour: f32) {
+    let (crossed, runtime) = {
+        let Ok(s) = state.lock() else { return };
+
+        let solar_midnight = s.solar_midnight_hour();
+        let crossed = rhythm_core::crossed_solar_midnight(last_hour, current_hour, solar_midnight);
 
         if crossed {
             info!(
                 "Solar midnight crossed (last_local={:.2}, now_local={:.2}, trigger_local={:.2}) - resetting offsets",
-                last, current_hour, solar_midnight
+                last_hour, current_hour, solar_midnight
             );
         }
 
@@ -844,8 +916,62 @@ pub fn check_solar_midnight(state: &SharedState, current_hour: f32) {
                     );
                 }
             }
+
+            info!("Reset room offsets for new solar day");
         }
     }
+}
+
+fn check_solar_midnight_at(
+    state: &SharedState,
+    current_hour: f32,
+    current_utc_offset_hours: f32,
+    observed_at: Instant,
+) -> PeriodicTimeCheckResult {
+    let result =
+        advance_periodic_time_check(state, current_hour, current_utc_offset_hours, observed_at);
+
+    match result {
+        PeriodicTimeCheckResult::Continuous { last_hour } => {
+            maybe_reset_on_solar_midnight(state, last_hour, current_hour);
+        }
+        PeriodicTimeCheckResult::Discontinuous {
+            last_hour,
+            adjusted_delta_hours,
+            expected_delta_hours,
+        } => {
+            warn!(
+                target: "sys",
+                "Wall-clock jump detected during periodic checks (last_local={:.2}, now_local={:.2}, adjusted_delta_hours={:.2}, expected_delta_hours={:.2}) - reseeding time-based checks",
+                last_hour,
+                current_hour,
+                adjusted_delta_hours,
+                expected_delta_hours
+            );
+        }
+        PeriodicTimeCheckResult::Seeded => {}
+    }
+
+    result
+}
+
+/// Check for solar midnight crossing and reset room offsets.
+///
+/// Solar midnight is when the sun is at its lowest point (opposite of solar noon).
+/// At this crossing, per-room time and brightness offsets are reset to zero,
+/// giving each day a clean start.
+pub fn check_solar_midnight(state: &SharedState, current_hour: f32) {
+    let current_utc_offset_hours = state
+        .lock()
+        .ok()
+        .map(|s| s.utc_offset_hours)
+        .unwrap_or_default();
+    let _ = check_solar_midnight_at(
+        state,
+        current_hour,
+        current_utc_offset_hours,
+        Instant::now(),
+    );
 }
 
 fn fallback_solar_trigger_hour(
@@ -1839,6 +1965,8 @@ mod tests {
         check_solar_midnight(&state, 14.0);
         let s = state.lock().unwrap();
         assert_eq!(s.last_check_hour, Some(14.0));
+        assert!(s.last_check_instant.is_some());
+        assert_eq!(s.last_check_utc_offset_hours, Some(0.0));
     }
 
     #[test]
@@ -1978,11 +2106,14 @@ mod tests {
         });
 
         let state = make_state();
+        let observed_at = Instant::now();
         {
             let mut s = state.lock().unwrap();
             // Solar noon = 12.5, midnight = 0.5
             s.runtime_config.solar_noon_hour = 12.5;
             s.last_check_hour = Some(0.4); // just before midnight
+            s.last_check_instant = Some(observed_at - Duration::from_secs(12 * 60));
+            s.last_check_utc_offset_hours = Some(0.0);
             let hub_type = crate::hub::HubType::parse("mock").unwrap();
             let hub_key = crate::canonical::identity::HubKey::new(hub_type.clone(), "mock");
             s.hubs.insert(
@@ -2000,7 +2131,11 @@ mod tests {
         }
 
         // Cross solar midnight: 0.4 → 0.6 crosses 0.5
-        check_solar_midnight(&state, 0.6);
+        let result = check_solar_midnight_at(&state, 0.6, 0.0, observed_at);
+        assert_eq!(
+            result,
+            PeriodicTimeCheckResult::Continuous { last_hour: 0.4 }
+        );
 
         let calls = runtime.restore_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -2018,13 +2153,194 @@ mod tests {
     #[test]
     fn solar_midnight_no_crossing_when_no_runtime() {
         let state = make_state();
+        let observed_at = Instant::now();
         {
             let mut s = state.lock().unwrap();
             s.runtime_config.solar_noon_hour = 12.5;
             s.last_check_hour = Some(0.4);
+            s.last_check_instant = Some(observed_at - Duration::from_secs(12 * 60));
+            s.last_check_utc_offset_hours = Some(0.0);
         }
         // This should not panic even with no runtime
-        check_solar_midnight(&state, 0.6);
+        let _ = check_solar_midnight_at(&state, 0.6, 0.0, observed_at);
+    }
+
+    #[test]
+    fn solar_midnight_large_clock_jump_is_reseeded() {
+        use rhythm_core::{
+            InputEvent, LightNodeKind, LightProfileConfig, RestoredRoomState, RoomSnapshot,
+            RuntimeHandle,
+        };
+        use std::sync::Mutex as StdMutex;
+
+        struct MockRuntime {
+            snapshots: StdMutex<Vec<RoomSnapshot>>,
+            restore_calls: StdMutex<Vec<(String, f32, f32)>>,
+        }
+
+        impl RuntimeHandle for MockRuntime {
+            fn handle_event(&self, _: &InputEvent) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            fn sync_rooms(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn set_solar(&self, _: rhythm_core::SolarTime) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn set_light_profile_config(&self, _: LightProfileConfig) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn set_mode_configs(&self, _: Vec<rhythm_core::ModeConfig>) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn periodic_tick_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn engine_room_snapshot(&self, id: &str) -> Option<RoomSnapshot> {
+                self.snapshots
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|s| s.id == id)
+                    .cloned()
+            }
+            fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot> {
+                self.snapshots.lock().unwrap().clone()
+            }
+            fn restore_room_state(&self, room_id: &str, state: RestoredRoomState) {
+                self.restore_calls.lock().unwrap().push((
+                    room_id.to_string(),
+                    state.time_offset_minutes,
+                    state.brightness_offset,
+                ));
+            }
+            fn add_room(&self, _: &str, _: &str) {}
+            fn remove_room(&self, _: &str) {}
+            fn dim_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn turn_on_room(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn apply_room_command(
+                &self,
+                _: &str,
+                _: rhythm_core::LightingCommand,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn lights_off_room(&self, _: &str, _: Option<u32>) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn set_power_save(&self, _: bool) -> Vec<String> {
+                vec![]
+            }
+            fn is_power_save(&self) -> bool {
+                false
+            }
+            fn set_room_brightness(&self, _: &str, _: u8) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn set_room_time_offset(&self, _: &str, _: f32) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn idle_brightness(&self) -> u8 {
+                1
+            }
+            fn soft_off_tick_room(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn any_lights_on(&self, _: &str) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            fn current_hour(&self) -> f32 {
+                12.0
+            }
+            fn set_light_profile(&self, _: &str) -> bool {
+                true
+            }
+            fn active_light_profile_id(&self) -> String {
+                "rhythm".into()
+            }
+            fn available_light_profiles(&self) -> Vec<(String, String)> {
+                vec![
+                    ("rhythm".into(), "Rhythm Curve".into()),
+                    ("sleep".into(), "Sleep Curve".into()),
+                ]
+            }
+        }
+
+        let runtime = Arc::new(MockRuntime {
+            snapshots: StdMutex::new(vec![RoomSnapshot {
+                id: "room1".into(),
+                name: "Room 1".into(),
+                kind: LightNodeKind::Room,
+                parent_id: None,
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 30.0,
+                brightness_offset: 10.0,
+                soft_off: false,
+                hard_off: false,
+                profile_settings: rhythm_core::RoomProfileSettings::default(),
+            }]),
+            restore_calls: StdMutex::new(Vec::new()),
+        });
+
+        let state = make_state();
+        let observed_at = Instant::now();
+        {
+            let mut s = state.lock().unwrap();
+            s.runtime_config.solar_noon_hour = 13.2264557;
+            s.last_check_hour = Some(0.03);
+            s.last_check_instant = Some(observed_at - Duration::from_secs(3 * 60));
+            s.last_check_utc_offset_hours = Some(-5.0);
+            let hub_type = crate::hub::HubType::parse("mock").unwrap();
+            let hub_key = crate::canonical::identity::HubKey::new(hub_type.clone(), "mock");
+            s.hubs.insert(
+                hub_key.clone(),
+                crate::hub::ActiveHub {
+                    hub_type,
+                    hub_key,
+                    runtime: Some(runtime.clone() as Arc<dyn RuntimeHandle>),
+                    hub_data: Box::new(()),
+                    registry: None,
+                    discovery: None,
+                    shutdown: Default::default(),
+                },
+            );
+        }
+
+        let result = check_solar_midnight_at(&state, 15.67, -4.0, observed_at);
+        assert_eq!(
+            result,
+            PeriodicTimeCheckResult::Discontinuous {
+                last_hour: 0.03,
+                adjusted_delta_hours: -8.36,
+                expected_delta_hours: 1.05,
+            }
+        );
+        assert!(runtime.restore_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn solar_midnight_allows_dst_fall_back_without_reseed() {
+        let state = make_state();
+        let observed_at = Instant::now();
+        {
+            let mut s = state.lock().unwrap();
+            s.runtime_config.solar_noon_hour = 12.5;
+            s.last_check_hour = Some(1.9);
+            s.last_check_instant = Some(observed_at - Duration::from_secs(3 * 60));
+            s.last_check_utc_offset_hours = Some(-4.0);
+        }
+
+        let result = check_solar_midnight_at(&state, 1.1, -5.0, observed_at);
+        assert_eq!(
+            result,
+            PeriodicTimeCheckResult::Continuous { last_hour: 1.9 }
+        );
     }
 
     // ========================================================================

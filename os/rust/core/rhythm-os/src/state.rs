@@ -220,8 +220,16 @@ pub struct AppState {
     pub motion_snapshots: HashMap<String, MotionSnapshot>,
     /// Rooms currently transitioning between global modes.
     pub room_mode_transitions: HashMap<String, RoomModeTransition>,
-    /// Last periodic update hour (for solar midnight detection).
+    /// Last observed local hour for periodic time-based checks.
     pub last_check_hour: Option<f32>,
+    /// Monotonic timestamp of the last periodic time observation.
+    ///
+    /// Used to distinguish real time progression from wall-clock jumps.
+    pub last_check_instant: Option<Instant>,
+    /// UTC offset captured alongside the last periodic time observation.
+    ///
+    /// Used to tolerate DST offset changes when validating wall-clock continuity.
+    pub last_check_utc_offset_hours: Option<f32>,
     /// Epoch milliseconds of the most recent periodic tick (for client bootstrap).
     pub last_tick_epoch_ms: u64,
 
@@ -416,6 +424,8 @@ impl Default for AppState {
             motion_snapshots: HashMap::new(),
             room_mode_transitions: HashMap::new(),
             last_check_hour: None,
+            last_check_instant: None,
+            last_check_utc_offset_hours: None,
             last_tick_epoch_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
