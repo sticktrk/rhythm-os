@@ -43,7 +43,6 @@ use crate::controller::{
 use crate::lighting::LightingCommand;
 use crate::room::Room;
 
-const DISPATCH_INFO_MS: u128 = 250;
 const DISPATCH_WARN_MS: u128 = 1000;
 
 pub(crate) fn format_node_log_label(node_id: &str, node_name: Option<&str>) -> String {
@@ -282,16 +281,7 @@ impl LightController for CompositeController {
                 latency_ms,
                 "Composite dispatch turn_on slow"
             ),
-            Ok(()) if latency_ms >= DISPATCH_INFO_MS => tracing::info!(
-                target: "cmd",
-                event = "dispatch_turn_on",
-                node_id = %room_id,
-                node = %node_label,
-                target_count = targets.len(),
-                latency_ms,
-                "Composite dispatch turn_on"
-            ),
-            Ok(()) => tracing::debug!(
+            Ok(()) => tracing::info!(
                 target: "cmd",
                 event = "dispatch_turn_on",
                 node_id = %room_id,
@@ -363,16 +353,7 @@ impl LightController for CompositeController {
                 latency_ms,
                 "Composite dispatch turn_off slow"
             ),
-            Ok(()) if latency_ms >= DISPATCH_INFO_MS => tracing::info!(
-                target: "cmd",
-                event = "dispatch_turn_off",
-                node_id = %room_id,
-                node = %node_label,
-                target_count = targets.len(),
-                latency_ms,
-                "Composite dispatch turn_off"
-            ),
-            Ok(()) => tracing::debug!(
+            Ok(()) => tracing::info!(
                 target: "cmd",
                 event = "dispatch_turn_off",
                 node_id = %room_id,

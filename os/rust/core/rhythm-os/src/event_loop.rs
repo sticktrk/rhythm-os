@@ -256,7 +256,7 @@ pub fn process_button_inline(
             crate::commands::sync_active_mode_from_runtime(state, &runtime);
             if let Ok(mut s) = state.lock() {
                 if s.room_mode_transitions.remove(node_id).is_some() {
-                    debug!(
+                    info!(
                         target: "evt",
                         "Inline: cleared mode transition for node '{}'",
                         node_id
@@ -357,7 +357,7 @@ pub fn turn_on_node_inline(state: &SharedState, node_id: &str) -> bool {
             );
             if let Ok(mut s) = state.lock() {
                 if s.room_mode_transitions.remove(node_id).is_some() {
-                    debug!(
+                    info!(
                         target: "evt",
                         "Motion: cleared mode transition for node '{}'",
                         node_id
@@ -908,7 +908,7 @@ pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
             format!("{}:[{}]", target_node_id, source_status.join(","))
         })
         .collect();
-    debug!(
+    info!(
         target: "evt",
         "Motion: checking timers - {} targets: {}",
         targets.len(),
@@ -1243,7 +1243,7 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                     crate::commands::sync_active_mode_from_runtime(state, &runtime);
                     if let Ok(mut s) = state.lock() {
                         if s.room_mode_transitions.remove(&node_id).is_some() {
-                            debug!(
+                            info!(
                                 target: "evt",
                                 "Worker: cleared mode transition for node '{}'",
                                 node_id
