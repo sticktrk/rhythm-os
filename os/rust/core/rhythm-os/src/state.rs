@@ -23,6 +23,27 @@ use crate::hub::{ActiveHub, HubCredentials, HubEvent};
 use crate::storage::Storage;
 use crate::topology::{NodeControlKind, RoomTopologyStore};
 
+/// Ephemeral startup-bootstrap retry state for one configured hub.
+#[derive(Clone, Debug)]
+pub struct HubStartupRetryState {
+    /// Number of consecutive failed startup/manual bootstrap attempts.
+    pub attempt_count: u32,
+    /// Monotonic time of the first failed attempt in the current retry window.
+    pub first_failure_at: Instant,
+    /// Wall-clock timestamp of the first failed attempt in epoch milliseconds.
+    pub first_failure_epoch_ms: i64,
+    /// Wall-clock timestamp of the most recent failed attempt in epoch milliseconds.
+    pub last_failure_epoch_ms: i64,
+    /// Next scheduled retry time, if automatic retrying is still active.
+    pub next_retry_at: Option<Instant>,
+    /// Wall-clock timestamp for the next scheduled retry in epoch milliseconds.
+    pub next_retry_epoch_ms: Option<i64>,
+    /// Most recent bootstrap error string for app diagnostics.
+    pub last_error: String,
+    /// Whether automatic retries have stopped and the app must request another attempt.
+    pub manual_retry_required: bool,
+}
+
 /// Work items for background processing.
 ///
 /// Heavy operations (TLS to hub, float math, JSON formatting) are
@@ -175,6 +196,8 @@ pub struct AppState {
     pub hub_reconnect_sync_at: HashMap<HubKey, Instant>,
     /// Hub credentials keyed by HubKey. Supports multiple simultaneous hubs.
     pub hub_credentials: HashMap<HubKey, HubCredentials>,
+    /// Ephemeral startup bootstrap retry state keyed by HubKey.
+    pub hub_startup_retry: HashMap<HubKey, HubStartupRetryState>,
     /// API-facing capability metadata for integrations available on this platform.
     pub hub_capabilities: Vec<crate::hub::HubIntegrationCapability>,
 
@@ -318,6 +341,12 @@ pub struct AppState {
         >,
     >,
 
+    /// Request the platform-owned stored-hub bootstrap worker.
+    ///
+    /// Used when the app manually nudges a configured hub after automatic
+    /// startup retries have been exhausted.
+    pub request_hub_bootstrap_fn: Option<Arc<dyn Fn(&SharedState) + Send + Sync>>,
+
     /// Optional platform-owned follow-up for a full factory reset.
     ///
     /// Shared reset logic clears in-memory and persisted Rhythm state, then
@@ -348,6 +377,9 @@ pub struct AppState {
 
     /// Broadcast sender for SSE server events.
     pub event_tx: Option<tokio::sync::broadcast::Sender<crate::server_event::ServerEvent>>,
+
+    /// Whether the stored-hub bootstrap worker thread is currently running.
+    pub hub_bootstrap_worker_running: bool,
 }
 
 impl Default for AppState {
@@ -374,6 +406,7 @@ impl Default for AppState {
             hub_sync_in_progress: HashSet::new(),
             hub_reconnect_sync_at: HashMap::new(),
             hub_credentials: HashMap::new(),
+            hub_startup_retry: HashMap::new(),
             hub_capabilities: Vec::new(),
             canonical_registry: CanonicalRegistry::new(),
             topology: RoomTopologyStore::new(),
@@ -404,6 +437,7 @@ impl Default for AppState {
             start_pairing_fn: None,
             start_unpairing_fn: None,
             hub_credentials_interceptor: None,
+            request_hub_bootstrap_fn: None,
             after_factory_reset_fn: None,
             firmware_version: "0.0.0",
             platform_type: "desktop",
@@ -412,6 +446,7 @@ impl Default for AppState {
             listen_port: None,
             platform: PlatformConfig::default(),
             event_tx: None,
+            hub_bootstrap_worker_running: false,
         };
         state.sync_active_mode_runtime_overrides();
         state
@@ -680,6 +715,33 @@ impl AppState {
     /// Clear reconnect-sync timing so the next reconnect can try again.
     pub fn clear_hub_reconnect_sync(&mut self, key: &HubKey) {
         self.hub_reconnect_sync_at.remove(key);
+    }
+
+    /// Get startup bootstrap retry state for a configured hub.
+    pub fn hub_startup_retry(&self, key: &HubKey) -> Option<&HubStartupRetryState> {
+        self.hub_startup_retry.get(key)
+    }
+
+    /// Clear startup bootstrap retry state for a hub.
+    pub fn clear_hub_startup_retry(&mut self, key: &HubKey) {
+        self.hub_startup_retry.remove(key);
+    }
+
+    /// Mark the stored-hub bootstrap worker as running.
+    ///
+    /// Returns `true` when this call claimed the worker slot.
+    pub fn begin_hub_bootstrap_worker(&mut self) -> bool {
+        if self.hub_bootstrap_worker_running {
+            false
+        } else {
+            self.hub_bootstrap_worker_running = true;
+            true
+        }
+    }
+
+    /// Mark the stored-hub bootstrap worker as no longer running.
+    pub fn finish_hub_bootstrap_worker(&mut self) {
+        self.hub_bootstrap_worker_running = false;
     }
 
     /// Mark a per-hub room sync as running.

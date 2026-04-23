@@ -5,6 +5,7 @@
 //! networking, and packaging concerns do not accumulate in `rhythm-server`.
 
 mod ble_provision;
+mod factory_reset;
 mod http_server;
 mod wifi;
 
@@ -85,6 +86,9 @@ fn main() -> Result<()> {
         s.hub_credentials_interceptor = Some(rhythm_os::hub::combined_credentials_interceptor(
             hub::INTEGRATIONS,
         ));
+        s.request_hub_bootstrap_fn = Some(Arc::new(|state| {
+            rhythm_os::hub::spawn_stored_hub_bootstrap(state.clone(), hub::INTEGRATIONS);
+        }));
     }
     install_factory_reset_hook(&state)?;
     hydrate_persisted_wifi_credentials(&state);
@@ -176,15 +180,32 @@ fn main() -> Result<()> {
 }
 
 fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
+    let (data_dir, firmware_version) = {
+        let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        (state.data_dir.clone(), state.firmware_version.to_string())
+    };
+
     let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    state.after_factory_reset_fn = Some(Arc::new(|_| {
-        std::thread::spawn(|| {
+    state.after_factory_reset_fn = Some(Arc::new(move |_| {
+        let data_dir = data_dir.clone();
+        let firmware_version = firmware_version.clone();
+        std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(1));
 
             if let Err(error) = wifi::clear_credentials() {
                 warn!(
                     target: "sys",
                     "Failed to clear appliance Wi-Fi credentials during factory reset: {:#}",
+                    error
+                );
+            }
+
+            if let Err(error) =
+                factory_reset::scrub_appliance_factory_reset_state(&data_dir, &firmware_version)
+            {
+                warn!(
+                    target: "sys",
+                    "Failed to scrub appliance OTA/log state during factory reset: {:#}",
                     error
                 );
             }

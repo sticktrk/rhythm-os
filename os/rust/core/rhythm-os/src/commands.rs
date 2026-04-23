@@ -23,9 +23,10 @@ use serde_json::Value;
 
 use crate::api_types::{
     ActiveProfileDto, ActiveProfileEffectiveDto, ApiCapabilitiesDto, FixResponse, HubCapabilityDto,
-    HubDto, LocationDto, ModeLastChangeDto, ModeSettingsDto, ModeTransitionsDto, NodeStateDto,
-    NodesPollResponse, ProfilesDto, RoomPollState, RoomRhythmState, RoomsPollResponse, SettingsDto,
-    StateSnapshot, TopologyNodeControlDto, TopologyNodeDto,
+    HubDto, HubStartupRetryDto, LocationDto, ModeLastChangeDto, ModeSettingsDto,
+    ModeTransitionsDto, NodeStateDto, NodesPollResponse, ProfilesDto, RoomPollState,
+    RoomRhythmState, RoomsPollResponse, SettingsDto, StateSnapshot, TopologyNodeControlDto,
+    TopologyNodeDto,
 };
 use crate::bundle::{
     BackupBundle, BackupConfiguration, BackupConfigurationRoom, BackupHubCredentials,
@@ -1357,6 +1358,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
                     .unwrap_or_else(|| "none".to_string()),
                 address: Some(creds.address.clone()),
                 connected: s.hub_is_connected(key),
+                startup_retry: s.hub_startup_retry(key).map(build_hub_startup_retry_dto),
             })
             .collect();
         let capabilities_dto = ApiCapabilitiesDto {
@@ -1556,6 +1558,21 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         nodes,
     };
     serde_json::to_string(&snapshot).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+}
+
+fn build_hub_startup_retry_dto(retry: &crate::state::HubStartupRetryState) -> HubStartupRetryDto {
+    HubStartupRetryDto {
+        status: if retry.manual_retry_required {
+            "manual_retry_required".to_string()
+        } else {
+            "scheduled".to_string()
+        },
+        attempt_count: retry.attempt_count,
+        first_failure_epoch_ms: retry.first_failure_epoch_ms,
+        last_failure_epoch_ms: retry.last_failure_epoch_ms,
+        next_retry_epoch_ms: retry.next_retry_epoch_ms,
+        last_error: Some(retry.last_error.clone()),
+    }
 }
 
 /// Build a full node state for a single addressable node.
@@ -5147,6 +5164,7 @@ pub fn do_hub_credentials(
 
     let hub_type = crate::hub::HubType::parse(hub_type_str)
         .ok_or_else(|| anyhow::anyhow!("Unknown hub type: {}", hub_type_str))?;
+    let hub_key = crate::canonical::identity::HubKey::new(hub_type.clone(), address);
 
     let credentials_json = serde_json::to_string(credentials)?;
 
@@ -5157,10 +5175,12 @@ pub fn do_hub_credentials(
             .ok_or_else(|| anyhow::anyhow!("No hub provider registered"))?
     };
 
+    if let Ok(mut s) = state.lock() {
+        s.clear_hub_startup_retry(&hub_key);
+    }
+
     let provider = get_provider(hub_type.clone());
     provider.configure(address, &credentials_json, state)?;
-
-    let hub_key = crate::canonical::identity::HubKey::new(hub_type, address);
 
     // Register the new hub's controller with the composite (if runtime already exists).
     register_hub_with_composite(state, &hub_key);
@@ -5219,6 +5239,58 @@ pub fn do_hub_credentials(
     Ok(())
 }
 
+/// Reset startup retry state for one configured hub and request an immediate
+/// stored-credentials bootstrap attempt.
+pub fn do_retry_hub_connect(state: &SharedState, hub_type_str: &str, address: &str) -> Result<()> {
+    let hub_type = crate::hub::HubType::parse(hub_type_str)
+        .ok_or_else(|| anyhow::anyhow!("Unknown hub type: {}", hub_type_str))?;
+    let hub_key = HubKey::new(hub_type, address);
+
+    let request_bootstrap = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+
+        let creds = s
+            .hub_credentials
+            .get(&hub_key)
+            .ok_or_else(|| anyhow::anyhow!("No stored credentials for {}", hub_key))?;
+        if !creds.can_connect() {
+            return Err(anyhow::anyhow!(
+                "Stored credentials for {} are not connectable",
+                hub_key
+            ));
+        }
+        if !s
+            .hub_capabilities
+            .iter()
+            .any(|capability| capability.hub_type == hub_type_str)
+        {
+            return Err(anyhow::anyhow!(
+                "Hub type '{}' is not supported on this runtime",
+                hub_type_str
+            ));
+        }
+        if s.hubs.contains_key(&hub_key) {
+            return Ok(());
+        }
+
+        s.clear_hub_startup_retry(&hub_key);
+        s.request_hub_bootstrap_fn
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No hub bootstrap callback registered"))?
+    };
+
+    request_bootstrap(state);
+    crate::state::emit_server_event(
+        state,
+        crate::server_event::ServerEvent::HubStatus {
+            hub_type: Some(hub_type_str.to_string()),
+            address: Some(address.to_string()),
+            connected: false,
+        },
+    );
+    Ok(())
+}
+
 /// Disconnect all hubs — clear credentials, runtime, and rooms.
 pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
     info!(target: "cmd", "hub_disconnect: clearing all hubs, credentials, and rooms");
@@ -5248,6 +5320,7 @@ pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
         }
         s.hub_connection_status.clear();
         s.hub_seen_connected_once.clear();
+        s.hub_startup_retry.clear();
 
         s.hub_credentials.clear();
         if let Some(ref storage) = s.storage {
@@ -5346,6 +5419,7 @@ pub fn do_hub_disconnect_one(state: &SharedState, hub_type_str: &str, address: &
         old_hub = s.hubs.remove(&key);
         topology_changed = !s.topology.remove_stale_bindings(&key, &[]).is_empty();
         s.clear_hub_connected(&key);
+        s.clear_hub_startup_retry(&key);
         s.hub_credentials.remove(&key);
 
         if let Some(ref storage) = s.storage {

@@ -76,6 +76,9 @@ fn main() -> Result<()> {
         s.hub_credentials_interceptor = Some(rhythm_os::hub::combined_credentials_interceptor(
             hub::INTEGRATIONS,
         ));
+        s.request_hub_bootstrap_fn = Some(Arc::new(|state| {
+            rhythm_os::hub::spawn_stored_hub_bootstrap(state.clone(), hub::INTEGRATIONS);
+        }));
     }
     install_factory_reset_hook(&state)?;
 

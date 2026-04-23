@@ -93,6 +93,7 @@ fn shared_routes() -> Router<SharedState> {
             "/api/hub/credentials",
             put(put_hub_credentials).delete(delete_hub),
         )
+        .route("/api/hub/retry", post(post_hub_retry))
         .route("/api/nodes/preferences", put(put_node_preferences))
         // Canonical device management
         .route("/api/devices/canonical", get(get_canonical_devices))
@@ -549,6 +550,13 @@ pub async fn delete_hub(
         handlers::handle_delete_hub(&state, hub_type.as_deref(), address.as_deref())
     })
     .await
+}
+
+pub async fn post_hub_retry(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_post_hub_retry(&state, &body)).await
 }
 
 pub async fn room_action(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {

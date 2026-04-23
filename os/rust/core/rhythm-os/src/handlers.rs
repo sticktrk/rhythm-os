@@ -909,6 +909,30 @@ pub fn handle_delete_hub(
     }
 }
 
+pub fn handle_post_hub_retry(state: &SharedState, body: &Value) -> ApiResponse {
+    let hub_type = match body.get("hub_type").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => return ApiResponse::bad_request("Missing hub_type"),
+    };
+    let address = match body.get("address").and_then(|v| v.as_str()) {
+        Some(a) => a,
+        None => return ApiResponse::bad_request("Missing address"),
+    };
+
+    match commands::do_retry_hub_connect(state, hub_type, address) {
+        Ok(()) => ApiResponse::no_content(),
+        Err(e)
+            if e.to_string().contains("Unknown hub type")
+                || e.to_string().contains("No stored credentials")
+                || e.to_string().contains("not connectable")
+                || e.to_string().contains("not supported") =>
+        {
+            ApiResponse::bad_request(&e.to_string())
+        }
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
 /// Dispatch room action(s). Accepts single object or array.
 ///
 /// Always returns `{"rooms":[...]}` regardless of count.

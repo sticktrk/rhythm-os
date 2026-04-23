@@ -9,10 +9,11 @@
 //! crates can store in a static registry.
 
 use std::any::Any;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use log::{info, warn};
@@ -448,7 +449,10 @@ pub fn combined_credentials_interceptor(
     })
 }
 
-const STORED_HUB_BOOTSTRAP_RETRY_INTERVAL: Duration = Duration::from_secs(15);
+const STORED_HUB_BOOTSTRAP_INITIAL_RETRY_DELAY: Duration = Duration::from_secs(5);
+const STORED_HUB_BOOTSTRAP_MAX_RETRY_DELAY: Duration = Duration::from_secs(60 * 60);
+const STORED_HUB_BOOTSTRAP_AUTO_RETRY_WINDOW: Duration = Duration::from_secs(60 * 60 * 24);
+const STORED_HUB_BOOTSTRAP_WAKE_INTERVAL: Duration = Duration::from_secs(1);
 
 struct StoredHubBootstrapCandidate<'a> {
     key: HubKey,
@@ -457,8 +461,50 @@ struct StoredHubBootstrapCandidate<'a> {
 
 struct StoredHubBootstrapScan<'a> {
     connectable_credential_count: usize,
-    missing_supported: Vec<StoredHubBootstrapCandidate<'a>>,
+    due_supported: Vec<StoredHubBootstrapCandidate<'a>>,
+    scheduled_supported_count: usize,
+    manual_retry_required_count: usize,
+    next_retry_after: Option<Duration>,
     unsupported_missing: Vec<(HubKey, String)>,
+}
+
+enum BootstrapLoopDecision {
+    Done,
+    Sleep(Duration),
+}
+
+trait BootstrapClock {
+    fn now_instant(&self) -> Instant;
+    fn now_epoch_ms(&self) -> i64;
+    fn sleep(&mut self, duration: Duration);
+}
+
+struct SystemBootstrapClock;
+
+impl BootstrapClock for SystemBootstrapClock {
+    fn now_instant(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn now_epoch_ms(&self) -> i64 {
+        chrono::Utc::now().timestamp_millis()
+    }
+
+    fn sleep(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
+struct HubBootstrapWorkerGuard {
+    state: SharedState,
+}
+
+impl Drop for HubBootstrapWorkerGuard {
+    fn drop(&mut self) {
+        if let Ok(mut s) = self.state.lock() {
+            s.finish_hub_bootstrap_worker();
+        }
+    }
 }
 
 /// Spawn a background worker that connects hubs from stored credentials and
@@ -468,54 +514,68 @@ pub fn spawn_stored_hub_bootstrap(
     state: SharedState,
     integrations: &'static [&'static dyn ExternalLightHubIntegration],
 ) {
+    let should_spawn = match state.lock() {
+        Ok(mut s) => s.begin_hub_bootstrap_worker(),
+        Err(_) => {
+            warn!(
+                target: "sys",
+                "Skipping hub bootstrap spawn: state lock poisoned"
+            );
+            false
+        }
+    };
+    if !should_spawn {
+        return;
+    }
+
     info!(
         target: "sys",
         "Starting hub bootstrap in background; HTTP startup will not wait for hub sync"
     );
 
-    std::thread::Builder::new()
+    let thread_state = state.clone();
+    let spawn_result = std::thread::Builder::new()
         .name("hub-bootstrap".to_string())
         .spawn(move || {
-            bootstrap_stored_hubs_until_settled(&state, integrations, std::thread::sleep);
-        })
-        .expect("Failed to spawn hub bootstrap thread");
+            let _guard = HubBootstrapWorkerGuard {
+                state: thread_state.clone(),
+            };
+            let mut clock = SystemBootstrapClock;
+            bootstrap_stored_hubs_until_settled(&thread_state, integrations, &mut clock);
+        });
+
+    if spawn_result.is_err() {
+        if let Ok(mut s) = state.lock() {
+            s.finish_hub_bootstrap_worker();
+        }
+    }
+    spawn_result.expect("Failed to spawn hub bootstrap thread");
 }
 
-fn bootstrap_stored_hubs_until_settled<'a, F>(
+fn bootstrap_stored_hubs_until_settled<'a>(
     state: &SharedState,
     integrations: &'a [&'a dyn ExternalLightHubIntegration],
-    mut sleep_retry: F,
-) where
-    F: FnMut(Duration),
-{
+    clock: &mut impl BootstrapClock,
+) {
     loop {
-        let retry_needed = bootstrap_stored_hubs_once(state, integrations);
-        if !retry_needed {
-            return;
+        match bootstrap_stored_hubs_once(state, integrations, clock) {
+            BootstrapLoopDecision::Done => return,
+            BootstrapLoopDecision::Sleep(duration) => clock.sleep(duration),
         }
-
-        let remaining = scan_stored_hub_bootstrap_candidates(state, integrations)
-            .map(|scan| scan.missing_supported.len())
-            .unwrap_or_default();
-        info!(
-            target: "sys",
-            "Hub bootstrap still waiting on {} stored hub(s); retrying in {}s",
-            remaining,
-            STORED_HUB_BOOTSTRAP_RETRY_INTERVAL.as_secs()
-        );
-        sleep_retry(STORED_HUB_BOOTSTRAP_RETRY_INTERVAL);
     }
 }
 
 fn bootstrap_stored_hubs_once<'a>(
     state: &SharedState,
     integrations: &'a [&'a dyn ExternalLightHubIntegration],
-) -> bool {
-    let scan = match scan_stored_hub_bootstrap_candidates(state, integrations) {
+    clock: &mut impl BootstrapClock,
+) -> BootstrapLoopDecision {
+    let now = clock.now_instant();
+    let scan = match scan_stored_hub_bootstrap_candidates(state, integrations, now) {
         Ok(scan) => scan,
         Err(_) => {
             warn!(target: "sys", "Hub bootstrap aborted: state lock poisoned");
-            return false;
+            return BootstrapLoopDecision::Done;
         }
     };
 
@@ -524,25 +584,41 @@ fn bootstrap_stored_hubs_once<'a>(
             target: "sys",
             "No connectable hub credentials loaded, waiting for credential push"
         );
-        return false;
+        return BootstrapLoopDecision::Done;
     }
 
-    for (key, hub_type_str) in &scan.unsupported_missing {
-        warn!(
-            target: "sys",
-            "No integration for hub type '{}', skipping stored hub {}",
-            hub_type_str,
-            key
-        );
-    }
+    if scan.due_supported.is_empty() {
+        if scan.scheduled_supported_count > 0 {
+            return BootstrapLoopDecision::Sleep(
+                scan.next_retry_after
+                    .unwrap_or(STORED_HUB_BOOTSTRAP_WAKE_INTERVAL)
+                    .min(STORED_HUB_BOOTSTRAP_WAKE_INTERVAL),
+            );
+        }
 
-    if scan.missing_supported.is_empty() {
-        return false;
+        if !scan.unsupported_missing.is_empty() {
+            for (key, hub_type_str) in &scan.unsupported_missing {
+                warn!(
+                    target: "sys",
+                    "No integration for hub type '{}', skipping stored hub {}",
+                    hub_type_str,
+                    key
+                );
+            }
+        }
+        if scan.manual_retry_required_count > 0 {
+            info!(
+                target: "sys",
+                "Hub bootstrap waiting for manual retry on {} stored hub(s)",
+                scan.manual_retry_required_count
+            );
+        }
+        return BootstrapLoopDecision::Done;
     }
 
     let mut newly_connected: Vec<StoredHubBootstrapCandidate<'a>> = Vec::new();
 
-    for candidate in scan.missing_supported {
+    for candidate in scan.due_supported {
         candidate
             .integration
             .refresh_credentials(state, &candidate.key);
@@ -577,31 +653,58 @@ fn bootstrap_stored_hubs_once<'a>(
                 };
 
                 if registered {
+                    if let Ok(mut s) = state.lock() {
+                        s.clear_hub_startup_retry(&candidate.key);
+                    }
                     newly_connected.push(candidate);
                 } else {
-                    warn!(
-                        target: "sys",
-                        "Stored hub {} connected but did not leave an active hub behind; will retry",
+                    let error = format!(
+                        "Stored hub {} connected but did not leave an active hub behind",
                         candidate.key
                     );
+                    let retry_status = note_stored_hub_bootstrap_failure(
+                        state,
+                        &candidate.key,
+                        &error,
+                        clock.now_instant(),
+                        clock.now_epoch_ms(),
+                    );
+                    log_bootstrap_failure(&candidate.key, &error, &retry_status);
                 }
             }
             Err(error) => {
-                warn!(
-                    target: "sys",
-                    "Failed to connect stored hub {}: {}",
-                    candidate.key,
-                    error
+                let error_text = error.to_string();
+                let retry_status = note_stored_hub_bootstrap_failure(
+                    state,
+                    &candidate.key,
+                    &error_text,
+                    clock.now_instant(),
+                    clock.now_epoch_ms(),
                 );
+                log_bootstrap_failure(&candidate.key, &error_text, &retry_status);
             }
         }
     }
 
     finish_bootstrapped_hubs(state, &newly_connected);
 
-    scan_stored_hub_bootstrap_candidates(state, integrations)
-        .map(|scan| !scan.missing_supported.is_empty())
-        .unwrap_or(false)
+    match scan_stored_hub_bootstrap_candidates(state, integrations, clock.now_instant()) {
+        Ok(next_scan) if next_scan.scheduled_supported_count > 0 => BootstrapLoopDecision::Sleep(
+            next_scan
+                .next_retry_after
+                .unwrap_or(STORED_HUB_BOOTSTRAP_WAKE_INTERVAL)
+                .min(STORED_HUB_BOOTSTRAP_WAKE_INTERVAL),
+        ),
+        Ok(next_scan)
+            if !next_scan.due_supported.is_empty()
+                || next_scan.manual_retry_required_count > 0
+                || !next_scan.unsupported_missing.is_empty() =>
+        {
+            BootstrapLoopDecision::Done
+        }
+        Ok(_) => BootstrapLoopDecision::Done,
+        Err(_) => BootstrapLoopDecision::Done,
+    }
 }
 
 fn finish_bootstrapped_hubs<'a>(
@@ -640,11 +743,25 @@ fn finish_bootstrapped_hubs<'a>(
 fn scan_stored_hub_bootstrap_candidates<'a>(
     state: &SharedState,
     integrations: &'a [&'a dyn ExternalLightHubIntegration],
+    now: Instant,
 ) -> Result<StoredHubBootstrapScan<'a>> {
-    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
     let mut connectable_credential_count = 0usize;
-    let mut missing_supported = Vec::new();
+    let connectable_keys: HashSet<_> = s
+        .hub_credentials
+        .iter()
+        .filter(|(_, creds)| creds.can_connect())
+        .map(|(key, _)| key.clone())
+        .collect();
+    let active_keys: HashSet<_> = s.hubs.keys().cloned().collect();
+    s.hub_startup_retry
+        .retain(|key, _| connectable_keys.contains(key) && !active_keys.contains(key));
+
+    let mut due_supported = Vec::new();
+    let mut scheduled_supported_count = 0usize;
+    let mut manual_retry_required_count = 0usize;
+    let mut next_retry_after = None;
     let mut unsupported_missing = Vec::new();
 
     for (key, creds) in &s.hub_credentials {
@@ -663,7 +780,26 @@ fn scan_stored_hub_bootstrap_candidates<'a>(
         };
 
         if let Some(integration) = find_integration(integrations, hub_type.as_str()) {
-            missing_supported.push(StoredHubBootstrapCandidate {
+            let retry = s.hub_startup_retry(key);
+            if retry.is_some_and(|retry| retry.manual_retry_required) {
+                manual_retry_required_count += 1;
+                continue;
+            }
+
+            if let Some(retry) = retry {
+                if let Some(next_retry_at) = retry.next_retry_at {
+                    if next_retry_at > now {
+                        scheduled_supported_count += 1;
+                        let wait = next_retry_at.duration_since(now);
+                        next_retry_after = Some(
+                            next_retry_after.map_or(wait, |current: Duration| current.min(wait)),
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            due_supported.push(StoredHubBootstrapCandidate {
                 key: key.clone(),
                 integration,
             });
@@ -674,9 +810,112 @@ fn scan_stored_hub_bootstrap_candidates<'a>(
 
     Ok(StoredHubBootstrapScan {
         connectable_credential_count,
-        missing_supported,
+        due_supported,
+        scheduled_supported_count,
+        manual_retry_required_count,
+        next_retry_after,
         unsupported_missing,
     })
+}
+
+enum BootstrapFailureOutcome {
+    RetryScheduled { next_delay: Duration },
+    ManualRetryRequired,
+}
+
+fn log_bootstrap_failure(hub_key: &HubKey, error: &str, outcome: &BootstrapFailureOutcome) {
+    match outcome {
+        BootstrapFailureOutcome::RetryScheduled { next_delay } => warn!(
+            target: "sys",
+            "Failed to connect stored hub {}: {} (retrying in {}s)",
+            hub_key,
+            error,
+            next_delay.as_secs()
+        ),
+        BootstrapFailureOutcome::ManualRetryRequired => warn!(
+            target: "sys",
+            "Failed to connect stored hub {}: {} (automatic retry window exhausted; waiting for app retry)",
+            hub_key,
+            error
+        ),
+    }
+}
+
+fn note_stored_hub_bootstrap_failure(
+    state: &SharedState,
+    hub_key: &HubKey,
+    error: &str,
+    now: Instant,
+    now_epoch_ms: i64,
+) -> BootstrapFailureOutcome {
+    let outcome = match state.lock() {
+        Ok(mut s) => {
+            let retry = s
+                .hub_startup_retry
+                .entry(hub_key.clone())
+                .or_insert_with(|| crate::state::HubStartupRetryState {
+                    attempt_count: 0,
+                    first_failure_at: now,
+                    first_failure_epoch_ms: now_epoch_ms,
+                    last_failure_epoch_ms: now_epoch_ms,
+                    next_retry_at: None,
+                    next_retry_epoch_ms: None,
+                    last_error: error.to_string(),
+                    manual_retry_required: false,
+                });
+            retry.attempt_count += 1;
+            retry.last_failure_epoch_ms = now_epoch_ms;
+            retry.last_error = error.to_string();
+
+            match next_bootstrap_retry_delay(retry.attempt_count, retry.first_failure_at, now) {
+                Some(next_delay) => {
+                    retry.next_retry_at = Some(now + next_delay);
+                    retry.next_retry_epoch_ms =
+                        Some(now_epoch_ms.saturating_add(next_delay.as_millis() as i64));
+                    retry.manual_retry_required = false;
+                    BootstrapFailureOutcome::RetryScheduled { next_delay }
+                }
+                None => {
+                    retry.next_retry_at = None;
+                    retry.next_retry_epoch_ms = None;
+                    retry.manual_retry_required = true;
+                    BootstrapFailureOutcome::ManualRetryRequired
+                }
+            }
+        }
+        Err(_) => BootstrapFailureOutcome::ManualRetryRequired,
+    };
+
+    crate::state::emit_server_event(
+        state,
+        crate::server_event::ServerEvent::HubStatus {
+            hub_type: Some(hub_key.hub_type.as_str().to_string()),
+            address: Some(hub_key.address.clone()),
+            connected: false,
+        },
+    );
+
+    outcome
+}
+
+fn next_bootstrap_retry_delay(
+    attempt_count: u32,
+    first_failure_at: Instant,
+    now: Instant,
+) -> Option<Duration> {
+    let next_delay = bootstrap_retry_delay_for_attempt(attempt_count);
+    let window_deadline = first_failure_at + STORED_HUB_BOOTSTRAP_AUTO_RETRY_WINDOW;
+    let next_retry_at = now.checked_add(next_delay)?;
+    (next_retry_at <= window_deadline).then_some(next_delay)
+}
+
+fn bootstrap_retry_delay_for_attempt(attempt_count: u32) -> Duration {
+    let exponent = attempt_count.saturating_sub(1).min(16);
+    let seconds = STORED_HUB_BOOTSTRAP_INITIAL_RETRY_DELAY
+        .as_secs()
+        .saturating_mul(1u64 << exponent)
+        .min(STORED_HUB_BOOTSTRAP_MAX_RETRY_DELAY.as_secs());
+    Duration::from_secs(seconds)
 }
 
 /// Callback set returned by [`integration_callbacks`].
@@ -889,6 +1128,38 @@ mod tests {
         }
     }
 
+    struct MockBootstrapClock {
+        now_instant: Instant,
+        now_epoch_ms: i64,
+        sleeps: Vec<Duration>,
+    }
+
+    impl MockBootstrapClock {
+        fn new() -> Self {
+            Self {
+                now_instant: Instant::now(),
+                now_epoch_ms: 1_700_000_000_000,
+                sleeps: Vec::new(),
+            }
+        }
+    }
+
+    impl BootstrapClock for MockBootstrapClock {
+        fn now_instant(&self) -> Instant {
+            self.now_instant
+        }
+
+        fn now_epoch_ms(&self) -> i64 {
+            self.now_epoch_ms
+        }
+
+        fn sleep(&mut self, duration: Duration) {
+            self.sleeps.push(duration);
+            self.now_instant += duration;
+            self.now_epoch_ms += duration.as_millis() as i64;
+        }
+    }
+
     struct BootstrapTestIntegration {
         failures_before_success: AtomicU32,
         connect_attempts: AtomicU32,
@@ -1072,17 +1343,19 @@ mod tests {
             HubCredentials::new("hue", "192.168.1.5", serde_json::json!({"username": "abc"})),
         );
 
-        let sleep_calls = AtomicU32::new(0);
-        bootstrap_stored_hubs_until_settled(&state, integrations, |_| {
-            sleep_calls.fetch_add(1, Ordering::Relaxed);
-        });
+        let mut clock = MockBootstrapClock::new();
+        bootstrap_stored_hubs_until_settled(&state, integrations, &mut clock);
 
         let s = state.lock().unwrap();
         assert!(s.hubs.contains_key(&key));
         assert_eq!(s.pending_hub_event_rxs.len(), 1);
         assert_eq!(integration.connect_attempts(), 2);
         assert_eq!(integration.post_connect_calls(), 1);
-        assert_eq!(sleep_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(clock.sleeps.len(), 5);
+        assert!(clock
+            .sleeps
+            .iter()
+            .all(|sleep| *sleep == Duration::from_secs(1)));
     }
 
     #[test]
@@ -1112,11 +1385,48 @@ mod tests {
             );
         }
 
-        bootstrap_stored_hubs_until_settled(&state, integrations, |_| {});
+        let mut clock = MockBootstrapClock::new();
+        bootstrap_stored_hubs_until_settled(&state, integrations, &mut clock);
 
         assert_eq!(integration.connect_attempts(), 0);
         assert_eq!(integration.post_connect_calls(), 0);
         assert_eq!(state.lock().unwrap().pending_hub_event_rxs.len(), 0);
+        assert!(clock.sleeps.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_retry_delay_caps_at_one_hour() {
+        assert_eq!(
+            bootstrap_retry_delay_for_attempt(1),
+            STORED_HUB_BOOTSTRAP_INITIAL_RETRY_DELAY
+        );
+        assert_eq!(
+            bootstrap_retry_delay_for_attempt(2),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            bootstrap_retry_delay_for_attempt(10),
+            Duration::from_secs(2560)
+        );
+        assert_eq!(
+            bootstrap_retry_delay_for_attempt(20),
+            STORED_HUB_BOOTSTRAP_MAX_RETRY_DELAY
+        );
+    }
+
+    #[test]
+    fn bootstrap_retry_window_eventually_requires_manual_retry() {
+        let first_failure = Instant::now();
+        assert_eq!(
+            next_bootstrap_retry_delay(1, first_failure, first_failure),
+            Some(Duration::from_secs(5))
+        );
+        let almost_done =
+            first_failure + STORED_HUB_BOOTSTRAP_AUTO_RETRY_WINDOW - Duration::from_secs(30);
+        assert_eq!(
+            next_bootstrap_retry_delay(20, first_failure, almost_done),
+            None
+        );
     }
 
     // ── HubCredentials / HubKey ───────────────────────────────────────

@@ -123,6 +123,23 @@ pub struct HubDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
     pub connected: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub startup_retry: Option<HubStartupRetryDto>,
+}
+
+/// Startup bootstrap retry metadata for a configured-but-not-active hub.
+#[derive(Clone, Debug, Serialize)]
+pub struct HubStartupRetryDto {
+    /// `"scheduled"` while automatic retrying is still active,
+    /// `"manual_retry_required"` once the 24h retry budget is exhausted.
+    pub status: String,
+    pub attempt_count: u32,
+    pub first_failure_epoch_ms: i64,
+    pub last_failure_epoch_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_retry_epoch_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 /// API capability metadata in state snapshot.
@@ -732,6 +749,7 @@ mod tests {
             hub_type: "hue".into(),
             address: Some("192.168.1.100".into()),
             connected: true,
+            startup_retry: None,
         };
         let json: Value = serde_json::to_value(&hub).unwrap();
         // Serialized as "type", not "hub_type"
@@ -747,11 +765,37 @@ mod tests {
             hub_type: "none".into(),
             address: None,
             connected: false,
+            startup_retry: None,
         };
         let json: Value = serde_json::to_value(&hub).unwrap();
         assert!(json.get("address").is_none());
         assert_eq!(json["type"], "none");
         assert_eq!(json["connected"], false);
+    }
+
+    #[test]
+    fn hub_dto_serializes_startup_retry_when_present() {
+        let hub = HubDto {
+            hub_type: "hue".into(),
+            address: Some("192.168.1.100".into()),
+            connected: false,
+            startup_retry: Some(HubStartupRetryDto {
+                status: "scheduled".into(),
+                attempt_count: 3,
+                first_failure_epoch_ms: 1_700_000_000_000,
+                last_failure_epoch_ms: 1_700_000_000_500,
+                next_retry_epoch_ms: Some(1_700_000_010_500),
+                last_error: Some("timeout".into()),
+            }),
+        };
+        let json: Value = serde_json::to_value(&hub).unwrap();
+        assert_eq!(json["startup_retry"]["status"], "scheduled");
+        assert_eq!(json["startup_retry"]["attempt_count"], 3);
+        assert_eq!(
+            json["startup_retry"]["next_retry_epoch_ms"],
+            1_700_000_010_500i64
+        );
+        assert_eq!(json["startup_retry"]["last_error"], "timeout");
     }
 
     #[test]
@@ -1003,6 +1047,7 @@ mod tests {
                 hub_type: "hue".into(),
                 address: Some("192.168.1.2".into()),
                 connected: true,
+                startup_retry: None,
             }],
             capabilities: ApiCapabilitiesDto {
                 hubs: vec![HubCapabilityDto {
