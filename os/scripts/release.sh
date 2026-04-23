@@ -22,20 +22,8 @@ DRY_RUN=false
 UPLOAD=false
 SKIP_BUILDER_REFRESH=false
 MESSAGE=""
-WORKSPACE_VERSION_FILES=("Cargo.toml" "Cargo.lock" "install/rpiz/builder-image.lock")
+WORKSPACE_VERSION_FILES=("Cargo.toml" "install/rpiz/builder-image.lock")
 BUILDER_LOCK_FILE="install/rpiz/builder-image.lock"
-WORKSPACE_PACKAGES=(
-    rhythm-addon
-    rhythm-core
-    rhythm-devices
-    rhythm-ha
-    rhythm-hue
-    rhythm-linux-appliance
-    rhythm-matter
-    rhythm-os
-    rhythm-profile
-    rhythm-server
-)
 
 usage() {
     cat <<EOF
@@ -376,7 +364,6 @@ upload_rpiz_feed() {
 update_workspace_version_files() {
     local new_version="$1"
     local current_version="$2"
-    local pkg
 
     if [ "$current_version" = "$new_version" ]; then
         return 0
@@ -385,12 +372,6 @@ update_workspace_version_files() {
     NEW_VERSION="$new_version" perl -0pi -e '
         s/(\[workspace\.package\]\n(?:[^\[]*\n)*?version = ")[^"]+(")/$1.$ENV{NEW_VERSION}.$2/se
     ' "$PROJECT_ROOT/Cargo.toml"
-
-    for pkg in "${WORKSPACE_PACKAGES[@]}"; do
-        PKG_NAME="$pkg" NEW_VERSION="$new_version" perl -0pi -e '
-            s/(\[\[package\]\]\nname = "\Q$ENV{PKG_NAME}\E"\nversion = ")[^"]+(")/$1.$ENV{NEW_VERSION}.$2/se
-        ' "$PROJECT_ROOT/Cargo.lock"
-    done
 }
 
 commit_release_version_update() {
@@ -516,7 +497,7 @@ if [ "$DRY_RUN" = true ]; then
         echo "[dry-run] Would run: scripts/build/refresh-builder-image.sh --push"
     fi
     if [ "$CURRENT_WORKSPACE_VERSION" != "$VERSION" ]; then
-        echo "[dry-run] Would update workspace version files: Cargo.toml, Cargo.lock"
+        echo "[dry-run] Would update workspace version files: Cargo.toml"
     fi
     echo "[dry-run] Would commit any changes to: ${WORKSPACE_VERSION_FILES[*]}"
     echo "[dry-run] Would create annotated tag: git tag -a $TAG -m \"$MESSAGE\""
@@ -576,4 +557,3 @@ else
     echo "  git push $REMOTE HEAD:refs/heads/$CURRENT_BRANCH"
     echo "  git push $REMOTE refs/tags/$TAG"
 fi
-

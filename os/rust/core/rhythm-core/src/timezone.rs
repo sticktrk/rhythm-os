@@ -2,7 +2,9 @@
 //!
 //! Thin wrapper around chrono-tz for IANA timezone support with DST handling.
 
-use chrono::{Datelike, NaiveDate, NaiveDateTime, Offset, TimeZone, Timelike, Utc};
+use chrono::{
+    DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, Offset, TimeZone, Timelike, Utc,
+};
 use chrono_tz::Tz;
 
 #[cfg(feature = "serde")]
@@ -103,6 +105,13 @@ impl Timezone {
     pub fn local_datetime_from_utc(&self, utc: NaiveDateTime) -> NaiveDateTime {
         let utc_dt = chrono::DateTime::<Utc>::from_naive_utc_and_offset(utc, Utc);
         utc_dt.with_timezone(&self.tz()).naive_local()
+    }
+
+    /// Convert a UTC naive datetime into the corresponding local datetime with
+    /// its explicit UTC offset preserved.
+    pub fn local_datetime_with_offset_from_utc(&self, utc: NaiveDateTime) -> DateTime<FixedOffset> {
+        let utc_dt = chrono::DateTime::<Utc>::from_naive_utc_and_offset(utc, Utc);
+        utc_dt.with_timezone(&self.tz()).fixed_offset()
     }
 
     /// Convert a local naive datetime into UTC when the local time is unambiguous.
@@ -252,6 +261,22 @@ mod tests {
         let (year, month, day, hour) = tz.local_date_hour_from_utc(utc);
 
         assert_eq!((year, month, day, hour), (2026, 4, 8, 20));
+    }
+
+    #[test]
+    fn test_local_datetime_with_offset_from_utc_preserves_dst_offset() {
+        let tz = Timezone::new("America/New_York");
+        let utc = NaiveDate::from_ymd_opt(2026, 4, 23)
+            .unwrap()
+            .and_hms_opt(19, 32, 47)
+            .unwrap();
+
+        let local = tz.local_datetime_with_offset_from_utc(utc);
+
+        assert_eq!(
+            local.format("%Y-%m-%dT%H:%M:%S%:z").to_string(),
+            "2026-04-23T15:32:47-04:00"
+        );
     }
 
     /// Verify that utc_offset() changes across the March DST boundary.

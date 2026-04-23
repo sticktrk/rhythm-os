@@ -22,6 +22,7 @@ use rhythm_os::provisioning::{
 };
 use rhythm_os::state::SharedState;
 
+use crate::time_sync;
 use crate::wifi;
 
 const FORCE_ENV: &str = "RHYTHM_BLE_PROVISION_ALWAYS";
@@ -200,7 +201,18 @@ impl ProvisioningBackend for LinuxWifiBackend {
             .name(format!("wifi-prov-{}", attempt))
             .spawn(move || {
                 let result = match wifi::connect_with_credentials(&creds, timeout) {
-                    Ok(ip) => ProvisioningConnectResult::Connected { ip },
+                    Ok(ip) => {
+                        if let Err(error) =
+                            time_sync::sync_system_clock("BLE provisioning Wi-Fi connection")
+                        {
+                            warn!(
+                                target: "sys",
+                                "Failed to sync wall clock after BLE provisioning connected Wi-Fi: {:#}",
+                                error
+                            );
+                        }
+                        ProvisioningConnectResult::Connected { ip }
+                    }
                     Err(e) => ProvisioningConnectResult::Failed {
                         error: e.to_string(),
                     },

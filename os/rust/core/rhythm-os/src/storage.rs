@@ -147,6 +147,10 @@ impl StoredLocation {
         *latitude = self.latitude;
         *longitude = self.longitude;
         *timezone_name = self.timezone_name.clone();
+        let has_location = self.latitude.is_some()
+            || self.longitude.is_some()
+            || self.timezone_name.is_some()
+            || self.utc_offset_hours.abs() > f32::EPSILON;
 
         if let Some(ref tz_name) = self.timezone_name {
             let tz = rhythm_core::Timezone::new(tz_name);
@@ -157,10 +161,16 @@ impl StoredLocation {
                 runtime_config.solar_noon_hour =
                     rhythm_core::calculate_solar_noon(lon, year, month, day, &tz);
             }
+            crate::logging::update_log_clock_from_location(
+                self.timezone_name.as_deref(),
+                *utc_offset_hours,
+                has_location,
+            );
             info!(target: "sys", "Loaded location: lat={:?}, lon={:?}, tz={}, utc_offset={}, solar_noon={:.2}",
                 latitude, longitude, tz_name, utc_offset_hours, runtime_config.solar_noon_hour);
         } else {
             *utc_offset_hours = self.utc_offset_hours;
+            crate::logging::update_log_clock_from_location(None, *utc_offset_hours, has_location);
             info!(target: "sys", "Loaded location: lat={:?}, lon={:?}, utc_offset={}",
                 latitude, longitude, utc_offset_hours);
         }
@@ -571,6 +581,14 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
             }
         }
     }
+    crate::logging::update_log_clock_from_location(
+        s.timezone_name.as_deref(),
+        s.utc_offset_hours,
+        s.latitude.is_some()
+            || s.longitude.is_some()
+            || s.timezone_name.is_some()
+            || s.utc_offset_hours.abs() > f32::EPSILON,
+    );
 
     let loaded_settings = s.storage.as_ref().map(|storage| storage.load_settings());
     if let Some(result) = loaded_settings {

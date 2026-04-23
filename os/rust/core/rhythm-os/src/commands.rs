@@ -5306,6 +5306,11 @@ pub fn do_location_set(
             )
         };
         s.runtime_config.solar_noon_hour = solar_noon;
+        crate::logging::update_log_clock_from_location(
+            s.timezone_name.as_deref(),
+            s.utc_offset_hours,
+            true,
+        );
 
         if let Some(runtime) = s.hub_runtime() {
             let solar_time = rhythm_core::SolarTime::new(solar_noon, lat, day_of_year);

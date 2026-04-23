@@ -7,11 +7,12 @@
 mod ble_provision;
 mod factory_reset;
 mod http_server;
+mod time_sync;
 mod wifi;
 
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Parser;
@@ -28,6 +29,7 @@ const VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
 const RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV: &str = "RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION";
 const STARTUP_WIFI_RESTORE_TIMEOUT: Duration = Duration::from_secs(30);
 const PERIODIC_WIFI_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const CLOCK_SYNC_RETRY_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Rhythm OS Linux appliance.
 #[derive(Parser, Debug)]
@@ -196,7 +198,7 @@ fn main() -> Result<()> {
         std::thread::Builder::new()
             .name("periodic".to_string())
             .spawn(move || {
-                run_periodic_when_wifi_ready(periodic_state);
+                run_periodic_when_clock_ready(periodic_state);
             })
             .expect("Failed to spawn periodic thread");
     }
@@ -289,6 +291,7 @@ enum StartupWifiRestoreAction {
 enum PeriodicStartupAction {
     StartImmediately,
     WaitForWifi,
+    WaitForClockSync,
 }
 
 fn startup_wifi_restore_action(
@@ -304,30 +307,68 @@ fn startup_wifi_restore_action(
     }
 }
 
-fn periodic_startup_action(has_active_connection: bool) -> PeriodicStartupAction {
-    if has_active_connection {
-        PeriodicStartupAction::StartImmediately
-    } else {
+fn periodic_startup_action(
+    has_active_connection: bool,
+    clock_ready: bool,
+) -> PeriodicStartupAction {
+    if !has_active_connection {
         PeriodicStartupAction::WaitForWifi
+    } else if !clock_ready {
+        PeriodicStartupAction::WaitForClockSync
+    } else {
+        PeriodicStartupAction::StartImmediately
     }
 }
 
-fn run_periodic_when_wifi_ready(state: SharedState) {
-    if periodic_startup_action(wifi::has_active_connection()) == PeriodicStartupAction::WaitForWifi
-    {
-        info!(
-            target: "sys",
-            "Delaying periodic loop start until appliance has an active Wi-Fi IP"
+fn run_periodic_when_clock_ready(state: SharedState) {
+    let mut last_action = None;
+    let mut next_sync_retry_at = Instant::now();
+
+    loop {
+        let action = periodic_startup_action(
+            wifi::has_active_connection(),
+            time_sync::system_clock_is_sane(),
         );
-        loop {
-            if wifi::has_active_connection() {
-                info!(
+
+        if last_action != Some(action) {
+            match action {
+                PeriodicStartupAction::StartImmediately => info!(
                     target: "sys",
-                    "Active Wi-Fi IP detected; starting periodic loop"
-                );
-                break;
+                    "Startup prerequisites satisfied; starting periodic loop"
+                ),
+                PeriodicStartupAction::WaitForWifi => info!(
+                    target: "sys",
+                    "Delaying periodic loop start until appliance has an active Wi-Fi IP"
+                ),
+                PeriodicStartupAction::WaitForClockSync => info!(
+                    target: "sys",
+                    "Delaying periodic loop start until appliance wall clock is synchronized"
+                ),
             }
-            std::thread::sleep(PERIODIC_WIFI_WAIT_POLL_INTERVAL);
+            last_action = Some(action);
+        }
+
+        match action {
+            PeriodicStartupAction::StartImmediately => break,
+            PeriodicStartupAction::WaitForWifi => {
+                std::thread::sleep(PERIODIC_WIFI_WAIT_POLL_INTERVAL);
+            }
+            PeriodicStartupAction::WaitForClockSync => {
+                let now = Instant::now();
+                if now >= next_sync_retry_at {
+                    if let Err(error) = time_sync::sync_system_clock("periodic startup gate") {
+                        warn!(
+                            target: "sys",
+                            "Explicit wall-clock sync attempt failed: {:#}",
+                            error
+                        );
+                    }
+                    next_sync_retry_at = Instant::now() + CLOCK_SYNC_RETRY_INTERVAL;
+                    continue;
+                }
+
+                std::thread::sleep(PERIODIC_WIFI_WAIT_POLL_INTERVAL);
+            }
         }
     }
 
@@ -378,12 +419,23 @@ fn hydrate_persisted_wifi_credentials(state: &SharedState) {
     );
 
     match wifi::connect_with_credentials(&creds, STARTUP_WIFI_RESTORE_TIMEOUT) {
-        Ok(ip) => info!(
-            target: "sys",
-            "Restored appliance Wi-Fi connectivity from persisted credentials (SSID='{}', ip={})",
-            creds.ssid,
-            ip
-        ),
+        Ok(ip) => {
+            info!(
+                target: "sys",
+                "Restored appliance Wi-Fi connectivity from persisted credentials (SSID='{}', ip={})",
+                creds.ssid,
+                ip
+            );
+            if let Err(error) =
+                time_sync::sync_system_clock("restored persisted appliance Wi-Fi connectivity")
+            {
+                warn!(
+                    target: "sys",
+                    "Failed to sync wall clock after restoring persisted Wi-Fi credentials: {:#}",
+                    error
+                );
+            }
+        }
         Err(error) => warn!(
             target: "sys",
             "Failed to restore appliance Wi-Fi from persisted credentials for SSID '{}': {:#}",
@@ -503,6 +555,8 @@ mod tests {
         periodic_startup_action, startup_wifi_restore_action, PeriodicStartupAction,
         StartupWifiRestoreAction, STARTUP_WIFI_RESTORE_TIMEOUT,
     };
+    use crate::time_sync::clock_is_sane_at;
+    use chrono::{TimeZone, Utc};
 
     #[test]
     fn extract_serial_suffix_takes_last_eight_hex_chars() {
@@ -572,7 +626,7 @@ mod tests {
     #[test]
     fn periodic_startup_starts_immediately_when_wifi_is_connected() {
         assert_eq!(
-            periodic_startup_action(true),
+            periodic_startup_action(true, true),
             PeriodicStartupAction::StartImmediately
         );
     }
@@ -580,9 +634,28 @@ mod tests {
     #[test]
     fn periodic_startup_waits_for_wifi_when_disconnected() {
         assert_eq!(
-            periodic_startup_action(false),
+            periodic_startup_action(false, true),
             PeriodicStartupAction::WaitForWifi
         );
+    }
+
+    #[test]
+    fn periodic_startup_waits_for_clock_sync_when_wifi_is_connected_but_clock_is_unsynced() {
+        assert_eq!(
+            periodic_startup_action(true, false),
+            PeriodicStartupAction::WaitForClockSync
+        );
+    }
+
+    #[test]
+    fn appliance_clock_sanity_matches_expected_boot_vs_real_time_behavior() {
+        let boot_epoch = Utc.timestamp_opt(15, 0).single().unwrap();
+        let synced_time = Utc
+            .with_ymd_and_hms(2026, 4, 23, 19, 41, 2)
+            .single()
+            .unwrap();
+        assert!(!clock_is_sane_at(boot_epoch));
+        assert!(clock_is_sane_at(synced_time));
     }
 
     #[test]

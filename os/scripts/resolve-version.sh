@@ -76,7 +76,7 @@ resolve_workspace_version() {
     sha="$(git -C "$PROJECT_ROOT" rev-parse --short=8 HEAD)"
     describe_output="$(git -C "$PROJECT_ROOT" describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || true)"
 
-    VERSION="${base_version}-beta.dev.${commit_count}.g${sha}"
+    VERSION="${base_version}.dev.${commit_count}.g${sha}"
     if [[ "$describe_output" == *-dirty ]]; then
         VERSION="${VERSION}.dirty"
     fi
