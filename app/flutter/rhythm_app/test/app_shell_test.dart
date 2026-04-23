@@ -35,6 +35,13 @@ class _FakeHomeProvider extends HomeProvider {
   }
 
   @override
+  Future<bool> deleteHub(String hubId) async {
+    _hubs.removeWhere((hub) => hub.id == hubId);
+    notifyListeners();
+    return true;
+  }
+
+  @override
   Future<void> onUserSignIn() async {}
 }
 
@@ -349,6 +356,48 @@ void main() {
     await tester.pump(const Duration(milliseconds: 10));
     expect(find.text('Server Unreachable'), findsNothing);
     expect(find.text('Add Hubs'), findsOneWidget);
+  });
+
+  testWidgets('pops pushed routes when the paired server hub is removed',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    final homeProvider = _FakeHomeProvider([_serverHub()]);
+    final connection = _TestRhythmConnection(
+      initialState: RhythmConnectionState.connected,
+    );
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await _pumpAppShell(
+      tester,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+      serverSync: serverSync,
+    );
+
+    final appShellContext = tester.element(find.byType(AppShell));
+    unawaited(
+      Navigator.of(appShellContext).push(
+        MaterialPageRoute<void>(
+          builder: (_) => const Scaffold(body: Text('Pushed route')),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Pushed route'), findsOneWidget);
+
+    await homeProvider.deleteHub('server-1');
+    await tester.pumpAndSettle();
+
+    expect(find.text('Pushed route'), findsNothing);
+    expect(find.text('Find Your Rhythm Box'), findsOneWidget);
   });
 
   testWidgets('shows the room grid when the connected server has rooms',

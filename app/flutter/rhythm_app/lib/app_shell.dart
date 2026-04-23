@@ -44,6 +44,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   bool _isFixing = false;
   final PageController _roomPageController = PageController();
   int _currentRoomPage = 0;
+  bool _hadServerHub = false;
+  bool _serverRemovalCleanupPending = false;
 
   /// Sticky flag: true once the server enters [RhythmConnectionState.reconnecting],
   /// cleared when [RhythmConnectionState.connected] is reached.  Prevents flashing
@@ -140,6 +142,26 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     SunPositionScreen.show(context);
   }
 
+  void _handleServerHubLifecycle({required bool hasServerHub}) {
+    if (hasServerHub) {
+      _hadServerHub = true;
+      _serverRemovalCleanupPending = false;
+      return;
+    }
+
+    if (!_hadServerHub || _serverRemovalCleanupPending) return;
+    _serverRemovalCleanupPending = true;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final navigator = Navigator.maybeOf(context, rootNavigator: true);
+      if (navigator != null && navigator.canPop()) {
+        navigator.popUntil((route) => route.isFirst);
+      }
+      _serverRemovalCleanupPending = false;
+    });
+  }
+
   bool _showsInAllRooms(RoomDto room) {
     if (room.kind.isRoom) return true;
     if (!room.kind.isLightDevice) return false;
@@ -204,6 +226,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    final hasServerHub = context.select<HomeProvider, bool>(
+      (homeProvider) => homeProvider.getFirstHubOfType(HubType.server) != null,
+    );
+    _handleServerHubLifecycle(hasServerHub: hasServerHub);
+
     final showSliders = _isLargeScreen(context);
 
     // For large screens, show the original bottom nav with sliders
