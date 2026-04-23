@@ -30,6 +30,12 @@ import 'ha_configurator_screen.dart';
 import 'hue_configurator_screen.dart';
 import 'matter_pairing_flow.dart';
 
+String _formatOtaVersionLabel(String version) {
+  return version.startsWith('v') || version.startsWith('V')
+      ? version
+      : 'v$version';
+}
+
 /// Settings screen for a connected server hub (ESP32, standalone, HA addon).
 ///
 /// Adapts visible sections based on the server's platform context.
@@ -1003,6 +1009,11 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
       case OtaState.available:
         final release = _otaService.availableRelease!;
+        final targetVersionLabel = _formatOtaVersion(release.version);
+        final updateMessage =
+            release.updateReason == OtaUpdateReason.componentDrift
+                ? 'A repair bundle is ready to install.'
+                : 'A new update is ready to install.';
         return [
           Divider(
             height: 1,
@@ -1023,11 +1034,36 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  'A new update is ready to install.',
+                  updateMessage,
                   style: TextStyle(
                     color: CelestialColors.textSecondary.withValues(alpha: 0.7),
                     fontSize: 13,
                   ),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'Updating To',
+                      style: TextStyle(
+                        color: CelestialColors.textSecondary
+                            .withValues(alpha: 0.75),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                        letterSpacing: 0.3,
+                      ),
+                    ),
+                    Text(
+                      targetVersionLabel,
+                      style: const TextStyle(
+                        color: _teal,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -2668,6 +2704,8 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
     with SingleTickerProviderStateMixin {
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
+  String? _targetVersionLabel;
+  bool _isBundleRepair = false;
 
   static const _teal = Color(0xFF00BCD4);
 
@@ -2675,6 +2713,7 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
   void initState() {
     super.initState();
     widget.otaService.addListener(_onStateChanged);
+    _syncOverlayMetadata();
 
     _pulseController = AnimationController(
       duration: const Duration(milliseconds: 2000),
@@ -2694,7 +2733,73 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
   }
 
   void _onStateChanged() {
+    _syncOverlayMetadata();
     if (mounted) setState(() {});
+  }
+
+  void _syncOverlayMetadata() {
+    _isBundleRepair = _isBundleRepair || widget.otaService.isBundleRepair;
+    _targetVersionLabel ??= _resolveTargetVersionLabel();
+  }
+
+  String? _resolveTargetVersionLabel() {
+    final releaseVersion = widget.otaService.availableRelease?.version;
+    if (releaseVersion != null && releaseVersion.isNotEmpty) {
+      return _formatOtaVersionLabel(releaseVersion);
+    }
+
+    final latestVersion = widget.otaService.latestVersion;
+    if (latestVersion != null && latestVersion.isNotEmpty) {
+      return _formatOtaVersionLabel(latestVersion);
+    }
+
+    return null;
+  }
+
+  String _buildProgressMessage({required bool isDownloading}) {
+    final targetVersion = _targetVersionLabel;
+    if (targetVersion == null) {
+      return isDownloading ? 'Downloading update...' : 'Installing update...';
+    }
+
+    if (_isBundleRepair) {
+      return isDownloading
+          ? 'Downloading repair for $targetVersion...'
+          : 'Installing repair for $targetVersion...';
+    }
+
+    return isDownloading
+        ? 'Downloading update to $targetVersion...'
+        : 'Installing update to $targetVersion...';
+  }
+
+  String _buildRebootingMessage() {
+    final targetVersion = _targetVersionLabel;
+    if (targetVersion == null) {
+      return 'Restarting your device...';
+    }
+
+    if (_isBundleRepair) {
+      return 'Restarting after repair on $targetVersion...';
+    }
+
+    return 'Restarting into $targetVersion...';
+  }
+
+  String _buildCompletionMessage() {
+    final statusMessage = widget.otaService.statusMessage?.trim();
+    if (statusMessage != null && statusMessage.isNotEmpty) {
+      return statusMessage;
+    }
+
+    final targetVersion = _targetVersionLabel;
+    if (targetVersion == null) {
+      return 'Your device is up to date.';
+    }
+
+    return _isBundleRepair
+        ? 'Repair completed on $targetVersion.'
+        : 'Updated to $targetVersion.';
   }
 
   bool get _isFinished {
@@ -2751,8 +2856,7 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
     final isDownloading = widget.otaService.state == OtaState.downloading;
     final pct = widget.otaService.progress;
     const title = 'Updating Device';
-    final message =
-        isDownloading ? 'Downloading update...' : 'Installing update...';
+    final message = _buildProgressMessage(isDownloading: isDownloading);
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -2892,9 +2996,9 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
           ),
         ),
         const SizedBox(height: 8),
-        const Text(
-          'Installing update...',
-          style: TextStyle(
+        Text(
+          _buildProgressMessage(isDownloading: false),
+          style: const TextStyle(
             color: CelestialColors.textSecondary,
             fontSize: 15,
           ),
@@ -2966,9 +3070,9 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
           ),
         ),
         const SizedBox(height: 8),
-        const Text(
-          'Restarting your device...',
-          style: TextStyle(
+        Text(
+          _buildRebootingMessage(),
+          style: const TextStyle(
             color: CelestialColors.textSecondary,
             fontSize: 15,
           ),
@@ -3031,9 +3135,9 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
           ),
         ),
         const SizedBox(height: 8),
-        const Text(
-          'Your device is up to date.',
-          style: TextStyle(
+        Text(
+          _buildCompletionMessage(),
+          style: const TextStyle(
             color: Color(0xFF22C55E),
             fontSize: 15,
             fontWeight: FontWeight.w500,

@@ -10,6 +10,7 @@ import '../../models/config_model.dart';
 import '../../providers/room_provider.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../services/analytics_service.dart';
+import '../../utils/room_visibility.dart';
 
 /// Full-screen modal for configuring the light profile.
 ///
@@ -2950,7 +2951,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
 
   Widget _buildRoomDefaultsSection() {
     return Selector<RoomProvider, List<RoomDto>>(
-      selector: (_, provider) => provider.rooms,
+      selector: (_, provider) =>
+          provider.rooms.where(showsInAllRooms).toList(growable: false),
       builder: (context, rooms, child) {
         if (rooms.isEmpty) return const SizedBox.shrink();
 

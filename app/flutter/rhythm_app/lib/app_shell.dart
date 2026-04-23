@@ -24,6 +24,7 @@ import 'screens/server_disconnected_screen.dart';
 import 'services/analytics_service.dart';
 import 'services/app_state_refresh.dart';
 import 'services/hue/hue_service_locator.dart';
+import 'utils/room_visibility.dart';
 
 /// Main app shell with constellation grid layout.
 ///
@@ -157,13 +158,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       }
       _serverRemovalCleanupPending = false;
     });
-  }
-
-  bool _showsInAllRooms(RoomDto room) {
-    if (room.kind.isRoom) return true;
-    if (!room.kind.isLightDevice) return false;
-    final parentId = room.parentId;
-    return parentId == null || parentId.isEmpty;
   }
 
   /// Reset all on-lights to current adaptive values and enable rhythm tracking.
@@ -305,7 +299,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     final roomPageProvider = context.watch<RoomPageProvider>();
     final enabledRooms = roomProvider.enabledRooms;
     final visibleRooms =
-        enabledRooms.where(_showsInAllRooms).toList(growable: false);
+        enabledRooms.where(showsInAllRooms).toList(growable: false);
     final pageCount = roomPageProvider.pageCount;
     // Clamp current page if page count decreased
     if (_currentRoomPage >= pageCount) {
