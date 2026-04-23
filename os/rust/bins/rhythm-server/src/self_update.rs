@@ -5,6 +5,7 @@
 //! `rhythm-chipd` updates and optional full-image artifacts for appliance
 //! update flows.
 
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -1355,6 +1356,7 @@ fn stage_install_targets(
         .collect::<Vec<_>>();
 
     if asset_name.ends_with(".tar.gz") {
+        ensure_stage_space(download_path, &staged_targets)?;
         extract_targets_from_archive(download_path, &staged_targets)?;
     } else {
         if staged_targets.len() != 1 {
@@ -1379,6 +1381,101 @@ fn stage_install_targets(
     }
 
     Ok(staged_targets)
+}
+
+#[cfg(unix)]
+fn ensure_stage_space(
+    archive_path: &Path,
+    install_targets: &[StagedInstallTarget],
+) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut required_by_device = HashMap::<u64, (PathBuf, u64)>::new();
+    let mut target_devices = Vec::with_capacity(install_targets.len());
+
+    for target in install_targets {
+        let stage_dir = target
+            .stage_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        fs::create_dir_all(&stage_dir)
+            .map_err(|e| format!("Failed to prepare {}: {}", stage_dir.display(), e))?;
+        let device_id = fs::metadata(&stage_dir)
+            .map_err(|e| format!("Failed to inspect {}: {}", stage_dir.display(), e))?
+            .dev();
+        target_devices.push(device_id);
+        required_by_device
+            .entry(device_id)
+            .or_insert((stage_dir, 0));
+    }
+
+    let file = File::open(archive_path).map_err(|e| format!("Failed to open archive: {}", e))?;
+    let decoder = GzDecoder::new(file);
+    let mut archive = Archive::new(decoder);
+    let entries = archive
+        .entries()
+        .map_err(|e| format!("Failed to read archive entries: {}", e))?;
+    let mut found = vec![false; install_targets.len()];
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read archive entry: {}", e))?;
+        let entry_path = entry
+            .path()
+            .map_err(|e| format!("Failed to inspect archive entry: {}", e))?;
+        let entry_name = entry_path.to_string_lossy();
+        let entry_file_name = entry_path.file_name().and_then(|name| name.to_str());
+
+        for (index, target) in install_targets.iter().enumerate() {
+            let matches = entry_name == target.spec.archive_path
+                || entry_file_name == Some(target.spec.archive_path.as_str());
+            if !matches {
+                continue;
+            }
+
+            if let Some((_stage_dir, required_bytes)) =
+                required_by_device.get_mut(&target_devices[index])
+            {
+                *required_bytes = required_bytes.saturating_add(entry.size());
+            }
+            found[index] = true;
+            break;
+        }
+    }
+
+    for (index, target) in install_targets.iter().enumerate() {
+        if !found[index] && target.spec.required {
+            return Err(format!(
+                "Archive did not contain required payload {}",
+                target.spec.archive_path
+            ));
+        }
+    }
+
+    for (_device_id, (stage_dir, required_bytes)) in required_by_device {
+        if required_bytes == 0 {
+            continue;
+        }
+        let available_bytes = available_bytes_for_path(&stage_dir)?;
+        if available_bytes < required_bytes {
+            return Err(format!(
+                "Insufficient free space in {} to stage update: need {} bytes, have {} bytes available",
+                stage_dir.display(),
+                required_bytes,
+                available_bytes
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_stage_space(
+    _archive_path: &Path,
+    _install_targets: &[StagedInstallTarget],
+) -> Result<(), String> {
+    Ok(())
 }
 
 fn extract_targets_from_archive(
@@ -1430,6 +1527,34 @@ fn extract_targets_from_archive(
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn available_bytes_for_path(path: &Path) -> Result<u64, String> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path_bytes = path.as_os_str().as_bytes();
+    let c_path = CString::new(path_bytes)
+        .map_err(|_| format!("Path contains interior NUL byte: {}", path.display()))?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    let result = unsafe { libc::statvfs(c_path.as_ptr(), stats.as_mut_ptr()) };
+    if result != 0 {
+        return Err(format!(
+            "Failed to inspect free space for {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    let stats = unsafe { stats.assume_init() };
+    let fragment_size = if stats.f_frsize == 0 {
+        stats.f_bsize
+    } else {
+        stats.f_frsize
+    };
+
+    Ok((stats.f_bavail as u64).saturating_mul(fragment_size as u64))
 }
 
 fn commit_staged_targets(staged_targets: &[StagedInstallTarget]) -> Result<Vec<String>, String> {
@@ -1493,6 +1618,8 @@ fn commit_staged_targets(staged_targets: &[StagedInstallTarget]) -> Result<Vec<S
         );
     }
 
+    cleanup_backup_files(&applied);
+
     Ok(installed_targets)
 }
 
@@ -1503,6 +1630,14 @@ fn rollback_applied_targets(applied: &[AppliedInstallTarget]) {
         }
         if target.previously_existed && target.backup_path.exists() {
             let _ = fs::rename(&target.backup_path, &target.destination);
+        }
+    }
+}
+
+fn cleanup_backup_files(applied: &[AppliedInstallTarget]) {
+    for target in applied {
+        if target.previously_existed {
+            remove_if_exists(&target.backup_path);
         }
     }
 }
@@ -2143,6 +2278,35 @@ mod tests {
         assert_eq!(fs::read(server_stage).unwrap(), b"fake-rhythm-server");
         assert_eq!(fs::read(chipd_stage).unwrap(), b"fake-rhythm-chipd");
         cleanup_staged_files(&staged);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn commit_staged_targets_removes_backup_files_after_success() {
+        let dir = unique_test_dir("commit-cleanup");
+        let destination = dir.join("rhythm-server");
+        let stage_path = dir.join("rhythm-server.new");
+        let backup_path = dir.join("rhythm-server.old");
+
+        fs::write(&destination, b"old-server").unwrap();
+        fs::write(&stage_path, b"new-server").unwrap();
+
+        let installed = commit_staged_targets(&[StagedInstallTarget {
+            spec: InstallTarget {
+                archive_path: "rhythm-server".to_string(),
+                destination: destination.clone(),
+                required: true,
+            },
+            stage_path: stage_path.clone(),
+            backup_path: backup_path.clone(),
+        }])
+        .unwrap();
+
+        assert_eq!(installed, vec!["rhythm-server".to_string()]);
+        assert_eq!(fs::read(&destination).unwrap(), b"new-server");
+        assert!(!stage_path.exists(), "stage file should be promoted");
+        assert!(!backup_path.exists(), "backup file should be cleaned up");
+
         let _ = fs::remove_dir_all(dir);
     }
 
