@@ -10,7 +10,11 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmConnectionState,
         RhythmDevice,
         RhythmDeviceType,
+        RhythmApiException,
         RhythmDiagnosticsApi,
+        RhythmHubInfo,
+        RhythmHubStartupRetry,
+        RhythmHubStartupRetryStatus,
         RhythmRoom,
         RoomModeState;
 import '../../widgets/solar_orbit.dart';
@@ -18,7 +22,9 @@ import '../../providers/server_sync_provider.dart';
 import '../../providers/home_provider.dart';
 import '../../providers/room_provider.dart';
 import '../../services/analytics_service.dart';
+import '../../services/debug_bundle_submission_service.dart';
 import '../../services/ota_service.dart';
+import '../../widgets/beta_badge.dart';
 import '../../widgets/device_detail_sheet.dart';
 import 'ha_configurator_screen.dart';
 import 'hue_configurator_screen.dart';
@@ -78,6 +84,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   bool _isFactoryResetting = false;
   bool _isRefreshing = false;
   bool _isConfiguringHub = false;
+  bool _isSubmittingDebugBundle = false;
   OtaState? _lastHandledOtaState;
 
   // Per-hub-type device summaries from /api/devices/canonical
@@ -97,6 +104,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   bool get _isEmbedded =>
       _serverContext == 'embedded' || _serverContext == 'esp32';
   bool get _isHaAddon => _serverContext == 'ha_addon';
+  bool get _supportsDebugBundle => !_isEmbedded;
 
   String get _headerTitle => switch (_serverContext) {
         'ha_addon' => 'Rhythm Add-on',
@@ -389,6 +397,10 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                       _buildHubPairingSuggestions(),
                       const SizedBox(height: 16),
                       _buildVersionSection(),
+                      if (_supportsDebugBundle) ...[
+                        const SizedBox(height: 16),
+                        _buildDebugSection(),
+                      ],
                       const SizedBox(height: 24),
                       if (_isEmbedded) ...[
                         _buildDiagnosticsButton(),
@@ -746,6 +758,237 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildDebugSection() {
+    final subtitle = _isSubmittingDebugBundle
+        ? 'Generating and uploading a tar.gz snapshot...'
+        : 'Capture logs and redacted state from this server and upload the bundle to support.';
+
+    return _buildSection(
+      title: 'DEBUG',
+      children: [
+        GestureDetector(
+          onTap: _isSubmittingDebugBundle ? null : _submitDebugBundle,
+          behavior: HitTestBehavior.opaque,
+          child: AnimatedOpacity(
+            duration: const Duration(milliseconds: 150),
+            opacity: _isSubmittingDebugBundle ? 0.7 : 1,
+            child: Container(
+              decoration: BoxDecoration(
+                color: CelestialColors.backgroundCard,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+                ),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: _teal.withValues(alpha: 0.16),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.cloud_upload_outlined,
+                        color: _teal,
+                        size: 20,
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Submit Debug Bundle',
+                            style: TextStyle(
+                              color: CelestialColors.textPrimary,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            subtitle,
+                            style: TextStyle(
+                              color: CelestialColors.textSecondary
+                                  .withValues(alpha: 0.7),
+                              fontSize: 13,
+                              height: 1.3,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    if (_isSubmittingDebugBundle)
+                      const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation(_teal),
+                        ),
+                      )
+                    else
+                      Icon(
+                        Icons.chevron_right,
+                        color: CelestialColors.textSecondary
+                            .withValues(alpha: 0.5),
+                        size: 22,
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _submitDebugBundle() async {
+    if (_isSubmittingDebugBundle) return;
+
+    final summary = await _showDebugBundlePrompt();
+    if (summary == null || !mounted) return;
+
+    final syncProvider = context.read<ServerSyncProvider>();
+    final currentVersion = _otaService.currentVersion != '0.0.0'
+        ? _otaService.currentVersion
+        : syncProvider.firmwareVersion;
+    final serverVersion = currentVersion == '0.0.0'
+        ? 'Unknown'
+        : _formatOtaVersion(currentVersion);
+
+    setState(() => _isSubmittingDebugBundle = true);
+    _showDebugBundleProgressDialog();
+
+    try {
+      final bundle = await _client.downloadDebugBundle();
+      final submission = await DebugBundleSubmissionService.instance.submit(
+        serverHub: widget.hub,
+        bundle: bundle,
+        serverVersion: serverVersion,
+        serverPlatformContext: syncProvider.serverPlatformContext,
+        summary: summary,
+      );
+
+      if (!mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+
+      await _showDebugBundleSubmittedDialog(submission.referenceCode);
+    } catch (error) {
+      if (!mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+      final message = switch (error) {
+        RhythmApiException apiError =>
+          apiError.serverMessage ?? apiError.message,
+        DebugBundleSubmissionException submitError => submitError.message,
+        _ => 'Failed to submit the debug bundle.',
+      };
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(message),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: Colors.red.shade400,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isSubmittingDebugBundle = false);
+      }
+    }
+  }
+
+  Future<String?> _showDebugBundlePrompt() async {
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => const _DebugBundlePromptDialog(),
+    );
+  }
+
+  void _showDebugBundleProgressDialog() {
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: CelestialColors.backgroundCard,
+        content: Row(
+          children: [
+            const SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Text(
+                'Generating and uploading debug bundle...',
+                style: const TextStyle(color: CelestialColors.textPrimary),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showDebugBundleSubmittedDialog(String referenceCode) {
+    return showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: CelestialColors.backgroundCard,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+        ),
+        title: const Text(
+          'Debug bundle submitted',
+          style: TextStyle(
+            color: CelestialColors.textPrimary,
+            fontSize: 17,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Support can now review this bundle.',
+              style: TextStyle(
+                color: CelestialColors.textSecondary,
+                fontSize: 14,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Reference: $referenceCode',
+              style: const TextStyle(
+                color: CelestialColors.textPrimary,
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                fontFamily: 'monospace',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text(
+              'Done',
+              style: TextStyle(color: _teal),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1346,13 +1589,15 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
   Widget _buildHubRow(Map<String, dynamic> hubInfo) {
     final type = hubInfo['type'] as String;
-    final connected = hubInfo['connected'] as bool? ?? false;
     final label = _hubLabel(type);
     final hubColor = _hubColor(type);
+    final connected = hubInfo['connected'] as bool? ?? false;
+    final statusColor = _hubConnectionColor(hubInfo);
     final deviceSummary = _hubSummaries[type] ??
         (_hubSummariesLoaded
             ? (connected ? 'Connected · no devices' : 'No devices')
             : 'Loading…');
+    final subtitle = _hubRowSubtitle(hubInfo, deviceSummary);
 
     return GestureDetector(
       onTap: () => _HubDetailScreen.show(context, hubInfo: hubInfo),
@@ -1371,17 +1616,27 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    label,
-                    style: const TextStyle(
-                      color: CelestialColors.textPrimary,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
+                  if (_hubHasBetaBadge(type))
+                    BetaLabel(
+                      label: label,
+                      style: TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    )
+                  else
+                    Text(
+                      label,
+                      style: const TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
                     ),
-                  ),
                   const SizedBox(height: 2),
                   Text(
-                    deviceSummary,
+                    subtitle,
                     style: TextStyle(
                       color:
                           CelestialColors.textSecondary.withValues(alpha: 0.6),
@@ -1397,13 +1652,11 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               margin: const EdgeInsets.only(right: 8),
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: connected
-                    ? const Color(0xFF22C55E)
-                    : const Color(0xFFEF4444),
+                color: statusColor,
                 boxShadow: !connected
                     ? [
                         BoxShadow(
-                          color: const Color(0xFFEF4444).withValues(alpha: 0.6),
+                          color: statusColor.withValues(alpha: 0.6),
                           blurRadius: 6,
                           spreadRadius: 1,
                         ),
@@ -1443,6 +1696,81 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
         _ => Icons.hub_outlined,
       };
 
+  static bool _hubHasBetaBadge(String type) => switch (type) {
+        'homeassistant' || 'home_assistant' || 'matter' => true,
+        _ => false,
+      };
+
+  static const Color _connectedGreen = Color(0xFF22C55E);
+  static const Color _warningAmber = Color(0xFFE8A54B);
+  static const Color _errorRed = Color(0xFFEF4444);
+
+  static RhythmHubInfo _parsedHubInfo(Map<String, dynamic> hubInfo) {
+    return RhythmHubInfo.fromJson(hubInfo);
+  }
+
+  static RhythmHubStartupRetry? _startupRetry(Map<String, dynamic> hubInfo) {
+    return _parsedHubInfo(hubInfo).startupRetry;
+  }
+
+  static bool _hubNeedsManualRetry(Map<String, dynamic> hubInfo) {
+    return (hubInfo['connected'] as bool? ?? false) != true &&
+        _startupRetry(hubInfo)?.status ==
+            RhythmHubStartupRetryStatus.manualRetryRequired;
+  }
+
+  static bool _hubIsAutoRetrying(Map<String, dynamic> hubInfo) {
+    return (hubInfo['connected'] as bool? ?? false) != true &&
+        _startupRetry(hubInfo)?.status == RhythmHubStartupRetryStatus.scheduled;
+  }
+
+  static Color _hubConnectionColor(Map<String, dynamic> hubInfo) {
+    if (hubInfo['connected'] as bool? ?? false) return _connectedGreen;
+    if (_hubIsAutoRetrying(hubInfo)) return _warningAmber;
+    return _errorRed;
+  }
+
+  static String _hubConnectionLabel(Map<String, dynamic> hubInfo) {
+    if (hubInfo['connected'] as bool? ?? false) return 'Connected';
+    if (_hubIsAutoRetrying(hubInfo)) return 'Retrying Automatically';
+    if (_hubNeedsManualRetry(hubInfo)) return 'Retry Required';
+    return 'Disconnected';
+  }
+
+  static String? _hubRetrySummary(Map<String, dynamic> hubInfo) {
+    final retry = _startupRetry(hubInfo);
+    if (retry == null) return null;
+    if (retry.isManualRetryRequired) {
+      return 'Automatic retries paused after 24 hours';
+    }
+    final nextRetryEpochMs = retry.nextRetryEpochMs;
+    if (retry.isScheduled && nextRetryEpochMs != null) {
+      return 'Next retry ${_formatRetryEta(nextRetryEpochMs)}';
+    }
+    if (retry.isScheduled) {
+      return 'Stored credentials are retrying automatically';
+    }
+    return null;
+  }
+
+  static String _hubRowSubtitle(
+    Map<String, dynamic> hubInfo,
+    String deviceSummary,
+  ) {
+    final retrySummary = _hubRetrySummary(hubInfo);
+    if (retrySummary != null) return retrySummary;
+    return deviceSummary;
+  }
+
+  static String _formatRetryEta(int epochMs) {
+    final remaining =
+        DateTime.fromMillisecondsSinceEpoch(epochMs).difference(DateTime.now());
+    if (remaining.inSeconds <= 0) return 'again shortly';
+    if (remaining.inMinutes < 1) return 'in ${remaining.inSeconds}s';
+    if (remaining.inHours < 1) return 'in ${remaining.inMinutes}m';
+    return 'in ${remaining.inHours}h';
+  }
+
   Future<void> _startMatterAddFlow({
     MatterAddMethod? preferredMethod,
   }) async {
@@ -1461,6 +1789,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
         icon: Icons.memory_outlined,
         label: 'Add Matter Device',
         color: const Color(0xFF26A69A),
+        showBetaBadge: true,
         onTap: () => _startMatterAddFlow(),
       ),
     ];
@@ -1518,6 +1847,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     label: 'Home Assistant',
                     color: const Color(0xFF42A5F5),
                     isLoading: _isConfiguringHub,
+                    showBetaBadge: true,
                     onTap:
                         _isConfiguringHub ? null : () => _pairHa(syncProvider),
                   ),
@@ -1556,6 +1886,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
           label: 'Add Home Assistant',
           color: const Color(0xFF42A5F5),
           isLoading: _isConfiguringHub,
+          showBetaBadge: true,
           onTap: _isConfiguringHub ? null : () => _pairHa(syncProvider),
         ));
       }
@@ -1624,6 +1955,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     required Color color,
     bool isActive = false,
     bool isLoading = false,
+    bool showBetaBadge = false,
     VoidCallback? onTap,
   }) {
     return GestureDetector(
@@ -1639,14 +1971,23 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
             ),
             const SizedBox(width: 12),
             Expanded(
-              child: Text(
-                label,
-                style: TextStyle(
-                  color: CelestialColors.textPrimary,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
+              child: showBetaBadge
+                  ? BetaLabel(
+                      label: label,
+                      style: TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    )
+                  : Text(
+                      label,
+                      style: const TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
             ),
             if (isLoading)
               SizedBox(
@@ -2242,6 +2583,108 @@ class _DeviceCounts {
   int lights = 0;
   int buttons = 0;
   int motion = 0;
+}
+
+class _DebugBundlePromptDialog extends StatefulWidget {
+  const _DebugBundlePromptDialog();
+
+  @override
+  State<_DebugBundlePromptDialog> createState() =>
+      _DebugBundlePromptDialogState();
+}
+
+class _DebugBundlePromptDialogState extends State<_DebugBundlePromptDialog> {
+  final TextEditingController _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: CelestialColors.backgroundCard,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+      ),
+      title: const Text(
+        'Submit debug bundle',
+        style: TextStyle(
+          color: CelestialColors.textPrimary,
+          fontSize: 17,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'This uploads a tar.gz snapshot of recent logs and redacted server state to Rhythm support.',
+              style: TextStyle(
+                color: CelestialColors.textSecondary,
+                fontSize: 14,
+              ),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _controller,
+              autofocus: true,
+              maxLines: 4,
+              minLines: 3,
+              maxLength: 500,
+              style: const TextStyle(
+                color: CelestialColors.textPrimary,
+              ),
+              decoration: InputDecoration(
+                hintText: 'What went wrong? (optional)',
+                hintStyle: TextStyle(
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.45),
+                ),
+                filled: true,
+                fillColor: CelestialColors.backgroundDark,
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(
+                    color: CelestialColors.orbitRing.withValues(alpha: 0.35),
+                  ),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(
+                    color: _RhythmServerSettingsScreenState._teal
+                        .withValues(alpha: 0.7),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: Text(
+            'Cancel',
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.8),
+            ),
+          ),
+        ),
+        ElevatedButton(
+          onPressed: () => Navigator.of(context).pop(_controller.text),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: _RhythmServerSettingsScreenState._teal,
+            foregroundColor: const Color(0xFF0A0F14),
+          ),
+          child: const Text('Submit'),
+        ),
+      ],
+    );
+  }
 }
 
 // =============================================================================
@@ -3895,7 +4338,6 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
   static const _teal = Color(0xFF00BCD4);
 
   String get _type => widget.hubInfo['type'] as String;
-  bool get _connected => widget.hubInfo['connected'] as bool? ?? false;
   String? get _address => widget.hubInfo['address'] as String?;
 
   // Canonical devices grouped into rooms for this hub type.
@@ -4013,8 +4455,26 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
-    context.watch<ServerSyncProvider>();
-    final syncProvider = context.read<ServerSyncProvider>();
+    final syncProvider = context.watch<ServerSyncProvider>();
+    final hubInfo = _currentHubInfo(syncProvider);
+    final connected = hubInfo['connected'] as bool? ?? false;
+    final connectionLabel =
+        _RhythmServerSettingsScreenState._hubConnectionLabel(hubInfo);
+    final connectionColor =
+        _RhythmServerSettingsScreenState._hubConnectionColor(hubInfo);
+    final retrySummary =
+        _RhythmServerSettingsScreenState._hubRetrySummary(hubInfo);
+    final retryActionEnabled =
+        !_RhythmServerSettingsScreenState._hubIsAutoRetrying(hubInfo);
+    final retryActionLabel = connected
+        ? 'Reconnect'
+        : _RhythmServerSettingsScreenState._hubIsAutoRetrying(hubInfo)
+            ? 'Retrying Automatically'
+            : 'Retry';
+    final retryActionColor =
+        _RhythmServerSettingsScreenState._hubIsAutoRetrying(hubInfo)
+            ? _RhythmServerSettingsScreenState._warningAmber
+            : _teal;
     final rooms = _canonicalRooms ?? [];
     final deviceSummary =
         _canonicalLoading ? 'Loading...' : (_canonicalSummary ?? 'No devices');
@@ -4055,15 +4515,28 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                     ),
                   ),
                   Expanded(
-                    child: Text(
-                      label,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        color: CelestialColors.textPrimary,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w600,
-                        letterSpacing: 0.3,
-                      ),
+                    child: Center(
+                      child: _RhythmServerSettingsScreenState._hubHasBetaBadge(
+                              _type)
+                          ? BetaLabel(
+                              label: label,
+                              style: TextStyle(
+                                color: CelestialColors.textPrimary,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 0.3,
+                              ),
+                            )
+                          : Text(
+                              label,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: CelestialColors.textPrimary,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 0.3,
+                              ),
+                            ),
                     ),
                   ),
                   const SizedBox(width: 40),
@@ -4086,14 +4559,13 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                           center: Alignment.center,
                           radius: 1.2,
                           colors: [
-                            hubColor.withValues(
-                                alpha: _connected ? 0.08 : 0.03),
+                            hubColor.withValues(alpha: connected ? 0.08 : 0.03),
                             CelestialColors.backgroundCard,
                           ],
                         ),
                         border: Border.all(
-                          color: hubColor.withValues(
-                              alpha: _connected ? 0.2 : 0.1),
+                          color:
+                              hubColor.withValues(alpha: connected ? 0.2 : 0.1),
                           width: 1,
                         ),
                       ),
@@ -4105,12 +4577,12 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                             decoration: BoxDecoration(
                               shape: BoxShape.circle,
                               color: hubColor.withValues(
-                                  alpha: _connected ? 0.2 : 0.1),
+                                  alpha: connected ? 0.2 : 0.1),
                             ),
                             child: Icon(
                               hubIcon,
                               color: hubColor.withValues(
-                                  alpha: _connected ? 1.0 : 0.5),
+                                  alpha: connected ? 1.0 : 0.5),
                               size: 28,
                             ),
                           ),
@@ -4123,24 +4595,32 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                                 height: 8,
                                 decoration: BoxDecoration(
                                   shape: BoxShape.circle,
-                                  color: _connected
-                                      ? const Color(0xFF22C55E)
-                                      : const Color(0xFFEF4444),
+                                  color: connectionColor,
                                 ),
                               ),
                               const SizedBox(width: 8),
                               Text(
-                                _connected ? 'Connected' : 'Disconnected',
+                                connectionLabel,
                                 style: TextStyle(
-                                  color: _connected
-                                      ? const Color(0xFF22C55E)
-                                      : const Color(0xFFEF4444),
+                                  color: connectionColor,
                                   fontSize: 14,
                                   fontWeight: FontWeight.w500,
                                 ),
                               ),
                             ],
                           ),
+                          if (retrySummary != null) ...[
+                            const SizedBox(height: 6),
+                            Text(
+                              retrySummary,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: connectionColor.withValues(alpha: 0.9),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
                           if (_address != null && _address!.isNotEmpty) ...[
                             const SizedBox(height: 4),
                             Text(
@@ -4188,9 +4668,11 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                       // Actions
                       _buildActionButton(
                         icon: Icons.refresh_rounded,
-                        label: _connected ? 'Reconnect' : 'Retry',
-                        color: _teal,
-                        onTap: () => _retryHub(),
+                        label: retryActionLabel,
+                        color: retryActionColor,
+                        onTap: retryActionEnabled
+                            ? () => _retryHub(hubInfo)
+                            : null,
                       ),
                       const SizedBox(height: 10),
                       _buildActionButton(
@@ -4388,28 +4870,33 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
     required IconData icon,
     required String label,
     required Color color,
-    required VoidCallback onTap,
+    VoidCallback? onTap,
   }) {
+    final enabled = onTap != null;
     return GestureDetector(
       onTap: onTap,
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 14),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(14),
-          color: color.withValues(alpha: 0.1),
+          color: color.withValues(alpha: enabled ? 0.1 : 0.05),
           border: Border.all(
-            color: color.withValues(alpha: 0.3),
+            color: color.withValues(alpha: enabled ? 0.3 : 0.16),
           ),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(icon, color: color, size: 18),
+            Icon(
+              icon,
+              color: color.withValues(alpha: enabled ? 1.0 : 0.55),
+              size: 18,
+            ),
             const SizedBox(width: 10),
             Text(
               label,
               style: TextStyle(
-                color: color,
+                color: color.withValues(alpha: enabled ? 1.0 : 0.55),
                 fontSize: 15,
                 fontWeight: FontWeight.w600,
               ),
@@ -4447,18 +4934,27 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
           ),
       };
 
-  Future<void> _retryHub() async {
-    final syncProvider = context.read<ServerSyncProvider>();
-    final source = switch (_type) {
-      'hue' => RoomSourceDto.hue,
-      'homeassistant' || 'home_assistant' => RoomSourceDto.homeAssistant,
-      _ => null,
-    };
-    if (source != null) {
-      await syncProvider.pushHubCredentials(source);
-    } else {
-      await syncProvider.connection.reconnect();
+  Map<String, dynamic> _currentHubInfo(ServerSyncProvider syncProvider) {
+    final address = _address;
+    for (final hubInfo in syncProvider.serverHubInfos) {
+      final type = hubInfo['type'] as String?;
+      if (type != _type) continue;
+      if (address == null || address.isEmpty) return hubInfo;
+      if (hubInfo['address'] == address) return hubInfo;
     }
+    return widget.hubInfo;
+  }
+
+  Future<void> _retryHub(Map<String, dynamic> hubInfo) async {
+    final syncProvider = context.read<ServerSyncProvider>();
+    final needsManualRetry =
+        _RhythmServerSettingsScreenState._hubNeedsManualRetry(hubInfo);
+    final address = hubInfo['address'] as String? ?? _address ?? '';
+    if (needsManualRetry && address.isNotEmpty) {
+      await syncProvider.retryHub(_type, address);
+      return;
+    }
+    await syncProvider.connection.reconnect();
   }
 
   void _disconnectHub() async {

@@ -17,8 +17,13 @@ import 'solar_orbit.dart'; // For CelestialColors
 /// satellite on a room orb while in settings mode.
 class RoomSettingsSheet extends StatefulWidget {
   final RoomDto room;
+  final bool enableLivePreview;
 
-  const RoomSettingsSheet({super.key, required this.room});
+  const RoomSettingsSheet({
+    super.key,
+    required this.room,
+    this.enableLivePreview = true,
+  });
 
   static Future<void> show(BuildContext context, RoomDto room) {
     HapticFeedback.mediumImpact();
@@ -88,47 +93,49 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
                 ),
               ),
             ),
-            // Room orb preview with live CCT + light output
-            Selector<RoomProvider,
-                (int?, int?, (int, int, int)?, bool, bool, DateTime?)>(
-              selector: (_, rp) {
-                final r = rp.getRoom(room.id);
-                return (
-                  rp.getBrightness(room.id),
-                  rp.getKelvin(room.id),
-                  rp.getRoomColor(room.id),
-                  r?.lightsOn ?? false,
-                  r?.rhythmEnabled ?? false,
-                  rp.getLastTickTime(room.id),
-                );
-              },
-              builder: (context, data, _) {
-                final (
-                  brightness,
-                  kelvin,
-                  color,
-                  lightsOn,
-                  rhythmEnabled,
-                  lastTickTime
-                ) = data;
-                final intervalSecs =
-                    context.read<ServerSyncProvider>().rhythmIntervalSecs;
-                return _AnimatedRoomOrb(
-                  roomId: room.id,
-                  roomName: room.name,
-                  brightness: brightness,
-                  kelvin: kelvin,
-                  directColor: color != null
-                      ? Color.fromARGB(255, color.$1, color.$2, color.$3)
-                      : null,
-                  lightsOn: lightsOn,
-                  rhythmEnabled: rhythmEnabled,
-                  rhythmIntervalSecs: intervalSecs,
-                  lastTickTime: lastTickTime,
-                );
-              },
-            ),
-            const SizedBox(height: 12),
+            if (widget.enableLivePreview) ...[
+              // Room orb preview with live CCT + light output
+              Selector<RoomProvider,
+                  (int?, int?, (int, int, int)?, bool, bool, DateTime?)>(
+                selector: (_, rp) {
+                  final r = rp.getRoom(room.id);
+                  return (
+                    rp.getBrightness(room.id),
+                    rp.getKelvin(room.id),
+                    rp.getRoomColor(room.id),
+                    r?.lightsOn ?? false,
+                    r?.rhythmEnabled ?? false,
+                    rp.getLastTickTime(room.id),
+                  );
+                },
+                builder: (context, data, _) {
+                  final (
+                    brightness,
+                    kelvin,
+                    color,
+                    lightsOn,
+                    rhythmEnabled,
+                    lastTickTime
+                  ) = data;
+                  final intervalSecs =
+                      context.read<ServerSyncProvider>().rhythmIntervalSecs;
+                  return _AnimatedRoomOrb(
+                    roomId: room.id,
+                    roomName: room.name,
+                    brightness: brightness,
+                    kelvin: kelvin,
+                    directColor: color != null
+                        ? Color.fromARGB(255, color.$1, color.$2, color.$3)
+                        : null,
+                    lightsOn: lightsOn,
+                    rhythmEnabled: rhythmEnabled,
+                    rhythmIntervalSecs: intervalSecs,
+                    lastTickTime: lastTickTime,
+                  );
+                },
+              ),
+              const SizedBox(height: 12),
+            ],
             // Tab selector
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -494,6 +501,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
   Future<void> _deleteRoom(BuildContext context) async {
     final syncProvider = context.read<ServerSyncProvider>();
     final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
     setState(() => _deletingRoom = true);
 
     final success = await syncProvider.api.topologyDeleteRoom(room.id);
@@ -511,7 +519,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     await syncProvider.fullRefresh();
     if (!mounted) return;
 
-    Navigator.of(context).pop();
+    navigator.pop();
     messenger.showSnackBar(
       SnackBar(content: Text('Deleted ${room.name}')),
     );

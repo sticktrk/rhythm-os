@@ -14,6 +14,7 @@ class DemoServerSnapshot {
   final List<RhythmRoom> helloNodes;
   final List<RhythmTopologyNode> topologyNodes;
   final List<Map<String, dynamic>> hubInfos;
+  final RhythmReviewSummary review;
   final int triagePendingCount;
   final int triagePendingDevices;
   final int triagePendingRooms;
@@ -22,6 +23,7 @@ class DemoServerSnapshot {
     required this.helloNodes,
     required this.topologyNodes,
     required this.hubInfos,
+    required this.review,
     required this.triagePendingCount,
     required this.triagePendingDevices,
     required this.triagePendingRooms,
@@ -240,6 +242,7 @@ class DemoServerApi extends RhythmServerApi {
 
   DemoServerSnapshot snapshot() {
     ensureSeeded();
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final triageEntries = _triageEntries.values.toList(growable: false);
     final deviceCount = triageEntries
         .where(
@@ -257,6 +260,42 @@ class DemoServerApi extends RhythmServerApi {
           },
         )
         .length;
+    final reviewEntries = [
+      for (final entry in triageEntries) _reviewEntryFromPending(entry, now),
+      RhythmReviewEntry(
+        id: 'demo_history_kept_separate',
+        kind: 'device_merge',
+        status: 'new_device',
+        hubType: 'hue',
+        hubAddress: _demoHubAddress,
+        nativeId: 'demo-history-device',
+        name: 'Desk Accent',
+        createdAt: now - 86400 * 5,
+        resolvedAt: now - 86400 * 4,
+        resolvedBy: 'api',
+        summary: 'Kept as a separate device',
+        guidance: null,
+      ),
+      RhythmReviewEntry(
+        id: 'demo_history_dismissed',
+        kind: 'room_binding',
+        status: 'dismissed',
+        hubType: 'hue',
+        hubAddress: _demoHubAddress,
+        nativeId: 'demo-history-room',
+        name: 'Guest Room',
+        createdAt: now - 86400 * 3,
+        resolvedAt: now - 86400 * 2,
+        resolvedBy: 'api',
+        summary: 'Room binding proposal dismissed',
+        guidance: null,
+      ),
+    ];
+    final hubConfiguredConflicts = reviewEntries
+        .where(
+          (entry) => entry.kind == 'hub_configured' && entry.isPending,
+        )
+        .toList(growable: false);
 
     return DemoServerSnapshot(
       helloNodes: lightAddressableNodes,
@@ -268,9 +307,83 @@ class DemoServerApi extends RhythmServerApi {
           'connected': true,
         },
       ],
+      review: RhythmReviewSummary(
+        pending: RhythmReviewCounts(
+          devices: deviceCount,
+          rooms: roomCount,
+          unassigned: _triageEntries.values
+              .where((entry) => entry['kind'] == 'unassigned_device')
+              .length,
+          hubConfigured: _triageEntries.values
+              .where((entry) => entry['kind'] == 'hub_configured')
+              .length,
+          total: triageEntries.length,
+        ),
+        triageEntries: reviewEntries,
+        hubConfiguredConflicts: hubConfiguredConflicts,
+      ),
       triagePendingCount: triageEntries.length,
       triagePendingDevices: deviceCount,
       triagePendingRooms: roomCount,
+    );
+  }
+
+  RhythmReviewEntry _reviewEntryFromPending(
+    Map<String, dynamic> entry,
+    int now,
+  ) {
+    final kind = entry['kind'] as String? ?? 'device_merge';
+    final hubKey = Map<String, dynamic>.from(
+      entry['hub_key'] as Map? ?? const <String, dynamic>{},
+    );
+    final device = Map<String, dynamic>.from(
+      switch (kind) {
+        'unassigned_device' =>
+          entry['unassigned_device'] as Map? ?? const <String, dynamic>{},
+        'room_binding' =>
+          entry['room_binding'] as Map? ?? const <String, dynamic>{},
+        'hub_configured' =>
+          entry['hub_configured'] as Map? ?? const <String, dynamic>{},
+        _ => entry['discovered'] as Map? ?? const <String, dynamic>{},
+      },
+    );
+
+    final summary = switch (kind) {
+      'room_binding' =>
+        'Review whether this hub room should merge into an existing Rhythm room',
+      'unassigned_device' => 'Assign this device to a Rhythm room',
+      'hub_configured' =>
+        'Native hub automation is still configured for this device',
+      _ => 'Review whether these endpoints represent the same physical device',
+    };
+    final guidance = switch (kind) {
+      'room_binding' =>
+        'Merge only when both rooms should act as one Rhythm room.',
+      'unassigned_device' =>
+        'Assign the device to keep routing and automations stable.',
+      'hub_configured' =>
+        'Remove the native automation in the hub app, then recheck.',
+      _ => 'Keep separate only if they are different physical devices.',
+    };
+
+    return RhythmReviewEntry(
+      id: entry['id'] as String? ?? '',
+      kind: kind,
+      status: 'pending',
+      hubType:
+          hubKey['hub_type'] as String? ?? device['hub_type'] as String? ?? '',
+      hubAddress:
+          hubKey['address'] as String? ?? device['address'] as String? ?? '',
+      nativeId: device['id'] as String? ??
+          device['native_id'] as String? ??
+          device['hub_room_id'] as String? ??
+          '',
+      name: device['name'] as String? ??
+          device['hub_room_name'] as String? ??
+          'Review item',
+      createdAt: now - 3600,
+      summary: summary,
+      guidance: guidance,
     );
   }
 

@@ -8,10 +8,11 @@ import '../../../providers/home_provider.dart';
 import '../../../providers/server_sync_provider.dart';
 import '../../../services/analytics_service.dart';
 import '../../../services/cloud_backup_service.dart';
+import '../../triage_screen.dart';
 import '../../../widgets/settings_row.dart';
 import '../../../widgets/solar_orbit.dart';
 
-class BackupRestoreScreen extends StatelessWidget {
+class BackupRestoreScreen extends StatefulWidget {
   const BackupRestoreScreen({super.key});
 
   static Future<void> show(BuildContext context) {
@@ -22,15 +23,68 @@ class BackupRestoreScreen extends StatelessWidget {
   }
 
   @override
+  State<BackupRestoreScreen> createState() => _BackupRestoreScreenState();
+}
+
+class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
+  CloudBackupSnapshot? _latestSnapshot;
+  bool _isLoadingSnapshot = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshSnapshotAvailability();
+  }
+
+  Future<void> _refreshSnapshotAvailability() async {
+    final cloudBackups = CloudBackupService.instance;
+    if (!cloudBackups.canUseCloudBackups) {
+      if (!mounted) return;
+      setState(() {
+        _latestSnapshot = null;
+        _isLoadingSnapshot = false;
+      });
+      return;
+    }
+
+    setState(() {
+      _isLoadingSnapshot = true;
+    });
+
+    CloudBackupSnapshot? snapshot;
+    try {
+      snapshot = await cloudBackups.getSnapshotForCurrentUser();
+    } catch (error) {
+      debugPrint(
+          'BackupRestoreScreen: failed to load snapshot metadata: $error');
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _latestSnapshot = snapshot;
+      _isLoadingSnapshot = false;
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     final serverSync = context.watch<ServerSyncProvider>();
     final serverConnected =
         serverSync.connectionState == RhythmConnectionState.connected;
     final canUseCloudBackups = CloudBackupService.instance.canUseCloudBackups;
-    final availabilityLabel = !serverConnected
+    final backupAvailabilityLabel = !serverConnected
         ? 'Server not connected'
         : (canUseCloudBackups ? null : 'Sign in required');
-    final actionsEnabled = serverConnected && canUseCloudBackups;
+    final restoreAvailabilityLabel = !serverConnected
+        ? 'Server not connected'
+        : !canUseCloudBackups
+            ? 'Sign in required'
+            : _isLoadingSnapshot
+                ? 'Checking cloud backup...'
+                : (_latestSnapshot == null ? 'No cloud backup' : null);
+    final backupEnabled = serverConnected && canUseCloudBackups;
+    final restoreEnabled =
+        backupEnabled && !_isLoadingSnapshot && _latestSnapshot != null;
 
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,
@@ -67,22 +121,28 @@ class BackupRestoreScreen extends StatelessWidget {
                           icon: Icons.cloud_upload_rounded,
                           iconColor: const Color(0xFF42A5F5),
                           label: 'Back Up Now',
-                          value: availabilityLabel,
-                          showChevron: actionsEnabled,
+                          value: backupAvailabilityLabel,
+                          showChevron: backupEnabled,
                           onTap:
-                              actionsEnabled ? () => _backupNow(context) : null,
+                              backupEnabled ? () => _backupNow(context) : null,
                         ),
                         SettingsRow(
                           icon: Icons.settings_backup_restore_rounded,
                           iconColor: const Color(0xFF26A69A),
                           label: 'Restore From Backup',
-                          value: availabilityLabel,
-                          showChevron: actionsEnabled,
-                          onTap: actionsEnabled
+                          value: restoreAvailabilityLabel,
+                          showChevron: restoreEnabled,
+                          onTap: restoreEnabled
                               ? () => _restoreFromBackup(context)
                               : null,
                         ),
                       ],
+                    ),
+                    const SizedBox(height: 16),
+                    _buildReviewStatusCard(
+                      context,
+                      serverSync: serverSync,
+                      serverConnected: serverConnected,
                     ),
                     const SizedBox(height: 40),
                   ],
@@ -128,6 +188,121 @@ class BackupRestoreScreen extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 40),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReviewStatusCard(
+    BuildContext context, {
+    required ServerSyncProvider serverSync,
+    required bool serverConnected,
+  }) {
+    final review = serverSync.review;
+    final hasAttention = serverSync.hasReviewAttention;
+    final lines = <String>[
+      if (review.pending.total > 0)
+        '${review.pending.total} pending review item${review.pending.total == 1 ? '' : 's'} still need confirmation.',
+      if (review.disconnectedHubs.isNotEmpty)
+        'Reconnect ${review.disconnectedHubs.length} hub${review.disconnectedHubs.length == 1 ? '' : 's'}: ${review.disconnectedHubs.take(2).map((hub) => hub.label).join(', ')}${review.disconnectedHubs.length > 2 ? '...' : ''}',
+      if (review.preferredEndpoints.isNotEmpty)
+        '${review.preferredEndpoints.length} device${review.preferredEndpoints.length == 1 ? '' : 's'} kept a preferred endpoint selection.',
+      if (review.hubConfiguredConflicts.isNotEmpty)
+        '${review.hubConfiguredConflicts.length} native hub conflict${review.hubConfiguredConflicts.length == 1 ? '' : 's'} still need a recheck.',
+    ];
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: CelestialColors.backgroundCard,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: const Color(0xFF64B5F6).withValues(alpha: 0.2),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(
+                Icons.fact_check_outlined,
+                color: Color(0xFF64B5F6),
+                size: 18,
+              ),
+              SizedBox(width: 10),
+              Text(
+                'After Restore',
+                style: TextStyle(
+                  color: CelestialColors.textPrimary,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            !serverConnected
+                ? 'Connect a Rhythm Server to inspect restore status.'
+                : hasAttention
+                    ? 'Reconnect hubs, confirm prior review decisions, and clear conflicts before calling the restore complete.'
+                    : 'Current server state is clear. If you restore a backup, any reconnect or review follow-up will appear here.',
+            style: const TextStyle(
+              color: CelestialColors.textSecondary,
+              fontSize: 13,
+              height: 1.35,
+            ),
+          ),
+          for (final line in lines) ...[
+            const SizedBox(height: 8),
+            Text(
+              line,
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.72),
+                fontSize: 12,
+                height: 1.3,
+              ),
+            ),
+          ],
+          if (review.preferredEndpoints.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              'Preferred route: ${review.preferredEndpoints.first.name} via ${review.preferredEndpoints.first.hubLabel}',
+              style: TextStyle(
+                color: const Color(0xFF9FD3FF).withValues(alpha: 0.92),
+                fontSize: 12,
+              ),
+            ),
+          ],
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: _InlineActionButton(
+                  label: 'Refresh Status',
+                  color: const Color(0xFF64B5F6),
+                  enabled: serverConnected,
+                  onTap: () async {
+                    await serverSync.fullRefresh();
+                    if (!mounted) return;
+                    setState(() {});
+                  },
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _InlineActionButton(
+                  label: 'Device Review',
+                  color: const Color(0xFFFF9800),
+                  enabled: serverConnected,
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const TriageScreen()),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ],
       ),
     );
@@ -216,6 +391,10 @@ class BackupRestoreScreen extends StatelessWidget {
 
       if (context.mounted) {
         Navigator.of(context, rootNavigator: true).pop();
+        setState(() {
+          _latestSnapshot = snapshot;
+          _isLoadingSnapshot = false;
+        });
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Cloud backup saved from the connected server.'),
@@ -277,25 +456,20 @@ class BackupRestoreScreen extends StatelessWidget {
       return;
     }
 
-    var snapshot = await cloudBackups.getSnapshotForCurrentUser();
+    final snapshot =
+        _latestSnapshot ?? await cloudBackups.getSnapshotForCurrentUser();
     if (snapshot == null) {
-      try {
-        snapshot = await cloudBackups.captureNow(
-          serverHub: serverHub,
-          home: homeProvider.currentHome,
-          reason: 'restore_prefetch',
+      if (context.mounted) {
+        setState(() {
+          _latestSnapshot = null;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No cloud backup is available to restore.'),
+          ),
         );
-      } catch (error) {
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Could not load a cloud backup: $error'),
-              backgroundColor: Colors.red.shade800,
-            ),
-          );
-        }
-        return;
       }
+      return;
     }
     if (!context.mounted) return;
 
@@ -353,18 +527,14 @@ class BackupRestoreScreen extends StatelessWidget {
       final api = RhythmBundleApi(baseUrl: serverHub.endpoint.baseUrl);
       await api.putBackupBundle(snapshot.backupBundle);
       await serverSync.fullRefresh();
-      cloudBackups.scheduleCapture(
-        serverHub: serverHub,
-        home: homeProvider.currentHome,
-        delay: const Duration(seconds: 3),
-        reason: 'manual_restore',
-      );
 
       if (context.mounted) {
         Navigator.of(context, rootNavigator: true).pop();
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Backup restored to the connected Rhythm Server.'),
+            content: Text(
+              'Backup restored. Reconnect hubs and review any remaining items below.',
+            ),
           ),
         );
       }
@@ -441,5 +611,47 @@ class BackupRestoreScreen extends StatelessWidget {
   String _trimAnalyticsError(Object error) {
     final value = error.toString();
     return value.substring(0, value.length > 120 ? 120 : value.length);
+  }
+}
+
+class _InlineActionButton extends StatelessWidget {
+  const _InlineActionButton({
+    required this.label,
+    required this.color,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  final String label;
+  final Color color;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: enabled ? onTap : null,
+      child: Opacity(
+        opacity: enabled ? 1 : 0.45,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: color.withValues(alpha: 0.28)),
+          ),
+          child: Center(
+            child: Text(
+              label,
+              style: TextStyle(
+                color: color,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }

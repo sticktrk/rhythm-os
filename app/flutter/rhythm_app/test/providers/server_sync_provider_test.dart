@@ -36,6 +36,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   _FakeRhythmServerApi() : super(Dio());
 
   int hubCredentialsCalls = 0;
+  int hubRetryCalls = 0;
   String? lastHubType;
   String? lastAddress;
   Map<String, dynamic>? lastCredentials;
@@ -59,6 +60,17 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     lastHubType = hubType;
     lastAddress = address;
     lastCredentials = credentials;
+  }
+
+  @override
+  Future<bool> hubRetry({
+    required String hubType,
+    required String address,
+  }) async {
+    hubRetryCalls++;
+    lastHubType = hubType;
+    lastAddress = address;
+    return true;
   }
 
   @override
@@ -168,7 +180,7 @@ Widget _buildTestApp({
   );
 }
 
-Future<void> _pumpRoomSettingsLauncher(
+Future<void> _pumpRoomSettingsSheet(
   WidgetTester tester, {
   required RoomProvider roomProvider,
   required ServerSyncProvider provider,
@@ -178,26 +190,34 @@ Future<void> _pumpRoomSettingsLauncher(
     _buildTestApp(
       roomProvider: roomProvider,
       provider: provider,
-      child: Builder(
-        builder: (context) {
-          return TextButton(
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => Scaffold(
-                  body: TickerMode(
-                    enabled: false,
-                    child: RoomSettingsSheet(room: room),
-                  ),
-                ),
-              ),
-            ),
-            child: const Text('Open'),
-          );
-        },
+      child: TickerMode(
+        enabled: false,
+        child: RoomSettingsSheet(
+          room: room,
+          enableLivePreview: false,
+        ),
       ),
     ),
   );
   await tester.pump(const Duration(milliseconds: 10));
+}
+
+Future<void> _selectRoomSettingsTab(
+  WidgetTester tester,
+  String label,
+) async {
+  final labelFinder = find.text(label).last;
+  await tester.ensureVisible(labelFinder);
+  final tapTarget = tester.getTopLeft(labelFinder) + const Offset(4, 4);
+  await tester.tapAt(tapTarget);
+  await tester.pump(const Duration(milliseconds: 250));
+}
+
+void _registerWidgetCleanup(WidgetTester tester) {
+  addTearDown(() async {
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
 }
 
 void main() {
@@ -293,6 +313,66 @@ void main() {
 
       expect(api.hubCredentialsCalls, 0);
       expect(connection.reconnectCalls, 0);
+    });
+  });
+
+  group('ServerSyncProvider.retryHub', () {
+    late RoomProvider roomProvider;
+    late _FakeRhythmServerApi api;
+    late _FakeRhythmConnection connection;
+
+    setUp(() {
+      roomProvider = RoomProvider();
+      api = _FakeRhythmServerApi();
+      connection = _FakeRhythmConnection(api);
+    });
+
+    tearDown(() {
+      roomProvider.dispose();
+      connection.dispose();
+    });
+
+    test('calls /api/hub/retry and refreshes state once', () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      final ok = await provider.retryHub('hue', '192.168.1.20:443');
+
+      expect(ok, isTrue);
+      expect(api.hubRetryCalls, 1);
+      expect(api.lastHubType, 'hue');
+      expect(api.lastAddress, '192.168.1.20:443');
+      expect(connection.reconnectCalls, 1);
+    });
+
+    test('retries multiple hubs and reconnects once', () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      final accepted = await provider.retryHubs([
+        {
+          'type': 'hue',
+          'address': '192.168.1.20:443',
+          'startup_retry': {'status': 'manual_retry_required'},
+        },
+        {
+          'type': 'homeassistant',
+          'address': 'ha.local:8123',
+          'startup_retry': {'status': 'manual_retry_required'},
+        },
+      ]);
+
+      expect(accepted, 2);
+      expect(api.hubRetryCalls, 2);
+      expect(connection.reconnectCalls, 1);
     });
   });
 
@@ -526,6 +606,7 @@ void main() {
   testWidgets(
       'Hub picker always shows Matter and marks connected Hue and HA hubs',
       (tester) async {
+    _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
     final api = _FakeRhythmServerApi();
     final connection = _HelloRhythmConnection(api);
@@ -585,6 +666,7 @@ void main() {
     expect(find.text('Home Assistant'), findsOneWidget);
     expect(find.text('Philips Hue'), findsOneWidget);
     expect(find.text('Matter'), findsOneWidget);
+    expect(find.text('BETA'), findsNWidgets(2));
     expect(find.byIcon(Icons.check_circle_rounded), findsNWidgets(2));
   });
 
@@ -636,6 +718,10 @@ void main() {
       expect(provider.triagePendingCount, 2);
       expect(provider.triagePendingDevices, 1);
       expect(provider.triagePendingRooms, 1);
+      expect(provider.hasReviewAttention, isTrue);
+      expect(provider.hubConfiguredConflicts, hasLength(1));
+      expect(provider.reviewHistory, isNotEmpty);
+      expect(provider.reviewHistory.first.isPending, isFalse);
     });
 
     test('refreshes demo topology after assigning an unassigned device',
@@ -670,6 +756,7 @@ void main() {
   });
 
   testWidgets('Unassigned keeps a new matter bulb unassigned', (tester) async {
+    _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
     final api = _FakeRhythmServerApi();
     final connection = _HelloRhythmConnection(api);
@@ -692,11 +779,11 @@ void main() {
             'kind': 'room',
             'hub_types': ['matter'],
             'state': 'active',
-            'rhythm_enabled': true,
+            'rhythm_enabled': false,
             'disabled': false,
             'time_offset': 0.0,
             'brightness_offset': 0.0,
-            'lights_on': true,
+            'lights_on': false,
           },
         ],
         'location': const <String, dynamic>{},
@@ -752,6 +839,7 @@ void main() {
 
   testWidgets('Move to Room sheet scrolls when many rooms are available',
       (tester) async {
+    _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
     final api = _FakeRhythmServerApi();
     final connection = _HelloRhythmConnection(api);
@@ -842,6 +930,7 @@ void main() {
 
   testWidgets('Room card device flow offers Unassigned for Matter bulbs',
       (tester) async {
+    _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
     final api = _FakeRhythmServerApi();
     final connection = _HelloRhythmConnection(api);
@@ -899,9 +988,9 @@ void main() {
         'location': const <String, dynamic>{},
       }),
     );
-    await Future<void>.delayed(const Duration(milliseconds: 10));
+    await tester.pump(const Duration(milliseconds: 10));
 
-    await _pumpRoomSettingsLauncher(
+    await _pumpRoomSettingsSheet(
       tester,
       roomProvider: roomProvider,
       provider: provider,
@@ -910,27 +999,27 @@ void main() {
         name: 'Kitchen',
         source: RoomSourceDto.matter,
         deviceIds: ['light-1'],
-        rhythmEnabled: true,
+        rhythmEnabled: false,
         disabled: false,
-        lightsOn: true,
+        lightsOn: false,
         timeOffsetMinutes: 0,
         brightnessOffset: 0,
       ),
     );
 
-    await tester.tap(find.text('Open'));
-    await tester.pump(const Duration(milliseconds: 400));
-    await tester.tap(find.text('Devices'));
-    await tester.pump(const Duration(milliseconds: 250));
-    await tester.tap(find.text('Desk Lamp'));
-    await tester.pump(const Duration(milliseconds: 400));
+    await _selectRoomSettingsTab(tester, 'Devices');
+    await tester.tap(find.text('Desk Lamp').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Move to Room...'), findsOneWidget);
+
     await tester.tap(find.text('Move to Room...'));
-    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle();
 
     expect(find.text('Unassigned'), findsOneWidget);
 
     await tester.tap(find.text('Unassigned'));
-    await tester.pump(const Duration(milliseconds: 500));
+    await tester.pumpAndSettle();
 
     expect(api.assignDeviceParentCalls, 1);
     expect(api.lastAssignedDeviceId, 'light-1');
@@ -941,6 +1030,7 @@ void main() {
 
   testWidgets('Delete Room is hidden when the room has Hue bulbs',
       (tester) async {
+    _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
     final api = _FakeRhythmServerApi();
     final connection = _HelloRhythmConnection(api);
@@ -966,17 +1056,18 @@ void main() {
             'hub_types': ['hue'],
             'device_ids': ['light-1'],
             'state': 'active',
-            'rhythm_enabled': true,
+            'rhythm_enabled': false,
             'disabled': false,
             'time_offset': 0.0,
             'brightness_offset': 0.0,
-            'lights_on': true,
+            'lights_on': false,
           },
         ],
         'location': const <String, dynamic>{},
       }),
     );
-    await _pumpRoomSettingsLauncher(
+    await tester.pump(const Duration(milliseconds: 10));
+    await _pumpRoomSettingsSheet(
       tester,
       roomProvider: roomProvider,
       provider: provider,
@@ -985,18 +1076,15 @@ void main() {
         name: 'Kitchen',
         source: RoomSourceDto.hue,
         deviceIds: ['light-1'],
-        rhythmEnabled: true,
+        rhythmEnabled: false,
         disabled: false,
-        lightsOn: true,
+        lightsOn: false,
         timeOffsetMinutes: 0,
         brightnessOffset: 0,
       ),
     );
 
-    await tester.tap(find.text('Open'));
-    await tester.pump(const Duration(milliseconds: 400));
-    await tester.tap(find.text('Settings'));
-    await tester.pump(const Duration(milliseconds: 250));
+    await _selectRoomSettingsTab(tester, 'Settings');
 
     expect(find.text('Delete Room'), findsNothing);
     expect(api.topologyDeleteRoomCalls, 0);
@@ -1004,6 +1092,7 @@ void main() {
 
   testWidgets('Delete Room is shown for matter rooms and calls the SDK method',
       (tester) async {
+    _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
     final api = _FakeRhythmServerApi();
     final connection = _HelloRhythmConnection(api);
@@ -1029,17 +1118,18 @@ void main() {
             'hub_types': ['matter'],
             'device_ids': ['light-1'],
             'state': 'active',
-            'rhythm_enabled': true,
+            'rhythm_enabled': false,
             'disabled': false,
             'time_offset': 0.0,
             'brightness_offset': 0.0,
-            'lights_on': true,
+            'lights_on': false,
           },
         ],
         'location': const <String, dynamic>{},
       }),
     );
-    await _pumpRoomSettingsLauncher(
+    await tester.pump(const Duration(milliseconds: 10));
+    await _pumpRoomSettingsSheet(
       tester,
       roomProvider: roomProvider,
       provider: provider,
@@ -1048,18 +1138,15 @@ void main() {
         name: 'Kitchen',
         source: RoomSourceDto.matter,
         deviceIds: ['light-1'],
-        rhythmEnabled: true,
+        rhythmEnabled: false,
         disabled: false,
-        lightsOn: true,
+        lightsOn: false,
         timeOffsetMinutes: 0,
         brightnessOffset: 0,
       ),
     );
 
-    await tester.tap(find.text('Open'));
-    await tester.pump(const Duration(milliseconds: 400));
-    await tester.tap(find.text('Settings'));
-    await tester.pump(const Duration(milliseconds: 250));
+    await _selectRoomSettingsTab(tester, 'Settings');
 
     expect(find.text('Delete Room'), findsOneWidget);
 

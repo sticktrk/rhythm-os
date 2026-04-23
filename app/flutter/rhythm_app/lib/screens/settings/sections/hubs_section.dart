@@ -27,11 +27,14 @@ class HubsSection extends StatelessWidget {
                 // ── RhythmServer ──
                 Builder(
                   builder: (context) {
-                    final esp32Hub = homeProvider.getFirstHubOfType(HubType.server);
+                    final esp32Hub =
+                        homeProvider.getFirstHubOfType(HubType.server);
                     final serverState = serverSync.connectionState;
-                    final isOnline = serverState == RhythmConnectionState.connected;
-                    final isConnecting = serverState == RhythmConnectionState.connecting ||
-                        serverState == RhythmConnectionState.reconnecting;
+                    final isOnline =
+                        serverState == RhythmConnectionState.connected;
+                    final isConnecting =
+                        serverState == RhythmConnectionState.connecting ||
+                            serverState == RhythmConnectionState.reconnecting;
 
                     String? statusText;
                     Color? statusColor;
@@ -77,15 +80,18 @@ class HubsSection extends StatelessWidget {
                           ],
                           Icon(
                             Icons.chevron_right,
-                            color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+                            color: CelestialColors.textSecondary
+                                .withValues(alpha: 0.7),
                             size: 24,
                           ),
                         ],
                       ),
                       showChevron: false,
                       onTap: esp32Hub != null
-                          ? () => RhythmServerSettingsScreen.show(context, hub: esp32Hub)
-                          : () => ConnectHubScreen.show(context, mode: ConnectHubMode.rhythmServer),
+                          ? () => RhythmServerSettingsScreen.show(context,
+                              hub: esp32Hub)
+                          : () => ConnectHubScreen.show(context,
+                              mode: ConnectHubMode.rhythmServer),
                     );
                   },
                 ),
@@ -99,12 +105,18 @@ class HubsSection extends StatelessWidget {
                   icon: Icons.devices_other,
                   iconColor: const Color(0xFFFF9800),
                   label: 'Device Review',
+                  value: serverSync.hubConfiguredConflicts.isNotEmpty
+                      ? '${serverSync.hubConfiguredConflicts.length} conflict${serverSync.hubConfiguredConflicts.length == 1 ? '' : 's'}'
+                      : serverSync.triagePendingCount > 0
+                          ? '${serverSync.triagePendingCount} pending'
+                          : 'Clear',
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       if (serverSync.triagePendingCount > 0)
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 7, vertical: 2),
                           decoration: BoxDecoration(
                             color: const Color(0xFFFF9800),
                             borderRadius: BorderRadius.circular(10),
@@ -122,7 +134,8 @@ class HubsSection extends StatelessWidget {
                         const SizedBox(width: 8),
                       Icon(
                         Icons.chevron_right,
-                        color: CelestialColors.textSecondary.withValues(alpha: 0.5),
+                        color: CelestialColors.textSecondary
+                            .withValues(alpha: 0.5),
                         size: 22,
                       ),
                     ],

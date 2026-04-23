@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import '../../widgets/beta_badge.dart';
 import '../../widgets/solar_orbit.dart';
 import '../../widgets/hub_status_indicator.dart';
 import '../../providers/home_provider.dart';

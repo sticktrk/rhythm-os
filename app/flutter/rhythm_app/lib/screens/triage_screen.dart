@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../services/analytics_service.dart';
@@ -66,6 +67,7 @@ class _TriageScreenState extends State<TriageScreen> {
       if (sync) {
         debugPrint('TriageScreen: triggering sync...');
         await http.triggerSync();
+        await syncProvider.fullRefresh();
         debugPrint('TriageScreen: sync complete');
       }
       final entries = await http.getTriageEntries();
@@ -103,6 +105,7 @@ class _TriageScreenState extends State<TriageScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final serverSync = context.watch<ServerSyncProvider>();
     debugPrint(
         'TriageScreen: build (loading=$_loading, busy=$_busy, connErr=$_connectionError, entries=${_entries.length})');
     return Scaffold(
@@ -126,10 +129,17 @@ class _TriageScreenState extends State<TriageScreen> {
             )
           : _connectionError
               ? _buildConnectionError()
-              : _entries.isEmpty
-                  ? _buildEmptyState()
-                  : _buildEntryList(),
+              : _buildBody(serverSync),
     );
+  }
+
+  Widget _buildBody(ServerSyncProvider serverSync) {
+    if (_entries.isEmpty &&
+        !serverSync.hasReviewAttention &&
+        serverSync.reviewHistory.isEmpty) {
+      return _buildEmptyState();
+    }
+    return _buildEntryList(serverSync);
   }
 
   Widget _buildConnectionError() {
@@ -271,41 +281,44 @@ class _TriageScreenState extends State<TriageScreen> {
     );
   }
 
-  Widget _buildEntryList() {
+  Widget _buildEntryList(ServerSyncProvider serverSync) {
     final filtered = _filteredEntries;
     final hasBothKinds = _deviceCount > 0 && _roomCount > 0;
-    final headerCount =
-        hasBothKinds ? 2 : 1; // filter bar + summary, or just summary
-
-    final noun = switch (_filter) {
-      _TriageFilter.all => 'item',
-      _TriageFilter.devices => 'device',
-      _TriageFilter.rooms => 'room',
-    };
+    final headerWidgets = <Widget>[
+      if (serverSync.hasReviewAttention)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 16),
+          child: _buildReviewSummaryCard(serverSync),
+        ),
+      if (serverSync.reviewHistory.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 20),
+          child: _buildReviewHistorySection(serverSync),
+        ),
+      if (hasBothKinds) _buildFilterBar(),
+      Padding(
+        padding: EdgeInsets.only(
+          bottom: filtered.isEmpty ? 0 : 20,
+          top: hasBothKinds ? 0 : 4,
+        ),
+        child: Text(
+          _summaryLabel(serverSync, filtered.length),
+          style: TextStyle(
+            color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+            fontSize: 14,
+          ),
+        ),
+      ),
+    ];
 
     return ListView.builder(
       padding: const EdgeInsets.all(20),
-      itemCount: filtered.length + headerCount,
+      itemCount: filtered.length + headerWidgets.length,
       itemBuilder: (context, index) {
-        // Filter bar (only when both kinds exist)
-        if (hasBothKinds && index == 0) {
-          return _buildFilterBar();
+        if (index < headerWidgets.length) {
+          return headerWidgets[index];
         }
-        // Summary text
-        final summaryIndex = hasBothKinds ? 1 : 0;
-        if (index == summaryIndex) {
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 20),
-            child: Text(
-              '${filtered.length} $noun${filtered.length != 1 ? 's' : ''} need your attention',
-              style: TextStyle(
-                color: CelestialColors.textSecondary.withValues(alpha: 0.7),
-                fontSize: 14,
-              ),
-            ),
-          );
-        }
-        final entry = filtered[index - headerCount];
+        final entry = filtered[index - headerWidgets.length];
         final kind = _kindForEntry(entry);
         if (kind == 'room_binding') {
           return Padding(
@@ -334,12 +347,19 @@ class _TriageScreenState extends State<TriageScreen> {
           );
         }
         if (kind == 'hub_configured') {
+          final reviewEntry = _reviewEntryForId(
+            serverSync,
+            entry['id']?.toString() ?? '',
+          );
           return Padding(
             padding: const EdgeInsets.only(bottom: 16),
             child: _InfoTriageCard(
               key: ValueKey(entry['id']),
               entry: entry,
               busy: _busy,
+              summary: reviewEntry?.summary,
+              guidance: reviewEntry?.guidance,
+              onRecheck: _recheckConflicts,
               onDismiss: () => _resolveDismiss(entry),
             ),
           );
@@ -359,6 +379,228 @@ class _TriageScreenState extends State<TriageScreen> {
     );
   }
 
+  String _summaryLabel(ServerSyncProvider serverSync, int filteredCount) {
+    if (_entries.isEmpty) {
+      if (serverSync.hasReviewAttention) {
+        return 'No pending triage entries. Review the restore and conflict status below.';
+      }
+      return 'No items need your attention right now.';
+    }
+
+    final noun = switch (_filter) {
+      _TriageFilter.all => 'item',
+      _TriageFilter.devices => 'device',
+      _TriageFilter.rooms => 'room',
+    };
+    return '$filteredCount $noun${filteredCount != 1 ? 's' : ''} need your attention';
+  }
+
+  RhythmReviewEntry? _reviewEntryForId(
+    ServerSyncProvider serverSync,
+    String id,
+  ) {
+    for (final entry in serverSync.review.triageEntries) {
+      if (entry.id == id) return entry;
+    }
+    return null;
+  }
+
+  Widget _buildReviewSummaryCard(ServerSyncProvider serverSync) {
+    final review = serverSync.review;
+    final detailLines = <String>[
+      if (review.pending.total > 0)
+        '${review.pending.total} pending review item${review.pending.total == 1 ? '' : 's'}',
+      if (review.disconnectedHubs.isNotEmpty)
+        'Reconnect ${review.disconnectedHubs.length} hub${review.disconnectedHubs.length == 1 ? '' : 's'}: ${review.disconnectedHubs.take(2).map((hub) => hub.label).join(', ')}${review.disconnectedHubs.length > 2 ? '...' : ''}',
+      if (review.preferredEndpoints.isNotEmpty)
+        '${review.preferredEndpoints.length} device${review.preferredEndpoints.length == 1 ? '' : 's'} kept an explicit preferred endpoint',
+      if (review.hubConfiguredConflicts.isNotEmpty)
+        '${review.hubConfiguredConflicts.length} native automation conflict${review.hubConfiguredConflicts.length == 1 ? '' : 's'} still need recheck',
+    ];
+
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF1D2C36),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: const Color(0xFF64B5F6).withValues(alpha: 0.24),
+        ),
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(
+                Icons.fact_check_outlined,
+                color: Color(0xFF64B5F6),
+                size: 20,
+              ),
+              SizedBox(width: 10),
+              Text(
+                'Restore Review',
+                style: TextStyle(
+                  color: CelestialColors.textPrimary,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'Use this screen to verify reconnects, previous review decisions, and native-automation conflicts after a restore or major resync.',
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.78),
+              fontSize: 13,
+              height: 1.35,
+            ),
+          ),
+          for (final line in detailLines) ...[
+            const SizedBox(height: 8),
+            Text(
+              line,
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.72),
+                fontSize: 12,
+              ),
+            ),
+          ],
+          if (review.preferredEndpoints.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(
+              'Preferred route: ${review.preferredEndpoints.first.name} via ${review.preferredEndpoints.first.hubLabel}',
+              style: TextStyle(
+                color: const Color(0xFF9FD3FF).withValues(alpha: 0.9),
+                fontSize: 12,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReviewHistorySection(ServerSyncProvider serverSync) {
+    final history = serverSync.reviewHistory.take(4).toList(growable: false);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Recent Decisions',
+          style: TextStyle(
+            color: CelestialColors.textSecondary.withValues(alpha: 0.8),
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.8,
+          ),
+        ),
+        const SizedBox(height: 10),
+        for (final entry in history)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Container(
+              decoration: BoxDecoration(
+                color: CelestialColors.backgroundCard,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: _historyColor(entry).withValues(alpha: 0.22),
+                ),
+              ),
+              padding: const EdgeInsets.all(14),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: _historyColor(entry).withValues(alpha: 0.14),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      entry.statusLabel,
+                      style: TextStyle(
+                        color: _historyColor(entry),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          entry.name.isEmpty ? entry.summary : entry.name,
+                          style: const TextStyle(
+                            color: CelestialColors.textPrimary,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          entry.summary,
+                          style: TextStyle(
+                            color: CelestialColors.textSecondary
+                                .withValues(alpha: 0.72),
+                            fontSize: 12,
+                            height: 1.3,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          _historyMeta(entry),
+                          style: TextStyle(
+                            color: CelestialColors.textSecondary
+                                .withValues(alpha: 0.5),
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Color _historyColor(RhythmReviewEntry entry) {
+    if (entry.isKeepSeparate) return const Color(0xFF64B5F6);
+    if (entry.isDismissed) return const Color(0xFFB0BEC5);
+    if (entry.isConfirmed) return const Color(0xFF81C784);
+    return CelestialColors.sunWarm;
+  }
+
+  String _historyMeta(RhythmReviewEntry entry) {
+    final resolvedAt = entry.resolvedAtDateTime;
+    final when = resolvedAt == null ? 'Recently' : _relativeTime(resolvedAt);
+    final hub = hubTypeLabel(entry.hubType);
+    return [hub, when].where((part) => part.isNotEmpty).join(' - ');
+  }
+
+  String _relativeTime(DateTime time) {
+    final delta = DateTime.now().difference(time);
+    if (delta.inMinutes < 1) return 'just now';
+    if (delta.inHours < 1) return '${delta.inMinutes}m ago';
+    if (delta.inDays < 1) return '${delta.inHours}h ago';
+    return '${delta.inDays}d ago';
+  }
+
+  Future<void> _refreshReviewState() async {
+    try {
+      await context.read<ServerSyncProvider>().fullRefresh();
+    } catch (e, st) {
+      debugPrint('TriageScreen: review refresh failed: $e\n$st');
+    }
+  }
+
   Future<void> _resolveMerge(
     Map<String, dynamic> entry,
     String canonicalId,
@@ -374,6 +616,7 @@ class _TriageScreenState extends State<TriageScreen> {
       if (!success) {
         throw StateError('The server rejected this merge.');
       }
+      await _refreshReviewState();
       AnalyticsService().logTriageResolution(
         kind: 'device_merge',
         action: 'merge',
@@ -394,14 +637,6 @@ class _TriageScreenState extends State<TriageScreen> {
     }
   }
 
-  Future<void> _refreshRoomsAfterTopologyChange() async {
-    try {
-      await context.read<ServerSyncProvider>().connection.reconnect();
-    } catch (e, st) {
-      debugPrint('TriageScreen: topology refresh failed: $e\n$st');
-    }
-  }
-
   Future<void> _resolveNew(Map<String, dynamic> entry) async {
     debugPrint(
         'TriageScreen: _resolveNew called (busy=$_busy, entryId=${entry['id']})');
@@ -414,9 +649,7 @@ class _TriageScreenState extends State<TriageScreen> {
       if (result == null) {
         throw StateError('The server did not accept this resolution.');
       }
-      if (_kindForEntry(entry) == 'room_binding') {
-        await _refreshRoomsAfterTopologyChange();
-      }
+      await _refreshReviewState();
       AnalyticsService().logTriageResolution(
         kind: _kindForEntry(entry),
         action: 'keep_separate',
@@ -450,7 +683,7 @@ class _TriageScreenState extends State<TriageScreen> {
       if (!success) {
         throw StateError('The server rejected this room merge.');
       }
-      await _refreshRoomsAfterTopologyChange();
+      await _refreshReviewState();
       AnalyticsService().logTriageResolution(
         kind: 'room_binding',
         action: 'merge',
@@ -487,7 +720,7 @@ class _TriageScreenState extends State<TriageScreen> {
       if (!success) {
         throw StateError('The server rejected this room assignment.');
       }
-      await _refreshRoomsAfterTopologyChange();
+      await _refreshReviewState();
       AnalyticsService().logTriageResolution(
         kind: 'unassigned_device',
         action: 'assign_room',
@@ -609,6 +842,7 @@ class _TriageScreenState extends State<TriageScreen> {
       if (!success) {
         throw StateError('The server rejected this dismissal.');
       }
+      await _refreshReviewState();
       AnalyticsService().logTriageResolution(
         kind: _kindForEntry(entry),
         action: 'dismiss',
@@ -623,6 +857,16 @@ class _TriageScreenState extends State<TriageScreen> {
               backgroundColor: Colors.red.shade800),
         );
       }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _recheckConflicts() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await _loadEntries(sync: true);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -770,6 +1014,15 @@ class _TriageCard extends StatelessWidget {
             ),
             for (final candidate in candidates) _buildCandidateRow(candidate),
           ],
+          const SizedBox(height: 12),
+          Text(
+            'Keep Separate saves this as a different physical device. Dismiss only closes this suggestion without recording that separate-device decision.',
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+              fontSize: 12,
+              height: 1.3,
+            ),
+          ),
           const SizedBox(height: 16),
           // Actions
           Opacity(
@@ -1060,12 +1313,18 @@ class _UnassignedDeviceCard extends StatelessWidget {
 class _InfoTriageCard extends StatelessWidget {
   final Map<String, dynamic> entry;
   final bool busy;
+  final String? summary;
+  final String? guidance;
+  final VoidCallback onRecheck;
   final VoidCallback onDismiss;
 
   const _InfoTriageCard({
     super.key,
     required this.entry,
     this.busy = false,
+    this.summary,
+    this.guidance,
+    required this.onRecheck,
     required this.onDismiss,
   });
 
@@ -1084,11 +1343,12 @@ class _InfoTriageCard extends StatelessWidget {
       hubType.toUpperCase(),
       if (address != null && address.isNotEmpty) address,
     ].join(' \u00B7 ');
-    final message = switch (entry['kind'] as String?) {
-      'hub_configured' =>
-        'The backend reported a hub-level triage item. Review the updated rooms and dismiss this entry when finished.',
-      _ => 'This triage item is not yet specialized in the UI.',
-    };
+    final message = guidance ??
+        switch (entry['kind'] as String?) {
+          'hub_configured' =>
+            'Remove the native automation in the hub app, then tap Recheck to confirm Rhythm cleared the conflict.',
+          _ => 'This triage item is not yet specialized in the UI.',
+        };
 
     return Container(
       decoration: BoxDecoration(
@@ -1145,6 +1405,17 @@ class _InfoTriageCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 12),
+          if (summary != null && summary!.isNotEmpty) ...[
+            Text(
+              summary!,
+              style: const TextStyle(
+                color: CelestialColors.textPrimary,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
           Text(
             message,
             style: TextStyle(
@@ -1159,6 +1430,14 @@ class _InfoTriageCard extends StatelessWidget {
               ignoring: busy,
               child: Row(
                 children: [
+                  Expanded(
+                    child: _ActionButton(
+                      label: 'Recheck',
+                      color: const Color(0xFF64B5F6),
+                      onTap: onRecheck,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
                   Expanded(
                     child: _ActionButton(
                       label: 'Dismiss',
@@ -1313,6 +1592,15 @@ class _RoomBindingCard extends StatelessWidget {
             for (final candidate in candidates)
               _buildCandidateRoomRow(candidate),
           ],
+          const SizedBox(height: 12),
+          Text(
+            'Keep Separate saves this as a separate Rhythm room. Dismiss only hides the current suggestion without saving that room-separation choice.',
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+              fontSize: 12,
+              height: 1.3,
+            ),
+          ),
           const SizedBox(height: 16),
           // Actions
           Opacity(

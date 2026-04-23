@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnectionState;
+import 'package:rhythm_sdk/rhythm_sdk.dart'
+    show RhythmConnectionState, RhythmHubInfo, RhythmHubStartupRetryStatus;
 import '../providers/home_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../services/analytics_service.dart';
@@ -93,12 +94,31 @@ class _HubConnectionBannerState extends State<HubConnectionBanner>
 
   Widget _buildBanner(
     List<Map<String, dynamic>> disconnected,
-    bool retrying,
+    bool busy,
   ) {
     final count = disconnected.length;
+    final manualRetryRequired =
+        disconnected.where(_hubNeedsManualRetry).toList(growable: false);
+    final retryingAutomatically =
+        disconnected.where(_hubIsAutoRetrying).toList(growable: false);
     final names = disconnected.map((h) => _hubLabel(h['type'] as String));
-    final headline =
-        count == 1 ? '${names.first} unreachable' : '$count hubs unreachable';
+    final headline = switch ((
+      manualRetryRequired.isNotEmpty,
+      retryingAutomatically.length == count && count > 0,
+    )) {
+      (true, _) =>
+        count == 1 ? '${names.first} needs retry' : '$count hubs need retry',
+      (false, true) =>
+        count == 1 ? '${names.first} reconnecting' : '$count hubs reconnecting',
+      _ =>
+        count == 1 ? '${names.first} unreachable' : '$count hubs unreachable',
+    };
+    final retryButtonLabel = manualRetryRequired.isNotEmpty
+        ? (busy ? 'Retrying' : 'Retry')
+        : retryingAutomatically.isNotEmpty
+            ? 'Retrying'
+            : (busy ? 'Retrying' : 'Retry');
+    final retryButtonEnabled = !busy && retryingAutomatically.isEmpty;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -187,8 +207,14 @@ class _HubConnectionBannerState extends State<HubConnectionBanner>
               ),
               const SizedBox(width: 10),
               _RetryButton(
-                retrying: retrying,
-                onPressed: retrying ? null : () => _retryHubs(count),
+                busy: busy,
+                label: retryButtonLabel,
+                onPressed: retryButtonEnabled
+                    ? () => _retryHubs(
+                          manualRetryRequired: manualRetryRequired,
+                          disconnectedCount: count,
+                        )
+                    : null,
               ),
             ],
           ),
@@ -210,13 +236,37 @@ class _HubConnectionBannerState extends State<HubConnectionBanner>
     }
   }
 
-  Future<void> _retryHubs(int disconnectedCount) async {
+  Future<void> _retryHubs({
+    required List<Map<String, dynamic>> manualRetryRequired,
+    required int disconnectedCount,
+  }) async {
     HapticFeedback.selectionClick();
-    await context.read<ServerSyncProvider>().fullRefresh();
+    final syncProvider = context.read<ServerSyncProvider>();
+    if (manualRetryRequired.isNotEmpty) {
+      await syncProvider.retryHubs(manualRetryRequired);
+    } else {
+      await syncProvider.fullRefresh();
+    }
     AnalyticsService().logHubRecoveryAction(
       action: 'retry',
       disconnectedCount: disconnectedCount,
     );
+  }
+
+  static RhythmHubInfo _parsedHubInfo(Map<String, dynamic> hubInfo) {
+    return RhythmHubInfo.fromJson(hubInfo);
+  }
+
+  static bool _hubNeedsManualRetry(Map<String, dynamic> hubInfo) {
+    return (hubInfo['connected'] as bool? ?? false) != true &&
+        _parsedHubInfo(hubInfo).startupRetry?.status ==
+            RhythmHubStartupRetryStatus.manualRetryRequired;
+  }
+
+  static bool _hubIsAutoRetrying(Map<String, dynamic> hubInfo) {
+    return (hubInfo['connected'] as bool? ?? false) != true &&
+        _parsedHubInfo(hubInfo).startupRetry?.status ==
+            RhythmHubStartupRetryStatus.scheduled;
   }
 
   static String _hubLabel(String type) => switch (type) {
@@ -228,17 +278,20 @@ class _HubConnectionBannerState extends State<HubConnectionBanner>
 }
 
 class _RetryButton extends StatelessWidget {
-  final bool retrying;
+  final bool busy;
+  final String label;
   final Future<void> Function()? onPressed;
 
   const _RetryButton({
-    required this.retrying,
+    required this.busy,
+    required this.label,
     required this.onPressed,
   });
 
   @override
   Widget build(BuildContext context) {
     final accent = const Color(0xFFE8A54B);
+    final enabled = onPressed != null;
     return Material(
       type: MaterialType.transparency,
       child: InkWell(
@@ -247,23 +300,23 @@ class _RetryButton extends StatelessWidget {
         child: Ink(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           decoration: BoxDecoration(
-            color: accent.withValues(alpha: retrying ? 0.08 : 0.12),
+            color: accent.withValues(alpha: enabled ? 0.12 : 0.08),
             borderRadius: BorderRadius.circular(10),
             border: Border.all(
-              color: accent.withValues(alpha: retrying ? 0.18 : 0.24),
+              color: accent.withValues(alpha: enabled ? 0.24 : 0.18),
             ),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (retrying)
+              if (busy)
                 SizedBox(
                   width: 14,
                   height: 14,
                   child: CircularProgressIndicator(
                     strokeWidth: 2,
                     valueColor: AlwaysStoppedAnimation<Color>(
-                      accent.withValues(alpha: 0.9),
+                      accent.withValues(alpha: enabled ? 0.9 : 0.7),
                     ),
                   ),
                 )
@@ -271,13 +324,13 @@ class _RetryButton extends StatelessWidget {
                 Icon(
                   Icons.refresh_rounded,
                   size: 15,
-                  color: accent.withValues(alpha: 0.9),
+                  color: accent.withValues(alpha: enabled ? 0.9 : 0.7),
                 ),
               const SizedBox(width: 6),
               Text(
-                retrying ? 'Retrying' : 'Retry',
+                label,
                 style: TextStyle(
-                  color: accent.withValues(alpha: 0.92),
+                  color: accent.withValues(alpha: enabled ? 0.92 : 0.72),
                   fontSize: 12,
                   fontWeight: FontWeight.w600,
                   letterSpacing: 0.1,

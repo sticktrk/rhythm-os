@@ -126,6 +126,12 @@ class RhythmServerDetailScreen extends StatelessWidget {
                               icon: Icons.devices_other,
                               iconColor: const Color(0xFFFF9800),
                               label: 'Device Review',
+                              value: serverSync
+                                      .hubConfiguredConflicts.isNotEmpty
+                                  ? '${serverSync.hubConfiguredConflicts.length} conflict${serverSync.hubConfiguredConflicts.length == 1 ? '' : 's'}'
+                                  : serverSync.triagePendingCount > 0
+                                      ? '${serverSync.triagePendingCount} pending'
+                                      : 'Clear',
                               trailing: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [

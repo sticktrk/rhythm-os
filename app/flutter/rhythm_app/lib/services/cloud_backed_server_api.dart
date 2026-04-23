@@ -1,24 +1,15 @@
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
-typedef ScheduleCloudCapture = void Function({
-  Duration delay,
-  String reason,
-});
-
-/// Delegates to [RhythmServerApi] and schedules a cloud snapshot after
-/// structural mutations succeed.
+/// Delegates to [RhythmServerApi].
+///
+/// Cloud backup is intentionally manual-only. This wrapper preserves the
+/// existing call surface used by the app without scheduling captures.
 class CloudBackedServerApi {
   CloudBackedServerApi({
     required RhythmServerApi delegate,
-    required ScheduleCloudCapture scheduleCloudCapture,
-  })  : _delegate = delegate,
-        _scheduleCloudCapture = scheduleCloudCapture;
+  }) : _delegate = delegate;
 
   final RhythmServerApi _delegate;
-  final ScheduleCloudCapture _scheduleCloudCapture;
-
-  static const Duration _defaultDelay = Duration(seconds: 2);
-  static const Duration _syncDelay = Duration(seconds: 5);
 
   Future<RhythmRoomState?> roomAction({
     required String roomId,
@@ -75,33 +66,27 @@ class CloudBackedServerApi {
   Future<void> roomOffset({
     required String roomId,
     required double timeOffset,
-  }) async {
-    await _delegate.roomOffset(roomId: roomId, timeOffset: timeOffset);
-    _scheduleCloudCapture(reason: 'room_offset', delay: _defaultDelay);
+  }) {
+    return _delegate.roomOffset(roomId: roomId, timeOffset: timeOffset);
   }
 
   Future<void> nodeOffset({
     required String nodeId,
     required double timeOffset,
-  }) async {
-    await _delegate.nodeOffset(nodeId: nodeId, timeOffset: timeOffset);
-    _scheduleCloudCapture(reason: 'node_offset', delay: _defaultDelay);
+  }) {
+    return _delegate.nodeOffset(nodeId: nodeId, timeOffset: timeOffset);
   }
 
   Future<List<RhythmRoomState>> roomOffsetBatch(
     List<({String roomId, double timeOffset})> items,
-  ) async {
-    final states = await _delegate.roomOffsetBatch(items);
-    _scheduleCloudCapture(reason: 'room_offset_batch', delay: _defaultDelay);
-    return states;
+  ) {
+    return _delegate.roomOffsetBatch(items);
   }
 
   Future<List<RhythmRoomState>> nodeOffsetBatch(
     List<({String nodeId, double timeOffset})> items,
-  ) async {
-    final states = await _delegate.nodeOffsetBatch(items);
-    _scheduleCloudCapture(reason: 'node_offset_batch', delay: _defaultDelay);
-    return states;
+  ) {
+    return _delegate.nodeOffsetBatch(items);
   }
 
   Future<void> roomPreferencesSet({
@@ -111,8 +96,8 @@ class CloudBackedServerApi {
     RoomModeState? state,
     bool? softOff,
     Map<String, dynamic>? profileSettings,
-  }) async {
-    await _delegate.roomPreferencesSet(
+  }) {
+    return _delegate.roomPreferencesSet(
       roomId: roomId,
       rhythmEnabled: rhythmEnabled,
       disabled: disabled,
@@ -120,7 +105,6 @@ class CloudBackedServerApi {
       softOff: softOff,
       profileSettings: profileSettings,
     );
-    _scheduleCloudCapture(reason: 'room_preferences_set', delay: _defaultDelay);
   }
 
   Future<void> nodePreferencesSet({
@@ -130,8 +114,8 @@ class CloudBackedServerApi {
     RoomModeState? state,
     bool? softOff,
     Map<String, dynamic>? profileSettings,
-  }) async {
-    await _delegate.nodePreferencesSet(
+  }) {
+    return _delegate.nodePreferencesSet(
       nodeId: nodeId,
       rhythmEnabled: rhythmEnabled,
       disabled: disabled,
@@ -139,23 +123,14 @@ class CloudBackedServerApi {
       softOff: softOff,
       profileSettings: profileSettings,
     );
-    _scheduleCloudCapture(reason: 'node_preferences_set', delay: _defaultDelay);
   }
 
-  Future<void> roomPreferencesBatchSet(List<Map<String, dynamic>> items) async {
-    await _delegate.roomPreferencesBatchSet(items);
-    _scheduleCloudCapture(
-      reason: 'room_preferences_batch_set',
-      delay: _defaultDelay,
-    );
+  Future<void> roomPreferencesBatchSet(List<Map<String, dynamic>> items) {
+    return _delegate.roomPreferencesBatchSet(items);
   }
 
-  Future<void> nodePreferencesBatchSet(List<Map<String, dynamic>> items) async {
-    await _delegate.nodePreferencesBatchSet(items);
-    _scheduleCloudCapture(
-      reason: 'node_preferences_batch_set',
-      delay: _defaultDelay,
-    );
+  Future<void> nodePreferencesBatchSet(List<Map<String, dynamic>> items) {
+    return _delegate.nodePreferencesBatchSet(items);
   }
 
   Future<List<RhythmRoomState>> fixMyLights({
@@ -196,31 +171,19 @@ class CloudBackedServerApi {
   Future<RhythmCurveConfig?> absorbTimeOffset(
     double offsetMinutes, {
     String? id,
-  }) async {
-    final result = await _delegate.absorbTimeOffset(offsetMinutes, id: id);
-    if (result != null) {
-      _scheduleCloudCapture(reason: 'absorb_time_offset', delay: _defaultDelay);
-    }
-    return result;
+  }) {
+    return _delegate.absorbTimeOffset(offsetMinutes, id: id);
   }
 
-  Future<RhythmCurveConfig?> resetConfig({String? id}) async {
-    final result = await _delegate.resetConfig(id: id);
-    if (result != null) {
-      _scheduleCloudCapture(reason: 'reset_config', delay: _defaultDelay);
-    }
-    return result;
+  Future<RhythmCurveConfig?> resetConfig({String? id}) {
+    return _delegate.resetConfig(id: id);
   }
 
   Future<bool> configSet(
     RhythmCurveConfig config, {
     String? id,
-  }) async {
-    final success = await _delegate.configSet(config, id: id);
-    if (success) {
-      _scheduleCloudCapture(reason: 'config_set', delay: _defaultDelay);
-    }
-    return success;
+  }) {
+    return _delegate.configSet(config, id: id);
   }
 
   Future<void> locationSet({
@@ -228,67 +191,67 @@ class CloudBackedServerApi {
     required double lon,
     double? utcOffset,
     String? timezoneName,
-  }) async {
-    await _delegate.locationSet(
+  }) {
+    return _delegate.locationSet(
       lat: lat,
       lon: lon,
       utcOffset: utcOffset,
       timezoneName: timezoneName,
     );
-    _scheduleCloudCapture(reason: 'location_set', delay: _defaultDelay);
   }
 
   Future<void> hubCredentials({
     required String hubType,
     required String address,
     required Map<String, dynamic> credentials,
-  }) async {
-    await _delegate.hubCredentials(
+  }) {
+    return _delegate.hubCredentials(
       hubType: hubType,
       address: address,
       credentials: credentials,
     );
-    _scheduleCloudCapture(reason: 'hub_credentials', delay: _syncDelay);
   }
 
-  Future<void> hubDisconnect() async {
-    await _delegate.hubDisconnect();
-    _scheduleCloudCapture(reason: 'hub_disconnect', delay: _syncDelay);
+  Future<void> hubDisconnect() {
+    return _delegate.hubDisconnect();
   }
 
   Future<void> hubDisconnectOne({
     required String hubType,
     required String address,
-  }) async {
-    await _delegate.hubDisconnectOne(hubType: hubType, address: address);
-    _scheduleCloudCapture(reason: 'hub_disconnect_one', delay: _syncDelay);
+  }) {
+    return _delegate.hubDisconnectOne(hubType: hubType, address: address);
+  }
+
+  Future<bool> hubRetry({
+    required String hubType,
+    required String address,
+  }) {
+    return _delegate.hubRetry(hubType: hubType, address: address);
   }
 
   Future<void> motionTimeoutSet({
     String? nodeId,
     String? roomId,
     required int? timeoutSecs,
-  }) async {
-    await _delegate.motionTimeoutSet(
+  }) {
+    return _delegate.motionTimeoutSet(
       nodeId: nodeId,
       roomId: roomId,
       timeoutSecs: timeoutSecs,
     );
-    _scheduleCloudCapture(reason: 'motion_timeout_set', delay: _defaultDelay);
   }
 
   Future<RhythmSettings?> getSettings() {
     return _delegate.getSettings();
   }
 
-  Future<void> sleep() async {
-    await _delegate.sleep();
-    _scheduleCloudCapture(reason: 'sleep', delay: _defaultDelay);
+  Future<void> sleep() {
+    return _delegate.sleep();
   }
 
-  Future<void> wake() async {
-    await _delegate.wake();
-    _scheduleCloudCapture(reason: 'wake', delay: _defaultDelay);
+  Future<void> wake() {
+    return _delegate.wake();
   }
 
   Future<RhythmModeResource?> getMode() {
@@ -299,19 +262,14 @@ class CloudBackedServerApi {
     return _delegate.getProfiles();
   }
 
-  Future<void> setActiveMode(RhythmMode mode) async {
-    await _delegate.setActiveMode(mode);
-    _scheduleCloudCapture(reason: 'set_active_mode', delay: _defaultDelay);
+  Future<void> setActiveMode(RhythmMode mode) {
+    return _delegate.setActiveMode(mode);
   }
 
   Future<bool> settingsSet({
     bool? powerSave,
-  }) async {
-    final success = await _delegate.settingsSet(powerSave: powerSave);
-    if (success) {
-      _scheduleCloudCapture(reason: 'settings_set', delay: _defaultDelay);
-    }
-    return success;
+  }) {
+    return _delegate.settingsSet(powerSave: powerSave);
   }
 
   Future<Map<String, dynamic>?> getCanonicalDevice(String id) {
@@ -338,38 +296,23 @@ class CloudBackedServerApi {
     required String nodeId,
     required String controlKind,
     required String? targetId,
-  }) async {
-    final success = await _delegate.setTopologyNodeControlTarget(
+  }) {
+    return _delegate.setTopologyNodeControlTarget(
       nodeId: nodeId,
       controlKind: controlKind,
       targetId: targetId,
     );
-    if (success) {
-      _scheduleCloudCapture(
-        reason: 'topology_node_control_target',
-        delay: _defaultDelay,
-      );
-    }
-    return success;
   }
 
-  Future<bool> resolveTriageMerge(String entryId, String canonicalId) async {
-    final success = await _delegate.resolveTriageMerge(entryId, canonicalId);
-    if (success) {
-      _scheduleCloudCapture(reason: 'triage_merge', delay: _defaultDelay);
-    }
-    return success;
+  Future<bool> resolveTriageMerge(String entryId, String canonicalId) {
+    return _delegate.resolveTriageMerge(entryId, canonicalId);
   }
 
   Future<bool> modeSet({
     RhythmMode? active,
     List<RhythmModeConfig>? configs,
-  }) async {
-    final success = await _delegate.modeSet(active: active, configs: configs);
-    if (success) {
-      _scheduleCloudCapture(reason: 'mode_set', delay: _defaultDelay);
-    }
-    return success;
+  }) {
+    return _delegate.modeSet(active: active, configs: configs);
   }
 
   Future<List<RhythmModeTransitionConfig>> getTransitions() {
@@ -378,28 +321,16 @@ class CloudBackedServerApi {
 
   Future<bool> setTransitions(
     List<RhythmModeTransitionConfig> transitions,
-  ) async {
-    final success = await _delegate.setTransitions(transitions);
-    if (success) {
-      _scheduleCloudCapture(reason: 'set_transitions', delay: _defaultDelay);
-    }
-    return success;
+  ) {
+    return _delegate.setTransitions(transitions);
   }
 
-  Future<bool> triggerTransition(String id) async {
-    final success = await _delegate.triggerTransition(id);
-    if (success) {
-      _scheduleCloudCapture(reason: 'trigger_transition', delay: _defaultDelay);
-    }
-    return success;
+  Future<bool> triggerTransition(String id) {
+    return _delegate.triggerTransition(id);
   }
 
-  Future<Map<String, dynamic>?> resolveTriageNewResult(String entryId) async {
-    final result = await _delegate.resolveTriageNewResult(entryId);
-    if (result != null) {
-      _scheduleCloudCapture(reason: 'triage_new', delay: _defaultDelay);
-    }
-    return result;
+  Future<Map<String, dynamic>?> resolveTriageNewResult(String entryId) {
+    return _delegate.resolveTriageNewResult(entryId);
   }
 
   Future<String?> resolveTriageNew(String entryId) async {
@@ -407,146 +338,86 @@ class CloudBackedServerApi {
     return result?['canonical_id'] as String?;
   }
 
-  Future<bool> resolveTriageDismiss(String entryId) async {
-    final success = await _delegate.resolveTriageDismiss(entryId);
-    if (success) {
-      _scheduleCloudCapture(reason: 'triage_dismiss', delay: _defaultDelay);
-    }
-    return success;
+  Future<bool> resolveTriageDismiss(String entryId) {
+    return _delegate.resolveTriageDismiss(entryId);
   }
 
   Future<bool> resolveTriageBind(
     String entryId, {
     String? targetRoomId,
-  }) async {
-    final success = await _delegate.resolveTriageBind(
+  }) {
+    return _delegate.resolveTriageBind(
       entryId,
       targetRoomId: targetRoomId,
     );
-    if (success) {
-      _scheduleCloudCapture(reason: 'triage_bind', delay: _defaultDelay);
-    }
-    return success;
   }
 
-  Future<bool> resolveTriageRoom(String entryId, String roomId) async {
-    final success = await _delegate.resolveTriageRoom(entryId, roomId);
-    if (success) {
-      _scheduleCloudCapture(reason: 'triage_room', delay: _defaultDelay);
-    }
-    return success;
+  Future<bool> resolveTriageRoom(String entryId, String roomId) {
+    return _delegate.resolveTriageRoom(entryId, roomId);
   }
 
-  Future<bool> topologyRenameRoom(String roomId, String name) async {
-    final success = await _delegate.topologyRenameRoom(roomId, name);
-    if (success) {
-      _scheduleCloudCapture(
-          reason: 'topology_rename_room', delay: _defaultDelay);
-    }
-    return success;
+  Future<bool> topologyRenameRoom(String roomId, String name) {
+    return _delegate.topologyRenameRoom(roomId, name);
   }
 
-  Future<bool> topologyMergeRooms(String targetId, String sourceId) async {
-    final success = await _delegate.topologyMergeRooms(targetId, sourceId);
-    if (success) {
-      _scheduleCloudCapture(
-          reason: 'topology_merge_rooms', delay: _defaultDelay);
-    }
-    return success;
+  Future<bool> topologyMergeRooms(String targetId, String sourceId) {
+    return _delegate.topologyMergeRooms(targetId, sourceId);
   }
 
-  Future<bool> topologyDeleteRoom(String roomId) async {
-    final success = await _delegate.topologyDeleteRoom(roomId);
-    if (success) {
-      _scheduleCloudCapture(
-          reason: 'topology_delete_room', delay: _defaultDelay);
-    }
-    return success;
+  Future<bool> topologyDeleteRoom(String roomId) {
+    return _delegate.topologyDeleteRoom(roomId);
   }
 
   Future<bool> topologyMoveDevice({
     required String deviceId,
     required String fromRoomId,
     required String toRoomId,
-  }) async {
-    final success = await _delegate.topologyMoveDevice(
+  }) {
+    return _delegate.topologyMoveDevice(
       deviceId: deviceId,
       fromRoomId: fromRoomId,
       toRoomId: toRoomId,
     );
-    if (success) {
-      _scheduleCloudCapture(
-          reason: 'topology_move_device', delay: _defaultDelay);
-    }
-    return success;
   }
 
   Future<Map<String, dynamic>?> pairDevice({
     required String hubType,
     Map<String, dynamic> params = const {},
     Duration receiveTimeout = const Duration(seconds: 45),
-  }) async {
-    final result = await _delegate.pairDevice(
+  }) {
+    return _delegate.pairDevice(
       hubType: hubType,
       params: params,
       receiveTimeout: receiveTimeout,
     );
-    if (result != null) {
-      _scheduleCloudCapture(reason: 'pair_device', delay: _syncDelay);
-    }
-    return result;
   }
 
   Future<Map<String, dynamic>?> unpairDevice({
     required String hubType,
     required String deviceId,
     bool force = false,
-  }) async {
-    final result = await _delegate.unpairDevice(
+  }) {
+    return _delegate.unpairDevice(
       hubType: hubType,
       deviceId: deviceId,
       force: force,
     );
-    if (result != null) {
-      _scheduleCloudCapture(reason: 'unpair_device', delay: _syncDelay);
-    }
-    return result;
   }
 
-  Future<bool> assignDeviceRoom(String deviceId, String? roomId) async {
-    final success = await _delegate.assignDeviceRoom(deviceId, roomId);
-    if (success) {
-      _scheduleCloudCapture(reason: 'assign_device_room', delay: _defaultDelay);
-    }
-    return success;
+  Future<bool> assignDeviceRoom(String deviceId, String? roomId) {
+    return _delegate.assignDeviceRoom(deviceId, roomId);
   }
 
-  Future<bool> assignDeviceParent(String deviceId, String? parentId) async {
-    final success = await _delegate.assignDeviceParent(deviceId, parentId);
-    if (success) {
-      _scheduleCloudCapture(
-        reason: 'assign_device_parent',
-        delay: _defaultDelay,
-      );
-    }
-    return success;
+  Future<bool> assignDeviceParent(String deviceId, String? parentId) {
+    return _delegate.assignDeviceParent(deviceId, parentId);
   }
 
-  Future<Map<String, dynamic>?> createTopologyRoom(String name) async {
-    final result = await _delegate.createTopologyRoom(name);
-    if (result != null) {
-      _scheduleCloudCapture(
-          reason: 'create_topology_room', delay: _defaultDelay);
-    }
-    return result;
+  Future<Map<String, dynamic>?> createTopologyRoom(String name) {
+    return _delegate.createTopologyRoom(name);
   }
 
-  Future<Map<String, dynamic>?> triggerSync() async {
-    final result = await _delegate.triggerSync();
-    if (result != null) {
-      _scheduleCloudCapture(reason: 'trigger_sync', delay: _syncDelay);
-    }
-    return result;
+  Future<Map<String, dynamic>?> triggerSync() {
+    return _delegate.triggerSync();
   }
 
   Future<bool> ping() {

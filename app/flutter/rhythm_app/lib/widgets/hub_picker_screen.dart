@@ -8,6 +8,7 @@ import '../screens/hubs/ha_configurator_screen.dart';
 import '../screens/hubs/hue_configurator_screen.dart';
 import '../screens/hubs/matter_add_method.dart';
 import '../screens/hubs/matter_pairing_flow.dart';
+import 'beta_badge.dart';
 import 'solar_orbit.dart';
 import 'bottom_nav_overlay.dart';
 
@@ -171,6 +172,7 @@ class _HubPickerScreenState extends State<HubPickerScreen>
                             color: const Color(0xFF42A5F5),
                             isConnected: homeAssistantConnected,
                             isLoading: _isConfiguringHa,
+                            showBetaBadge: true,
                             onTap: _isConfiguringHa ? null : _configureHa,
                           ),
                           const SizedBox(height: 12),
@@ -181,6 +183,7 @@ class _HubPickerScreenState extends State<HubPickerScreen>
                             subtitle: 'Connect with a long-lived access token',
                             color: const Color(0xFF42A5F5),
                             isConnected: homeAssistantConnected,
+                            showBetaBadge: true,
                             onTap: _configureHaManual,
                           ),
                           const SizedBox(height: 12),
@@ -200,6 +203,7 @@ class _HubPickerScreenState extends State<HubPickerScreen>
                           title: 'Matter',
                           subtitle: _matterSubtitle(serverSync),
                           color: const Color(0xFF26A69A),
+                          showBetaBadge: true,
                           onTap: _configureMatter,
                         ),
                         // Space for bottom nav
@@ -274,6 +278,7 @@ class _HubPickerScreenState extends State<HubPickerScreen>
     required Color color,
     bool isConnected = false,
     bool isLoading = false,
+    bool showBetaBadge = false,
     VoidCallback? onTap,
   }) {
     return GestureDetector(
@@ -308,14 +313,24 @@ class _HubPickerScreenState extends State<HubPickerScreen>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    title,
-                    style: TextStyle(
-                      color: CelestialColors.textPrimary,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
+                  if (showBetaBadge)
+                    BetaLabel(
+                      label: title,
+                      style: const TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    )
+                  else
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
-                  ),
                   const SizedBox(height: 3),
                   Text(
                     subtitle,

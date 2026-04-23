@@ -15,10 +15,7 @@ import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
-import '../backend/auth/auth_user.dart';
 import '../services/cloud_backed_server_api.dart';
-import '../services/cloud_backup_service.dart';
-import '../services/auth_service.dart';
 import '../services/demo_server_api.dart';
 import '../services/hue/demo_hue_bridge_service.dart';
 import '../services/hue/hue_service_locator.dart';
@@ -46,7 +43,6 @@ class ServerSyncProvider extends ChangeNotifier {
   final RhythmConnection _connection;
   final RoomProvider _roomProvider;
   final HomeProvider _homeProvider;
-  final CloudBackupService _cloudBackupService = CloudBackupService.instance;
 
   StreamSubscription<RhythmHello>? _helloSub;
   StreamSubscription<RhythmRoomState>? _rhythmStateSub;
@@ -56,7 +52,6 @@ class ServerSyncProvider extends ChangeNotifier {
   StreamSubscription<void>? _newNodesSub;
   StreamSubscription<Map<String, dynamic>>? _triageChangedSub;
   StreamSubscription<RhythmConnectionState>? _connectionStateSub;
-  StreamSubscription<AuthUser?>? _authStateSub;
   StreamSubscription<void>? _demoChangeSub;
 
   /// Suppresses push-back when receiving rhythm_state from server.
@@ -84,6 +79,9 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Cooldown: last time a hub-connected event triggered a re-hello.
   DateTime? _lastHubReconnectTime;
+
+  /// Cooldown: last time a hub disconnect triggered a state refresh.
+  DateTime? _lastHubDisconnectRefreshTime;
 
   /// Full node-state snapshot from the last server hello.
   List<RhythmRoom> _helloNodes = [];
@@ -136,6 +134,9 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Effective motion timeout from server (auto-computed, always present).
   int? _effectiveMotionTimeoutSecs;
+
+  /// Review summary from `/api/state.review`.
+  RhythmReviewSummary _review = const RhythmReviewSummary();
 
   /// Pending triage counts from SSE triage_changed events.
   int _triagePendingCount = 0;
@@ -199,6 +200,26 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Effective motion timeout from server (auto-computed).
   int? get effectiveMotionTimeoutSecs => _effectiveMotionTimeoutSecs;
 
+  /// Restore/review metadata from the latest server state snapshot.
+  RhythmReviewSummary get review => _review;
+
+  /// Hubs that still need to reconnect after restore or startup.
+  List<RhythmReviewHub> get disconnectedReviewHubs => review.disconnectedHubs;
+
+  /// Devices that preserved an explicit preferred endpoint.
+  List<RhythmPreferredEndpoint> get preferredReviewEndpoints =>
+      review.preferredEndpoints;
+
+  /// Pending native-automation conflicts.
+  List<RhythmReviewEntry> get hubConfiguredConflicts =>
+      review.hubConfiguredConflicts;
+
+  /// Recent resolved triage history carried in the state snapshot.
+  List<RhythmReviewEntry> get reviewHistory => review.resolvedEntries;
+
+  /// Whether review follow-up is still needed after restore/reconnect.
+  bool get hasReviewAttention => review.hasAttention;
+
   /// Total pending triage entries (devices + rooms).
   int get triagePendingCount => _triagePendingCount;
 
@@ -210,6 +231,12 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// All hub infos from last server hello.
   List<Map<String, dynamic>> get serverHubInfos => _lastHubInfos;
+
+  /// Parsed hub infos from last server hello.
+  List<RhythmHubInfo> get serverHubs => _lastHubInfos
+      .map(RhythmHubInfo.fromJson)
+      .where((hub) => hub.configured)
+      .toList(growable: false);
 
   /// Host capabilities from the last server hello, if the server advertises them.
   RhythmCapabilities? get serverCapabilities => _capabilities;
@@ -463,13 +490,10 @@ class ServerSyncProvider extends ChangeNotifier {
   RhythmConnection get connection => _connection;
 
   /// The server API client (available after connect).
-  ///
-  /// Mutating methods schedule a debounced cloud snapshot for signed-in users.
   CloudBackedServerApi get api => CloudBackedServerApi(
         delegate: HueServiceLocator.isDemoMode
             ? DemoServerApi.instance
             : _connection.api,
-        scheduleCloudCapture: _scheduleCloudBackupCapture,
       );
 
   ServerSyncProvider({
@@ -496,10 +520,6 @@ class ServerSyncProvider extends ChangeNotifier {
     _connectionStateSub =
         _connection.connectionStateStream.listen(_onConnectionStateChanged);
 
-    // If the user upgrades from anonymous while a server is already connected,
-    // schedule the initial cloud snapshot immediately instead of waiting for
-    // the next hello or settings mutation.
-    _authStateSub = AuthService().authStateChanges.listen(_onAuthStateChanged);
     _demoChangeSub = DemoServerApi.instance.changes.listen((_) {
       if (!HueServiceLocator.isDemoMode) return;
       unawaited(_refreshDemoState());
@@ -623,6 +643,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _effectiveFadeMs = activeProfileConfig?.fadeMs ?? hello.effectiveFadeMs;
     _effectiveMotionTimeoutSecs = activeProfileConfig?.motionTimeoutSecs ??
         hello.effectiveMotionTimeoutSecs;
+    _review = hello.review;
     _helloNodes = hello.nodes;
     _helloRooms = _buildRoomSummaries();
     _lastHubInfos = hello.hubs;
@@ -670,10 +691,6 @@ class ServerSyncProvider extends ChangeNotifier {
     }
     _refreshTopologyNodes();
 
-    _scheduleCloudBackupCapture(
-      delay: const Duration(seconds: 3),
-      reason: 'hello_sync',
-    );
     notifyListeners();
   }
 
@@ -876,7 +893,24 @@ class ServerSyncProvider extends ChangeNotifier {
       _lastHubReconnectTime = now;
       debugPrint(
           'ServerSync: Hub connected — triggering re-hello for room sync');
-      _connection.reconnect();
+      unawaited(_connection.reconnect());
+      return;
+    }
+
+    // Retry metadata now lives in /api/state, not hub_status, so refetch
+    // when a hub disconnects if the UI is surfacing startup backoff state.
+    if (event == 'disconnected') {
+      final now = DateTime.now();
+      if (_lastHubDisconnectRefreshTime != null &&
+          now.difference(_lastHubDisconnectRefreshTime!).inSeconds < 2) {
+        debugPrint(
+            'ServerSync: Hub disconnected — skipping state refresh (cooldown)');
+        return;
+      }
+      _lastHubDisconnectRefreshTime = now;
+      debugPrint(
+          'ServerSync: Hub disconnected — refreshing state for retry metadata');
+      unawaited(_connection.reconnect());
     }
   }
 
@@ -938,6 +972,7 @@ class ServerSyncProvider extends ChangeNotifier {
       _rhythmIntervalSecs = 60;
       _effectiveFadeMs = null;
       _effectiveMotionTimeoutSecs = null;
+      _review = const RhythmReviewSummary();
       _triagePendingCount = 0;
       _triagePendingDevices = 0;
       _triagePendingRooms = 0;
@@ -1295,6 +1330,43 @@ class ServerSyncProvider extends ChangeNotifier {
     await api.hubDisconnectOne(hubType: hubType, address: address);
   }
 
+  /// Manually re-arm startup retry for a single stored hub credential set.
+  Future<bool> retryHub(
+    String hubType,
+    String address, {
+    bool refreshState = true,
+  }) async {
+    if (!_connection.connected) return false;
+    if (hubType.isEmpty || address.isEmpty) return false;
+    debugPrint('ServerSync: Retrying hub $hubType @ $address');
+    final accepted = await api.hubRetry(hubType: hubType, address: address);
+    if (accepted && refreshState) {
+      await _connection.reconnect();
+    }
+    return accepted;
+  }
+
+  /// Re-arm startup retry for multiple hubs, then refresh state once.
+  Future<int> retryHubs(Iterable<Map<String, dynamic>> hubInfos) async {
+    if (!_connection.connected) return 0;
+    var accepted = 0;
+    for (final hubInfo in hubInfos) {
+      final hubType = hubInfo['type'] as String? ?? '';
+      final address = hubInfo['address'] as String? ?? '';
+      if (hubType.isEmpty || address.isEmpty) continue;
+      final ok = await retryHub(
+        hubType,
+        address,
+        refreshState: false,
+      );
+      if (ok) accepted++;
+    }
+    if (accepted > 0) {
+      await _connection.reconnect();
+    }
+    return accepted;
+  }
+
   Future<void> _pushHubCredentialsForSource(RoomSourceDto source) async {
     final hubType = _hubTypeForSource(source);
     if (hubType == null) return;
@@ -1504,6 +1576,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _rhythmIntervalSecs = 60;
     _effectiveFadeMs = 1800;
     _effectiveMotionTimeoutSecs = 120;
+    _review = snapshot.review;
     _lastHubInfos = snapshot.hubInfos;
     _capabilities = null;
     _helloNodes = snapshot.helloNodes;
@@ -1615,29 +1688,6 @@ class ServerSyncProvider extends ChangeNotifier {
     return sensorTargetIds;
   }
 
-  void _scheduleCloudBackupCapture({
-    Duration delay = const Duration(seconds: 2),
-    String reason = 'unspecified',
-  }) {
-    final serverHub = _serverHub;
-    if (serverHub == null) return;
-
-    _cloudBackupService.scheduleCapture(
-      serverHub: serverHub,
-      home: _homeProvider.currentHome,
-      delay: delay,
-      reason: reason,
-    );
-  }
-
-  void _onAuthStateChanged(AuthUser? user) {
-    if (user == null || user.isAnonymous) return;
-    _scheduleCloudBackupCapture(
-      delay: const Duration(seconds: 2),
-      reason: 'auth_state_signed_in',
-    );
-  }
-
   // ============================================================================
   // Hub-agnostic helpers
   // ============================================================================
@@ -1738,7 +1788,6 @@ class ServerSyncProvider extends ChangeNotifier {
     _newNodesSub?.cancel();
     _triageChangedSub?.cancel();
     _connectionStateSub?.cancel();
-    _authStateSub?.cancel();
     _demoChangeSub?.cancel();
     super.dispose();
   }

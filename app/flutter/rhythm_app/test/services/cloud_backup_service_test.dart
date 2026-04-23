@@ -81,21 +81,16 @@ void main() {
 
   group('CloudBackedServerApi', () {
     late _FakeRhythmServerApi delegate;
-    late List<({Duration delay, String reason})> captures;
     late CloudBackedServerApi api;
 
     setUp(() {
       delegate = _FakeRhythmServerApi();
-      captures = <({Duration delay, String reason})>[];
       api = CloudBackedServerApi(
         delegate: delegate,
-        scheduleCloudCapture: ({delay = Duration.zero, reason = ''}) {
-          captures.add((delay: delay, reason: reason));
-        },
       );
     });
 
-    test('schedules a capture after config writes', () async {
+    test('does not auto-capture after config writes', () async {
       await api.configSet(
         const RhythmCurveConfig(
           id: 'rhythm',
@@ -104,9 +99,6 @@ void main() {
       );
 
       expect(delegate.configSetCalls, 1);
-      expect(captures, hasLength(1));
-      expect(captures.single.reason, 'config_set');
-      expect(captures.single.delay, const Duration(seconds: 2));
     });
 
     test('does not schedule a capture for read-only calls', () async {
@@ -114,16 +106,12 @@ void main() {
 
       expect(settings?.powerSave, isFalse);
       expect(delegate.getSettingsCalls, 1);
-      expect(captures, isEmpty);
     });
 
-    test('uses a longer debounce after sync operations', () async {
+    test('does not auto-capture after sync operations', () async {
       await api.triggerSync();
 
       expect(delegate.triggerSyncCalls, 1);
-      expect(captures, hasLength(1));
-      expect(captures.single.reason, 'trigger_sync');
-      expect(captures.single.delay, const Duration(seconds: 5));
     });
   });
 }

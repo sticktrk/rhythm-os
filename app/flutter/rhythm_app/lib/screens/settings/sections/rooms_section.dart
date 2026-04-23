@@ -3,9 +3,9 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import '../../../widgets/settings_row.dart';
+import '../../../widgets/beta_badge.dart';
 import '../../../widgets/solar_orbit.dart';
 import '../../../providers/room_provider.dart';
-import '../../../providers/server_sync_provider.dart';
 
 /// Rooms section for managing synced rooms.
 ///
@@ -50,7 +50,11 @@ class RoomsSection extends StatelessWidget {
             const SizedBox(height: 16),
             // Matter rooms
             if (matterRooms.isNotEmpty) ...[
-              _buildSourceHeader('Matter', const Color(0xFF26A69A)),
+              _buildSourceHeader(
+                'Matter',
+                const Color(0xFF26A69A),
+                showBetaBadge: true,
+              ),
               const SizedBox(height: 8),
               _buildRoomGroup(context, roomProvider, matterRooms),
               const SizedBox(height: 16),
@@ -64,7 +68,11 @@ class RoomsSection extends StatelessWidget {
             ],
             // Home Assistant rooms
             if (haRooms.isNotEmpty) ...[
-              _buildSourceHeader('Home Assistant', const Color(0xFF03A9F4)),
+              _buildSourceHeader(
+                'Home Assistant',
+                const Color(0xFF03A9F4),
+                showBetaBadge: true,
+              ),
               const SizedBox(height: 8),
               _buildRoomGroup(context, roomProvider, haRooms),
               const SizedBox(height: 16),
@@ -82,7 +90,11 @@ class RoomsSection extends StatelessWidget {
     );
   }
 
-  Widget _buildSourceHeader(String title, Color color) {
+  Widget _buildSourceHeader(
+    String title,
+    Color color, {
+    bool showBetaBadge = false,
+  }) {
     return Padding(
       padding: const EdgeInsets.only(left: 4),
       child: Row(
@@ -96,14 +108,25 @@ class RoomsSection extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
-          Text(
-            title,
-            style: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.8),
-              fontSize: 13,
-              fontWeight: FontWeight.w500,
+          if (showBetaBadge)
+            BetaLabel(
+              label: title,
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.8),
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+              ),
+              spacing: 6,
+            )
+          else
+            Text(
+              title,
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.8),
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+              ),
             ),
-          ),
         ],
       ),
     );
