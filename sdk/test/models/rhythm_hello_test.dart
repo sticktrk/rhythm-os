@@ -78,6 +78,8 @@ void main() {
       expect(hello.rooms.first.id, 'room-1');
       expect(hello.hub, {'type': 'hue', 'ip': '192.168.1.100'});
       expect(hello.hubs, hasLength(2));
+      expect(hello.hubInfos, hasLength(2));
+      expect(hello.hubInfos.first.type, 'hue');
       expect(hello.activeProfile['id'], 'rhythm');
       expect((hello.activeProfile['curve'] as Map<String, dynamic>)['type'],
           'super-gaussian');
@@ -89,6 +91,50 @@ void main() {
       expect(hello.mode!.activeConfig?.idleProfileId, 'sleep_idle');
       expect(hello.profiles, hasLength(4));
       expect(hello.profiles.last.id, 'sleep_idle');
+    });
+
+    test('parses node-first state payloads from /api/state', () {
+      final hello = RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Living Room',
+            'kind': 'room',
+            'hub_types': ['hue'],
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+            'brightness': 70,
+            'kelvin': 3200,
+          },
+          {
+            'id': 'bulb-1',
+            'name': 'Lamp',
+            'kind': 'light_device',
+            'parent_id': 'room-1',
+            'placement': 'standalone',
+            'hub_types': ['hue'],
+            'state': 'idle',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+            'brightness': 1,
+            'kelvin': 2200,
+          },
+        ],
+      });
+
+      expect(hello.nodes, hasLength(2));
+      expect(hello.nodes.first.kind, RhythmNodeKind.room);
+      expect(hello.nodes.last.kind, RhythmNodeKind.lightDevice);
+      expect(hello.nodes.last.parentId, 'room-1');
+      expect(hello.nodes.last.placement, RhythmNodePlacement.standalone);
+      expect(hello.rooms, hasLength(2));
     });
 
     test('uses documented defaults when fields are missing', () {
@@ -110,6 +156,7 @@ void main() {
       });
 
       expect(hello.hubs, hasLength(1));
+      expect(hello.hubInfos, hasLength(1));
       expect(hello.hubs.first['type'], 'hue');
     });
 
@@ -126,6 +173,51 @@ void main() {
 
       expect(hello.hub['type'], 'homeassistant');
       expect(hello.hub['connected'], isTrue);
+    });
+
+    test('parses typed startup retry metadata from hub entries', () {
+      final hello = RhythmHello.fromJson({
+        'hubs': [
+          {
+            'type': 'hue',
+            'address': '192.168.1.2',
+            'connected': false,
+            'startup_retry': {
+              'status': 'scheduled',
+              'attempt_count': 4,
+              'first_failure_epoch_ms': 1710000000000,
+              'last_failure_epoch_ms': 1710000300000,
+              'next_retry_epoch_ms': 1710000600000,
+              'last_error': 'timeout',
+            },
+          },
+          {
+            'type': 'homeassistant',
+            'address': 'ha.local:8123',
+            'connected': false,
+            'startup_retry': {
+              'status': 'manual_retry_required',
+              'attempt_count': 12,
+            },
+          },
+        ],
+      });
+
+      expect(hello.hubInfos, hasLength(2));
+      expect(
+        hello.hubInfos.first.startupRetry?.status,
+        RhythmHubStartupRetryStatus.scheduled,
+      );
+      expect(hello.hubInfos.first.startupRetry?.attemptCount, 4);
+      expect(
+        hello.hubInfos.first.startupRetry?.nextRetryEpochMs,
+        1710000600000,
+      );
+      expect(
+        hello.hubInfos.last.startupRetry?.status,
+        RhythmHubStartupRetryStatus.manualRetryRequired,
+      );
+      expect(hello.hubInfos.last.startupRetry?.nextRetryEpochMs, isNull);
     });
 
     test('normalizes current_time into location.current_local_time', () {

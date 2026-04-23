@@ -173,6 +173,9 @@ void main() {
           'lights_on': true,
           'brightness': 80,
           'kelvin': 4000,
+          'profile_settings': {
+            'motion_timeout_secs': 123,
+          },
         });
         expect(room.id, 'room-1');
         expect(room.name, 'Living Room');
@@ -188,6 +191,17 @@ void main() {
         expect(room.lightsOn, true);
         expect(room.brightness, 80);
         expect(room.kelvin, 4000);
+        expect(room.profileSettings?.motionTimeoutSecs, 123);
+      });
+
+      test('prefers profile_settings over legacy room_profile', () {
+        final room = RhythmRoom.fromJson({
+          'profile_settings': {'motion_timeout_secs': 111},
+          'room_profile': {'motion_timeout_secs': 222},
+        });
+
+        expect(room.profileSettings?.motionTimeoutSecs, 111);
+        expect(room.roomProfile?.motionTimeoutSecs, 111);
       });
 
       test('parses deviceIds as List<String>', () {
@@ -413,11 +427,34 @@ void main() {
     });
   });
 
+  group('RhythmTopologyNode', () {
+    test('parses controls from topology payload', () {
+      final node = RhythmTopologyNode.fromJson({
+        'id': 'sensor-1',
+        'name': 'Hall Motion',
+        'kind': 'motion_sensor',
+        'controls': [
+          {
+            'kind': 'motion',
+            'target_id': 'room-1',
+            'inherited': true,
+          },
+        ],
+      });
+
+      expect(node.controls, hasLength(1));
+      expect(node.controls.first.kind, 'motion');
+      expect(node.controls.first.targetId, 'room-1');
+      expect(node.controls.first.inherited, isTrue);
+      expect(node.motionTargetId, 'room-1');
+    });
+  });
+
   group('RhythmRoomState', () {
     group('fromJson', () {
-      test('parses room_id field', () {
+      test('parses node_id field', () {
         final state = RhythmRoomState.fromJson({
-          'room_id': 'room-42',
+          'node_id': 'node-42',
           'rhythm_enabled': true,
           'time_offset': 1.0,
           'brightness_offset': -5.0,
@@ -425,8 +462,10 @@ void main() {
           'lights_on': true,
           'brightness': 75,
           'kelvin': 3500,
+          'profile_settings': {'motion_timeout_secs': 77},
         });
-        expect(state.roomId, 'room-42');
+        expect(state.nodeId, 'node-42');
+        expect(state.roomId, 'node-42');
         expect(state.rhythmEnabled, true);
         expect(state.timeOffset, 1.0);
         expect(state.brightnessOffset, -5.0);
@@ -434,6 +473,7 @@ void main() {
         expect(state.lightsOn, true);
         expect(state.brightness, 75);
         expect(state.kelvin, 3500);
+        expect(state.profileSettings?.motionTimeoutSecs, 77);
       });
 
       test('falls back to id field when room_id is missing', () {
@@ -487,14 +527,15 @@ void main() {
 
   group('RhythmMotionTimer', () {
     test('constructor sets all fields', () {
-      const timer = RhythmMotionTimer(
-        roomId: 'room-1',
+      const timer = RhythmMotionTimer.node(
+        nodeId: 'node-1',
         motionActive: true,
         motionOwned: true,
         remainingSecs: 120,
         timeoutSecs: 300,
       );
-      expect(timer.roomId, 'room-1');
+      expect(timer.nodeId, 'node-1');
+      expect(timer.roomId, 'node-1');
       expect(timer.motionActive, true);
       expect(timer.motionOwned, true);
       expect(timer.remainingSecs, 120);

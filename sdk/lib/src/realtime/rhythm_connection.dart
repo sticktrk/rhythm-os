@@ -1,7 +1,7 @@
 /// Stateful connection manager for Rhythm server communication.
 ///
 /// Manages polling, SSE, reconnect, and cache diffing. Exposes typed
-/// streams for real-time room state updates.
+/// streams for real-time node state updates.
 ///
 /// Uses [StreamController]s instead of ChangeNotifier for pure Dart
 /// compatibility (no Flutter dependency).
@@ -20,8 +20,8 @@ import '../models/rhythm_hello.dart';
 import '../models/rhythm_room.dart';
 import '../rhythm_log_interceptor.dart';
 
-/// Cached room state for diff detection.
-class _CachedRoomState {
+/// Cached node state for diff detection.
+class _CachedNodeState {
   final bool rhythmEnabled;
   final double timeOffset;
   final double brightnessOffset;
@@ -37,7 +37,7 @@ class _CachedRoomState {
   final int? motionTimeout;
   final bool hasMotionSensor;
 
-  const _CachedRoomState({
+  const _CachedNodeState({
     required this.rhythmEnabled,
     required this.timeOffset,
     required this.brightnessOffset,
@@ -69,7 +69,7 @@ class RhythmConnection {
       StreamController<({String event, String? hubType})>.broadcast();
   final _motionTimerController =
       StreamController<RhythmMotionTimer>.broadcast();
-  final _newRoomsController = StreamController<void>.broadcast();
+  final _newNodesController = StreamController<void>.broadcast();
   final _triageChangedController =
       StreamController<Map<String, dynamic>>.broadcast();
   final _connectionStateController =
@@ -115,10 +115,10 @@ class RhythmConnection {
   final Map<String, ({String type, String summary, DateTime time})>
       _lastSseEvents = {};
 
-  // Cached room states for diff detection.
-  final Map<String, _CachedRoomState> _cachedRoomStates = {};
+  // Cached node states for diff detection.
+  final Map<String, _CachedNodeState> _cachedNodeStates = {};
   final Map<String, bool> _cachedHubConnected = {};
-  final Set<String> _reHelloSuppressedRoomIds = {};
+  final Set<String> _reHelloSuppressedNodeIds = {};
 
   // Optional web base URL (consumer passes Uri.base.toString() on web).
   String? _webBaseUrl;
@@ -137,7 +137,8 @@ class RhythmConnection {
       _hubEventController.stream;
   Stream<RhythmMotionTimer> get motionTimerEvents =>
       _motionTimerController.stream;
-  Stream<void> get newRoomsDetected => _newRoomsController.stream;
+  Stream<void> get newNodesDetected => _newNodesController.stream;
+  Stream<void> get newRoomsDetected => newNodesDetected;
   Stream<Map<String, dynamic>> get triageChangedEvents =>
       _triageChangedController.stream;
   Stream<RhythmConnectionState> get connectionStateStream =>
@@ -184,9 +185,9 @@ class RhythmConnection {
       _reconnectTimer?.cancel();
       _reconnectTimer = null;
       _reconnectAttempts = 0;
-      _cachedRoomStates.clear();
+      _cachedNodeStates.clear();
       _cachedHubConnected.clear();
-      _reHelloSuppressedRoomIds.clear();
+      _reHelloSuppressedNodeIds.clear();
       _sseSupported = true;
       _sseDirectAttempted = false;
     }
@@ -217,7 +218,7 @@ class RhythmConnection {
     _sseReconnectAttempts = 0;
     _reconnectAttempts = 0;
     _consecutivePollFailures = 0;
-    _cachedRoomStates.clear();
+    _cachedNodeStates.clear();
     // Keep _cachedHubConnected across reconnects — the hello will update it
     // authoritatively, but preserving it prevents the re-established SSE
     // stream's initial hub_status event from looking like a new change
@@ -242,9 +243,9 @@ class RhythmConnection {
     _dio = null;
     _api = null;
 
-    _cachedRoomStates.clear();
+    _cachedNodeStates.clear();
     _cachedHubConnected.clear();
-    _reHelloSuppressedRoomIds.clear();
+    _reHelloSuppressedNodeIds.clear();
     _sseSupported = true;
     _sseDirectAttempted = false;
 
@@ -254,7 +255,7 @@ class RhythmConnection {
   /// Trigger an immediate poll cycle.
   Future<void> pollNow() async {
     if (connected) {
-      _cachedRoomStates.clear();
+      _cachedNodeStates.clear();
       await _poll();
     }
   }
@@ -299,7 +300,7 @@ class RhythmConnection {
     _rhythmStateController.close();
     _hubEventController.close();
     _motionTimerController.close();
-    _newRoomsController.close();
+    _newNodesController.close();
     _triageChangedController.close();
     _connectionStateController.close();
   }
@@ -327,28 +328,31 @@ class RhythmConnection {
       _listenPort = hello.listenPort;
       _sseDirectAttempted = false;
 
-      _cachedRoomStates.clear();
-      for (final room in hello.rooms) {
-        _cachedRoomStates[room.id] = _CachedRoomState(
-          rhythmEnabled: room.rhythmEnabled,
-          timeOffset: room.timeOffset,
-          brightnessOffset: room.brightnessOffset,
-          state: room.state,
-          transitioning: room.transitioning,
-          lightsOn: room.lightsOn,
-          brightness: room.brightness,
-          kelvin: room.kelvin,
-          hasMotionSensor: room.hasMotionSensor,
+      _cachedNodeStates.clear();
+      for (final node in hello.nodes) {
+        _cachedNodeStates[node.id] = _CachedNodeState(
+          rhythmEnabled: node.rhythmEnabled,
+          timeOffset: node.timeOffset,
+          brightnessOffset: node.brightnessOffset,
+          state: node.state,
+          transitioning: node.transitioning,
+          lightsOn: node.lightsOn,
+          brightness: node.brightness,
+          kelvin: node.kelvin,
+          motionActive: node.motionActive,
+          motionOwned: node.motionOwned,
+          motionRemaining: node.remainingSecs,
+          motionTimeout: node.timeoutSecs,
+          hasMotionSensor: node.hasMotionSensor,
         );
       }
 
-      _reHelloSuppressedRoomIds.removeAll(_cachedRoomStates.keys);
+      _reHelloSuppressedNodeIds.removeAll(_cachedNodeStates.keys);
       // Cache per-hub connected state from hello for diff detection.
       _cachedHubConnected.clear();
-      for (final hub in hello.hubs) {
-        final hubType = hub['type'] as String?;
-        if (hubType != null && hubType != 'none') {
-          _cachedHubConnected[hubType] = hub['connected'] as bool? ?? false;
+      for (final hub in hello.hubInfos) {
+        if (hub.configured) {
+          _cachedHubConnected[hub.type] = hub.connected;
         }
       }
 
@@ -357,7 +361,7 @@ class RhythmConnection {
       _consecutivePollFailures = 0;
 
       _log.config('Connected, platform=${hello.platformType}, '
-          '${hello.rooms.length} rooms');
+          '${hello.nodes.length} nodes');
 
       _helloController.add(hello);
       _startPolling();
@@ -398,52 +402,53 @@ class RhythmConnection {
     if (_dio == null || !connected) return;
 
     try {
-      final response = await _dio!.get('api/rooms/state');
+      final response = await _dio!.get('api/nodes/state');
       final data = response.data as Map<String, dynamic>;
       _consecutivePollFailures = 0;
 
       // Poll doesn't carry per-hub status — skip hub event emission.
       // The hello (which runs on reconnect) provides authoritative per-hub state.
 
-      final previousRoomIds = _cachedRoomStates.keys.toSet();
-      final rooms = data['rooms'] as List<dynamic>? ?? [];
-      final seenRoomIds = <String>{};
+      final previousNodeIds = _cachedNodeStates.keys.toSet();
+      final nodes = data['nodes'] as List<dynamic>? ??
+          data['rooms'] as List<dynamic>? ??
+          [];
+      final seenNodeIds = <String>{};
 
-      for (final raw in rooms) {
-        final roomJson = raw as Map<String, dynamic>;
-        final roomId = roomJson['id'] as String? ?? '';
-        if (roomId.isEmpty) continue;
-        seenRoomIds.add(roomId);
+      for (final raw in nodes) {
+        final nodeJson = raw as Map<String, dynamic>;
+        final nodeState = RhythmRoomState.fromJson(nodeJson);
+        final nodeId = nodeState.nodeId;
+        if (nodeId.isEmpty) continue;
+        seenNodeIds.add(nodeId);
 
-        final roomState = RhythmRoomState.fromJson(roomJson);
-
-        final motionActive = roomJson['motion_active'] as bool?;
-        final motionOwned = roomJson['motion_owned'] as bool?;
-        final motionRemaining = jsonInt(roomJson['remaining_secs'],
+        final motionActive = nodeJson['motion_active'] as bool?;
+        final motionOwned = nodeJson['motion_owned'] as bool?;
+        final motionRemaining = jsonInt(nodeJson['remaining_secs'],
                 preferredKeys: const ['remaining_secs']) ??
             jsonInt(
-              roomJson['motion_remaining'],
+              nodeJson['motion_remaining'],
               preferredKeys: const ['motion_remaining', 'remaining_secs'],
             );
-        final motionTimeout = jsonInt(roomJson['timeout_secs'],
+        final motionTimeout = jsonInt(nodeJson['timeout_secs'],
                 preferredKeys: const ['timeout_secs']) ??
             jsonInt(
-              roomJson['motion_timeout'],
+              nodeJson['motion_timeout'],
               preferredKeys: const ['motion_timeout', 'timeout_secs'],
             );
 
-        final cached = _cachedRoomStates[roomId];
+        final cached = _cachedNodeStates[nodeId];
         final hasMotionSensor = motionActive != null;
 
         final rhythmChanged = cached == null ||
-            cached.rhythmEnabled != roomState.rhythmEnabled ||
-            cached.timeOffset != roomState.timeOffset ||
-            cached.brightnessOffset != roomState.brightnessOffset ||
-            cached.state != roomState.state ||
-            cached.transitioning != roomState.transitioning ||
-            cached.lightsOn != roomState.lightsOn ||
-            cached.brightness != roomState.brightness ||
-            cached.kelvin != roomState.kelvin;
+            cached.rhythmEnabled != nodeState.rhythmEnabled ||
+            cached.timeOffset != nodeState.timeOffset ||
+            cached.brightnessOffset != nodeState.brightnessOffset ||
+            cached.state != nodeState.state ||
+            cached.transitioning != nodeState.transitioning ||
+            cached.lightsOn != nodeState.lightsOn ||
+            cached.brightness != nodeState.brightness ||
+            cached.kelvin != nodeState.kelvin;
 
         final motionChanged = cached == null ||
             cached.motionActive != motionActive ||
@@ -452,16 +457,16 @@ class RhythmConnection {
             cached.motionTimeout != motionTimeout;
 
         if (rhythmChanged || motionChanged) {
-          _cachedRoomStates[roomId] = _CachedRoomState(
-            rhythmEnabled: roomState.rhythmEnabled,
-            timeOffset: roomState.timeOffset,
-            brightnessOffset: roomState.brightnessOffset,
-            state: roomState.state,
-            transitioning: roomState.transitioning,
-            mode: roomState.mode,
-            lightsOn: roomState.lightsOn,
-            brightness: roomState.brightness,
-            kelvin: roomState.kelvin,
+          _cachedNodeStates[nodeId] = _CachedNodeState(
+            rhythmEnabled: nodeState.rhythmEnabled,
+            timeOffset: nodeState.timeOffset,
+            brightnessOffset: nodeState.brightnessOffset,
+            state: nodeState.state,
+            transitioning: nodeState.transitioning,
+            mode: nodeState.mode,
+            lightsOn: nodeState.lightsOn,
+            brightness: nodeState.brightness,
+            kelvin: nodeState.kelvin,
             motionActive: motionActive,
             motionOwned: motionOwned,
             motionRemaining: motionRemaining,
@@ -470,39 +475,39 @@ class RhythmConnection {
           );
 
           if (rhythmChanged) {
-            _rhythmStateController.add(roomState);
+            _rhythmStateController.add(nodeState);
           }
 
           if (motionChanged) {
             if (motionActive != null && motionTimeout != null) {
-              _motionTimerController.add(RhythmMotionTimer(
-                roomId: roomId,
+              _motionTimerController.add(RhythmMotionTimer.node(
+                nodeId: nodeId,
                 motionActive: motionActive,
                 motionOwned: motionOwned ?? false,
                 remainingSecs: motionRemaining,
                 timeoutSecs: motionTimeout,
               ));
             } else if (cached?.motionActive != null) {
-              _motionTimerController.add(RhythmMotionTimer.cleared(roomId));
+              _motionTimerController.add(RhythmMotionTimer.cleared(nodeId));
             }
           }
         }
       }
 
-      // Detect new rooms.
-      final newRoomIds = seenRoomIds.difference(previousRoomIds);
-      final unsuppressedIds = newRoomIds.difference(_reHelloSuppressedRoomIds);
-      if (unsuppressedIds.isNotEmpty && previousRoomIds.isNotEmpty) {
-        _reHelloSuppressedRoomIds.addAll(unsuppressedIds);
-        _newRoomsController.add(null);
+      // Detect new nodes.
+      final newNodeIds = seenNodeIds.difference(previousNodeIds);
+      final unsuppressedIds = newNodeIds.difference(_reHelloSuppressedNodeIds);
+      if (unsuppressedIds.isNotEmpty && previousNodeIds.isNotEmpty) {
+        _reHelloSuppressedNodeIds.addAll(unsuppressedIds);
+        _newNodesController.add(null);
       }
 
-      // Clear motion for removed rooms.
-      for (final entry in _cachedRoomStates.entries.toList()) {
-        if (!seenRoomIds.contains(entry.key) &&
+      // Clear motion for removed nodes.
+      for (final entry in _cachedNodeStates.entries.toList()) {
+        if (!seenNodeIds.contains(entry.key) &&
             entry.value.motionActive != null) {
           _motionTimerController.add(RhythmMotionTimer.cleared(entry.key));
-          _cachedRoomStates[entry.key] = _CachedRoomState(
+          _cachedNodeStates[entry.key] = _CachedNodeState(
             rhythmEnabled: entry.value.rhythmEnabled,
             timeOffset: entry.value.timeOffset,
             brightnessOffset: entry.value.brightnessOffset,
@@ -575,7 +580,8 @@ class RhythmConnection {
       _sseReconnectAttempts = 0;
       _log.config('SSE connected');
       _lastSseActivity = DateTime.now();
-      _stopPolling();
+      // Keep polling active even when SSE is connected as a safety net for
+      // dropped streams and runtime recovery.
       _startSseWatchdog();
 
       String? eventType;
@@ -647,28 +653,30 @@ class RhythmConnection {
     );
     try {
       switch (eventType) {
+        case 'node_state':
         case 'room_state':
           final json = jsonDecode(data) as Map<String, dynamic>;
-          final rooms = (json['data'] as Map<String, dynamic>?)?['rooms']
-                  as List<dynamic>? ??
+          final payload = json['data'] as Map<String, dynamic>? ?? json;
+          final nodes = payload['nodes'] as List<dynamic>? ??
+              payload['rooms'] as List<dynamic>? ??
               [];
-          for (final raw in rooms) {
-            final room = raw as Map<String, dynamic>;
-            final roomId = room['id'] as String? ?? '';
-            if (roomId.isEmpty) continue;
+          for (final raw in nodes) {
+            final node = raw as Map<String, dynamic>;
+            final nodeState = RhythmRoomState.fromJson(node);
+            final nodeId = nodeState.nodeId;
+            if (nodeId.isEmpty) continue;
 
-            final roomState = RhythmRoomState.fromJson(room);
-            final existing = _cachedRoomStates[roomId];
-            _cachedRoomStates[roomId] = _CachedRoomState(
-              rhythmEnabled: roomState.rhythmEnabled,
-              timeOffset: roomState.timeOffset,
-              brightnessOffset: roomState.brightnessOffset,
-              state: roomState.state,
-              transitioning: roomState.transitioning,
-              mode: roomState.mode,
-              lightsOn: roomState.lightsOn,
-              brightness: roomState.brightness,
-              kelvin: roomState.kelvin,
+            final existing = _cachedNodeStates[nodeId];
+            _cachedNodeStates[nodeId] = _CachedNodeState(
+              rhythmEnabled: nodeState.rhythmEnabled,
+              timeOffset: nodeState.timeOffset,
+              brightnessOffset: nodeState.brightnessOffset,
+              state: nodeState.state,
+              transitioning: nodeState.transitioning,
+              mode: nodeState.mode,
+              lightsOn: nodeState.lightsOn,
+              brightness: nodeState.brightness,
+              kelvin: nodeState.kelvin,
               motionActive: existing?.motionActive,
               motionOwned: existing?.motionOwned,
               motionRemaining: existing?.motionRemaining,
@@ -676,21 +684,22 @@ class RhythmConnection {
               hasMotionSensor: existing?.hasMotionSensor ?? false,
             );
 
-            _rhythmStateController.add(roomState);
+            _rhythmStateController.add(nodeState);
           }
 
         case 'motion_timer':
           final json = jsonDecode(data) as Map<String, dynamic>;
-          final timers = (json['data'] as Map<String, dynamic>?)?['timers']
-                  as List<dynamic>? ??
-              [];
+          final payload = json['data'] as Map<String, dynamic>? ?? json;
+          final timers = payload['timers'] as List<dynamic>? ?? [];
 
-          final seenRoomIds = <String>{};
+          final seenNodeIds = <String>{};
           for (final raw in timers) {
             final timer = raw as Map<String, dynamic>;
-            final roomId = timer['room_id'] as String? ?? '';
-            if (roomId.isEmpty) continue;
-            seenRoomIds.add(roomId);
+            final nodeId = timer['node_id'] as String? ??
+                timer['room_id'] as String? ??
+                '';
+            if (nodeId.isEmpty) continue;
+            seenNodeIds.add(nodeId);
 
             final motionActive = timer['motion_active'] as bool? ?? false;
             final motionOwned = timer['motion_owned'] as bool? ?? false;
@@ -702,9 +711,9 @@ class RhythmConnection {
                     preferredKeys: const ['timeout_secs']) ??
                 0;
 
-            final cached = _cachedRoomStates[roomId];
+            final cached = _cachedNodeStates[nodeId];
             if (cached != null) {
-              _cachedRoomStates[roomId] = _CachedRoomState(
+              _cachedNodeStates[nodeId] = _CachedNodeState(
                 rhythmEnabled: cached.rhythmEnabled,
                 timeOffset: cached.timeOffset,
                 brightnessOffset: cached.brightnessOffset,
@@ -719,8 +728,8 @@ class RhythmConnection {
               );
             }
 
-            _motionTimerController.add(RhythmMotionTimer(
-              roomId: roomId,
+            _motionTimerController.add(RhythmMotionTimer.node(
+              nodeId: nodeId,
               motionActive: motionActive,
               motionOwned: motionOwned,
               remainingSecs: remainingSecs,
@@ -728,11 +737,11 @@ class RhythmConnection {
             ));
           }
 
-          for (final entry in _cachedRoomStates.entries.toList()) {
+          for (final entry in _cachedNodeStates.entries.toList()) {
             if (entry.value.motionActive != null &&
-                !seenRoomIds.contains(entry.key)) {
+                !seenNodeIds.contains(entry.key)) {
               _motionTimerController.add(RhythmMotionTimer.cleared(entry.key));
-              _cachedRoomStates[entry.key] = _CachedRoomState(
+              _cachedNodeStates[entry.key] = _CachedNodeState(
                 rhythmEnabled: entry.value.rhythmEnabled,
                 timeOffset: entry.value.timeOffset,
                 brightnessOffset: entry.value.brightnessOffset,
@@ -760,9 +769,10 @@ class RhythmConnection {
 
         case 'settings_changed':
         case 'config_changed':
+        case 'nodes_changed':
         case 'rooms_changed':
-          _reHelloSuppressedRoomIds.clear();
-          _newRoomsController.add(null);
+          _reHelloSuppressedNodeIds.clear();
+          _newNodesController.add(null);
 
         case 'triage_changed':
           final json = jsonDecode(data) as Map<String, dynamic>;
@@ -863,8 +873,8 @@ class RhythmConnection {
   /// Update internal cache from action responses to prevent duplicate events.
   void _updateCacheFromStates(List<RhythmRoomState> states) {
     for (final state in states) {
-      final existing = _cachedRoomStates[state.roomId];
-      _cachedRoomStates[state.roomId] = _CachedRoomState(
+      final existing = _cachedNodeStates[state.nodeId];
+      _cachedNodeStates[state.nodeId] = _CachedNodeState(
         rhythmEnabled: state.rhythmEnabled,
         timeOffset: state.timeOffset,
         brightnessOffset: state.brightnessOffset,

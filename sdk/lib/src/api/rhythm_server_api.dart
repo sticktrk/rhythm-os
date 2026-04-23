@@ -12,7 +12,7 @@ import '../models/rhythm_time_info.dart';
 /// already applied via an action response.
 typedef RhythmCacheUpdater = void Function(List<RhythmRoomState> states);
 
-/// Stateless API client for room/device/state management endpoints.
+/// Stateless API client for node/device/state management endpoints.
 ///
 /// All methods are fire-and-forget safe (log errors, don't throw for
 /// expected failures). Methods that return data throw [DioException]
@@ -27,120 +27,197 @@ class RhythmServerApi {
       : _onStatesReceived = onStatesReceived;
 
   // =========================================================================
-  // Room actions
+  // Node actions
   // =========================================================================
 
-  /// Dispatch a room action via the server runtime.
-  Future<RhythmRoomState?> roomAction({
-    required String roomId,
+  /// Dispatch a node action via the server runtime.
+  Future<RhythmRoomState?> nodeAction({
+    required String nodeId,
     required String action,
   }) async {
     try {
-      final response = await _dio.put('api/rooms/action', data: {
-        'room_id': roomId,
+      final response = await _dio.put('api/nodes/action', data: {
+        'node_id': nodeId,
         'action': action,
       });
       final data = response.data as Map<String, dynamic>?;
-      final rooms = data?['rooms'] as List<dynamic>?;
-      Map<String, dynamic>? roomJson;
-      if (rooms != null && rooms.isNotEmpty) {
-        roomJson = rooms[0] as Map<String, dynamic>?;
+      final nodes =
+          data?['nodes'] as List<dynamic>? ?? data?['rooms'] as List<dynamic>?;
+      Map<String, dynamic>? nodeJson;
+      if (nodes != null && nodes.isNotEmpty) {
+        nodeJson = nodes[0] as Map<String, dynamic>?;
       } else if (data != null && data.containsKey('rhythm_enabled')) {
-        roomJson = data;
+        nodeJson = data;
       }
-      if (roomJson != null && roomJson.containsKey('rhythm_enabled')) {
-        final state = RhythmRoomState.fromJson(roomJson);
+      if (nodeJson != null && nodeJson.containsKey('rhythm_enabled')) {
+        final state = RhythmRoomState.fromJson(nodeJson);
         _onStatesReceived?.call([state]);
         return state;
       }
     } catch (e) {
-      _log.warning('roomAction failed', e);
+      _log.warning('nodeAction failed', e);
     }
     return null;
+  }
+
+  /// Dispatch a room action via the node-first server contract.
+  Future<RhythmRoomState?> roomAction({
+    required String roomId,
+    required String action,
+  }) {
+    return nodeAction(nodeId: roomId, action: action);
+  }
+
+  /// Dispatch actions for multiple nodes in a single request.
+  Future<List<RhythmRoomState>> nodeActionBatch(
+    List<({String nodeId, String action})> actions,
+  ) async {
+    if (actions.isEmpty) return [];
+    try {
+      final response = await _dio.put(
+        'api/nodes/action',
+        data: [
+          for (final a in actions) {'node_id': a.nodeId, 'action': a.action}
+        ],
+        options: Options(receiveTimeout: const Duration(seconds: 30)),
+      );
+      return _parseAndCacheStatesResponse(response.data);
+    } catch (e) {
+      _log.warning('nodeActionBatch failed', e);
+    }
+    return [];
   }
 
   /// Dispatch actions for multiple rooms in a single request.
   Future<List<RhythmRoomState>> roomActionBatch(
     List<({String roomId, String action})> actions,
-  ) async {
-    if (actions.isEmpty) return [];
-    try {
-      final response = await _dio.put(
-        'api/rooms/action',
-        data: [
-          for (final a in actions) {'room_id': a.roomId, 'action': a.action}
-        ],
-        options: Options(receiveTimeout: const Duration(seconds: 30)),
-      );
-      return _parseAndCacheRoomsResponse(response.data);
-    } catch (e) {
-      _log.warning('roomActionBatch failed', e);
-    }
-    return [];
+  ) {
+    return nodeActionBatch([
+      for (final action in actions)
+        (nodeId: action.roomId, action: action.action),
+    ]);
   }
 
-  /// Set room brightness via the server runtime.
+  /// Set node brightness via the server runtime.
+  Future<void> nodeBrightness({
+    required String nodeId,
+    required int brightness,
+  }) async {
+    await _safePut('api/nodes/brightness', data: {
+      'node_id': nodeId,
+      'brightness': brightness,
+    });
+  }
+
+  /// Set room brightness via the node-first server contract.
   Future<void> roomBrightness({
     required String roomId,
     required int brightness,
-  }) async {
-    await _safePut('api/rooms/brightness', data: {
-      'room_id': roomId,
-      'brightness': brightness,
-    });
+  }) {
+    return nodeBrightness(nodeId: roomId, brightness: brightness);
+  }
+
+  /// Set brightness for multiple nodes in a single request.
+  Future<List<RhythmRoomState>> nodeBrightnessBatch(
+    List<({String nodeId, int brightness})> items,
+  ) async {
+    if (items.isEmpty) return [];
+    try {
+      final response = await _dio.put(
+        'api/nodes/brightness',
+        data: [
+          for (final i in items)
+            {'node_id': i.nodeId, 'brightness': i.brightness}
+        ],
+        options: Options(receiveTimeout: const Duration(seconds: 30)),
+      );
+      return _parseAndCacheStatesResponse(response.data);
+    } catch (e) {
+      _log.warning('nodeBrightnessBatch failed', e);
+    }
+    return [];
   }
 
   /// Set brightness for multiple rooms in a single request.
   Future<List<RhythmRoomState>> roomBrightnessBatch(
     List<({String roomId, int brightness})> items,
+  ) {
+    return nodeBrightnessBatch([
+      for (final item in items)
+        (nodeId: item.roomId, brightness: item.brightness),
+    ]);
+  }
+
+  /// Set the time offset for a single node.
+  Future<void> nodeOffset({
+    required String nodeId,
+    required double timeOffset,
+  }) async {
+    await _safePut('api/nodes/offset', data: {
+      'node_id': nodeId,
+      'time_offset': timeOffset,
+    });
+  }
+
+  /// Set the time offset for a single room via the node-first contract.
+  Future<void> roomOffset({
+    required String roomId,
+    required double timeOffset,
+  }) {
+    return nodeOffset(nodeId: roomId, timeOffset: timeOffset);
+  }
+
+  /// Set time offset for multiple nodes in a single request.
+  Future<List<RhythmRoomState>> nodeOffsetBatch(
+    List<({String nodeId, double timeOffset})> items,
   ) async {
     if (items.isEmpty) return [];
     try {
       final response = await _dio.put(
-        'api/rooms/brightness',
+        'api/nodes/offset',
         data: [
           for (final i in items)
-            {'room_id': i.roomId, 'brightness': i.brightness}
+            {'node_id': i.nodeId, 'time_offset': i.timeOffset}
         ],
         options: Options(receiveTimeout: const Duration(seconds: 30)),
       );
-      return _parseAndCacheRoomsResponse(response.data);
+      return _parseAndCacheStatesResponse(response.data);
     } catch (e) {
-      _log.warning('roomBrightnessBatch failed', e);
+      _log.warning('nodeOffsetBatch failed', e);
     }
     return [];
-  }
-
-  /// Set the time offset for a single room.
-  Future<void> roomOffset({
-    required String roomId,
-    required double timeOffset,
-  }) async {
-    await _safePut('api/rooms/offset', data: {
-      'room_id': roomId,
-      'time_offset': timeOffset,
-    });
   }
 
   /// Set time offset for multiple rooms in a single request.
   Future<List<RhythmRoomState>> roomOffsetBatch(
     List<({String roomId, double timeOffset})> items,
-  ) async {
-    if (items.isEmpty) return [];
-    try {
-      final response = await _dio.put(
-        'api/rooms/offset',
-        data: [
-          for (final i in items)
-            {'room_id': i.roomId, 'time_offset': i.timeOffset}
-        ],
-        options: Options(receiveTimeout: const Duration(seconds: 30)),
-      );
-      return _parseAndCacheRoomsResponse(response.data);
-    } catch (e) {
-      _log.warning('roomOffsetBatch failed', e);
-    }
-    return [];
+  ) {
+    return nodeOffsetBatch([
+      for (final item in items)
+        (nodeId: item.roomId, timeOffset: item.timeOffset),
+    ]);
+  }
+
+  /// Push node preferences (rhythm_enabled, disabled, soft_off).
+  Future<void> nodePreferencesSet({
+    required String nodeId,
+    bool? rhythmEnabled,
+    bool? disabled,
+    RoomModeState? state,
+    bool? softOff,
+    Map<String, dynamic>? profileSettings,
+  }) async {
+    final effectiveState = state ??
+        (softOff == null
+            ? null
+            : (softOff ? RoomModeState.idle : RoomModeState.active));
+    await _safePut('api/nodes/preferences', data: {
+      'node_id': nodeId,
+      if (rhythmEnabled != null) 'rhythm_enabled': rhythmEnabled,
+      if (disabled != null) 'disabled': disabled,
+      if (effectiveState != null) 'state': effectiveState.wireValue,
+      if (profileSettings != null) 'profile_settings': profileSettings,
+    });
   }
 
   /// Push room preferences (rhythm_enabled, disabled, soft_off).
@@ -150,41 +227,61 @@ class RhythmServerApi {
     bool? disabled,
     RoomModeState? state,
     bool? softOff,
-  }) async {
-    final effectiveState = state ??
-        (softOff == null
-            ? null
-            : (softOff ? RoomModeState.idle : RoomModeState.active));
-    await _safePut('api/rooms/preferences', data: {
-      'room_id': roomId,
-      if (rhythmEnabled != null) 'rhythm_enabled': rhythmEnabled,
-      if (disabled != null) 'disabled': disabled,
-      if (effectiveState != null) 'state': effectiveState.wireValue,
-    });
+    Map<String, dynamic>? profileSettings,
+  }) {
+    return nodePreferencesSet(
+      nodeId: roomId,
+      rhythmEnabled: rhythmEnabled,
+      disabled: disabled,
+      state: state,
+      softOff: softOff,
+      profileSettings: profileSettings,
+    );
+  }
+
+  /// Push node preferences for multiple nodes.
+  Future<void> nodePreferencesBatchSet(List<Map<String, dynamic>> items) async {
+    if (items.isEmpty) return;
+    await _safePut('api/nodes/preferences', data: [
+      for (final item in items)
+        {
+          for (final entry in item.entries)
+            if (entry.key != 'room_id' && entry.key != 'room_profile')
+              entry.key: entry.value,
+          if (!item.containsKey('node_id') && item.containsKey('room_id'))
+            'node_id': item['room_id'],
+          if (!item.containsKey('profile_settings') &&
+              item.containsKey('room_profile'))
+            'profile_settings': item['room_profile'],
+        }
+    ]);
   }
 
   /// Push room preferences for multiple rooms.
   Future<void> roomPreferencesBatchSet(List<Map<String, dynamic>> items) async {
-    if (items.isEmpty) return;
-    await _safePut('api/rooms/preferences', data: items);
+    await nodePreferencesBatchSet([
+      for (final item in items)
+        {
+          for (final entry in item.entries)
+            if (entry.key != 'room_id' && entry.key != 'room_profile')
+              entry.key: entry.value,
+          'node_id': item['room_id'],
+          if (!item.containsKey('profile_settings') &&
+              item.containsKey('room_profile'))
+            'profile_settings': item['room_profile'],
+        },
+    ]);
   }
 
-  /// Reset all on-rooms back to their current adaptive curve position.
-  Future<List<RhythmRoomState>> fixMyLights() async {
-    try {
-      final response = await _dio.post(
-        'api/rooms/fix',
-        options: Options(receiveTimeout: const Duration(seconds: 30)),
-      );
-      final data = response.data as Map<String, dynamic>?;
-      final roomStates = data?['rooms'] as List<dynamic>? ??
-          data?['room_states'] as List<dynamic>?;
-      if (roomStates == null) return [];
-      return _parseAndCacheRoomsList(roomStates);
-    } catch (e) {
-      _log.warning('fixMyLights failed', e);
-    }
-    return [];
+  /// Reset the provided nodes back to their current adaptive curve position.
+  Future<List<RhythmRoomState>> fixMyLights({
+    required Iterable<String> nodeIds,
+  }) async {
+    final ids = nodeIds.where((id) => id.isNotEmpty).toSet().toList();
+    if (ids.isEmpty) return [];
+    return nodeActionBatch([
+      for (final nodeId in ids) (nodeId: nodeId, action: 'reset'),
+    ]);
   }
 
 // =========================================================================
@@ -385,17 +482,41 @@ class RhythmServerApi {
     }
   }
 
+  /// Re-arm startup bootstrap for a single configured hub.
+  Future<bool> hubRetry({
+    required String hubType,
+    required String address,
+  }) async {
+    try {
+      final response = await _dio.post('api/hub/retry', data: {
+        'hub_type': hubType,
+        'address': address,
+      });
+      return response.statusCode == null ||
+          (response.statusCode! >= 200 && response.statusCode! < 300);
+    } catch (e) {
+      _log.warning('hubRetry failed', e);
+    }
+    return false;
+  }
+
   // =========================================================================
   // Motion
   // =========================================================================
 
-  /// Set per-room motion timeout on the server.
+  /// Set per-node motion timeout on the server.
   Future<void> motionTimeoutSet({
-    required String roomId,
-    required int timeoutSecs,
+    String? nodeId,
+    String? roomId,
+    required int? timeoutSecs,
   }) async {
-    await _safePut('api/motion-timeout', data: {
-      'room_id': roomId,
+    final effectiveNodeId = nodeId ?? roomId;
+    if (effectiveNodeId == null || effectiveNodeId.isEmpty) {
+      _log.warning('motionTimeoutSet skipped: missing node id');
+      return;
+    }
+    await _safePut('api/nodes/motion-timeout', data: {
+      'node_id': effectiveNodeId,
       'timeout_secs': timeoutSecs,
     });
   }
@@ -710,6 +831,59 @@ class RhythmServerApi {
     return false;
   }
 
+  /// Delete a topology room.
+  Future<bool> topologyDeleteRoom(String roomId) async {
+    try {
+      final response = await _dio.delete('api/topology/rooms/$roomId');
+      return response.statusCode == 204;
+    } catch (e) {
+      _log.warning('topologyDeleteRoom failed', e);
+    }
+    return false;
+  }
+
+  /// Fetch the node topology graph.
+  Future<List<RhythmTopologyNode>> getTopologyNodes() async {
+    try {
+      final response = await _dio.get('api/topology/nodes');
+      final data = response.data;
+      if (data is List<dynamic>) {
+        return data
+            .whereType<Map<String, dynamic>>()
+            .map((node) => RhythmTopologyNode.fromJson(node))
+            .toList();
+      }
+      if (data is Map<String, dynamic>) {
+        final nodes = data['nodes'] as List<dynamic>? ?? const [];
+        return nodes
+            .whereType<Map<String, dynamic>>()
+            .map((node) => RhythmTopologyNode.fromJson(node))
+            .toList();
+      }
+    } catch (e) {
+      _log.warning('getTopologyNodes failed', e);
+    }
+    return const [];
+  }
+
+  /// Set or clear an explicit topology control target for a node.
+  Future<bool> setTopologyNodeControlTarget({
+    required String nodeId,
+    required String controlKind,
+    required String? targetId,
+  }) async {
+    try {
+      await _dio.put(
+        'api/topology/nodes/$nodeId/controls/$controlKind',
+        data: {'target_id': targetId},
+      );
+      return true;
+    } catch (e) {
+      _log.warning('setTopologyNodeControlTarget failed', e);
+    }
+    return false;
+  }
+
   // =========================================================================
   // Device pairing
   // =========================================================================
@@ -806,17 +980,23 @@ class RhythmServerApi {
     return null;
   }
 
-  /// Assign a canonical device to a room (or unassign with `null`).
-  Future<bool> assignDeviceRoom(String deviceId, String? roomId) async {
+  /// Assign a canonical device to a parent node (or unassign with `null`).
+  Future<bool> assignDeviceParent(String deviceId, String? parentId) async {
     try {
-      await _dio.put('api/devices/canonical/$deviceId/room', data: {
-        if (roomId != null) 'room_id': roomId,
-      });
+      await _dio.put(
+        'api/devices/canonical/$deviceId/parent',
+        data: {'parent_id': parentId},
+      );
       return true;
     } catch (e) {
-      _log.warning('assignDeviceRoom failed', e);
+      _log.warning('assignDeviceParent failed', e);
     }
     return false;
+  }
+
+  /// Assign a canonical device to a room (or unassign with `null`).
+  Future<bool> assignDeviceRoom(String deviceId, String? roomId) {
+    return assignDeviceParent(deviceId, roomId);
   }
 
   /// Create a new topology room. Returns the created room JSON.
@@ -903,16 +1083,17 @@ class RhythmServerApi {
     return RhythmCurveConfig.fromJson(json);
   }
 
-  List<RhythmRoomState> _parseAndCacheRoomsResponse(dynamic responseData) {
+  List<RhythmRoomState> _parseAndCacheStatesResponse(dynamic responseData) {
     final data = responseData as Map<String, dynamic>?;
-    final rooms = data?['rooms'] as List<dynamic>?;
-    if (rooms == null) return [];
-    return _parseAndCacheRoomsList(rooms);
+    final states =
+        data?['nodes'] as List<dynamic>? ?? data?['rooms'] as List<dynamic>?;
+    if (states == null) return [];
+    return _parseAndCacheStatesList(states);
   }
 
-  List<RhythmRoomState> _parseAndCacheRoomsList(List<dynamic> rooms) {
+  List<RhythmRoomState> _parseAndCacheStatesList(List<dynamic> states) {
     final results = <RhythmRoomState>[];
-    for (final r in rooms) {
+    for (final r in states) {
       if (r is Map<String, dynamic> && r.containsKey('rhythm_enabled')) {
         final state = RhythmRoomState.fromJson(r);
         results.add(state);

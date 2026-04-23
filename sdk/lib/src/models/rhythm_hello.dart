@@ -1,6 +1,8 @@
 import '../json_parsing.dart';
 import 'rhythm_capabilities.dart';
 import 'rhythm_curve_config.dart';
+import 'rhythm_hub_info.dart';
+import 'rhythm_review.dart';
 import 'rhythm_room.dart';
 import 'rhythm_settings.dart';
 
@@ -10,9 +12,10 @@ class RhythmHello {
   final String platformType;
   final String platformContext;
   final int? listenPort;
-  final List<RhythmRoom> rooms;
+  final List<RhythmRoom> nodes;
   final Map<String, dynamic> hub;
   final List<Map<String, dynamic>> hubs;
+  final List<RhythmHubInfo> hubInfos;
   final RhythmCapabilities? capabilities;
   final Map<String, dynamic> activeProfile;
   final RhythmModeResource? mode;
@@ -20,6 +23,7 @@ class RhythmHello {
   final List<RhythmCurveConfig> profiles;
   final Map<String, dynamic> location;
   final RhythmSettings? settings;
+  final RhythmReviewSummary review;
   final int? lastTickEpochMs;
 
   /// Always-present computed fade duration (accounts for auto mode).
@@ -33,9 +37,10 @@ class RhythmHello {
     required this.platformType,
     required this.platformContext,
     this.listenPort,
-    required this.rooms,
+    required this.nodes,
     required this.hub,
     required this.hubs,
+    this.hubInfos = const [],
     this.capabilities,
     required this.activeProfile,
     this.mode,
@@ -43,10 +48,13 @@ class RhythmHello {
     this.profiles = const [],
     required this.location,
     this.settings,
+    this.review = const RhythmReviewSummary(),
     this.lastTickEpochMs,
     this.effectiveFadeMs,
     this.effectiveMotionTimeoutSecs,
   });
+
+  List<RhythmRoom> get rooms => nodes;
 
   factory RhythmHello.fromJson(Map<String, dynamic> json) {
     final settingsJson = jsonMap(json['settings']);
@@ -60,10 +68,12 @@ class RhythmHello {
     final hub = rawHub.isNotEmpty
         ? rawHub
         : (hubs.isNotEmpty ? hubs.first : const <String, dynamic>{});
+    final hubInfos = hubs.map(RhythmHubInfo.fromJson).toList(growable: false);
     final location = _normalizeLocation(json);
     final activeProfile = normalizeActiveProfile(json);
     final modeJson = jsonMap(json['mode']);
     final capabilitiesJson = jsonMap(json['capabilities']);
+    final reviewJson = jsonMap(json['review']);
     final profiles = ((json['profiles'] as List<dynamic>?) ?? const <dynamic>[])
         .map(jsonMap)
         .nonNulls
@@ -78,15 +88,17 @@ class RhythmHello {
       platformContext: json['context'] as String? ?? 'server',
       listenPort:
           jsonInt(json['listen_port'], preferredKeys: const ['listen_port']),
-      rooms: (json['rooms'] as List<dynamic>?)
-              ?.map(jsonMap)
-              .nonNulls
-              .map(RhythmRoom.fromJson)
-              .where((r) => r.id.isNotEmpty)
-              .toList() ??
-          [],
+      nodes: ((json['nodes'] as List<dynamic>?) ??
+              (json['rooms'] as List<dynamic>?) ??
+              const [])
+          .map(jsonMap)
+          .nonNulls
+          .map(RhythmRoom.fromJson)
+          .where((r) => r.id.isNotEmpty)
+          .toList(),
       hub: hub,
       hubs: hubs,
+      hubInfos: hubInfos,
       capabilities: capabilitiesJson == null
           ? null
           : RhythmCapabilities.fromJson(capabilitiesJson),
@@ -102,6 +114,9 @@ class RhythmHello {
       location: location,
       settings:
           settingsJson != null ? RhythmSettings.fromJson(settingsJson) : null,
+      review: reviewJson == null
+          ? const RhythmReviewSummary()
+          : RhythmReviewSummary.fromJson(reviewJson),
       lastTickEpochMs: jsonInt(
         json['last_tick_epoch_ms'],
         preferredKeys: const ['last_tick_epoch_ms'],

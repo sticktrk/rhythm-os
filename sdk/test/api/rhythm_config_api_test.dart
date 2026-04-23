@@ -938,6 +938,85 @@ void main() {
       expect(matter.canAddDevice, isTrue);
     });
 
+    test('parses review metadata from /api/state', () async {
+      when(() => dio.get('api/state')).thenAnswer(
+        (_) async => Response(
+          requestOptions: RequestOptions(path: 'api/state'),
+          statusCode: 200,
+          data: {
+            'rooms': const <Map<String, dynamic>>[],
+            'location': <String, dynamic>{},
+            'review': {
+              'pending': {
+                'devices': 2,
+                'rooms': 1,
+                'unassigned': 1,
+                'hub_configured': 1,
+                'total': 3,
+              },
+              'disconnected_hubs': [
+                {
+                  'type': 'hue',
+                  'address': 'hue.local',
+                },
+              ],
+              'preferred_endpoints': [
+                {
+                  'canonical_id': 'device-1',
+                  'name': 'Kitchen Lamp',
+                  'type': 'matter',
+                  'hub_address': 'matter.local',
+                  'native_id': 'node-44',
+                  'endpoint_count': 2,
+                },
+              ],
+              'hub_configured_conflicts': [
+                {
+                  'id': 'conflict-1',
+                  'kind': 'hub_configured',
+                  'status': 'pending',
+                  'type': 'hue',
+                  'hub_address': 'hue.local',
+                  'native_id': 'light-1',
+                  'name': 'Kitchen Lamp',
+                  'created_at': 1710000000,
+                  'summary':
+                      'Native hub automation is still configured for this device',
+                  'guidance': 'Remove it in Hue, then recheck.',
+                },
+              ],
+              'triage_entries': [
+                {
+                  'id': 'history-1',
+                  'kind': 'device_merge',
+                  'status': 'new_device',
+                  'type': 'matter',
+                  'hub_address': 'matter.local',
+                  'native_id': 'node-77',
+                  'name': 'Desk Lamp',
+                  'created_at': 1710000000,
+                  'resolved_at': 1710000300,
+                  'resolved_by': 'api',
+                  'summary': 'Kept as a separate device',
+                },
+              ],
+            },
+          },
+        ),
+      );
+
+      final hello = await api.getState();
+
+      expect(hello.review.pending.total, 3);
+      expect(hello.review.pending.unassigned, 1);
+      expect(hello.review.disconnectedHubs.single.label, 'Hue - hue.local');
+      expect(hello.review.preferredEndpoints.single.endpointCount, 2);
+      expect(hello.review.hubConfiguredConflicts.single.guidance,
+          'Remove it in Hue, then recheck.');
+      expect(hello.review.triageEntries.single.isKeepSeparate, isTrue);
+      expect(hello.review.resolvedEntries, hasLength(1));
+    });
+
     test('keeps legacy add_device payloads working during rollout', () async {
       when(() => dio.get('api/state')).thenAnswer(
         (_) async => Response(

@@ -60,8 +60,8 @@ void main() {
       expect(cacheUpdates[0], hasLength(1));
       expect(cacheUpdates[0][0].roomId, 'r1');
 
-      verify(() => dio.put('api/rooms/action', data: {
-            'room_id': 'r1',
+      verify(() => dio.put('api/nodes/action', data: {
+            'node_id': 'r1',
             'action': 'enable',
           })).called(1);
     });
@@ -184,15 +184,16 @@ void main() {
   // fixMyLights
   // ---------------------------------------------------------------------------
   group('fixMyLights', () {
-    test('parses response using "rooms" key', () async {
-      when(() => dio.post(any(), options: any(named: 'options')))
+    test('dispatches reset actions through the node batch endpoint', () async {
+      when(() => dio.put(any(),
+              data: any(named: 'data'), options: any(named: 'options')))
           .thenAnswer((_) async => Response(
-                requestOptions: RequestOptions(path: 'api/rooms/fix'),
+                requestOptions: RequestOptions(path: 'api/nodes/action'),
                 statusCode: 200,
                 data: {
-                  'rooms': [
+                  'nodes': [
                     {
-                      'room_id': 'r1',
+                      'node_id': 'room-1',
                       'rhythm_enabled': true,
                       'time_offset': 0.0,
                       'brightness_offset': 0.0,
@@ -204,44 +205,138 @@ void main() {
                 },
               ));
 
-      final result = await api.fixMyLights();
+      final result = await api.fixMyLights(nodeIds: ['room-1']);
       expect(result, hasLength(1));
-      expect(result[0].roomId, 'r1');
+      expect(result[0].nodeId, 'room-1');
       expect(result[0].brightness, 75);
       expect(cacheUpdates, hasLength(1));
+
+      verify(() => dio.put(
+            'api/nodes/action',
+            data: [
+              {
+                'node_id': 'room-1',
+                'action': 'reset',
+              },
+            ],
+            options: any(named: 'options'),
+          )).called(1);
     });
 
-    test('parses response using "room_states" key', () async {
-      when(() => dio.post(any(), options: any(named: 'options')))
-          .thenAnswer((_) async => Response(
-                requestOptions: RequestOptions(path: 'api/rooms/fix'),
-                statusCode: 200,
-                data: {
-                  'room_states': [
-                    {
-                      'room_id': 'r2',
-                      'rhythm_enabled': false,
-                      'time_offset': 0.0,
-                      'brightness_offset': 0.0,
-                      'soft_off': false,
-                    },
-                  ],
-                },
-              ));
+    test('returns empty list when no node ids are provided', () async {
+      final result = await api.fixMyLights(nodeIds: const []);
 
-      final result = await api.fixMyLights();
-      expect(result, hasLength(1));
-      expect(result[0].roomId, 'r2');
+      expect(result, isEmpty);
+      verifyNever(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          ));
     });
 
     test('returns empty list on error', () async {
-      when(() => dio.post(any(), options: any(named: 'options')))
-          .thenThrow(DioException(
-        requestOptions: RequestOptions(path: 'api/rooms/fix'),
+      when(() => dio.put(any(),
+          data: any(named: 'data'),
+          options: any(named: 'options'))).thenThrow(DioException(
+        requestOptions: RequestOptions(path: 'api/nodes/action'),
       ));
 
-      final result = await api.fixMyLights();
+      final result = await api.fixMyLights(nodeIds: ['room-1']);
       expect(result, isEmpty);
+    });
+  });
+
+  group('node preference writes', () {
+    test('nodePreferencesSet sends profile_settings on the node endpoint',
+        () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/nodes/preferences'),
+            statusCode: 204,
+          ));
+
+      await api.nodePreferencesSet(
+        nodeId: 'node-1',
+        rhythmEnabled: true,
+        profileSettings: {
+          'motion_timeout_secs': 60,
+        },
+      );
+
+      verify(() => dio.put(
+            'api/nodes/preferences',
+            data: {
+              'node_id': 'node-1',
+              'rhythm_enabled': true,
+              'profile_settings': {
+                'motion_timeout_secs': 60,
+              },
+            },
+            queryParameters: null,
+          )).called(1);
+    });
+
+    test('nodePreferencesBatchSet normalizes room_profile to profile_settings',
+        () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/nodes/preferences'),
+            statusCode: 204,
+          ));
+
+      await api.nodePreferencesBatchSet([
+        {
+          'room_id': 'room-1',
+          'disabled': true,
+          'room_profile': {
+            'motion_timeout_secs': 90,
+          },
+        },
+      ]);
+
+      verify(() => dio.put(
+            'api/nodes/preferences',
+            data: [
+              {
+                'node_id': 'room-1',
+                'disabled': true,
+                'profile_settings': {
+                  'motion_timeout_secs': 90,
+                },
+              },
+            ],
+            queryParameters: null,
+          )).called(1);
+    });
+  });
+
+  group('motion timeout writes', () {
+    test('motionTimeoutSet can clear the timeout with null', () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/nodes/motion-timeout'),
+            statusCode: 204,
+          ));
+
+      await api.motionTimeoutSet(nodeId: 'node-1', timeoutSecs: null);
+
+      verify(() => dio.put(
+            'api/nodes/motion-timeout',
+            data: {
+              'node_id': 'node-1',
+              'timeout_secs': null,
+            },
+            queryParameters: null,
+          )).called(1);
     });
   });
 
@@ -479,6 +574,7 @@ void main() {
             'idle_profile_id': null,
             'wake_profile_id': null,
             'warning_profile_id': null,
+            'room_defaults': [],
           },
         ],
       });
@@ -516,6 +612,129 @@ void main() {
       ));
 
       expect(await api.ping(), isFalse);
+    });
+  });
+
+  group('topology', () {
+    test('getTopologyNodes parses the bare array response', () async {
+      when(() => dio.get(any())).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/topology/nodes'),
+            statusCode: 200,
+            data: [
+              {
+                'id': 'room-1',
+                'name': 'Living Room',
+                'kind': 'room',
+              },
+              {
+                'id': 'bulb-1',
+                'name': 'Lamp',
+                'kind': 'light_device',
+                'parent_id': 'room-1',
+                'placement': 'standalone',
+                'controls': [
+                  {
+                    'kind': 'motion',
+                    'target_id': 'room-1',
+                    'inherited': false,
+                  },
+                ],
+                'manufacturer': 'Signify',
+                'model': 'Hue Color',
+              },
+            ],
+          ));
+
+      final nodes = await api.getTopologyNodes();
+
+      expect(nodes, hasLength(2));
+      expect(nodes.first.kind, RhythmNodeKind.room);
+      expect(nodes.last.kind, RhythmNodeKind.lightDevice);
+      expect(nodes.last.parentId, 'room-1');
+      expect(nodes.last.placement, RhythmNodePlacement.standalone);
+      expect(nodes.last.controls, hasLength(1));
+      expect(nodes.last.controls.first.targetId, 'room-1');
+      verify(() => dio.get('api/topology/nodes')).called(1);
+    });
+
+    test('setTopologyNodeControlTarget sends target_id including null',
+        () async {
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(
+                  path: 'api/topology/nodes/sensor-1/controls/motion',
+                ),
+                statusCode: 200,
+              ));
+
+      final saved = await api.setTopologyNodeControlTarget(
+        nodeId: 'sensor-1',
+        controlKind: 'motion',
+        targetId: null,
+      );
+
+      expect(saved, isTrue);
+      verify(() => dio.put(
+            'api/topology/nodes/sensor-1/controls/motion',
+            data: {'target_id': null},
+          )).called(1);
+    });
+
+    test('assignDeviceParent sends parent_id including null', () async {
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(
+                  path: 'api/devices/canonical/device-1/parent',
+                ),
+                statusCode: 204,
+              ));
+
+      final saved = await api.assignDeviceParent('device-1', null);
+
+      expect(saved, isTrue);
+      verify(() => dio.put(
+            'api/devices/canonical/device-1/parent',
+            data: {'parent_id': null},
+          )).called(1);
+    });
+  });
+
+  group('hub retry', () {
+    test('posts the manual retry request body and returns true on 204',
+        () async {
+      when(() => dio.post(any(), data: any(named: 'data'))).thenAnswer(
+        (_) async => Response(
+          requestOptions: RequestOptions(path: 'api/hub/retry'),
+          statusCode: 204,
+        ),
+      );
+
+      final ok = await api.hubRetry(
+        hubType: 'hue',
+        address: '192.168.1.2',
+      );
+
+      expect(ok, isTrue);
+      verify(() => dio.post('api/hub/retry', data: {
+            'hub_type': 'hue',
+            'address': '192.168.1.2',
+          })).called(1);
+    });
+
+    test('returns false on DioException', () async {
+      when(() => dio.post(any(), data: any(named: 'data'))).thenThrow(
+        DioException(
+          requestOptions: RequestOptions(path: 'api/hub/retry'),
+          type: DioExceptionType.badResponse,
+        ),
+      );
+
+      final ok = await api.hubRetry(
+        hubType: 'hue',
+        address: '192.168.1.2',
+      );
+
+      expect(ok, isFalse);
     });
   });
 
