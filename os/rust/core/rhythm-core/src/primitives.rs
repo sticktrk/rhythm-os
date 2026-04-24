@@ -21,6 +21,7 @@ use crate::lighting::LightingCommand;
 use crate::room::{
     EffectiveRoomState, ModeConfig, RoomManager, RoomModeState, RoomProfileSettings,
 };
+use crate::runtime::events::ButtonAction;
 use crate::solar::{SolarTime, SunTimes};
 use crate::steps::StepAction;
 use crate::LightingValues;
@@ -45,6 +46,30 @@ pub(crate) enum PeriodicTickPlan {
         command: LightingCommand,
         room_state: RoomModeState,
         profile_id: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ManualDispatchPlan {
+    TurnOn {
+        source_room_id: String,
+        target_id: String,
+        command: LightingCommand,
+    },
+    TurnOff {
+        target_id: String,
+        transition_ms: Option<u32>,
+    },
+}
+
+pub(crate) enum ManualActionPlan {
+    Noop {
+        turned_on: bool,
+    },
+    RequiresLightCheck,
+    Dispatch {
+        dispatch: ManualDispatchPlan,
+        turned_on: bool,
     },
 }
 
@@ -346,6 +371,378 @@ impl<C: LightController> RhythmEngine<C> {
                 skipped_cycles: 0,
             },
         );
+    }
+
+    pub(crate) fn plan_non_periodic_turn_on_target(
+        &mut self,
+        source_room_id: &str,
+        target_id: &str,
+        command: LightingCommand,
+    ) -> ManualDispatchPlan {
+        self.clear_periodic_dedupe_target(source_room_id, target_id);
+        ManualDispatchPlan::TurnOn {
+            source_room_id: source_room_id.to_string(),
+            target_id: target_id.to_string(),
+            command,
+        }
+    }
+
+    pub(crate) fn plan_non_periodic_turn_on(
+        &mut self,
+        room_id: &str,
+        command: LightingCommand,
+    ) -> ManualDispatchPlan {
+        self.clear_periodic_dedupe_room(room_id);
+        self.plan_non_periodic_turn_on_target(room_id, room_id, command)
+    }
+
+    pub(crate) fn plan_non_periodic_turn_off_target(
+        &mut self,
+        source_room_id: &str,
+        target_id: &str,
+        transition_ms: Option<u32>,
+    ) -> ManualDispatchPlan {
+        self.clear_periodic_dedupe_target(source_room_id, target_id);
+        ManualDispatchPlan::TurnOff {
+            target_id: target_id.to_string(),
+            transition_ms,
+        }
+    }
+
+    pub(crate) fn plan_non_periodic_turn_off(
+        &mut self,
+        room_id: &str,
+        transition_ms: Option<u32>,
+    ) -> ManualDispatchPlan {
+        self.clear_periodic_dedupe_room(room_id);
+        self.plan_non_periodic_turn_off_target(room_id, room_id, transition_ms)
+    }
+
+    pub(crate) fn plan_turn_on(&mut self, room_id: &str, current_hour: f32) -> ManualDispatchPlan {
+        {
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.enable_rhythm();
+            room.soft_off = false;
+            room.hard_off = false;
+        };
+        let effective = self.effective_room_state(room_id);
+        let offset_minutes = effective.time_offset_minutes;
+        let brightness_offset = effective.brightness_offset;
+        let profile_settings = effective.profile_settings;
+
+        let ctx = self.create_context(current_hour);
+        let module = self.active_profile_for_settings(Some(&profile_settings));
+        let values = module.calculate_with_offset(&ctx, offset_minutes);
+        let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
+        let command = Self::build_command(&values, brightness);
+        self.plan_non_periodic_turn_on(room_id, command)
+    }
+
+    pub(crate) fn plan_dim_to_factor(
+        &mut self,
+        room_id: &str,
+        current_hour: f32,
+        factor: f32,
+    ) -> Option<ManualDispatchPlan> {
+        {
+            let room = self.rooms.get_mut(room_id)?;
+            room.soft_off = false;
+            room.hard_off = false;
+        };
+        let effective = self.effective_room_state(room_id);
+        let offset_minutes = effective.time_offset_minutes;
+        let brightness_offset = effective.brightness_offset;
+        let profile_settings = effective.profile_settings;
+
+        let ctx = self.create_context(current_hour);
+        let module = self.active_profile_for_settings(Some(&profile_settings));
+        let values = module.calculate_with_offset(&ctx, offset_minutes);
+        let brightness =
+            ((values.brightness as f32 + brightness_offset) * factor).clamp(1.0, 100.0) as u8;
+        let command = Self::build_command(&values, brightness);
+        Some(self.plan_non_periodic_turn_on(room_id, command))
+    }
+
+    pub(crate) fn plan_turn_off(&mut self, room_id: &str, current_hour: f32) -> ManualDispatchPlan {
+        if self.power_save {
+            if let Some(room) = self.rooms.get_mut(room_id) {
+                room.hard_off = false;
+            }
+            self.plan_non_periodic_turn_off(room_id, None)
+        } else {
+            {
+                let room = self.rooms.get_or_create(room_id, room_id);
+                room.soft_off = true;
+                room.hard_off = false;
+            };
+            let effective = self.effective_room_state(room_id);
+            let offset = effective.time_offset_minutes;
+            let profile_settings = effective.profile_settings;
+            let values =
+                self.idle_values_for_settings(Some(&profile_settings), current_hour, offset);
+
+            let command = Self::build_command(&values, values.brightness);
+            self.plan_non_periodic_turn_on(room_id, command)
+        }
+    }
+
+    pub(crate) fn plan_lights_off(
+        &mut self,
+        room_id: &str,
+        transition_ms: Option<u32>,
+    ) -> ManualDispatchPlan {
+        let room = self.rooms.get_or_create(room_id, room_id);
+        room.soft_off = false;
+        room.hard_off = true;
+        self.plan_non_periodic_turn_off(room_id, transition_ms)
+    }
+
+    pub(crate) fn plan_soft_off_tick(
+        &mut self,
+        room_id: &str,
+        current_hour: f32,
+    ) -> ManualDispatchPlan {
+        let (offset, profile_settings) = self
+            .rooms
+            .effective_state(room_id)
+            .map(|state| (state.time_offset_minutes, state.profile_settings))
+            .unwrap_or((0.0, RoomProfileSettings::default()));
+        let values = self.idle_values_for_settings(Some(&profile_settings), current_hour, offset);
+
+        let command = Self::build_command(&values, values.brightness);
+        self.plan_non_periodic_turn_on(room_id, command)
+    }
+
+    pub(crate) fn plan_step(
+        &mut self,
+        room_id: &str,
+        current_hour: f32,
+        action: StepAction,
+    ) -> ManualDispatchPlan {
+        if let Some(room) = self.rooms.get_mut(room_id) {
+            room.soft_off = false;
+            room.hard_off = false;
+        }
+
+        let (current_offset, profile_settings) = self
+            .rooms
+            .effective_state(room_id)
+            .map(|state| (state.time_offset_minutes, state.profile_settings))
+            .unwrap_or((0.0, RoomProfileSettings::default()));
+
+        let effective_hour = (current_hour + current_offset / 60.0).rem_euclid(24.0);
+        let ctx = self.create_context(effective_hour);
+        let module = self.active_profile_for_settings(Some(&profile_settings));
+        let step_result = module.calculate_step(&ctx, action);
+
+        let room = self.rooms.get_or_create(room_id, room_id);
+        room.apply_time_offset(step_result.time_offset_minutes);
+
+        let command = LightingCommand::from_values(&step_result.values);
+        self.plan_non_periodic_turn_on(room_id, command)
+    }
+
+    pub(crate) fn plan_dim(
+        &mut self,
+        room_id: &str,
+        current_hour: f32,
+        amount: f32,
+    ) -> ManualDispatchPlan {
+        {
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.soft_off = false;
+            room.hard_off = false;
+            room.apply_brightness_offset(amount);
+        };
+        let effective = self.effective_room_state(room_id);
+        let offset_minutes = effective.time_offset_minutes;
+        let brightness_offset = effective.brightness_offset;
+        let profile_settings = effective.profile_settings;
+
+        let ctx = self.create_context(current_hour);
+        let module = self.active_profile_for_settings(Some(&profile_settings));
+        let values = module.calculate_with_offset(&ctx, offset_minutes);
+        let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
+        let command = Self::build_command(&values, brightness);
+        self.plan_non_periodic_turn_on(room_id, command)
+    }
+
+    pub(crate) fn plan_set_brightness(
+        &mut self,
+        room_id: &str,
+        current_hour: f32,
+        target: u8,
+    ) -> ManualDispatchPlan {
+        {
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.soft_off = false;
+            room.hard_off = false;
+        };
+        let effective = self.effective_room_state(room_id);
+        let offset_minutes = effective.time_offset_minutes;
+        let profile_settings = effective.profile_settings;
+
+        let ctx = self.create_context(current_hour);
+        let module = self.active_profile_for_settings(Some(&profile_settings));
+        let values = module.calculate_with_offset(&ctx, offset_minutes);
+
+        let room = self.rooms.get_or_create(room_id, room_id);
+        room.brightness_offset = target as f32 - values.brightness as f32;
+
+        let command = Self::build_command(&values, target);
+        self.plan_non_periodic_turn_on(room_id, command)
+    }
+
+    pub(crate) fn plan_set_time_offset(
+        &mut self,
+        room_id: &str,
+        current_hour: f32,
+        offset_minutes: f32,
+    ) -> Option<ManualDispatchPlan> {
+        {
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.time_offset_minutes = offset_minutes;
+        }
+
+        let effective = self.effective_room_state(room_id);
+        let rhythm_enabled = effective.rhythm_enabled;
+        let soft_off = effective.soft_off;
+        let hard_off = effective.hard_off;
+        let brightness_offset = effective.brightness_offset;
+        let time_offset = effective.time_offset_minutes;
+        let profile_settings = effective.profile_settings;
+
+        if hard_off || (!rhythm_enabled && !soft_off) {
+            return None;
+        }
+
+        let ctx = self.create_context(current_hour);
+        let module = self.active_profile_for_settings(Some(&profile_settings));
+        let values = module.calculate_with_offset(&ctx, time_offset);
+
+        let command = if soft_off && !self.power_save {
+            let idle_values =
+                self.idle_values_for_settings(Some(&profile_settings), current_hour, time_offset);
+            Self::build_command(&idle_values, idle_values.brightness)
+        } else {
+            let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
+            Self::build_command(&values, brightness)
+        };
+
+        Some(self.plan_non_periodic_turn_on(room_id, command))
+    }
+
+    pub(crate) fn plan_reset(&mut self, room_id: &str, current_hour: f32) -> ManualDispatchPlan {
+        {
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.reset_offsets();
+            room.soft_off = false;
+            room.hard_off = false;
+            room.enable_rhythm();
+        };
+        let profile_settings = self.effective_room_state(room_id).profile_settings;
+
+        let ctx = self.create_context(current_hour);
+        let module = self.active_profile_for_settings(Some(&profile_settings));
+        let values = module.calculate(&ctx);
+        let command = LightingCommand::from_values(&values);
+        self.plan_non_periodic_turn_on(room_id, command)
+    }
+
+    pub(crate) fn plan_toggle(
+        &mut self,
+        room_id: &str,
+        current_hour: f32,
+        lights_on: Option<bool>,
+    ) -> ManualActionPlan {
+        let effectively_off = if !self.power_save && self.effective_room_state(room_id).soft_off {
+            Some(true)
+        } else {
+            lights_on.map(|is_on| !is_on)
+        };
+
+        match effectively_off {
+            None => ManualActionPlan::RequiresLightCheck,
+            Some(true) => ManualActionPlan::Dispatch {
+                dispatch: self.plan_turn_on(room_id, current_hour),
+                turned_on: true,
+            },
+            Some(false) => ManualActionPlan::Dispatch {
+                dispatch: self.plan_turn_off(room_id, current_hour),
+                turned_on: false,
+            },
+        }
+    }
+
+    pub(crate) fn plan_button_action(
+        &mut self,
+        room_id: &str,
+        action: ButtonAction,
+        current_hour: f32,
+        lights_on: Option<bool>,
+    ) -> ManualActionPlan {
+        match action {
+            ButtonAction::OnPress => ManualActionPlan::Dispatch {
+                dispatch: self.plan_turn_on(room_id, current_hour),
+                turned_on: true,
+            },
+            ButtonAction::Toggle => self.plan_toggle(room_id, current_hour, lights_on),
+            ButtonAction::OffPress => ManualActionPlan::Dispatch {
+                dispatch: self.plan_turn_off(room_id, current_hour),
+                turned_on: false,
+            },
+            ButtonAction::Reset => ManualActionPlan::Dispatch {
+                dispatch: self.plan_reset(room_id, current_hour),
+                turned_on: true,
+            },
+            ButtonAction::UpPress => ManualActionPlan::Dispatch {
+                dispatch: self.plan_dim(room_id, current_hour, 20.0),
+                turned_on: true,
+            },
+            ButtonAction::DownPress => ManualActionPlan::Dispatch {
+                dispatch: self.plan_dim(room_id, current_hour, -20.0),
+                turned_on: true,
+            },
+            ButtonAction::UpHold => ManualActionPlan::Dispatch {
+                dispatch: self.plan_step(room_id, current_hour, StepAction::Brighten),
+                turned_on: true,
+            },
+            ButtonAction::DownHold => ManualActionPlan::Dispatch {
+                dispatch: self.plan_step(room_id, current_hour, StepAction::Dim),
+                turned_on: true,
+            },
+            ButtonAction::Stop => ManualActionPlan::Noop { turned_on: false },
+            ButtonAction::RhythmOn => {
+                let room = self.rooms.get_or_create(room_id, room_id);
+                room.enable_rhythm();
+                ManualActionPlan::Noop { turned_on: false }
+            }
+            ButtonAction::RhythmOff => {
+                if let Some(room) = self.rooms.get_mut(room_id) {
+                    room.disable_rhythm();
+                }
+                self.clear_periodic_dedupe_room(room_id);
+                ManualActionPlan::Noop { turned_on: false }
+            }
+            ButtonAction::LightsOff => ManualActionPlan::Dispatch {
+                dispatch: self.plan_lights_off(room_id, None),
+                turned_on: false,
+            },
+            ButtonAction::SleepOn => {
+                self.set_light_profile(crate::light_profile::SLEEP_PROFILE_ID);
+                ManualActionPlan::Dispatch {
+                    dispatch: self.plan_turn_off(room_id, current_hour),
+                    turned_on: false,
+                }
+            }
+            ButtonAction::SleepOff => {
+                self.set_light_profile(crate::light_profile::RHYTHM_PROFILE_ID);
+                ManualActionPlan::Dispatch {
+                    dispatch: self.plan_turn_on(room_id, current_hour),
+                    turned_on: true,
+                }
+            }
+        }
     }
 
     fn should_dispatch_periodic_command(

@@ -26,6 +26,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 tower = { version = "0.4", features = ["util"] }
 rhythm-core = { path = "../rhythm-core", features = ["test-support"] }
 rhythm-hue = { path = "../../integrations/rhythm-hue", features = ["test-support"] }

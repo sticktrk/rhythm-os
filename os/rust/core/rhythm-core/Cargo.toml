@@ -26,7 +26,7 @@ sunrise = "3.0"
 # Runtime dependencies
 anyhow = "1.0"
 log = "0.4"
-tokio = { version = "1.0", features = ["rt", "time", "sync"] }
+tokio = { version = "1.0", features = ["rt", "rt-multi-thread", "time", "sync"] }
 futures = { version = "0.3" }
 
 [dev-dependencies]

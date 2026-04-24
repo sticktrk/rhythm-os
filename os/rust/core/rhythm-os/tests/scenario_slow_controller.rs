@@ -8,9 +8,21 @@
 
 mod harness;
 
+use async_trait::async_trait;
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use harness::{rooms_with_lights, TestHarness};
+use rhythm_core::controller::{LightControlResult, LightController};
+use rhythm_core::lighting::LightingCommand;
+use rhythm_core::room::Room;
+use rhythm_core::runtime::events::InputEvent;
+use rhythm_core::runtime::handle::RuntimeHandle;
+use rhythm_core::runtime::orchestrator::RhythmRuntime;
+use rhythm_core::runtime::registry::SimpleDeviceRegistry;
+use rhythm_core::runtime::scheduler::NoOpScheduler;
+use rhythm_core::runtime::time::MockTimeProvider;
+use rhythm_core::runtime::RuntimeConfig;
 use rhythm_core::ButtonAction;
 use rhythm_os::event_loop::{handle_hub_event, MotionTimerState};
 use rhythm_os::hub::HubEvent;
@@ -45,6 +57,133 @@ fn wait_until(timeout: Duration, mut predicate: impl FnMut() -> bool, failure: &
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(predicate(), "{failure}");
+}
+
+struct BlockingController {
+    started: Arc<(Mutex<bool>, Condvar)>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl BlockingController {
+    fn new() -> Self {
+        Self {
+            started: Arc::new((Mutex::new(false), Condvar::new())),
+            release: Arc::new((Mutex::new(false), Condvar::new())),
+        }
+    }
+
+    fn wait_started(&self, timeout: Duration) -> bool {
+        let (lock, cvar) = &*self.started;
+        let started = lock.lock().unwrap();
+        let (started, _) = cvar
+            .wait_timeout_while(started, timeout, |started| !*started)
+            .unwrap();
+        *started
+    }
+
+    fn release(&self) {
+        let (lock, cvar) = &*self.release;
+        *lock.lock().unwrap() = true;
+        cvar.notify_all();
+    }
+
+    fn block_until_released(&self) {
+        {
+            let (lock, cvar) = &*self.started;
+            *lock.lock().unwrap() = true;
+            cvar.notify_all();
+        }
+
+        let (lock, cvar) = &*self.release;
+        let released = lock.lock().unwrap();
+        let _released = cvar.wait_while(released, |released| !*released).unwrap();
+    }
+}
+
+#[async_trait]
+impl LightController for BlockingController {
+    async fn turn_on(&self, _room_id: &str, _command: LightingCommand) -> LightControlResult<()> {
+        self.block_until_released();
+        Ok(())
+    }
+
+    async fn turn_off(
+        &self,
+        _room_id: &str,
+        _transition_ms: Option<u32>,
+    ) -> LightControlResult<()> {
+        Ok(())
+    }
+
+    async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
+        Ok(vec![])
+    }
+
+    async fn is_connected(&self) -> bool {
+        true
+    }
+
+    async fn any_lights_on(&self, _room_id: &str) -> LightControlResult<bool> {
+        Ok(false)
+    }
+
+    fn name(&self) -> &str {
+        "blocking-test"
+    }
+}
+
+#[test]
+fn in_flight_button_command_does_not_hold_engine_state_lock() {
+    let controller = Arc::new(BlockingController::new());
+    let runtime = Arc::new(RhythmRuntime::new(
+        controller.clone(),
+        MockTimeProvider::new(14.0, 172, 2026),
+        NoOpScheduler::new(),
+        SimpleDeviceRegistry::new(),
+        RuntimeConfig::default(),
+    ));
+    RuntimeHandle::add_room(runtime.as_ref(), "room-a", "Room A");
+    RuntimeHandle::add_room(runtime.as_ref(), "room-b", "Room B");
+
+    let event_runtime = runtime.clone();
+    let event_thread = std::thread::spawn(move || {
+        RuntimeHandle::handle_event(
+            event_runtime.as_ref(),
+            &InputEvent::new("room-a", ButtonAction::OnPress),
+        )
+    });
+
+    assert!(
+        controller.wait_started(Duration::from_secs(1)),
+        "test controller should enter the blocking turn_on call"
+    );
+
+    let (read_tx, read_rx) = mpsc::channel();
+    let read_runtime = runtime.clone();
+    let reader_thread = std::thread::spawn(move || {
+        let started = Instant::now();
+        let snapshots = RuntimeHandle::engine_all_room_snapshots(read_runtime.as_ref());
+        read_tx.send((started.elapsed(), snapshots.len())).unwrap();
+    });
+
+    let read_result = read_rx.recv_timeout(Duration::from_millis(100));
+    controller.release();
+    event_thread
+        .join()
+        .expect("button thread should not panic")
+        .expect("button action should complete after release");
+    reader_thread
+        .join()
+        .expect("reader thread should not panic");
+
+    let (elapsed, snapshot_count) =
+        read_result.expect("engine snapshots should be readable while controller I/O is in flight");
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "engine snapshot read was blocked by controller I/O for {:?}",
+        elapsed
+    );
+    assert_eq!(snapshot_count, 2);
 }
 
 #[test]

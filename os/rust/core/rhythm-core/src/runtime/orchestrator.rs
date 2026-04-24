@@ -10,7 +10,7 @@ use tracing::{debug, info};
 
 use crate::controller::LightController;
 use crate::light_profile::LightProfileConfig;
-use crate::primitives::RhythmEngine;
+use crate::primitives::{ManualActionPlan, ManualDispatchPlan, RhythmEngine};
 use crate::room::ModeConfig;
 use crate::solar::{SolarTime, SunTimes};
 
@@ -196,7 +196,7 @@ where
     ///
     /// This routes the event to the appropriate RhythmEngine primitive.
     /// Returns true if the action resulted in lights being turned on.
-    #[allow(clippy::await_holding_lock)] // Intentional: sync RwLock with blocking engine ops
+    #[allow(clippy::await_holding_lock)] // Intentional: same-room I/O stays serialized; engine state is not held across awaits.
     pub async fn handle_event(&self, event: &InputEvent) -> RuntimeResult<bool> {
         let current_hour = self.current_hour();
 
@@ -205,82 +205,75 @@ where
             event.room_id, event.action, event.device_id
         );
 
-        let mut engine = self
-            .engine
-            .write()
-            .map_err(|e| RuntimeError::Internal(format!("Failed to lock engine: {}", e)))?;
-
         match event.action {
-            ButtonAction::OnPress => {
-                info!("turn_on for {}", event.room_id);
-                engine.turn_on(&event.room_id, current_hour).await?;
-                Ok(true)
+            ButtonAction::OnPress => info!("turn_on for {}", event.room_id),
+            ButtonAction::Toggle => info!("toggle for {}", event.room_id),
+            ButtonAction::OffPress => info!("turn_off for {}", event.room_id),
+            ButtonAction::Reset => info!("reset for {}", event.room_id),
+            ButtonAction::UpPress => info!("dim_up for {}", event.room_id),
+            ButtonAction::DownPress => info!("dim_down for {}", event.room_id),
+            ButtonAction::UpHold => info!("step_up for {}", event.room_id),
+            ButtonAction::DownHold => info!("step_down for {}", event.room_id),
+            ButtonAction::Stop => debug!("stop (ignored) for {}", event.room_id),
+            ButtonAction::RhythmOn => info!("rhythm_on for {}", event.room_id),
+            ButtonAction::RhythmOff => info!("rhythm_off for {}", event.room_id),
+            ButtonAction::LightsOff => info!("lights_off for {}", event.room_id),
+            ButtonAction::SleepOn => info!("sleep_on for {}", event.room_id),
+            ButtonAction::SleepOff => info!("sleep_off for {}", event.room_id),
+        }
+
+        let dispatch_lock = self.dispatch_lock(&event.room_id);
+        let _dispatch_guard = dispatch_lock
+            .lock()
+            .map_err(|e| RuntimeError::Internal(format!("Failed to lock dispatch gate: {}", e)))?;
+        let mut lights_on = None;
+
+        loop {
+            let plan = {
+                let mut engine = self
+                    .engine
+                    .write()
+                    .map_err(|e| RuntimeError::Internal(format!("Failed to lock engine: {}", e)))?;
+                engine.plan_button_action(&event.room_id, event.action, current_hour, lights_on)
+            };
+
+            match plan {
+                ManualActionPlan::Noop { turned_on } => return Ok(turned_on),
+                ManualActionPlan::RequiresLightCheck => {
+                    lights_on = Some(self.controller.any_lights_on(&event.room_id).await?);
+                }
+                ManualActionPlan::Dispatch {
+                    dispatch,
+                    turned_on,
+                } => {
+                    self.dispatch_manual_plan(dispatch).await?;
+                    return Ok(turned_on);
+                }
             }
-            ButtonAction::Toggle => {
-                info!("toggle for {}", event.room_id);
-                let turned_on = engine.toggle(&event.room_id, current_hour).await?;
-                Ok(turned_on)
+        }
+    }
+
+    async fn dispatch_manual_plan(&self, dispatch: ManualDispatchPlan) -> RuntimeResult<()> {
+        match dispatch {
+            ManualDispatchPlan::TurnOn {
+                source_room_id,
+                target_id,
+                command,
+            } => {
+                self.controller.turn_on(&target_id, command.clone()).await?;
+                let mut engine = self
+                    .engine
+                    .write()
+                    .map_err(|e| RuntimeError::Internal(format!("Failed to lock engine: {}", e)))?;
+                engine.record_turn_on_dispatch(&source_room_id, &target_id, command);
+                Ok(())
             }
-            ButtonAction::OffPress => {
-                info!("turn_off for {}", event.room_id);
-                engine.turn_off(&event.room_id, current_hour).await?;
-                Ok(false)
-            }
-            ButtonAction::Reset => {
-                info!("reset for {}", event.room_id);
-                engine.reset(&event.room_id, current_hour).await?;
-                Ok(true)
-            }
-            ButtonAction::UpPress => {
-                info!("dim_up for {}", event.room_id);
-                engine.dim_up(&event.room_id, current_hour, None).await?;
-                Ok(true)
-            }
-            ButtonAction::DownPress => {
-                info!("dim_down for {}", event.room_id);
-                engine.dim_down(&event.room_id, current_hour, None).await?;
-                Ok(true)
-            }
-            ButtonAction::UpHold => {
-                info!("step_up for {}", event.room_id);
-                engine.step_up(&event.room_id, current_hour).await?;
-                Ok(true)
-            }
-            ButtonAction::DownHold => {
-                info!("step_down for {}", event.room_id);
-                engine.step_down(&event.room_id, current_hour).await?;
-                Ok(true)
-            }
-            ButtonAction::Stop => {
-                debug!("stop (ignored) for {}", event.room_id);
-                Ok(false)
-            }
-            ButtonAction::RhythmOn => {
-                info!("rhythm_on for {}", event.room_id);
-                engine.rhythm_on(&event.room_id).await?;
-                Ok(false) // No lights changed
-            }
-            ButtonAction::RhythmOff => {
-                info!("rhythm_off for {}", event.room_id);
-                engine.rhythm_off(&event.room_id).await?;
-                Ok(false)
-            }
-            ButtonAction::LightsOff => {
-                info!("lights_off for {}", event.room_id);
-                engine.lights_off(&event.room_id, None).await?;
-                Ok(false)
-            }
-            ButtonAction::SleepOn => {
-                info!("sleep_on for {}", event.room_id);
-                engine.set_light_profile(crate::light_profile::SLEEP_PROFILE_ID);
-                engine.turn_off(&event.room_id, current_hour).await?;
-                Ok(false)
-            }
-            ButtonAction::SleepOff => {
-                info!("sleep_off for {}", event.room_id);
-                engine.set_light_profile(crate::light_profile::RHYTHM_PROFILE_ID);
-                engine.turn_on(&event.room_id, current_hour).await?;
-                Ok(true)
+            ManualDispatchPlan::TurnOff {
+                target_id,
+                transition_ms,
+            } => {
+                self.controller.turn_off(&target_id, transition_ms).await?;
+                Ok(())
             }
         }
     }

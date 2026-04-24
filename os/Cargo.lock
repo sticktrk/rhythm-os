@@ -1796,6 +1796,7 @@ name = "rhythm-os"
 version = "0.4.168-beta"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "chrono",
  "futures",

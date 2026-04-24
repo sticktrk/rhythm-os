@@ -7,7 +7,7 @@
 use crate::controller::LightController;
 use crate::light_profile::LightProfileConfig;
 use crate::lighting::LightingCommand;
-use crate::primitives::PeriodicTickPlan;
+use crate::primitives::{ManualDispatchPlan, PeriodicTickPlan};
 use crate::room::{LightNodeKind, ModeConfig, RoomModeState, RoomProfileSettings};
 use crate::solar::SolarTime;
 use anyhow::Result;
@@ -299,6 +299,44 @@ impl From<&RestoredNodeState> for RestoredRoomState {
 // Blanket impl — any RhythmRuntime<C,T,S,R> satisfies RuntimeHandle
 // ============================================================================
 
+fn dispatch_manual_plan<C, T, S, R>(
+    runtime: &RhythmRuntime<C, T, S, R>,
+    dispatch: ManualDispatchPlan,
+) -> Result<()>
+where
+    C: LightController + Send + Sync + 'static,
+    T: TimeProvider + Send + Sync + 'static,
+    S: Scheduler + Send + Sync + 'static,
+    R: DeviceRegistry + Send + Sync + 'static,
+{
+    match dispatch {
+        ManualDispatchPlan::TurnOn {
+            source_room_id,
+            target_id,
+            command,
+        } => {
+            crate::runtime::executor::block_on(
+                runtime.controller().turn_on(&target_id, command.clone()),
+            )
+            .map_err(|e| anyhow::anyhow!("turn_on failed: {}", e))?;
+
+            let mut engine = runtime
+                .engine()
+                .write()
+                .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
+            engine.record_turn_on_dispatch(&source_room_id, &target_id, command);
+            Ok(())
+        }
+        ManualDispatchPlan::TurnOff {
+            target_id,
+            transition_ms,
+        } => crate::runtime::executor::block_on(
+            runtime.controller().turn_off(&target_id, transition_ms),
+        )
+        .map_err(|e| anyhow::anyhow!("turn_off failed: {}", e)),
+    }
+}
+
 impl<C, T, S, R> RuntimeHandle for RhythmRuntime<C, T, S, R>
 where
     C: LightController + Send + Sync + 'static,
@@ -307,10 +345,6 @@ where
     R: DeviceRegistry + Send + Sync + 'static,
 {
     fn handle_event(&self, event: &InputEvent) -> Result<bool> {
-        let dispatch_lock = self.dispatch_lock(&event.room_id);
-        let _dispatch_guard = dispatch_lock
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Failed to lock dispatch gate: {}", e))?;
         Ok(crate::runtime::executor::block_on(
             RhythmRuntime::handle_event(self, event),
         )?)
@@ -651,12 +685,19 @@ where
             .lock()
             .map_err(|e| anyhow::anyhow!("Failed to lock dispatch gate: {}", e))?;
         let current_hour = self.current_hour();
-        let mut engine = self
-            .engine()
-            .write()
-            .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
-        crate::runtime::executor::block_on(engine.dim_to_factor(room_id, current_hour, factor))
-            .map_err(|e| anyhow::anyhow!("dim_to_factor failed: {}", e))
+        let dispatch = {
+            let mut engine = self
+                .engine()
+                .write()
+                .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
+            engine.plan_dim_to_factor(room_id, current_hour, factor)
+        };
+        if let Some(dispatch) = dispatch {
+            dispatch_manual_plan(self, dispatch)
+                .map_err(|e| anyhow::anyhow!("dim_to_factor failed: {}", e))
+        } else {
+            Ok(())
+        }
     }
 
     fn turn_on_room(&self, room_id: &str) -> Result<()> {
@@ -665,12 +706,14 @@ where
             .lock()
             .map_err(|e| anyhow::anyhow!("Failed to lock dispatch gate: {}", e))?;
         let current_hour = self.current_hour();
-        let mut engine = self
-            .engine()
-            .write()
-            .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
-        crate::runtime::executor::block_on(engine.turn_on(room_id, current_hour))
-            .map_err(|e| anyhow::anyhow!("turn_on failed: {}", e))
+        let dispatch = {
+            let mut engine = self
+                .engine()
+                .write()
+                .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
+            engine.plan_turn_on(room_id, current_hour)
+        };
+        dispatch_manual_plan(self, dispatch)
     }
 
     fn apply_room_command(&self, room_id: &str, command: LightingCommand) -> Result<()> {
@@ -695,15 +738,15 @@ where
             engine.invalidate_periodic_cache_for_room(room_id);
         }
 
-        crate::runtime::executor::block_on(self.controller().turn_on(room_id, command.clone()))
-            .map_err(|e| anyhow::anyhow!("apply_room_command failed: {}", e))?;
-
-        let mut engine = self
-            .engine()
-            .write()
-            .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
-        engine.record_turn_on_dispatch(room_id, room_id, command);
-        Ok(())
+        dispatch_manual_plan(
+            self,
+            ManualDispatchPlan::TurnOn {
+                source_room_id: room_id.to_string(),
+                target_id: room_id.to_string(),
+                command,
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("apply_room_command failed: {}", e))
     }
 
     fn lights_off_room(&self, room_id: &str, transition_ms: Option<u32>) -> Result<()> {
@@ -711,11 +754,14 @@ where
         let _dispatch_guard = dispatch_lock
             .lock()
             .map_err(|e| anyhow::anyhow!("Failed to lock dispatch gate: {}", e))?;
-        let mut engine = self
-            .engine()
-            .write()
-            .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
-        crate::runtime::executor::block_on(engine.lights_off(room_id, transition_ms))
+        let dispatch = {
+            let mut engine = self
+                .engine()
+                .write()
+                .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
+            engine.plan_lights_off(room_id, transition_ms)
+        };
+        dispatch_manual_plan(self, dispatch)
             .map_err(|e| anyhow::anyhow!("lights_off failed: {}", e))
     }
 
@@ -737,11 +783,14 @@ where
             .lock()
             .map_err(|e| anyhow::anyhow!("Failed to lock dispatch gate: {}", e))?;
         let current_hour = self.current_hour();
-        let mut engine = self
-            .engine()
-            .write()
-            .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
-        crate::runtime::executor::block_on(engine.set_brightness(room_id, current_hour, brightness))
+        let dispatch = {
+            let mut engine = self
+                .engine()
+                .write()
+                .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
+            engine.plan_set_brightness(room_id, current_hour, brightness)
+        };
+        dispatch_manual_plan(self, dispatch)
             .map_err(|e| anyhow::anyhow!("set_brightness failed: {}", e))
     }
 
@@ -751,16 +800,19 @@ where
             .lock()
             .map_err(|e| anyhow::anyhow!("Failed to lock dispatch gate: {}", e))?;
         let current_hour = self.current_hour();
-        let mut engine = self
-            .engine()
-            .write()
-            .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
-        crate::runtime::executor::block_on(engine.set_time_offset(
-            room_id,
-            current_hour,
-            offset_minutes,
-        ))
-        .map_err(|e| anyhow::anyhow!("set_time_offset failed: {}", e))
+        let dispatch = {
+            let mut engine = self
+                .engine()
+                .write()
+                .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
+            engine.plan_set_time_offset(room_id, current_hour, offset_minutes)
+        };
+        if let Some(dispatch) = dispatch {
+            dispatch_manual_plan(self, dispatch)
+                .map_err(|e| anyhow::anyhow!("set_time_offset failed: {}", e))
+        } else {
+            Ok(())
+        }
     }
 
     fn idle_brightness(&self) -> u8 {
@@ -777,11 +829,14 @@ where
             .lock()
             .map_err(|e| anyhow::anyhow!("Failed to lock dispatch gate: {}", e))?;
         let current_hour = self.current_hour();
-        let mut engine = self
-            .engine()
-            .write()
-            .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
-        crate::runtime::executor::block_on(engine.soft_off_tick(room_id, current_hour))
+        let dispatch = {
+            let mut engine = self
+                .engine()
+                .write()
+                .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
+            engine.plan_soft_off_tick(room_id, current_hour)
+        };
+        dispatch_manual_plan(self, dispatch)
             .map_err(|e| anyhow::anyhow!("soft_off_tick failed: {}", e))
     }
 
