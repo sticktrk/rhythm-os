@@ -1,5 +1,185 @@
 import '../json_parsing.dart';
 
+class RhythmTimerBreakpoint {
+  final double hour;
+  final int value;
+
+  const RhythmTimerBreakpoint({
+    required this.hour,
+    required this.value,
+  });
+
+  factory RhythmTimerBreakpoint.fromJson(Map<String, dynamic> json) =>
+      RhythmTimerBreakpoint(
+        hour: jsonDouble(json['hour'], preferredKeys: const ['hour']) ?? 0.0,
+        value: jsonInt(json['value'], preferredKeys: const ['value']) ?? 0,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'hour': hour,
+        'value': value,
+      };
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RhythmTimerBreakpoint &&
+          hour == other.hour &&
+          value == other.value;
+
+  @override
+  int get hashCode => Object.hash(hour, value);
+}
+
+sealed class RhythmTimerSetting {
+  const RhythmTimerSetting();
+
+  const factory RhythmTimerSetting.auto() = RhythmAutoTimerSetting;
+  const factory RhythmTimerSetting.fixed(int value) = RhythmFixedTimerSetting;
+  const factory RhythmTimerSetting.scheduled(
+    List<RhythmTimerBreakpoint> breakpoints,
+  ) = RhythmScheduledTimerSetting;
+
+  factory RhythmTimerSetting.fromJson(dynamic json) {
+    if (json is num) return RhythmTimerSetting.fixed(json.toInt());
+    if (json is String) {
+      final parsed = int.tryParse(json);
+      if (parsed != null) return RhythmTimerSetting.fixed(parsed);
+    }
+
+    final map = jsonMap(json);
+    if (map == null) return const RhythmTimerSetting.auto();
+
+    final mode = map['mode'] as String?;
+    if (mode == 'scheduled' || map['breakpoints'] is List<dynamic>) {
+      return RhythmTimerSetting.scheduled(
+        (map['breakpoints'] as List<dynamic>? ?? const <dynamic>[])
+            .map(jsonMap)
+            .nonNulls
+            .map(RhythmTimerBreakpoint.fromJson)
+            .toList(growable: false),
+      );
+    }
+
+    final fixedValue = jsonInt(map['value'], preferredKeys: const ['value']);
+    if (mode == 'fixed' || fixedValue != null) {
+      return RhythmTimerSetting.fixed(fixedValue ?? 0);
+    }
+
+    return const RhythmTimerSetting.auto();
+  }
+
+  Map<String, dynamic> toJson();
+
+  bool get isAuto;
+  bool get isFixed;
+  bool get isScheduled;
+
+  int? get fixedValue;
+  List<RhythmTimerBreakpoint> get breakpoints;
+}
+
+class RhythmAutoTimerSetting extends RhythmTimerSetting {
+  const RhythmAutoTimerSetting();
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'mode': 'auto',
+      };
+
+  @override
+  bool get isAuto => true;
+
+  @override
+  bool get isFixed => false;
+
+  @override
+  bool get isScheduled => false;
+
+  @override
+  int? get fixedValue => null;
+
+  @override
+  List<RhythmTimerBreakpoint> get breakpoints =>
+      const <RhythmTimerBreakpoint>[];
+
+  @override
+  bool operator ==(Object other) => other is RhythmAutoTimerSetting;
+
+  @override
+  int get hashCode => 0;
+}
+
+class RhythmFixedTimerSetting extends RhythmTimerSetting {
+  final int value;
+
+  const RhythmFixedTimerSetting(this.value);
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'mode': 'fixed',
+        'value': value,
+      };
+
+  @override
+  bool get isAuto => false;
+
+  @override
+  bool get isFixed => true;
+
+  @override
+  bool get isScheduled => false;
+
+  @override
+  int? get fixedValue => value;
+
+  @override
+  List<RhythmTimerBreakpoint> get breakpoints =>
+      const <RhythmTimerBreakpoint>[];
+
+  @override
+  bool operator ==(Object other) =>
+      other is RhythmFixedTimerSetting && other.value == value;
+
+  @override
+  int get hashCode => value.hashCode;
+}
+
+class RhythmScheduledTimerSetting extends RhythmTimerSetting {
+  @override
+  final List<RhythmTimerBreakpoint> breakpoints;
+
+  const RhythmScheduledTimerSetting(this.breakpoints);
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'mode': 'scheduled',
+        'breakpoints':
+            breakpoints.map((breakpoint) => breakpoint.toJson()).toList(),
+      };
+
+  @override
+  bool get isAuto => false;
+
+  @override
+  bool get isFixed => false;
+
+  @override
+  bool get isScheduled => true;
+
+  @override
+  int? get fixedValue => null;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RhythmScheduledTimerSetting &&
+          _listEquals(breakpoints, other.breakpoints);
+
+  @override
+  int get hashCode => Object.hashAll(breakpoints);
+}
+
 /// RGB color payload from the server.
 class RhythmRgbColor {
   final int r;
@@ -398,9 +578,12 @@ class RhythmCurveConfig {
   final int minBrightness;
   final int maxBrightness;
   final int maxDimSteps;
-  final int? fadeMs;
-  final int? motionTimeoutSecs;
-  final int? rhythmIntervalSecs;
+  final RhythmTimerSetting? _fadeSetting;
+  final RhythmTimerSetting? _motionTimeoutSetting;
+  final RhythmTimerSetting? _rhythmIntervalSetting;
+  final int? _fadeMsLegacy;
+  final int? _motionTimeoutSecsLegacy;
+  final int? _rhythmIntervalSecsLegacy;
 
   const RhythmCurveConfig({
     this.id = '',
@@ -417,16 +600,25 @@ class RhythmCurveConfig {
     double shapeP = defaultShapeP,
     RhythmDirectColor? directColor,
     this.maxDimSteps = defaultMaxDimSteps,
-    this.fadeMs = defaultFadeMs,
-    this.motionTimeoutSecs = defaultMotionTimeoutSecs,
-    this.rhythmIntervalSecs = defaultRhythmIntervalSecs,
+    RhythmTimerSetting? fadeSetting,
+    RhythmTimerSetting? motionTimeoutSetting,
+    RhythmTimerSetting? rhythmIntervalSetting,
+    int? fadeMs = defaultFadeMs,
+    int? motionTimeoutSecs = defaultMotionTimeoutSecs,
+    int? rhythmIntervalSecs = defaultRhythmIntervalSecs,
   })  : _curve = curve,
         _widthLeftBri = widthLeftBri,
         _widthRightBri = widthRightBri,
         _widthLeftCct = widthLeftCct,
         _widthRightCct = widthRightCct,
         _shapeP = shapeP,
-        _directColor = directColor;
+        _directColor = directColor,
+        _fadeSetting = fadeSetting,
+        _motionTimeoutSetting = motionTimeoutSetting,
+        _rhythmIntervalSetting = rhythmIntervalSetting,
+        _fadeMsLegacy = fadeMs,
+        _motionTimeoutSecsLegacy = motionTimeoutSecs,
+        _rhythmIntervalSecsLegacy = rhythmIntervalSecs;
 
   factory RhythmCurveConfig.fromJson(Map<String, dynamic> json) {
     final curveJson = jsonMap(json['curve']);
@@ -459,15 +651,21 @@ class RhythmCurveConfig {
       maxDimSteps: jsonInt(json['max_dim_steps'],
               preferredKeys: const ['max_dim_steps']) ??
           defaultMaxDimSteps,
-      fadeMs: jsonInt(json['fade_ms'], preferredKeys: const ['fade_ms']),
-      motionTimeoutSecs: jsonInt(
-        json['motion_timeout_secs'],
-        preferredKeys: const ['motion_timeout_secs', 'timeout_secs'],
+      fadeSetting: _timerSettingFromJson(
+        json,
+        'fade_ms',
       ),
-      rhythmIntervalSecs: jsonInt(
-            json['rhythm_interval_secs'],
-            preferredKeys: const ['rhythm_interval_secs'],
-          ),
+      motionTimeoutSetting: _timerSettingFromJson(
+        json,
+        'motion_timeout_secs',
+      ),
+      rhythmIntervalSetting: _timerSettingFromJson(
+        json,
+        'rhythm_interval_secs',
+      ),
+      fadeMs: null,
+      motionTimeoutSecs: null,
+      rhythmIntervalSecs: null,
     );
   }
 
@@ -497,6 +695,17 @@ class RhythmCurveConfig {
       superGaussianCurve?.widthRightCct ?? defaultWidthRightCct;
   double get shapeP => superGaussianCurve?.shapeP ?? defaultShapeP;
   RhythmDirectColor? get directColor => superGaussianCurve?.directColor;
+  RhythmTimerSetting? get fadeSetting =>
+      _fadeSetting ?? _timerSettingFromLegacyValue(_fadeMsLegacy);
+  RhythmTimerSetting? get motionTimeoutSetting =>
+      _motionTimeoutSetting ??
+      _timerSettingFromLegacyValue(_motionTimeoutSecsLegacy);
+  RhythmTimerSetting? get rhythmIntervalSetting =>
+      _rhythmIntervalSetting ??
+      _timerSettingFromLegacyValue(_rhythmIntervalSecsLegacy);
+  int? get fadeMs => fadeSetting?.fixedValue;
+  int? get motionTimeoutSecs => motionTimeoutSetting?.fixedValue;
+  int? get rhythmIntervalSecs => rhythmIntervalSetting?.fixedValue;
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -507,10 +716,11 @@ class RhythmCurveConfig {
         'min_brightness': minBrightness,
         'max_brightness': maxBrightness,
         'max_dim_steps': maxDimSteps,
-        if (fadeMs != null) 'fade_ms': fadeMs,
-        if (motionTimeoutSecs != null) 'motion_timeout_secs': motionTimeoutSecs,
-        if (rhythmIntervalSecs != null)
-          'rhythm_interval_secs': rhythmIntervalSecs,
+        if (fadeSetting != null) 'fade_ms': fadeSetting!.toJson(),
+        if (motionTimeoutSetting != null)
+          'motion_timeout_secs': motionTimeoutSetting!.toJson(),
+        if (rhythmIntervalSetting != null)
+          'rhythm_interval_secs': rhythmIntervalSetting!.toJson(),
       };
 
   Map<String, dynamic> toQueryParams() => {
@@ -539,9 +749,12 @@ class RhythmCurveConfig {
     double? shapeP,
     RhythmDirectColor? directColor,
     int? maxDimSteps,
-    int? fadeMs,
-    int? motionTimeoutSecs,
-    int? rhythmIntervalSecs,
+    Object? fadeSetting = _curveConfigCopySentinel,
+    Object? motionTimeoutSetting = _curveConfigCopySentinel,
+    Object? rhythmIntervalSetting = _curveConfigCopySentinel,
+    Object? fadeMs = _curveConfigCopySentinel,
+    Object? motionTimeoutSecs = _curveConfigCopySentinel,
+    Object? rhythmIntervalSecs = _curveConfigCopySentinel,
   }) {
     final nextCurve = curve ??
         (() {
@@ -565,6 +778,23 @@ class RhythmCurveConfig {
           }
           return this.curve;
         })();
+    final nextFadeSetting = !identical(fadeSetting, _curveConfigCopySentinel)
+        ? fadeSetting as RhythmTimerSetting?
+        : !identical(fadeMs, _curveConfigCopySentinel)
+            ? _timerSettingFromLegacyValue(fadeMs as int?)
+            : this.fadeSetting;
+    final nextMotionTimeoutSetting =
+        !identical(motionTimeoutSetting, _curveConfigCopySentinel)
+            ? motionTimeoutSetting as RhythmTimerSetting?
+            : !identical(motionTimeoutSecs, _curveConfigCopySentinel)
+                ? _timerSettingFromLegacyValue(motionTimeoutSecs as int?)
+                : this.motionTimeoutSetting;
+    final nextRhythmIntervalSetting =
+        !identical(rhythmIntervalSetting, _curveConfigCopySentinel)
+            ? rhythmIntervalSetting as RhythmTimerSetting?
+            : !identical(rhythmIntervalSecs, _curveConfigCopySentinel)
+                ? _timerSettingFromLegacyValue(rhythmIntervalSecs as int?)
+                : this.rhythmIntervalSetting;
     return RhythmCurveConfig(
       id: id ?? this.id,
       name: name ?? this.name,
@@ -574,9 +804,12 @@ class RhythmCurveConfig {
       minBrightness: minBrightness ?? this.minBrightness,
       maxBrightness: maxBrightness ?? this.maxBrightness,
       maxDimSteps: maxDimSteps ?? this.maxDimSteps,
-      fadeMs: fadeMs ?? this.fadeMs,
-      motionTimeoutSecs: motionTimeoutSecs ?? this.motionTimeoutSecs,
-      rhythmIntervalSecs: rhythmIntervalSecs ?? this.rhythmIntervalSecs,
+      fadeSetting: nextFadeSetting,
+      motionTimeoutSetting: nextMotionTimeoutSetting,
+      rhythmIntervalSetting: nextRhythmIntervalSetting,
+      fadeMs: null,
+      motionTimeoutSecs: null,
+      rhythmIntervalSecs: null,
     );
   }
 
@@ -592,9 +825,9 @@ class RhythmCurveConfig {
           minBrightness == other.minBrightness &&
           maxBrightness == other.maxBrightness &&
           maxDimSteps == other.maxDimSteps &&
-          fadeMs == other.fadeMs &&
-          motionTimeoutSecs == other.motionTimeoutSecs &&
-          rhythmIntervalSecs == other.rhythmIntervalSecs;
+          fadeSetting == other.fadeSetting &&
+          motionTimeoutSetting == other.motionTimeoutSetting &&
+          rhythmIntervalSetting == other.rhythmIntervalSetting;
 
   @override
   int get hashCode => Object.hash(
@@ -606,11 +839,27 @@ class RhythmCurveConfig {
         minBrightness,
         maxBrightness,
         maxDimSteps,
-        fadeMs,
-        motionTimeoutSecs,
-        rhythmIntervalSecs,
+        fadeSetting,
+        motionTimeoutSetting,
+        rhythmIntervalSetting,
       );
 }
+
+RhythmTimerSetting _timerSettingFromLegacyValue(int? value) => value == null
+    ? const RhythmTimerSetting.auto()
+    : RhythmTimerSetting.fixed(value);
+
+RhythmTimerSetting? _timerSettingFromJson(
+  Map<String, dynamic> json,
+  String key,
+) {
+  if (!json.containsKey(key)) return null;
+  final value = json[key];
+  if (value == null) return null;
+  return RhythmTimerSetting.fromJson(value);
+}
+
+const Object _curveConfigCopySentinel = Object();
 
 bool _listEquals<T>(List<T> a, List<T> b) {
   if (identical(a, b)) return true;

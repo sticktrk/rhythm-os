@@ -144,6 +144,16 @@ void main() {
         expect(config.maxColorTemp, RhythmCurveConfig.defaultMaxColorTemp);
         expect(config.shapeP, RhythmCurveConfig.defaultShapeP);
       });
+
+      test('parses fixed timer-setting maps', () {
+        final config = RhythmRawConfig.fromJson({
+          'fade_ms': {'mode': 'fixed', 'value': 450},
+          'motion_timeout_secs': {'mode': 'fixed', 'value': 900},
+        });
+
+        expect(config.fadeMs, 450);
+        expect(config.motionTimeoutSecs, 900);
+      });
     });
 
     group('toJson', () {

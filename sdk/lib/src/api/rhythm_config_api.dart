@@ -267,8 +267,8 @@ class RhythmConfigApi {
       minBrightness: raw.minBrightness,
       maxBrightness: raw.maxBrightness,
       maxDimSteps: raw.maxDimSteps,
-      fadeMs: raw.fadeMs,
-      motionTimeoutSecs: raw.motionTimeoutSecs,
+      fadeSetting: RhythmTimerSetting.fixed(raw.fadeMs),
+      motionTimeoutSetting: RhythmTimerSetting.fixed(raw.motionTimeoutSecs),
       curve: curve,
     );
   }
@@ -299,11 +299,11 @@ class RhythmConfigApi {
       minBrightness: overrides.minBrightness,
       maxBrightness: overrides.maxBrightness,
       maxDimSteps: overrides.maxDimSteps,
-      fadeMs: overrides.fadeMs ?? current.fadeMs,
-      motionTimeoutSecs:
-          overrides.motionTimeoutSecs ?? current.motionTimeoutSecs,
-      rhythmIntervalSecs:
-          overrides.rhythmIntervalSecs ?? current.rhythmIntervalSecs,
+      fadeSetting: overrides.fadeSetting ?? current.fadeSetting,
+      motionTimeoutSetting:
+          overrides.motionTimeoutSetting ?? current.motionTimeoutSetting,
+      rhythmIntervalSetting:
+          overrides.rhythmIntervalSetting ?? current.rhythmIntervalSetting,
       curve: nextCurve,
     );
   }

@@ -3,6 +3,30 @@ import 'package:test/test.dart';
 
 void main() {
   group('RhythmCurveConfig', () {
+    group('RhythmTimerSetting', () {
+      test('parses fixed, auto, and scheduled timer settings', () {
+        expect(
+          RhythmTimerSetting.fromJson({'mode': 'fixed', 'value': 123}),
+          const RhythmTimerSetting.fixed(123),
+        );
+        expect(
+          RhythmTimerSetting.fromJson({'mode': 'auto'}),
+          const RhythmTimerSetting.auto(),
+        );
+        expect(
+          RhythmTimerSetting.fromJson({
+            'mode': 'scheduled',
+            'breakpoints': [
+              {'hour': 8.0, 'value': 60},
+            ],
+          }),
+          const RhythmTimerSetting.scheduled([
+            RhythmTimerBreakpoint(hour: 8.0, value: 60),
+          ]),
+        );
+      });
+    });
+
     group('static constants', () {
       test('defaultMinColorTemp is 2200', () {
         expect(RhythmCurveConfig.defaultMinColorTemp, 2200);
@@ -99,6 +123,9 @@ void main() {
           'width_right_cct': 1.0,
           'shape_p': 5.0,
           'max_dim_steps': 8,
+          'fade_ms': {'mode': 'fixed', 'value': 450},
+          'motion_timeout_secs': {'mode': 'fixed', 'value': 700},
+          'rhythm_interval_secs': {'mode': 'fixed', 'value': 75},
         };
         final config = RhythmCurveConfig.fromJson(json);
         expect(config.minColorTemp, 2200);
@@ -111,6 +138,9 @@ void main() {
         expect(config.widthRightCct, 1.0);
         expect(config.shapeP, 5.0);
         expect(config.maxDimSteps, 8);
+        expect(config.fadeMs, 450);
+        expect(config.motionTimeoutSecs, 700);
+        expect(config.rhythmIntervalSecs, 75);
       });
 
       test('uses defaults for missing fields', () {
@@ -167,6 +197,30 @@ void main() {
         expect(config.widthRightCct, 1.0);
         expect(config.shapeP, 5.0);
       });
+
+      test('preserves auto and scheduled timer settings', () {
+        final config = RhythmCurveConfig.fromJson({
+          'fade_ms': {'mode': 'auto'},
+          'motion_timeout_secs': {
+            'mode': 'scheduled',
+            'breakpoints': [
+              {'hour': 8.0, 'value': 300},
+            ],
+          },
+          'rhythm_interval_secs': {'mode': 'fixed', 'value': 60},
+        });
+
+        expect(config.fadeSetting, const RhythmTimerSetting.auto());
+        expect(
+          config.motionTimeoutSetting,
+          const RhythmTimerSetting.scheduled([
+            RhythmTimerBreakpoint(hour: 8.0, value: 300),
+          ]),
+        );
+        expect(config.fadeMs, isNull);
+        expect(config.motionTimeoutSecs, isNull);
+        expect(config.rhythmIntervalSecs, 60);
+      });
     });
 
     group('toJson', () {
@@ -180,9 +234,21 @@ void main() {
         expect(json, containsPair('min_brightness', 1));
         expect(json, containsPair('max_brightness', 100));
         expect(json, containsPair('max_dim_steps', 12));
-        expect(json, containsPair('fade_ms', 500));
-        expect(json, containsPair('motion_timeout_secs', 600));
-        expect(json, containsPair('rhythm_interval_secs', 60));
+        expect(json, containsPair('fade_ms', {'mode': 'fixed', 'value': 500}));
+        expect(
+          json,
+          containsPair(
+            'motion_timeout_secs',
+            {'mode': 'fixed', 'value': 600},
+          ),
+        );
+        expect(
+          json,
+          containsPair(
+            'rhythm_interval_secs',
+            {'mode': 'fixed', 'value': 60},
+          ),
+        );
         expect(
           json['curve'],
           {
@@ -264,6 +330,14 @@ void main() {
         const original = RhythmCurveConfig();
         final copied = original.copyWith();
         expect(copied, original);
+      });
+
+      test('can switch a timer field to auto', () {
+        const original = RhythmCurveConfig();
+        final copied = original.copyWith(motionTimeoutSecs: null);
+
+        expect(copied.motionTimeoutSetting, const RhythmTimerSetting.auto());
+        expect(copied.motionTimeoutSecs, isNull);
       });
     });
 

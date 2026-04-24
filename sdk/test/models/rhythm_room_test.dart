@@ -194,6 +194,20 @@ void main() {
         expect(room.profileSettings?.motionTimeoutSecs, 123);
       });
 
+      test('parses typed profile settings fields', () {
+        final room = RhythmRoom.fromJson({
+          'profile_settings': {
+            'profile_id': 'sleep',
+            'fade_ms': {'mode': 'fixed', 'value': 1200},
+            'motion_timeout_secs': {'mode': 'fixed', 'value': 300},
+          },
+        });
+
+        expect(room.profileSettings?.profileId, 'sleep');
+        expect(room.profileSettings?.fadeMs, 1200);
+        expect(room.profileSettings?.motionTimeoutSecs, 300);
+      });
+
       test('prefers profile_settings over legacy room_profile', () {
         final room = RhythmRoom.fromJson({
           'profile_settings': {'motion_timeout_secs': 111},
@@ -474,6 +488,22 @@ void main() {
         expect(state.brightness, 75);
         expect(state.kelvin, 3500);
         expect(state.profileSettings?.motionTimeoutSecs, 77);
+      });
+
+      test('parses fixed timer settings in profile_settings', () {
+        final state = RhythmRoomState.fromJson({
+          'node_id': 'room-1',
+          'rhythm_enabled': true,
+          'profile_settings': {
+            'profile_id': 'sleep',
+            'fade_ms': {'mode': 'fixed', 'value': 900},
+            'motion_timeout_secs': {'mode': 'fixed', 'value': 180},
+          },
+        });
+
+        expect(state.profileSettings?.profileId, 'sleep');
+        expect(state.profileSettings?.fadeMs, 900);
+        expect(state.profileSettings?.motionTimeoutSecs, 180);
       });
 
       test('falls back to id field when room_id is missing', () {

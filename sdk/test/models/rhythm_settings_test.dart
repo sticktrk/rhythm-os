@@ -201,7 +201,7 @@ void main() {
             'min_color_temp': 2200,
             'max_color_temp': 6500,
             'max_dim_steps': 12,
-            'rhythm_interval_secs': 60,
+            'rhythm_interval_secs': {'mode': 'fixed', 'value': 60},
           },
           {
             'id': 'sleep',
@@ -218,9 +218,9 @@ void main() {
             'min_color_temp': 500,
             'max_color_temp': 500,
             'max_dim_steps': 12,
-            'fade_ms': 500,
-            'motion_timeout_secs': 1200,
-            'rhythm_interval_secs': 90,
+            'fade_ms': {'mode': 'fixed', 'value': 500},
+            'motion_timeout_secs': {'mode': 'fixed', 'value': 1200},
+            'rhythm_interval_secs': {'mode': 'fixed', 'value': 90},
           },
           {
             'id': 'sleep_idle',

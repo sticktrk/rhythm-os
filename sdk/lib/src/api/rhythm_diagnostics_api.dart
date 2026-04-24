@@ -130,7 +130,7 @@ class RhythmDiagnosticsApi {
     String? platformContext,
   }) async {
     try {
-      await _dio.post('api/configuration/reset');
+      await _dio.post('api/factory-reset');
       if (_isRpizPlatform(
         platformType: platformType,
         platformContext: platformContext,

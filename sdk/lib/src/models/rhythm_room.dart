@@ -1,4 +1,5 @@
 import '../json_parsing.dart';
+import 'rhythm_curve_config.dart' show RhythmTimerSetting;
 
 enum RhythmMode {
   day,
@@ -166,29 +167,57 @@ class RhythmHubRoomBinding {
 }
 
 class RhythmNodeProfileSettings {
-  final int? motionTimeoutSecs;
+  final String? profileId;
+  final RhythmTimerSetting? fadeSetting;
+  final RhythmTimerSetting? motionTimeoutSetting;
   final Map<String, dynamic> raw;
 
   const RhythmNodeProfileSettings({
-    this.motionTimeoutSecs,
+    this.profileId,
+    this.fadeSetting,
+    this.motionTimeoutSetting,
     this.raw = const <String, dynamic>{},
   });
 
-  bool get isEmpty => motionTimeoutSecs == null && raw.isEmpty;
+  int? get fadeMs => fadeSetting?.fixedValue;
+  int? get motionTimeoutSecs => motionTimeoutSetting?.fixedValue;
 
-  factory RhythmNodeProfileSettings.fromJson(Map<String, dynamic> json) =>
-      RhythmNodeProfileSettings(
-        motionTimeoutSecs: jsonInt(
-          json['motion_timeout_secs'],
-          preferredKeys: const ['motion_timeout_secs', 'timeout_secs'],
-        ),
-        raw: Map<String, dynamic>.from(json),
-      );
+  bool get isEmpty =>
+      profileId == null &&
+      fadeSetting == null &&
+      motionTimeoutSetting == null &&
+      raw.isEmpty;
+
+  factory RhythmNodeProfileSettings.fromJson(Map<String, dynamic> json) {
+    final raw = Map<String, dynamic>.from(json)
+      ..remove('profile_id')
+      ..remove('fade_ms')
+      ..remove('motion_timeout_secs');
+    return RhythmNodeProfileSettings(
+      profileId: json['profile_id'] as String?,
+      fadeSetting: _timerSettingFromJson(json, 'fade_ms'),
+      motionTimeoutSetting: _timerSettingFromJson(json, 'motion_timeout_secs'),
+      raw: raw,
+    );
+  }
 
   Map<String, dynamic> toJson() => {
         ...raw,
-        if (motionTimeoutSecs != null) 'motion_timeout_secs': motionTimeoutSecs,
+        if (profileId != null) 'profile_id': profileId,
+        if (fadeSetting != null) 'fade_ms': fadeSetting!.toJson(),
+        if (motionTimeoutSetting != null)
+          'motion_timeout_secs': motionTimeoutSetting!.toJson(),
       };
+}
+
+RhythmTimerSetting? _timerSettingFromJson(
+  Map<String, dynamic> json,
+  String key,
+) {
+  if (!json.containsKey(key)) return null;
+  final value = json[key];
+  if (value == null) return null;
+  return RhythmTimerSetting.fromJson(value);
 }
 
 /// A device from the Rhythm device registry.
@@ -641,6 +670,7 @@ class RhythmMotionTimer {
   final bool motionOwned;
   final int? remainingSecs;
   final int timeoutSecs;
+  final bool warningActive;
 
   const RhythmMotionTimer({
     required String roomId,
@@ -648,6 +678,7 @@ class RhythmMotionTimer {
     required this.motionOwned,
     this.remainingSecs,
     required this.timeoutSecs,
+    this.warningActive = false,
   }) : nodeId = roomId;
 
   const RhythmMotionTimer.node({
@@ -656,13 +687,15 @@ class RhythmMotionTimer {
     required this.motionOwned,
     this.remainingSecs,
     required this.timeoutSecs,
+    this.warningActive = false,
   });
 
   const RhythmMotionTimer.cleared(this.nodeId)
       : motionActive = false,
         motionOwned = false,
         remainingSecs = null,
-        timeoutSecs = 0;
+        timeoutSecs = 0,
+        warningActive = false;
 
   String get roomId => nodeId;
 

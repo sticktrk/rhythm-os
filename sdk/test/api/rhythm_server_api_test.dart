@@ -272,7 +272,10 @@ void main() {
               'node_id': 'node-1',
               'rhythm_enabled': true,
               'profile_settings': {
-                'motion_timeout_secs': 60,
+                'motion_timeout_secs': {
+                  'mode': 'fixed',
+                  'value': 60,
+                },
               },
             },
             queryParameters: null,
@@ -295,7 +298,9 @@ void main() {
           'room_id': 'room-1',
           'disabled': true,
           'room_profile': {
+            'fade_ms': 1200,
             'motion_timeout_secs': 90,
+            'rhythm_interval_secs': 60,
           },
         },
       ]);
@@ -307,7 +312,14 @@ void main() {
                 'node_id': 'room-1',
                 'disabled': true,
                 'profile_settings': {
-                  'motion_timeout_secs': 90,
+                  'fade_ms': {
+                    'mode': 'fixed',
+                    'value': 1200,
+                  },
+                  'motion_timeout_secs': {
+                    'mode': 'fixed',
+                    'value': 90,
+                  },
                 },
               },
             ],
@@ -578,6 +590,55 @@ void main() {
           },
         ],
       });
+    });
+  });
+
+  group('configSet', () {
+    test('sends full profile config with timer-setting payloads', () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/config'),
+            statusCode: 204,
+          ));
+
+      const saved = RhythmCurveConfig(
+        id: 'day',
+        name: 'Day',
+        fadeSetting: RhythmTimerSetting.auto(),
+        motionTimeoutSetting: RhythmTimerSetting.fixed(300),
+        rhythmIntervalSetting: RhythmTimerSetting.scheduled([
+          RhythmTimerBreakpoint(hour: 8.0, value: 60),
+        ]),
+      );
+
+      final ok = await api.configSet(saved);
+
+      expect(ok, isTrue);
+      final captured = verify(() => dio.put(
+            'api/config',
+            data: captureAny(named: 'data'),
+            queryParameters: captureAny(named: 'queryParameters'),
+          )).captured;
+      expect(captured[0], containsPair('id', 'day'));
+      expect(captured[0], containsPair('fade_ms', {'mode': 'auto'}));
+      expect(
+          captured[0],
+          containsPair('motion_timeout_secs', {
+            'mode': 'fixed',
+            'value': 300,
+          }));
+      expect(
+          captured[0],
+          containsPair('rhythm_interval_secs', {
+            'mode': 'scheduled',
+            'breakpoints': [
+              {'hour': 8.0, 'value': 60},
+            ],
+          }));
+      expect(captured[1], {'id': 'day'});
     });
   });
 

@@ -211,12 +211,15 @@ class RhythmServerApi {
         (softOff == null
             ? null
             : (softOff ? RoomModeState.idle : RoomModeState.active));
+    final normalizedProfileSettings =
+        _normalizeProfileSettings(profileSettings);
     await _safePut('api/nodes/preferences', data: {
       'node_id': nodeId,
       if (rhythmEnabled != null) 'rhythm_enabled': rhythmEnabled,
       if (disabled != null) 'disabled': disabled,
       if (effectiveState != null) 'state': effectiveState.wireValue,
-      if (profileSettings != null) 'profile_settings': profileSettings,
+      if (normalizedProfileSettings != null)
+        'profile_settings': normalizedProfileSettings,
     });
   }
 
@@ -242,19 +245,8 @@ class RhythmServerApi {
   /// Push node preferences for multiple nodes.
   Future<void> nodePreferencesBatchSet(List<Map<String, dynamic>> items) async {
     if (items.isEmpty) return;
-    await _safePut('api/nodes/preferences', data: [
-      for (final item in items)
-        {
-          for (final entry in item.entries)
-            if (entry.key != 'room_id' && entry.key != 'room_profile')
-              entry.key: entry.value,
-          if (!item.containsKey('node_id') && item.containsKey('room_id'))
-            'node_id': item['room_id'],
-          if (!item.containsKey('profile_settings') &&
-              item.containsKey('room_profile'))
-            'profile_settings': item['room_profile'],
-        }
-    ]);
+    await _safePut('api/nodes/preferences',
+        data: [for (final item in items) _normalizeNodePreferencesItem(item)]);
   }
 
   /// Push room preferences for multiple rooms.
@@ -262,13 +254,8 @@ class RhythmServerApi {
     await nodePreferencesBatchSet([
       for (final item in items)
         {
-          for (final entry in item.entries)
-            if (entry.key != 'room_id' && entry.key != 'room_profile')
-              entry.key: entry.value,
+          ...item,
           'node_id': item['room_id'],
-          if (!item.containsKey('profile_settings') &&
-              item.containsKey('room_profile'))
-            'profile_settings': item['room_profile'],
         },
     ]);
   }
@@ -1103,5 +1090,76 @@ class RhythmServerApi {
       _onStatesReceived?.call(results);
     }
     return results;
+  }
+
+  Map<String, dynamic> _normalizeNodePreferencesItem(
+    Map<String, dynamic> item,
+  ) {
+    final normalized = <String, dynamic>{
+      for (final entry in item.entries)
+        if (entry.key != 'room_id' && entry.key != 'room_profile')
+          entry.key: entry.key == 'profile_settings'
+              ? _normalizeProfileSettings(
+                  entry.value is Map<String, dynamic>
+                      ? entry.value as Map<String, dynamic>
+                      : null,
+                )
+              : entry.value,
+    };
+
+    if (!normalized.containsKey('node_id') && item.containsKey('room_id')) {
+      normalized['node_id'] = item['room_id'];
+    }
+
+    if (!normalized.containsKey('profile_settings') &&
+        item['room_profile'] is Map<String, dynamic>) {
+      normalized['profile_settings'] = _normalizeProfileSettings(
+        item['room_profile'] as Map<String, dynamic>,
+      );
+    }
+
+    return normalized;
+  }
+
+  Map<String, dynamic>? _normalizeProfileSettings(
+    Map<String, dynamic>? profileSettings,
+  ) {
+    if (profileSettings == null) return null;
+    return <String, dynamic>{
+      for (final entry in profileSettings.entries)
+        if (entry.key != 'rhythm_interval_secs')
+          entry.key: switch (entry.key) {
+            'fade_ms' ||
+            'motion_timeout_secs' =>
+              _normalizeTimerSettingValue(entry.value),
+            _ => entry.value,
+          },
+    };
+  }
+
+  dynamic _normalizeTimerSettingValue(dynamic value) {
+    if (value == null) return null;
+    if (value is num) {
+      return RhythmTimerSetting.fixed(value.toInt()).toJson();
+    }
+    if (value is String) {
+      final parsed = int.tryParse(value);
+      if (parsed != null) {
+        return RhythmTimerSetting.fixed(parsed).toJson();
+      }
+      return value;
+    }
+    final map = value is Map<String, dynamic>
+        ? value
+        : value is Map
+            ? value.cast<String, dynamic>()
+            : null;
+    if (map == null) return value;
+    if (map['mode'] is String ||
+        map['value'] != null ||
+        map['breakpoints'] is List<dynamic>) {
+      return RhythmTimerSetting.fromJson(map).toJson();
+    }
+    return value;
   }
 }

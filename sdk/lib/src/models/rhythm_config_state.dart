@@ -109,9 +109,12 @@ class RhythmRawConfig {
           RhythmCurveConfig.defaultShapeP,
       maxDimSteps: (json['max_dim_steps'] as num?)?.toInt() ??
           RhythmCurveConfig.defaultMaxDimSteps,
-      fadeMs:
-          (json['fade_ms'] as num?)?.toInt() ?? RhythmCurveConfig.defaultFadeMs,
-      motionTimeoutSecs: (json['motion_timeout_secs'] as num?)?.toInt() ??
+      fadeMs: jsonInt(json['fade_ms'], preferredKeys: const ['fade_ms']) ??
+          RhythmCurveConfig.defaultFadeMs,
+      motionTimeoutSecs: jsonInt(
+            json['motion_timeout_secs'],
+            preferredKeys: const ['motion_timeout_secs', 'timeout_secs'],
+          ) ??
           RhythmCurveConfig.defaultMotionTimeoutSecs,
     );
   }

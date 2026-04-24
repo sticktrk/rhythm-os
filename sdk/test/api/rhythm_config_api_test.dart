@@ -371,9 +371,9 @@ void main() {
       expect(body['min_color_temp'], 1800);
       expect(body['max_color_temp'], 5500);
       expect(body['max_dim_steps'], 6);
-      expect(body['fade_ms'], 400);
-      expect(body['motion_timeout_secs'], 900);
-      expect(body['rhythm_interval_secs'], 60);
+      expect(body['fade_ms'], {'mode': 'fixed', 'value': 400});
+      expect(body['motion_timeout_secs'], {'mode': 'fixed', 'value': 900});
+      expect(body['rhythm_interval_secs'], {'mode': 'fixed', 'value': 60});
       expect(curve['type'], 'constant');
       expect(curve['brightness'], 1);
       expect(curve['color_temp'], 0);

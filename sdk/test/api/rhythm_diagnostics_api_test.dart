@@ -105,7 +105,7 @@ void main() {
       final result = await api.factoryReset();
 
       expect(result, isTrue);
-      expect(server!.requests, ['/api/configuration/reset']);
+      expect(server!.requests, ['/api/factory-reset']);
     });
 
     test('factoryReset sends wifi delete after reset for rpiz context',
@@ -121,7 +121,7 @@ void main() {
       expect(result, isTrue);
       expect(
         server!.requests,
-        ['/api/configuration/reset', '/api/wifi'],
+        ['/api/factory-reset', '/api/wifi'],
       );
     });
 
@@ -163,8 +163,7 @@ class _FakeDiagnosticsServer {
   Future<void> _handleRequest(HttpRequest request) async {
     requests.add(request.uri.path);
 
-    if (request.method == 'POST' &&
-        request.uri.path == '/api/configuration/reset') {
+    if (request.method == 'POST' && request.uri.path == '/api/factory-reset') {
       await _writeJson(request.response, {'ok': true});
       return;
     }
