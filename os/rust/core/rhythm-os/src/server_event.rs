@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use rhythm_core::{NodeSnapshot, RhythmMode, RoomModeState, RoomProfileSettings};
 
+use crate::api_types::ObservedPowerDto;
 use crate::state::MotionSnapshot;
 
 /// A server event broadcast to all connected SSE clients.
@@ -62,6 +63,7 @@ pub struct NodeStateEvent {
     pub brightness_offset: f32,
     /// Whether lights are currently on in this room.
     pub lights_on: bool,
+    pub observed_power: ObservedPowerDto,
     /// Whether a global mode transition fade is currently in progress.
     pub transitioning: bool,
     /// Effective brightness percentage (1-100) after offsets.
@@ -82,6 +84,7 @@ pub(crate) struct NodeStateEventParams {
     pub mode: RhythmMode,
     pub state: RoomModeState,
     pub lights_on: bool,
+    pub observed_power: ObservedPowerDto,
     pub transitioning: bool,
     pub brightness: u8,
     pub kelvin: u16,
@@ -95,6 +98,7 @@ impl NodeStateEvent {
             mode,
             state,
             lights_on,
+            observed_power,
             transitioning,
             brightness,
             kelvin,
@@ -108,6 +112,7 @@ impl NodeStateEvent {
             time_offset: snap.time_offset_minutes,
             brightness_offset: snap.brightness_offset,
             lights_on,
+            observed_power,
             transitioning,
             brightness,
             kelvin,

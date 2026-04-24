@@ -17,6 +17,17 @@ use crate::topology::{DevicePlacement, HubRoomBinding, NodeControlKind};
 // Room state structs
 // ---------------------------------------------------------------------------
 
+/// Observed power metadata for a room or node.
+#[derive(Clone, Debug, Serialize)]
+pub struct ObservedPowerDto {
+    pub lights_on: bool,
+    pub fresh: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_at_epoch_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
 /// Core room rhythm state — used by mutation responses and as the base
 /// for poll and full-state variants.
 #[derive(Clone, Debug, Serialize)]
@@ -30,6 +41,7 @@ pub struct RoomRhythmState {
     pub time_offset: f32,
     pub brightness_offset: f32,
     pub lights_on: bool,
+    pub observed_power: ObservedPowerDto,
     pub transitioning: bool,
     pub brightness: u8,
     pub kelvin: u16,
@@ -378,6 +390,7 @@ pub struct NodeStateDto {
     pub time_offset: f32,
     pub brightness_offset: f32,
     pub lights_on: bool,
+    pub observed_power: ObservedPowerDto,
     pub transitioning: bool,
     pub brightness: u8,
     pub kelvin: u16,
@@ -571,6 +584,12 @@ mod tests {
             time_offset: 5.0,
             brightness_offset: -10.0,
             lights_on: true,
+            observed_power: ObservedPowerDto {
+                lights_on: true,
+                fresh: true,
+                observed_at_epoch_ms: Some(1_700_000_000_000),
+                source: Some("periodic".into()),
+            },
             transitioning: true,
             brightness: 80,
             kelvin: 4000,
@@ -594,6 +613,12 @@ mod tests {
             time_offset: 5.0,
             brightness_offset: -10.0,
             lights_on: true,
+            observed_power: ObservedPowerDto {
+                lights_on: true,
+                fresh: true,
+                observed_at_epoch_ms: Some(1_700_000_000_000),
+                source: Some("periodic".into()),
+            },
             transitioning: true,
             brightness: 80,
             kelvin: 4000,
@@ -627,6 +652,13 @@ mod tests {
         assert_eq!(json["time_offset"], 5.0);
         assert_eq!(json["brightness_offset"], -10.0);
         assert_eq!(json["lights_on"], true);
+        assert_eq!(json["observed_power"]["lights_on"], true);
+        assert_eq!(json["observed_power"]["fresh"], true);
+        assert_eq!(
+            json["observed_power"]["observed_at_epoch_ms"],
+            1_700_000_000_000u64
+        );
+        assert_eq!(json["observed_power"]["source"], "periodic");
         assert_eq!(json["transitioning"], true);
         assert_eq!(json["brightness"], 80);
         assert_eq!(json["kelvin"], 4000);

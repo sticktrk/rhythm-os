@@ -256,11 +256,21 @@ pub fn handle_health() -> ApiResponse {
     ApiResponse::json_ok(r#"{"status":"healthy"}"#.to_string())
 }
 
-pub fn handle_get_state(state: &SharedState) -> ApiResponse {
+pub fn handle_get_state_with_options(state: &SharedState, authoritative: bool) -> ApiResponse {
+    if authoritative {
+        if let Err(e) = commands::refresh_observed_power_authoritatively(state) {
+            return ApiResponse::server_error(e);
+        }
+    }
+
     match commands::build_state_snapshot(state) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
     }
+}
+
+pub fn handle_get_state(state: &SharedState) -> ApiResponse {
+    handle_get_state_with_options(state, false)
 }
 
 pub fn handle_get_profile_bundle(state: &SharedState) -> ApiResponse {

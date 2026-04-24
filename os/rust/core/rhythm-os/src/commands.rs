@@ -24,8 +24,8 @@ use serde_json::Value;
 use crate::api_types::{
     ActiveProfileDto, ActiveProfileEffectiveDto, ApiCapabilitiesDto, FixResponse, HubCapabilityDto,
     HubDto, HubStartupRetryDto, LocationDto, ModeLastChangeDto, ModeSettingsDto,
-    ModeTransitionsDto, NodeStateDto, NodesPollResponse, PreferredEndpointDto, ProfilesDto,
-    ReviewCountsDto, ReviewEntryDto, ReviewHubDto, ReviewSummaryDto, RoomPollState,
+    ModeTransitionsDto, NodeStateDto, NodesPollResponse, ObservedPowerDto, PreferredEndpointDto,
+    ProfilesDto, ReviewCountsDto, ReviewEntryDto, ReviewHubDto, ReviewSummaryDto, RoomPollState,
     RoomRhythmState, RoomsPollResponse, SettingsDto, StateSnapshot, TopologyNodeControlDto,
     TopologyNodeDto,
 };
@@ -41,7 +41,10 @@ use crate::factory_default_config::{
     factory_default_mode_config_map, factory_default_mode_transition_configs,
     factory_default_power_save, factory_default_profile_bundle,
 };
-use crate::state::{rooms_from_engine, AppState, SharedState};
+use crate::state::{
+    current_epoch_ms, rooms_from_engine, AppState, ObservedPowerSource, ObservedPowerState,
+    SharedState,
+};
 use crate::storage::StoredLocation;
 use crate::topology::NodeControlKind;
 
@@ -447,6 +450,7 @@ fn queue_motion_timer_clear(state: &SharedState, room_id: &str) {
 
 fn clear_removed_node_ephemeral_state(s: &mut AppState, node_id: &str) {
     s.room_lights_on.remove(node_id);
+    s.room_observed_power.remove(node_id);
     s.motion_snapshots.remove(node_id);
     s.room_mode_transitions.remove(node_id);
     s.pending_periodic_ticks.remove(node_id);
@@ -727,6 +731,90 @@ fn lights_on_from_cache(
         .unwrap_or(false)
 }
 
+const OBSERVED_POWER_MIN_FRESHNESS_SECS: u64 = 15;
+
+fn observed_power_is_fresh(s: &AppState, observed: &ObservedPowerState) -> bool {
+    match observed.source {
+        ObservedPowerSource::SemanticOverride => true,
+        ObservedPowerSource::Command => false,
+        ObservedPowerSource::Periodic
+        | ObservedPowerSource::SyncPoll
+        | ObservedPowerSource::AuthoritativeRefresh => {
+            let freshness_window_secs = OBSERVED_POWER_MIN_FRESHNESS_SECS
+                .max(s.runtime_config.update_interval_secs.saturating_mul(2));
+            let age_ms = current_epoch_ms().saturating_sub(observed.observed_at_epoch_ms);
+            age_ms <= freshness_window_secs.saturating_mul(1000)
+        }
+    }
+}
+
+fn observed_power_dto(
+    s: &AppState,
+    observed: &ObservedPowerState,
+) -> crate::api_types::ObservedPowerDto {
+    ObservedPowerDto {
+        lights_on: observed.lights_on,
+        fresh: observed_power_is_fresh(s, observed),
+        observed_at_epoch_ms: Some(observed.observed_at_epoch_ms),
+        source: Some(observed.source.as_str().to_string()),
+    }
+}
+
+fn fallback_observed_power_dto(lights_on: bool) -> crate::api_types::ObservedPowerDto {
+    ObservedPowerDto {
+        lights_on,
+        fresh: false,
+        observed_at_epoch_ms: None,
+        source: None,
+    }
+}
+
+fn observed_power_from_cache(
+    s: &AppState,
+    room_observed_power: &HashMap<String, ObservedPowerState>,
+    room_lights_on: &HashMap<String, bool>,
+    node_id: &str,
+    kind: LightNodeKind,
+    parent_id: Option<&str>,
+    semantic_override: Option<bool>,
+) -> ObservedPowerDto {
+    let cache_key = effective_lights_on_cache_key(s, node_id, kind, parent_id);
+
+    if let Some(lights_on) = semantic_override {
+        return ObservedPowerDto {
+            lights_on,
+            fresh: true,
+            observed_at_epoch_ms: room_observed_power
+                .get(cache_key)
+                .filter(|observed| observed.source == ObservedPowerSource::SemanticOverride)
+                .map(|observed| observed.observed_at_epoch_ms),
+            source: Some(ObservedPowerSource::SemanticOverride.as_str().to_string()),
+        };
+    }
+
+    if let Some(observed) = room_observed_power.get(cache_key) {
+        return observed_power_dto(s, observed);
+    }
+
+    fallback_observed_power_dto(room_lights_on.get(cache_key).copied().unwrap_or(false))
+}
+
+fn update_lights_on_cache_for_node_with_source(
+    state: &SharedState,
+    node_id: &str,
+    kind: LightNodeKind,
+    parent_id: Option<&str>,
+    lights_on: bool,
+    source: ObservedPowerSource,
+) {
+    if let Ok(mut s) = state.lock() {
+        let cache_key = effective_lights_on_cache_key(&s, node_id, kind, parent_id).to_string();
+        s.room_lights_on.insert(cache_key.clone(), lights_on);
+        s.room_observed_power
+            .insert(cache_key, ObservedPowerState::new(lights_on, source));
+    }
+}
+
 pub(crate) fn light_state_query_id<'a>(
     s: &AppState,
     node_id: &'a str,
@@ -736,32 +824,36 @@ pub(crate) fn light_state_query_id<'a>(
     effective_lights_on_cache_key(s, node_id, kind, parent_id)
 }
 
-pub(crate) fn update_lights_on_cache_for_node(
-    state: &SharedState,
-    node_id: &str,
-    kind: LightNodeKind,
-    parent_id: Option<&str>,
-    lights_on: bool,
-) {
-    if let Ok(mut s) = state.lock() {
-        let cache_key = effective_lights_on_cache_key(&s, node_id, kind, parent_id).to_string();
-        s.room_lights_on.insert(cache_key, lights_on);
-    }
-}
-
 pub(crate) fn update_lights_on_cache_for_runtime_node(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
     node_id: &str,
     lights_on: bool,
 ) {
+    update_lights_on_cache_for_runtime_node_with_source(
+        state,
+        runtime,
+        node_id,
+        lights_on,
+        ObservedPowerSource::Command,
+    );
+}
+
+pub(crate) fn update_lights_on_cache_for_runtime_node_with_source(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+    lights_on: bool,
+    source: ObservedPowerSource,
+) {
     if let Some(snap) = runtime.engine_effective_node_snapshot(node_id) {
-        update_lights_on_cache_for_node(
+        update_lights_on_cache_for_node_with_source(
             state,
             &snap.id,
             snap.kind,
             snap.parent_id.as_deref(),
             lights_on,
+            source,
         );
 
         if let Some(parent_id) = snap
@@ -771,12 +863,13 @@ pub(crate) fn update_lights_on_cache_for_runtime_node(
         {
             match runtime.any_lights_on(parent_id) {
                 Ok(parent_lights_on) => {
-                    update_lights_on_cache_for_node(
+                    update_lights_on_cache_for_node_with_source(
                         state,
                         parent_id,
                         LightNodeKind::Room,
                         None,
                         parent_lights_on,
+                        source,
                     );
                 }
                 Err(e) => {
@@ -791,52 +884,63 @@ pub(crate) fn update_lights_on_cache_for_runtime_node(
             }
         }
     } else {
-        update_lights_on_cache_for_node(state, node_id, LightNodeKind::Room, None, lights_on);
+        update_lights_on_cache_for_node_with_source(
+            state,
+            node_id,
+            LightNodeKind::Room,
+            None,
+            lights_on,
+            source,
+        );
     }
 }
 
-pub(crate) fn refresh_lights_on_cache_for_runtime_node(
+pub(crate) fn refresh_lights_on_cache_for_runtime_snapshot_with_source(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
-    node_id: &str,
+    snap: &rhythm_core::NodeSnapshot,
+    source: ObservedPowerSource,
 ) {
-    let Some(snap) = runtime.engine_effective_node_snapshot(node_id) else {
-        return;
-    };
     if !snap.kind.is_light_addressable() {
         return;
     }
 
-    let lights_on =
-        if let Some(lights_on) = semantic_lights_on_override(snap.hard_off, snap.soft_off) {
-            lights_on
-        } else {
-            let query_id = {
-                let Ok(s) = state.lock() else { return };
-                light_state_query_id(&s, &snap.id, snap.kind, snap.parent_id.as_deref()).to_string()
-            };
-
-            match runtime.any_lights_on(&query_id) {
-                Ok(lights_on) => lights_on,
-                Err(e) => {
-                    warn!(
-                        target: "cmd",
-                        "Failed to refresh lights_on for '{}' via '{}': {}",
-                        node_id,
-                        query_id,
-                        e
-                    );
-                    return;
-                }
-            }
+    let semantic_override = semantic_lights_on_override(snap.hard_off, snap.soft_off);
+    let observation_source = if semantic_override.is_some() {
+        ObservedPowerSource::SemanticOverride
+    } else {
+        source
+    };
+    let lights_on = if let Some(lights_on) = semantic_override {
+        lights_on
+    } else {
+        let query_id = {
+            let Ok(s) = state.lock() else { return };
+            light_state_query_id(&s, &snap.id, snap.kind, snap.parent_id.as_deref()).to_string()
         };
 
-    update_lights_on_cache_for_node(
+        match runtime.any_lights_on(&query_id) {
+            Ok(lights_on) => lights_on,
+            Err(e) => {
+                warn!(
+                    target: "cmd",
+                    "Failed to refresh lights_on for '{}' via '{}': {}",
+                    snap.id,
+                    query_id,
+                    e
+                );
+                return;
+            }
+        }
+    };
+
+    update_lights_on_cache_for_node_with_source(
         state,
         &snap.id,
         snap.kind,
         snap.parent_id.as_deref(),
         lights_on,
+        observation_source,
     );
 
     if let Some(parent_id) = snap
@@ -845,22 +949,109 @@ pub(crate) fn refresh_lights_on_cache_for_runtime_node(
         .filter(|parent_id| *parent_id != snap.id)
     {
         match runtime.any_lights_on(parent_id) {
-            Ok(parent_lights_on) => update_lights_on_cache_for_node(
+            Ok(parent_lights_on) => update_lights_on_cache_for_node_with_source(
                 state,
                 parent_id,
                 LightNodeKind::Room,
                 None,
                 parent_lights_on,
+                source,
             ),
             Err(e) => warn!(
                 target: "cmd",
                 "Failed to refresh parent lights_on for '{}' after node '{}': {}",
                 parent_id,
-                node_id,
+                snap.id,
                 e
             ),
         }
     }
+}
+
+pub(crate) fn refresh_lights_on_cache_for_runtime_node_with_source(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+    source: ObservedPowerSource,
+) {
+    let Some(snap) = runtime.engine_effective_node_snapshot(node_id) else {
+        return;
+    };
+    refresh_lights_on_cache_for_runtime_snapshot_with_source(state, runtime, &snap, source);
+}
+
+pub(crate) fn refresh_lights_on_cache_for_runtime_node(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+) {
+    refresh_lights_on_cache_for_runtime_node_with_source(
+        state,
+        runtime,
+        node_id,
+        ObservedPowerSource::Command,
+    );
+}
+
+pub(crate) fn refresh_all_lights_on_cache_for_runtime(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    source: ObservedPowerSource,
+) -> Vec<rhythm_core::RoomSnapshot> {
+    let snapshots = runtime.engine_all_room_snapshots();
+    if snapshots.is_empty() {
+        return snapshots;
+    }
+
+    let mut query_results: HashMap<String, bool> = HashMap::new();
+    for snap in &snapshots {
+        if !snap.kind.is_light_addressable() {
+            continue;
+        }
+
+        let semantic_override = semantic_lights_on_override(snap.hard_off, snap.soft_off);
+        let lights_on = if let Some(lights_on) = semantic_override {
+            lights_on
+        } else {
+            let query_id = {
+                let Ok(s) = state.lock() else { continue };
+                light_state_query_id(&s, &snap.id, snap.kind, snap.parent_id.as_deref()).to_string()
+            };
+
+            if let Some(lights_on) = query_results.get(&query_id).copied() {
+                lights_on
+            } else {
+                match runtime.any_lights_on(&query_id) {
+                    Ok(lights_on) => {
+                        query_results.insert(query_id, lights_on);
+                        lights_on
+                    }
+                    Err(e) => {
+                        warn!(
+                            target: "cmd",
+                            "Failed to refresh lights_on for '{}' during full refresh: {}",
+                            snap.id,
+                            e
+                        );
+                        continue;
+                    }
+                }
+            }
+        };
+
+        update_lights_on_cache_for_node_with_source(
+            state,
+            &snap.id,
+            snap.kind,
+            snap.parent_id.as_deref(),
+            lights_on,
+            semantic_override
+                .map(|_| ObservedPowerSource::SemanticOverride)
+                .unwrap_or(source),
+        );
+    }
+
+    snapshots
 }
 
 fn node_metadata_from_topology(
@@ -892,6 +1083,7 @@ struct NodeStateDtoBuildContext<'a> {
     longitude: Option<f32>,
     timezone_name: Option<&'a str>,
     utc_offset: f32,
+    room_observed_power: &'a HashMap<String, ObservedPowerState>,
     room_lights_on: &'a HashMap<String, bool>,
     motion_snapshots: &'a HashMap<String, crate::state::MotionSnapshot>,
     nodes_with_sensors: &'a HashSet<String>,
@@ -938,6 +1130,15 @@ fn build_node_state_dto_from_snapshot_parts(
         .get(&snap.id)
         .is_some_and(|motion| motion.warning_active);
     let state = room_mode_state_from_flags(snap.hard_off, snap.soft_off, warning_active);
+    let observed_power = observed_power_from_cache(
+        ctx.state,
+        ctx.room_observed_power,
+        ctx.room_lights_on,
+        &snap.id,
+        snap.kind,
+        effective_parent_id.as_deref(),
+        semantic_lights_on_override(snap.hard_off, snap.soft_off),
+    );
     let (brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
         RoomLightingContext {
             light_profile_configs: ctx.light_profile_configs,
@@ -1000,13 +1201,8 @@ fn build_node_state_dto_from_snapshot_parts(
         disabled: snap.disabled,
         time_offset: snap.time_offset_minutes,
         brightness_offset: snap.brightness_offset,
-        lights_on: lights_on_from_cache(
-            ctx.state,
-            ctx.room_lights_on,
-            &snap.id,
-            snap.kind,
-            effective_parent_id.as_deref(),
-        ),
+        lights_on: observed_power.lights_on,
+        observed_power,
         transitioning: ctx.transitioning_nodes.contains(&snap.id),
         brightness,
         kelvin,
@@ -1029,7 +1225,7 @@ pub fn build_node_state_event(
     snap: &rhythm_core::NodeSnapshot,
 ) -> crate::server_event::NodeStateEvent {
     let now = std::time::Instant::now();
-    let (mode, room_state, lights_on, transitioning, brightness, kelvin, hub_types) = {
+    let (mode, room_state, observed_power, transitioning, brightness, kelvin, hub_types) = {
         let s = state.lock().unwrap_or_else(|e| e.into_inner());
         let mode = s.active_mode;
         let mode_configs = s.mode_configs();
@@ -1040,12 +1236,14 @@ pub fn build_node_state_event(
                 .get(&snap.id)
                 .is_some_and(|motion| motion.warning_active),
         );
-        let lights_on = lights_on_from_cache(
+        let observed_power = observed_power_from_cache(
             &s,
+            &s.room_observed_power,
             &s.room_lights_on,
             &snap.id,
             snap.kind,
             snap.parent_id.as_deref(),
+            semantic_lights_on_override(snap.hard_off, snap.soft_off),
         );
         let transitioning = room_mode_transition_active(&s.room_mode_transitions, &snap.id, now);
         let hub_types = node_hub_types_from_topology(&s, &snap.id);
@@ -1070,7 +1268,7 @@ pub fn build_node_state_event(
         (
             mode,
             room_state,
-            lights_on,
+            observed_power,
             transitioning,
             curve_brightness,
             kelvin,
@@ -1083,7 +1281,8 @@ pub fn build_node_state_event(
             hub_types,
             mode,
             state: room_state,
-            lights_on,
+            lights_on: observed_power.lights_on,
+            observed_power,
             transitioning,
             brightness,
             kelvin,
@@ -1322,6 +1521,24 @@ pub(crate) fn resolve_node_control_target(
 // State snapshots (for GET endpoints)
 // ============================================================================
 
+pub fn refresh_observed_power_authoritatively(state: &SharedState) -> Result<()> {
+    let runtime = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.hub_runtime()
+    };
+
+    let Some(runtime) = runtime else {
+        return Ok(());
+    };
+
+    refresh_all_lights_on_cache_for_runtime(
+        state,
+        &runtime,
+        ObservedPowerSource::AuthoritativeRefresh,
+    );
+    Ok(())
+}
+
 /// Build a full state snapshot.
 ///
 /// Two-phase lock: collects metadata from state (brief lock), then queries
@@ -1342,6 +1559,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         platform_type,
         platform_ctx,
         listen_port,
+        room_observed_power,
         room_lights_on,
         motion_snapshots,
         nodes_with_sensors,
@@ -1471,6 +1689,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             s.platform_type,
             s.platform_context,
             s.listen_port,
+            s.room_observed_power.clone(),
             s.room_lights_on.clone(),
             s.motion_snapshots.clone(),
             s.motion_control_target_ids(),
@@ -1540,6 +1759,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             longitude,
             timezone_name: timezone_name.as_deref(),
             utc_offset,
+            room_observed_power: &room_observed_power,
             room_lights_on: &room_lights_on,
             motion_snapshots: &motion_snapshots,
             nodes_with_sensors: &nodes_with_sensors,
@@ -1774,10 +1994,18 @@ fn build_hub_startup_retry_dto(retry: &crate::state::HubStartupRetryState) -> Hu
 
 /// Build a full node state for a single addressable node.
 pub fn build_node_state(state: &SharedState, node_id: &str) -> Result<NodeStateDto> {
-    let (runtime, room_lights_on, motion_snapshots, nodes_with_sensors, transitioning_nodes) = {
+    let (
+        runtime,
+        room_observed_power,
+        room_lights_on,
+        motion_snapshots,
+        nodes_with_sensors,
+        transitioning_nodes,
+    ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             s.hub_runtime(),
+            s.room_observed_power.clone(),
             s.room_lights_on.clone(),
             s.motion_snapshots.clone(),
             s.motion_control_target_ids(),
@@ -1802,6 +2030,7 @@ pub fn build_node_state(state: &SharedState, node_id: &str) -> Result<NodeStateD
         longitude: s.longitude,
         timezone_name: s.timezone_name.as_deref(),
         utc_offset: s.utc_offset_hours,
+        room_observed_power: &room_observed_power,
         room_lights_on: &room_lights_on,
         motion_snapshots: &motion_snapshots,
         nodes_with_sensors: &nodes_with_sensors,
@@ -1829,6 +2058,7 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
     let (
         hub_connected,
         runtime,
+        room_observed_power,
         room_lights_on,
         motion_snapshots,
         nodes_with_sensors,
@@ -1846,6 +2076,7 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
         (
             s.has_any_connected_hub(),
             s.hub_runtime(),
+            s.room_observed_power.clone(),
             s.room_lights_on.clone(),
             s.motion_snapshots.clone(),
             s.motion_control_target_ids(),
@@ -1899,6 +2130,7 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
         longitude,
         timezone_name: timezone_name.as_deref(),
         utc_offset,
+        room_observed_power: &room_observed_power,
         room_lights_on: &room_lights_on,
         motion_snapshots: &motion_snapshots,
         nodes_with_sensors: &nodes_with_sensors,
@@ -1932,6 +2164,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
         runtime,
         storage_rooms,
         motion_snapshots,
+        room_observed_power,
         room_lights_on,
         light_profile_configs,
         mode_configs,
@@ -1954,6 +2187,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
             None
         };
         let motion = s.motion_snapshots.clone();
+        let observed_power = s.room_observed_power.clone();
         let lights = s.room_lights_on.clone();
         let sensor_rooms = s.motion_control_target_ids();
         (
@@ -1961,6 +2195,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
             runtime,
             storage_rooms,
             motion,
+            observed_power,
             lights,
             s.light_profile_configs.clone(),
             s.mode_configs(),
@@ -1987,12 +2222,14 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
     if !snapshots.is_empty() {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         for snap in &snapshots {
-            let lights_on = lights_on_from_cache(
+            let observed_power = observed_power_from_cache(
                 &s,
+                &room_observed_power,
                 &room_lights_on,
                 &snap.id,
                 snap.kind,
                 snap.parent_id.as_deref(),
+                semantic_lights_on_override(snap.hard_off, snap.soft_off),
             );
             let room_state = room_mode_state_from_flags(
                 snap.hard_off,
@@ -2021,7 +2258,8 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                 rhythm_enabled: snap.rhythm_enabled,
                 time_offset: snap.time_offset_minutes,
                 brightness_offset: snap.brightness_offset,
-                lights_on,
+                lights_on: observed_power.lights_on,
+                observed_power,
                 transitioning: transitioning_rooms.contains(&snap.id),
                 brightness: curve_brightness,
                 kelvin,
@@ -2095,6 +2333,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                     time_offset: room.time_offset_minutes,
                     brightness_offset: room.brightness_offset,
                     lights_on: false,
+                    observed_power: fallback_observed_power_dto(false),
                     transitioning: false,
                     brightness: curve_brightness,
                     kelvin,
@@ -2119,11 +2358,12 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
 /// Build a `RoomRhythmState` for a single room from engine state.
 pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<RoomRhythmState> {
     let now = std::time::Instant::now();
-    let (runtime, lights_on, warning_active, transitioning, hub_types) = {
+    let (runtime, room_observed_power, room_lights_on, warning_active, transitioning, hub_types) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             s.hub_runtime(),
-            s.room_lights_on.get(room_id).copied().unwrap_or(false),
+            s.room_observed_power.clone(),
+            s.room_lights_on.clone(),
             s.motion_snapshots
                 .get(room_id)
                 .is_some_and(|motion| motion.warning_active),
@@ -2137,6 +2377,18 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
         .engine_room_snapshot(room_id)
         .ok_or_else(|| anyhow::anyhow!("Room '{}' not found in engine", room_id))?;
     let room_state = room_mode_state_from_flags(snap.hard_off, snap.soft_off, warning_active);
+    let observed_power = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        observed_power_from_cache(
+            &s,
+            &room_observed_power,
+            &room_lights_on,
+            room_id,
+            snap.kind,
+            snap.parent_id.as_deref(),
+            semantic_lights_on_override(snap.hard_off, snap.soft_off),
+        )
+    };
     let (curve_brightness, kelvin) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         compute_room_display_values_for_settings(
@@ -2155,7 +2407,8 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
         rhythm_enabled: snap.rhythm_enabled,
         time_offset: snap.time_offset_minutes,
         brightness_offset: snap.brightness_offset,
-        lights_on,
+        lights_on: observed_power.lights_on,
+        observed_power,
         transitioning,
         brightness: curve_brightness,
         kelvin,
@@ -2505,6 +2758,7 @@ fn clear_factory_reset_ephemeral_state(state: &SharedState) -> Result<()> {
     s.hub_sync_in_progress.clear();
     s.hub_reconnect_sync_at.clear();
     s.room_lights_on.clear();
+    s.room_observed_power.clear();
     s.motion_snapshots.clear();
     s.room_mode_transitions.clear();
     s.last_check_hour = None;
@@ -3107,7 +3361,12 @@ fn apply_room_mode_defaults(
 
     if let Ok(mut s) = state.lock() {
         for (room_id, lights_on) in lights_on_updates {
+            let cache_key = room_id.clone();
             s.room_lights_on.insert(room_id, lights_on);
+            s.room_observed_power.insert(
+                cache_key,
+                ObservedPowerState::new(lights_on, ObservedPowerSource::SemanticOverride),
+            );
         }
     }
 
@@ -5559,6 +5818,7 @@ pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
         }
 
         s.room_lights_on.clear();
+        s.room_observed_power.clear();
         s.motion_snapshots.clear();
 
         if let Some(ref storage) = s.storage {
@@ -7097,6 +7357,7 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
         }
 
         s.room_lights_on.remove(room_id);
+        s.room_observed_power.remove(room_id);
         s.motion_snapshots.remove(room_id);
         s.room_mode_transitions.remove(room_id);
         s.pending_motion_clear.retain(|pending| pending != room_id);

@@ -805,6 +805,13 @@ pub fn post_tick_node(state: &SharedState, runtime: &Arc<dyn RuntimeHandle>, nod
         return;
     };
 
+    crate::commands::refresh_lights_on_cache_for_runtime_snapshot_with_source(
+        state,
+        runtime,
+        &snap,
+        crate::state::ObservedPowerSource::Periodic,
+    );
+
     {
         let mut event = crate::commands::build_node_state_event(state, &snap);
         event.tick = true;
@@ -1484,6 +1491,48 @@ mod tests {
 
     fn make_state() -> SharedState {
         Arc::new(Mutex::new(crate::state::AppState::default()))
+    }
+
+    #[test]
+    fn post_tick_node_refreshes_lights_on_cache_before_emitting_event() {
+        use rhythm_core::controller::NoOpController;
+        use rhythm_core::runtime::orchestrator::RhythmRuntime;
+        use rhythm_core::runtime::registry::SimpleDeviceRegistry;
+        use rhythm_core::runtime::scheduler::NoOpScheduler;
+        use rhythm_core::runtime::time::MockTimeProvider;
+        use rhythm_core::RuntimeConfig;
+
+        let state = make_state();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(4);
+        {
+            let mut s = state.lock().unwrap();
+            s.event_tx = Some(tx);
+            s.room_lights_on.insert("room1".into(), true);
+        }
+
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(RhythmRuntime::new(
+            Arc::new(NoOpController::new()),
+            MockTimeProvider::new(14.0, 172, 2026),
+            NoOpScheduler::new(),
+            SimpleDeviceRegistry::new(),
+            RuntimeConfig::default(),
+        ));
+        runtime.add_room("room1", "Room 1");
+
+        post_tick_node(&state, &runtime, "room1");
+
+        let cached = state.lock().unwrap().room_lights_on.get("room1").copied();
+        assert_eq!(cached, Some(false));
+
+        match rx.try_recv().expect("post-tick should emit a node event") {
+            crate::server_event::ServerEvent::NodeState { nodes } => {
+                assert_eq!(nodes.len(), 1);
+                assert_eq!(nodes[0].id, "room1");
+                assert!(!nodes[0].lights_on);
+                assert!(nodes[0].tick);
+            }
+            _ => panic!("unexpected event type"),
+        }
     }
 
     // ========================================================================

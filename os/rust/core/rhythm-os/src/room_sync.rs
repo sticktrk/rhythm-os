@@ -786,7 +786,7 @@ fn get_all_typed_device_ids_with_types(
         .unwrap_or_default()
 }
 
-/// Poll the hub for each room's on/off state and populate `room_lights_on`.
+/// Poll the hub for each room's on/off state and populate observed power state.
 ///
 /// Called after `sync_from_hub()` to fill in the initial light state so
 /// the UI shows correct on/off status immediately instead of waiting for
@@ -798,51 +798,30 @@ pub fn poll_initial_light_state(state: &SharedState) {
     };
     let Some(runtime) = runtime else { return };
 
-    let snapshots = runtime.engine_all_room_snapshots();
+    let snapshots = commands::refresh_all_lights_on_cache_for_runtime(
+        state,
+        &runtime,
+        crate::state::ObservedPowerSource::SyncPoll,
+    );
     if snapshots.is_empty() {
         return;
     }
 
-    let mut query_results: HashMap<String, bool> = HashMap::new();
     let mut on_count = 0usize;
     let mut room_count = 0usize;
     for snap in &snapshots {
-        if !snap.kind.is_light_addressable() {
+        if !snap.kind.is_room() {
             continue;
         }
 
-        let query_id = {
-            let Ok(s) = state.lock() else { continue };
-            commands::light_state_query_id(&s, &snap.id, snap.kind, snap.parent_id.as_deref())
-        };
-
-        let on = if let Some(on) = query_results.get(query_id).copied() {
-            on
-        } else {
-            match runtime.any_lights_on(query_id) {
-                Ok(on) => {
-                    query_results.insert(query_id.to_string(), on);
-                    on
-                }
-                Err(e) => {
-                    warn!(target: "room_sync", "Failed to poll lights for '{}': {}", query_id, e);
-                    continue;
-                }
-            }
-        };
-
-        commands::update_lights_on_cache_for_node(
-            state,
-            &snap.id,
-            snap.kind,
-            snap.parent_id.as_deref(),
-            on,
-        );
-        if snap.kind.is_room() {
-            room_count += 1;
-            if on {
-                on_count += 1;
-            }
+        room_count += 1;
+        if state
+            .lock()
+            .ok()
+            .and_then(|s| s.room_lights_on.get(&snap.id).copied())
+            .unwrap_or(false)
+        {
+            on_count += 1;
         }
     }
 

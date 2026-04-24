@@ -41,7 +41,9 @@ use rhythm_os::discovery::{DiscoveredDevice, DiscoveredRoom, HubDiscovery};
 use rhythm_os::hub::{ActiveHub, HubType};
 use rhythm_os::registry::HubDeviceRegistry;
 use rhythm_os::room_sync::{self, SyncReport};
-use rhythm_os::state::{AppState, MotionSnapshot, SharedState};
+use rhythm_os::state::{
+    AppState, MotionSnapshot, ObservedPowerSource, ObservedPowerState, SharedState,
+};
 
 fn default_profile_for_id(profile_id: &str) -> LightProfileConfig {
     match profile_id {
@@ -261,11 +263,12 @@ impl TestHarness {
     /// Translates hub-native IDs to topology IDs automatically.
     pub fn set_lights_on(&self, room_id: &str, on: bool) {
         let resolved = self.resolve(room_id);
-        self.state
-            .lock()
-            .unwrap()
-            .room_lights_on
-            .insert(resolved, on);
+        let mut state = self.state.lock().unwrap();
+        state.room_lights_on.insert(resolved.clone(), on);
+        state.room_observed_power.insert(
+            resolved,
+            ObservedPowerState::new(on, ObservedPowerSource::Command),
+        );
     }
 
     /// Add an active motion snapshot for a room.

@@ -161,8 +161,15 @@ async fn health() -> ApiResponse {
     handlers::handle_health()
 }
 
-async fn get_state(State(state): State<SharedState>) -> ApiResponse {
-    handlers::handle_get_state(&state)
+async fn get_state(
+    State(state): State<SharedState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResponse {
+    let authoritative = params
+        .get("authoritative")
+        .and_then(|value| value.parse::<bool>().ok())
+        .unwrap_or(false);
+    handlers::handle_get_state_with_options(&state, authoritative)
 }
 
 async fn get_profile_bundle(State(state): State<SharedState>) -> ApiResponse {

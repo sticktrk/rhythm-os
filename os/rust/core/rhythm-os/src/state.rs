@@ -98,6 +98,55 @@ pub struct MotionSnapshot {
     pub warning_active: bool,
 }
 
+/// Where the current observed power state came from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObservedPowerSource {
+    /// Server-owned light action or command path.
+    Command,
+    /// Periodic reconciliation sampled the hub/runtime.
+    Periodic,
+    /// Startup or reconnect sync sampled the hub/runtime.
+    SyncPoll,
+    /// An explicit authoritative API refresh sampled the hub/runtime.
+    AuthoritativeRefresh,
+    /// Room semantics make power state explicit (`hard_off` / `soft_off`).
+    SemanticOverride,
+}
+
+impl ObservedPowerSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Command => "command",
+            Self::Periodic => "periodic",
+            Self::SyncPoll => "sync_poll",
+            Self::AuthoritativeRefresh => "authoritative_refresh",
+            Self::SemanticOverride => "semantic_override",
+        }
+    }
+}
+
+/// Last observed power state for one cache key.
+#[derive(Clone, Debug)]
+pub struct ObservedPowerState {
+    pub lights_on: bool,
+    pub observed_at_epoch_ms: u64,
+    pub source: ObservedPowerSource,
+}
+
+impl ObservedPowerState {
+    pub fn new(lights_on: bool, source: ObservedPowerSource) -> Self {
+        Self {
+            lights_on,
+            observed_at_epoch_ms: current_epoch_ms(),
+            source,
+        }
+    }
+}
+
+pub(crate) fn current_epoch_ms() -> u64 {
+    chrono::Utc::now().timestamp_millis().max(0) as u64
+}
+
 /// Runtime state for a room whose rendered output is currently transitioning
 /// between two global modes.
 #[derive(Clone)]
@@ -214,6 +263,12 @@ pub struct AppState {
     /// Used to include `lights_on` in SSE events so clients don't need
     /// to poll the hub directly.
     pub room_lights_on: HashMap<String, bool>,
+    /// Typed observed-power cache for API and SSE projections.
+    ///
+    /// This is the migration target for `lights_on` reads. The legacy
+    /// `room_lights_on` bool map remains temporarily so older tests and
+    /// call sites do not all need to move in one change.
+    pub room_observed_power: HashMap<String, ObservedPowerState>,
 
     /// Per-target motion timer snapshots, updated by the main loop.
     /// Keyed by **topology node IDs** (not hub-native IDs).
@@ -421,6 +476,7 @@ impl Default for AppState {
             canonical_registry: CanonicalRegistry::new(),
             topology: RoomTopologyStore::new(),
             room_lights_on: HashMap::new(),
+            room_observed_power: HashMap::new(),
             motion_snapshots: HashMap::new(),
             room_mode_transitions: HashMap::new(),
             last_check_hour: None,
@@ -842,6 +898,7 @@ mod tests {
         assert!(state.longitude.is_none());
         assert_eq!(state.utc_offset_hours, 0.0);
         assert!(state.room_lights_on.is_empty());
+        assert!(state.room_observed_power.is_empty());
         assert!(state.last_active_mode_change_utc_ms.is_some());
         assert_eq!(state.firmware_version, "0.0.0");
         assert_eq!(state.platform_type, "desktop");
