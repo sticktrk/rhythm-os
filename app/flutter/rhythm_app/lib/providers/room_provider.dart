@@ -70,6 +70,7 @@ class MotionTimerInfo {
   final bool motionOwned;
   final int? remainingSecs;
   final int timeoutSecs;
+  final bool warningActive;
 
   /// When this info was received — used for local countdown interpolation.
   final DateTime receivedAt;
@@ -79,6 +80,7 @@ class MotionTimerInfo {
     required this.motionOwned,
     this.remainingSecs,
     required this.timeoutSecs,
+    this.warningActive = false,
     required this.receivedAt,
   });
 
@@ -89,7 +91,8 @@ class MotionTimerInfo {
           motionActive == other.motionActive &&
           motionOwned == other.motionOwned &&
           remainingSecs == other.remainingSecs &&
-          timeoutSecs == other.timeoutSecs;
+          timeoutSecs == other.timeoutSecs &&
+          warningActive == other.warningActive;
 
   @override
   int get hashCode => Object.hash(
@@ -97,6 +100,7 @@ class MotionTimerInfo {
         motionOwned,
         remainingSecs,
         timeoutSecs,
+        warningActive,
       );
 }
 
@@ -178,13 +182,30 @@ class RoomProvider extends ChangeNotifier {
   Stream<RoomSourceDto> get onSourceRoomsChanged =>
       _sourceChangedController.stream;
 
-  /// Effective room state, falling back to lights-on state before server sync.
+  /// Raw room mode state from the server/local controls.
+  ///
+  /// This represents Rhythm's automation intent (`active`, `idle`,
+  /// `hardOff`, etc.) and may remain `active` even when the physical lights
+  /// are currently off due to an external wall switch, dimmer, or hub action.
   RoomModeState getRoomState(String roomId) {
     final state = _roomStates[roomId];
     if (state != null) return state;
     final room = getRoom(roomId);
     if (room == null) return RoomModeState.active;
     return room.lightsOn ? RoomModeState.active : RoomModeState.hardOff;
+  }
+
+  /// Visual room state for cards and other UI that reflects actual power.
+  ///
+  /// The backend can legitimately report `state=active` while `lightsOn=false`
+  /// when a room is configured to participate in Rhythm but was turned off
+  /// outside the app. For "is this room on right now?" UI, `lightsOn` wins.
+  RoomModeState getDisplayRoomState(String roomId) {
+    final state = getRoomState(roomId);
+    final room = getRoom(roomId);
+    if (room == null) return state;
+    if (!room.lightsOn) return RoomModeState.hardOff;
+    return state;
   }
 
   /// Whether a room is in idle mode.

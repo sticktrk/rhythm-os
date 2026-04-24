@@ -64,7 +64,7 @@ class _RoomCardState extends State<RoomCard> {
     final room = roomProvider.getRoom(widget.roomId);
     if (room == null) return;
     final previousMode =
-        _analyticsModeForState(roomProvider.getRoomState(widget.roomId));
+        _analyticsModeForState(roomProvider.getDisplayRoomState(widget.roomId));
 
     final serverSync = context.read<ServerSyncProvider>();
 
@@ -154,7 +154,7 @@ class _RoomCardState extends State<RoomCard> {
         p.getRoom(widget.roomId),
         p.resetGeneration,
         p.getMotionTimer(widget.roomId),
-        p.getRoomState(widget.roomId),
+        p.getDisplayRoomState(widget.roomId),
         p.getBrightness(widget.roomId),
         p.getKelvin(widget.roomId),
         p.getRoomColor(widget.roomId),

@@ -143,6 +143,11 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
   _HelloRhythmConnection(super.fakeApi);
 
   final _helloController = StreamController<RhythmHello>.broadcast();
+  final _rhythmStateController = StreamController<RhythmRoomState>.broadcast();
+  final _hubEventController =
+      StreamController<({String event, String? hubType, String? address})>.broadcast();
+  final _motionTimerController =
+      StreamController<RhythmMotionTimer>.broadcast();
   final _connectionStateController =
       StreamController<RhythmConnectionState>.broadcast();
 
@@ -150,16 +155,15 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
   Stream<RhythmHello> get helloEvents => _helloController.stream;
 
   @override
-  Stream<RhythmRoomState> get rhythmStateEvents =>
-      const Stream<RhythmRoomState>.empty();
+  Stream<RhythmRoomState> get rhythmStateEvents => _rhythmStateController.stream;
 
   @override
-  Stream<({String event, String? hubType})> get hubEvents =>
-      const Stream<({String event, String? hubType})>.empty();
+  Stream<({String event, String? hubType, String? address})> get hubEvents =>
+      _hubEventController.stream;
 
   @override
   Stream<RhythmMotionTimer> get motionTimerEvents =>
-      const Stream<RhythmMotionTimer>.empty();
+      _motionTimerController.stream;
 
   @override
   Stream<void> get newNodesDetected => const Stream<void>.empty();
@@ -176,9 +180,32 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
     _helloController.add(hello);
   }
 
+  void emitRhythmState(RhythmRoomState state) {
+    _rhythmStateController.add(state);
+  }
+
+  void emitHubEvent({
+    required String event,
+    String? hubType,
+    String? address,
+  }) {
+    _hubEventController.add((
+      event: event,
+      hubType: hubType,
+      address: address,
+    ));
+  }
+
+  void emitMotionTimer(RhythmMotionTimer timer) {
+    _motionTimerController.add(timer);
+  }
+
   @override
   void dispose() {
     _helloController.close();
+    _rhythmStateController.close();
+    _hubEventController.close();
+    _motionTimerController.close();
     _connectionStateController.close();
     super.dispose();
   }
@@ -620,6 +647,238 @@ void main() {
         roomProvider.enabledRooms.map((room) => room.id),
         contains('light-1'),
       );
+    });
+  });
+
+  group('ServerSyncProvider SSE sync', () {
+    late RoomProvider roomProvider;
+    late _FakeRhythmServerApi api;
+    late _HelloRhythmConnection connection;
+
+    setUp(() {
+      roomProvider = RoomProvider();
+      api = _FakeRhythmServerApi();
+      connection = _HelloRhythmConnection(api);
+    });
+
+    tearDown(() {
+      roomProvider.dispose();
+      connection.dispose();
+    });
+
+    test('bootstraps motion timer state from hello nodes', () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': [
+            {
+              'id': 'room-1',
+              'name': 'Kitchen',
+              'kind': 'room',
+              'hub_types': ['hue'],
+              'state': 'active',
+              'rhythm_enabled': true,
+              'disabled': false,
+              'time_offset': 0.0,
+              'brightness_offset': 0.0,
+              'lights_on': true,
+              'motion_active': false,
+              'motion_owned': true,
+              'remaining_secs': 42,
+              'timeout_secs': 1200,
+              'warning_active': true,
+              'devices': [
+                {
+                  'id': 'sensor-1',
+                  'type': 'motion',
+                  'name': 'Kitchen Motion',
+                },
+              ],
+            },
+          ],
+          'location': const <String, dynamic>{},
+        }),
+      );
+
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final timer = roomProvider.getMotionTimer('room-1');
+      expect(timer, isNotNull);
+      expect(timer!.remainingSecs, 42);
+      expect(timer.motionOwned, isTrue);
+      expect(timer.warningActive, isTrue);
+      expect(roomProvider.hasMotionSensor('room-1'), isTrue);
+      expect(
+        provider.helloRooms.singleWhere((room) => room.id == 'room-1').warningActive,
+        isTrue,
+      );
+    });
+
+    test('applies node_state updates to hello room summaries', () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': [
+            {
+              'id': 'room-1',
+              'name': 'Kitchen',
+              'kind': 'room',
+              'hub_types': ['hue'],
+              'state': 'active',
+              'rhythm_enabled': true,
+              'disabled': false,
+              'time_offset': 0.0,
+              'brightness_offset': 0.0,
+              'lights_on': true,
+            },
+          ],
+          'location': const <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      connection.emitRhythmState(
+        RhythmRoomState.fromJson({
+          'id': 'room-1',
+          'name': 'Kitchen Evening',
+          'kind': 'room',
+          'hub_types': ['hue'],
+          'state': 'idle',
+          'transitioning': true,
+          'rhythm_enabled': false,
+          'time_offset': 12.0,
+          'brightness_offset': -8.0,
+          'lights_on': false,
+          'brightness': 9,
+          'kelvin': 2100,
+          'profile_settings': {
+            'profile_id': 'sleep',
+            'fade_ms': {'mode': 'fixed', 'value': 1500},
+          },
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final room = provider.helloRooms.singleWhere((entry) => entry.id == 'room-1');
+      expect(room.name, 'Kitchen Evening');
+      expect(room.state, RoomModeState.idle);
+      expect(room.transitioning, isTrue);
+      expect(room.rhythmEnabled, isFalse);
+      expect(room.lightsOn, isFalse);
+      expect(room.brightness, 9);
+      expect(room.kelvin, 2100);
+      expect(room.profileSettings?.profileId, 'sleep');
+      expect(room.profileSettings?.fadeMs, 1500);
+    });
+
+    test('applies motion timer SSE updates to room provider and hello rooms',
+        () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': [
+            {
+              'id': 'room-1',
+              'name': 'Kitchen',
+              'kind': 'room',
+              'hub_types': ['hue'],
+              'state': 'active',
+              'rhythm_enabled': true,
+              'disabled': false,
+              'time_offset': 0.0,
+              'brightness_offset': 0.0,
+              'lights_on': true,
+            },
+          ],
+          'location': const <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      connection.emitMotionTimer(
+        const RhythmMotionTimer.node(
+          nodeId: 'room-1',
+          motionActive: false,
+          motionOwned: true,
+          remainingSecs: 18,
+          timeoutSecs: 1200,
+          warningActive: true,
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final timer = roomProvider.getMotionTimer('room-1');
+      expect(timer, isNotNull);
+      expect(timer!.remainingSecs, 18);
+      expect(timer.warningActive, isTrue);
+
+      final room = provider.helloRooms.singleWhere((entry) => entry.id == 'room-1');
+      expect(room.motionOwned, isTrue);
+      expect(room.remainingSecs, 18);
+      expect(room.timeoutSecs, 1200);
+      expect(room.warningActive, isTrue);
+    });
+
+    test('updates only the addressed hub when multiple hubs share a type',
+        () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': const <Map<String, dynamic>>[],
+          'location': const <String, dynamic>{},
+          'hubs': [
+            {
+              'type': 'hue',
+              'address': '192.168.1.10:443',
+              'connected': true,
+            },
+            {
+              'type': 'hue',
+              'address': '192.168.1.11:443',
+              'connected': true,
+            },
+          ],
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      connection.emitHubEvent(
+        event: 'disconnected',
+        hubType: 'hue',
+        address: '192.168.1.11:443',
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final hubsByAddress = {
+        for (final hub in provider.serverHubInfos)
+          hub['address'] as String: hub['connected'] as bool? ?? false,
+      };
+      expect(hubsByAddress['192.168.1.10:443'], isTrue);
+      expect(hubsByAddress['192.168.1.11:443'], isFalse);
     });
   });
 

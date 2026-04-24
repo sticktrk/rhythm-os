@@ -42,7 +42,7 @@ class RoomSettingsSheet extends StatefulWidget {
 enum _SheetTab { rhythm, devices, settings }
 
 class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
-  _SheetTab _selectedTab = _SheetTab.rhythm;
+  _SheetTab _selectedTab = _SheetTab.devices;
   bool _deletingRoom = false;
 
   RoomDto get room => widget.room;
@@ -594,8 +594,8 @@ class _TabSelector extends StatelessWidget {
       ),
       child: Row(
         children: [
-          _tabItem('Rhythm', _SheetTab.rhythm),
           _tabItem('Devices', _SheetTab.devices),
+          _tabItem('Rhythm', _SheetTab.rhythm),
           _tabItem('Settings', _SheetTab.settings),
         ],
       ),

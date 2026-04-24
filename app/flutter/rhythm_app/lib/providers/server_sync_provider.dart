@@ -46,7 +46,8 @@ class ServerSyncProvider extends ChangeNotifier {
 
   StreamSubscription<RhythmHello>? _helloSub;
   StreamSubscription<RhythmRoomState>? _rhythmStateSub;
-  StreamSubscription<({String event, String? hubType})>? _hubEventSub;
+  StreamSubscription<({String event, String? hubType, String? address})>?
+      _hubEventSub;
   StreamSubscription<RoomSourceDto>? _sourceChangedSub;
   StreamSubscription<RhythmMotionTimer>? _motionTimerSub;
   StreamSubscription<void>? _newNodesSub;
@@ -673,6 +674,7 @@ class ServerSyncProvider extends ChangeNotifier {
       // 2. Reconcile motion sensors — mark rooms that have sensors,
       //    unmark rooms that lost their sensors since last hello
       _roomProvider.setMotionSensorNodes(_sensorTargetNodeIds());
+      _syncHelloMotionState(hello.nodes);
 
       // 3. Accept server config as authoritative, push location if different
       _acceptServerConfig(hello.activeProfile);
@@ -805,6 +807,7 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Handle rhythm_state from server (button event, tick, poll diff).
   void _onRhythmState(RhythmRoomState state) {
     _receivingFromServer = true;
+    var helloChanged = false;
     try {
       if (_roomProvider.getNode(state.nodeId) == null) return;
       _roomProvider.applyServerNodeState(
@@ -823,8 +826,12 @@ class ServerSyncProvider extends ChangeNotifier {
             : null,
         tick: state.tick,
       );
+      helloChanged = _updateHelloNodeFromRhythmState(state);
     } finally {
       _receivingFromServer = false;
+    }
+    if (helloChanged) {
+      notifyListeners();
     }
   }
 
@@ -832,22 +839,18 @@ class ServerSyncProvider extends ChangeNotifier {
   void _onMotionTimer(RhythmMotionTimer event) {
     // Any motion event (even clearing) means this node has a sensor.
     _roomProvider.markNodeHasSensor(event.nodeId);
+    _applyMotionTimerState(
+      nodeId: event.nodeId,
+      motionActive: event.motionActive,
+      motionOwned: event.motionOwned,
+      remainingSecs: event.remainingSecs,
+      timeoutSecs: event.timeoutSecs,
+      warningActive: event.warningActive,
+      cleared: event.isCleared,
+    );
 
-    // Idle sensor (no active motion, no countdown) — just mark presence.
-    final isIdle = !event.motionActive && event.remainingSecs == null;
-    if (event.isCleared || isIdle) {
-      _roomProvider.clearNodeMotionTimer(event.nodeId);
-    } else {
-      _roomProvider.updateNodeMotionTimer(
-        event.nodeId,
-        MotionTimerInfo(
-          motionActive: event.motionActive,
-          motionOwned: event.motionOwned,
-          remainingSecs: event.remainingSecs,
-          timeoutSecs: event.timeoutSecs,
-          receivedAt: DateTime.now(),
-        ),
-      );
+    if (_updateHelloNodeMotionState(event)) {
+      notifyListeners();
     }
   }
 
@@ -861,9 +864,9 @@ class ServerSyncProvider extends ChangeNotifier {
   ///
   /// When a hub connects, trigger a re-hello to pick up newly discovered
   /// rooms. When a hub disconnects, just update the UI.
-  void _onHubEvent(({String event, String? hubType}) hubEvent) {
-    final (:event, :hubType) = hubEvent;
-    debugPrint('ServerSync: hub_status=$event hub=$hubType');
+  void _onHubEvent(({String event, String? hubType, String? address}) hubEvent) {
+    final (:event, :hubType, :address) = hubEvent;
+    debugPrint('ServerSync: hub_status=$event hub=$hubType address=$address');
     // Update the specific hub's connected state in _lastHubInfos.
     // If hubType is null (legacy/aggregate event), ignore it — the hello
     // provides authoritative per-hub status and we can't safely guess
@@ -871,7 +874,8 @@ class ServerSyncProvider extends ChangeNotifier {
     if (_lastHubInfos.isNotEmpty && hubType != null) {
       _lastHubInfos = [
         for (final h in _lastHubInfos)
-          if (h['type'] == hubType)
+          if (h['type'] == hubType &&
+              (address == null || h['address'] == address))
             {...h, 'connected': event == 'connected'}
           else
             h,
@@ -1589,10 +1593,176 @@ class ServerSyncProvider extends ChangeNotifier {
     _acceptServerNodes(_helloNodes);
     _helloRooms = _buildRoomSummaries();
     _roomProvider.setMotionSensorNodes(_sensorTargetNodeIds());
+    _syncHelloMotionState(_helloNodes);
 
     if (hasListeners) {
       notifyListeners();
     }
+  }
+
+  void _syncHelloMotionState(Iterable<RhythmRoom> nodes) {
+    for (final node in nodes) {
+      if (node.id.isEmpty) continue;
+      _applyMotionTimerState(
+        nodeId: node.id,
+        motionActive: node.motionActive ?? false,
+        motionOwned: node.motionOwned ?? false,
+        remainingSecs: node.remainingSecs,
+        timeoutSecs: node.timeoutSecs ?? 0,
+        warningActive: node.warningActive ?? false,
+      );
+    }
+  }
+
+  void _applyMotionTimerState({
+    required String nodeId,
+    required bool motionActive,
+    required bool motionOwned,
+    required int? remainingSecs,
+    required int timeoutSecs,
+    bool warningActive = false,
+    bool cleared = false,
+  }) {
+    final isIdle = !motionActive && remainingSecs == null && !warningActive;
+    if (cleared || isIdle) {
+      _roomProvider.clearNodeMotionTimer(nodeId);
+      return;
+    }
+
+    _roomProvider.updateNodeMotionTimer(
+      nodeId,
+      MotionTimerInfo(
+        motionActive: motionActive,
+        motionOwned: motionOwned,
+        remainingSecs: remainingSecs,
+        timeoutSecs: timeoutSecs,
+        warningActive: warningActive,
+        receivedAt: DateTime.now(),
+      ),
+    );
+  }
+
+  bool _updateHelloNodeFromRhythmState(RhythmRoomState state) {
+    final index = _helloNodes.indexWhere((node) => node.id == state.nodeId);
+    if (index == -1) return false;
+
+    final previous = _helloNodes[index];
+    final updated = RhythmRoom(
+      id: previous.id,
+      name: state.name ?? previous.name,
+      kind: state.kind ?? previous.kind,
+      parentId: state.parentId ?? previous.parentId,
+      placement: state.placement ?? previous.placement,
+      groupedLightId: previous.groupedLightId,
+      state: state.state,
+      transitioning: state.transitioning,
+      rhythmEnabled: state.rhythmEnabled,
+      disabled: previous.disabled,
+      timeOffset: state.timeOffset,
+      brightnessOffset: state.brightnessOffset,
+      hubTypes: state.hubTypes.isNotEmpty ? state.hubTypes : previous.hubTypes,
+      manufacturer: state.manufacturer ?? previous.manufacturer,
+      model: state.model ?? previous.model,
+      deviceIds: previous.deviceIds,
+      devices: previous.devices,
+      profileSettings: state.profileSettings ?? previous.profileSettings,
+      lightsOn: state.lightsOn ?? previous.lightsOn,
+      brightness: state.brightness ?? previous.brightness,
+      kelvin: state.kelvin ?? previous.kelvin,
+      motionActive: state.motionActive ?? previous.motionActive,
+      motionOwned: state.motionOwned ?? previous.motionOwned,
+      remainingSecs: state.remainingSecs ?? previous.remainingSecs,
+      timeoutSecs: state.timeoutSecs ?? previous.timeoutSecs,
+      warningActive: state.warningActive ?? previous.warningActive,
+    );
+
+    if (!_helloNodeChanged(previous, updated)) {
+      return false;
+    }
+
+    _helloNodes[index] = updated;
+    _helloRooms = _buildRoomSummaries();
+    return true;
+  }
+
+  bool _updateHelloNodeMotionState(RhythmMotionTimer event) {
+    final index = _helloNodes.indexWhere((node) => node.id == event.nodeId);
+    if (index == -1) return false;
+
+    final previous = _helloNodes[index];
+    final updated = RhythmRoom(
+      id: previous.id,
+      name: previous.name,
+      kind: previous.kind,
+      parentId: previous.parentId,
+      placement: previous.placement,
+      groupedLightId: previous.groupedLightId,
+      state: previous.state,
+      transitioning: previous.transitioning,
+      rhythmEnabled: previous.rhythmEnabled,
+      disabled: previous.disabled,
+      timeOffset: previous.timeOffset,
+      brightnessOffset: previous.brightnessOffset,
+      hubTypes: previous.hubTypes,
+      manufacturer: previous.manufacturer,
+      model: previous.model,
+      deviceIds: previous.deviceIds,
+      devices: previous.devices,
+      profileSettings: previous.profileSettings,
+      lightsOn: previous.lightsOn,
+      brightness: previous.brightness,
+      kelvin: previous.kelvin,
+      motionActive: event.isCleared ? false : event.motionActive,
+      motionOwned: event.isCleared ? false : event.motionOwned,
+      remainingSecs: event.isCleared ? null : event.remainingSecs,
+      timeoutSecs:
+          event.isCleared && previous.timeoutSecs != null && previous.timeoutSecs! > 0
+              ? previous.timeoutSecs
+              : event.timeoutSecs,
+      warningActive: event.isCleared ? false : event.warningActive,
+    );
+
+    if (!_helloNodeChanged(previous, updated)) {
+      return false;
+    }
+
+    _helloNodes[index] = updated;
+    _helloRooms = _buildRoomSummaries();
+    return true;
+  }
+
+  bool _helloNodeChanged(RhythmRoom left, RhythmRoom right) {
+    return left.name != right.name ||
+        left.kind != right.kind ||
+        left.parentId != right.parentId ||
+        left.placement != right.placement ||
+        left.state != right.state ||
+        left.transitioning != right.transitioning ||
+        left.rhythmEnabled != right.rhythmEnabled ||
+        left.disabled != right.disabled ||
+        left.timeOffset != right.timeOffset ||
+        left.brightnessOffset != right.brightnessOffset ||
+        !_stringListsEqual(left.hubTypes, right.hubTypes) ||
+        left.manufacturer != right.manufacturer ||
+        left.model != right.model ||
+        left.profileSettings?.toJson().toString() !=
+            right.profileSettings?.toJson().toString() ||
+        left.lightsOn != right.lightsOn ||
+        left.brightness != right.brightness ||
+        left.kelvin != right.kelvin ||
+        left.motionActive != right.motionActive ||
+        left.motionOwned != right.motionOwned ||
+        left.remainingSecs != right.remainingSecs ||
+        left.timeoutSecs != right.timeoutSecs ||
+        left.warningActive != right.warningActive;
+  }
+
+  bool _stringListsEqual(List<String> left, List<String> right) {
+    if (left.length != right.length) return false;
+    for (var i = 0; i < left.length; i++) {
+      if (left[i] != right[i]) return false;
+    }
+    return true;
   }
 
   List<RhythmRoom> _buildRoomSummaries() {

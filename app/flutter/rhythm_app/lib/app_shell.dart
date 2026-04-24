@@ -177,6 +177,27 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     }
   }
 
+  String _modeLabel(RhythmMode mode) {
+    return switch (mode) {
+      RhythmMode.day => 'Day',
+      RhythmMode.sleep => 'Sleep',
+    };
+  }
+
+  String _defaultTransitionIdForMode(RhythmMode mode) {
+    return switch (mode) {
+      RhythmMode.day => 'sleep_to_day',
+      RhythmMode.sleep => 'day_to_sleep',
+    };
+  }
+
+  void _showModeActionError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+
   /// Flip the global mode from the All Rooms toggle.
   ///
   /// For the day/sleep toggle we run the default saved transitions so the
@@ -190,12 +211,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     final currentMode = serverSync.activeMode;
     if (currentMode == mode) return;
 
-    final transitionId = currentMode == null
-        ? null
-        : switch (mode) {
-            RhythmMode.sleep => 'day_to_sleep',
-            RhythmMode.day => 'sleep_to_day',
-          };
+    final transitionId =
+        currentMode == null ? null : _defaultTransitionIdForMode(mode);
     if (transitionId == null) {
       await serverSync.dispatchSetActiveMode(mode);
       await _loadData();
@@ -213,6 +230,61 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       mode.name,
       source: 'all_rooms_toggle',
     );
+  }
+
+  Future<void> _confirmReapplyActiveMode(RhythmMode mode) async {
+    final roomProvider = context.read<RoomProvider>();
+    if (roomProvider.anyRoomTransitioning) return;
+
+    final modeLabel = _modeLabel(mode);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Set all lights to $modeLabel settings?'),
+        content: const Text(
+          'This reapplies the current preset for every light.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Set All'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+    await _reapplyActiveMode(mode);
+  }
+
+  Future<void> _reapplyActiveMode(RhythmMode mode) async {
+    final roomProvider = context.read<RoomProvider>();
+    if (roomProvider.anyRoomTransitioning) return;
+
+    final serverSync = context.read<ServerSyncProvider>();
+    final modeLabel = _modeLabel(mode);
+
+    if (!serverSync.canDispatchActions) {
+      _showModeActionError('Could not reapply $modeLabel settings.');
+      return;
+    }
+
+    HapticFeedback.mediumImpact();
+
+    final ranTransition = await serverSync
+        .dispatchRunTransition(_defaultTransitionIdForMode(mode));
+    if (ranTransition) {
+      await _loadData();
+      if (mounted) HapticFeedback.heavyImpact();
+      return;
+    }
+
+    await serverSync.dispatchFixMyLights();
+    if (mounted) HapticFeedback.heavyImpact();
   }
 
   @override
@@ -331,6 +403,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                     ? serverSync.activeMode
                     : null,
                 onModeSelected: _setActiveMode,
+                onActiveModeDoubleTap: _confirmReapplyActiveMode,
                 onPageChanged: (page) {
                   setState(() => _currentRoomPage = page);
                 },

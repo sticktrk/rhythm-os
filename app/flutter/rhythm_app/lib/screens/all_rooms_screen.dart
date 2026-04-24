@@ -30,6 +30,7 @@ class AllRoomsScreen extends StatefulWidget {
   final RhythmMode? activeMode;
   final RhythmMode? pendingMode;
   final ValueChanged<RhythmMode>? onModeSelected;
+  final ValueChanged<RhythmMode>? onActiveModeDoubleTap;
 
   const AllRoomsScreen({
     super.key,
@@ -41,6 +42,7 @@ class AllRoomsScreen extends StatefulWidget {
     this.activeMode,
     this.pendingMode,
     this.onModeSelected,
+    this.onActiveModeDoubleTap,
   });
 
   @override
@@ -718,6 +720,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
               activeMode: widget.activeMode!,
               pendingMode: widget.pendingMode,
               onModeSelected: widget.onModeSelected,
+              onActiveModeDoubleTap: widget.onActiveModeDoubleTap,
             ),
         ],
       ),
@@ -1242,11 +1245,13 @@ class _CurveProfileToggle extends StatelessWidget {
   final RhythmMode activeMode;
   final RhythmMode? pendingMode;
   final ValueChanged<RhythmMode>? onModeSelected;
+  final ValueChanged<RhythmMode>? onActiveModeDoubleTap;
 
   const _CurveProfileToggle({
     required this.activeMode,
     this.pendingMode,
     this.onModeSelected,
+    this.onActiveModeDoubleTap,
   });
 
   static const _duration = Duration(milliseconds: 350);
@@ -1284,6 +1289,9 @@ class _CurveProfileToggle extends StatelessWidget {
                   isPending: mode == pendingMode,
                   activeColor: _modeVisuals[mode]!.$3,
                   onTap: () => onModeSelected?.call(mode),
+                  onDoubleTap: mode == activeMode
+                      ? () => onActiveModeDoubleTap?.call(mode)
+                      : null,
                 ),
             ],
           ),
@@ -1299,6 +1307,7 @@ class _CurveProfileToggle extends StatelessWidget {
     required bool isPending,
     required Color activeColor,
     required VoidCallback onTap,
+    VoidCallback? onDoubleTap,
   }) {
     final isHighlighted = isActive || isPending;
 
@@ -1310,6 +1319,14 @@ class _CurveProfileToggle extends StatelessWidget {
           onTap();
         }
       },
+      onDoubleTap: onDoubleTap == null
+          ? null
+          : () {
+              if (isActive && !isPending && pendingMode == null) {
+                HapticFeedback.lightImpact();
+                onDoubleTap();
+              }
+            },
       child: AnimatedContainer(
         duration: _duration,
         curve: Curves.easeInOut,

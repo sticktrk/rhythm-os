@@ -84,8 +84,8 @@ class _TestRhythmConnection extends RhythmConnection {
       const Stream<RhythmRoomState>.empty();
 
   @override
-  Stream<({String event, String? hubType})> get hubEvents =>
-      const Stream<({String event, String? hubType})>.empty();
+  Stream<({String event, String? hubType, String? address})> get hubEvents =>
+      const Stream<({String event, String? hubType, String? address})>.empty();
 
   @override
   Stream<RhythmMotionTimer> get motionTimerEvents =>
