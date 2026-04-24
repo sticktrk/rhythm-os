@@ -52,7 +52,10 @@ pub use adaptive::LightingValues;
 pub use color::{
     kelvin_to_mireds, kelvin_to_rgb, kelvin_to_xy, mireds_to_kelvin, rgb_to_xy, Rgb, XyColor,
 };
-pub use config::SolarContext;
+pub use config::{
+    curve_context_for_local_date_and_hour, curve_context_for_local_datetime,
+    resolve_sun_times_for_local_date, SolarContext,
+};
 pub use controller::{
     HubDispatchTarget, HubLightController, LightControlError, LightControlResult, LightController,
     NoOpController,

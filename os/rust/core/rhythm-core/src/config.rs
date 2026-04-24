@@ -7,7 +7,11 @@
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
+use rhythm_profile::CurveContext;
+
 use crate::solar::{SunTimes, TwilightTimes};
+use crate::{calculate_sun_times, SolarTime, Timezone};
 
 /// Default motion timeout in seconds (20 minutes).
 pub const DEFAULT_MOTION_TIMEOUT_SECS: u16 = 1200;
@@ -91,6 +95,69 @@ impl Default for SolarContext {
     fn default() -> Self {
         Self::default_context()
     }
+}
+
+/// Resolve sun times for a specific local date when full location data is available.
+pub fn resolve_sun_times_for_local_date(
+    latitude: Option<f32>,
+    longitude: Option<f32>,
+    timezone_name: Option<&str>,
+    sample_date: NaiveDate,
+) -> Option<SunTimes> {
+    let lat = latitude?;
+    let lon = longitude?;
+    let tz_name = timezone_name?;
+    let tz = Timezone::new(tz_name);
+
+    Some(calculate_sun_times(
+        lat,
+        lon,
+        sample_date.year(),
+        sample_date.month(),
+        sample_date.day(),
+        &tz,
+    ))
+}
+
+/// Build a curve context for a specific local date and decimal hour.
+pub fn curve_context_for_local_date_and_hour(
+    solar_noon: f32,
+    latitude: Option<f32>,
+    longitude: Option<f32>,
+    timezone_name: Option<&str>,
+    sample_date: NaiveDate,
+    sample_hour: f32,
+) -> CurveContext {
+    let day_of_year =
+        crate::timezone::day_of_year(sample_date.year(), sample_date.month(), sample_date.day());
+    let solar = SolarTime::new(solar_noon, latitude.unwrap_or(35.0), day_of_year);
+    let sun_times =
+        resolve_sun_times_for_local_date(latitude, longitude, timezone_name, sample_date);
+
+    CurveContext::new(sample_hour, solar, sun_times)
+}
+
+/// Build a curve context for a specific local datetime.
+pub fn curve_context_for_local_datetime(
+    solar_noon: f32,
+    latitude: Option<f32>,
+    longitude: Option<f32>,
+    timezone_name: Option<&str>,
+    sample_at: NaiveDateTime,
+) -> CurveContext {
+    let sample_time = sample_at.time();
+    let sample_hour = sample_time.hour() as f32
+        + sample_time.minute() as f32 / 60.0
+        + sample_time.second() as f32 / 3600.0;
+
+    curve_context_for_local_date_and_hour(
+        solar_noon,
+        latitude,
+        longitude,
+        timezone_name,
+        sample_at.date(),
+        sample_hour,
+    )
 }
 
 #[cfg(test)]

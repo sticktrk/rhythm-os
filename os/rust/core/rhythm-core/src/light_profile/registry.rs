@@ -338,6 +338,19 @@ impl LightProfileRegistry {
         self.profile_for_config_with_active(&state_config, active_profile)
     }
 
+    /// Calculate room output values for a mode/state pair using the resolved profile.
+    pub fn calculate_room_values(
+        &self,
+        mode: RhythmMode,
+        state: RoomModeState,
+        settings: Option<&RoomProfileSettings>,
+        ctx: &CurveContext,
+        time_offset_minutes: f32,
+    ) -> LightingValues {
+        self.profile_for_room_state(mode, state, settings)
+            .calculate_with_offset(ctx, time_offset_minutes)
+    }
+
     /// Replace the mode/state profile mappings.
     ///
     /// Missing modes fall back to their built-in defaults.

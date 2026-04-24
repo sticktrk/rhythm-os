@@ -220,9 +220,7 @@ fn summarize_periodic_dispatch(
                 node,
                 collapse_attached_light_nodes,
             ))
-            .or_insert_with(|| {
-                periodic_settings_node_kind(node, collapse_attached_light_nodes)
-            });
+            .or_insert_with(|| periodic_settings_node_kind(node, collapse_attached_light_nodes));
     }
 
     let eligible_node_count = eligible_settings_node_kinds.len();
@@ -351,30 +349,6 @@ pub(crate) fn effective_cycle_duration(
     Duration::from_secs(chosen_secs)
 }
 
-fn resolve_periodic_sun_times(
-    latitude: Option<f32>,
-    longitude: Option<f32>,
-    timezone_name: Option<&str>,
-    utc_offset: f32,
-) -> Option<rhythm_core::SunTimes> {
-    let lat = latitude?;
-    let lon = longitude?;
-    let tz_name = timezone_name?;
-
-    let local_now =
-        chrono::Utc::now().naive_utc() + chrono::Duration::seconds((utc_offset * 3600.0) as i64);
-    let (year, month, day) = (
-        chrono::Datelike::year(&local_now.date()),
-        chrono::Datelike::month(&local_now.date()),
-        chrono::Datelike::day(&local_now.date()),
-    );
-    let tz = rhythm_core::Timezone::new(tz_name);
-
-    Some(rhythm_core::calculate_sun_times(
-        lat, lon, year, month, day, &tz,
-    ))
-}
-
 fn enqueue_periodic_tick(
     state: &SharedState,
     tx: &std::sync::mpsc::SyncSender<WorkItem>,
@@ -497,7 +471,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
         let doy = SystemTimeProvider::new(utc_offset).day_of_year();
 
         // Check for DST transition and refresh UTC offset if needed
-        let (utc_offset, solar_noon, doy) = refresh_dst_offset(
+        let (utc_offset, solar_noon, _doy) = refresh_dst_offset(
             &state,
             utc_offset,
             solar_noon,
@@ -509,12 +483,18 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
 
         let time_provider = SystemTimeProvider::new(utc_offset);
         let current_hour = time_provider.current_hour();
-        let sun_times =
-            resolve_periodic_sun_times(latitude, longitude, timezone_name.as_deref(), utc_offset);
+        let local_now = chrono::Utc::now().naive_utc()
+            + chrono::Duration::seconds((utc_offset * 3600.0) as i64);
 
         // Calculate generic curve values (no offset) for logging
-        let solar = rhythm_core::SolarTime::new(solar_noon, lat, doy);
-        let ctx = rhythm_core::light_profile::CurveContext::new(current_hour, solar, sun_times);
+        let ctx = rhythm_core::curve_context_for_local_date_and_hour(
+            solar_noon,
+            latitude,
+            longitude,
+            timezone_name.as_deref(),
+            local_now.date(),
+            current_hour,
+        );
         let module = profile_registry.active_profile();
         let values = module.calculate(&ctx);
 
@@ -597,11 +577,8 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
 
         room_snapshots.sort_by_key(|room| stable_room_phase_key(&room.id));
         periodic_nodes.sort_by_key(|node| stable_room_phase_key(&node.node_id));
-        let dispatch_summary = summarize_periodic_dispatch(
-            &room_snapshots,
-            &periodic_nodes,
-            has_composite_controller,
-        );
+        let dispatch_summary =
+            summarize_periodic_dispatch(&room_snapshots, &periodic_nodes, has_composite_controller);
         let last_node_index_by_emit_target =
             last_periodic_node_index_by_emit_target(&periodic_nodes);
         let cycle_duration = effective_cycle_duration(
