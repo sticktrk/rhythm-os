@@ -1309,16 +1309,14 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             };
             let Some(runtime) = runtime else { return };
 
-            if runtime.engine_node_snapshot(&node_id).is_none()
-                || runtime.engine_node_snapshot(&settings_node_id).is_none()
-            {
+            if runtime.engine_node_snapshot(&settings_node_id).is_none() {
                 tracing::debug!(
                     target: "sys",
                     event = "periodic_node_tick_skipped",
                     command_id = %command_id,
                     node_id = %node_id,
                     settings_node_id = %settings_node_id,
-                    reason = "stale",
+                    reason = "stale_settings_node",
                     "Skipping stale periodic tick"
                 );
                 return;
@@ -1825,6 +1823,106 @@ mod tests {
         }
     }
 
+    struct PeriodicWorkerTestRuntime {
+        snapshots: Vec<RoomSnapshot>,
+        periodic_tick_node_calls: Arc<Mutex<Vec<(String, String, f32)>>>,
+    }
+
+    impl RuntimeHandle for PeriodicWorkerTestRuntime {
+        fn handle_event(&self, _: &rhythm_core::InputEvent) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn sync_rooms(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn set_solar(&self, _: rhythm_core::SolarTime) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn set_light_profile_config(&self, _: LightProfileConfig) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn set_mode_configs(&self, _: Vec<rhythm_core::ModeConfig>) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn periodic_tick_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn periodic_tick_node(
+            &self,
+            node_id: &str,
+            source_room_id: &str,
+            current_hour: f32,
+        ) -> anyhow::Result<()> {
+            self.periodic_tick_node_calls.lock().unwrap().push((
+                node_id.to_string(),
+                source_room_id.to_string(),
+                current_hour,
+            ));
+            Ok(())
+        }
+        fn engine_room_snapshot(&self, room_id: &str) -> Option<RoomSnapshot> {
+            self.snapshots
+                .iter()
+                .find(|snap| snap.id == room_id)
+                .cloned()
+        }
+        fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot> {
+            self.snapshots.clone()
+        }
+        fn restore_room_state(&self, _: &str, _: rhythm_core::RestoredRoomState) {}
+        fn add_room(&self, _: &str, _: &str) {}
+        fn remove_room(&self, _: &str) {}
+        fn dim_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn turn_on_room(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn apply_room_command(
+            &self,
+            _: &str,
+            _: rhythm_core::LightingCommand,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn lights_off_room(&self, _: &str, _: Option<u32>) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn set_power_save(&self, _: bool) -> Vec<String> {
+            vec![]
+        }
+        fn is_power_save(&self) -> bool {
+            false
+        }
+        fn set_room_brightness(&self, _: &str, _: u8) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn set_room_time_offset(&self, _: &str, _: f32) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn idle_brightness(&self) -> u8 {
+            1
+        }
+        fn soft_off_tick_room(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn any_lights_on(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn current_hour(&self) -> f32 {
+            12.0
+        }
+        fn set_light_profile(&self, _: &str) -> bool {
+            true
+        }
+        fn active_light_profile_id(&self) -> String {
+            rhythm_core::RHYTHM_PROFILE_ID.to_string()
+        }
+        fn available_light_profiles(&self) -> Vec<(String, String)> {
+            vec![]
+        }
+    }
+
     fn make_state_with_motion_override(timeout_secs: u32) -> SharedState {
         let mut app = crate::state::AppState::default();
         let mut active = app
@@ -2062,6 +2160,46 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(handle_event_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn periodic_worker_accepts_internal_light_node_with_live_settings_node() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(PeriodicWorkerTestRuntime {
+            snapshots: vec![RoomSnapshot {
+                id: "room_a".into(),
+                name: "Room A".into(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                hard_off: false,
+                profile_settings: RoomProfileSettings::default(),
+            }],
+            periodic_tick_node_calls: calls.clone(),
+        });
+        let state = make_state_with_runtime(runtime);
+        let internal_node_id =
+            "__rhythm_light_node__|room=room_a|kind=group|hub=hue@bridge|source=hue-room";
+
+        process_work_item(
+            &state,
+            WorkItem::PeriodicNodeTick {
+                command_id: "periodic-test".into(),
+                node_id: internal_node_id.into(),
+                settings_node_id: "room_a".into(),
+                current_hour: 20.25,
+                emit_parent_node_id: None,
+            },
+        );
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(internal_node_id.to_string(), "room_a".to_string(), 20.25)]
+        );
     }
 
     #[test]
