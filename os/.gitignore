@@ -123,3 +123,4 @@ rust/bins/rhythm-esp32/.embuild/
 *.tmp
 *.temp
 .cache/
+rhythm-app

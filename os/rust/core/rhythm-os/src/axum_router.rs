@@ -681,7 +681,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
-    use axum::body::Body;
+    use axum::body::{to_bytes, Body};
     use axum::http::{Method as HttpMethod, Request, StatusCode};
     use rhythm_core::{LightProfileConfig, RoomSnapshot, RuntimeHandle, SolarTime};
     use serde_json::json;
@@ -823,7 +823,7 @@ mod tests {
 
     fn test_state_with_runtime(
         runtime: Arc<dyn RuntimeHandle>,
-        room_lights_on: &[(&str, bool)],
+        observed_power: &[(&str, bool)],
     ) -> SharedState {
         let mut app_state = crate::state::AppState::default();
         let hub_type = HubType::new("test");
@@ -840,10 +840,14 @@ mod tests {
                 shutdown: Arc::new(AtomicBool::new(false)),
             },
         );
-        for (room_id, lights_on) in room_lights_on {
-            app_state
-                .room_lights_on
-                .insert((*room_id).to_string(), *lights_on);
+        for (room_id, lights_on) in observed_power {
+            app_state.room_observed_power.insert(
+                (*room_id).to_string(),
+                crate::state::ObservedPowerState::new(
+                    *lights_on,
+                    crate::state::ObservedPowerSource::Command,
+                ),
+            );
         }
         Arc::new(Mutex::new(app_state))
     }
@@ -872,6 +876,15 @@ mod tests {
             .body(Body::from(body.to_string()))
             .unwrap();
         app.oneshot(req).await.unwrap().status()
+    }
+
+    fn room_state_json<'a>(body: &'a serde_json::Value, room_id: &str) -> &'a serde_json::Value {
+        body["nodes"]
+            .as_array()
+            .expect("state nodes should be an array")
+            .iter()
+            .find(|node| node["id"].as_str() == Some(room_id))
+            .expect("room should exist in state response")
     }
 
     /// Verify every shared route is registered in the axum router.
@@ -1063,6 +1076,83 @@ mod tests {
             .unwrap()
             .iter()
             .any(|call| call == "set_room_time_offset@http-handler"));
+    }
+
+    #[tokio::test]
+    async fn get_state_authoritative_query_reconciles_stale_observed_power() {
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(ThreadRecordingRuntime {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            snapshots: vec![RoomSnapshot {
+                id: "room1".into(),
+                name: "Room 1".into(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                hard_off: false,
+                profile_settings: rhythm_core::RoomProfileSettings::default(),
+            }],
+            current_hour: 12.0,
+        });
+        let state = test_state_with_runtime(runtime, &[("room1", true)]);
+        let app = api_routes().with_state(state.clone());
+
+        let stale_request = Request::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/state")
+            .body(Body::empty())
+            .unwrap();
+        let stale_response = app.clone().oneshot(stale_request).await.unwrap();
+        assert_eq!(stale_response.status(), StatusCode::OK);
+        let stale_body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(stale_response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let stale_room = room_state_json(&stale_body, "room1");
+        assert_eq!(stale_room["lights_on"].as_bool(), Some(true));
+        assert_eq!(
+            stale_room["observed_power"]["source"].as_str(),
+            Some("command")
+        );
+
+        let fresh_request = Request::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/state?authoritative=true")
+            .body(Body::empty())
+            .unwrap();
+        let fresh_response = app.oneshot(fresh_request).await.unwrap();
+        assert_eq!(fresh_response.status(), StatusCode::OK);
+        let fresh_body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(fresh_response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let fresh_room = room_state_json(&fresh_body, "room1");
+        assert_eq!(fresh_room["lights_on"].as_bool(), Some(false));
+        assert_eq!(
+            fresh_room["observed_power"]["lights_on"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            fresh_room["observed_power"]["source"].as_str(),
+            Some("authoritative_refresh")
+        );
+        assert_eq!(fresh_room["observed_power"]["fresh"].as_bool(), Some(true));
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .room_observed_power
+                .get("room1")
+                .map(|observed| observed.lights_on),
+            Some(false)
+        );
     }
 
     #[tokio::test]

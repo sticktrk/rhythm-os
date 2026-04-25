@@ -2,7 +2,7 @@
 //!
 //! These tests catch regressions where changes to startup room sync break
 //! the Fix My Lights button, or vice versa. Both flows share mutable state
-//! (`room_lights_on`, `motion_snapshots`, engine snapshots) and these tests
+//! (`room_observed_power`, `motion_snapshots`, engine snapshots) and these tests
 //! verify that state flows correctly between them.
 //!
 //! ## Pattern for new scenario tests
@@ -45,7 +45,7 @@ fn sync_rooms_then_fix_resets_on_rooms() {
     // -- Setup: mark 2 rooms as lights-on (simulates event handler state) --
     harness.set_lights_on("kitchen", true);
     harness.set_lights_on("living_room", true);
-    // bedroom is off (not in room_lights_on)
+    // bedroom is off (no observed power entry)
 
     // -- Action: fix my lights --
     let result = harness.fix_my_lights();

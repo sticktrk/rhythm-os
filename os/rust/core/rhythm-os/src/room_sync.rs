@@ -818,7 +818,11 @@ pub fn poll_initial_light_state(state: &SharedState) {
         if state
             .lock()
             .ok()
-            .and_then(|s| s.room_lights_on.get(&snap.id).copied())
+            .and_then(|s| {
+                s.room_observed_power
+                    .get(&snap.id)
+                    .map(|observed| observed.lights_on)
+            })
             .unwrap_or(false)
         {
             on_count += 1;

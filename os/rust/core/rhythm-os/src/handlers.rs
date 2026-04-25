@@ -1678,7 +1678,7 @@ mod tests {
     use crate::hub::{ActiveHub, HubType};
     use crate::pairing::{PairingStatus, UnpairingRequest, UnpairingResult};
     use crate::registry::HubDeviceRegistry;
-    use crate::state::AppState;
+    use crate::state::{AppState, ObservedPowerSource, ObservedPowerState};
     use crate::topology::HubRoomBinding;
     use rhythm_core::runtime::hub_registry::DeviceType;
     use serde_json::json;
@@ -3026,11 +3026,10 @@ mod tests {
     #[test]
     fn fix_returns_rooms_as_objects_not_ids() {
         let state = handler_state_with_runtime();
-        state
-            .lock()
-            .unwrap()
-            .room_lights_on
-            .insert("room1".into(), true);
+        state.lock().unwrap().room_observed_power.insert(
+            "room1".into(),
+            ObservedPowerState::new(true, ObservedPowerSource::Command),
+        );
 
         let r = handle_fix_my_lights(&state, false);
         assert_eq!(r.status, 200);

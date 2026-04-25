@@ -11,7 +11,7 @@
 //! 2. **Same lifecycle as production** — runtime starts as `None`, created lazily
 //!    on first room via `ensure_runtime_fn`.
 //! 3. **Call public APIs only** — `commands::do_*`, `room_sync::sync_from_hub_for_key`.
-//! 4. **Assert on observable state** — `room_lights_on`, engine snapshots, return values.
+//! 4. **Assert on observable state** — observed power, engine snapshots, return values.
 //! 5. **Each test is self-contained** — fresh `TestHarness` per test.
 //! 6. **Read top-to-bottom as a scenario** — setup → action → assertion.
 
@@ -264,7 +264,6 @@ impl TestHarness {
     pub fn set_lights_on(&self, room_id: &str, on: bool) {
         let resolved = self.resolve(room_id);
         let mut state = self.state.lock().unwrap();
-        state.room_lights_on.insert(resolved.clone(), on);
         state.room_observed_power.insert(
             resolved,
             ObservedPowerState::new(on, ObservedPowerSource::Command),
@@ -335,9 +334,9 @@ impl TestHarness {
         self.state
             .lock()
             .unwrap()
-            .room_lights_on
+            .room_observed_power
             .get(&resolved)
-            .copied()
+            .map(|observed| observed.lights_on)
             .unwrap_or(false)
     }
 

@@ -264,17 +264,10 @@ pub struct AppState {
     pub topology: RoomTopologyStore,
 
     // ---- Room state (all keyed by topology room IDs) ----
-    /// Per-room lights-on state, updated by actions and hub events.
-    /// Keyed by **topology room IDs** (not hub-native IDs).
+    /// Typed observed-power cache for API, poll, and SSE projections.
     ///
-    /// Used to include `lights_on` in SSE events so clients don't need
-    /// to poll the hub directly.
-    pub room_lights_on: HashMap<String, bool>,
-    /// Typed observed-power cache for API and SSE projections.
-    ///
-    /// This is the migration target for `lights_on` reads. The legacy
-    /// `room_lights_on` bool map remains temporarily so older tests and
-    /// call sites do not all need to move in one change.
+    /// Keyed by the effective light-state cache key (topology room IDs for
+    /// normal room dispatch, parent room IDs for composite/group dispatch).
     pub room_observed_power: HashMap<String, ObservedPowerState>,
 
     /// Per-target motion timer snapshots, updated by the main loop.
@@ -483,7 +476,6 @@ impl Default for AppState {
             hub_capabilities: Vec::new(),
             canonical_registry: CanonicalRegistry::new(),
             topology: RoomTopologyStore::new(),
-            room_lights_on: HashMap::new(),
             room_observed_power: HashMap::new(),
             motion_snapshots: HashMap::new(),
             room_mode_transitions: HashMap::new(),
@@ -932,7 +924,6 @@ mod tests {
         assert!(state.latitude.is_none());
         assert!(state.longitude.is_none());
         assert_eq!(state.utc_offset_hours, 0.0);
-        assert!(state.room_lights_on.is_empty());
         assert!(state.room_observed_power.is_empty());
         assert!(state.last_active_mode_change_utc_ms.is_some());
         assert_eq!(state.firmware_version, "0.0.0");

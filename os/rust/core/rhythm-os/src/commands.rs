@@ -449,7 +449,6 @@ fn queue_motion_timer_clear(state: &SharedState, room_id: &str) {
 }
 
 fn clear_removed_node_ephemeral_state(s: &mut AppState, node_id: &str) {
-    s.room_lights_on.remove(node_id);
     s.room_observed_power.remove(node_id);
     s.motion_snapshots.remove(node_id);
     s.room_mode_transitions.remove(node_id);
@@ -718,19 +717,6 @@ pub(crate) fn effective_lights_on_cache_key<'a>(
     }
 }
 
-fn lights_on_from_cache(
-    s: &AppState,
-    room_lights_on: &HashMap<String, bool>,
-    node_id: &str,
-    kind: LightNodeKind,
-    parent_id: Option<&str>,
-) -> bool {
-    room_lights_on
-        .get(effective_lights_on_cache_key(s, node_id, kind, parent_id))
-        .copied()
-        .unwrap_or(false)
-}
-
 const OBSERVED_POWER_MIN_FRESHNESS_SECS: u64 = 15;
 
 fn observed_power_is_fresh(s: &AppState, observed: &ObservedPowerState) -> bool {
@@ -772,7 +758,6 @@ fn fallback_observed_power_dto(lights_on: bool) -> crate::api_types::ObservedPow
 fn observed_power_from_cache(
     s: &AppState,
     room_observed_power: &HashMap<String, ObservedPowerState>,
-    room_lights_on: &HashMap<String, bool>,
     node_id: &str,
     kind: LightNodeKind,
     parent_id: Option<&str>,
@@ -796,7 +781,25 @@ fn observed_power_from_cache(
         return observed_power_dto(s, observed);
     }
 
-    fallback_observed_power_dto(room_lights_on.get(cache_key).copied().unwrap_or(false))
+    fallback_observed_power_dto(semantic_override.unwrap_or(false))
+}
+
+fn lights_on_from_observed_cache(
+    s: &AppState,
+    room_observed_power: &HashMap<String, ObservedPowerState>,
+    node_id: &str,
+    kind: LightNodeKind,
+    parent_id: Option<&str>,
+    semantic_override: Option<bool>,
+) -> bool {
+    if let Some(lights_on) = semantic_override {
+        return lights_on;
+    }
+
+    room_observed_power
+        .get(effective_lights_on_cache_key(s, node_id, kind, parent_id))
+        .map(|observed| observed.lights_on)
+        .unwrap_or(false)
 }
 
 fn update_lights_on_cache_for_node_with_source(
@@ -809,7 +812,6 @@ fn update_lights_on_cache_for_node_with_source(
 ) {
     if let Ok(mut s) = state.lock() {
         let cache_key = effective_lights_on_cache_key(&s, node_id, kind, parent_id).to_string();
-        s.room_lights_on.insert(cache_key.clone(), lights_on);
         s.room_observed_power
             .insert(cache_key, ObservedPowerState::new(lights_on, source));
     }
@@ -1084,7 +1086,6 @@ struct NodeStateDtoBuildContext<'a> {
     timezone_name: Option<&'a str>,
     utc_offset: f32,
     room_observed_power: &'a HashMap<String, ObservedPowerState>,
-    room_lights_on: &'a HashMap<String, bool>,
     motion_snapshots: &'a HashMap<String, crate::state::MotionSnapshot>,
     nodes_with_sensors: &'a HashSet<String>,
     transitioning_nodes: &'a HashSet<String>,
@@ -1133,7 +1134,6 @@ fn build_node_state_dto_from_snapshot_parts(
     let observed_power = observed_power_from_cache(
         ctx.state,
         ctx.room_observed_power,
-        ctx.room_lights_on,
         &snap.id,
         snap.kind,
         effective_parent_id.as_deref(),
@@ -1239,7 +1239,6 @@ pub fn build_node_state_event(
         let observed_power = observed_power_from_cache(
             &s,
             &s.room_observed_power,
-            &s.room_lights_on,
             &snap.id,
             snap.kind,
             snap.parent_id.as_deref(),
@@ -1560,7 +1559,6 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         platform_ctx,
         listen_port,
         room_observed_power,
-        room_lights_on,
         motion_snapshots,
         nodes_with_sensors,
         transitioning_nodes,
@@ -1690,7 +1688,6 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             s.platform_context,
             s.listen_port,
             s.room_observed_power.clone(),
-            s.room_lights_on.clone(),
             s.motion_snapshots.clone(),
             s.motion_control_target_ids(),
             active_transition_room_ids(&s.room_mode_transitions, now),
@@ -1760,7 +1757,6 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             timezone_name: timezone_name.as_deref(),
             utc_offset,
             room_observed_power: &room_observed_power,
-            room_lights_on: &room_lights_on,
             motion_snapshots: &motion_snapshots,
             nodes_with_sensors: &nodes_with_sensors,
             transitioning_nodes: &transitioning_nodes,
@@ -1994,19 +1990,11 @@ fn build_hub_startup_retry_dto(retry: &crate::state::HubStartupRetryState) -> Hu
 
 /// Build a full node state for a single addressable node.
 pub fn build_node_state(state: &SharedState, node_id: &str) -> Result<NodeStateDto> {
-    let (
-        runtime,
-        room_observed_power,
-        room_lights_on,
-        motion_snapshots,
-        nodes_with_sensors,
-        transitioning_nodes,
-    ) = {
+    let (runtime, room_observed_power, motion_snapshots, nodes_with_sensors, transitioning_nodes) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             s.hub_runtime(),
             s.room_observed_power.clone(),
-            s.room_lights_on.clone(),
             s.motion_snapshots.clone(),
             s.motion_control_target_ids(),
             active_transition_room_ids(&s.room_mode_transitions, std::time::Instant::now()),
@@ -2031,7 +2019,6 @@ pub fn build_node_state(state: &SharedState, node_id: &str) -> Result<NodeStateD
         timezone_name: s.timezone_name.as_deref(),
         utc_offset: s.utc_offset_hours,
         room_observed_power: &room_observed_power,
-        room_lights_on: &room_lights_on,
         motion_snapshots: &motion_snapshots,
         nodes_with_sensors: &nodes_with_sensors,
         transitioning_nodes: &transitioning_nodes,
@@ -2059,7 +2046,6 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
         hub_connected,
         runtime,
         room_observed_power,
-        room_lights_on,
         motion_snapshots,
         nodes_with_sensors,
         transitioning_nodes,
@@ -2077,7 +2063,6 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
             s.has_any_connected_hub(),
             s.hub_runtime(),
             s.room_observed_power.clone(),
-            s.room_lights_on.clone(),
             s.motion_snapshots.clone(),
             s.motion_control_target_ids(),
             active_transition_room_ids(&s.room_mode_transitions, std::time::Instant::now()),
@@ -2131,7 +2116,6 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
         timezone_name: timezone_name.as_deref(),
         utc_offset,
         room_observed_power: &room_observed_power,
-        room_lights_on: &room_lights_on,
         motion_snapshots: &motion_snapshots,
         nodes_with_sensors: &nodes_with_sensors,
         transitioning_nodes: &transitioning_nodes,
@@ -2165,7 +2149,6 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
         storage_rooms,
         motion_snapshots,
         room_observed_power,
-        room_lights_on,
         light_profile_configs,
         mode_configs,
         active_mode,
@@ -2188,7 +2171,6 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
         };
         let motion = s.motion_snapshots.clone();
         let observed_power = s.room_observed_power.clone();
-        let lights = s.room_lights_on.clone();
         let sensor_rooms = s.motion_control_target_ids();
         (
             s.has_any_connected_hub(),
@@ -2196,7 +2178,6 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
             storage_rooms,
             motion,
             observed_power,
-            lights,
             s.light_profile_configs.clone(),
             s.mode_configs(),
             s.active_mode,
@@ -2225,7 +2206,6 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
             let observed_power = observed_power_from_cache(
                 &s,
                 &room_observed_power,
-                &room_lights_on,
                 &snap.id,
                 snap.kind,
                 snap.parent_id.as_deref(),
@@ -2358,12 +2338,11 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
 /// Build a `RoomRhythmState` for a single room from engine state.
 pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<RoomRhythmState> {
     let now = std::time::Instant::now();
-    let (runtime, room_observed_power, room_lights_on, warning_active, transitioning, hub_types) = {
+    let (runtime, room_observed_power, warning_active, transitioning, hub_types) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             s.hub_runtime(),
             s.room_observed_power.clone(),
-            s.room_lights_on.clone(),
             s.motion_snapshots
                 .get(room_id)
                 .is_some_and(|motion| motion.warning_active),
@@ -2382,7 +2361,6 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
         observed_power_from_cache(
             &s,
             &room_observed_power,
-            &room_lights_on,
             room_id,
             snap.kind,
             snap.parent_id.as_deref(),
@@ -2758,7 +2736,6 @@ fn clear_factory_reset_ephemeral_state(state: &SharedState) -> Result<()> {
     s.hub_sync_in_progress.clear();
     s.hub_reconnect_sync_at.clear();
     s.hub_pending_disconnect_at.clear();
-    s.room_lights_on.clear();
     s.room_observed_power.clear();
     s.motion_snapshots.clear();
     s.room_mode_transitions.clear();
@@ -3024,7 +3001,7 @@ fn restore_backup_room_manager(
 
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.room_lights_on
+        s.room_observed_power
             .retain(|room_id, _| desired_ids.contains(room_id));
         s.motion_snapshots
             .retain(|room_id, _| desired_ids.contains(room_id));
@@ -3363,7 +3340,6 @@ fn apply_room_mode_defaults(
     if let Ok(mut s) = state.lock() {
         for (room_id, lights_on) in lights_on_updates {
             let cache_key = room_id.clone();
-            s.room_lights_on.insert(room_id, lights_on);
             s.room_observed_power.insert(
                 cache_key,
                 ObservedPowerState::new(lights_on, ObservedPowerSource::SemanticOverride),
@@ -3685,7 +3661,7 @@ fn apply_active_mode_outputs(
         longitude,
         utc_offset,
         timezone_name,
-        mut room_lights_on,
+        mut room_observed_power,
         motion_snapshots,
         update_interval,
         power_save,
@@ -3700,7 +3676,7 @@ fn apply_active_mode_outputs(
             s.longitude,
             s.utc_offset_hours,
             s.timezone_name.clone(),
-            s.room_lights_on.clone(),
+            s.room_observed_power.clone(),
             s.motion_snapshots.clone(),
             Duration::from_secs(s.runtime_config.update_interval_secs),
             s.power_save,
@@ -3750,7 +3726,7 @@ fn apply_active_mode_outputs(
     );
     if room_defaults_changed {
         if let Ok(s) = state.lock() {
-            room_lights_on = s.room_lights_on.clone();
+            room_observed_power = s.room_observed_power.clone();
         }
     }
     let snapshots = if room_defaults_changed {
@@ -3793,12 +3769,13 @@ fn apply_active_mode_outputs(
             RoomModeState::HardOff => false,
             RoomModeState::Active | RoomModeState::Wake | RoomModeState::Warning => {
                 state.lock().ok().is_some_and(|s| {
-                    lights_on_from_cache(
+                    lights_on_from_observed_cache(
                         &s,
-                        &room_lights_on,
+                        &room_observed_power,
                         &snap.id,
                         snap.kind,
                         snap.parent_id.as_deref(),
+                        semantic_lights_on_override(snap.hard_off, snap.soft_off),
                     )
                 })
             }
@@ -4855,7 +4832,7 @@ pub fn do_node_action(
 ///
 /// Returns JSON with status, counts, and lists of affected room IDs.
 pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
-    let (runtime, room_lights_on, motion_room_ids) = {
+    let (runtime, room_observed_power, motion_room_ids) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         // Rooms with active motion timers
         let mut motion_ids: HashSet<String> = s.motion_snapshots.keys().cloned().collect();
@@ -4864,7 +4841,7 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
         // lost timer state, but lights were still on from prior motion
         // activation.
         motion_ids.extend(s.motion_control_target_ids());
-        (s.hub_runtime(), s.room_lights_on.clone(), motion_ids)
+        (s.hub_runtime(), s.room_observed_power.clone(), motion_ids)
     };
 
     let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
@@ -4878,12 +4855,13 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
         .filter(|snap| {
             !snap.disabled
                 && !snap.soft_off
-                && lights_on_from_cache(
+                && lights_on_from_observed_cache(
                     &s,
-                    &room_lights_on,
+                    &room_observed_power,
                     &snap.id,
                     snap.kind,
                     snap.parent_id.as_deref(),
+                    semantic_lights_on_override(snap.hard_off, snap.soft_off),
                 )
                 && !motion_room_ids.contains(&snap.id)
         })
@@ -4895,12 +4873,13 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
         .filter(|snap| {
             !snap.disabled
                 && motion_room_ids.contains(&snap.id)
-                && lights_on_from_cache(
+                && lights_on_from_observed_cache(
                     &s,
-                    &room_lights_on,
+                    &room_observed_power,
                     &snap.id,
                     snap.kind,
                     snap.parent_id.as_deref(),
+                    semantic_lights_on_override(snap.hard_off, snap.soft_off),
                 )
         })
         .collect();
@@ -5042,7 +5021,7 @@ pub fn do_set_node_brightness(
 
 /// Set the time offset for a node directly (not additive).
 ///
-/// Does NOT change `room_lights_on` tracking — offset doesn't imply lights-on state change.
+/// Does NOT change observed power tracking — offset doesn't imply lights-on state change.
 pub fn do_set_node_time_offset(
     state: &SharedState,
     node_id: &str,
@@ -5819,7 +5798,6 @@ pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
             let _ = storage.save_all_hub_credentials(&[]);
         }
 
-        s.room_lights_on.clear();
         s.room_observed_power.clear();
         s.motion_snapshots.clear();
 
@@ -6004,12 +5982,13 @@ pub fn do_node_preferences_set(
         .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
     let lights_on = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        lights_on_from_cache(
+        lights_on_from_observed_cache(
             &s,
-            &s.room_lights_on,
+            &s.room_observed_power,
             &snap.id,
             snap.kind,
             snap.parent_id.as_deref(),
+            semantic_lights_on_override(snap.hard_off, snap.soft_off),
         )
     };
 
@@ -7398,7 +7377,6 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
             ensure_synthetic_device_registry_rooms(&mut s, &device.name, &active_endpoints);
         }
 
-        s.room_lights_on.remove(room_id);
         s.room_observed_power.remove(room_id);
         s.motion_snapshots.remove(room_id);
         s.room_mode_transitions.remove(room_id);
@@ -7854,7 +7832,7 @@ mod tests {
         factory_default_profile_bundle,
     };
     use crate::hub::{ActiveHub, HubCredentials, HubProvider, HubType};
-    use crate::state::{AppState, MotionSnapshot};
+    use crate::state::{AppState, MotionSnapshot, ObservedPowerSource, ObservedPowerState};
     use crate::storage::{Storage, StoredLightProfiles, StoredSettings};
     use chrono::{Datelike, Timelike};
     use rhythm_core::{HubRegistry, LightProfileConfig, RoomSnapshot, RuntimeHandle};
@@ -8705,6 +8683,33 @@ mod tests {
         focus
     }
 
+    fn set_observed_lights_on(state: &SharedState, node_id: &str, lights_on: bool) {
+        state.lock().unwrap().room_observed_power.insert(
+            node_id.to_string(),
+            ObservedPowerState::new(lights_on, ObservedPowerSource::Command),
+        );
+    }
+
+    fn set_observed_lights_on_in_app(app: &mut AppState, node_id: &str, lights_on: bool) {
+        app.room_observed_power.insert(
+            node_id.to_string(),
+            ObservedPowerState::new(lights_on, ObservedPowerSource::Command),
+        );
+    }
+
+    fn observed_lights_on(app: &AppState, node_id: &str) -> Option<bool> {
+        app.room_observed_power
+            .get(node_id)
+            .map(|observed| observed.lights_on)
+    }
+
+    fn observed_lights_map(app: &AppState) -> HashMap<String, bool> {
+        app.room_observed_power
+            .iter()
+            .map(|(node_id, observed)| (node_id.clone(), observed.lights_on))
+            .collect()
+    }
+
     #[test]
     fn fix_resets_on_rooms_only() {
         let (state, runtime) = setup_state(vec![
@@ -8715,16 +8720,8 @@ mod tests {
         ]);
 
         // Mark only on_room as lights-on
-        state
-            .lock()
-            .unwrap()
-            .room_lights_on
-            .insert("on_room".into(), true);
-        state
-            .lock()
-            .unwrap()
-            .room_lights_on
-            .insert("off_room".into(), false);
+        set_observed_lights_on(&state, "on_room", true);
+        set_observed_lights_on(&state, "off_room", false);
 
         let result = do_fix_my_lights(&state, false).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -8748,16 +8745,8 @@ mod tests {
         ]);
 
         // motion_room has active motion, normal_room is just on
-        state
-            .lock()
-            .unwrap()
-            .room_lights_on
-            .insert("motion_room".into(), true);
-        state
-            .lock()
-            .unwrap()
-            .room_lights_on
-            .insert("normal_room".into(), true);
+        set_observed_lights_on(&state, "motion_room", true);
+        set_observed_lights_on(&state, "normal_room", true);
         state.lock().unwrap().motion_snapshots.insert(
             "motion_room".into(),
             MotionSnapshot {
@@ -8795,18 +8784,14 @@ mod tests {
         let s = state.lock().unwrap();
         assert_eq!(s.pending_motion_clear, vec!["motion_room".to_string()]);
         // lights_on should be false for motion room
-        assert_eq!(s.room_lights_on.get("motion_room"), Some(&false));
+        assert_eq!(observed_lights_on(&s, "motion_room"), Some(false));
     }
 
     #[test]
     fn fix_skips_disabled_motion_rooms() {
         let (state, runtime) = setup_state(vec![make_snapshot("disabled_motion", true, false)]);
 
-        state
-            .lock()
-            .unwrap()
-            .room_lights_on
-            .insert("disabled_motion".into(), true);
+        set_observed_lights_on(&state, "disabled_motion", true);
         state.lock().unwrap().motion_snapshots.insert(
             "disabled_motion".into(),
             MotionSnapshot {
@@ -8856,8 +8841,8 @@ mod tests {
                 shutdown: Default::default(),
             },
         );
-        app.room_lights_on.insert("motion_room".into(), true);
-        app.room_lights_on.insert("normal_room".into(), true);
+        set_observed_lights_on_in_app(&mut app, "motion_room", true);
+        set_observed_lights_on_in_app(&mut app, "normal_room", true);
         let state: SharedState = Arc::new(Mutex::new(app));
 
         let result = do_fix_my_lights(&state, false).unwrap();
@@ -8914,8 +8899,8 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(runtime.events(), vec![(device_id, ButtonAction::OnPress)]);
         let s = state.lock().unwrap();
-        assert_eq!(s.room_lights_on.get("room1"), Some(&true));
-        assert_eq!(s.room_lights_on.len(), 1);
+        assert_eq!(observed_lights_on(&s, "room1"), Some(true));
+        assert_eq!(s.room_observed_power.len(), 1);
     }
 
     #[test]
@@ -8923,7 +8908,7 @@ mod tests {
         let (state, runtime, device_id) = setup_attached_matter_light_without_group_dispatch();
         {
             let mut s = state.lock().unwrap();
-            s.room_lights_on.insert("room1".into(), false);
+            set_observed_lights_on_in_app(&mut s, "room1", false);
         }
 
         let result = do_node_action(&state, &device_id, "on", false);
@@ -8934,8 +8919,8 @@ mod tests {
             vec![(device_id.clone(), ButtonAction::OnPress)]
         );
         let s = state.lock().unwrap();
-        assert_eq!(s.room_lights_on.get(&device_id), Some(&true));
-        assert_eq!(s.room_lights_on.get("room1"), Some(&true));
+        assert_eq!(observed_lights_on(&s, &device_id), Some(true));
+        assert_eq!(observed_lights_on(&s, "room1"), Some(true));
     }
 
     #[test]
@@ -8947,8 +8932,8 @@ mod tests {
 
         assert!(result.is_ok());
         let s = state.lock().unwrap();
-        assert_eq!(s.room_lights_on.get(&matter_id), Some(&true));
-        assert_eq!(s.room_lights_on.get("room1"), Some(&true));
+        assert_eq!(observed_lights_on(&s, &matter_id), Some(true));
+        assert_eq!(observed_lights_on(&s, "room1"), Some(true));
     }
 
     #[test]
@@ -8963,8 +8948,8 @@ mod tests {
 
         assert!(result.is_ok());
         let s = state.lock().unwrap();
-        assert_eq!(s.room_lights_on.get(&matter_id), Some(&false));
-        assert_eq!(s.room_lights_on.get("room1"), Some(&true));
+        assert_eq!(observed_lights_on(&s, &matter_id), Some(false));
+        assert_eq!(observed_lights_on(&s, "room1"), Some(true));
     }
 
     #[test]
@@ -9155,11 +9140,7 @@ mod tests {
     #[test]
     fn build_room_rhythm_state_returns_struct() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
-        state
-            .lock()
-            .unwrap()
-            .room_lights_on
-            .insert("r1".into(), true);
+        set_observed_lights_on(&state, "r1", true);
 
         let room_state = build_room_rhythm_state(&state, "r1").unwrap();
         assert_eq!(room_state.id, "r1");
@@ -9188,11 +9169,7 @@ mod tests {
     #[test]
     fn build_room_rhythm_state_serializes_without_status() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
-        state
-            .lock()
-            .unwrap()
-            .room_lights_on
-            .insert("r1".into(), true);
+        set_observed_lights_on(&state, "r1", true);
 
         let room_state = build_room_rhythm_state(&state, "r1").unwrap();
         let json_str = serde_json::to_string(&room_state).unwrap();
@@ -9217,11 +9194,7 @@ mod tests {
     #[test]
     fn build_room_rhythm_state_warning_uses_dimmed_brightness() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
-        state
-            .lock()
-            .unwrap()
-            .room_lights_on
-            .insert("r1".into(), true);
+        set_observed_lights_on(&state, "r1", true);
         state.lock().unwrap().motion_snapshots.insert(
             "r1".into(),
             MotionSnapshot {
@@ -9288,11 +9261,7 @@ mod tests {
     #[test]
     fn build_node_state_event_marks_active_mode_transition() {
         let (state, rt) = setup_state(vec![make_snapshot("r1", false, false)]);
-        state
-            .lock()
-            .unwrap()
-            .room_lights_on
-            .insert("r1".into(), true);
+        set_observed_lights_on(&state, "r1", true);
         state.lock().unwrap().room_mode_transitions.insert(
             "r1".into(),
             crate::state::RoomModeTransition {
@@ -9328,11 +9297,7 @@ mod tests {
     #[test]
     fn build_node_state_event_uses_parent_lights_on_for_attached_light() {
         let (state, rt, device_id) = setup_attached_hue_light_with_group_dispatch();
-        state
-            .lock()
-            .unwrap()
-            .room_lights_on
-            .insert("room1".into(), true);
+        set_observed_lights_on(&state, "room1", true);
 
         let snap = rhythm_core::NodeSnapshot::from_room_snapshot(
             rt.engine_room_snapshot(&device_id).unwrap(),
@@ -9347,8 +9312,8 @@ mod tests {
         let (state, rt, device_id) = setup_attached_matter_light_without_group_dispatch();
         {
             let mut s = state.lock().unwrap();
-            s.room_lights_on.insert("room1".into(), false);
-            s.room_lights_on.insert(device_id.clone(), true);
+            set_observed_lights_on_in_app(&mut s, "room1", false);
+            set_observed_lights_on_in_app(&mut s, &device_id, true);
         }
 
         let snap = rhythm_core::NodeSnapshot::from_room_snapshot(
@@ -9848,8 +9813,8 @@ mod tests {
 
         {
             let mut s = state.lock().unwrap();
-            s.room_lights_on.insert("stale-room".into(), true);
-            s.room_lights_on.insert("office".into(), true);
+            set_observed_lights_on_in_app(&mut s, "stale-room", true);
+            set_observed_lights_on_in_app(&mut s, "office", true);
             s.motion_snapshots.insert(
                 "stale-room".into(),
                 MotionSnapshot {
@@ -9909,7 +9874,7 @@ mod tests {
 
         let s = state.lock().unwrap();
         assert_eq!(
-            s.room_lights_on,
+            observed_lights_map(&s),
             HashMap::from([("office".to_string(), true)])
         );
         assert!(!s.motion_snapshots.contains_key("stale-room"));
@@ -10564,7 +10529,7 @@ mod tests {
             s.longitude = Some(-74.0060);
             s.utc_offset_hours = -5.0;
             s.timezone_name = Some("America/New_York".into());
-            s.room_lights_on.insert("r1".into(), true);
+            set_observed_lights_on_in_app(&mut s, "r1", true);
             s.pending_periodic_ticks.insert("r1".into(), 12.0);
             s.pending_motion_clear.push("r1".into());
             s.pending_motion_seed.push(("sensor-1".into(), "r1".into()));
@@ -10609,7 +10574,7 @@ mod tests {
         assert!(s.canonical_registry.device_count() == 0);
         assert_eq!(s.canonical_registry.triage().pending_count(), 0);
         assert_eq!(s.topology.room_count(), 0);
-        assert!(s.room_lights_on.is_empty());
+        assert!(s.room_observed_power.is_empty());
         assert!(s.pending_periodic_ticks.is_empty());
         assert!(s.pending_hub_event_rxs.is_empty());
         assert!(s.pending_motion_clear.is_empty());
@@ -10658,11 +10623,7 @@ mod tests {
     #[test]
     fn build_rooms_state_uses_sse_motion_field_names() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
-        state
-            .lock()
-            .unwrap()
-            .room_lights_on
-            .insert("r1".into(), true);
+        set_observed_lights_on(&state, "r1", true);
         state.lock().unwrap().motion_snapshots.insert(
             "r1".into(),
             MotionSnapshot {
@@ -10710,11 +10671,7 @@ mod tests {
     #[test]
     fn build_rooms_state_omits_motion_when_absent() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
-        state
-            .lock()
-            .unwrap()
-            .room_lights_on
-            .insert("r1".into(), true);
+        set_observed_lights_on(&state, "r1", true);
 
         let result = build_rooms_state(&state).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -11174,11 +11131,7 @@ mod tests {
     #[test]
     fn fix_response_no_status_key() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
-        state
-            .lock()
-            .unwrap()
-            .room_lights_on
-            .insert("r1".into(), true);
+        set_observed_lights_on(&state, "r1", true);
 
         let result = do_fix_my_lights(&state, false).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -11191,11 +11144,7 @@ mod tests {
     #[test]
     fn fix_response_no_room_states_key() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
-        state
-            .lock()
-            .unwrap()
-            .room_lights_on
-            .insert("r1".into(), true);
+        set_observed_lights_on(&state, "r1", true);
 
         let result = do_fix_my_lights(&state, false).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -11211,16 +11160,8 @@ mod tests {
             make_snapshot("r1", false, false),
             make_snapshot("r2", false, false),
         ]);
-        state
-            .lock()
-            .unwrap()
-            .room_lights_on
-            .insert("r1".into(), true);
-        state
-            .lock()
-            .unwrap()
-            .room_lights_on
-            .insert("r2".into(), true);
+        set_observed_lights_on(&state, "r1", true);
+        set_observed_lights_on(&state, "r2", true);
 
         let result = do_fix_my_lights(&state, false).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -11245,7 +11186,7 @@ mod tests {
         let result = do_set_node_brightness(&state, "r1", 75, false);
         assert!(result.is_ok());
         // Setting brightness marks room as lights_on
-        assert_eq!(state.lock().unwrap().room_lights_on.get("r1"), Some(&true));
+        assert_eq!(observed_lights_on(&state.lock().unwrap(), "r1"), Some(true));
     }
 
     #[test]
@@ -11256,8 +11197,8 @@ mod tests {
 
         assert!(result.is_ok());
         let s = state.lock().unwrap();
-        assert_eq!(s.room_lights_on.get("room1"), Some(&true));
-        assert_eq!(s.room_lights_on.len(), 1);
+        assert_eq!(observed_lights_on(&s, "room1"), Some(true));
+        assert_eq!(s.room_observed_power.len(), 1);
     }
 
     #[test]
@@ -11325,17 +11266,13 @@ mod tests {
     fn room_preferences_disabled_does_not_change_lights_on_cache() {
         let snap = make_snapshot("r1", false, false);
         let (state, _rt) = setup_state(vec![snap]);
-        state
-            .lock()
-            .unwrap()
-            .room_lights_on
-            .insert("r1".into(), true);
+        set_observed_lights_on(&state, "r1", true);
 
         let result = do_node_preferences_set(&state, "r1", None, Some(true), None, None, false);
 
         assert!(result.is_ok());
         let s = state.lock().unwrap();
-        assert_eq!(s.room_lights_on.get("r1"), Some(&true));
+        assert_eq!(observed_lights_on(&s, "r1"), Some(true));
     }
 
     #[test]
@@ -11355,7 +11292,7 @@ mod tests {
         );
         assert!(result.is_ok());
         // Idle implies lights conceptually on.
-        assert_eq!(state.lock().unwrap().room_lights_on.get("r1"), Some(&true));
+        assert_eq!(observed_lights_on(&state.lock().unwrap(), "r1"), Some(true));
     }
 
     #[test]
@@ -11383,8 +11320,8 @@ mod tests {
 
         assert!(result.is_ok());
         let s = state.lock().unwrap();
-        assert_eq!(s.room_lights_on.get("room1"), Some(&true));
-        assert_eq!(s.room_lights_on.len(), 1);
+        assert_eq!(observed_lights_on(&s, "room1"), Some(true));
+        assert_eq!(s.room_observed_power.len(), 1);
     }
 
     #[test]
@@ -11412,8 +11349,8 @@ mod tests {
 
         assert!(result.is_ok());
         let s = state.lock().unwrap();
-        assert_eq!(s.room_lights_on.get(&device_id), Some(&true));
-        assert_eq!(s.room_lights_on.get("room1"), Some(&true));
+        assert_eq!(observed_lights_on(&s, &device_id), Some(true));
+        assert_eq!(observed_lights_on(&s, "room1"), Some(true));
     }
 
     #[test]
@@ -11436,8 +11373,8 @@ mod tests {
 
         assert!(result.is_ok());
         let s = state.lock().unwrap();
-        assert_eq!(s.room_lights_on.get(&matter_id), Some(&false));
-        assert_eq!(s.room_lights_on.get("room1"), Some(&true));
+        assert_eq!(observed_lights_on(&s, &matter_id), Some(false));
+        assert_eq!(observed_lights_on(&s, "room1"), Some(true));
     }
 
     #[test]
@@ -11543,7 +11480,7 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             s.active_mode = RhythmMode::Sleep;
-            s.room_lights_on.insert("r1".into(), true);
+            set_observed_lights_on_in_app(&mut s, "r1", true);
             s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
                 RhythmMode::Sleep,
                 RhythmMode::Day,
@@ -11578,8 +11515,8 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             s.active_mode = RhythmMode::Sleep;
-            s.room_lights_on.insert("r1".into(), true);
-            s.room_lights_on.insert("r2".into(), true);
+            set_observed_lights_on_in_app(&mut s, "r1", true);
+            set_observed_lights_on_in_app(&mut s, "r2", true);
             s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
                 RhythmMode::Sleep,
                 RhythmMode::Day,
@@ -11719,7 +11656,7 @@ mod tests {
             rhythm.fade_ms = TimerSetting::Fixed { value: 1_234 };
             s.set_light_profile_config(rhythm);
             s.active_mode = RhythmMode::Sleep;
-            s.room_lights_on.insert("r1".into(), true);
+            set_observed_lights_on_in_app(&mut s, "r1", true);
             s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
                 RhythmMode::Sleep,
                 RhythmMode::Day,
@@ -11756,7 +11693,7 @@ mod tests {
             rhythm.fade_ms = TimerSetting::Auto;
             s.set_light_profile_config(rhythm);
             s.active_mode = RhythmMode::Sleep;
-            s.room_lights_on.insert("r1".into(), true);
+            set_observed_lights_on_in_app(&mut s, "r1", true);
             s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
                 RhythmMode::Sleep,
                 RhythmMode::Day,
@@ -11789,7 +11726,7 @@ mod tests {
         let transition_id = {
             let mut s = state.lock().unwrap();
             s.active_mode = RhythmMode::Sleep;
-            s.room_lights_on.insert("r1".into(), true);
+            set_observed_lights_on_in_app(&mut s, "r1", true);
             s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
                 RhythmMode::Day,
                 RhythmMode::Sleep,
@@ -11827,7 +11764,7 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             s.active_mode = RhythmMode::Day;
-            s.room_lights_on.insert("active_room".into(), true);
+            set_observed_lights_on_in_app(&mut s, "active_room", true);
 
             let mut idle = rhythm_core::default_day_idle_profile();
             idle.curve = rhythm_core::LightCurveShape::Constant {
@@ -11878,7 +11815,7 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             s.active_mode = RhythmMode::Day;
-            s.room_lights_on.insert("active_room".into(), true);
+            set_observed_lights_on_in_app(&mut s, "active_room", true);
         }
 
         do_settings_set(
@@ -11906,7 +11843,7 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             s.active_mode = RhythmMode::Day;
-            s.room_lights_on.insert("r1".into(), true);
+            set_observed_lights_on_in_app(&mut s, "r1", true);
             s.set_mode_configs(vec![ModeConfig {
                 mode: RhythmMode::Sleep,
                 active_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
@@ -11941,7 +11878,7 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             s.active_mode = RhythmMode::Day;
-            s.room_lights_on.insert("r1".into(), false);
+            set_observed_lights_on_in_app(&mut s, "r1", false);
             s.set_mode_configs(vec![ModeConfig {
                 mode: RhythmMode::Sleep,
                 active_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
@@ -11973,7 +11910,7 @@ mod tests {
             runtime.applied_states(),
             vec![("r1".into(), RoomModeState::Active)]
         );
-        assert_eq!(state.lock().unwrap().room_lights_on.get("r1"), Some(&true));
+        assert_eq!(observed_lights_on(&state.lock().unwrap(), "r1"), Some(true));
     }
 
     #[test]
@@ -11982,7 +11919,7 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             s.active_mode = RhythmMode::Day;
-            s.room_lights_on.insert("r1".into(), true);
+            set_observed_lights_on_in_app(&mut s, "r1", true);
             s.motion_snapshots.insert(
                 "r1".into(),
                 MotionSnapshot {
@@ -12021,7 +11958,7 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             s.active_mode = RhythmMode::Day;
-            s.room_lights_on.insert("r1".into(), true);
+            set_observed_lights_on_in_app(&mut s, "r1", true);
             s.set_mode_configs(vec![ModeConfig {
                 mode: RhythmMode::Sleep,
                 active_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
@@ -12058,7 +11995,7 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             s.active_mode = RhythmMode::Day;
-            s.room_lights_on.insert("r1".into(), true);
+            set_observed_lights_on_in_app(&mut s, "r1", true);
         }
 
         do_settings_set(
@@ -12915,7 +12852,7 @@ mod tests {
             let mut s = state.lock().unwrap();
             s.canonical_registry.assign_room(&device_id, Some(&room_id));
             assert!(s.topology.attach_device_user_override(&room_id, &device_id));
-            s.room_lights_on.insert(room_id.clone(), true);
+            set_observed_lights_on_in_app(&mut s, &room_id, true);
             s.motion_snapshots.insert(
                 room_id.clone(),
                 crate::state::MotionSnapshot {
@@ -12952,7 +12889,7 @@ mod tests {
             None
         );
         assert_eq!(s.canonical_registry.triage().pending_unassigned_count(), 1);
-        assert!(!s.room_lights_on.contains_key(&room_id));
+        assert!(!s.room_observed_power.contains_key(&room_id));
         assert!(!s.motion_snapshots.contains_key(&room_id));
         assert!(!s.room_mode_transitions.contains_key(&room_id));
         assert_eq!(s.pending_motion_clear, vec![room_id.clone()]);
@@ -13072,7 +13009,7 @@ mod tests {
 
         {
             let mut s = state.lock().unwrap();
-            s.room_lights_on.insert(device_id.clone(), true);
+            set_observed_lights_on_in_app(&mut s, &device_id, true);
             s.motion_snapshots.insert(
                 device_id.clone(),
                 crate::state::MotionSnapshot {
@@ -13101,7 +13038,7 @@ mod tests {
         let s = state.lock().unwrap();
         assert!(s.canonical_registry.get(&device_id).is_none());
         assert!(s.topology.get_device_node(&device_id).is_none());
-        assert!(!s.room_lights_on.contains_key(&device_id));
+        assert!(!s.room_observed_power.contains_key(&device_id));
         assert!(!s.motion_snapshots.contains_key(&device_id));
         assert!(!s.room_mode_transitions.contains_key(&device_id));
         assert!(!s.pending_periodic_ticks.contains_key(&device_id));

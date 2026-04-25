@@ -1482,6 +1482,7 @@ pub fn refresh_dst_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{ObservedPowerSource, ObservedPowerState};
     use chrono::NaiveDate;
     use rhythm_core::CompositeController;
     use rhythm_core::{
@@ -1507,7 +1508,10 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             s.event_tx = Some(tx);
-            s.room_lights_on.insert("room1".into(), true);
+            s.room_observed_power.insert(
+                "room1".into(),
+                ObservedPowerState::new(true, ObservedPowerSource::Command),
+            );
         }
 
         let runtime: Arc<dyn RuntimeHandle> = Arc::new(RhythmRuntime::new(
@@ -1521,7 +1525,12 @@ mod tests {
 
         post_tick_node(&state, &runtime, "room1");
 
-        let cached = state.lock().unwrap().room_lights_on.get("room1").copied();
+        let cached = state
+            .lock()
+            .unwrap()
+            .room_observed_power
+            .get("room1")
+            .map(|observed| observed.lights_on);
         assert_eq!(cached, Some(false));
 
         match rx.try_recv().expect("post-tick should emit a node event") {
