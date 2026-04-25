@@ -24,8 +24,12 @@ pub const WARNING_BEFORE_SECS: u64 = 60;
 /// Brightness multiplier during warning dim (50% of adaptive).
 pub const WARNING_DIM_FACTOR: f32 = 0.5;
 
-/// Rate-limit reconnect-triggered full hub resyncs during SSE flapping.
-const RECONNECT_RESYNC_COOLDOWN: Duration = Duration::from_secs(120);
+/// Default rate-limit for reconnect-triggered full hub resyncs.
+const DEFAULT_RECONNECT_RESYNC_COOLDOWN: Duration = Duration::from_secs(120);
+/// Hue SSE recycles frequently; full Hue topology/device resync is expensive and noisy.
+const HUE_RECONNECT_RESYNC_COOLDOWN: Duration = Duration::from_secs(24 * 60 * 60);
+/// Delay app-visible hub loss so brief SSE reconnects do not flash unavailable.
+const HUB_DISCONNECT_GRACE: Duration = Duration::from_secs(120);
 /// How often the idle event loop wakes to check for new hub events.
 const EVENT_LOOP_IDLE_SLEEP: Duration = Duration::from_millis(10);
 /// How often to evaluate motion timeouts while sources are active.
@@ -520,7 +524,7 @@ fn spawn_reconnect_sync(state: &SharedState, hub_key: &crate::canonical::identit
                 discover_devices,
             ) {
                 Ok(report) => {
-                    info!(
+                    debug!(
                         target: "conn",
                         "Hub {} resync: +{} ~{} -{} devices={}",
                         sync_hub_key,
@@ -572,6 +576,102 @@ fn spawn_light_state_poll(state: &SharedState, hub_key: &crate::canonical::ident
     }
 }
 
+fn emit_hub_status(
+    state: &SharedState,
+    hub_key: Option<&crate::canonical::identity::HubKey>,
+    connected: bool,
+) {
+    crate::state::emit_server_event(
+        state,
+        crate::server_event::ServerEvent::HubStatus {
+            hub_type: hub_key.map(|k| k.hub_type.as_str().to_string()),
+            address: hub_key.map(|k| k.address.clone()),
+            connected,
+        },
+    );
+}
+
+fn notify_hub_disconnect(state: &SharedState) {
+    let on_disconnect = {
+        let Ok(s) = state.lock() else { return };
+        s.on_hub_disconnect.clone()
+    };
+    if let Some(cb) = on_disconnect {
+        cb();
+    }
+}
+
+fn spawn_pending_disconnect(
+    state: &SharedState,
+    hub_key: &crate::canonical::identity::HubKey,
+    deadline: Instant,
+    reason: String,
+) {
+    let disconnect_state = state.clone();
+    let disconnect_hub_key = hub_key.clone();
+    let thread_name = format!(
+        "hub-disconnect-grace-{}",
+        disconnect_hub_key.hub_type.as_str()
+    );
+
+    let spawn_result = std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            if let Some(wait) = deadline.checked_duration_since(Instant::now()) {
+                std::thread::sleep(wait);
+            }
+
+            let should_emit = {
+                let Ok(mut s) = disconnect_state.lock() else {
+                    return;
+                };
+                if !s.hub_pending_disconnect_matches(&disconnect_hub_key, deadline) {
+                    return;
+                }
+                s.clear_hub_pending_disconnect(&disconnect_hub_key);
+                if !s.hub_is_connected(&disconnect_hub_key) {
+                    return;
+                }
+                s.set_hub_connected(&disconnect_hub_key, false);
+                true
+            };
+
+            if should_emit {
+                warn!(
+                    target: "conn",
+                    "Hub {} still disconnected after {}s grace: {}",
+                    disconnect_hub_key,
+                    HUB_DISCONNECT_GRACE.as_secs(),
+                    reason
+                );
+                emit_hub_status(&disconnect_state, Some(&disconnect_hub_key), false);
+                notify_hub_disconnect(&disconnect_state);
+            }
+        });
+
+    if let Err(e) = spawn_result {
+        warn!(
+            target: "conn",
+            "Failed to spawn disconnect grace thread for {}: {}",
+            hub_key,
+            e
+        );
+        let should_emit = {
+            let Ok(mut s) = state.lock() else { return };
+            s.clear_hub_pending_disconnect(hub_key);
+            if !s.hub_is_connected(hub_key) {
+                return;
+            }
+            s.set_hub_connected(hub_key, false);
+            true
+        };
+        if should_emit {
+            emit_hub_status(state, Some(hub_key), false);
+            notify_hub_disconnect(state);
+        }
+    }
+}
+
 fn should_run_reconnect_resync(
     state: &SharedState,
     hub_key: &crate::canonical::identity::HubKey,
@@ -580,12 +680,20 @@ fn should_run_reconnect_resync(
         return true;
     };
 
-    if s.reconnect_sync_recently_ran(hub_key, RECONNECT_RESYNC_COOLDOWN) {
+    if s.reconnect_sync_recently_ran(hub_key, reconnect_resync_cooldown(hub_key)) {
         return false;
     }
 
     s.note_hub_reconnect_sync(hub_key);
     true
+}
+
+fn reconnect_resync_cooldown(hub_key: &crate::canonical::identity::HubKey) -> Duration {
+    if hub_key.hub_type.as_str() == crate::hub::HubType::HUE {
+        HUE_RECONNECT_RESYNC_COOLDOWN
+    } else {
+        DEFAULT_RECONNECT_RESYNC_COOLDOWN
+    }
 }
 
 /// Handle a hub-agnostic event from the event stream.
@@ -595,55 +703,56 @@ fn should_run_reconnect_resync(
 /// slow light command cannot block the shared hub-event ingress loop.
 pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut MotionTimerState) {
     let hub_key = event.hub_key().cloned();
-    let connected = !matches!(&event, HubEvent::Disconnected { .. });
-    let (became_connected, first_connected_event) = if let Some(ref key) = hub_key {
-        if let Ok(mut s) = state.lock() {
-            let was_connected = s.hub_is_connected(key);
-            let first_connected_event = connected && s.note_hub_connected_event(key);
-            s.set_hub_connected(key, connected);
-            (connected && !was_connected, first_connected_event)
-        } else {
-            (false, false)
-        }
-    } else {
-        (false, false)
-    };
 
     match event {
         HubEvent::Connected { .. } => {
-            info!(target: "conn", "Hub connected");
-            if became_connected {
-                if first_connected_event {
-                    if let Some(ref key) = hub_key {
-                        debug!(
-                            target: "conn",
-                            "Skipping reconnect resync for initial connect of {}",
-                            key
-                        );
+            debug!(target: "conn", "Hub connected");
+            let (app_became_connected, first_connected_event, reconnect_after_gap) =
+                if let Some(ref key) = hub_key {
+                    if let Ok(mut s) = state.lock() {
+                        let was_connected = s.hub_is_connected(key);
+                        let pending_disconnect = s.clear_hub_pending_disconnect(key);
+                        let first_connected_event = s.note_hub_connected_event(key);
+                        s.set_hub_connected(key, true);
+                        (
+                            !was_connected,
+                            first_connected_event,
+                            !first_connected_event && (!was_connected || pending_disconnect),
+                        )
+                    } else {
+                        (false, false, false)
                     }
-                } else if let Some(ref key) = hub_key {
+                } else {
+                    (true, false, false)
+                };
+
+            if first_connected_event {
+                if let Some(ref key) = hub_key {
+                    debug!(
+                        target: "conn",
+                        "Skipping reconnect resync for initial connect of {}",
+                        key
+                    );
+                }
+            } else if reconnect_after_gap {
+                if let Some(ref key) = hub_key {
                     if should_run_reconnect_resync(state, key) {
                         spawn_reconnect_sync(state, key);
                     } else {
-                        info!(
+                        debug!(
                             target: "conn",
                             "Hub {} reconnected within {}s; skipping full resync",
                             key,
-                            RECONNECT_RESYNC_COOLDOWN.as_secs()
+                            reconnect_resync_cooldown(key).as_secs()
                         );
                         spawn_light_state_poll(state, key);
                     }
                 }
             }
 
-            crate::state::emit_server_event(
-                state,
-                crate::server_event::ServerEvent::HubStatus {
-                    hub_type: hub_key.as_ref().map(|k| k.hub_type.as_str().to_string()),
-                    address: hub_key.as_ref().map(|k| k.address.clone()),
-                    connected: true,
-                },
-            );
+            if app_became_connected {
+                emit_hub_status(state, hub_key.as_ref(), true);
+            }
         }
 
         HubEvent::Button {
@@ -790,28 +899,41 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
         }
 
         HubEvent::Disconnected { reason, .. } => {
-            warn!(target: "conn", "Hub disconnected: {}", reason);
+            debug!(target: "conn", "Hub disconnected: {}", reason);
 
             // Motion timers are local state (Instant timestamps) — they keep
             // counting regardless of hub connectivity.  Clearing them here
             // means a transient SSE reconnection permanently prevents the
             // timeout from firing, so lights never turn off.
 
-            crate::state::emit_server_event(
-                state,
-                crate::server_event::ServerEvent::HubStatus {
-                    hub_type: hub_key.as_ref().map(|k| k.hub_type.as_str().to_string()),
-                    address: hub_key.as_ref().map(|k| k.address.clone()),
-                    connected: false,
-                },
-            );
+            if let Some(ref key) = hub_key {
+                let pending_deadline = {
+                    let Ok(mut s) = state.lock() else { return };
+                    if s.hub_is_connected(key) && s.hub_seen_connected_once(key) {
+                        Some(s.note_hub_pending_disconnect(key, HUB_DISCONNECT_GRACE))
+                    } else if s.hub_is_connected(key) {
+                        s.set_hub_connected(key, false);
+                        None
+                    } else {
+                        None
+                    }
+                };
 
-            let on_disconnect = {
-                let Ok(s) = state.lock() else { return };
-                s.on_hub_disconnect.clone()
-            };
-            if let Some(cb) = on_disconnect {
-                cb();
+                if let Some(deadline) = pending_deadline {
+                    debug!(
+                        target: "conn",
+                        "Hub {} disconnect pending for {}s before app-visible unavailable",
+                        key,
+                        HUB_DISCONNECT_GRACE.as_secs()
+                    );
+                    spawn_pending_disconnect(state, key, deadline, reason);
+                } else {
+                    emit_hub_status(state, hub_key.as_ref(), false);
+                    notify_hub_disconnect(state);
+                }
+            } else {
+                emit_hub_status(state, None, false);
+                notify_hub_disconnect(state);
             }
         }
 
@@ -1612,6 +1734,21 @@ mod tests {
         assert!((WARNING_DIM_FACTOR - 0.5).abs() < f32::EPSILON);
     }
 
+    #[test]
+    fn hue_reconnect_resync_cooldown_is_24_hours() {
+        let hue_key = HubKey::new(HubType::new(HubType::HUE), "192.168.1.2:443");
+        let other_key = HubKey::new(HubType::new("test"), "hub.local");
+
+        assert_eq!(
+            reconnect_resync_cooldown(&hue_key),
+            Duration::from_secs(24 * 60 * 60)
+        );
+        assert_eq!(
+            reconnect_resync_cooldown(&other_key),
+            DEFAULT_RECONNECT_RESYNC_COOLDOWN
+        );
+    }
+
     // ========================================================================
     // check_motion_timers tests
     // ========================================================================
@@ -2007,6 +2144,104 @@ mod tests {
         fn discover_devices(&self) -> anyhow::Result<Vec<DiscoveredDevice>> {
             Ok(vec![])
         }
+    }
+
+    #[test]
+    fn transient_disconnect_does_not_make_hub_api_unavailable() {
+        let state = make_state();
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(16);
+        let hub_type = HubType::new("test");
+        let hub_key = HubKey::new(hub_type.clone(), "hub.local");
+
+        let mut registry = crate::registry::HubDeviceRegistry::new();
+        registry.restore_from_snapshot(RegistrySnapshot {
+            rooms: vec![SnapshotRoom {
+                id: "room_a".into(),
+                name: "Room A".into(),
+                grouped_light_id: "gl_room_a".into(),
+            }],
+            devices: vec![],
+            buttons: HashMap::new(),
+            area_lights: HashMap::new(),
+        });
+        let registry: Arc<Mutex<dyn HubRegistry>> = Arc::new(Mutex::new(registry));
+
+        {
+            let mut s = state.lock().unwrap();
+            s.event_tx = Some(event_tx);
+            s.hubs.insert(
+                hub_key.clone(),
+                ActiveHub {
+                    hub_type,
+                    hub_key: hub_key.clone(),
+                    runtime: None,
+                    hub_data: Box::new(()),
+                    registry: Some(registry),
+                    discovery: Some(Arc::new(ReconnectTestDiscovery)),
+                    shutdown: Arc::new(AtomicBool::new(false)),
+                },
+            );
+            s.set_hub_connected(&hub_key, false);
+        }
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Connected {
+                hub_key: Some(hub_key.clone()),
+            },
+            &mut MotionTimerState::new(),
+        );
+        while event_rx.try_recv().is_ok() {}
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Disconnected {
+                hub_key: Some(hub_key.clone()),
+                reason: "SSE dropped".into(),
+            },
+            &mut MotionTimerState::new(),
+        );
+
+        {
+            let s = state.lock().unwrap();
+            assert!(
+                s.hub_is_connected(&hub_key),
+                "transient disconnect should remain app-visible as connected"
+            );
+            assert!(
+                s.hub_pending_disconnect_at.contains_key(&hub_key),
+                "disconnect should be pending during the grace window"
+            );
+        }
+
+        let mut saw_unavailable = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(
+                event,
+                crate::server_event::ServerEvent::HubStatus {
+                    connected: false,
+                    ..
+                }
+            ) {
+                saw_unavailable = true;
+            }
+        }
+        assert!(
+            !saw_unavailable,
+            "transient disconnect should not emit app-visible unavailable"
+        );
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Connected {
+                hub_key: Some(hub_key.clone()),
+            },
+            &mut MotionTimerState::new(),
+        );
+
+        let s = state.lock().unwrap();
+        assert!(s.hub_is_connected(&hub_key));
+        assert!(!s.hub_pending_disconnect_at.contains_key(&hub_key));
     }
 
     #[test]
@@ -2483,7 +2718,7 @@ mod tests {
 
         // Full discover-rooms resync should have fired at most once during
         // the whole storm — everything after that is suppressed by the
-        // RECONNECT_RESYNC_COOLDOWN rate-limiter.
+        // reconnect-resync cooldown rate-limiter.
         let discover = discover_rooms_calls.load(Ordering::SeqCst);
         assert!(
             discover <= 1,

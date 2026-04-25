@@ -2757,6 +2757,7 @@ fn clear_factory_reset_ephemeral_state(state: &SharedState) -> Result<()> {
     s.hub_seen_connected_once.clear();
     s.hub_sync_in_progress.clear();
     s.hub_reconnect_sync_at.clear();
+    s.hub_pending_disconnect_at.clear();
     s.room_lights_on.clear();
     s.room_observed_power.clear();
     s.motion_snapshots.clear();
@@ -5810,6 +5811,7 @@ pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
         }
         s.hub_connection_status.clear();
         s.hub_seen_connected_once.clear();
+        s.hub_pending_disconnect_at.clear();
         s.hub_startup_retry.clear();
 
         s.hub_credentials.clear();
@@ -6261,6 +6263,20 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
     };
 
     let existing_runtime = state.lock().ok().and_then(|s| s.hub_runtime());
+    let persisted_node_states: HashMap<String, rhythm_core::Room> = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.storage
+            .as_ref()
+            .and_then(|storage| storage.load_rooms().ok())
+            .filter(|rooms| !crate::lifecycle::persisted_rooms_look_corrupted(rooms))
+            .map(|rooms| {
+                rooms
+                    .iter()
+                    .map(|room| (room.id.clone(), room.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     let existing_room_states: HashMap<String, rhythm_core::RoomSnapshot> = existing_runtime
         .as_ref()
         .map(|runtime| {
@@ -6343,6 +6359,19 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
                     profile_settings: snap.profile_settings.clone(),
                 },
             );
+        } else if let Some(room) = persisted_node_states.get(&room_id) {
+            runtime.restore_room_state(
+                &room_id,
+                RestoredRoomState {
+                    rhythm_enabled: room.rhythm_enabled,
+                    disabled: room.disabled,
+                    time_offset_minutes: room.time_offset_minutes,
+                    brightness_offset: room.brightness_offset,
+                    soft_off: room.soft_off,
+                    hard_off: room.hard_off,
+                    profile_settings: room.profile_settings.clone(),
+                },
+            );
         }
     }
 
@@ -6359,6 +6388,19 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
                     soft_off: snap.soft_off,
                     hard_off: snap.hard_off,
                     profile_settings: snap.profile_settings.clone(),
+                },
+            );
+        } else if let Some(node) = persisted_node_states.get(&node_id) {
+            runtime.restore_node_state(
+                &node_id,
+                RestoredNodeState {
+                    rhythm_enabled: node.rhythm_enabled,
+                    disabled: node.disabled,
+                    time_offset_minutes: node.time_offset_minutes,
+                    brightness_offset: node.brightness_offset,
+                    soft_off: node.soft_off,
+                    hard_off: node.hard_off,
+                    profile_settings: node.profile_settings.clone(),
                 },
             );
         }
@@ -12409,6 +12451,40 @@ mod tests {
                 .as_deref(),
             Some(room_id.as_str())
         );
+    }
+
+    #[test]
+    fn reconcile_runtime_from_state_restores_persisted_room_flags_when_bootstrapping_runtime() {
+        let (state, runtime, _hub_key) = setup_state_with_deferred_runtime();
+        let storage = TestStorage::default();
+        let room_id = state.lock().unwrap().topology.create_room("Office");
+        let mut rooms = rhythm_core::RoomManager::new();
+        let mut room = rhythm_core::Room::new(&room_id, "Office");
+        room.rhythm_enabled = true;
+        room.time_offset_minutes = 14.0;
+        room.brightness_offset = -3.0;
+        room.soft_off = true;
+        rooms.add_room(room);
+        storage.save_rooms(&rooms).unwrap();
+        state.lock().unwrap().storage = Some(Box::new(storage.clone()));
+
+        reconcile_runtime_from_state(&state).unwrap();
+        persist_rooms(&state);
+
+        let office = runtime
+            .engine_room_snapshot(&room_id)
+            .expect("persisted topology room should be materialized");
+        assert!(office.rhythm_enabled);
+        assert_eq!(office.time_offset_minutes, 14.0);
+        assert_eq!(office.brightness_offset, -3.0);
+        assert!(office.soft_off);
+
+        let saved = storage.inner.lock().unwrap();
+        let saved_office = saved
+            .rooms
+            .get(&room_id)
+            .expect("persisted room flags should survive reconcile save");
+        assert!(saved_office.soft_off);
     }
 
     #[test]

@@ -223,10 +223,10 @@ pub struct AppState {
     // ---- Hub abstraction ----
     /// Active hubs keyed by HubKey. Supports multiple simultaneous hubs.
     pub hubs: HashMap<HubKey, ActiveHub>,
-    /// Live connection status keyed by HubKey.
+    /// API-visible connection status keyed by HubKey.
     ///
-    /// A hub can remain configured and active in-process while its transport
-    /// is temporarily disconnected and reconnecting.
+    /// Brief transport gaps stay visible as connected until the pending
+    /// disconnect grace period expires.
     pub hub_connection_status: HashMap<HubKey, bool>,
     /// Hubs that have emitted at least one `Connected` event since configuration.
     ///
@@ -243,6 +243,13 @@ pub struct AppState {
     /// Rapid SSE reconnect churn should refresh live light state, but it
     /// should not keep re-running full room/device discovery every time.
     pub hub_reconnect_sync_at: HashMap<HubKey, Instant>,
+    /// Pending API-visible disconnect deadlines keyed by HubKey.
+    ///
+    /// Event streams can recycle briefly while the hub is still reachable.
+    /// During that grace period the hub remains app-visible as connected; if
+    /// no reconnect arrives before the deadline, the delayed task marks it
+    /// disconnected and emits the hub-status event.
+    pub hub_pending_disconnect_at: HashMap<HubKey, Instant>,
     /// Hub credentials keyed by HubKey. Supports multiple simultaneous hubs.
     pub hub_credentials: HashMap<HubKey, HubCredentials>,
     /// Ephemeral startup bootstrap retry state keyed by HubKey.
@@ -470,6 +477,7 @@ impl Default for AppState {
             hub_seen_connected_once: HashSet::new(),
             hub_sync_in_progress: HashSet::new(),
             hub_reconnect_sync_at: HashMap::new(),
+            hub_pending_disconnect_at: HashMap::new(),
             hub_credentials: HashMap::new(),
             hub_startup_retry: HashMap::new(),
             hub_capabilities: Vec::new(),
@@ -757,6 +765,7 @@ impl AppState {
         self.hub_connection_status.remove(key);
         self.hub_seen_connected_once.remove(key);
         self.hub_reconnect_sync_at.remove(key);
+        self.hub_pending_disconnect_at.remove(key);
     }
 
     /// Record that a hub emitted a `Connected` event.
@@ -765,6 +774,11 @@ impl AppState {
     /// hub since it was configured.
     pub fn note_hub_connected_event(&mut self, key: &HubKey) -> bool {
         self.hub_seen_connected_once.insert(key.clone())
+    }
+
+    /// Whether a hub has emitted at least one connected event.
+    pub fn hub_seen_connected_once(&self, key: &HubKey) -> bool {
+        self.hub_seen_connected_once.contains(key)
     }
 
     /// Whether a reconnect-triggered full sync ran recently for this hub.
@@ -783,6 +797,27 @@ impl AppState {
     /// Clear reconnect-sync timing so the next reconnect can try again.
     pub fn clear_hub_reconnect_sync(&mut self, key: &HubKey) {
         self.hub_reconnect_sync_at.remove(key);
+    }
+
+    /// Start or refresh the delayed API-visible disconnect deadline.
+    pub fn note_hub_pending_disconnect(&mut self, key: &HubKey, grace: Duration) -> Instant {
+        let deadline = Instant::now() + grace;
+        self.hub_pending_disconnect_at.insert(key.clone(), deadline);
+        deadline
+    }
+
+    /// Clear any pending API-visible disconnect for this hub.
+    ///
+    /// Returns whether a pending disconnect was present.
+    pub fn clear_hub_pending_disconnect(&mut self, key: &HubKey) -> bool {
+        self.hub_pending_disconnect_at.remove(key).is_some()
+    }
+
+    /// Whether the delayed API-visible disconnect is still the active one.
+    pub fn hub_pending_disconnect_matches(&self, key: &HubKey, deadline: Instant) -> bool {
+        self.hub_pending_disconnect_at
+            .get(key)
+            .is_some_and(|pending| *pending == deadline)
     }
 
     /// Get startup bootstrap retry state for a configured hub.

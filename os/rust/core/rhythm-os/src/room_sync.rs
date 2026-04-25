@@ -825,7 +825,7 @@ pub fn poll_initial_light_state(state: &SharedState) {
         }
     }
 
-    info!(
+    debug!(
         target: "room_sync",
         "Initial light state: {}/{} rooms have lights on",
         on_count,

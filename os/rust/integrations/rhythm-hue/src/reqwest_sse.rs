@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use log::{debug, info, warn};
+use log::{debug, warn};
 
 use crate::sse::{drain_sse_lines, HueSseConfig, HueSseEvent, SseParseState};
 
@@ -74,7 +74,7 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
 
     while !shutdown.load(Ordering::Relaxed) {
         connect_count += 1;
-        info!(target: "sse", "Connecting SSE to {} (conn #{})...", url, connect_count);
+        debug!(target: "sse", "Connecting SSE to {} (conn #{})...", url, connect_count);
 
         let request = client
             .get(&url)
@@ -86,7 +86,7 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
                 Ok(response) => response,
                 Err(e) => {
                     warn!(target: "sse", "SSE connect failed: {}", e);
-                    info!(target: "sse", "Reconnecting SSE in {:?}...", backoff);
+                    debug!(target: "sse", "Reconnecting SSE in {:?}...", backoff);
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(max_backoff);
                     continue;
@@ -94,7 +94,7 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
             },
             Err(e) => {
                 warn!(target: "sse", "SSE request failed: {}", e);
-                info!(target: "sse", "Reconnecting SSE in {:?}...", backoff);
+                debug!(target: "sse", "Reconnecting SSE in {:?}...", backoff);
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(max_backoff);
                 continue;
@@ -105,7 +105,7 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
         let mut line_buf = Vec::with_capacity(4096);
         let mut stream = response.bytes_stream();
 
-        info!(target: "sse", "SSE connected (conn #{})", connect_count);
+        debug!(target: "sse", "SSE connected (conn #{})", connect_count);
         let _ = tx.try_send(HueSseEvent::Connected);
         backoff = Duration::from_secs(1);
         let now = Instant::now();
@@ -152,11 +152,11 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
                     break;
                 }
                 Ok(None) => {
-                    info!(target: "sse", "SSE stream ended");
+                    debug!(target: "sse", "SSE stream ended");
                     break;
                 }
                 Err(_) => {
-                    warn!(
+                    debug!(
                         target: "sse",
                         "SSE: No bytes for {}s (stall detected), reconnecting",
                         SSE_IDLE_TIMEOUT_SECS
@@ -168,7 +168,7 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
 
         if !shutdown.load(Ordering::Relaxed) {
             let _ = tx.try_send(HueSseEvent::Disconnected("Connection lost".to_string()));
-            info!(target: "sse", "Reconnecting SSE in {:?}...", backoff);
+            debug!(target: "sse", "Reconnecting SSE in {:?}...", backoff);
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(max_backoff);
         }
