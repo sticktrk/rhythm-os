@@ -112,7 +112,7 @@ class _TestRhythmConnection extends RhythmConnection {
   Future<void> pingOrReconnect() async {}
 
   @override
-  Future<void> reconnect() async {}
+  Future<void> reconnect({bool authoritative = false}) async {}
 
   @override
   void disconnect() {

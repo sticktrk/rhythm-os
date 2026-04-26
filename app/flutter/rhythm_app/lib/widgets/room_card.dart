@@ -77,6 +77,7 @@ class _RoomCardState extends State<RoomCard> {
         roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.active);
       case RoomMode.idle:
         HapticFeedback.lightImpact();
+        roomProvider.setRoomLightsOnLocal(widget.roomId, true);
         roomProvider.setRoomRhythmEnabled(widget.roomId, true);
         roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.idle);
       case RoomMode.off:

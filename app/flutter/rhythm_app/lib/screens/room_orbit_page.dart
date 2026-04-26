@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RoomModeState;
 import '../api/hybrid_client.dart';
 import '../providers/room_provider.dart';
 import '../services/hue/hue_service_locator.dart';
@@ -281,6 +282,10 @@ class _RoomOrbitPageState extends State<RoomOrbitPage> {
           HapticFeedback.mediumImpact();
 
           final updatedRoom = roomProvider.getRoom(widget.room.id);
+          if (updatedRoom?.lightsOn ?? false) {
+            roomProvider.setRoomStateLocal(
+                widget.room.id, RoomModeState.active);
+          }
           AnalyticsService().logLightToggle(
             turnedOn: updatedRoom?.lightsOn ?? false,
             roomId: widget.room.id,
@@ -355,6 +360,7 @@ class _RoomOrbitPageState extends State<RoomOrbitPage> {
         final room = roomProvider.getRoom(widget.room.id);
         if (room != null && !room.lightsOn) {
           roomProvider.setRoomLightsOn(widget.room.id, true);
+          roomProvider.setRoomStateLocal(widget.room.id, RoomModeState.active);
         }
         HapticFeedback.lightImpact();
       }

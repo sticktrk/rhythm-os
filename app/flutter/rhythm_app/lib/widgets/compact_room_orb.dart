@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RoomModeState;
 import '../providers/server_sync_provider.dart';
 import '../providers/home_provider.dart';
 import '../providers/room_provider.dart';
@@ -117,9 +118,10 @@ class _CompactRoomOrbState extends State<CompactRoomOrb> {
     final newOn = !room.lightsOn;
     roomProvider.setRoomLightsOnLocal(widget.roomId, newOn);
 
-    // Turn on → auto-enable rhythm; turn off → rhythm state unchanged
+    // Turn on → auto-enable rhythm and clear any stale hard-off semantics.
     if (newOn) {
       roomProvider.setRoomRhythmEnabled(widget.roomId, true);
+      roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.active);
     }
 
     final serverSync = context.read<ServerSyncProvider>();

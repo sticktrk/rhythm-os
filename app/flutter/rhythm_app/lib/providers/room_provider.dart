@@ -18,7 +18,7 @@ import '../services/settings_service.dart';
 /// Preserves:
 /// - `disabled` (user preference)
 /// - `rhythmEnabled`, `timeOffset`, `brightnessOffset` (ESP32-authoritative)
-/// - `lightsOn` (may have been set by Hue fetch or ESP32)
+/// - `lightsOn` (replaced from server-observed power on refresh)
 /// - `curveConfig` (per-room override)
 ///
 /// Fresh rooms provide updated metadata (name, deviceIds) from the hub.
@@ -187,12 +187,13 @@ class RoomProvider extends ChangeNotifier {
   /// This represents Rhythm's automation intent (`active`, `idle`,
   /// `hardOff`, etc.) and may remain `active` even when the physical lights
   /// are currently off due to an external wall switch, dimmer, or hub action.
+  ///
+  /// Until the first authoritative server state arrives, default to `active`
+  /// rather than inferring semantics from observed power alone.
   RoomModeState getRoomState(String roomId) {
     final state = _roomStates[roomId];
     if (state != null) return state;
-    final room = getRoom(roomId);
-    if (room == null) return RoomModeState.active;
-    return room.lightsOn ? RoomModeState.active : RoomModeState.hardOff;
+    return RoomModeState.active;
   }
 
   /// Visual room state for cards and other UI that reflects actual power.
@@ -562,7 +563,7 @@ class RoomProvider extends ChangeNotifier {
       _roomModes[roomId] = mode;
       changed = true;
     }
-    // Update lights_on (respecting the 3s lock for optimistic UI)
+    // Update observed lights_on (respecting the 3s lock for optimistic UI).
     if (lightsOn != null) {
       final lockedUntil = _lightsOnLockedUntil[roomId];
       if (lockedUntil == null || DateTime.now().isAfter(lockedUntil)) {
@@ -638,13 +639,13 @@ class RoomProvider extends ChangeNotifier {
   /// Skips the update if the room is currently locked by a recent
   /// [setRoomLightsOnLocal] call, preventing stale external state from
   /// overriding the user's optimistic toggle.
+  ///
+  /// Power-only updates do not rewrite semantic room mode.
   Future<void> setRoomLightsOn(String roomId, bool lightsOn) async {
     final lockedUntil = _lightsOnLockedUntil[roomId];
     if (lockedUntil != null && DateTime.now().isBefore(lockedUntil)) {
       return; // suppress stale external override
     }
-    _roomStates[roomId] =
-        lightsOn ? RoomModeState.active : RoomModeState.hardOff;
     _state = room_state.setRoomLightsOn(
         state: _state, roomId: roomId, lightsOn: lightsOn);
     await _save();
@@ -656,13 +657,11 @@ class RoomProvider extends ChangeNotifier {
   /// Locks the room so that incoming ESP32/Hue state events don't
   /// immediately overwrite the optimistic value before the bridge
   /// has processed the command.
+  ///
+  /// Local power toggles do not rewrite semantic room mode.
   Future<void> setRoomLightsOnLocal(String roomId, bool lightsOn) async {
     _lightsOnLockedUntil[roomId] =
         DateTime.now().add(const Duration(seconds: 3));
-    _roomStateLockedUntil[roomId] =
-        DateTime.now().add(const Duration(seconds: 3));
-    _roomStates[roomId] =
-        lightsOn ? RoomModeState.active : RoomModeState.hardOff;
     _state = room_state.setRoomLightsOn(
         state: _state, roomId: roomId, lightsOn: lightsOn);
     await _save();

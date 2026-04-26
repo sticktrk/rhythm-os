@@ -90,7 +90,7 @@ class _FakeRhythmConnection extends RhythmConnection {
   RhythmServerApi get api => fakeApi;
 
   @override
-  Future<void> reconnect() async {
+  Future<void> reconnect({bool authoritative = false}) async {
     reconnectCalls++;
   }
 }

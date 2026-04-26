@@ -580,8 +580,9 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Trigger a full reconnect (for pull-to-refresh).
   ///
-  /// Re-fetches `GET /api/state` and emits a fresh hello so the UI gets the
-  /// complete picture (devices, config, rooms, sensors, settings).
+  /// Re-fetches `GET /api/state?authoritative=true` and emits a fresh hello so
+  /// the UI gets the complete picture (devices, config, rooms, sensors,
+  /// settings).
   ///
   /// Skips if called within 2 seconds of the last refresh to protect the server
   /// from rapid pull-refreshes.
@@ -593,7 +594,7 @@ class ServerSyncProvider extends ChangeNotifier {
     final now = DateTime.now();
     if (now.difference(_lastPollTime).inSeconds < 2) return;
     _lastPollTime = now;
-    await _connection.reconnect();
+    await _connection.reconnect(authoritative: true);
   }
 
   /// Trigger an immediate lightweight poll (rooms/state only).
@@ -864,7 +865,8 @@ class ServerSyncProvider extends ChangeNotifier {
   ///
   /// When a hub connects, trigger a re-hello to pick up newly discovered
   /// rooms. When a hub disconnects, just update the UI.
-  void _onHubEvent(({String event, String? hubType, String? address}) hubEvent) {
+  void _onHubEvent(
+      ({String event, String? hubType, String? address}) hubEvent) {
     final (:event, :hubType, :address) = hubEvent;
     debugPrint('ServerSync: hub_status=$event hub=$hubType address=$address');
     // Update the specific hub's connected state in _lastHubInfos.
@@ -1715,10 +1717,11 @@ class ServerSyncProvider extends ChangeNotifier {
       motionActive: event.isCleared ? false : event.motionActive,
       motionOwned: event.isCleared ? false : event.motionOwned,
       remainingSecs: event.isCleared ? null : event.remainingSecs,
-      timeoutSecs:
-          event.isCleared && previous.timeoutSecs != null && previous.timeoutSecs! > 0
-              ? previous.timeoutSecs
-              : event.timeoutSecs,
+      timeoutSecs: event.isCleared &&
+              previous.timeoutSecs != null &&
+              previous.timeoutSecs! > 0
+          ? previous.timeoutSecs
+          : event.timeoutSecs,
       warningActive: event.isCleared ? false : event.warningActive,
     );
 

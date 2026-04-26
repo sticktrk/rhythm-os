@@ -126,6 +126,7 @@ class _FakeRhythmConnection extends RhythmConnection {
   final _FakeRhythmServerApi fakeApi;
   bool isConnected = true;
   int reconnectCalls = 0;
+  bool? lastReconnectAuthoritative;
 
   @override
   bool get connected => isConnected;
@@ -134,8 +135,9 @@ class _FakeRhythmConnection extends RhythmConnection {
   RhythmServerApi get api => fakeApi;
 
   @override
-  Future<void> reconnect() async {
+  Future<void> reconnect({bool authoritative = false}) async {
     reconnectCalls++;
+    lastReconnectAuthoritative = authoritative;
   }
 }
 
@@ -144,8 +146,8 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
 
   final _helloController = StreamController<RhythmHello>.broadcast();
   final _rhythmStateController = StreamController<RhythmRoomState>.broadcast();
-  final _hubEventController =
-      StreamController<({String event, String? hubType, String? address})>.broadcast();
+  final _hubEventController = StreamController<
+      ({String event, String? hubType, String? address})>.broadcast();
   final _motionTimerController =
       StreamController<RhythmMotionTimer>.broadcast();
   final _connectionStateController =
@@ -155,7 +157,8 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
   Stream<RhythmHello> get helloEvents => _helloController.stream;
 
   @override
-  Stream<RhythmRoomState> get rhythmStateEvents => _rhythmStateController.stream;
+  Stream<RhythmRoomState> get rhythmStateEvents =>
+      _rhythmStateController.stream;
 
   @override
   Stream<({String event, String? hubType, String? address})> get hubEvents =>
@@ -648,6 +651,47 @@ void main() {
         contains('light-1'),
       );
     });
+
+    test('uses observed_power lights_on for room visuals', () async {
+      final homeProvider = _TestHomeProvider(const []);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: homeProvider,
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': [
+            {
+              'id': 'room-1',
+              'name': 'Kitchen',
+              'kind': 'room',
+              'hub_types': ['hue'],
+              'state': 'active',
+              'rhythm_enabled': true,
+              'disabled': false,
+              'time_offset': 0.0,
+              'brightness_offset': 0.0,
+              'lights_on': true,
+              'observed_power': {'lights_on': false},
+            },
+          ],
+          'location': const <String, dynamic>{},
+        }),
+      );
+
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final room = roomProvider.getRoom('room-1');
+      expect(room, isNotNull);
+      expect(room!.lightsOn, isFalse);
+
+      final helloRoom =
+          provider.helloRooms.singleWhere((entry) => entry.id == 'room-1');
+      expect(helloRoom.lightsOn, isFalse);
+    });
   });
 
   group('ServerSyncProvider SSE sync', () {
@@ -715,7 +759,9 @@ void main() {
       expect(timer.warningActive, isTrue);
       expect(roomProvider.hasMotionSensor('room-1'), isTrue);
       expect(
-        provider.helloRooms.singleWhere((room) => room.id == 'room-1').warningActive,
+        provider.helloRooms
+            .singleWhere((room) => room.id == 'room-1')
+            .warningActive,
         isTrue,
       );
     });
@@ -771,7 +817,8 @@ void main() {
       );
       await Future<void>.delayed(const Duration(milliseconds: 10));
 
-      final room = provider.helloRooms.singleWhere((entry) => entry.id == 'room-1');
+      final room =
+          provider.helloRooms.singleWhere((entry) => entry.id == 'room-1');
       expect(room.name, 'Kitchen Evening');
       expect(room.state, RoomModeState.idle);
       expect(room.transitioning, isTrue);
@@ -830,7 +877,8 @@ void main() {
       expect(timer!.remainingSecs, 18);
       expect(timer.warningActive, isTrue);
 
-      final room = provider.helloRooms.singleWhere((entry) => entry.id == 'room-1');
+      final room =
+          provider.helloRooms.singleWhere((entry) => entry.id == 'room-1');
       expect(room.motionOwned, isTrue);
       expect(room.remainingSecs, 18);
       expect(room.timeoutSecs, 1200);
@@ -879,6 +927,37 @@ void main() {
       };
       expect(hubsByAddress['192.168.1.10:443'], isTrue);
       expect(hubsByAddress['192.168.1.11:443'], isFalse);
+    });
+  });
+
+  group('ServerSyncProvider fullRefresh', () {
+    late RoomProvider roomProvider;
+    late _FakeRhythmServerApi api;
+    late _FakeRhythmConnection connection;
+
+    setUp(() {
+      roomProvider = RoomProvider();
+      api = _FakeRhythmServerApi();
+      connection = _FakeRhythmConnection(api);
+    });
+
+    tearDown(() {
+      roomProvider.dispose();
+      connection.dispose();
+    });
+
+    test('requests authoritative state on reconnect', () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      await provider.fullRefresh();
+
+      expect(connection.reconnectCalls, 1);
+      expect(connection.lastReconnectAuthoritative, isTrue);
     });
   });
 
