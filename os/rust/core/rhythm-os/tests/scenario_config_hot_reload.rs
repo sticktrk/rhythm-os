@@ -10,7 +10,6 @@
 //! 2. Drags brightness/color slider
 //! 3. PUT /api/config pushes new LightProfileConfig
 //! 4. Active rooms immediately use new curve for next action/tick
-//! 5. Fix My Lights uses new curve values
 
 mod harness;
 
@@ -103,40 +102,6 @@ fn config_change_preserves_offsets() {
         before.brightness_offset, after.brightness_offset,
         "brightness offset should be preserved"
     );
-}
-
-// ============================================================================
-// Scenario: Fix after config change uses new curve
-// ============================================================================
-
-/// Fix My Lights should recalculate adaptive values using the new curve.
-#[test]
-fn fix_after_config_change_uses_new_curve() {
-    let (harness, spy) = TestHarness::with_spy_controller();
-    let harness = harness.with_discovery(
-        vec![room("kitchen", "Kitchen"), room("bedroom", "Bedroom")],
-        vec![],
-    );
-    harness.sync();
-
-    // Both rooms on
-    harness.action("kitchen", "on").unwrap();
-    harness.action("bedroom", "on").unwrap();
-
-    // -- Action: push constrained config, then fix --
-    harness.set_config(config_with_max_brightness(40));
-    spy.reset();
-    let result = harness.fix_my_lights();
-    assert_eq!(result["rooms_reset"], 2);
-
-    // -- Assert: all turn_on calls respect new max --
-    for (_, cmd) in spy.turn_on_calls() {
-        assert!(
-            cmd.brightness <= 40,
-            "fix should use new curve, got brightness {}",
-            cmd.brightness
-        );
-    }
 }
 
 // ============================================================================

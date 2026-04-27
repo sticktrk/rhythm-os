@@ -1430,17 +1430,6 @@ pub fn handle_put_node_preferences(
     nodes_response(results, batch, dispatch_spacing)
 }
 
-/// Reset all on-rooms back to their current adaptive curve position.
-///
-/// When `persist` is `true`, persists state after reset.
-/// When `false`, the caller is responsible for deferred persistence.
-pub fn handle_fix_my_lights(state: &SharedState, persist: bool) -> ApiResponse {
-    match commands::do_fix_my_lights(state, persist) {
-        Ok(json) => ApiResponse::json_ok(json),
-        Err(e) => ApiResponse::server_error(e),
-    }
-}
-
 pub fn handle_post_sync(state: &SharedState) -> ApiResponse {
     match crate::room_sync::sync_all_hubs(state) {
         Ok(report) => {
@@ -1792,7 +1781,7 @@ mod tests {
     use crate::hub::{ActiveHub, HubType};
     use crate::pairing::{PairingStatus, UnpairingRequest, UnpairingResult};
     use crate::registry::HubDeviceRegistry;
-    use crate::state::{AppState, ObservedPowerSource, ObservedPowerState, WorkItem};
+    use crate::state::{AppState, WorkItem};
     use crate::topology::HubRoomBinding;
     use rhythm_core::runtime::hub_registry::DeviceType;
     use serde_json::json;
@@ -3284,31 +3273,6 @@ mod tests {
         assert!(r
             .body
             .contains("rhythm_interval_secs now belongs in light profile config"));
-    }
-
-    // -- fix_my_lights returns rooms as objects --
-
-    #[test]
-    fn fix_returns_rooms_as_objects_not_ids() {
-        let state = handler_state_with_runtime();
-        state.lock().unwrap().room_observed_power.insert(
-            "room1".into(),
-            ObservedPowerState::new(true, ObservedPowerSource::Command),
-        );
-
-        let r = handle_fix_my_lights(&state, false);
-        assert_eq!(r.status, 200);
-        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
-        // rooms contains objects, not ID strings
-        assert!(parsed["rooms"].is_array());
-        if let Some(first) = parsed["rooms"].as_array().unwrap().first() {
-            assert!(first.is_object());
-            assert!(first["id"].is_string());
-            assert!(first["brightness"].is_number());
-        }
-        // No status or room_states keys
-        assert!(parsed.get("status").is_none());
-        assert!(parsed.get("room_states").is_none());
     }
 
     // -- No handler returns {"status":"ok"} --

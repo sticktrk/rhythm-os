@@ -60,7 +60,7 @@ Rhythm OS exposes a complete REST API for managing lights, rooms, and curves. Al
 | **Profile Bundle** | `GET /api/profile-bundle`, `PUT /api/profile-bundle`, `GET /api/profile-bundle/factory-default`, `POST /api/profile-bundle/reset` | Export/import the current portable profile bundle: profiles, transitions, and power-save |
 | **Backup** | `GET /api/backup`, `PUT /api/backup` | Full installation backup/restore including topology and installation metadata |
 | **Factory Reset** | `POST /api/factory-reset` | Clear installation state and restore shipped defaults |
-| **Nodes** | `PUT /api/nodes/action`, `PUT /api/nodes/brightness`, `PUT /api/nodes/offset`, `PUT /api/nodes/preferences`, `POST /api/nodes/fix` | Control live nodes and room/device preferences |
+| **Nodes** | `PUT /api/nodes/action`, `PUT /api/nodes/brightness`, `PUT /api/nodes/offset`, `PUT /api/nodes/preferences` | Control live nodes and room/device preferences |
 | **Topology** | `GET/POST /api/topology/rooms`, `PUT /api/topology/rooms/:id`, `PUT /api/topology/rooms/:id/merge`, `PUT /api/topology/rooms/:id/devices/move` | Manage user-facing room/device graph |
 | **Canonical & Triage** | `GET /api/devices/canonical`, `PUT /api/devices/canonical/:id/room`, `PUT /api/devices/canonical/:id/parent`, `GET /api/triage` | Review normalized devices and resolve merge/binding decisions |
 | **Config** | `GET /api/config`, `PUT /api/config`, `PUT /api/location` | Read/write curve config and location |

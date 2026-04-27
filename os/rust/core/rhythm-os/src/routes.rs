@@ -118,10 +118,6 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["PUT", "DELETE"],
     },
     SharedRoute {
-        path: "/api/nodes/fix",
-        methods: &["POST"],
-    },
-    SharedRoute {
         path: "/api/sync",
         methods: &["POST"],
     },

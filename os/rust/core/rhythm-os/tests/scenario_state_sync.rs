@@ -10,11 +10,10 @@
 //! 1. User taps room card → PUT /api/nodes/action returns immediate state
 //! 2. GET /api/nodes/state (15s poll) returns current state reflecting last action
 //! 3. Multiple rapid taps → server processes in order, final state correct
-//! 4. Fix My Lights → all affected rooms visible in next poll
 
 mod harness;
 
-use harness::{motion_sensor, room, rooms_with_lights, TestHarness};
+use harness::{room, rooms_with_lights, TestHarness};
 
 // ============================================================================
 // Scenario 4a: Action response includes immediate state
@@ -157,82 +156,7 @@ fn preferences_reflected_in_snapshots() {
 }
 
 // ============================================================================
-// Scenario 4f: Fix My Lights clears offsets
-// ============================================================================
-
-/// Fix My Lights should reset rooms to default state (offsets zeroed).
-/// After fix, the engine snapshots show 0 offsets.
-#[test]
-fn fix_resets_to_default_adaptive_values() {
-    let harness = TestHarness::new().with_discovery(
-        vec![room("kitchen", "Kitchen"), room("bedroom", "Bedroom")],
-        vec![],
-    );
-    harness.sync();
-
-    // Turn on both rooms
-    harness.action("kitchen", "on").unwrap();
-    harness.action("bedroom", "on").unwrap();
-
-    // -- Action: Fix My Lights --
-    let result = harness.fix_my_lights();
-    assert_eq!(result["rooms_reset"], 2, "both on-rooms should be reset");
-
-    // -- Assert: offsets are zero (default adaptive) --
-    let snap = harness.snapshot("kitchen").unwrap();
-    assert_eq!(
-        snap.time_offset_minutes, 0.0,
-        "time_offset should be 0 after fix"
-    );
-    assert_eq!(
-        snap.brightness_offset, 0.0,
-        "brightness_offset should be 0 after fix"
-    );
-
-    let snap = harness.snapshot("bedroom").unwrap();
-    assert_eq!(
-        snap.time_offset_minutes, 0.0,
-        "time_offset should be 0 after fix"
-    );
-    assert_eq!(
-        snap.brightness_offset, 0.0,
-        "brightness_offset should be 0 after fix"
-    );
-}
-
-// ============================================================================
-// Scenario 4g: Motion rooms get turned off by fix, not reset
-// ============================================================================
-
-/// Rooms with active motion sensors should be turned off by Fix My Lights
-/// (OffPress) rather than reset to adaptive values.
-#[test]
-fn fix_turns_off_motion_rooms() {
-    let harness = TestHarness::new().with_discovery(
-        vec![room("hallway", "Hallway"), room("kitchen", "Kitchen")],
-        vec![motion_sensor("motion_01", "hallway")],
-    );
-    harness.sync();
-
-    // Set up: hallway has motion and lights on, kitchen has lights on
-    harness.set_lights_on("hallway", true);
-    harness.set_motion_active("hallway");
-    harness.set_lights_on("kitchen", true);
-
-    // -- Action: Fix My Lights --
-    let result = harness.fix_my_lights();
-
-    // -- Assert: kitchen reset, hallway motion-cleared --
-    assert_eq!(result["rooms_reset"], 1, "only kitchen should be reset");
-    assert_eq!(
-        result["motion_cleared"], 1,
-        "hallway should be motion-cleared"
-    );
-    assert!(!harness.lights_on("hallway"), "hallway should be off");
-}
-
-// ============================================================================
-// Scenario 4h: Action on cross-hub room in multi-hub setup
+// Scenario 4f: Action on cross-hub room in multi-hub setup
 // ============================================================================
 
 /// Cross-hub rooms should accept all standard actions without errors.

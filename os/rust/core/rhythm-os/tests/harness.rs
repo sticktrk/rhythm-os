@@ -259,7 +259,7 @@ impl TestHarness {
     ///
     /// In production, this is set by event handlers (button press, motion)
     /// and action dispatch. Use this to set up initial state for scenarios
-    /// that test downstream behavior (like fix_my_lights).
+    /// that test downstream behavior.
     /// Translates hub-native IDs to topology IDs automatically.
     pub fn set_lights_on(&self, room_id: &str, on: bool) {
         let resolved = self.resolve(room_id);
@@ -296,19 +296,6 @@ impl TestHarness {
     pub fn action(&self, room_id: &str, action: &str) -> Result<String> {
         let resolved = self.resolve(room_id);
         commands::do_node_action(&self.state, &resolved, action, false)
-    }
-
-    /// Call Fix My Lights and return the parsed JSON response.
-    ///
-    /// Returns a `serde_json::Value` with fields:
-    /// - `rooms_reset`: number of normal rooms reset
-    /// - `rooms`: array of room state objects
-    /// - `motion_cleared`: number of motion rooms turned off
-    /// - `motion_rooms`: array of motion room IDs
-    pub fn fix_my_lights(&self) -> serde_json::Value {
-        let json_str =
-            commands::do_fix_my_lights(&self.state, false).expect("do_fix_my_lights failed");
-        serde_json::from_str(&json_str).expect("failed to parse fix response")
     }
 
     /// Read a room's engine snapshot (returns `None` if room doesn't exist).

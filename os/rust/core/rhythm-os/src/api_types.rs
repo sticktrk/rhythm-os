@@ -465,23 +465,6 @@ pub struct TopologyNodeControlDto {
 // Mutation responses
 // ---------------------------------------------------------------------------
 
-/// Response for `POST /api/nodes/fix`.
-#[derive(Debug, Serialize)]
-pub struct FixResponse {
-    pub rooms_reset: usize,
-    pub rooms: Vec<RoomRhythmState>,
-    pub motion_cleared: usize,
-    pub motion_rooms: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub queued: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dispatch_count: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dispatch_spacing_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub estimated_dispatch_ms: Option<u64>,
-}
-
 /// Response for `POST /api/sync`.
 #[derive(Debug, Serialize)]
 pub struct SyncResponse {
@@ -1019,34 +1002,6 @@ mod tests {
         assert_eq!(json["id"], "dev1");
         assert_eq!(json["type"], "motion");
         assert!(json.get("device_type").is_none());
-    }
-
-    // ---- FixResponse ----
-
-    #[test]
-    fn fix_response_rooms_are_objects() {
-        let resp = FixResponse {
-            rooms_reset: 1,
-            rooms: vec![sample_rhythm_state()],
-            motion_cleared: 0,
-            motion_rooms: vec![],
-            queued: None,
-            dispatch_count: None,
-            dispatch_spacing_ms: None,
-            estimated_dispatch_ms: None,
-        };
-        let json: Value = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["rooms_reset"], 1);
-        // rooms contains objects with id, not bare ID strings
-        assert!(json["rooms"][0].is_object());
-        assert_eq!(json["rooms"][0]["id"], "room1");
-        assert_eq!(json["rooms"][0]["brightness"], 80);
-        assert_eq!(json["motion_cleared"], 0);
-        assert!(json["motion_rooms"].as_array().unwrap().is_empty());
-        // No status wrapper
-        assert!(json.get("status").is_none());
-        // No room_states key (old shape)
-        assert!(json.get("room_states").is_none());
     }
 
     // ---- SyncResponse ----

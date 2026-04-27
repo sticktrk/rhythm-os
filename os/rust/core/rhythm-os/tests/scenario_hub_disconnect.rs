@@ -183,26 +183,3 @@ fn multiple_resync_cycles_maintain_consistency() {
         "Kitchen turned off after re-syncs"
     );
 }
-
-// ============================================================================
-// Scenario 3f: Fix My Lights works after hub re-sync
-// ============================================================================
-
-/// Fix My Lights should work correctly even after hub re-syncs.
-#[test]
-fn fix_works_after_resync() {
-    let (harness, ha_key) = setup_bound_kitchen();
-
-    harness.action("hue-kitchen", "on").unwrap();
-    harness.action("hue-bedroom", "on").unwrap();
-
-    // Re-sync both hubs
-    harness.sync();
-    harness.sync_hub(&ha_key);
-
-    // -- Action: Fix My Lights --
-    let result = harness.fix_my_lights();
-
-    // -- Assert: both on-rooms reset --
-    assert_eq!(result["rooms_reset"], 2, "both on-rooms should be reset");
-}

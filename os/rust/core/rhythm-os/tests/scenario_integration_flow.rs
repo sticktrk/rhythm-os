@@ -211,52 +211,6 @@ fn lights_off_sends_turn_off() {
 }
 
 #[test]
-fn fix_my_lights_resets_on_rooms() {
-    let (rooms, devices) = rooms_with_lights(&[
-        ("kitchen", "Kitchen"),
-        ("bedroom", "Bedroom"),
-        ("office", "Office"),
-    ]);
-    let (h, spy) = harness::TestHarness::with_spy_controller();
-    let h = h.with_discovery(rooms, devices);
-    h.sync();
-
-    // Turn on two rooms
-    h.action("kitchen", "on").unwrap();
-    h.action("bedroom", "on").unwrap();
-    // Office stays off
-    spy.reset();
-
-    // Fix resets on-rooms to adaptive values
-    h.fix_my_lights();
-
-    // Should have turn_on calls for kitchen and bedroom (the on rooms)
-    let calls = spy.turn_on_calls();
-    assert_eq!(
-        calls.len(),
-        2,
-        "fix should reset 2 on-rooms, got {}",
-        calls.len()
-    );
-
-    // Each command should have valid adaptive values
-    for (room_id, cmd) in &calls {
-        assert!(
-            cmd.brightness >= 1 && cmd.brightness <= 100,
-            "room {} brightness {} out of range",
-            room_id,
-            cmd.brightness
-        );
-        assert!(
-            cmd.kelvin >= 2000 && cmd.kelvin <= 6500,
-            "room {} kelvin {} out of range",
-            room_id,
-            cmd.kelvin
-        );
-    }
-}
-
-#[test]
 fn reset_action_sends_adaptive_command() {
     let (rooms, devices) = rooms_with_lights(&[("kitchen", "Kitchen")]);
     let (h, spy) = harness::TestHarness::with_spy_controller();

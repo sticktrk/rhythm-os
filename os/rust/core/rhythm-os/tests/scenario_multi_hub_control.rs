@@ -184,52 +184,7 @@ fn brightness_on_cross_hub_room() {
 }
 
 // ============================================================================
-// Scenario 2f: Fix My Lights resets cross-hub rooms
-// ============================================================================
-
-/// Fix My Lights should reset cross-hub rooms just like single-hub rooms.
-#[test]
-fn fix_resets_cross_hub_rooms() {
-    let harness = setup_multi_hub();
-
-    // Turn on multiple rooms including cross-hub Kitchen
-    harness.action("hue-kitchen", "on").unwrap();
-    harness.action("hue-bedroom", "on").unwrap();
-    harness.action("ha-office", "on").unwrap();
-
-    // -- Action: Fix My Lights --
-    let result = harness.fix_my_lights();
-
-    // -- Assert: all on-rooms reset --
-    assert_eq!(result["rooms_reset"], 3, "all 3 on-rooms should be reset");
-
-    // Verify resolved IDs are in the response
-    let kitchen_id = harness.resolve("hue-kitchen");
-    let bedroom_id = harness.resolve("hue-bedroom");
-    let office_id = harness.resolve("ha-office");
-
-    let room_ids: Vec<&str> = result["rooms"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|r| r["id"].as_str().unwrap())
-        .collect();
-    assert!(
-        room_ids.contains(&kitchen_id.as_str()),
-        "Kitchen should be reset"
-    );
-    assert!(
-        room_ids.contains(&bedroom_id.as_str()),
-        "Bedroom should be reset"
-    );
-    assert!(
-        room_ids.contains(&office_id.as_str()),
-        "Office should be reset"
-    );
-}
-
-// ============================================================================
-// Scenario 2g: Room state preserved through re-sync
+// Scenario 2f: Room state preserved through re-sync
 // ============================================================================
 
 /// User state (rhythm_enabled, soft_off) should survive hub re-sync.

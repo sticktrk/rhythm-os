@@ -1,61 +1,18 @@
 //! Scenario: Motion sensor state interactions — "Room Grid → Motion Indicator".
 //!
 //! Tests motion sensor state interactions visible in the room grid UI. Motion
-//! sensors are a key feature shown per-room, and their interaction with
-//! fix/soft_off/disable had zero existing coverage.
+//! sensors are a key feature shown per-room, and their interaction with manual
+//! actions and soft-off needs scenario coverage.
 //!
 //! ## API journey
 //!
 //! 1. Room grid shows motion icon on rooms with motion sensors
-//! 2. Fix My Lights turns off motion rooms instead of resetting
-//! 3. Manual actions override motion state
-//! 4. Disabled + motion rooms are fully excluded from fix
+//! 2. Manual actions override motion state
+//! 3. Soft-off works while motion state is active
 
 mod harness;
 
 use harness::{motion_sensor, room, TestHarness};
-
-// ============================================================================
-// Scenario: Motion rooms are turned off (not reset) by fix
-// ============================================================================
-
-/// Fix My Lights should turn off motion rooms via OffPress and reset
-/// non-motion on-rooms. The fix response distinguishes the two categories.
-#[test]
-fn motion_room_excluded_from_fix_reset() {
-    let harness = TestHarness::new().with_discovery(
-        vec![
-            room("hallway", "Hallway"),
-            room("kitchen", "Kitchen"),
-            room("bedroom", "Bedroom"),
-        ],
-        vec![motion_sensor("motion_01", "hallway")],
-    );
-    harness.sync();
-
-    // All rooms on, hallway has active motion
-    harness.set_lights_on("hallway", true);
-    harness.set_lights_on("kitchen", true);
-    harness.set_lights_on("bedroom", true);
-    harness.set_motion_active("hallway");
-
-    // -- Action: Fix My Lights --
-    let result = harness.fix_my_lights();
-
-    // -- Assert: kitchen+bedroom reset, hallway motion-cleared --
-    assert_eq!(
-        result["rooms_reset"], 2,
-        "kitchen and bedroom should be reset"
-    );
-    assert_eq!(
-        result["motion_cleared"], 1,
-        "hallway should be motion-cleared"
-    );
-    assert!(
-        !harness.lights_on("hallway"),
-        "hallway should be off after fix"
-    );
-}
 
 // ============================================================================
 // Scenario: Manual on action works on a room with motion
@@ -93,7 +50,7 @@ fn manual_on_works_on_motion_room() {
 // ============================================================================
 
 /// Individual lights_off action should not clear the motion snapshot from
-/// AppState — only fix_my_lights clears motion state.
+/// AppState.
 #[test]
 fn lights_off_does_not_clear_motion_snapshot() {
     let harness = TestHarness::new().with_discovery(
@@ -118,10 +75,7 @@ fn lights_off_does_not_clear_motion_snapshot() {
         .unwrap()
         .motion_snapshots
         .contains_key(&resolved);
-    assert!(
-        has_motion,
-        "motion snapshot should still be present (only fix clears it)"
-    );
+    assert!(has_motion, "motion snapshot should still be present");
 }
 
 // ============================================================================
@@ -156,110 +110,4 @@ fn soft_off_on_motion_room() {
         .motion_snapshots
         .contains_key(&resolved);
     assert!(has_motion, "motion snapshot should still be present");
-}
-
-// ============================================================================
-// Scenario: Disabled motion room excluded from fix entirely
-// ============================================================================
-
-/// A room that is both disabled AND has motion should be excluded from
-/// fix entirely — not reset AND not motion-cleared.
-#[test]
-fn disabled_motion_room_excluded_from_fix() {
-    let harness = TestHarness::new().with_discovery(
-        vec![room("hallway", "Hallway"), room("kitchen", "Kitchen")],
-        vec![motion_sensor("motion_01", "hallway")],
-    );
-    harness.sync();
-
-    // Both on, hallway has motion
-    harness.set_lights_on("hallway", true);
-    harness.set_lights_on("kitchen", true);
-    harness.set_motion_active("hallway");
-
-    // Disable hallway
-    harness.set_room_preferences("hallway", None, Some(true), None);
-
-    // -- Action: Fix My Lights --
-    let result = harness.fix_my_lights();
-
-    // -- Assert: only kitchen reset, hallway fully excluded --
-    assert_eq!(result["rooms_reset"], 1, "only kitchen should be reset");
-    assert_eq!(
-        result["motion_cleared"], 0,
-        "disabled motion room should not be motion-cleared"
-    );
-    assert!(
-        harness.lights_on("hallway"),
-        "hallway lights unchanged (fix skipped it)"
-    );
-}
-
-// ============================================================================
-// Scenario: Fix My Lights clears stale offsets on motion rooms
-// ============================================================================
-
-/// Motion rooms that accumulated time/brightness offsets (e.g., from the Light
-/// Tuning screen's batch offset) should have those offsets cleared by Fix My
-/// Lights, not just turned off. Otherwise the stale offset persists and
-/// produces wrong brightness on next motion activation.
-#[test]
-fn fix_clears_offsets_on_motion_rooms() {
-    let harness = TestHarness::new().with_discovery(
-        vec![room("hallway", "Hallway"), room("kitchen", "Kitchen")],
-        vec![motion_sensor("motion_01", "hallway")],
-    );
-    harness.sync();
-
-    // Apply -120 time offset to both rooms (simulates Light Tuning batch offset)
-    harness.set_room_offset("hallway", -120.0);
-    harness.set_room_offset("kitchen", -120.0);
-
-    // Both on, hallway has active motion
-    harness.set_lights_on("hallway", true);
-    harness.set_lights_on("kitchen", true);
-    harness.set_motion_active("hallway");
-
-    // Verify offsets are set
-    assert_eq!(
-        harness.snapshot("hallway").unwrap().time_offset_minutes,
-        -120.0
-    );
-    assert_eq!(
-        harness.snapshot("kitchen").unwrap().time_offset_minutes,
-        -120.0
-    );
-
-    // -- Action: Fix My Lights --
-    let result = harness.fix_my_lights();
-
-    // -- Assert: both categories handled --
-    assert_eq!(result["rooms_reset"], 1, "kitchen should be reset");
-    assert_eq!(
-        result["motion_cleared"], 1,
-        "hallway should be motion-cleared"
-    );
-
-    // -- Assert: offsets cleared on both rooms --
-    let hallway = harness.snapshot("hallway").unwrap();
-    assert_eq!(
-        hallway.time_offset_minutes, 0.0,
-        "hallway time offset should be cleared"
-    );
-    assert_eq!(
-        hallway.brightness_offset, 0.0,
-        "hallway brightness offset should be cleared"
-    );
-
-    let kitchen = harness.snapshot("kitchen").unwrap();
-    assert_eq!(
-        kitchen.time_offset_minutes, 0.0,
-        "kitchen time offset should be cleared (via Reset)"
-    );
-
-    // -- Assert: hallway still turned off --
-    assert!(
-        !harness.lights_on("hallway"),
-        "hallway should be off after fix"
-    );
 }

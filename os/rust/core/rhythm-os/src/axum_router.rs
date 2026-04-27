@@ -50,7 +50,6 @@ pub fn api_routes() -> Router<SharedState> {
         .route("/api/nodes/action", put(node_action))
         .route("/api/nodes/brightness", put(set_node_brightness))
         .route("/api/nodes/offset", put(set_node_time_offset))
-        .route("/api/nodes/fix", post(fix_my_lights))
         .route("/api/sync", post(post_sync))
 }
 
@@ -591,10 +590,6 @@ pub async fn set_time_offset(
     Json(body): Json<Value>,
 ) -> ApiResponse {
     run_blocking(move || handlers::handle_set_time_offset(&state, &body, true)).await
-}
-
-pub async fn fix_my_lights(State(state): State<SharedState>) -> ApiResponse {
-    run_blocking(move || handlers::handle_fix_my_lights(&state, true)).await
 }
 
 pub async fn post_sync(State(state): State<SharedState>) -> ApiResponse {

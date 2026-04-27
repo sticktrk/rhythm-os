@@ -2,49 +2,17 @@
 //!
 //! Tests the disabled room flag which users toggle in Settings to exclude
 //! rooms from adaptive lighting. The disable/re-enable lifecycle and its
-//! interaction with fix/offsets had zero existing coverage.
+//! interaction with offsets needs scenario coverage.
 //!
 //! ## API journey
 //!
 //! 1. User opens Settings → Rooms
 //! 2. Toggles a room's switch to disabled
-//! 3. Room is excluded from Fix My Lights
-//! 4. User toggles back to enabled → normal control resumes
+//! 3. User toggles back to enabled → normal control resumes
 
 mod harness;
 
-use harness::{room, rooms_with_lights, TestHarness};
-
-// ============================================================================
-// Scenario: Disabled room excluded from fix
-// ============================================================================
-
-/// Fix My Lights should skip disabled rooms entirely — they are not reset.
-#[test]
-fn disabled_room_excluded_from_fix() {
-    let harness = TestHarness::new().with_discovery(
-        vec![room("kitchen", "Kitchen"), room("bedroom", "Bedroom")],
-        vec![],
-    );
-    harness.sync();
-
-    // Both rooms on
-    harness.action("kitchen", "on").unwrap();
-    harness.action("bedroom", "on").unwrap();
-
-    // Disable kitchen
-    harness.set_room_preferences("kitchen", None, Some(true), None);
-
-    // -- Action: Fix My Lights --
-    let result = harness.fix_my_lights();
-
-    // -- Assert: only bedroom reset --
-    assert_eq!(result["rooms_reset"], 1, "only bedroom should be reset");
-    assert!(
-        harness.lights_on("kitchen"),
-        "kitchen lights should be unchanged (fix skipped it)"
-    );
-}
+use harness::{room, TestHarness};
 
 // ============================================================================
 // Scenario: Disable then re-enable restores control
@@ -136,80 +104,4 @@ fn disable_during_active_rhythm() {
         snap.rhythm_enabled,
         "rhythm_enabled should be preserved (not cleared)"
     );
-}
-
-// ============================================================================
-// Scenario: Disabled room not in fix response rooms array
-// ============================================================================
-
-/// The fix response's rooms array should only contain rooms that were
-/// actually reset — disabled rooms should be absent.
-#[test]
-fn disabled_room_not_in_fix_response() {
-    let (rooms, devices) = rooms_with_lights(&[
-        ("kitchen", "Kitchen"),
-        ("bedroom", "Bedroom"),
-        ("office", "Office"),
-    ]);
-    let harness = TestHarness::new().with_discovery(rooms, devices);
-    harness.sync();
-
-    // All on, disable kitchen
-    harness.action("kitchen", "on").unwrap();
-    harness.action("bedroom", "on").unwrap();
-    harness.action("office", "on").unwrap();
-    harness.set_room_preferences("kitchen", None, Some(true), None);
-
-    // -- Action: Fix My Lights --
-    let result = harness.fix_my_lights();
-
-    // -- Assert: kitchen not in rooms array --
-    assert_eq!(result["rooms_reset"], 2, "should reset bedroom + office");
-    let rooms_arr = result["rooms"].as_array().expect("rooms should be array");
-    let kitchen_resolved = harness.resolve("kitchen");
-    let kitchen_in_response = rooms_arr
-        .iter()
-        .any(|r| r["room_id"].as_str() == Some(&kitchen_resolved));
-    assert!(
-        !kitchen_in_response,
-        "disabled kitchen should not appear in fix response rooms"
-    );
-}
-
-// ============================================================================
-// Scenario: Partial disable — fix only resets enabled rooms
-// ============================================================================
-
-/// With a mix of enabled and disabled rooms, fix should only reset the
-/// enabled ones.
-#[test]
-fn partial_disable_mix() {
-    let (rooms, devices) = rooms_with_lights(&[
-        ("kitchen", "Kitchen"),
-        ("bedroom", "Bedroom"),
-        ("office", "Office"),
-        ("hallway", "Hallway"),
-    ]);
-    let harness = TestHarness::new().with_discovery(rooms, devices);
-    harness.sync();
-
-    // All on
-    for id in &["kitchen", "bedroom", "office", "hallway"] {
-        harness.action(id, "on").unwrap();
-    }
-
-    // Disable two
-    harness.set_room_preferences("kitchen", None, Some(true), None);
-    harness.set_room_preferences("office", None, Some(true), None);
-
-    // -- Action: Fix My Lights --
-    let result = harness.fix_my_lights();
-
-    // -- Assert: only 2 enabled rooms reset --
-    assert_eq!(
-        result["rooms_reset"], 2,
-        "should reset bedroom + hallway only"
-    );
-    assert!(harness.lights_on("kitchen"), "disabled kitchen unchanged");
-    assert!(harness.lights_on("office"), "disabled office unchanged");
 }
