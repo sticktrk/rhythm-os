@@ -483,6 +483,23 @@ fn spawn_motion_turn_on_action(state: &SharedState, node_id: String) {
     }
 }
 
+fn spawn_motion_dim_action(state: &SharedState, node_id: String, factor: f32) {
+    let builder = std::thread::Builder::new().name("evt-motion-dim".to_string());
+    let state_clone = state.clone();
+    let node_id_clone = node_id.clone();
+
+    if let Err(error) = builder.spawn(move || {
+        dim_node_inline(&state_clone, &node_id_clone, factor);
+    }) {
+        warn!(
+            target: "evt",
+            "Failed to spawn motion dim dispatch thread for node '{}': {}",
+            node_id,
+            error
+        );
+    }
+}
+
 /// Translate a hub-native room/device ID to the public topology node ID if available.
 ///
 /// Used at the event boundary so all downstream processing uses public node
@@ -830,7 +847,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                         "Motion: restoring full brightness in node {} (was warning-dimmed)",
                         target_node_id
                     );
-                    dim_node_inline(state, &target_node_id, 1.0);
+                    spawn_motion_dim_action(state, target_node_id.clone(), 1.0);
                 }
 
                 let is_new_target = !motion.has_sources_for_target(&target_node_id);
@@ -1081,7 +1098,7 @@ pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
                     target_node_id,
                     remaining
                 );
-                dim_node_inline(state, target_node_id, WARNING_DIM_FACTOR);
+                spawn_motion_dim_action(state, target_node_id.clone(), WARNING_DIM_FACTOR);
                 motion.warning_active.insert(target_node_id.clone());
             }
         }

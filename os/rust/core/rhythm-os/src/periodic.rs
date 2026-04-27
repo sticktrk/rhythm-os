@@ -1287,10 +1287,6 @@ fn replay_missed_mode_transitions(state: &SharedState) {
         )
     };
 
-    if start_cause == rhythm_core::ModeChangeCause::Manual {
-        return;
-    }
-
     let Some(start_change_utc_ms) = start_change_utc_ms else {
         return;
     };
@@ -1321,8 +1317,8 @@ fn replay_missed_mode_transitions(state: &SharedState) {
     };
 
     info!(
-        "Replaying missed mode transition {:?} -> {:?} on {:?} after restart/downtime",
-        start_mode, transition.to_mode, transition.trigger
+        "Replaying missed mode transition {:?} -> {:?} on {:?} after restart/downtime (last_change_cause={:?})",
+        start_mode, transition.to_mode, transition.trigger, start_cause
     );
 
     if let Err(e) = crate::commands::do_set_active_mode_with_trigger(
@@ -1483,7 +1479,7 @@ pub fn refresh_dst_offset(
 mod tests {
     use super::*;
     use crate::state::{ObservedPowerSource, ObservedPowerState};
-    use chrono::NaiveDate;
+    use chrono::{NaiveDate, Timelike};
     use rhythm_core::CompositeController;
     use rhythm_core::{
         default_rhythm_profile, CurveContext, LightProfileRegistry, RoomProfileSettings,
@@ -2712,14 +2708,27 @@ mod tests {
     }
 
     #[test]
-    fn replay_wrapper_ignores_manual_mode_changes() {
+    fn replay_wrapper_applies_scheduled_transition_after_manual_mode_change() {
         let state = make_state();
+        let now_utc = chrono::Utc::now().naive_utc();
+        let start_utc = now_utc - chrono::Duration::hours(3);
+        let trigger_utc = now_utc - chrono::Duration::hours(1);
+        let trigger_time = rhythm_core::ModeTransitionTime::from_hour_minute(
+            trigger_utc.hour() as u8,
+            trigger_utc.minute() as u8,
+        )
+        .unwrap();
         {
             let mut s = state.lock().unwrap();
-            s.active_mode = rhythm_core::RhythmMode::Sleep;
+            s.active_mode = rhythm_core::RhythmMode::Day;
             s.last_active_mode_cause = rhythm_core::ModeChangeCause::Manual;
-            s.last_active_mode_change_utc_ms =
-                Some(chrono::Utc::now().timestamp_millis() - 12 * 60 * 60 * 1000);
+            s.last_active_mode_change_utc_ms = Some(start_utc.and_utc().timestamp_millis());
+            s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
+                rhythm_core::RhythmMode::Day,
+                rhythm_core::RhythmMode::Sleep,
+                1_000,
+            )
+            .with_trigger(rhythm_core::ModeTransitionTrigger::Scheduled(trigger_time))]);
         }
 
         replay_missed_mode_transitions(&state);
@@ -2727,6 +2736,38 @@ mod tests {
         assert_eq!(
             state.lock().unwrap().active_mode,
             rhythm_core::RhythmMode::Sleep
+        );
+    }
+
+    #[test]
+    fn replay_wrapper_preserves_manual_override_after_scheduled_transition() {
+        let state = make_state();
+        let now_utc = chrono::Utc::now().naive_utc();
+        let start_utc = now_utc - chrono::Duration::minutes(30);
+        let trigger_utc = now_utc - chrono::Duration::hours(1);
+        let trigger_time = rhythm_core::ModeTransitionTime::from_hour_minute(
+            trigger_utc.hour() as u8,
+            trigger_utc.minute() as u8,
+        )
+        .unwrap();
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = rhythm_core::RhythmMode::Day;
+            s.last_active_mode_cause = rhythm_core::ModeChangeCause::Manual;
+            s.last_active_mode_change_utc_ms = Some(start_utc.and_utc().timestamp_millis());
+            s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
+                rhythm_core::RhythmMode::Day,
+                rhythm_core::RhythmMode::Sleep,
+                1_000,
+            )
+            .with_trigger(rhythm_core::ModeTransitionTrigger::Scheduled(trigger_time))]);
+        }
+
+        replay_missed_mode_transitions(&state);
+
+        assert_eq!(
+            state.lock().unwrap().active_mode,
+            rhythm_core::RhythmMode::Day
         );
     }
 }

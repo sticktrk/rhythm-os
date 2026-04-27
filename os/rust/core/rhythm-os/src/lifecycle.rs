@@ -16,6 +16,8 @@ use crate::hub::{ActiveHub, HubCredentials, HubEvent, HubType};
 use crate::registry::{HubDeviceRegistry, RegistrySnapshot};
 use crate::state::SharedState;
 
+const HUB_EVENT_CHANNEL_CAPACITY: usize = 256;
+
 // ============================================================================
 // connect_hub — replaces connect_hue_sse() and connect_ha()
 // ============================================================================
@@ -106,7 +108,7 @@ pub(crate) fn persisted_rooms_look_corrupted(rooms: &rhythm_core::room::RoomMana
 }
 
 fn tag_hub_events(raw_rx: Receiver<HubEvent>, hub_key: HubKey) -> Receiver<HubEvent> {
-    let (tx, rx) = std::sync::mpsc::sync_channel::<HubEvent>(32);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<HubEvent>(HUB_EVENT_CHANNEL_CAPACITY);
 
     std::thread::Builder::new()
         .name(format!("hub-tag-{}", hub_key))
@@ -115,7 +117,11 @@ fn tag_hub_events(raw_rx: Receiver<HubEvent>, hub_key: HubKey) -> Receiver<HubEv
                 match tx.try_send(event.with_hub_key(hub_key.clone())) {
                     Ok(()) => {}
                     Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                        warn!(target: "evt", "Hub event channel full, dropping tagged event");
+                        warn!(
+                            target: "evt",
+                            "Hub event channel full (capacity={}), dropping tagged event",
+                            HUB_EVENT_CHANNEL_CAPACITY
+                        );
                     }
                     Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return,
                 }
@@ -424,7 +430,7 @@ pub fn start_event_translator<E: Send + 'static>(
     thread_name: &str,
     on_activity: Option<Arc<dyn Fn() + Send + Sync>>,
 ) -> Receiver<HubEvent> {
-    let (hub_tx, hub_rx) = std::sync::mpsc::sync_channel::<HubEvent>(32);
+    let (hub_tx, hub_rx) = std::sync::mpsc::sync_channel::<HubEvent>(HUB_EVENT_CHANNEL_CAPACITY);
 
     std::thread::Builder::new()
         .name(thread_name.to_string())
@@ -440,7 +446,11 @@ pub fn start_event_translator<E: Send + 'static>(
                     match hub_tx.try_send(hub_event) {
                         Ok(()) => {}
                         Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                            warn!(target: "evt", "Hub event channel full, dropping event");
+                            warn!(
+                                target: "evt",
+                                "Hub event channel full (capacity={}), dropping event",
+                                HUB_EVENT_CHANNEL_CAPACITY
+                            );
                         }
                         Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
                             return;

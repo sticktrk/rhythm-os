@@ -88,6 +88,29 @@ struct FileErrorEntry {
     error: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct FdSnapshotEntry {
+    fd: String,
+    target: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ProcessResourceSnapshot {
+    schema_version: u32,
+    generated_at: String,
+    target_os: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    open_fd_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    open_fds: Vec<FdSnapshotEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limits: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sockstat: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sockstat6: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct DebugBundleManifest {
     schema_version: u32,
@@ -303,6 +326,8 @@ pub fn build_debug_bundle(state: &SharedState) -> Result<DebugBundle> {
             .collect(),
     );
     let (host, process) = snapshot_host_and_process_metadata(created_at, &mut diagnostics);
+    let process_resources_json = build_process_resources_json(created_at, &mut diagnostics)
+        .context("building process resource snapshot")?;
 
     let log_artifacts = discover_log_artifacts(&searched_log_dirs, &mut diagnostics);
     let persisted_artifacts = discover_persisted_artifacts(&runtime, &mut diagnostics);
@@ -334,6 +359,12 @@ pub fn build_debug_bundle(state: &SharedState) -> Result<DebugBundle> {
         &mut generated_files,
         "triage_queue.json",
         triage_queue_json.as_bytes(),
+    )?;
+    append_generated_file(
+        &mut builder,
+        &mut generated_files,
+        "process_resources.json",
+        process_resources_json.as_bytes(),
     )?;
 
     let mut captured_logs = Vec::<CapturedFileEntry>::new();
@@ -827,6 +858,105 @@ fn linux_clock_ticks_per_second(diagnostics: &mut BundleDiagnostics) -> Option<u
     }
 }
 
+fn build_process_resources_json(
+    generated_at: DateTime<Utc>,
+    diagnostics: &mut BundleDiagnostics,
+) -> Result<String> {
+    #[cfg(target_os = "linux")]
+    let snapshot = {
+        let mut snapshot = ProcessResourceSnapshot {
+            schema_version: DEBUG_BUNDLE_SCHEMA_VERSION,
+            generated_at: generated_at.to_rfc3339(),
+            target_os: std::env::consts::OS.to_string(),
+            open_fd_count: None,
+            open_fds: Vec::new(),
+            limits: None,
+            sockstat: None,
+            sockstat6: None,
+        };
+
+        snapshot.open_fds = linux_open_fd_snapshot(diagnostics);
+        snapshot.open_fd_count = Some(snapshot.open_fds.len());
+        snapshot.limits = linux_read_optional_proc_file("/proc/self/limits", diagnostics);
+        snapshot.sockstat = linux_read_optional_proc_file("/proc/net/sockstat", diagnostics);
+        snapshot.sockstat6 = linux_read_optional_proc_file("/proc/net/sockstat6", diagnostics);
+        snapshot
+    };
+
+    #[cfg(not(target_os = "linux"))]
+    let snapshot = {
+        let _ = diagnostics;
+        ProcessResourceSnapshot {
+            schema_version: DEBUG_BUNDLE_SCHEMA_VERSION,
+            generated_at: generated_at.to_rfc3339(),
+            target_os: std::env::consts::OS.to_string(),
+            open_fd_count: None,
+            open_fds: Vec::new(),
+            limits: None,
+            sockstat: None,
+            sockstat6: None,
+        }
+    };
+
+    serde_json::to_string_pretty(&snapshot).context("serializing process resource snapshot")
+}
+
+#[cfg(target_os = "linux")]
+fn linux_read_optional_proc_file(
+    path: &str,
+    diagnostics: &mut BundleDiagnostics,
+) -> Option<String> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Some(contents),
+        Err(err) => {
+            diagnostics.record_file_error("read", path, &err);
+            None
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_open_fd_snapshot(diagnostics: &mut BundleDiagnostics) -> Vec<FdSnapshotEntry> {
+    let entries = match fs::read_dir("/proc/self/fd") {
+        Ok(entries) => entries,
+        Err(err) => {
+            diagnostics.record_file_error("read_dir", "/proc/self/fd", &err);
+            return Vec::new();
+        }
+    };
+
+    let mut fds = Vec::<FdSnapshotEntry>::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                diagnostics.record_file_error("read_dir_entry", "/proc/self/fd", &err);
+                continue;
+            }
+        };
+        let path = entry.path();
+        let fd = entry.file_name().to_string_lossy().to_string();
+        let target = match fs::read_link(&path) {
+            Ok(target) => target.display().to_string(),
+            Err(err) => {
+                diagnostics.record_file_error("read_link", path.display().to_string(), &err);
+                "<unreadable>".to_string()
+            }
+        };
+        fds.push(FdSnapshotEntry { fd, target });
+    }
+
+    fds.sort_by(|left, right| {
+        let left_fd = left.fd.parse::<u64>().ok();
+        let right_fd = right.fd.parse::<u64>().ok();
+        left_fd
+            .cmp(&right_fd)
+            .then_with(|| left.fd.cmp(&right.fd))
+            .then_with(|| left.target.cmp(&right.target))
+    });
+    fds
+}
+
 fn build_topology_debug_json(
     debug_state: &StateDebugSnapshot,
     generated_at: DateTime<Utc>,
@@ -1238,6 +1368,7 @@ mod tests {
         assert!(files.contains_key("profile_bundle.json"));
         assert!(files.contains_key("topology_debug.json"));
         assert!(files.contains_key("triage_queue.json"));
+        assert!(files.contains_key("process_resources.json"));
         assert!(files.contains_key("bundle_diagnostics.json"));
         assert!(files.contains_key("manifest.json"));
 
@@ -1262,6 +1393,11 @@ mod tests {
             .unwrap()
             .iter()
             .any(|value| value["archive_path"] == "bundle_diagnostics.json"));
+        assert!(manifest["generated_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value["archive_path"] == "process_resources.json"));
         assert!(manifest["process"]["pid"]
             .as_u64()
             .is_some_and(|pid| pid > 0));
@@ -1290,6 +1426,14 @@ mod tests {
         let triage_queue: Value =
             serde_json::from_slice(files.get("triage_queue.json").unwrap()).unwrap();
         assert!(triage_queue["entries"].is_array());
+
+        let process_resources: Value =
+            serde_json::from_slice(files.get("process_resources.json").unwrap()).unwrap();
+        assert_eq!(
+            process_resources["schema_version"],
+            DEBUG_BUNDLE_SCHEMA_VERSION
+        );
+        assert_eq!(process_resources["target_os"], std::env::consts::OS);
 
         let _ = fs::remove_dir_all(root);
     }

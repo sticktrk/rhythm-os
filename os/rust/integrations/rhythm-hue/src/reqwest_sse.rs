@@ -23,6 +23,37 @@ const SSE_IDLE_TIMEOUT_SECS: u64 = 45;
 /// Log an "SSE alive" message at this interval during idle periods.
 const ALIVE_LOG_INTERVAL_SECS: u64 = 300;
 
+fn open_fd_count() -> Option<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_dir("/proc/self/fd")
+            .ok()
+            .map(|fds| fds.count())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+fn fd_log_suffix() -> String {
+    open_fd_count()
+        .map(|count| format!(" open_fds={}", count))
+        .unwrap_or_default()
+}
+
+fn build_sse_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .tcp_keepalive(Duration::from_secs(30))
+        // The Hue event stream is a single long-lived response. Avoid keeping
+        // abandoned reconnect sockets in reqwest's idle pool.
+        .pool_max_idle_per_host(0)
+        .connect_timeout(Duration::from_secs(5))
+        .build()
+}
+
 /// Start an SSE event stream reader in a background thread.
 ///
 /// Returns a receiver for parsed SSE events. The thread runs until
@@ -51,22 +82,6 @@ pub fn start_reqwest_sse(
 async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutdown: &AtomicBool) {
     let url = format!("https://{}/eventstream/clip/v2", config.bridge_ip);
 
-    let client = match reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .tcp_keepalive(Duration::from_secs(30))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(target: "sse", "Failed to build SSE client: {}", e);
-            let _ = tx.try_send(HueSseEvent::Disconnected(format!(
-                "Client build error: {}",
-                e
-            )));
-            return;
-        }
-    };
-
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(60);
     let mut parse_state = SseParseState::new();
@@ -75,6 +90,23 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
     while !shutdown.load(Ordering::Relaxed) {
         connect_count += 1;
         debug!(target: "sse", "Connecting SSE to {} (conn #{})...", url, connect_count);
+
+        let client = match build_sse_client() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(
+                    target: "sse",
+                    "Failed to build SSE client: {}{}",
+                    e,
+                    fd_log_suffix()
+                );
+                let _ = tx.try_send(HueSseEvent::Disconnected(format!(
+                    "Client build error: {}",
+                    e
+                )));
+                return;
+            }
+        };
 
         let request = client
             .get(&url)
@@ -85,7 +117,12 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
             Ok(response) => match response.error_for_status() {
                 Ok(response) => response,
                 Err(e) => {
-                    warn!(target: "sse", "SSE connect failed: {}", e);
+                    warn!(
+                        target: "sse",
+                        "SSE connect failed: {}{}",
+                        e,
+                        fd_log_suffix()
+                    );
                     debug!(target: "sse", "Reconnecting SSE in {:?}...", backoff);
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(max_backoff);
@@ -93,7 +130,12 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
                 }
             },
             Err(e) => {
-                warn!(target: "sse", "SSE request failed: {}", e);
+                warn!(
+                    target: "sse",
+                    "SSE request failed: {}{}",
+                    e,
+                    fd_log_suffix()
+                );
                 debug!(target: "sse", "Reconnecting SSE in {:?}...", backoff);
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(max_backoff);
@@ -148,7 +190,7 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
                     }
                 }
                 Ok(Some(Err(e))) => {
-                    warn!(target: "sse", "SSE error: {}", e);
+                    warn!(target: "sse", "SSE error: {}{}", e, fd_log_suffix());
                     break;
                 }
                 Ok(None) => {
