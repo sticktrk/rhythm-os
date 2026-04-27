@@ -4,9 +4,9 @@
 //! recent logs, persisted topology/canonical state, and runtime-derived
 //! diagnostics without needing filesystem access to the appliance.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::fs;
-use std::io::{Cursor, Write};
+use std::io::{BufRead, Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::sync::MutexGuard;
 
@@ -95,6 +95,15 @@ struct FdSnapshotEntry {
 }
 
 #[derive(Clone, Debug, Serialize)]
+struct ThreadSnapshotEntry {
+    tid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct ProcessResourceSnapshot {
     schema_version: u32,
     generated_at: String,
@@ -104,11 +113,218 @@ struct ProcessResourceSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     open_fds: Vec<FdSnapshotEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    thread_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    threads: Vec<ThreadSnapshotEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     limits: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    loadavg: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    meminfo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sockstat: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sockstat6: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tcp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tcp6: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeHealthSnapshot {
+    schema_version: u32,
+    generated_at: String,
+    now_epoch_ms: i64,
+    platform: RuntimePlatformHealth,
+    mode: RuntimeModeHealth,
+    timing: RuntimeTimingHealth,
+    queues: RuntimeQueueHealth,
+    hubs: Vec<RuntimeHubHealth>,
+    topology: RuntimeTopologyHealth,
+    motion: RuntimeMotionHealth,
+    observed_power: RuntimeObservedPowerHealth,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimePlatformHealth {
+    firmware_version: String,
+    platform_type: String,
+    platform_context: String,
+    data_dir: String,
+    listen_port: Option<u16>,
+    eager_tls_warmup: bool,
+    full_device_discovery: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeModeHealth {
+    active_mode: String,
+    last_change_cause: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_change_transition_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_change_epoch_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_change_age_secs: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeTimingHealth {
+    last_tick_epoch_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_tick_age_secs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_check_hour: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_check_age_secs: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_check_utc_offset_hours: Option<f32>,
+    default_motion_timeout_secs: u64,
+    default_fade_ms: u32,
+    utc_offset_hours: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    timezone_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    latitude: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    longitude: Option<f32>,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeQueueHealth {
+    work_queue_configured: bool,
+    periodic_work_queue_configured: bool,
+    pending_periodic_ticks: usize,
+    pending_hub_event_receivers: usize,
+    pending_motion_clear: usize,
+    pending_motion_seed: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    event_broadcast_receiver_count: Option<usize>,
+    hub_bootstrap_worker_running: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeHubHealth {
+    hub_key: String,
+    hub_type: String,
+    address: String,
+    connected: bool,
+    seen_connected_once: bool,
+    sync_in_progress: bool,
+    runtime_present: bool,
+    registry_present: bool,
+    discovery_present: bool,
+    shutdown_requested: bool,
+    credentials_present: bool,
+    credentials_can_connect: bool,
+    credentials_secrets_redacted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_disconnect_remaining_secs: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reconnect_sync_age_secs: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    startup_retry: Option<RuntimeHubStartupRetryHealth>,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeHubStartupRetryHealth {
+    attempt_count: u32,
+    first_failure_epoch_ms: i64,
+    last_failure_epoch_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    next_retry_epoch_ms: Option<i64>,
+    manual_retry_required: bool,
+    last_error: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeTopologyHealth {
+    room_count: usize,
+    device_node_count: usize,
+    canonical_device_count: usize,
+    pending_triage_count: usize,
+    room_mode_transition_count: usize,
+    active_light_node_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeMotionHealth {
+    snapshot_count: usize,
+    active_count: usize,
+    owned_count: usize,
+    warning_count: usize,
+    snapshots: Vec<RuntimeMotionEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeMotionEntry {
+    node_id: String,
+    motion_active: bool,
+    motion_owned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remaining_secs: Option<u64>,
+    timeout_secs: u64,
+    warning_active: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeObservedPowerHealth {
+    entry_count: usize,
+    on_count: usize,
+    recent_entries: Vec<RuntimeObservedPowerEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeObservedPowerEntry {
+    cache_key: String,
+    lights_on: bool,
+    observed_at_epoch_ms: u64,
+    source: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct LogSummarySnapshot {
+    schema_version: u32,
+    generated_at: String,
+    files: Vec<LogFileSummary>,
+    total_lines_scanned: usize,
+    warning_count: usize,
+    error_count: usize,
+    hub_event_channel_full_count: usize,
+    sse_line_count: usize,
+    periodic_cycle_count: usize,
+    launch_line_count: usize,
+    recent_warnings: Vec<LogLineEntry>,
+    recent_errors: Vec<LogLineEntry>,
+    recent_hub_event_channel_full: Vec<LogLineEntry>,
+    recent_sse_lines: Vec<LogLineEntry>,
+    recent_periodic_cycles: Vec<LogLineEntry>,
+    recent_launches: Vec<LogLineEntry>,
+    tail: Vec<LogLineEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct LogFileSummary {
+    archive_path: String,
+    source_path: String,
+    lines_scanned: usize,
+    warning_count: usize,
+    error_count: usize,
+    hub_event_channel_full_count: usize,
+    sse_line_count: usize,
+    periodic_cycle_count: usize,
+    launch_line_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct LogLineEntry {
+    archive_path: String,
+    line_number: usize,
+    text: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -315,6 +531,8 @@ pub fn build_debug_bundle(state: &SharedState) -> Result<DebugBundle> {
         .context("building topology debug snapshot")?;
     let triage_queue_json = build_triage_queue_json(&debug_state, created_at)
         .context("building triage queue snapshot")?;
+    let runtime_health_json =
+        build_runtime_health_json(state, created_at).context("building runtime health snapshot")?;
 
     let searched_log_dirs = discover_log_dirs(&runtime);
     let mut diagnostics = BundleDiagnostics::new(
@@ -330,6 +548,8 @@ pub fn build_debug_bundle(state: &SharedState) -> Result<DebugBundle> {
         .context("building process resource snapshot")?;
 
     let log_artifacts = discover_log_artifacts(&searched_log_dirs, &mut diagnostics);
+    let log_summary_json = build_log_summary_json(&log_artifacts, created_at, &mut diagnostics)
+        .context("building log summary snapshot")?;
     let persisted_artifacts = discover_persisted_artifacts(&runtime, &mut diagnostics);
 
     let encoder = flate2::write::GzEncoder::new(Vec::<u8>::new(), flate2::Compression::default());
@@ -359,6 +579,18 @@ pub fn build_debug_bundle(state: &SharedState) -> Result<DebugBundle> {
         &mut generated_files,
         "triage_queue.json",
         triage_queue_json.as_bytes(),
+    )?;
+    append_generated_file(
+        &mut builder,
+        &mut generated_files,
+        "runtime_health.json",
+        runtime_health_json.as_bytes(),
+    )?;
+    append_generated_file(
+        &mut builder,
+        &mut generated_files,
+        "log_summary.json",
+        log_summary_json.as_bytes(),
     )?;
     append_generated_file(
         &mut builder,
@@ -858,6 +1090,228 @@ fn linux_clock_ticks_per_second(diagnostics: &mut BundleDiagnostics) -> Option<u
     }
 }
 
+fn build_runtime_health_json(state: &SharedState, generated_at: DateTime<Utc>) -> Result<String> {
+    let now_epoch_ms = generated_at.timestamp_millis();
+    let now_instant = std::time::Instant::now();
+    let s = lock_state(state)?;
+
+    let mut hubs = s
+        .hubs
+        .iter()
+        .map(|(hub_key, hub)| {
+            let credentials = s.hub_credentials.get(hub_key);
+            RuntimeHubHealth {
+                hub_key: hub_key.to_string(),
+                hub_type: hub_key.hub_type.as_str().to_string(),
+                address: hub_key.address.clone(),
+                connected: s.hub_is_connected(hub_key),
+                seen_connected_once: s.hub_seen_connected_once(hub_key),
+                sync_in_progress: s.hub_sync_in_progress.contains(hub_key),
+                runtime_present: hub.runtime.is_some(),
+                registry_present: hub.registry.is_some(),
+                discovery_present: hub.discovery.is_some(),
+                shutdown_requested: hub.shutdown.load(std::sync::atomic::Ordering::Relaxed),
+                credentials_present: credentials.is_some(),
+                credentials_can_connect: credentials
+                    .is_some_and(|credentials| credentials.can_connect()),
+                credentials_secrets_redacted: credentials
+                    .map(|credentials| credentials.secrets_redacted)
+                    .unwrap_or(false),
+                pending_disconnect_remaining_secs: s.hub_pending_disconnect_at.get(hub_key).map(
+                    |deadline| {
+                        deadline
+                            .checked_duration_since(now_instant)
+                            .unwrap_or_default()
+                            .as_secs_f64()
+                    },
+                ),
+                reconnect_sync_age_secs: s
+                    .hub_reconnect_sync_at
+                    .get(hub_key)
+                    .map(|last| now_instant.duration_since(*last).as_secs_f64()),
+                startup_retry: s.hub_startup_retry(hub_key).map(|retry| {
+                    RuntimeHubStartupRetryHealth {
+                        attempt_count: retry.attempt_count,
+                        first_failure_epoch_ms: retry.first_failure_epoch_ms,
+                        last_failure_epoch_ms: retry.last_failure_epoch_ms,
+                        next_retry_epoch_ms: retry.next_retry_epoch_ms,
+                        manual_retry_required: retry.manual_retry_required,
+                        last_error: retry.last_error.clone(),
+                    }
+                }),
+            }
+        })
+        .collect::<Vec<_>>();
+    for (hub_key, credentials) in &s.hub_credentials {
+        if s.hubs.contains_key(hub_key) {
+            continue;
+        }
+        hubs.push(RuntimeHubHealth {
+            hub_key: hub_key.to_string(),
+            hub_type: hub_key.hub_type.as_str().to_string(),
+            address: hub_key.address.clone(),
+            connected: s.hub_is_connected(hub_key),
+            seen_connected_once: s.hub_seen_connected_once(hub_key),
+            sync_in_progress: s.hub_sync_in_progress.contains(hub_key),
+            runtime_present: false,
+            registry_present: false,
+            discovery_present: false,
+            shutdown_requested: false,
+            credentials_present: true,
+            credentials_can_connect: credentials.can_connect(),
+            credentials_secrets_redacted: credentials.secrets_redacted,
+            pending_disconnect_remaining_secs: s.hub_pending_disconnect_at.get(hub_key).map(
+                |deadline| {
+                    deadline
+                        .checked_duration_since(now_instant)
+                        .unwrap_or_default()
+                        .as_secs_f64()
+                },
+            ),
+            reconnect_sync_age_secs: s
+                .hub_reconnect_sync_at
+                .get(hub_key)
+                .map(|last| now_instant.duration_since(*last).as_secs_f64()),
+            startup_retry: s
+                .hub_startup_retry(hub_key)
+                .map(|retry| RuntimeHubStartupRetryHealth {
+                    attempt_count: retry.attempt_count,
+                    first_failure_epoch_ms: retry.first_failure_epoch_ms,
+                    last_failure_epoch_ms: retry.last_failure_epoch_ms,
+                    next_retry_epoch_ms: retry.next_retry_epoch_ms,
+                    manual_retry_required: retry.manual_retry_required,
+                    last_error: retry.last_error.clone(),
+                }),
+        });
+    }
+    hubs.sort_by(|left, right| left.hub_key.cmp(&right.hub_key));
+
+    let mut motion_entries = s
+        .motion_snapshots
+        .iter()
+        .map(|(node_id, snap)| RuntimeMotionEntry {
+            node_id: node_id.clone(),
+            motion_active: snap.motion_active,
+            motion_owned: snap.motion_owned,
+            remaining_secs: snap.remaining_secs,
+            timeout_secs: snap.timeout_secs,
+            warning_active: snap.warning_active,
+        })
+        .collect::<Vec<_>>();
+    motion_entries.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+
+    let mut observed_power_entries = s
+        .room_observed_power
+        .iter()
+        .map(|(cache_key, observed)| RuntimeObservedPowerEntry {
+            cache_key: cache_key.clone(),
+            lights_on: observed.lights_on,
+            observed_at_epoch_ms: observed.observed_at_epoch_ms,
+            source: observed.source.as_str(),
+        })
+        .collect::<Vec<_>>();
+    observed_power_entries.sort_by(|left, right| {
+        right
+            .observed_at_epoch_ms
+            .cmp(&left.observed_at_epoch_ms)
+            .then_with(|| left.cache_key.cmp(&right.cache_key))
+    });
+    observed_power_entries.truncate(75);
+
+    let active_light_node_count = s.topology.periodic_light_nodes(&s.canonical_registry).len();
+    let last_tick_age_secs = if s.last_tick_epoch_ms == 0 {
+        None
+    } else {
+        Some(((now_epoch_ms - s.last_tick_epoch_ms as i64) / 1000).max(0))
+    };
+    let last_change_age_secs = s
+        .last_active_mode_change_utc_ms
+        .map(|epoch_ms| ((now_epoch_ms - epoch_ms) / 1000).max(0));
+
+    let snapshot = RuntimeHealthSnapshot {
+        schema_version: DEBUG_BUNDLE_SCHEMA_VERSION,
+        generated_at: generated_at.to_rfc3339(),
+        now_epoch_ms,
+        platform: RuntimePlatformHealth {
+            firmware_version: s.firmware_version.to_string(),
+            platform_type: s.platform_type.to_string(),
+            platform_context: s.platform_context.to_string(),
+            data_dir: s.data_dir.clone(),
+            listen_port: s.listen_port,
+            eager_tls_warmup: s.platform.eager_tls_warmup,
+            full_device_discovery: s.platform.full_device_discovery,
+        },
+        mode: RuntimeModeHealth {
+            active_mode: format!("{:?}", s.active_mode),
+            last_change_cause: format!("{:?}", s.last_active_mode_cause),
+            last_change_transition_id: s.last_active_mode_transition_id.clone(),
+            last_change_epoch_ms: s.last_active_mode_change_utc_ms,
+            last_change_age_secs,
+        },
+        timing: RuntimeTimingHealth {
+            last_tick_epoch_ms: s.last_tick_epoch_ms,
+            last_tick_age_secs,
+            last_check_hour: s.last_check_hour,
+            last_check_age_secs: s
+                .last_check_instant
+                .map(|instant| now_instant.duration_since(instant).as_secs_f64()),
+            last_check_utc_offset_hours: s.last_check_utc_offset_hours,
+            default_motion_timeout_secs: s.default_motion_timeout_secs,
+            default_fade_ms: s.default_fade_ms,
+            utc_offset_hours: s.utc_offset_hours,
+            timezone_name: s.timezone_name.clone(),
+            latitude: s.latitude,
+            longitude: s.longitude,
+        },
+        queues: RuntimeQueueHealth {
+            work_queue_configured: s.work_tx.is_some(),
+            periodic_work_queue_configured: s.periodic_work_tx.is_some(),
+            pending_periodic_ticks: s.pending_periodic_ticks.len(),
+            pending_hub_event_receivers: s.pending_hub_event_rxs.len(),
+            pending_motion_clear: s.pending_motion_clear.len(),
+            pending_motion_seed: s.pending_motion_seed.len(),
+            event_broadcast_receiver_count: s.event_tx.as_ref().map(|tx| tx.receiver_count()),
+            hub_bootstrap_worker_running: s.hub_bootstrap_worker_running,
+        },
+        hubs,
+        topology: RuntimeTopologyHealth {
+            room_count: s.topology.rooms().count(),
+            device_node_count: s.topology.device_nodes().count(),
+            canonical_device_count: s.canonical_registry.device_count(),
+            pending_triage_count: s.canonical_registry.triage().pending_count(),
+            room_mode_transition_count: s.room_mode_transitions.len(),
+            active_light_node_count,
+        },
+        motion: RuntimeMotionHealth {
+            snapshot_count: motion_entries.len(),
+            active_count: motion_entries
+                .iter()
+                .filter(|entry| entry.motion_active)
+                .count(),
+            owned_count: motion_entries
+                .iter()
+                .filter(|entry| entry.motion_owned)
+                .count(),
+            warning_count: motion_entries
+                .iter()
+                .filter(|entry| entry.warning_active)
+                .count(),
+            snapshots: motion_entries,
+        },
+        observed_power: RuntimeObservedPowerHealth {
+            entry_count: s.room_observed_power.len(),
+            on_count: s
+                .room_observed_power
+                .values()
+                .filter(|observed| observed.lights_on)
+                .count(),
+            recent_entries: observed_power_entries,
+        },
+    };
+
+    serde_json::to_string_pretty(&snapshot).context("serializing runtime health snapshot")
+}
+
 fn build_process_resources_json(
     generated_at: DateTime<Utc>,
     diagnostics: &mut BundleDiagnostics,
@@ -870,16 +1324,30 @@ fn build_process_resources_json(
             target_os: std::env::consts::OS.to_string(),
             open_fd_count: None,
             open_fds: Vec::new(),
+            thread_count: None,
+            threads: Vec::new(),
+            status: None,
             limits: None,
+            loadavg: None,
+            meminfo: None,
             sockstat: None,
             sockstat6: None,
+            tcp: None,
+            tcp6: None,
         };
 
         snapshot.open_fds = linux_open_fd_snapshot(diagnostics);
         snapshot.open_fd_count = Some(snapshot.open_fds.len());
+        snapshot.threads = linux_thread_snapshot(diagnostics);
+        snapshot.thread_count = Some(snapshot.threads.len());
+        snapshot.status = linux_read_optional_proc_file("/proc/self/status", diagnostics);
         snapshot.limits = linux_read_optional_proc_file("/proc/self/limits", diagnostics);
+        snapshot.loadavg = linux_read_optional_proc_file("/proc/loadavg", diagnostics);
+        snapshot.meminfo = linux_read_optional_proc_file("/proc/meminfo", diagnostics);
         snapshot.sockstat = linux_read_optional_proc_file("/proc/net/sockstat", diagnostics);
         snapshot.sockstat6 = linux_read_optional_proc_file("/proc/net/sockstat6", diagnostics);
+        snapshot.tcp = linux_read_optional_proc_file("/proc/net/tcp", diagnostics);
+        snapshot.tcp6 = linux_read_optional_proc_file("/proc/net/tcp6", diagnostics);
         snapshot
     };
 
@@ -892,9 +1360,16 @@ fn build_process_resources_json(
             target_os: std::env::consts::OS.to_string(),
             open_fd_count: None,
             open_fds: Vec::new(),
+            thread_count: None,
+            threads: Vec::new(),
+            status: None,
             limits: None,
+            loadavg: None,
+            meminfo: None,
             sockstat: None,
             sockstat6: None,
+            tcp: None,
+            tcp6: None,
         }
     };
 
@@ -955,6 +1430,238 @@ fn linux_open_fd_snapshot(diagnostics: &mut BundleDiagnostics) -> Vec<FdSnapshot
             .then_with(|| left.target.cmp(&right.target))
     });
     fds
+}
+
+#[cfg(target_os = "linux")]
+fn linux_thread_snapshot(diagnostics: &mut BundleDiagnostics) -> Vec<ThreadSnapshotEntry> {
+    let entries = match fs::read_dir("/proc/self/task") {
+        Ok(entries) => entries,
+        Err(err) => {
+            diagnostics.record_file_error("read_dir", "/proc/self/task", &err);
+            return Vec::new();
+        }
+    };
+
+    let mut threads = Vec::<ThreadSnapshotEntry>::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                diagnostics.record_file_error("read_dir_entry", "/proc/self/task", &err);
+                continue;
+            }
+        };
+        let tid = entry.file_name().to_string_lossy().to_string();
+        let task_dir = entry.path();
+        let comm_path = task_dir.join("comm");
+        let status_path = task_dir.join("status");
+        let name = fs::read_to_string(&comm_path)
+            .map(|value| value.trim().to_string())
+            .ok();
+        let state = match fs::read_to_string(&status_path) {
+            Ok(status) => status_field(&status, "State").map(str::to_string),
+            Err(err) => {
+                diagnostics.record_file_error("read", status_path.display().to_string(), &err);
+                None
+            }
+        };
+        threads.push(ThreadSnapshotEntry { tid, name, state });
+    }
+
+    threads.sort_by(|left, right| {
+        let left_tid = left.tid.parse::<u64>().ok();
+        let right_tid = right.tid.parse::<u64>().ok();
+        left_tid
+            .cmp(&right_tid)
+            .then_with(|| left.tid.cmp(&right.tid))
+    });
+    threads
+}
+
+#[cfg(target_os = "linux")]
+fn status_field<'a>(status: &'a str, field: &str) -> Option<&'a str> {
+    let prefix = format!("{field}:");
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix).map(str::trim))
+}
+
+fn build_log_summary_json(
+    log_artifacts: &[FileArtifact],
+    generated_at: DateTime<Utc>,
+    diagnostics: &mut BundleDiagnostics,
+) -> Result<String> {
+    const RECENT_WARNINGS_LIMIT: usize = 200;
+    const RECENT_ERRORS_LIMIT: usize = 200;
+    const RECENT_HUB_FULL_LIMIT: usize = 100;
+    const RECENT_SSE_LIMIT: usize = 150;
+    const RECENT_PERIODIC_LIMIT: usize = 50;
+    const RECENT_LAUNCH_LIMIT: usize = 50;
+    const TAIL_LIMIT: usize = 250;
+
+    let mut files = Vec::<LogFileSummary>::new();
+    let mut total_lines_scanned = 0usize;
+    let mut warning_count = 0usize;
+    let mut error_count = 0usize;
+    let mut hub_event_channel_full_count = 0usize;
+    let mut sse_line_count = 0usize;
+    let mut periodic_cycle_count = 0usize;
+    let mut launch_line_count = 0usize;
+
+    let mut recent_warnings = VecDeque::<LogLineEntry>::new();
+    let mut recent_errors = VecDeque::<LogLineEntry>::new();
+    let mut recent_hub_event_channel_full = VecDeque::<LogLineEntry>::new();
+    let mut recent_sse_lines = VecDeque::<LogLineEntry>::new();
+    let mut recent_periodic_cycles = VecDeque::<LogLineEntry>::new();
+    let mut recent_launches = VecDeque::<LogLineEntry>::new();
+    let mut tail = VecDeque::<LogLineEntry>::new();
+
+    for artifact in log_artifacts {
+        let file = match fs::File::open(&artifact.source_path) {
+            Ok(file) => file,
+            Err(err) => {
+                diagnostics.record_file_error(
+                    "open_for_summary",
+                    artifact.source_path.display().to_string(),
+                    &err,
+                );
+                continue;
+            }
+        };
+
+        let mut summary = LogFileSummary {
+            archive_path: artifact.archive_path.clone(),
+            source_path: artifact.source_path.display().to_string(),
+            lines_scanned: 0,
+            warning_count: 0,
+            error_count: 0,
+            hub_event_channel_full_count: 0,
+            sse_line_count: 0,
+            periodic_cycle_count: 0,
+            launch_line_count: 0,
+        };
+
+        for line in std::io::BufReader::new(file).lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(err) => {
+                    diagnostics.record_file_error(
+                        "read_line_for_summary",
+                        artifact.source_path.display().to_string(),
+                        &err,
+                    );
+                    break;
+                }
+            };
+            summary.lines_scanned += 1;
+            total_lines_scanned += 1;
+
+            let text = truncate_log_line(&line);
+            let entry = LogLineEntry {
+                archive_path: artifact.archive_path.clone(),
+                line_number: summary.lines_scanned,
+                text,
+            };
+
+            push_limited(&mut tail, TAIL_LIMIT, entry.clone());
+
+            let is_warning = line.contains(" WARN ") || line.contains("\tWARN ");
+            let is_error = line.contains(" ERROR ") || line.contains("\tERROR ");
+            let is_hub_full = line.contains("Hub event channel full");
+            let is_sse = line.contains("hue-sse") || line.contains("sse:");
+            let is_periodic =
+                line.contains("event=\"periodic_cycle\"") || line.contains("Periodic cycle");
+            let is_launch = line.starts_with("rhythm-launch:")
+                || line.contains(" Rhythm Linux Appliance ")
+                || line.contains(" Rhythm Server ");
+
+            if is_warning {
+                summary.warning_count += 1;
+                warning_count += 1;
+                push_limited(&mut recent_warnings, RECENT_WARNINGS_LIMIT, entry.clone());
+            }
+            if is_error {
+                summary.error_count += 1;
+                error_count += 1;
+                push_limited(&mut recent_errors, RECENT_ERRORS_LIMIT, entry.clone());
+            }
+            if is_hub_full {
+                summary.hub_event_channel_full_count += 1;
+                hub_event_channel_full_count += 1;
+                push_limited(
+                    &mut recent_hub_event_channel_full,
+                    RECENT_HUB_FULL_LIMIT,
+                    entry.clone(),
+                );
+            }
+            if is_sse {
+                summary.sse_line_count += 1;
+                sse_line_count += 1;
+                push_limited(&mut recent_sse_lines, RECENT_SSE_LIMIT, entry.clone());
+            }
+            if is_periodic {
+                summary.periodic_cycle_count += 1;
+                periodic_cycle_count += 1;
+                push_limited(
+                    &mut recent_periodic_cycles,
+                    RECENT_PERIODIC_LIMIT,
+                    entry.clone(),
+                );
+            }
+            if is_launch {
+                summary.launch_line_count += 1;
+                launch_line_count += 1;
+                push_limited(&mut recent_launches, RECENT_LAUNCH_LIMIT, entry);
+            }
+        }
+
+        files.push(summary);
+    }
+
+    let snapshot = LogSummarySnapshot {
+        schema_version: DEBUG_BUNDLE_SCHEMA_VERSION,
+        generated_at: generated_at.to_rfc3339(),
+        files,
+        total_lines_scanned,
+        warning_count,
+        error_count,
+        hub_event_channel_full_count,
+        sse_line_count,
+        periodic_cycle_count,
+        launch_line_count,
+        recent_warnings: recent_warnings.into(),
+        recent_errors: recent_errors.into(),
+        recent_hub_event_channel_full: recent_hub_event_channel_full.into(),
+        recent_sse_lines: recent_sse_lines.into(),
+        recent_periodic_cycles: recent_periodic_cycles.into(),
+        recent_launches: recent_launches.into(),
+        tail: tail.into(),
+    };
+
+    serde_json::to_string_pretty(&snapshot).context("serializing log summary snapshot")
+}
+
+fn push_limited<T>(items: &mut VecDeque<T>, limit: usize, item: T) {
+    if items.len() >= limit {
+        items.pop_front();
+    }
+    items.push_back(item);
+}
+
+fn truncate_log_line(line: &str) -> String {
+    const MAX_CHARS: usize = 2_000;
+    let mut chars = line.chars();
+    let mut truncated = String::new();
+    for _ in 0..MAX_CHARS {
+        let Some(ch) = chars.next() else {
+            return line.to_string();
+        };
+        truncated.push(ch);
+    }
+    if chars.next().is_some() {
+        truncated.push_str("...<truncated>");
+    }
+    truncated
 }
 
 fn build_topology_debug_json(
@@ -1368,6 +2075,8 @@ mod tests {
         assert!(files.contains_key("profile_bundle.json"));
         assert!(files.contains_key("topology_debug.json"));
         assert!(files.contains_key("triage_queue.json"));
+        assert!(files.contains_key("runtime_health.json"));
+        assert!(files.contains_key("log_summary.json"));
         assert!(files.contains_key("process_resources.json"));
         assert!(files.contains_key("bundle_diagnostics.json"));
         assert!(files.contains_key("manifest.json"));
@@ -1398,6 +2107,16 @@ mod tests {
             .unwrap()
             .iter()
             .any(|value| value["archive_path"] == "process_resources.json"));
+        assert!(manifest["generated_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value["archive_path"] == "runtime_health.json"));
+        assert!(manifest["generated_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value["archive_path"] == "log_summary.json"));
         assert!(manifest["process"]["pid"]
             .as_u64()
             .is_some_and(|pid| pid > 0));
@@ -1434,6 +2153,20 @@ mod tests {
             DEBUG_BUNDLE_SCHEMA_VERSION
         );
         assert_eq!(process_resources["target_os"], std::env::consts::OS);
+
+        let runtime_health: Value =
+            serde_json::from_slice(files.get("runtime_health.json").unwrap()).unwrap();
+        assert_eq!(
+            runtime_health["schema_version"],
+            DEBUG_BUNDLE_SCHEMA_VERSION
+        );
+        assert_eq!(runtime_health["platform"]["platform_context"], "rpiz");
+
+        let log_summary: Value =
+            serde_json::from_slice(files.get("log_summary.json").unwrap()).unwrap();
+        assert_eq!(log_summary["schema_version"], DEBUG_BUNDLE_SCHEMA_VERSION);
+        assert_eq!(log_summary["total_lines_scanned"], 2);
+        assert_eq!(log_summary["files"].as_array().unwrap().len(), 2);
 
         let _ = fs::remove_dir_all(root);
     }
