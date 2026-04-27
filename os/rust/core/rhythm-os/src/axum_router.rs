@@ -745,7 +745,9 @@ mod tests {
             self.snapshots.clone()
         }
 
-        fn restore_room_state(&self, _: &str, _: rhythm_core::RestoredRoomState) {}
+        fn restore_room_state(&self, _: &str, _: rhythm_core::RestoredRoomState) {
+            self.record("restore_room_state");
+        }
 
         fn add_room(&self, _: &str, _: &str) {}
 
@@ -963,7 +965,12 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .any(|call| call == "set_room_time_offset@http-handler"));
+            .any(|call| call == "restore_room_state@http-handler"));
+        assert!(!calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("set_room_time_offset@")));
     }
 
     #[tokio::test]
@@ -1075,7 +1082,12 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .any(|call| call == "set_room_time_offset@http-handler"));
+            .any(|call| call == "restore_room_state@http-handler"));
+        assert!(!calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("set_room_time_offset@")));
     }
 
     #[tokio::test]

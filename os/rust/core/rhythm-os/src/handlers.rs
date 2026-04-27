@@ -18,6 +18,7 @@ use std::fmt::Display;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -26,6 +27,55 @@ use crate::commands::{self};
 use crate::logging;
 use crate::state::SharedState;
 use crate::topology::NodeControlKind;
+
+fn mutation_items(body: &Value) -> Result<Vec<Value>, String> {
+    if let Some(items) = body.get("items").and_then(|v| v.as_array()) {
+        return Ok(items.clone());
+    }
+    if let Some(items) = body.get("nodes").and_then(|v| v.as_array()) {
+        return Ok(items.clone());
+    }
+    if let Some(items) = body.get("rooms").and_then(|v| v.as_array()) {
+        return Ok(items.clone());
+    }
+    if body.is_array() {
+        return Ok(body.as_array().cloned().unwrap_or_default());
+    }
+    Ok(vec![body.clone()])
+}
+
+fn dispatch_spacing_from_body(body: &Value) -> Result<Duration, String> {
+    let Some(value) = body.get("dispatch_spacing_ms") else {
+        return Ok(commands::default_http_batch_dispatch_spacing());
+    };
+    let Some(ms) = value.as_u64() else {
+        return Err("dispatch_spacing_ms must be a non-negative integer".to_string());
+    };
+    if ms > 60_000 {
+        return Err("dispatch_spacing_ms must be <= 60000".to_string());
+    }
+    Ok(Duration::from_millis(ms))
+}
+
+fn nodes_response(
+    results: Vec<crate::api_types::NodeStateDto>,
+    queued: bool,
+    spacing: Duration,
+) -> ApiResponse {
+    let count = results.len();
+    let body = NodesResponse {
+        nodes: results,
+        queued: queued.then_some(true),
+        dispatch_count: queued.then_some(count),
+        dispatch_spacing_ms: queued.then_some(spacing.as_millis() as u64),
+        estimated_dispatch_ms: queued
+            .then_some(commands::estimated_dispatch_duration(count, spacing).as_millis() as u64),
+    };
+    match serde_json::to_string(&body) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
 
 /// Framework-agnostic HTTP response.
 pub struct ApiResponse {
@@ -982,16 +1032,20 @@ pub fn handle_room_action(state: &SharedState, body: &Value, persist: bool) -> A
     ApiResponse::json_ok(format!(r#"{{"rooms":[{}]}}"#, results.join(",")))
 }
 
-/// Dispatch node action(s). Accepts single object or array.
+/// Dispatch node action(s). Batch actions are queued and paced on the
+/// background dispatch worker so HTTP cannot fan out directly to hubs.
 pub fn handle_node_action(state: &SharedState, body: &Value, persist: bool) -> ApiResponse {
-    let items: Vec<Value> = if body.is_array() {
-        body.as_array().cloned().unwrap_or_default()
-    } else {
-        vec![body.clone()]
+    let items = match mutation_items(body) {
+        Ok(items) => items,
+        Err(e) => return ApiResponse::bad_request(&e),
+    };
+    let dispatch_spacing = match dispatch_spacing_from_body(body) {
+        Ok(spacing) => spacing,
+        Err(e) => return ApiResponse::bad_request(&e),
     };
 
-    let mut results = Vec::new();
     let batch = items.len() > 1;
+    let mut actions = Vec::with_capacity(items.len());
 
     for item in &items {
         let raw_node_id = match item.get("node_id").and_then(|v| v.as_str()) {
@@ -1003,25 +1057,37 @@ pub fn handle_node_action(state: &SharedState, body: &Value, persist: bool) -> A
             Some(a) => a,
             None => return ApiResponse::bad_request("Missing action"),
         };
+        actions.push((node_id, action.to_string()));
+    }
 
-        let per_item_persist = persist && !batch;
-        if let Err(e) = commands::do_node_action(state, &node_id, action, per_item_persist) {
+    if batch {
+        let mut results = Vec::with_capacity(actions.len());
+        for (node_id, _) in &actions {
+            match commands::build_node_state(state, node_id) {
+                Ok(node) => results.push(node),
+                Err(e) => return ApiResponse::server_error(e),
+            }
+        }
+        if let Err(e) =
+            commands::queue_node_action_batch(state, actions.clone(), persist, dispatch_spacing)
+        {
             return ApiResponse::server_error(e);
         }
-        match commands::build_node_state(state, &node_id) {
+        return nodes_response(results, batch, dispatch_spacing);
+    }
+
+    let mut results = Vec::new();
+    for (node_id, action) in &actions {
+        if let Err(e) = commands::do_node_action(state, node_id, action, persist) {
+            return ApiResponse::server_error(e);
+        }
+        match commands::build_node_state(state, node_id) {
             Ok(node) => results.push(node),
             Err(e) => return ApiResponse::server_error(e),
         }
     }
 
-    if batch && persist {
-        commands::persist_rooms(state);
-    }
-
-    match serde_json::to_string(&NodesResponse { nodes: results }) {
-        Ok(json) => ApiResponse::json_ok(json),
-        Err(e) => ApiResponse::server_error(e),
-    }
+    nodes_response(results, batch, dispatch_spacing)
 }
 
 /// Set room brightness. Accepts single object or array.
@@ -1062,16 +1128,20 @@ pub fn handle_set_brightness(state: &SharedState, body: &Value, persist: bool) -
     ApiResponse::json_ok(format!(r#"{{"rooms":[{}]}}"#, results.join(",")))
 }
 
-/// Set node brightness. Accepts single object or array.
+/// Set node brightness. Batch updates are queued and paced on the background
+/// dispatch worker so HTTP cannot fan out directly to hubs.
 pub fn handle_set_node_brightness(state: &SharedState, body: &Value, persist: bool) -> ApiResponse {
-    let items: Vec<Value> = if body.is_array() {
-        body.as_array().cloned().unwrap_or_default()
-    } else {
-        vec![body.clone()]
+    let items = match mutation_items(body) {
+        Ok(items) => items,
+        Err(e) => return ApiResponse::bad_request(&e),
+    };
+    let dispatch_spacing = match dispatch_spacing_from_body(body) {
+        Ok(spacing) => spacing,
+        Err(e) => return ApiResponse::bad_request(&e),
     };
 
-    let mut results = Vec::new();
     let batch = items.len() > 1;
+    let mut updates = Vec::with_capacity(items.len());
 
     for item in &items {
         let raw_node_id = match item.get("node_id").and_then(|v| v.as_str()) {
@@ -1083,27 +1153,40 @@ pub fn handle_set_node_brightness(state: &SharedState, body: &Value, persist: bo
             Some(b) => b as u8,
             None => return ApiResponse::bad_request("Missing brightness"),
         };
+        updates.push((node_id, brightness));
+    }
 
-        let per_item_persist = persist && !batch;
-        if let Err(e) =
-            commands::do_set_node_brightness(state, &node_id, brightness, per_item_persist)
-        {
+    if batch {
+        let mut results = Vec::with_capacity(updates.len());
+        for (node_id, _) in &updates {
+            match commands::build_node_state(state, node_id) {
+                Ok(node) => results.push(node),
+                Err(e) => return ApiResponse::server_error(e),
+            }
+        }
+        if let Err(e) = commands::queue_set_node_brightness_batch(
+            state,
+            updates.clone(),
+            persist,
+            dispatch_spacing,
+        ) {
             return ApiResponse::server_error(e);
         }
-        match commands::build_node_state(state, &node_id) {
+        return nodes_response(results, batch, dispatch_spacing);
+    }
+
+    let mut results = Vec::new();
+    for (node_id, brightness) in &updates {
+        if let Err(e) = commands::do_set_node_brightness(state, node_id, *brightness, persist) {
+            return ApiResponse::server_error(e);
+        }
+        match commands::build_node_state(state, node_id) {
             Ok(node) => results.push(node),
             Err(e) => return ApiResponse::server_error(e),
         }
     }
 
-    if batch && persist {
-        commands::persist_rooms(state);
-    }
-
-    match serde_json::to_string(&NodesResponse { nodes: results }) {
-        Ok(json) => ApiResponse::json_ok(json),
-        Err(e) => ApiResponse::server_error(e),
-    }
+    nodes_response(results, batch, dispatch_spacing)
 }
 
 /// Set room time offset. Accepts single object or array.
@@ -1144,16 +1227,20 @@ pub fn handle_set_time_offset(state: &SharedState, body: &Value, persist: bool) 
     ApiResponse::json_ok(format!(r#"{{"rooms":[{}]}}"#, results.join(",")))
 }
 
-/// Set node time offset. Accepts single object or array.
+/// Set node time offset. Batch previews are queued and paced on the same
+/// background dispatch path used by periodic ticks.
 pub fn handle_set_node_time_offset(
     state: &SharedState,
     body: &Value,
     persist: bool,
 ) -> ApiResponse {
-    let items: Vec<Value> = if body.is_array() {
-        body.as_array().cloned().unwrap_or_default()
-    } else {
-        vec![body.clone()]
+    let items = match mutation_items(body) {
+        Ok(items) => items,
+        Err(e) => return ApiResponse::bad_request(&e),
+    };
+    let dispatch_spacing = match dispatch_spacing_from_body(body) {
+        Ok(spacing) => spacing,
+        Err(e) => return ApiResponse::bad_request(&e),
     };
 
     let mut results = Vec::new();
@@ -1171,9 +1258,13 @@ pub fn handle_set_node_time_offset(
         };
 
         let per_item_persist = persist && !batch;
-        if let Err(e) =
-            commands::do_set_node_time_offset(state, &node_id, time_offset, per_item_persist)
-        {
+        if let Err(e) = commands::do_set_node_time_offset_with_spacing(
+            state,
+            &node_id,
+            time_offset,
+            per_item_persist,
+            dispatch_spacing,
+        ) {
             return ApiResponse::server_error(e);
         }
         match commands::build_node_state(state, &node_id) {
@@ -1186,10 +1277,7 @@ pub fn handle_set_node_time_offset(
         commands::persist_rooms(state);
     }
 
-    match serde_json::to_string(&NodesResponse { nodes: results }) {
-        Ok(json) => ApiResponse::json_ok(json),
-        Err(e) => ApiResponse::server_error(e),
-    }
+    nodes_response(results, batch, dispatch_spacing)
 }
 
 /// Update room preferences. Accepts single object or array.
@@ -1252,20 +1340,24 @@ pub fn handle_put_room_preferences(
     ApiResponse::json_ok(format!(r#"{{"rooms":[{}]}}"#, results.join(",")))
 }
 
-/// Update node preferences. Accepts single object or array.
+/// Update node preferences. Batch preference changes are queued and paced on
+/// the background dispatch worker when they can trigger live hub commands.
 pub fn handle_put_node_preferences(
     state: &SharedState,
     body: &Value,
     persist: bool,
 ) -> ApiResponse {
-    let items: Vec<Value> = if body.is_array() {
-        body.as_array().cloned().unwrap_or_default()
-    } else {
-        vec![body.clone()]
+    let items = match mutation_items(body) {
+        Ok(items) => items,
+        Err(e) => return ApiResponse::bad_request(&e),
+    };
+    let dispatch_spacing = match dispatch_spacing_from_body(body) {
+        Ok(spacing) => spacing,
+        Err(e) => return ApiResponse::bad_request(&e),
     };
 
-    let mut results = Vec::new();
     let batch = items.len() > 1;
+    let mut updates = Vec::with_capacity(items.len());
 
     for item in &items {
         let raw_node_id = match item.get("node_id").and_then(|v| v.as_str()) {
@@ -1287,33 +1379,55 @@ pub fn handle_put_node_preferences(
                 Ok(patch) => patch,
                 Err(e) => return ApiResponse::bad_request(&e),
             };
-
-        let per_item_persist = persist && !batch;
-        if let Err(e) = commands::do_node_preferences_set(
-            state,
-            &node_id,
+        updates.push(commands::QueuedNodePreferencesPatch {
+            node_id,
             rhythm_enabled,
             disabled,
-            room_state,
-            room_profile.as_ref(),
-            per_item_persist,
+            target_state: room_state,
+            room_profile,
+        });
+    }
+
+    if batch {
+        let node_ids: Vec<String> = updates
+            .iter()
+            .map(|update| update.node_id.clone())
+            .collect();
+        let mut results = Vec::with_capacity(node_ids.len());
+        for node_id in &node_ids {
+            match commands::build_node_state(state, node_id) {
+                Ok(node) => results.push(node),
+                Err(e) => return ApiResponse::server_error(e),
+            }
+        }
+        if let Err(e) =
+            commands::queue_node_preferences_batch(state, updates, persist, dispatch_spacing)
+        {
+            return ApiResponse::server_error(e);
+        }
+        return nodes_response(results, batch, dispatch_spacing);
+    }
+
+    let mut results = Vec::new();
+    for update in updates {
+        if let Err(e) = commands::do_node_preferences_set(
+            state,
+            &update.node_id,
+            update.rhythm_enabled,
+            update.disabled,
+            update.target_state,
+            update.room_profile.as_ref(),
+            persist,
         ) {
             return ApiResponse::server_error(e);
         }
-        match commands::build_node_state(state, &node_id) {
+        match commands::build_node_state(state, &update.node_id) {
             Ok(node) => results.push(node),
             Err(e) => return ApiResponse::server_error(e),
         }
     }
 
-    if batch && persist {
-        commands::persist_rooms(state);
-    }
-
-    match serde_json::to_string(&NodesResponse { nodes: results }) {
-        Ok(json) => ApiResponse::json_ok(json),
-        Err(e) => ApiResponse::server_error(e),
-    }
+    nodes_response(results, batch, dispatch_spacing)
 }
 
 /// Reset all on-rooms back to their current adaptive curve position.
@@ -1678,7 +1792,7 @@ mod tests {
     use crate::hub::{ActiveHub, HubType};
     use crate::pairing::{PairingStatus, UnpairingRequest, UnpairingResult};
     use crate::registry::HubDeviceRegistry;
-    use crate::state::{AppState, ObservedPowerSource, ObservedPowerState};
+    use crate::state::{AppState, ObservedPowerSource, ObservedPowerState, WorkItem};
     use crate::topology::HubRoomBinding;
     use rhythm_core::runtime::hub_registry::DeviceType;
     use serde_json::json;
@@ -1686,7 +1800,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     // ---- ApiResponse construction ----
 
@@ -1722,6 +1836,19 @@ mod tests {
 
     fn test_state() -> SharedState {
         Arc::new(Mutex::new(AppState::default()))
+    }
+
+    fn attach_work_queue(state: &SharedState) -> std::sync::mpsc::Receiver<WorkItem> {
+        attach_work_queue_with_capacity(state, 16)
+    }
+
+    fn attach_work_queue_with_capacity(
+        state: &SharedState,
+        capacity: usize,
+    ) -> std::sync::mpsc::Receiver<WorkItem> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(capacity);
+        state.lock().unwrap().work_tx = Some(tx);
+        rx
     }
 
     struct TestDir {
@@ -1827,6 +1954,144 @@ mod tests {
         let state = test_state();
         let r = handle_set_brightness(&state, &json!({"room_id": "r"}), false);
         assert_eq!(r.status, 400);
+    }
+
+    #[test]
+    fn node_action_batch_queued() {
+        let state = handler_state_with_runtime();
+        let rx = attach_work_queue(&state);
+        let r = handle_node_action(
+            &state,
+            &json!([
+                {"node_id": "room1", "action": "on"},
+                {"node_id": "room2", "action": "on"}
+            ]),
+            false,
+        );
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["queued"], true);
+        assert_eq!(parsed["dispatch_spacing_ms"], 500);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            WorkItem::QueuedNodeAction { .. }
+        ));
+    }
+
+    #[test]
+    fn node_action_batch_tolerates_backpressured_queue() {
+        let state = handler_state_with_runtime();
+        let rx = attach_work_queue_with_capacity(&state, 1);
+        let r = handle_node_action(
+            &state,
+            &json!([
+                {"node_id": "room1", "action": "on"},
+                {"node_id": "room2", "action": "on"}
+            ]),
+            false,
+        );
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["queued"], true);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            WorkItem::QueuedNodeAction { .. }
+        ));
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            WorkItem::QueuedNodeAction { .. }
+        ));
+    }
+
+    #[test]
+    fn node_action_batch_persist_is_deferred_after_items() {
+        let state = handler_state_with_runtime();
+        let rx = attach_work_queue(&state);
+        let r = handle_node_action(
+            &state,
+            &json!([
+                {"node_id": "room1", "action": "on"},
+                {"node_id": "room2", "action": "on"}
+            ]),
+            true,
+        );
+        assert_eq!(r.status, 200);
+        for _ in 0..2 {
+            match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+                WorkItem::QueuedNodeAction { persist_after, .. } => {
+                    assert!(!persist_after);
+                }
+                _ => panic!("expected queued node action"),
+            }
+        }
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            WorkItem::DeferredPersist { .. }
+        ));
+    }
+
+    #[test]
+    fn node_brightness_batch_queued() {
+        let state = handler_state_with_runtime();
+        let rx = attach_work_queue(&state);
+        let r = handle_set_node_brightness(
+            &state,
+            &json!({
+                "dispatch_spacing_ms": 250,
+                "nodes": [
+                    {"node_id": "room1", "brightness": 50},
+                    {"node_id": "room2", "brightness": 50}
+                ]
+            }),
+            false,
+        );
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["queued"], true);
+        assert_eq!(parsed["dispatch_spacing_ms"], 250);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            WorkItem::SetNodeBrightness { .. }
+        ));
+    }
+
+    #[test]
+    fn node_time_offset_batch_supported() {
+        let state = handler_state_with_runtime();
+        let _rx = attach_work_queue(&state);
+        let r = handle_set_node_time_offset(
+            &state,
+            &json!([
+                {"node_id": "room1", "time_offset": -40.0},
+                {"node_id": "room2", "time_offset": -40.0}
+            ]),
+            false,
+        );
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["queued"], true);
+        assert_eq!(parsed["dispatch_count"], 2);
+    }
+
+    #[test]
+    fn node_preferences_batch_queued() {
+        let state = handler_state_with_runtime();
+        let rx = attach_work_queue(&state);
+        let r = handle_put_node_preferences(
+            &state,
+            &json!([
+                {"node_id": "room1", "state": "active"},
+                {"node_id": "room2", "state": "active"}
+            ]),
+            false,
+        );
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["queued"], true);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            WorkItem::SetNodePreferences { .. }
+        ));
     }
 
     // ---- Simple handlers ----

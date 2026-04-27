@@ -66,6 +66,7 @@ fn periodic_tick_refreshes_state_snapshot_and_node_event_after_external_off() {
             settings_node_id: room_id.clone(),
             current_hour: 14.0,
             emit_parent_node_id: None,
+            dispatch_spacing: std::time::Duration::ZERO,
         },
     );
 

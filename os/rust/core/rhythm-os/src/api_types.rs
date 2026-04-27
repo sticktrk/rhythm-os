@@ -412,6 +412,14 @@ pub struct NodeStateDto {
 #[derive(Debug, Serialize)]
 pub struct NodesResponse {
     pub nodes: Vec<NodeStateDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queued: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dispatch_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dispatch_spacing_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_dispatch_ms: Option<u64>,
 }
 
 /// Poll response — `{"hub_connected": bool, "nodes": [...]}`.
@@ -464,6 +472,14 @@ pub struct FixResponse {
     pub rooms: Vec<RoomRhythmState>,
     pub motion_cleared: usize,
     pub motion_rooms: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queued: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dispatch_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dispatch_spacing_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_dispatch_ms: Option<u64>,
 }
 
 /// Response for `POST /api/sync`.
@@ -1014,6 +1030,10 @@ mod tests {
             rooms: vec![sample_rhythm_state()],
             motion_cleared: 0,
             motion_rooms: vec![],
+            queued: None,
+            dispatch_count: None,
+            dispatch_spacing_ms: None,
+            estimated_dispatch_ms: None,
         };
         let json: Value = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["rooms_reset"], 1);

@@ -43,10 +43,24 @@ use crate::factory_default_config::{
 };
 use crate::state::{
     current_epoch_ms, rooms_from_engine, AppState, ObservedPowerSource, ObservedPowerState,
-    SharedState,
+    SharedState, WorkItem,
 };
 use crate::storage::StoredLocation;
 use crate::topology::NodeControlKind;
+
+pub const DEFAULT_HTTP_BATCH_DISPATCH_SPACING_MS: u64 = 500;
+
+pub fn default_http_batch_dispatch_spacing() -> Duration {
+    Duration::from_millis(DEFAULT_HTTP_BATCH_DISPATCH_SPACING_MS)
+}
+
+pub fn estimated_dispatch_duration(dispatch_count: usize, dispatch_spacing: Duration) -> Duration {
+    if dispatch_count <= 1 {
+        Duration::ZERO
+    } else {
+        dispatch_spacing.saturating_mul((dispatch_count - 1) as u32)
+    }
+}
 
 // ============================================================================
 // Display value computation
@@ -3347,17 +3361,47 @@ fn apply_room_mode_defaults(
         }
     }
 
-    for (room_id, transition_ms) in &hard_off_rooms {
-        queue_motion_timer_clear(state, room_id);
-        if let Err(e) = runtime.lights_off_room(room_id, *transition_ms) {
-            warn!(
-                target: "cmd",
-                "active_mode_apply: lights_off for '{}' failed after room default apply: {}",
-                room_id,
-                e
-            );
+    if !hard_off_rooms.is_empty() {
+        let work_items: Vec<_> = hard_off_rooms
+            .iter()
+            .map(|(room_id, transition_ms)| WorkItem::LightsOffRoom {
+                command_id: crate::logging::next_command_id("mode-hard-off"),
+                node_id: room_id.clone(),
+                transition_ms: *transition_ms,
+                dispatch_spacing: default_http_batch_dispatch_spacing(),
+            })
+            .collect();
+        let queued = match queue_node_dispatch_work_items(
+            state,
+            "active_mode_apply",
+            work_items,
+            default_http_batch_dispatch_spacing(),
+        ) {
+            Ok(queued) => queued,
+            Err(e) => {
+                warn!(
+                    target: "cmd",
+                    "active_mode_apply: failed to queue hard-off dispatches: {}",
+                    e
+                );
+                false
+            }
+        };
+
+        for (room_id, transition_ms) in &hard_off_rooms {
+            queue_motion_timer_clear(state, room_id);
+            if queued {
+                update_lights_on_cache_for_runtime_node(state, runtime, room_id, false);
+            } else if let Err(e) = runtime.lights_off_room(room_id, *transition_ms) {
+                warn!(
+                    target: "cmd",
+                    "active_mode_apply: lights_off for '{}' failed after room default apply: {}",
+                    room_id,
+                    e
+                );
+            }
+            emit_node_state_event_after_apply(state, runtime, room_id);
         }
-        emit_node_state_event_after_apply(state, runtime, room_id);
     }
 
     if !changed_room_ids.is_empty() || missing_rooms > 0 {
@@ -3447,6 +3491,76 @@ pub(crate) fn log_room_command_dispatch(
     );
 }
 
+fn queue_node_dispatch_work_items(
+    state: &SharedState,
+    dispatch_label: &str,
+    work_items: Vec<WorkItem>,
+    dispatch_spacing: Duration,
+) -> Result<bool> {
+    if work_items.is_empty() {
+        return Ok(true);
+    }
+
+    let tx = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.work_tx.clone()
+    };
+
+    let Some(tx) = tx else {
+        return Ok(false);
+    };
+
+    let item_count = work_items.len();
+    let error_label = dispatch_label.to_string();
+    let thread_label = error_label.clone();
+    std::thread::Builder::new()
+        .name("node-dispatch".to_string())
+        .spawn(move || {
+            for item in work_items {
+                if tx.send(item).is_err() {
+                    warn!(
+                        target: "cmd",
+                        "{}: node dispatch worker disconnected",
+                        thread_label
+                    );
+                    return;
+                }
+            }
+            debug!(
+                target: "cmd",
+                "{}: queued {} node dispatch work items spacing_ms={}",
+                thread_label,
+                item_count,
+                dispatch_spacing.as_millis()
+            );
+        })
+        .map_err(|e| anyhow::anyhow!("{}: failed to spawn node dispatcher: {}", error_label, e))?;
+
+    Ok(true)
+}
+
+fn queue_node_dispatch_batch(
+    state: &SharedState,
+    dispatch_label: &str,
+    mut work_items: Vec<WorkItem>,
+    persist_after: bool,
+    dispatch_spacing: Duration,
+) -> Result<()> {
+    if persist_after && !work_items.is_empty() {
+        work_items.push(WorkItem::DeferredPersist {
+            node_id: dispatch_label.to_string(),
+        });
+    }
+
+    let queued =
+        queue_node_dispatch_work_items(state, dispatch_label, work_items, dispatch_spacing)?;
+    if queued {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("Node dispatch queue unavailable"))
+    }
+}
+
 fn dispatch_room_commands(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
@@ -3477,7 +3591,12 @@ fn dispatch_room_commands(
         .spawn(move || {
             for (idx, (node_id, command)) in room_commands.into_iter().enumerate() {
                 if tx
-                    .send(crate::state::WorkItem::ApplyNodeCommand { node_id, command })
+                    .send(crate::state::WorkItem::ApplyNodeCommand {
+                        command_id: crate::logging::next_command_id("apply-node-command"),
+                        node_id,
+                        command,
+                        dispatch_spacing: phase_gap,
+                    })
                     .is_err()
                 {
                     warn!(target: "cmd", "active_mode_apply: room dispatcher disconnected");
@@ -4025,12 +4144,53 @@ fn do_settings_set_internal(
             s.hub_runtime()
         };
         if let Some(runtime) = runtime {
+            let work_items: Vec<_> = rooms_to_off
+                .iter()
+                .map(|room_id| WorkItem::QueuedNodeAction {
+                    command_id: crate::logging::next_command_id("power-save-off"),
+                    node_id: room_id.clone(),
+                    action: ButtonAction::OffPress,
+                    device_id: None,
+                    dispatch_spacing: default_http_batch_dispatch_spacing(),
+                    persist_after: false,
+                })
+                .collect();
+            let queued = match queue_node_dispatch_work_items(
+                state,
+                "settings_power_save",
+                work_items,
+                default_http_batch_dispatch_spacing(),
+            ) {
+                Ok(queued) => queued,
+                Err(e) => {
+                    warn!(
+                        target: "cmd",
+                        "settings: failed to queue power-save off dispatches: {}",
+                        e
+                    );
+                    false
+                }
+            };
+
             for room_id in &rooms_to_off {
                 info!(target: "cmd", "Turning off idle room '{}' (power_save ON)", room_id);
-                let event = InputEvent::new(room_id, ButtonAction::OffPress);
-                match runtime.handle_event(&event) {
-                    Ok(_) => sync_active_mode_from_runtime(state, &runtime),
-                    Err(e) => warn!(target: "cmd", "Failed to turn off room '{}': {}", room_id, e),
+                if queued {
+                    update_lights_on_cache_for_runtime_node(state, &runtime, room_id, false);
+                    emit_node_state_event_after_apply(state, &runtime, room_id);
+                } else {
+                    let event = InputEvent::new(room_id, ButtonAction::OffPress);
+                    match runtime.handle_event(&event) {
+                        Ok(turned_on) => {
+                            sync_active_mode_from_runtime(state, &runtime);
+                            update_lights_on_cache_for_runtime_node(
+                                state, &runtime, room_id, turned_on,
+                            );
+                            emit_node_state_event_after_apply(state, &runtime, room_id);
+                        }
+                        Err(e) => {
+                            warn!(target: "cmd", "Failed to turn off room '{}': {}", room_id, e)
+                        }
+                    }
                 }
             }
         }
@@ -4768,13 +4928,7 @@ pub fn do_node_action(
     action_str: &str,
     persist: bool,
 ) -> Result<String> {
-    let action = match action_str {
-        "on" => ButtonAction::OnPress,
-        "off" => ButtonAction::OffPress,
-        "toggle" => ButtonAction::Toggle,
-        other => ButtonAction::from_service_name(other)
-            .ok_or_else(|| anyhow::anyhow!("Unknown action: {}", other))?,
-    };
+    let action = parse_node_action(action_str)?;
 
     info!(target: "cmd", "node_action: {} -> {:?}", node_id, action);
 
@@ -4817,6 +4971,85 @@ pub fn do_node_action(
     build_node_state(state, node_id).and_then(|node_state| {
         serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
     })
+}
+
+fn parse_node_action(action_str: &str) -> Result<ButtonAction> {
+    match action_str {
+        "on" => Ok(ButtonAction::OnPress),
+        "off" => Ok(ButtonAction::OffPress),
+        "toggle" => Ok(ButtonAction::Toggle),
+        other => ButtonAction::from_service_name(other)
+            .ok_or_else(|| anyhow::anyhow!("Unknown action: {}", other)),
+    }
+}
+
+pub fn queue_node_action(
+    state: &SharedState,
+    node_id: &str,
+    action_str: &str,
+    persist_after: bool,
+    dispatch_spacing: Duration,
+) -> Result<()> {
+    let action = parse_node_action(action_str)?;
+    let (runtime, tx) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        (s.hub_runtime(), s.work_tx.clone())
+    };
+    let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    runtime
+        .engine_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+    let tx = tx.ok_or_else(|| anyhow::anyhow!("Node dispatch queue unavailable"))?;
+
+    tx.try_send(WorkItem::QueuedNodeAction {
+        command_id: crate::logging::next_command_id("node-action"),
+        node_id: node_id.to_string(),
+        action,
+        device_id: None,
+        dispatch_spacing,
+        persist_after,
+    })
+    .map_err(|e| anyhow::anyhow!("Node dispatch queue unavailable: {}", e))
+}
+
+pub fn queue_node_action_batch(
+    state: &SharedState,
+    actions: Vec<(String, String)>,
+    persist_after: bool,
+    dispatch_spacing: Duration,
+) -> Result<()> {
+    let runtime = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if s.work_tx.is_none() {
+            return Err(anyhow::anyhow!("Node dispatch queue unavailable"));
+        }
+        s.hub_runtime()
+    };
+    let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+
+    let mut work_items = Vec::with_capacity(actions.len() + usize::from(persist_after));
+    for (node_id, action_str) in actions {
+        let action = parse_node_action(&action_str)?;
+        runtime
+            .engine_node_snapshot(&node_id)
+            .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+        work_items.push(WorkItem::QueuedNodeAction {
+            command_id: crate::logging::next_command_id("node-action"),
+            node_id,
+            action,
+            device_id: None,
+            dispatch_spacing,
+            persist_after: false,
+        });
+    }
+
+    queue_node_dispatch_batch(
+        state,
+        "node_action_batch",
+        work_items,
+        persist_after,
+        dispatch_spacing,
+    )
 }
 
 /// Reset all qualifying rooms back to their current adaptive curve position,
@@ -4888,24 +5121,87 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
     info!(target: "cmd", "fix_my_lights: {} on-rooms to reset, {} motion rooms to turn off (of {} total)",
         qualifying.len(), motion_rooms.len(), snapshots.len());
 
+    let work_items: Vec<_> = qualifying
+        .iter()
+        .map(|snap| WorkItem::QueuedNodeAction {
+            command_id: crate::logging::next_command_id("fix-reset"),
+            node_id: snap.id.clone(),
+            action: ButtonAction::Reset,
+            device_id: None,
+            dispatch_spacing: default_http_batch_dispatch_spacing(),
+            persist_after: false,
+        })
+        .chain(motion_rooms.iter().map(|snap| WorkItem::QueuedNodeAction {
+            command_id: crate::logging::next_command_id("fix-motion-off"),
+            node_id: snap.id.clone(),
+            action: ButtonAction::OffPress,
+            device_id: None,
+            dispatch_spacing: default_http_batch_dispatch_spacing(),
+            persist_after: false,
+        }))
+        .collect();
+    let queued = match queue_node_dispatch_work_items(
+        state,
+        "fix_my_lights",
+        work_items,
+        default_http_batch_dispatch_spacing(),
+    ) {
+        Ok(queued) => queued,
+        Err(e) => {
+            warn!(target: "cmd", "fix_my_lights: failed to queue dispatches: {}", e);
+            false
+        }
+    };
+
     let mut reset_ids = Vec::new();
-    for snap in &qualifying {
-        let event = InputEvent::new(&snap.id, ButtonAction::Reset);
-        match runtime.handle_event(&event) {
-            Ok(turned_on) => {
-                sync_active_mode_from_runtime(state, &runtime);
-                update_lights_on_cache_for_runtime_node(state, &runtime, &snap.id, turned_on);
-                reset_ids.push(snap.id.clone());
-            }
-            Err(e) => {
-                warn!(target: "cmd", "fix_my_lights: reset failed for {}: {}", snap.id, e);
+    if queued {
+        for snap in &qualifying {
+            runtime.restore_room_state(
+                &snap.id,
+                RestoredRoomState {
+                    rhythm_enabled: true,
+                    disabled: snap.disabled,
+                    time_offset_minutes: 0.0,
+                    brightness_offset: 0.0,
+                    soft_off: false,
+                    hard_off: false,
+                    profile_settings: snap.profile_settings.clone(),
+                },
+            );
+            clear_room_mode_transition(state, &snap.id);
+            update_lights_on_cache_for_runtime_node(state, &runtime, &snap.id, true);
+            reset_ids.push(snap.id.clone());
+        }
+    } else {
+        for snap in &qualifying {
+            let event = InputEvent::new(&snap.id, ButtonAction::Reset);
+            match runtime.handle_event(&event) {
+                Ok(turned_on) => {
+                    sync_active_mode_from_runtime(state, &runtime);
+                    update_lights_on_cache_for_runtime_node(state, &runtime, &snap.id, turned_on);
+                    reset_ids.push(snap.id.clone());
+                }
+                Err(e) => {
+                    warn!(target: "cmd", "fix_my_lights: reset failed for {}: {}", snap.id, e);
+                }
             }
         }
     }
 
     // Clear stale offsets on motion rooms before turning off
     for snap in &motion_rooms {
-        if snap.time_offset_minutes.abs() > 0.001 || snap.brightness_offset.abs() > 0.001 {
+        if queued {
+            let mut restored = RestoredRoomState::from(*snap);
+            restored.time_offset_minutes = 0.0;
+            restored.brightness_offset = 0.0;
+            restored.hard_off = false;
+            if !runtime.is_power_save() {
+                restored.rhythm_enabled = true;
+                restored.soft_off = true;
+            }
+            runtime.restore_room_state(&snap.id, restored);
+            clear_room_mode_transition(state, &snap.id);
+        } else if snap.time_offset_minutes.abs() > 0.001 || snap.brightness_offset.abs() > 0.001 {
             runtime.restore_room_state(
                 &snap.id,
                 RestoredRoomState {
@@ -4921,16 +5217,23 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
     //   power_save=true  → fully off
     //   power_save=false → soft-off (dim to idle curve brightness with idle color)
     let mut motion_off_ids = Vec::new();
-    for snap in &motion_rooms {
-        let event = InputEvent::new(&snap.id, ButtonAction::OffPress);
-        match runtime.handle_event(&event) {
-            Ok(turned_on) => {
-                sync_active_mode_from_runtime(state, &runtime);
-                update_lights_on_cache_for_runtime_node(state, &runtime, &snap.id, turned_on);
-                motion_off_ids.push(snap.id.clone());
-            }
-            Err(e) => {
-                warn!(target: "cmd", "fix_my_lights: off failed for {}: {}", snap.id, e);
+    if queued {
+        for snap in &motion_rooms {
+            update_lights_on_cache_for_runtime_node(state, &runtime, &snap.id, false);
+            motion_off_ids.push(snap.id.clone());
+        }
+    } else {
+        for snap in &motion_rooms {
+            let event = InputEvent::new(&snap.id, ButtonAction::OffPress);
+            match runtime.handle_event(&event) {
+                Ok(turned_on) => {
+                    sync_active_mode_from_runtime(state, &runtime);
+                    update_lights_on_cache_for_runtime_node(state, &runtime, &snap.id, turned_on);
+                    motion_off_ids.push(snap.id.clone());
+                }
+                Err(e) => {
+                    warn!(target: "cmd", "fix_my_lights: off failed for {}: {}", snap.id, e);
+                }
             }
         }
     }
@@ -4972,11 +5275,20 @@ pub fn do_fix_my_lights(state: &SharedState, persist: bool) -> Result<String> {
         .filter_map(|id| build_room_rhythm_state(state, id).ok())
         .collect();
 
+    let dispatch_count = reset_ids.len() + motion_off_ids.len();
     let response = FixResponse {
         rooms_reset: reset_ids.len(),
         rooms: room_states,
         motion_cleared: motion_off_ids.len(),
         motion_rooms: motion_off_ids,
+        queued: queued.then_some(true),
+        dispatch_count: queued.then_some(dispatch_count),
+        dispatch_spacing_ms: queued
+            .then_some(default_http_batch_dispatch_spacing().as_millis() as u64),
+        estimated_dispatch_ms: queued.then_some(
+            estimated_dispatch_duration(dispatch_count, default_http_batch_dispatch_spacing())
+                .as_millis() as u64,
+        ),
     };
     serde_json::to_string(&response).map_err(|e| anyhow::anyhow!("serialize: {}", e))
 }
@@ -5019,6 +5331,72 @@ pub fn do_set_node_brightness(
     })
 }
 
+pub fn queue_set_node_brightness(
+    state: &SharedState,
+    node_id: &str,
+    brightness: u8,
+    persist_after: bool,
+    dispatch_spacing: Duration,
+) -> Result<()> {
+    let brightness = brightness.clamp(1, 100);
+    let (runtime, tx) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        (s.hub_runtime(), s.work_tx.clone())
+    };
+    let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    runtime
+        .engine_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+    let tx = tx.ok_or_else(|| anyhow::anyhow!("Node dispatch queue unavailable"))?;
+
+    tx.try_send(WorkItem::SetNodeBrightness {
+        command_id: crate::logging::next_command_id("node-brightness"),
+        node_id: node_id.to_string(),
+        brightness,
+        dispatch_spacing,
+        persist_after,
+    })
+    .map_err(|e| anyhow::anyhow!("Node dispatch queue unavailable: {}", e))
+}
+
+pub fn queue_set_node_brightness_batch(
+    state: &SharedState,
+    updates: Vec<(String, u8)>,
+    persist_after: bool,
+    dispatch_spacing: Duration,
+) -> Result<()> {
+    let runtime = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if s.work_tx.is_none() {
+            return Err(anyhow::anyhow!("Node dispatch queue unavailable"));
+        }
+        s.hub_runtime()
+    };
+    let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+
+    let mut work_items = Vec::with_capacity(updates.len() + usize::from(persist_after));
+    for (node_id, brightness) in updates {
+        runtime
+            .engine_node_snapshot(&node_id)
+            .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+        work_items.push(WorkItem::SetNodeBrightness {
+            command_id: crate::logging::next_command_id("node-brightness"),
+            node_id,
+            brightness: brightness.clamp(1, 100),
+            dispatch_spacing,
+            persist_after: false,
+        });
+    }
+
+    queue_node_dispatch_batch(
+        state,
+        "node_brightness_batch",
+        work_items,
+        persist_after,
+        dispatch_spacing,
+    )
+}
+
 /// Set the time offset for a node directly (not additive).
 ///
 /// Does NOT change observed power tracking — offset doesn't imply lights-on state change.
@@ -5027,6 +5405,22 @@ pub fn do_set_node_time_offset(
     node_id: &str,
     offset_minutes: f32,
     persist: bool,
+) -> Result<String> {
+    do_set_node_time_offset_with_spacing(
+        state,
+        node_id,
+        offset_minutes,
+        persist,
+        default_http_batch_dispatch_spacing(),
+    )
+}
+
+pub fn do_set_node_time_offset_with_spacing(
+    state: &SharedState,
+    node_id: &str,
+    offset_minutes: f32,
+    persist: bool,
+    dispatch_spacing: Duration,
 ) -> Result<String> {
     info!(
         target: "cmd",
@@ -5042,8 +5436,13 @@ pub fn do_set_node_time_offset(
 
     let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
 
-    runtime.set_room_time_offset(node_id, offset_minutes)?;
+    let snap = time_offset_room_node_snapshot(runtime.as_ref(), node_id)?;
+    let mut restored = RestoredNodeState::from(&snap);
+    restored.time_offset_minutes = offset_minutes;
+    runtime.restore_node_state(node_id, restored);
+
     clear_room_mode_transition(state, node_id);
+    enqueue_time_offset_preview_ticks(state, &runtime, node_id, dispatch_spacing)?;
 
     {
         emit_node_state_event_after_apply(state, &runtime, node_id);
@@ -5056,6 +5455,97 @@ pub fn do_set_node_time_offset(
     build_node_state(state, node_id).and_then(|node_state| {
         serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
     })
+}
+
+fn time_offset_room_node_snapshot(
+    runtime: &dyn RuntimeHandle,
+    node_id: &str,
+) -> Result<rhythm_core::NodeSnapshot> {
+    let snap = runtime
+        .engine_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+
+    if !snap.kind.is_room() {
+        return Err(anyhow::anyhow!(
+            "Time offsets can only be set on room nodes"
+        ));
+    }
+
+    Ok(snap)
+}
+
+fn enqueue_time_offset_preview_ticks(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+    dispatch_spacing: Duration,
+) -> Result<()> {
+    let target_snap = runtime
+        .engine_effective_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+    let (dispatch_nodes, dispatch_tx) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let dispatch_nodes =
+            crate::periodic::periodic_dispatch_nodes_from_state(&s, &[target_snap]);
+        (
+            dispatch_nodes,
+            s.periodic_work_tx.clone().or_else(|| s.work_tx.clone()),
+        )
+    };
+
+    if dispatch_nodes.is_empty() {
+        return Ok(());
+    }
+
+    let command_id = crate::logging::next_command_id("manual-preview");
+    let current_hour = runtime.current_hour();
+
+    if let Some(tx) = dispatch_tx {
+        let mut last_node_index_by_emit_target = HashMap::new();
+        for (idx, node) in dispatch_nodes.iter().enumerate() {
+            last_node_index_by_emit_target.insert(node.emit_node_id.clone(), idx);
+        }
+
+        for (idx, node) in dispatch_nodes.into_iter().enumerate() {
+            let emit_parent_node_id = last_node_index_by_emit_target
+                .get(&node.emit_node_id)
+                .is_some_and(|last_idx| *last_idx == idx)
+                .then_some(node.emit_node_id.as_str())
+                .filter(|emit_id| *emit_id != node.settings_node_id);
+            if !crate::periodic::enqueue_periodic_tick(
+                state,
+                &tx,
+                &command_id,
+                &node.node_id,
+                &node.settings_node_id,
+                current_hour,
+                emit_parent_node_id,
+                dispatch_spacing,
+            ) {
+                return Err(anyhow::anyhow!("Node dispatch queue full"));
+            }
+        }
+        return Ok(());
+    }
+
+    let mut last_node_index_by_emit_target = HashMap::new();
+    for (idx, node) in dispatch_nodes.iter().enumerate() {
+        last_node_index_by_emit_target.insert(node.emit_node_id.clone(), idx);
+    }
+    for (idx, node) in dispatch_nodes.into_iter().enumerate() {
+        runtime.periodic_tick_node(&node.node_id, &node.settings_node_id, current_hour)?;
+        crate::periodic::post_tick_node(state, runtime, &node.settings_node_id);
+        let emit_parent_node_id = last_node_index_by_emit_target
+            .get(&node.emit_node_id)
+            .is_some_and(|last_idx| *last_idx == idx)
+            .then_some(node.emit_node_id.as_str())
+            .filter(|emit_id| *emit_id != node.settings_node_id);
+        if let Some(emit_parent_node_id) = emit_parent_node_id {
+            crate::periodic::post_tick_node(state, runtime, emit_parent_node_id);
+        }
+    }
+
+    Ok(())
 }
 
 // ============================================================================
@@ -5514,11 +6004,29 @@ pub fn do_absorb_time_offset(
     // Reset all room time offsets to 0
     if let Some(ref rt) = runtime {
         let snapshots = rt.engine_all_room_snapshots();
+        let mut reset_room_ids = Vec::new();
         for snap in &snapshots {
             if snap.time_offset_minutes.abs() > 0.001 {
-                if let Err(e) = rt.set_room_time_offset(&snap.id, 0.0) {
-                    warn!(target: "cmd", "Failed to reset offset for room {}: {}", snap.id, e);
-                }
+                let mut restored = RestoredRoomState::from(snap);
+                restored.time_offset_minutes = 0.0;
+                rt.restore_room_state(&snap.id, restored);
+                reset_room_ids.push(snap.id.clone());
+            }
+        }
+
+        for room_id in reset_room_ids {
+            if let Err(e) = enqueue_time_offset_preview_ticks(
+                state,
+                rt,
+                &room_id,
+                default_http_batch_dispatch_spacing(),
+            ) {
+                warn!(
+                    target: "cmd",
+                    "Failed to enqueue offset reset refresh for room {}: {}",
+                    room_id,
+                    e
+                );
             }
         }
     }
@@ -6112,6 +6620,116 @@ pub fn do_node_preferences_set(
     build_node_state(state, node_id).and_then(|node_state| {
         serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
     })
+}
+
+pub struct QueuedNodePreferencesPatch {
+    pub node_id: String,
+    pub rhythm_enabled: Option<bool>,
+    pub disabled: Option<bool>,
+    pub target_state: Option<RoomModeState>,
+    pub room_profile: Option<RoomProfileSettingsPatch>,
+}
+
+fn validate_room_profile_settings_patch(
+    room_profile: Option<&RoomProfileSettingsPatch>,
+    valid_profile_ids: &HashSet<String>,
+) -> Result<()> {
+    if let Some(profile_id) = room_profile
+        .and_then(|patch| patch.profile_id.as_ref())
+        .and_then(|profile_id| profile_id.as_deref())
+    {
+        if rhythm_core::is_builtin_state_profile_id(profile_id) {
+            return Err(anyhow::anyhow!(
+                "State profiles cannot be selected per-node"
+            ));
+        }
+        if !valid_profile_ids.contains(profile_id) {
+            return Err(anyhow::anyhow!("Unknown light profile: {}", profile_id));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn queue_node_preferences_set(
+    state: &SharedState,
+    node_id: &str,
+    rhythm_enabled: Option<bool>,
+    disabled: Option<bool>,
+    target_state: Option<RoomModeState>,
+    room_profile: Option<RoomProfileSettingsPatch>,
+    persist_after: bool,
+    dispatch_spacing: Duration,
+) -> Result<()> {
+    let (runtime, tx) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        (s.hub_runtime(), s.work_tx.clone())
+    };
+    let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    runtime
+        .engine_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+    let tx = tx.ok_or_else(|| anyhow::anyhow!("Node dispatch queue unavailable"))?;
+
+    tx.try_send(WorkItem::SetNodePreferences {
+        command_id: crate::logging::next_command_id("node-preferences"),
+        node_id: node_id.to_string(),
+        rhythm_enabled,
+        disabled,
+        target_state,
+        room_profile,
+        dispatch_spacing,
+        persist_after,
+    })
+    .map_err(|e| anyhow::anyhow!("Node dispatch queue unavailable: {}", e))
+}
+
+pub fn queue_node_preferences_batch(
+    state: &SharedState,
+    updates: Vec<QueuedNodePreferencesPatch>,
+    persist_after: bool,
+    dispatch_spacing: Duration,
+) -> Result<()> {
+    let (runtime, valid_profile_ids) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if s.work_tx.is_none() {
+            return Err(anyhow::anyhow!("Node dispatch queue unavailable"));
+        }
+        (
+            s.hub_runtime(),
+            s.light_profile_configs
+                .keys()
+                .cloned()
+                .collect::<HashSet<_>>(),
+        )
+    };
+    let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+
+    let mut work_items = Vec::with_capacity(updates.len() + usize::from(persist_after));
+    for update in updates {
+        runtime
+            .engine_node_snapshot(&update.node_id)
+            .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", update.node_id))?;
+        validate_room_profile_settings_patch(update.room_profile.as_ref(), &valid_profile_ids)?;
+        work_items.push(WorkItem::SetNodePreferences {
+            command_id: crate::logging::next_command_id("node-preferences"),
+            node_id: update.node_id,
+            rhythm_enabled: update.rhythm_enabled,
+            disabled: update.disabled,
+            target_state: update.target_state,
+            room_profile: update.room_profile,
+            dispatch_spacing,
+            persist_after: false,
+        });
+    }
+
+    queue_node_dispatch_batch(
+        state,
+        "node_preferences_batch",
+        work_items,
+        persist_after,
+        dispatch_spacing,
+    )
 }
 
 // ============================================================================
@@ -8788,6 +9406,55 @@ mod tests {
     }
 
     #[test]
+    fn fix_queues_mass_actions_when_worker_available() {
+        let (state, runtime) = setup_state(vec![
+            make_snapshot("motion_room", false, false),
+            make_snapshot("normal_room", false, false),
+        ]);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        state.lock().unwrap().work_tx = Some(tx);
+
+        set_observed_lights_on(&state, "motion_room", true);
+        set_observed_lights_on(&state, "normal_room", true);
+        state.lock().unwrap().motion_snapshots.insert(
+            "motion_room".into(),
+            MotionSnapshot {
+                motion_active: true,
+                motion_owned: true,
+                remaining_secs: None,
+                timeout_secs: 300,
+                warning_active: false,
+            },
+        );
+
+        let result = do_fix_my_lights(&state, false).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["rooms_reset"], 1);
+        assert_eq!(parsed["motion_cleared"], 1);
+        assert!(
+            runtime.events().is_empty(),
+            "fix_my_lights should queue mass dispatches instead of calling runtime.handle_event inline"
+        );
+
+        let mut queued = Vec::new();
+        for _ in 0..2 {
+            match rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap() {
+                WorkItem::QueuedNodeAction {
+                    node_id, action, ..
+                } => queued.push((node_id, action)),
+                _ => panic!("expected queued button action"),
+            }
+        }
+        assert!(queued.contains(&("normal_room".into(), ButtonAction::Reset)));
+        assert!(queued.contains(&("motion_room".into(), ButtonAction::OffPress)));
+        assert_eq!(
+            observed_lights_on(&state.lock().unwrap(), "motion_room"),
+            Some(false)
+        );
+    }
+
+    #[test]
     fn fix_skips_disabled_motion_rooms() {
         let (state, runtime) = setup_state(vec![make_snapshot("disabled_motion", true, false)]);
 
@@ -11231,9 +11898,17 @@ mod tests {
 
     #[test]
     fn set_time_offset_succeeds() {
-        let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
+        let (state, rt) = setup_state(vec![make_snapshot("r1", false, false)]);
         let result = do_set_node_time_offset(&state, "r1", 30.0, false);
         assert!(result.is_ok());
+        assert!(
+            rt.time_offset_updates().is_empty(),
+            "preview offset should not dispatch through set_room_time_offset directly"
+        );
+        assert_eq!(
+            rt.engine_node_snapshot("r1").unwrap().time_offset_minutes,
+            30.0
+        );
     }
 
     #[test]
@@ -11241,6 +11916,15 @@ mod tests {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
         let result = do_set_node_time_offset(&state, "r1", -60.0, false);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn set_time_offset_rejects_device_node_target() {
+        let (state, _rt, device_id) = setup_attached_hue_light_with_group_dispatch();
+        let result = do_set_node_time_offset(&state, &device_id, 30.0, false);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("room nodes"));
     }
 
     #[test]
@@ -12068,14 +12752,14 @@ mod tests {
     fn absorb_offset_resets_room_offsets() {
         let mut snap = make_snapshot("r1", false, false);
         snap.time_offset_minutes = 30.0;
-        let (state, _rt) = setup_state(vec![snap]);
+        let (state, rt) = setup_state(vec![snap]);
 
         let result = do_absorb_time_offset(&state, None, 30.0);
         assert!(result.is_ok());
-
-        // MockRuntime's set_room_time_offset is a no-op, so we can't assert
-        // the offset was reset on the runtime — but we can verify the command
-        // completed without error.
+        assert_eq!(
+            rt.engine_node_snapshot("r1").unwrap().time_offset_minutes,
+            0.0
+        );
     }
 
     #[test]
@@ -12160,7 +12844,17 @@ mod tests {
         );
         assert_eq!(runtime.config_updates().len(), 1);
         assert_eq!(runtime.config_updates()[0].id, "day_alt");
-        assert_eq!(runtime.time_offset_updates(), vec![("r1".to_string(), 0.0)]);
+        assert!(
+            runtime.time_offset_updates().is_empty(),
+            "absorb reset should not dispatch through set_room_time_offset directly"
+        );
+        assert_eq!(
+            runtime
+                .engine_node_snapshot("r1")
+                .unwrap()
+                .time_offset_minutes,
+            0.0
+        );
     }
 
     #[test]
@@ -12194,7 +12888,17 @@ mod tests {
             runtime.config_updates().is_empty(),
             "non-super-gaussian target should not push config updates"
         );
-        assert_eq!(runtime.time_offset_updates(), vec![("r1".to_string(), 0.0)]);
+        assert!(
+            runtime.time_offset_updates().is_empty(),
+            "absorb reset should not dispatch through set_room_time_offset directly"
+        );
+        assert_eq!(
+            runtime
+                .engine_node_snapshot("r1")
+                .unwrap()
+                .time_offset_minutes,
+            0.0
+        );
     }
 
     #[test]
@@ -12228,7 +12932,17 @@ mod tests {
             runtime.config_updates().is_empty(),
             "non-super-gaussian target should not push config updates"
         );
-        assert_eq!(runtime.time_offset_updates(), vec![("r1".to_string(), 0.0)]);
+        assert!(
+            runtime.time_offset_updates().is_empty(),
+            "absorb reset should not dispatch through set_room_time_offset directly"
+        );
+        assert_eq!(
+            runtime
+                .engine_node_snapshot("r1")
+                .unwrap()
+                .time_offset_minutes,
+            0.0
+        );
     }
 
     #[test]

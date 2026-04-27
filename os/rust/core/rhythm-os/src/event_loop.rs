@@ -395,6 +395,8 @@ fn run_button_ingress_action(
     command_id: &str,
     persist_after: bool,
 ) {
+    // Physical button ingress is fast lane: execute inline on the ingress
+    // dispatch thread and never enqueue behind paced HTTP/system batches.
     if process_button_inline(state, node_id, action, device_id, command_id) && persist_after {
         {
             let runtime = {
@@ -462,6 +464,7 @@ fn spawn_button_ingress_action(
 }
 
 fn run_motion_turn_on_action(state: &SharedState, node_id: &str) {
+    // Motion ingress is fast lane for occupancy responsiveness.
     turn_on_node_inline(state, node_id);
 }
 
@@ -1319,25 +1322,27 @@ pub fn sync_motion_snapshots(state: &SharedState, motion: &MotionTimerState) {
 /// and deferred persist from inline button processing.
 pub fn process_work_item(state: &SharedState, item: WorkItem) {
     match item {
-        WorkItem::ButtonAction {
+        WorkItem::QueuedNodeAction {
             command_id,
             node_id,
             action,
             device_id,
+            dispatch_spacing,
+            persist_after,
         } => {
             let started = Instant::now();
             let (runtime, has_hub) = {
                 let Ok(s) = state.lock() else {
                     tracing::warn!(
                         target: "evt",
-                        event = "button_action_dropped",
+                        event = "queued_node_action_dropped",
                         command_id = %command_id,
                         action = ?action,
                         node_id = %node_id,
                         device_id = ?device_id.as_deref(),
                         source = "worker",
                         reason = "state_lock_poisoned",
-                        "Worker button action dropped"
+                        "Worker queued node action dropped"
                     );
                     return;
                 };
@@ -1346,7 +1351,7 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             let Some(runtime) = runtime else {
                 tracing::warn!(
                     target: "evt",
-                    event = "button_action_dropped",
+                    event = "queued_node_action_dropped",
                     command_id = %command_id,
                     action = ?action,
                     node_id = %node_id,
@@ -1354,7 +1359,7 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                     source = "worker",
                     has_hub,
                     reason = "no_runtime",
-                    "Worker button action dropped"
+                    "Worker queued node action dropped"
                 );
                 return;
             };
@@ -1365,11 +1370,17 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                 InputEvent::new(&node_id, action)
             };
 
+            crate::periodic::wait_for_node_dispatch_slot(
+                state,
+                &command_id,
+                &node_id,
+                dispatch_spacing,
+            );
             match runtime.handle_event(&event) {
                 Ok(turned_on) => {
                     tracing::info!(
                         target: "evt",
-                        event = "button_action_applied",
+                        event = "queued_node_action_applied",
                         command_id = %command_id,
                         action = ?action,
                         node_id = %node_id,
@@ -1377,7 +1388,7 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                         source = "worker",
                         turned_on,
                         latency_ms = started.elapsed().as_millis(),
-                        "Worker button action applied"
+                        "Worker queued node action applied"
                     );
                     crate::commands::sync_active_mode_from_runtime(state, &runtime);
                     if let Ok(mut s) = state.lock() {
@@ -1392,11 +1403,15 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                     crate::commands::update_lights_on_cache_for_runtime_node(
                         state, &runtime, &node_id, turned_on,
                     );
+                    crate::commands::emit_node_state_event_after_apply(state, &runtime, &node_id);
+                    if persist_after {
+                        crate::commands::persist_rooms(state);
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
                         target: "evt",
-                        event = "button_action_failed",
+                        event = "queued_node_action_failed",
                         command_id = %command_id,
                         action = ?action,
                         node_id = %node_id,
@@ -1404,18 +1419,144 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                         source = "worker",
                         latency_ms = started.elapsed().as_millis(),
                         error = %e,
-                        "Worker button action failed"
+                        "Worker queued node action failed"
                     );
                 }
             }
         }
-        WorkItem::ApplyNodeCommand { node_id, command } => {
+        WorkItem::SetNodeBrightness {
+            command_id,
+            node_id,
+            brightness,
+            dispatch_spacing,
+            persist_after,
+        } => {
+            crate::periodic::wait_for_node_dispatch_slot(
+                state,
+                &command_id,
+                &node_id,
+                dispatch_spacing,
+            );
+            if let Err(e) =
+                crate::commands::do_set_node_brightness(state, &node_id, brightness, persist_after)
+            {
+                tracing::warn!(
+                    target: "cmd",
+                    event = "set_node_brightness_failed",
+                    command_id = %command_id,
+                    node_id = %node_id,
+                    brightness,
+                    source = "worker",
+                    error = %e,
+                    "Worker set_node_brightness failed"
+                );
+            }
+        }
+        WorkItem::SetNodePreferences {
+            command_id,
+            node_id,
+            rhythm_enabled,
+            disabled,
+            target_state,
+            room_profile,
+            dispatch_spacing,
+            persist_after,
+        } => {
+            crate::periodic::wait_for_node_dispatch_slot(
+                state,
+                &command_id,
+                &node_id,
+                dispatch_spacing,
+            );
+            if let Err(e) = crate::commands::do_node_preferences_set(
+                state,
+                &node_id,
+                rhythm_enabled,
+                disabled,
+                target_state,
+                room_profile.as_ref(),
+                persist_after,
+            ) {
+                tracing::warn!(
+                    target: "cmd",
+                    event = "set_node_preferences_failed",
+                    command_id = %command_id,
+                    node_id = %node_id,
+                    source = "worker",
+                    error = %e,
+                    "Worker set_node_preferences failed"
+                );
+            }
+        }
+        WorkItem::LightsOffRoom {
+            command_id,
+            node_id,
+            transition_ms,
+            dispatch_spacing,
+        } => {
+            let started = Instant::now();
             let runtime = {
                 let Ok(s) = state.lock() else { return };
                 s.hub_runtime()
             };
             let Some(runtime) = runtime else { return };
 
+            crate::periodic::wait_for_node_dispatch_slot(
+                state,
+                &command_id,
+                &node_id,
+                dispatch_spacing,
+            );
+            match runtime.lights_off_room(&node_id, transition_ms) {
+                Ok(()) => {
+                    tracing::info!(
+                        target: "cmd",
+                        event = "lights_off_room_applied",
+                        command_id = %command_id,
+                        node_id = %node_id,
+                        transition_ms = ?transition_ms,
+                        source = "worker",
+                        latency_ms = started.elapsed().as_millis(),
+                        "Worker lights_off_room applied"
+                    );
+                    crate::commands::update_lights_on_cache_for_runtime_node(
+                        state, &runtime, &node_id, false,
+                    );
+                    crate::commands::emit_node_state_event_after_apply(state, &runtime, &node_id);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "cmd",
+                        event = "lights_off_room_failed",
+                        command_id = %command_id,
+                        node_id = %node_id,
+                        transition_ms = ?transition_ms,
+                        source = "worker",
+                        latency_ms = started.elapsed().as_millis(),
+                        error = %e,
+                        "Worker lights_off_room failed"
+                    );
+                }
+            }
+        }
+        WorkItem::ApplyNodeCommand {
+            command_id,
+            node_id,
+            command,
+            dispatch_spacing,
+        } => {
+            let runtime = {
+                let Ok(s) = state.lock() else { return };
+                s.hub_runtime()
+            };
+            let Some(runtime) = runtime else { return };
+
+            crate::periodic::wait_for_node_dispatch_slot(
+                state,
+                &command_id,
+                &node_id,
+                dispatch_spacing,
+            );
             crate::commands::log_room_command_dispatch(runtime.as_ref(), &node_id, &command);
             if let Err(e) = runtime.apply_room_command(&node_id, command) {
                 warn!(
@@ -1435,6 +1576,7 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             settings_node_id,
             current_hour,
             emit_parent_node_id,
+            dispatch_spacing,
         } => {
             let current_hour = state
                 .lock()
@@ -1461,6 +1603,12 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                 return;
             }
 
+            crate::periodic::wait_for_node_dispatch_slot(
+                state,
+                &command_id,
+                &node_id,
+                dispatch_spacing,
+            );
             let tick_started = Instant::now();
             let tick_result = runtime.periodic_tick_node(&node_id, &settings_node_id, current_hour);
             let elapsed = tick_started.elapsed();
@@ -2445,6 +2593,7 @@ mod tests {
                 settings_node_id: "room_a".into(),
                 current_hour: 20.25,
                 emit_parent_node_id: None,
+                dispatch_spacing: Duration::ZERO,
             },
         );
 

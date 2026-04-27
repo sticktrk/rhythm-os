@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use rhythm_core::{
     normalize_mode_transition_configs, ButtonAction, LightProfileConfig, ModeChangeCause,
-    ModeConfig, ModeTransitionConfig, RhythmMode, RuntimeConfig, RuntimeHandle,
+    ModeConfig, ModeTransitionConfig, RhythmMode, RoomModeState, RuntimeConfig, RuntimeHandle,
 };
 use rhythm_profile::profile_config::DEFAULT_FADE_MS;
 
@@ -49,12 +49,37 @@ pub struct HubStartupRetryState {
 /// Heavy operations (TLS to hub, float math, JSON formatting) are
 /// offloaded to a worker thread to avoid blocking the main/HTTP thread.
 pub enum WorkItem {
-    /// Execute a button action (involves TLS to hub).
-    ButtonAction {
+    /// Execute a queued node action from HTTP/system batch work.
+    ///
+    /// Hub button and motion ingress must not use this queue; those paths run
+    /// through the event-loop fast lane in `process_button_inline`,
+    /// `turn_on_node_inline`, and `dim_node_inline`.
+    QueuedNodeAction {
         command_id: String,
         node_id: String,
         action: ButtonAction,
         device_id: Option<String>,
+        dispatch_spacing: Duration,
+        persist_after: bool,
+    },
+    /// Set a node brightness through the runtime on the dispatch worker.
+    SetNodeBrightness {
+        command_id: String,
+        node_id: String,
+        brightness: u8,
+        dispatch_spacing: Duration,
+        persist_after: bool,
+    },
+    /// Apply node preference changes through the dispatch worker.
+    SetNodePreferences {
+        command_id: String,
+        node_id: String,
+        rhythm_enabled: Option<bool>,
+        disabled: Option<bool>,
+        target_state: Option<RoomModeState>,
+        room_profile: Option<crate::commands::RoomProfileSettingsPatch>,
+        dispatch_spacing: Duration,
+        persist_after: bool,
     },
     /// Apply a rendered lighting command to a single addressable node.
     ///
@@ -62,8 +87,20 @@ pub enum WorkItem {
     /// dispatched node-by-node on the background worker instead of blocking
     /// the caller while talking to hubs.
     ApplyNodeCommand {
+        command_id: String,
         node_id: String,
         command: rhythm_core::LightingCommand,
+        dispatch_spacing: Duration,
+    },
+    /// Turn a single node fully off, optionally with a fade.
+    ///
+    /// Used by batch mode/default operations that need hard-off semantics
+    /// without bypassing the queued node dispatch pacing.
+    LightsOffRoom {
+        command_id: String,
+        node_id: String,
+        transition_ms: Option<u32>,
+        dispatch_spacing: Duration,
     },
     /// Periodic update for a single schedulable light node.
     PeriodicNodeTick {
@@ -72,6 +109,7 @@ pub enum WorkItem {
         settings_node_id: String,
         current_hour: f32,
         emit_parent_node_id: Option<String>,
+        dispatch_spacing: Duration,
     },
     /// Deferred persist after inline button processing.
     DeferredPersist { node_id: String },
@@ -313,6 +351,8 @@ pub struct AppState {
     /// Used for latest-only coalescing so repeated scheduler passes update the
     /// most recent hour for a node without queueing duplicate work items.
     pub pending_periodic_ticks: HashMap<String, f32>,
+    /// Next reserved dispatch start slot for queued light-node work.
+    pub next_node_dispatch_at: Option<Instant>,
     /// Pending hub event receivers from hub reconfiguration (picked up by main loop).
     /// Multiple hubs produce multiple receivers — the event loop drains this Vec.
     pub pending_hub_event_rxs: Vec<std::sync::mpsc::Receiver<HubEvent>>,
@@ -493,6 +533,7 @@ impl Default for AppState {
             work_tx: None,
             periodic_work_tx: None,
             pending_periodic_ticks: HashMap::new(),
+            next_node_dispatch_at: None,
             pending_hub_event_rxs: Vec::new(),
             pending_motion_clear: Vec::new(),
             pending_motion_seed: Vec::new(),

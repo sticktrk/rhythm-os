@@ -92,10 +92,10 @@ enum PeriodicTimeCheckResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct PeriodicDispatchNode {
-    node_id: String,
-    settings_node_id: String,
-    emit_node_id: String,
+pub(crate) struct PeriodicDispatchNode {
+    pub(crate) node_id: String,
+    pub(crate) settings_node_id: String,
+    pub(crate) emit_node_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,7 +140,7 @@ fn periodic_settings_node_kind(
     }
 }
 
-fn periodic_dispatch_nodes_from_state(
+pub(crate) fn periodic_dispatch_nodes_from_state(
     state: &AppState,
     room_snapshots: &[rhythm_core::NodeSnapshot],
 ) -> Vec<PeriodicDispatchNode> {
@@ -349,7 +349,48 @@ pub(crate) fn effective_cycle_duration(
     Duration::from_secs(chosen_secs)
 }
 
-fn enqueue_periodic_tick(
+pub(crate) fn wait_for_node_dispatch_slot(
+    state: &SharedState,
+    command_id: &str,
+    node_id: &str,
+    spacing: Duration,
+) {
+    let sleep_for = {
+        let Ok(mut s) = state.lock() else {
+            return;
+        };
+        if spacing.is_zero() {
+            return;
+        }
+
+        let now = Instant::now();
+        match s.next_node_dispatch_at {
+            Some(next) if next > now => {
+                let sleep_for = next.duration_since(now);
+                s.next_node_dispatch_at = Some(next.checked_add(spacing).unwrap_or(next));
+                Some(sleep_for)
+            }
+            _ => {
+                s.next_node_dispatch_at = Some(now.checked_add(spacing).unwrap_or(now));
+                None
+            }
+        }
+    };
+
+    if let Some(sleep_for) = sleep_for {
+        tracing::debug!(
+            target: "sys",
+            event = "node_dispatch_paced",
+            command_id = %command_id,
+            node_id,
+            sleep_ms = sleep_for.as_millis(),
+            "Queued node dispatch paced"
+        );
+        thread::sleep(sleep_for);
+    }
+}
+
+pub(crate) fn enqueue_periodic_tick(
     state: &SharedState,
     tx: &std::sync::mpsc::SyncSender<WorkItem>,
     command_id: &str,
@@ -357,6 +398,7 @@ fn enqueue_periodic_tick(
     settings_node_id: &str,
     current_hour: f32,
     emit_parent_node_id: Option<&str>,
+    dispatch_spacing: Duration,
 ) -> bool {
     let should_enqueue = {
         let Ok(mut s) = state.lock() else {
@@ -395,6 +437,7 @@ fn enqueue_periodic_tick(
         settings_node_id: settings_node_id.to_string(),
         current_hour,
         emit_parent_node_id: emit_parent_node_id.map(str::to_string),
+        dispatch_spacing,
     }) {
         Ok(()) => true,
         Err(_) => {
@@ -673,6 +716,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                     &node.settings_node_id,
                     room_hour,
                     emit_parent_node_id,
+                    phase_gap,
                 ) {
                     tracing::warn!(
                         target: "sys",
@@ -704,6 +748,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                     &node.settings_node_id,
                     room_hour,
                     emit_parent_node_id,
+                    phase_gap,
                 ) {
                     tracing::warn!(
                         target: "sys",
@@ -1709,7 +1754,8 @@ mod tests {
             "node-1",
             "room1",
             10.0,
-            Some("room-parent")
+            Some("room-parent"),
+            Duration::from_millis(250),
         ));
         assert!(enqueue_periodic_tick(
             &state,
@@ -1718,7 +1764,8 @@ mod tests {
             "node-1",
             "room1",
             10.5,
-            Some("room-parent")
+            Some("room-parent"),
+            Duration::from_millis(250),
         ));
 
         let item = rx.try_recv().expect("first periodic item should be queued");
@@ -1729,6 +1776,7 @@ mod tests {
                 settings_node_id,
                 current_hour,
                 emit_parent_node_id,
+                ..
             } => {
                 assert_eq!(node_id, "node-1");
                 assert_eq!(settings_node_id, "room1");
