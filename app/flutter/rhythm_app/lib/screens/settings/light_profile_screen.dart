@@ -134,7 +134,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   double _timeOffsetMinutes = 0;
   double _sliderFraction = 0.5; // raw 0..1 position on the track
   bool _isDraggingTime = false;
-  bool _timeOffsetApplied = false; // true after user taps Apply
+  bool _timeOffsetApplied = false;
+  bool _timeOffsetPreviewActive = false;
   _TimeOffsetDispatchAction? _timeOffsetDispatchAction;
   bool _curvePreviewRefreshQueued = false;
   bool _curvePreviewRefreshInFlight = false;
@@ -723,6 +724,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
 
   bool get _hasTimeOffset => _timeOffsetMinutes.abs() > 0.5;
 
+  bool get _showTimeOffsetActions => _hasTimeOffset || _timeOffsetPreviewActive;
+
   String _formatHour(double hour) {
     final h = hour.floor() % 24;
     final m = ((hour - hour.floor()) * 60).round();
@@ -825,17 +828,13 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         () => _timeOffsetDispatchAction = _TimeOffsetDispatchAction.preview);
 
     try {
-      final rooms = _timeOffsetRooms();
-      final result = await _sendTimeOffset(
-        rooms: rooms,
-        offsetMinutes: previewOffset,
-      );
-      await _waitForTimeOffsetDispatch(
-        result,
-        fallbackDispatchCount: rooms.length,
-      );
+      final result = await _sendTimeOffset(offsetMinutes: previewOffset);
+      await _waitForTimeOffsetDispatch(result);
       if (!mounted) return;
-      setState(() => _timeOffsetApplied = true);
+      setState(() {
+        _timeOffsetApplied = _hasTimeOffset;
+        _timeOffsetPreviewActive = _hasTimeOffset;
+      });
       AnalyticsService().logLightProfilePreviewAction(
         profile: _selectedProfileId,
         action: 'apply',
@@ -848,32 +847,18 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     }
   }
 
-  List<RoomDto> _timeOffsetRooms() {
-    return context
-        .read<RoomProvider>()
-        .rooms
-        .where((room) => room.id.isNotEmpty)
-        .toList(growable: false);
-  }
-
   Future<sdk.RhythmDispatchResult> _sendTimeOffset({
-    required List<RoomDto> rooms,
     required double offsetMinutes,
   }) {
     final api = context.read<ServerSyncProvider>().api;
-    if (rooms.isEmpty) return Future.value(const sdk.RhythmDispatchResult());
-    return api.roomOffsetBatchResult([
-      for (final room in rooms) (roomId: room.id, timeOffset: offsetMinutes),
-    ]);
+    return api.nodeOffsetPreviewResult(timeOffset: offsetMinutes);
   }
 
   Future<void> _waitForTimeOffsetDispatch(
-    sdk.RhythmDispatchResult result, {
-    required int fallbackDispatchCount,
-  }) async {
+      sdk.RhythmDispatchResult result) async {
     final duration = result.estimatedDispatchDuration ??
         (result.queued
-            ? _dispatchDurationForCount(fallbackDispatchCount)
+            ? _dispatchDurationForCount(result.dispatchCount ?? 1)
             : null);
     if (duration == null || duration <= Duration.zero) return;
     await Future<void>.delayed(duration);
@@ -889,22 +874,16 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   Future<void> _resetTimeOffset() async {
     if (_timeOffsetDispatching) return;
     final previousOffset = _timeOffsetMinutes;
-    final rooms = _timeOffsetRooms();
     setState(() {
       _timeOffsetMinutes = 0;
       _sliderFraction = _hourToNowFraction();
       _timeOffsetApplied = false;
+      _timeOffsetPreviewActive = false;
       _timeOffsetDispatchAction = _TimeOffsetDispatchAction.reset;
     });
     try {
-      final result = await _sendTimeOffset(
-        rooms: rooms,
-        offsetMinutes: 0,
-      );
-      await _waitForTimeOffsetDispatch(
-        result,
-        fallbackDispatchCount: rooms.length,
-      );
+      final result = await _sendTimeOffset(offsetMinutes: 0);
+      await _waitForTimeOffsetDispatch(result);
       AnalyticsService().logLightProfilePreviewAction(
         profile: _selectedProfileId,
         action: 'reset',
@@ -920,7 +899,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   Future<void> _absorbTimeOffset() async {
     if (_timeOffsetDispatching) return;
     final absorbedOffset = _timeOffsetMinutes;
-    final rooms = _timeOffsetRooms();
     setState(
         () => _timeOffsetDispatchAction = _TimeOffsetDispatchAction.absorb);
 
@@ -937,15 +915,13 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         await _syncActiveConfigModel(sdkConfig);
         await _loadCurveData(profileId: _selectedProfileId);
       }
-      await _waitForTimeOffsetDispatch(
-        result.dispatch,
-        fallbackDispatchCount: rooms.length,
-      );
+      await _waitForTimeOffsetDispatch(result.dispatch);
       if (!mounted) return;
       setState(() {
         _timeOffsetMinutes = 0;
         _sliderFraction = _hourToNowFraction();
         _timeOffsetApplied = false;
+        _timeOffsetPreviewActive = false;
         _curveConfigDirty = false;
       });
       AnalyticsService().logLightProfilePreviewAction(
@@ -2562,32 +2538,41 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         AnimatedSize(
           duration: const Duration(milliseconds: 300),
           curve: Curves.easeOutCubic,
-          child: _hasTimeOffset
+          child: _showTimeOffsetActions
               ? Padding(
                   padding: const EdgeInsets.only(top: 16),
-                  child: _timeOffsetApplied
-                      ? Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            _buildResetTimeButton(),
-                            if (!_isSleepProfile) ...[
-                              const SizedBox(width: 12),
-                              _buildAbsorbTimeButton(),
-                            ],
-                          ],
-                        )
-                      : Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            _buildClearTimeButton(),
-                            const SizedBox(width: 12),
-                            _buildApplyTimeButton(),
-                          ],
-                        ),
+                  child: _buildTimeOffsetActions(),
                 )
               : const SizedBox.shrink(),
         ),
       ],
+    );
+  }
+
+  Widget _buildTimeOffsetActions() {
+    final children = <Widget>[];
+
+    if (_timeOffsetPreviewActive) {
+      children.add(_buildResetTimeButton());
+      if (_timeOffsetApplied && !_isSleepProfile) {
+        children
+          ..add(const SizedBox(width: 12))
+          ..add(_buildAbsorbTimeButton());
+      } else if (_hasTimeOffset) {
+        children
+          ..add(const SizedBox(width: 12))
+          ..add(_buildApplyTimeButton());
+      }
+    } else {
+      children
+        ..add(_buildClearTimeButton())
+        ..add(const SizedBox(width: 12))
+        ..add(_buildApplyTimeButton());
+    }
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: children,
     );
   }
 
@@ -2644,6 +2629,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                 _timeOffsetMinutes = 0;
                 _sliderFraction = _hourToNowFraction();
                 _timeOffsetApplied = false;
+                _timeOffsetPreviewActive = false;
               });
             },
       child: Container(

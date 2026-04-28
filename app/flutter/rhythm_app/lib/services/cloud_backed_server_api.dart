@@ -161,6 +161,18 @@ class CloudBackedServerApi {
     );
   }
 
+  Future<RhythmDispatchResult> nodeOffsetPreviewResult({
+    required double timeOffset,
+    List<String>? nodes,
+    int? dispatchSpacingMs,
+  }) {
+    return _delegate.nodeOffsetPreviewResult(
+      timeOffset: timeOffset,
+      nodes: nodes,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
+  }
+
   Future<void> roomPreferencesSet({
     required String roomId,
     bool? rhythmEnabled,
