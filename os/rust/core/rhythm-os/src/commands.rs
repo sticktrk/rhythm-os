@@ -187,6 +187,7 @@ struct ModeDefaultApplyContext<'a> {
     lighting: RoomLightingContext<'a>,
     transition: Option<&'a ModeTransitionConfig>,
     transition_started_at: chrono::NaiveDateTime,
+    dispatch_generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1459,6 +1460,7 @@ pub(crate) fn sync_active_mode_from_runtime(
             s.last_active_mode_transition_id = None;
             s.last_active_mode_change_utc_ms = Some(chrono::Utc::now().timestamp_millis());
             s.sync_active_mode_runtime_overrides();
+            s.invalidate_queued_light_dispatches();
             persist_settings_locked(&s);
         } else if matched_mode.is_none() {
             debug!(
@@ -2756,7 +2758,7 @@ fn clear_factory_reset_ephemeral_state(state: &SharedState) -> Result<()> {
     s.last_check_hour = None;
     s.last_check_instant = None;
     s.last_check_utc_offset_hours = None;
-    s.pending_periodic_ticks.clear();
+    s.invalidate_queued_light_dispatches();
     s.pending_hub_event_rxs.clear();
     s.pending_motion_clear.clear();
     s.pending_motion_seed.clear();
@@ -3073,6 +3075,7 @@ fn restore_backup_runtime_state(
     s.last_active_mode_transition_id = runtime_state.last_change_transition_id.clone();
     s.last_active_mode_change_utc_ms = runtime_state.last_change_epoch_ms;
     s.sync_active_mode_runtime_overrides();
+    s.invalidate_queued_light_dispatches();
     persist_settings_locked(&s);
     Ok(())
 }
@@ -3359,6 +3362,7 @@ fn apply_room_mode_defaults(
                 node_id: room_id.clone(),
                 transition_ms: *transition_ms,
                 dispatch_spacing: default_http_batch_dispatch_spacing(),
+                dispatch_generation: ctx.dispatch_generation,
             })
             .collect();
         let queued = match queue_node_dispatch_work_items(
@@ -3412,10 +3416,22 @@ fn apply_room_commands_inline(
     runtime: &Arc<dyn RuntimeHandle>,
     room_commands: Vec<(String, LightingCommand)>,
     phase_gap: Duration,
+    dispatch_generation: u64,
 ) {
     let room_count = room_commands.len();
 
     for (idx, (room_id, command)) in room_commands.into_iter().enumerate() {
+        if !crate::periodic::light_dispatch_generation_current(state, dispatch_generation) {
+            tracing::debug!(
+                target: "cmd",
+                event = "apply_node_command_skipped",
+                node_id = %room_id,
+                dispatch_generation,
+                reason = "stale_dispatch_generation",
+                "Skipping stale inline room command"
+            );
+            return;
+        }
         log_room_command_dispatch(runtime.as_ref(), &room_id, &command);
         if let Err(e) = runtime.apply_room_command(&room_id, command) {
             warn!(target: "cmd", "active_mode_apply: room '{}' failed: {}", room_id, e);
@@ -3556,6 +3572,7 @@ fn dispatch_room_commands(
     runtime: &Arc<dyn RuntimeHandle>,
     mut room_commands: Vec<(String, LightingCommand)>,
     cycle_duration: Duration,
+    dispatch_generation: u64,
 ) {
     if room_commands.is_empty() {
         return;
@@ -3570,22 +3587,44 @@ fn dispatch_room_commands(
         .and_then(|s| s.periodic_work_tx.clone().or_else(|| s.work_tx.clone()));
 
     let Some(tx) = dispatch_tx else {
-        apply_room_commands_inline(state, runtime, room_commands, phase_gap);
+        apply_room_commands_inline(
+            state,
+            runtime,
+            room_commands,
+            phase_gap,
+            dispatch_generation,
+        );
         return;
     };
 
     let room_count = room_commands.len();
     let fallback_commands = room_commands.clone();
+    let dispatcher_state = state.clone();
     if let Err(e) = std::thread::Builder::new()
         .name("room-dispatch".to_string())
         .spawn(move || {
             for (idx, (node_id, command)) in room_commands.into_iter().enumerate() {
+                if !crate::periodic::light_dispatch_generation_current(
+                    &dispatcher_state,
+                    dispatch_generation,
+                ) {
+                    tracing::debug!(
+                        target: "cmd",
+                        event = "apply_node_command_skipped",
+                        node_id = %node_id,
+                        dispatch_generation,
+                        reason = "stale_dispatch_generation",
+                        "Stopping stale room dispatcher"
+                    );
+                    return;
+                }
                 if tx
                     .send(crate::state::WorkItem::ApplyNodeCommand {
                         command_id: crate::logging::next_command_id("apply-node-command"),
                         node_id,
                         command,
                         dispatch_spacing: phase_gap,
+                        dispatch_generation,
                     })
                     .is_err()
                 {
@@ -3603,7 +3642,13 @@ fn dispatch_room_commands(
             "active_mode_apply: failed to spawn room dispatcher thread: {}",
             e
         );
-        apply_room_commands_inline(state, runtime, fallback_commands, phase_gap);
+        apply_room_commands_inline(
+            state,
+            runtime,
+            fallback_commands,
+            phase_gap,
+            dispatch_generation,
+        );
     }
 }
 
@@ -3760,6 +3805,7 @@ fn apply_active_mode_outputs(
     target_mode: RhythmMode,
     transition: Option<ModeTransitionConfig>,
     apply_scope: ModeOutputApplyScope,
+    dispatch_generation: u64,
 ) {
     let (
         runtime,
@@ -3830,6 +3876,7 @@ fn apply_active_mode_outputs(
             lighting,
             transition: transition.as_ref(),
             transition_started_at,
+            dispatch_generation,
         },
         &snapshots,
     );
@@ -3995,7 +4042,13 @@ fn apply_active_mode_outputs(
         unresolved_rooms
     );
     if let Some(cycle_duration) = cycle_duration {
-        dispatch_room_commands(state, &runtime, room_commands, cycle_duration);
+        dispatch_room_commands(
+            state,
+            &runtime,
+            room_commands,
+            cycle_duration,
+            dispatch_generation,
+        );
     }
 }
 
@@ -4026,6 +4079,7 @@ fn do_settings_set_internal(
         selected_mode,
         mode_changed,
         reapply_scope,
+        dispatch_generation,
         mode_change,
     ) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -4073,6 +4127,7 @@ fn do_settings_set_internal(
         let mut updated_mode_configs = None;
         let mut runtimes = Vec::new();
         let mut reapply_scope = ModeOutputApplyScope::default();
+        let mut dispatch_generation = s.light_dispatch_generation;
         if should_reapply_mode_outputs {
             s.sync_active_mode_runtime_overrides();
             active_profile_id = Some(s.active_mode_profile_id());
@@ -4093,6 +4148,17 @@ fn do_settings_set_internal(
                 .filter_map(|hub| hub.runtime.clone())
                 .collect();
         }
+        if mode_changed || force_reapply_outputs || !reapply_scope.is_empty() {
+            dispatch_generation = s.invalidate_queued_light_dispatches();
+            tracing::debug!(
+                target: "cmd",
+                event = "queued_light_dispatches_invalidated",
+                previous_mode = ?previous_mode,
+                selected_mode = ?selected_mode,
+                dispatch_generation,
+                "Invalidated queued generated light dispatches"
+            );
+        }
 
         persist_settings_locked(&s);
         (
@@ -4104,6 +4170,7 @@ fn do_settings_set_internal(
             selected_mode,
             mode_changed,
             reapply_scope,
+            dispatch_generation,
             mode_change,
         )
     };
@@ -4223,6 +4290,7 @@ fn do_settings_set_internal(
                 selected_mode,
                 transition_for_apply,
                 reapply_scope,
+                dispatch_generation,
             );
         } else {
             debug!(
@@ -5396,9 +5464,12 @@ where
         return Ok(0);
     }
 
-    let dispatch_tx = {
+    let (dispatch_tx, dispatch_generation) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.periodic_work_tx.clone().or_else(|| s.work_tx.clone())
+        (
+            s.periodic_work_tx.clone().or_else(|| s.work_tx.clone()),
+            s.light_dispatch_generation,
+        )
     };
 
     let command_id = crate::logging::next_command_id("manual-preview");
@@ -5422,6 +5493,7 @@ where
                 &command_id,
                 &node.node_id,
                 &node.settings_node_id,
+                dispatch_generation,
                 current_hour,
                 emit_parent_node_id,
                 dispatch_spacing,
@@ -12045,6 +12117,25 @@ mod tests {
             state.lock().unwrap().runtime_config.update_interval_secs,
             23
         );
+    }
+
+    #[test]
+    fn active_mode_change_invalidates_queued_light_dispatches() {
+        let (state, _rt) = setup_state(vec![]);
+        let previous_generation = {
+            let mut s = state.lock().unwrap();
+            s.pending_periodic_ticks.insert("room1".into(), 12.0);
+            s.next_node_dispatch_at =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
+            s.light_dispatch_generation
+        };
+
+        do_set_active_mode(&state, RhythmMode::Sleep).unwrap();
+
+        let s = state.lock().unwrap();
+        assert_ne!(s.light_dispatch_generation, previous_generation);
+        assert!(s.pending_periodic_ticks.is_empty());
+        assert!(s.next_node_dispatch_at.is_none());
     }
 
     #[test]

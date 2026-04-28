@@ -91,6 +91,7 @@ pub enum WorkItem {
         node_id: String,
         command: rhythm_core::LightingCommand,
         dispatch_spacing: Duration,
+        dispatch_generation: u64,
     },
     /// Turn a single node fully off, optionally with a fade.
     ///
@@ -101,6 +102,7 @@ pub enum WorkItem {
         node_id: String,
         transition_ms: Option<u32>,
         dispatch_spacing: Duration,
+        dispatch_generation: u64,
     },
     /// Periodic update for a single schedulable light node.
     PeriodicNodeTick {
@@ -110,6 +112,7 @@ pub enum WorkItem {
         current_hour: f32,
         emit_parent_node_id: Option<String>,
         dispatch_spacing: Duration,
+        dispatch_generation: u64,
     },
     /// Deferred persist after inline button processing.
     DeferredPersist { node_id: String },
@@ -351,6 +354,11 @@ pub struct AppState {
     /// Used for latest-only coalescing so repeated scheduler passes update the
     /// most recent hour for a node without queueing duplicate work items.
     pub pending_periodic_ticks: HashMap<String, f32>,
+    /// Generation token for queued light-output dispatches.
+    ///
+    /// Incrementing this invalidates already queued periodic and mode-apply
+    /// light work so an active-mode change cannot leak stale output commands.
+    pub light_dispatch_generation: u64,
     /// Next reserved dispatch start slot for queued light-node work.
     pub next_node_dispatch_at: Option<Instant>,
     /// Pending hub event receivers from hub reconfiguration (picked up by main loop).
@@ -533,6 +541,7 @@ impl Default for AppState {
             work_tx: None,
             periodic_work_tx: None,
             pending_periodic_ticks: HashMap::new(),
+            light_dispatch_generation: 0,
             next_node_dispatch_at: None,
             pending_hub_event_rxs: Vec::new(),
             pending_motion_clear: Vec::new(),
@@ -702,6 +711,14 @@ impl AppState {
                 .resolve(REF_HOUR)
                 .unwrap_or(DEFAULT_FADE_MS as u32);
         }
+    }
+
+    /// Invalidate queued generated light-output work and reset dispatch pacing.
+    pub fn invalidate_queued_light_dispatches(&mut self) -> u64 {
+        self.light_dispatch_generation = self.light_dispatch_generation.wrapping_add(1);
+        self.pending_periodic_ticks.clear();
+        self.next_node_dispatch_at = None;
+        self.light_dispatch_generation
     }
 
     /// Get the type-erased runtime handle for the first available hub.

@@ -1493,20 +1493,45 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             node_id,
             transition_ms,
             dispatch_spacing,
+            dispatch_generation,
         } => {
             let started = Instant::now();
+            if !crate::periodic::light_dispatch_generation_current(state, dispatch_generation) {
+                tracing::debug!(
+                    target: "cmd",
+                    event = "lights_off_room_skipped",
+                    command_id = %command_id,
+                    node_id = %node_id,
+                    dispatch_generation,
+                    reason = "stale_dispatch_generation",
+                    "Skipping stale lights_off_room"
+                );
+                return;
+            }
             let runtime = {
                 let Ok(s) = state.lock() else { return };
                 s.hub_runtime()
             };
             let Some(runtime) = runtime else { return };
 
-            crate::periodic::wait_for_node_dispatch_slot(
+            if !crate::periodic::wait_for_node_dispatch_slot_if_current(
                 state,
                 &command_id,
                 &node_id,
                 dispatch_spacing,
-            );
+                dispatch_generation,
+            ) {
+                tracing::debug!(
+                    target: "cmd",
+                    event = "lights_off_room_skipped",
+                    command_id = %command_id,
+                    node_id = %node_id,
+                    dispatch_generation,
+                    reason = "stale_dispatch_generation_after_pace",
+                    "Skipping stale lights_off_room"
+                );
+                return;
+            }
             match runtime.lights_off_room(&node_id, transition_ms) {
                 Ok(()) => {
                     tracing::info!(
@@ -1544,19 +1569,44 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             node_id,
             command,
             dispatch_spacing,
+            dispatch_generation,
         } => {
+            if !crate::periodic::light_dispatch_generation_current(state, dispatch_generation) {
+                tracing::debug!(
+                    target: "cmd",
+                    event = "apply_node_command_skipped",
+                    command_id = %command_id,
+                    node_id = %node_id,
+                    dispatch_generation,
+                    reason = "stale_dispatch_generation",
+                    "Skipping stale apply_node_command"
+                );
+                return;
+            }
             let runtime = {
                 let Ok(s) = state.lock() else { return };
                 s.hub_runtime()
             };
             let Some(runtime) = runtime else { return };
 
-            crate::periodic::wait_for_node_dispatch_slot(
+            if !crate::periodic::wait_for_node_dispatch_slot_if_current(
                 state,
                 &command_id,
                 &node_id,
                 dispatch_spacing,
-            );
+                dispatch_generation,
+            ) {
+                tracing::debug!(
+                    target: "cmd",
+                    event = "apply_node_command_skipped",
+                    command_id = %command_id,
+                    node_id = %node_id,
+                    dispatch_generation,
+                    reason = "stale_dispatch_generation_after_pace",
+                    "Skipping stale apply_node_command"
+                );
+                return;
+            }
             crate::commands::log_room_command_dispatch(runtime.as_ref(), &node_id, &command);
             if let Err(e) = runtime.apply_room_command(&node_id, command) {
                 warn!(
@@ -1577,12 +1627,28 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             current_hour,
             emit_parent_node_id,
             dispatch_spacing,
+            dispatch_generation,
         } => {
-            let current_hour = state
-                .lock()
-                .ok()
-                .and_then(|mut s| s.pending_periodic_ticks.remove(&node_id))
-                .unwrap_or(current_hour);
+            let current_hour = {
+                let Ok(mut s) = state.lock() else { return };
+                if s.light_dispatch_generation != dispatch_generation {
+                    tracing::debug!(
+                        target: "sys",
+                        event = "periodic_node_tick_skipped",
+                        command_id = %command_id,
+                        node_id = %node_id,
+                        settings_node_id = %settings_node_id,
+                        dispatch_generation,
+                        current_generation = s.light_dispatch_generation,
+                        reason = "stale_dispatch_generation",
+                        "Skipping stale periodic tick"
+                    );
+                    return;
+                }
+                s.pending_periodic_ticks
+                    .remove(&node_id)
+                    .unwrap_or(current_hour)
+            };
 
             let runtime = {
                 let Ok(s) = state.lock() else { return };
@@ -1603,12 +1669,25 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                 return;
             }
 
-            crate::periodic::wait_for_node_dispatch_slot(
+            if !crate::periodic::wait_for_node_dispatch_slot_if_current(
                 state,
                 &command_id,
                 &node_id,
                 dispatch_spacing,
-            );
+                dispatch_generation,
+            ) {
+                tracing::debug!(
+                    target: "sys",
+                    event = "periodic_node_tick_skipped",
+                    command_id = %command_id,
+                    node_id = %node_id,
+                    settings_node_id = %settings_node_id,
+                    dispatch_generation,
+                    reason = "stale_dispatch_generation_after_pace",
+                    "Skipping stale periodic tick"
+                );
+                return;
+            }
             let tick_started = Instant::now();
             let tick_result = runtime.periodic_tick_node(&node_id, &settings_node_id, current_hour);
             let elapsed = tick_started.elapsed();
@@ -2584,6 +2663,7 @@ mod tests {
         let state = make_state_with_runtime(runtime);
         let internal_node_id =
             "__rhythm_light_node__|room=room_a|kind=group|hub=hue@bridge|source=hue-room";
+        let dispatch_generation = state.lock().unwrap().light_dispatch_generation;
 
         process_work_item(
             &state,
@@ -2594,6 +2674,7 @@ mod tests {
                 current_hour: 20.25,
                 emit_parent_node_id: None,
                 dispatch_spacing: Duration::ZERO,
+                dispatch_generation,
             },
         );
 
@@ -2601,6 +2682,57 @@ mod tests {
             calls.lock().unwrap().as_slice(),
             &[(internal_node_id.to_string(), "room_a".to_string(), 20.25)]
         );
+    }
+
+    #[test]
+    fn periodic_worker_skips_stale_generation_without_clearing_current_pending_tick() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(PeriodicWorkerTestRuntime {
+            snapshots: vec![RoomSnapshot {
+                id: "room_a".into(),
+                name: "Room A".into(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                hard_off: false,
+                profile_settings: RoomProfileSettings::default(),
+            }],
+            periodic_tick_node_calls: calls.clone(),
+        });
+        let state = make_state_with_runtime(runtime);
+        let stale_generation = state.lock().unwrap().light_dispatch_generation;
+        let internal_node_id =
+            "__rhythm_light_node__|room=room_a|kind=group|hub=hue@bridge|source=hue-room";
+        {
+            let mut s = state.lock().unwrap();
+            s.invalidate_queued_light_dispatches();
+            s.pending_periodic_ticks
+                .insert(internal_node_id.to_string(), 21.0);
+        }
+
+        process_work_item(
+            &state,
+            WorkItem::PeriodicNodeTick {
+                command_id: "periodic-stale".into(),
+                node_id: internal_node_id.into(),
+                settings_node_id: "room_a".into(),
+                current_hour: 20.25,
+                emit_parent_node_id: None,
+                dispatch_spacing: Duration::ZERO,
+                dispatch_generation: stale_generation,
+            },
+        );
+
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(state
+            .lock()
+            .unwrap()
+            .pending_periodic_ticks
+            .contains_key(internal_node_id));
     }
 
     #[test]

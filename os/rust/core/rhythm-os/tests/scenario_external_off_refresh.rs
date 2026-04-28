@@ -57,6 +57,7 @@ fn periodic_tick_refreshes_state_snapshot_and_node_event_after_external_off() {
 
     let (tx, mut rx) = tokio::sync::broadcast::channel(4);
     harness.state.lock().unwrap().event_tx = Some(tx);
+    let dispatch_generation = harness.state.lock().unwrap().light_dispatch_generation;
 
     event_loop::process_work_item(
         &harness.state,
@@ -67,6 +68,7 @@ fn periodic_tick_refreshes_state_snapshot_and_node_event_after_external_off() {
             current_hour: 14.0,
             emit_parent_node_id: None,
             dispatch_spacing: std::time::Duration::ZERO,
+            dispatch_generation,
         },
     );
 

@@ -409,12 +409,79 @@ pub(crate) fn wait_for_node_dispatch_slot(
     }
 }
 
+pub(crate) fn light_dispatch_generation_current(
+    state: &SharedState,
+    dispatch_generation: u64,
+) -> bool {
+    state
+        .lock()
+        .ok()
+        .is_some_and(|s| s.light_dispatch_generation == dispatch_generation)
+}
+
+pub(crate) fn wait_for_node_dispatch_slot_if_current(
+    state: &SharedState,
+    command_id: &str,
+    node_id: &str,
+    spacing: Duration,
+    dispatch_generation: u64,
+) -> bool {
+    let sleep_for = {
+        let Ok(mut s) = state.lock() else {
+            return false;
+        };
+        if s.light_dispatch_generation != dispatch_generation {
+            return false;
+        }
+        if spacing.is_zero() {
+            return true;
+        }
+
+        let now = Instant::now();
+        match s.next_node_dispatch_at {
+            Some(next) if next > now => {
+                let sleep_for = next.duration_since(now);
+                s.next_node_dispatch_at = Some(next.checked_add(spacing).unwrap_or(next));
+                Some(sleep_for)
+            }
+            _ => {
+                s.next_node_dispatch_at = Some(now.checked_add(spacing).unwrap_or(now));
+                None
+            }
+        }
+    };
+
+    if let Some(sleep_for) = sleep_for {
+        tracing::debug!(
+            target: "sys",
+            event = "node_dispatch_paced",
+            command_id = %command_id,
+            node_id,
+            sleep_ms = sleep_for.as_millis(),
+            dispatch_generation,
+            "Queued node dispatch paced"
+        );
+
+        let started = Instant::now();
+        while started.elapsed() < sleep_for {
+            if !light_dispatch_generation_current(state, dispatch_generation) {
+                return false;
+            }
+            let remaining = sleep_for.saturating_sub(started.elapsed());
+            thread::sleep(remaining.min(Duration::from_millis(100)));
+        }
+    }
+
+    light_dispatch_generation_current(state, dispatch_generation)
+}
+
 pub(crate) fn enqueue_periodic_tick(
     state: &SharedState,
     tx: &std::sync::mpsc::SyncSender<WorkItem>,
     command_id: &str,
     node_id: &str,
     settings_node_id: &str,
+    dispatch_generation: u64,
     current_hour: f32,
     emit_parent_node_id: Option<&str>,
     dispatch_spacing: Duration,
@@ -423,6 +490,20 @@ pub(crate) fn enqueue_periodic_tick(
         let Ok(mut s) = state.lock() else {
             return false;
         };
+        if s.light_dispatch_generation != dispatch_generation {
+            tracing::debug!(
+                target: "sys",
+                event = "periodic_tick_skipped",
+                command_id = %command_id,
+                node_id = %node_id,
+                settings_node_id = %settings_node_id,
+                dispatch_generation,
+                current_generation = s.light_dispatch_generation,
+                reason = "stale_dispatch_generation",
+                "Periodic tick skipped before enqueue"
+            );
+            return true;
+        }
         match s.pending_periodic_ticks.entry(node_id.to_string()) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 let previous_hour = *entry.get();
@@ -457,6 +538,7 @@ pub(crate) fn enqueue_periodic_tick(
         current_hour,
         emit_parent_node_id: emit_parent_node_id.map(str::to_string),
         dispatch_spacing,
+        dispatch_generation,
     }) {
         Ok(()) => true,
         Err(_) => {
@@ -501,6 +583,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             update_interval,
             timezone_name,
             power_save,
+            dispatch_generation,
         ) = {
             let Ok(s) = state.lock() else {
                 thread::sleep(Duration::from_secs(60));
@@ -524,6 +607,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                 Duration::from_secs(s.runtime_config.update_interval_secs),
                 s.timezone_name.clone(),
                 s.power_save,
+                s.light_dispatch_generation,
             )
         };
 
@@ -721,6 +805,16 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
         // Dispatch per-node ticks with stable staggering across the cycle.
         if let Some(ref tx) = periodic_work_tx {
             for (idx, node) in periodic_nodes.iter().enumerate() {
+                if !light_dispatch_generation_current(&state, dispatch_generation) {
+                    tracing::debug!(
+                        target: "sys",
+                        event = "periodic_cycle_invalidated",
+                        command_id = %command_id,
+                        dispatch_generation,
+                        "Stopping stale periodic cycle"
+                    );
+                    break;
+                }
                 let room_hour = SystemTimeProvider::new(utc_offset).current_hour();
                 let emit_parent_node_id = last_node_index_by_emit_target
                     .get(&node.emit_node_id)
@@ -733,6 +827,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                     &command_id,
                     &node.node_id,
                     &node.settings_node_id,
+                    dispatch_generation,
                     room_hour,
                     emit_parent_node_id,
                     phase_gap,
@@ -753,6 +848,16 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             }
         } else if let Some(ref tx) = work_tx {
             for (idx, node) in periodic_nodes.iter().enumerate() {
+                if !light_dispatch_generation_current(&state, dispatch_generation) {
+                    tracing::debug!(
+                        target: "sys",
+                        event = "periodic_cycle_invalidated",
+                        command_id = %command_id,
+                        dispatch_generation,
+                        "Stopping stale periodic cycle"
+                    );
+                    break;
+                }
                 let room_hour = SystemTimeProvider::new(utc_offset).current_hour();
                 let emit_parent_node_id = last_node_index_by_emit_target
                     .get(&node.emit_node_id)
@@ -765,6 +870,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                     &command_id,
                     &node.node_id,
                     &node.settings_node_id,
+                    dispatch_generation,
                     room_hour,
                     emit_parent_node_id,
                     phase_gap,
@@ -1765,6 +1871,7 @@ mod tests {
     fn enqueue_periodic_tick_coalesces_latest_hour() {
         let state = make_state();
         let (tx, rx) = std::sync::mpsc::sync_channel::<WorkItem>(4);
+        let dispatch_generation = state.lock().unwrap().light_dispatch_generation;
 
         assert!(enqueue_periodic_tick(
             &state,
@@ -1772,6 +1879,7 @@ mod tests {
             "periodic-test-1",
             "node-1",
             "room1",
+            dispatch_generation,
             10.0,
             Some("room-parent"),
             Duration::from_millis(250),
@@ -1782,6 +1890,7 @@ mod tests {
             "periodic-test-2",
             "node-1",
             "room1",
+            dispatch_generation,
             10.5,
             Some("room-parent"),
             Duration::from_millis(250),
@@ -1817,6 +1926,35 @@ mod tests {
             .copied()
             .expect("latest hour should be retained");
         assert!((latest - 10.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn enqueue_periodic_tick_skips_stale_generation() {
+        let state = make_state();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<WorkItem>(4);
+        let stale_generation = state.lock().unwrap().light_dispatch_generation;
+        state.lock().unwrap().invalidate_queued_light_dispatches();
+
+        assert!(enqueue_periodic_tick(
+            &state,
+            &tx,
+            "periodic-test-stale",
+            "node-1",
+            "room1",
+            stale_generation,
+            10.0,
+            Some("room-parent"),
+            Duration::from_millis(250),
+        ));
+
+        assert!(
+            rx.try_recv().is_err(),
+            "stale generation should not enqueue a worker item"
+        );
+        assert!(
+            state.lock().unwrap().pending_periodic_ticks.is_empty(),
+            "stale generation should not reserve pending tick state"
+        );
     }
 
     #[test]
