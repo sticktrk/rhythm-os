@@ -231,11 +231,6 @@ class AnalyticsService {
     await logEvent('room_reset_to_curve', {'room_id': roomId});
   }
 
-  /// Track the global "Fix My Lights" action.
-  Future<void> logFixMyLights({required String source}) async {
-    await logEvent('fix_my_lights', {'source': source});
-  }
-
   /// Track refreshing the rooms experience.
   Future<void> logRoomsRefreshed({required String source}) async {
     await logEvent('rooms_refreshed', {'source': source});

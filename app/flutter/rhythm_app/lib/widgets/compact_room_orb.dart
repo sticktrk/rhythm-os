@@ -195,8 +195,8 @@ class _CompactRoomOrbState extends State<CompactRoomOrb> {
         final (room, resetGen, motionTimer, serverBrightness) = data;
         if (room == null) return const SizedBox.shrink();
 
-        // External reset (e.g. Fix My Lights) bumps the generation counter.
-        // Drop local overrides so the orb displays curve-computed values.
+        // Reset actions bump the generation counter. Drop local overrides so
+        // the orb displays curve-computed values.
         if (resetGen != _lastResetGen) {
           _lastResetGen = resetGen;
           _manualBrightness = null;

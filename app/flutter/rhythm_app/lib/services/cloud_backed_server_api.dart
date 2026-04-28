@@ -26,15 +26,39 @@ class CloudBackedServerApi {
   }
 
   Future<List<RhythmRoomState>> roomActionBatch(
-    List<({String roomId, String action})> actions,
-  ) {
-    return _delegate.roomActionBatch(actions);
+      List<({String roomId, String action})> actions,
+      {int? dispatchSpacingMs}) {
+    return _delegate.roomActionBatch(
+      actions,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
   }
 
   Future<List<RhythmRoomState>> nodeActionBatch(
-    List<({String nodeId, String action})> actions,
-  ) {
-    return _delegate.nodeActionBatch(actions);
+      List<({String nodeId, String action})> actions,
+      {int? dispatchSpacingMs}) {
+    return _delegate.nodeActionBatch(
+      actions,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
+  }
+
+  Future<RhythmDispatchResult> roomActionBatchResult(
+      List<({String roomId, String action})> actions,
+      {int? dispatchSpacingMs}) {
+    return _delegate.roomActionBatchResult(
+      actions,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
+  }
+
+  Future<RhythmDispatchResult> nodeActionBatchResult(
+      List<({String nodeId, String action})> actions,
+      {int? dispatchSpacingMs}) {
+    return _delegate.nodeActionBatchResult(
+      actions,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
   }
 
   Future<void> roomBrightness({
@@ -52,15 +76,39 @@ class CloudBackedServerApi {
   }
 
   Future<List<RhythmRoomState>> roomBrightnessBatch(
-    List<({String roomId, int brightness})> items,
-  ) {
-    return _delegate.roomBrightnessBatch(items);
+      List<({String roomId, int brightness})> items,
+      {int? dispatchSpacingMs}) {
+    return _delegate.roomBrightnessBatch(
+      items,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
   }
 
   Future<List<RhythmRoomState>> nodeBrightnessBatch(
-    List<({String nodeId, int brightness})> items,
-  ) {
-    return _delegate.nodeBrightnessBatch(items);
+      List<({String nodeId, int brightness})> items,
+      {int? dispatchSpacingMs}) {
+    return _delegate.nodeBrightnessBatch(
+      items,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
+  }
+
+  Future<RhythmDispatchResult> roomBrightnessBatchResult(
+      List<({String roomId, int brightness})> items,
+      {int? dispatchSpacingMs}) {
+    return _delegate.roomBrightnessBatchResult(
+      items,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
+  }
+
+  Future<RhythmDispatchResult> nodeBrightnessBatchResult(
+      List<({String nodeId, int brightness})> items,
+      {int? dispatchSpacingMs}) {
+    return _delegate.nodeBrightnessBatchResult(
+      items,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
   }
 
   Future<void> roomOffset({
@@ -78,15 +126,39 @@ class CloudBackedServerApi {
   }
 
   Future<List<RhythmRoomState>> roomOffsetBatch(
-    List<({String roomId, double timeOffset})> items,
-  ) {
-    return _delegate.roomOffsetBatch(items);
+      List<({String roomId, double timeOffset})> items,
+      {int? dispatchSpacingMs}) {
+    return _delegate.roomOffsetBatch(
+      items,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
   }
 
   Future<List<RhythmRoomState>> nodeOffsetBatch(
-    List<({String nodeId, double timeOffset})> items,
-  ) {
-    return _delegate.nodeOffsetBatch(items);
+      List<({String nodeId, double timeOffset})> items,
+      {int? dispatchSpacingMs}) {
+    return _delegate.nodeOffsetBatch(
+      items,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
+  }
+
+  Future<RhythmDispatchResult> roomOffsetBatchResult(
+      List<({String roomId, double timeOffset})> items,
+      {int? dispatchSpacingMs}) {
+    return _delegate.roomOffsetBatchResult(
+      items,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
+  }
+
+  Future<RhythmDispatchResult> nodeOffsetBatchResult(
+      List<({String nodeId, double timeOffset})> items,
+      {int? dispatchSpacingMs}) {
+    return _delegate.nodeOffsetBatchResult(
+      items,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
   }
 
   Future<void> roomPreferencesSet({
@@ -125,18 +197,44 @@ class CloudBackedServerApi {
     );
   }
 
-  Future<void> roomPreferencesBatchSet(List<Map<String, dynamic>> items) {
-    return _delegate.roomPreferencesBatchSet(items);
-  }
-
-  Future<void> nodePreferencesBatchSet(List<Map<String, dynamic>> items) {
-    return _delegate.nodePreferencesBatchSet(items);
-  }
-
-  Future<List<RhythmRoomState>> fixMyLights({
-    required Iterable<String> nodeIds,
+  Future<void> roomPreferencesBatchSet(
+    List<Map<String, dynamic>> items, {
+    int? dispatchSpacingMs,
   }) {
-    return _delegate.fixMyLights(nodeIds: nodeIds);
+    return _delegate.roomPreferencesBatchSet(
+      items,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
+  }
+
+  Future<void> nodePreferencesBatchSet(
+    List<Map<String, dynamic>> items, {
+    int? dispatchSpacingMs,
+  }) {
+    return _delegate.nodePreferencesBatchSet(
+      items,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
+  }
+
+  Future<RhythmDispatchResult> roomPreferencesBatchSetResult(
+    List<Map<String, dynamic>> items, {
+    int? dispatchSpacingMs,
+  }) {
+    return _delegate.roomPreferencesBatchSetResult(
+      items,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
+  }
+
+  Future<RhythmDispatchResult> nodePreferencesBatchSetResult(
+    List<Map<String, dynamic>> items, {
+    int? dispatchSpacingMs,
+  }) {
+    return _delegate.nodePreferencesBatchSetResult(
+      items,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
   }
 
   Future<RhythmCurveConfig?> getConfig({required String id}) {
@@ -173,6 +271,13 @@ class CloudBackedServerApi {
     String? id,
   }) {
     return _delegate.absorbTimeOffset(offsetMinutes, id: id);
+  }
+
+  Future<RhythmAbsorbTimeOffsetResult> absorbTimeOffsetResult(
+    double offsetMinutes, {
+    String? id,
+  }) {
+    return _delegate.absorbTimeOffsetResult(offsetMinutes, id: id);
   }
 
   Future<RhythmCurveConfig?> resetConfig({String? id}) {

@@ -16,6 +16,11 @@
 #   --codegen          Regenerate FRB bindings and sync FFI code (then exit)
 #   --clean            Clean build artifacts before building
 #
+# IPA/TestFlight build numbers come from the latest TestFlight build for the current app version,
+# plus one. Explicit --build-number or RHYTHM_BUILD_NUMBER values override this. Other release
+# builds use common CI run-number variables, then the +build value in flutter/rhythm_app/pubspec.yaml.
+# The script does not generate timestamp build numbers.
+#
 # First-time setup (iOS):
 #   1. Install CocoaPods: brew install cocoapods
 #   2. Run: ./scripts/build-mobile.sh --ios
@@ -56,6 +61,77 @@ find_flutter() {
     echo "$FLUTTER_CMD"
 }
 
+pubspec_version() {
+    sed -nE 's/^[[:space:]]*version:[[:space:]]*([^ #]+).*/\1/p' "$FLUTTER_APP/pubspec.yaml" | head -1
+}
+
+pubspec_build_name() {
+    local version
+    version="$(pubspec_version)"
+    echo "${version%%+*}"
+}
+
+pubspec_build_number() {
+    local version
+    version="$(pubspec_version)"
+
+    if [ "$version" != "${version##*+}" ]; then
+        echo "${version##*+}"
+    fi
+}
+
+resolve_testflight_build_number() {
+    local build_name
+    local latest_build_number
+
+    build_name="$(pubspec_build_name)"
+    if [ -z "$build_name" ]; then
+        echo "Error: could not read app version from $FLUTTER_APP/pubspec.yaml."
+        exit 1
+    fi
+
+    if ! command -v fastlane &> /dev/null; then
+        echo "Error: fastlane is required to read the latest TestFlight build number."
+        echo "Install with: brew install fastlane"
+        exit 1
+    fi
+
+    if [ ! -f "$ASC_API_KEY_PATH" ]; then
+        echo "Error: App Store Connect API key not configured."
+        echo "Run: ./scripts/build-mobile.sh --setup-testflight"
+        exit 1
+    fi
+
+    echo "Checking latest TestFlight build for $IOS_APP_IDENTIFIER $build_name..."
+
+    set +e
+    local fastlane_output
+    fastlane_output=$(FASTLANE_DISABLE_COLORS=1 FASTLANE_SKIP_UPDATE_CHECK=1 fastlane run latest_testflight_build_number \
+        api_key_path:"$ASC_API_KEY_PATH" \
+        app_identifier:"$IOS_APP_IDENTIFIER" \
+        version:"$build_name" \
+        platform:"ios" \
+        initial_build_number:0 2>&1)
+    local fastlane_status=$?
+    set -e
+
+    if [ $fastlane_status -ne 0 ]; then
+        echo "$fastlane_output"
+        echo "Error: failed to read latest TestFlight build number."
+        exit $fastlane_status
+    fi
+
+    latest_build_number="$(printf '%s\n' "$fastlane_output" | sed -nE 's/.*Result:[^0-9]*([0-9]+).*/\1/p' | tail -1)"
+    if ! [[ "$latest_build_number" =~ ^[0-9]+$ ]]; then
+        echo "$fastlane_output"
+        echo "Error: could not parse latest TestFlight build number from fastlane output."
+        exit 1
+    fi
+
+    BUILD_NUMBER_SOURCE="TestFlight latest build ($latest_build_number) + 1"
+    RESOLVED_BUILD_NUMBER="$((latest_build_number + 1))"
+}
+
 resolve_release_build_number() {
     if [ -n "$BUILD_NUMBER_OVERRIDE" ]; then
         BUILD_NUMBER_SOURCE="command line"
@@ -66,6 +142,11 @@ resolve_release_build_number() {
     if [ -n "${RHYTHM_BUILD_NUMBER:-}" ]; then
         BUILD_NUMBER_SOURCE="RHYTHM_BUILD_NUMBER"
         RESOLVED_BUILD_NUMBER="$RHYTHM_BUILD_NUMBER"
+        return 0
+    fi
+
+    if [ "$PLATFORM" = "ios" ] && [ "$BUILD_IPA" = true ]; then
+        resolve_testflight_build_number
         return 0
     fi
 
@@ -93,8 +174,16 @@ resolve_release_build_number() {
         return 0
     fi
 
-    BUILD_NUMBER_SOURCE="current Unix timestamp"
-    RESOLVED_BUILD_NUMBER="$(date -u +%s)"
+    local build_number
+    build_number="$(pubspec_build_number)"
+    if [ -n "$build_number" ]; then
+        BUILD_NUMBER_SOURCE="pubspec.yaml"
+        RESOLVED_BUILD_NUMBER="$build_number"
+        return 0
+    fi
+
+    BUILD_NUMBER_SOURCE=""
+    RESOLVED_BUILD_NUMBER=""
 }
 
 # macOS signing configuration
@@ -106,6 +195,7 @@ APP_NAME="RhythmLighting"
 
 # TestFlight configuration
 ASC_API_KEY_PATH="$HOME/.config/rhythm/asc_api_key.json"
+IOS_APP_IDENTIFIER="lighting.rhythm.app"
 
 # Defaults
 PLATFORM=""
@@ -203,7 +293,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            head -31 "$0" | tail -29
+            sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)

@@ -42,7 +42,6 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   int _currentPage = 0;
   CurveData? _curveData;
-  bool _isFixing = false;
   final PageController _roomPageController = PageController();
   int _currentRoomPage = 0;
   bool _hadServerHub = false;
@@ -160,23 +159,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     });
   }
 
-  /// Reset all on-lights to current adaptive values and enable rhythm tracking.
-  ///
-  /// Dispatches node resets for every currently-on light-addressable node.
-  Future<void> _fixMyLights() async {
-    HapticFeedback.mediumImpact();
-    setState(() => _isFixing = true);
-
-    try {
-      final serverSync = context.read<ServerSyncProvider>();
-      await serverSync.dispatchFixMyLights();
-      AnalyticsService().logFixMyLights(source: 'app_shell');
-      if (mounted) HapticFeedback.heavyImpact();
-    } finally {
-      if (mounted) setState(() => _isFixing = false);
-    }
-  }
-
   String _modeLabel(RhythmMode mode) {
     return switch (mode) {
       RhythmMode.day => 'Day',
@@ -283,8 +265,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       return;
     }
 
-    await serverSync.dispatchFixMyLights();
-    if (mounted) HapticFeedback.heavyImpact();
+    _showModeActionError('Could not reapply $modeLabel settings.');
   }
 
   @override
@@ -444,8 +425,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                       pageController: _roomPageController,
                       onSettingsTap: _openSettings,
                       onSunPositionTap: _openSunPosition,
-                      onFixMyLights: _fixMyLights,
-                      isFixing: _isFixing,
                     ),
                   ),
                 ),

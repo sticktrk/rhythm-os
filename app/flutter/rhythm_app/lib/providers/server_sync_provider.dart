@@ -1111,8 +1111,6 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   /// Reset a single node to its current adaptive curve position.
-  ///
-  /// Per-node equivalent of [dispatchFixMyLights].
   void dispatchResetNode(String nodeId) {
     if (HueServiceLocator.isDemoMode) {
       DemoServerApi.instance.updateRoomLightState(
@@ -1144,58 +1142,6 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   void dispatchResetRoom(String roomId) => dispatchResetNode(roomId);
-
-  /// Reset all currently-on light-addressable nodes to their curve position.
-  ///
-  /// Returns node states for immediate UI convergence.
-  Future<List<RhythmRoomState>> dispatchFixMyLights() async {
-    if (HueServiceLocator.isDemoMode) {
-      // Reset all on-rooms locally
-      for (final room in _roomProvider.rooms) {
-        if (room.lightsOn) {
-          DemoServerApi.instance.updateRoomLightState(
-            room.id,
-            on: true,
-            brightness: 75,
-            kelvin: 3200,
-          );
-          await _roomProvider.applyServerNodeState(
-            room.id,
-            rhythmEnabled: true,
-            timeOffset: 0,
-            brightnessOffset: 0,
-            state: RoomModeState.active,
-            lightsOn: true,
-            brightness: 75,
-            kelvin: 3200,
-          );
-        }
-      }
-      _roomProvider.bumpResetGeneration();
-      return [];
-    }
-    if (!_connection.connected) return [];
-    final nodeIds = _helloNodes
-        .where((node) => node.isLightAddressable && (node.lightsOn ?? false))
-        .map((node) => node.id)
-        .toSet();
-    if (nodeIds.isEmpty) {
-      nodeIds.addAll(
-        _roomProvider.rooms
-            .where((node) => node.lightsOn)
-            .map((node) => node.id)
-            .where((id) => id.isNotEmpty),
-      );
-    }
-    final states = await _connection.api.fixMyLights(nodeIds: nodeIds);
-    for (final state in states) {
-      _onRhythmState(state);
-    }
-    if (states.isNotEmpty) {
-      _roomProvider.bumpResetGeneration();
-    }
-    return states;
-  }
 
   /// Set the active global mode on the server.
   Future<void> dispatchSetActiveMode(RhythmMode mode) async {

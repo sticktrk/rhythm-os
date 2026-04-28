@@ -61,8 +61,13 @@ class LightProfileScreen extends StatefulWidget {
   State<LightProfileScreen> createState() => _LightProfileScreenState();
 }
 
+enum _TimeOffsetDispatchAction { preview, reset, absorb }
+
 class _LightProfileScreenState extends State<LightProfileScreen>
     with SingleTickerProviderStateMixin {
+  static const Duration _defaultBatchDispatchSpacing =
+      Duration(milliseconds: 500);
+
   static const List<String> _profileOrder = [
     'rhythm',
     'sleep',
@@ -130,6 +135,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   double _sliderFraction = 0.5; // raw 0..1 position on the track
   bool _isDraggingTime = false;
   bool _timeOffsetApplied = false; // true after user taps Apply
+  _TimeOffsetDispatchAction? _timeOffsetDispatchAction;
   bool _curvePreviewRefreshQueued = false;
   bool _curvePreviewRefreshInFlight = false;
   int _curvePreviewRequestId = 0;
@@ -807,65 +813,151 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     });
   }
 
-  void _applyTimeOffset() {
-    _sendTimeOffset();
-    setState(() => _timeOffsetApplied = true);
-    AnalyticsService().logLightProfilePreviewAction(
-      profile: _selectedProfileId,
-      action: 'apply',
-      offsetMinutes: _timeOffsetMinutes,
-    );
+  bool get _timeOffsetDispatching => _timeOffsetDispatchAction != null;
+
+  bool _isTimeOffsetDispatching(_TimeOffsetDispatchAction action) =>
+      _timeOffsetDispatchAction == action;
+
+  Future<void> _applyTimeOffset() async {
+    if (_timeOffsetDispatching) return;
+    final previewOffset = _timeOffsetMinutes;
+    setState(
+        () => _timeOffsetDispatchAction = _TimeOffsetDispatchAction.preview);
+
+    try {
+      final rooms = _timeOffsetRooms();
+      final result = await _sendTimeOffset(
+        rooms: rooms,
+        offsetMinutes: previewOffset,
+      );
+      await _waitForTimeOffsetDispatch(
+        result,
+        fallbackDispatchCount: rooms.length,
+      );
+      if (!mounted) return;
+      setState(() => _timeOffsetApplied = true);
+      AnalyticsService().logLightProfilePreviewAction(
+        profile: _selectedProfileId,
+        action: 'apply',
+        offsetMinutes: previewOffset,
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _timeOffsetDispatchAction = null);
+      }
+    }
   }
 
-  void _sendTimeOffset() {
+  List<RoomDto> _timeOffsetRooms() {
+    return context
+        .read<RoomProvider>()
+        .rooms
+        .where((room) => room.id.isNotEmpty)
+        .toList(growable: false);
+  }
+
+  Future<sdk.RhythmDispatchResult> _sendTimeOffset({
+    required List<RoomDto> rooms,
+    required double offsetMinutes,
+  }) {
     final api = context.read<ServerSyncProvider>().api;
-    final rooms = context.read<RoomProvider>().rooms;
-    if (rooms.isEmpty) return;
-    api.roomOffsetBatch([
-      for (final room in rooms)
-        (roomId: room.id, timeOffset: _timeOffsetMinutes),
+    if (rooms.isEmpty) return Future.value(const sdk.RhythmDispatchResult());
+    return api.roomOffsetBatchResult([
+      for (final room in rooms) (roomId: room.id, timeOffset: offsetMinutes),
     ]);
   }
 
-  void _resetTimeOffset() {
-    final previousOffset = _timeOffsetMinutes;
-    setState(() {
-      _timeOffsetMinutes = 0;
-      _sliderFraction = _hourToNowFraction();
-      _timeOffsetApplied = false;
-    });
-    _sendTimeOffset();
-    AnalyticsService().logLightProfilePreviewAction(
-      profile: _selectedProfileId,
-      action: 'reset',
-      offsetMinutes: previousOffset,
+  Future<void> _waitForTimeOffsetDispatch(
+    sdk.RhythmDispatchResult result, {
+    required int fallbackDispatchCount,
+  }) async {
+    final duration = result.estimatedDispatchDuration ??
+        (result.queued
+            ? _dispatchDurationForCount(fallbackDispatchCount)
+            : null);
+    if (duration == null || duration <= Duration.zero) return;
+    await Future<void>.delayed(duration);
+  }
+
+  Duration? _dispatchDurationForCount(int count) {
+    if (count <= 1) return null;
+    return Duration(
+      milliseconds: _defaultBatchDispatchSpacing.inMilliseconds * (count - 1),
     );
   }
 
-  Future<void> _absorbTimeOffset() async {
-    final absorbedOffset = _timeOffsetMinutes;
-    final sdkConfig = await context
-        .read<ServerSyncProvider>()
-        .api
-        .absorbTimeOffset(_timeOffsetMinutes, id: _selectedProfileId);
-    if (!mounted) return;
-    if (sdkConfig != null) {
-      _profileConfigs[_selectedProfileId] = sdkConfig;
-      _applyProfileConfig(sdkConfig);
-      await _syncActiveConfigModel(sdkConfig);
-      await _loadCurveData(profileId: _selectedProfileId);
-    }
+  Future<void> _resetTimeOffset() async {
+    if (_timeOffsetDispatching) return;
+    final previousOffset = _timeOffsetMinutes;
+    final rooms = _timeOffsetRooms();
     setState(() {
       _timeOffsetMinutes = 0;
       _sliderFraction = _hourToNowFraction();
       _timeOffsetApplied = false;
-      _curveConfigDirty = false;
+      _timeOffsetDispatchAction = _TimeOffsetDispatchAction.reset;
     });
-    AnalyticsService().logLightProfilePreviewAction(
-      profile: _selectedProfileId,
-      action: 'absorb',
-      offsetMinutes: absorbedOffset,
-    );
+    try {
+      final result = await _sendTimeOffset(
+        rooms: rooms,
+        offsetMinutes: 0,
+      );
+      await _waitForTimeOffsetDispatch(
+        result,
+        fallbackDispatchCount: rooms.length,
+      );
+      AnalyticsService().logLightProfilePreviewAction(
+        profile: _selectedProfileId,
+        action: 'reset',
+        offsetMinutes: previousOffset,
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _timeOffsetDispatchAction = null);
+      }
+    }
+  }
+
+  Future<void> _absorbTimeOffset() async {
+    if (_timeOffsetDispatching) return;
+    final absorbedOffset = _timeOffsetMinutes;
+    final rooms = _timeOffsetRooms();
+    setState(
+        () => _timeOffsetDispatchAction = _TimeOffsetDispatchAction.absorb);
+
+    try {
+      final result = await context
+          .read<ServerSyncProvider>()
+          .api
+          .absorbTimeOffsetResult(absorbedOffset, id: _selectedProfileId);
+      if (!mounted) return;
+      final sdkConfig = result.config;
+      if (sdkConfig != null) {
+        _profileConfigs[_selectedProfileId] = sdkConfig;
+        _applyProfileConfig(sdkConfig);
+        await _syncActiveConfigModel(sdkConfig);
+        await _loadCurveData(profileId: _selectedProfileId);
+      }
+      await _waitForTimeOffsetDispatch(
+        result.dispatch,
+        fallbackDispatchCount: rooms.length,
+      );
+      if (!mounted) return;
+      setState(() {
+        _timeOffsetMinutes = 0;
+        _sliderFraction = _hourToNowFraction();
+        _timeOffsetApplied = false;
+        _curveConfigDirty = false;
+      });
+      AnalyticsService().logLightProfilePreviewAction(
+        profile: _selectedProfileId,
+        action: 'absorb',
+        offsetMinutes: absorbedOffset,
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _timeOffsetDispatchAction = null);
+      }
+    }
   }
 
   Future<void> _resetToDefaults() async {
@@ -884,6 +976,26 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       _curveConfigDirty = false;
       _timeOffsetApplied = false;
     });
+    AnalyticsService().logLightProfileReset(_selectedProfileId);
+  }
+
+  void _resetCurveConfigToDefaults() {
+    if (_isSleepProfile) return;
+
+    final defaults = defaultCurveConfig;
+    _onCurveChanged(() {
+      _minColorTemp = defaults.minColorTemp.toDouble();
+      _maxColorTemp = defaults.maxColorTemp.toDouble();
+      _minBrightness = defaults.minBrightness.toDouble();
+      _maxBrightness = defaults.maxBrightness.toDouble();
+      _widthLeftBri = defaults.widthLeftBri;
+      _widthRightBri = defaults.widthRightBri;
+      _widthLeftCct = defaults.widthLeftCct;
+      _widthRightCct = defaults.widthRightCct;
+      _shapeP = defaults.shapeP;
+      _maxDimSteps = defaults.maxDimSteps.toDouble();
+    });
+    _queueDraftCurvePreviewRefresh();
     AnalyticsService().logLightProfileReset(_selectedProfileId);
   }
 
@@ -2525,13 +2637,15 @@ class _LightProfileScreenState extends State<LightProfileScreen>
 
   Widget _buildClearTimeButton() {
     return GestureDetector(
-      onTap: () {
-        setState(() {
-          _timeOffsetMinutes = 0;
-          _sliderFraction = _hourToNowFraction();
-          _timeOffsetApplied = false;
-        });
-      },
+      onTap: _timeOffsetDispatching
+          ? null
+          : () {
+              setState(() {
+                _timeOffsetMinutes = 0;
+                _sliderFraction = _hourToNowFraction();
+                _timeOffsetApplied = false;
+              });
+            },
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
         decoration: BoxDecoration(
@@ -2565,8 +2679,9 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   Widget _buildApplyTimeButton() {
+    final busy = _isTimeOffsetDispatching(_TimeOffsetDispatchAction.preview);
     return GestureDetector(
-      onTap: _applyTimeOffset,
+      onTap: _timeOffsetDispatching ? null : _applyTimeOffset,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
         decoration: BoxDecoration(
@@ -2579,14 +2694,16 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
-              Icons.play_arrow_rounded,
-              color: _Palette.amber.withValues(alpha: 0.8),
-              size: 16,
-            ),
+            busy
+                ? _buildTimeOffsetSpinner(_Palette.amber, size: 16)
+                : Icon(
+                    Icons.play_arrow_rounded,
+                    color: _Palette.amber.withValues(alpha: 0.8),
+                    size: 16,
+                  ),
             const SizedBox(width: 6),
             Text(
-              'Preview on Lights',
+              busy ? 'Updating Lights' : 'Preview on Lights',
               style: TextStyle(
                 color: _Palette.amber.withValues(alpha: 0.8),
                 fontSize: 12,
@@ -2600,8 +2717,9 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   Widget _buildResetTimeButton() {
+    final busy = _isTimeOffsetDispatching(_TimeOffsetDispatchAction.reset);
     return GestureDetector(
-      onTap: _resetTimeOffset,
+      onTap: _timeOffsetDispatching ? null : _resetTimeOffset,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
         decoration: BoxDecoration(
@@ -2614,14 +2732,16 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
-              Icons.refresh_rounded,
-              color: _Palette.textSecondary.withValues(alpha: 0.5),
-              size: 14,
-            ),
+            busy
+                ? _buildTimeOffsetSpinner(_Palette.textSecondary, size: 14)
+                : Icon(
+                    Icons.refresh_rounded,
+                    color: _Palette.textSecondary.withValues(alpha: 0.5),
+                    size: 14,
+                  ),
             const SizedBox(width: 6),
             Text(
-              'Reset',
+              busy ? 'Resetting Lights' : 'Reset',
               style: TextStyle(
                 color: _Palette.textSecondary.withValues(alpha: 0.6),
                 fontSize: 12,
@@ -2635,8 +2755,9 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   Widget _buildAbsorbTimeButton() {
+    final busy = _isTimeOffsetDispatching(_TimeOffsetDispatchAction.absorb);
     return GestureDetector(
-      onTap: _absorbTimeOffset,
+      onTap: _timeOffsetDispatching ? null : _absorbTimeOffset,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
         decoration: BoxDecoration(
@@ -2649,14 +2770,16 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
-              Icons.check_rounded,
-              color: const Color(0xFFD4A54A).withValues(alpha: 0.8),
-              size: 14,
-            ),
+            busy
+                ? _buildTimeOffsetSpinner(const Color(0xFFD4A54A), size: 14)
+                : Icon(
+                    Icons.check_rounded,
+                    color: const Color(0xFFD4A54A).withValues(alpha: 0.8),
+                    size: 14,
+                  ),
             const SizedBox(width: 6),
             Text(
-              'Absorb',
+              busy ? 'Updating Lights' : 'Absorb',
               style: TextStyle(
                 color: const Color(0xFFD4A54A).withValues(alpha: 0.8),
                 fontSize: 12,
@@ -2665,6 +2788,17 @@ class _LightProfileScreenState extends State<LightProfileScreen>
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildTimeOffsetSpinner(Color color, {required double size}) {
+    return SizedBox(
+      width: size,
+      height: size,
+      child: CircularProgressIndicator(
+        strokeWidth: 2,
+        color: color.withValues(alpha: 0.8),
       ),
     );
   }
@@ -3222,6 +3356,20 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       onTap: _resetToDefaults,
       child: Text(
         'Reset to Defaults',
+        style: TextStyle(
+          color: _Palette.textSecondary.withValues(alpha: 0.3),
+          fontSize: 12,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildResetCurveConfigButton() {
+    return GestureDetector(
+      onTap: _resetCurveConfigToDefaults,
+      child: Text(
+        'Reset Curve Defaults',
         style: TextStyle(
           color: _Palette.textSecondary.withValues(alpha: 0.3),
           fontSize: 12,
@@ -4110,6 +4258,8 @@ class _AdvancedColorEditorScreenState
                           const SizedBox(height: 24),
                           _parent._buildSaveButton(),
                         ],
+                        const SizedBox(height: 32),
+                        _parent._buildResetCurveConfigButton(),
                       ],
                     ),
                   );

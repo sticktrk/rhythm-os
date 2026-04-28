@@ -19,7 +19,6 @@ void main() {
                 totalPages: 1,
                 onSettingsTap: () => settingsTapCount++,
                 onSunPositionTap: () => sunTapCount++,
-                onFixMyLights: () {},
               ),
             ],
           ),
@@ -29,7 +28,6 @@ void main() {
 
     expect(find.byIcon(Icons.settings), findsOneWidget);
     expect(find.byIcon(Icons.wb_sunny_rounded), findsOneWidget);
-    expect(find.byIcon(Icons.auto_fix_high), findsNothing);
 
     await tester.tap(find.byIcon(Icons.settings));
     await tester.pump();

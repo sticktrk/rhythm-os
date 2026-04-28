@@ -119,8 +119,8 @@ class RoomProvider extends ChangeNotifier {
 
   /// Monotonic counter incremented on every reset action.
   ///
-  /// Widgets watching this can detect external resets (e.g. Fix My Lights)
-  /// and drop stale local overrides so the curve-computed values show through.
+  /// Widgets watching this can detect reset actions and drop stale local
+  /// overrides so the curve-computed values show through.
   int get resetGeneration => _resetGeneration;
 
   /// Bump the reset generation counter so room cards clear stale slider state.
