@@ -589,7 +589,15 @@ mod tests {
     fn test_rhythm_brightness_at_sunrise() {
         let profile = LightProfile::new(default_rhythm_profile());
         let bri = profile.calculate_brightness(&test_context(6.0));
-        assert!(bri < 15, "At sunrise, expected <15, got {}", bri);
+        let min_bri = profile.config().min_brightness;
+        let near_min_ceiling = min_bri.saturating_add(10);
+        assert!(
+            bri >= min_bri && bri <= near_min_ceiling,
+            "At sunrise, expected brightness near configured min ({}..={}), got {}",
+            min_bri,
+            near_min_ceiling,
+            bri
+        );
     }
 
     #[test]

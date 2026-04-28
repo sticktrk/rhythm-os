@@ -5185,7 +5185,7 @@ pub fn do_set_node_time_offset_with_spacing(
 
     let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
 
-    let snap = time_offset_room_node_snapshot(runtime.as_ref(), node_id)?;
+    let snap = time_offset_target_node_snapshot(runtime.as_ref(), node_id)?;
     let mut restored = RestoredNodeState::from(&snap);
     restored.time_offset_minutes = offset_minutes;
     runtime.restore_node_state(node_id, restored);
@@ -5206,7 +5206,81 @@ pub fn do_set_node_time_offset_with_spacing(
     })
 }
 
-fn time_offset_room_node_snapshot(
+pub fn do_set_node_time_offsets_batch_with_spacing(
+    state: &SharedState,
+    updates: &[(String, f32)],
+    persist: bool,
+    dispatch_spacing: Duration,
+) -> Result<usize> {
+    let runtime = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.hub_runtime()
+    };
+    let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+
+    let mut update_snaps = Vec::with_capacity(updates.len());
+    for (node_id, _) in updates {
+        update_snaps.push(time_offset_target_node_snapshot(runtime.as_ref(), node_id)?);
+    }
+
+    let top_level_update_ids = time_offset_top_level_update_ids(&update_snaps);
+    let mut emitted_node_ids = HashSet::new();
+    for ((node_id, offset_minutes), snap) in updates.iter().zip(update_snaps.iter()) {
+        if time_offset_batch_parent_covers_node(snap, &top_level_update_ids) {
+            continue;
+        }
+
+        let mut restored = RestoredNodeState::from(snap);
+        restored.time_offset_minutes = *offset_minutes;
+        runtime.restore_node_state(node_id, restored);
+
+        clear_room_mode_transition(state, node_id);
+        if emitted_node_ids.insert(node_id.clone()) {
+            emit_node_state_event_after_apply(state, &runtime, node_id);
+        }
+    }
+
+    let dispatch_count = enqueue_time_offset_batch_preview_ticks(
+        state,
+        &runtime,
+        &update_snaps,
+        &top_level_update_ids,
+        dispatch_spacing,
+    )?;
+
+    if persist {
+        persist_rooms(state);
+    }
+
+    Ok(dispatch_count)
+}
+
+pub fn default_node_time_offset_updates(
+    state: &SharedState,
+    offset_minutes: f32,
+) -> Result<Vec<(String, f32)>> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let runtime = s
+        .hub_runtime()
+        .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    let snapshots = runtime.engine_all_effective_node_snapshots();
+    let mut seen = HashSet::new();
+    let mut updates = Vec::new();
+    for snap in snapshots {
+        if !snap.kind.is_light_addressable() || snap.parent_id.is_some() {
+            continue;
+        }
+        if snap.kind.is_room() && !time_offset_preview_room_is_on(&s, &snap) {
+            continue;
+        }
+        if seen.insert(snap.id.clone()) {
+            updates.push((snap.id, offset_minutes));
+        }
+    }
+    Ok(updates)
+}
+
+fn time_offset_target_node_snapshot(
     runtime: &dyn RuntimeHandle,
     node_id: &str,
 ) -> Result<rhythm_core::NodeSnapshot> {
@@ -5214,9 +5288,9 @@ fn time_offset_room_node_snapshot(
         .engine_node_snapshot(node_id)
         .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
 
-    if !snap.kind.is_room() {
+    if !snap.kind.is_light_addressable() {
         return Err(anyhow::anyhow!(
-            "Time offsets can only be set on room nodes"
+            "Time offsets can only be set on light-addressable nodes"
         ));
     }
 
@@ -5228,34 +5302,115 @@ fn enqueue_time_offset_preview_ticks(
     runtime: &Arc<dyn RuntimeHandle>,
     node_id: &str,
     dispatch_spacing: Duration,
-) -> Result<()> {
+) -> Result<usize> {
     let target_snap = runtime
         .engine_effective_node_snapshot(node_id)
         .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
-    let (dispatch_nodes, dispatch_tx) = {
+    let dispatch_node = crate::periodic::preview_dispatch_node_for_target(&target_snap);
+    enqueue_time_offset_preview_dispatch_nodes(state, runtime, dispatch_node, dispatch_spacing)
+}
+
+fn enqueue_time_offset_batch_preview_ticks(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    update_snaps: &[rhythm_core::NodeSnapshot],
+    top_level_update_ids: &HashSet<String>,
+    dispatch_spacing: Duration,
+) -> Result<usize> {
+    let dispatch_nodes = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        let dispatch_nodes =
-            crate::periodic::periodic_dispatch_nodes_from_state(&s, &[target_snap]);
-        (
-            dispatch_nodes,
-            s.periodic_work_tx.clone().or_else(|| s.work_tx.clone()),
-        )
+        let mut source_snaps = Vec::new();
+        let mut direct_nodes = Vec::new();
+        let mut seen_source = HashSet::new();
+        let mut seen_direct = HashSet::new();
+        for snap in update_snaps {
+            if !snap.kind.is_light_addressable() {
+                continue;
+            }
+            if time_offset_batch_parent_covers_node(snap, top_level_update_ids) {
+                continue;
+            }
+            if snap.parent_id.is_some() {
+                if seen_direct.insert(snap.id.clone()) {
+                    if let Some(node) = crate::periodic::preview_dispatch_node_for_target(snap) {
+                        direct_nodes.push(node);
+                    }
+                }
+                continue;
+            }
+            if snap.kind.is_room() && !time_offset_preview_room_is_on(&s, snap) {
+                continue;
+            }
+            if seen_source.insert(snap.id.clone()) {
+                source_snaps.push(snap.clone());
+            }
+        }
+        let mut dispatch_nodes =
+            crate::periodic::periodic_dispatch_nodes_from_state(&s, &source_snaps);
+        dispatch_nodes.extend(direct_nodes);
+        dispatch_nodes
     };
 
+    enqueue_time_offset_preview_dispatch_nodes(state, runtime, dispatch_nodes, dispatch_spacing)
+}
+
+fn time_offset_top_level_update_ids(update_snaps: &[rhythm_core::NodeSnapshot]) -> HashSet<String> {
+    update_snaps
+        .iter()
+        .filter(|snap| snap.parent_id.is_none() && snap.kind.is_light_addressable())
+        .map(|snap| snap.id.clone())
+        .collect()
+}
+
+fn time_offset_batch_parent_covers_node(
+    snap: &rhythm_core::NodeSnapshot,
+    top_level_update_ids: &HashSet<String>,
+) -> bool {
+    snap.parent_id
+        .as_deref()
+        .is_some_and(|parent_id| top_level_update_ids.contains(parent_id))
+}
+
+fn time_offset_preview_room_is_on(s: &AppState, snap: &rhythm_core::NodeSnapshot) -> bool {
+    lights_on_from_observed_cache(
+        s,
+        &s.room_observed_power,
+        &snap.id,
+        snap.kind,
+        snap.parent_id.as_deref(),
+        semantic_lights_on_override(snap.hard_off, snap.soft_off),
+    )
+}
+
+fn enqueue_time_offset_preview_dispatch_nodes<I>(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    dispatch_nodes: I,
+    dispatch_spacing: Duration,
+) -> Result<usize>
+where
+    I: IntoIterator<Item = crate::periodic::PeriodicDispatchNode>,
+{
+    let dispatch_nodes: Vec<_> = dispatch_nodes.into_iter().collect();
     if dispatch_nodes.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
+
+    let dispatch_tx = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.periodic_work_tx.clone().or_else(|| s.work_tx.clone())
+    };
 
     let command_id = crate::logging::next_command_id("manual-preview");
     let current_hour = runtime.current_hour();
+    let mut last_node_index_by_emit_target = HashMap::new();
+    for (idx, node) in dispatch_nodes.iter().enumerate() {
+        last_node_index_by_emit_target.insert(node.emit_node_id.clone(), idx);
+    }
+    let dispatch_count = dispatch_nodes.len();
 
     if let Some(tx) = dispatch_tx {
-        let mut last_node_index_by_emit_target = HashMap::new();
         for (idx, node) in dispatch_nodes.iter().enumerate() {
-            last_node_index_by_emit_target.insert(node.emit_node_id.clone(), idx);
-        }
-
-        for (idx, node) in dispatch_nodes.into_iter().enumerate() {
             let emit_parent_node_id = last_node_index_by_emit_target
                 .get(&node.emit_node_id)
                 .is_some_and(|last_idx| *last_idx == idx)
@@ -5274,14 +5429,10 @@ fn enqueue_time_offset_preview_ticks(
                 return Err(anyhow::anyhow!("Node dispatch queue full"));
             }
         }
-        return Ok(());
+        return Ok(dispatch_count);
     }
 
-    let mut last_node_index_by_emit_target = HashMap::new();
     for (idx, node) in dispatch_nodes.iter().enumerate() {
-        last_node_index_by_emit_target.insert(node.emit_node_id.clone(), idx);
-    }
-    for (idx, node) in dispatch_nodes.into_iter().enumerate() {
         runtime.periodic_tick_node(&node.node_id, &node.settings_node_id, current_hour)?;
         crate::periodic::post_tick_node(state, runtime, &node.settings_node_id);
         let emit_parent_node_id = last_node_index_by_emit_target
@@ -5294,7 +5445,7 @@ fn enqueue_time_offset_preview_ticks(
         }
     }
 
-    Ok(())
+    Ok(dispatch_count)
 }
 
 // ============================================================================
@@ -8534,6 +8685,13 @@ mod tests {
         snapshot
     }
 
+    fn make_standalone_light_snapshot(id: &str) -> RoomSnapshot {
+        let mut snapshot = make_snapshot(id, false, false);
+        snapshot.kind = rhythm_core::LightNodeKind::LightDevice;
+        snapshot.parent_id = None;
+        snapshot
+    }
+
     fn setup_state(snapshots: Vec<RoomSnapshot>) -> (SharedState, Arc<MockRuntime>) {
         setup_state_at_hour(snapshots, 12.0)
     }
@@ -11399,12 +11557,263 @@ mod tests {
     }
 
     #[test]
-    fn set_time_offset_rejects_device_node_target() {
-        let (state, _rt, device_id) = setup_attached_hue_light_with_group_dispatch();
+    fn set_time_offset_accepts_light_device_node_target() {
+        let (state, rt, device_id) = setup_attached_hue_light_with_group_dispatch();
         let result = do_set_node_time_offset(&state, &device_id, 30.0, false);
 
+        assert!(result.is_ok());
+        assert_eq!(
+            rt.engine_node_snapshot(&device_id)
+                .unwrap()
+                .time_offset_minutes,
+            30.0
+        );
+    }
+
+    #[test]
+    fn set_time_offset_preview_queues_only_explicit_room_target() {
+        let (state, _rt, ..) = setup_mixed_room_with_hub_groups();
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        {
+            let mut s = state.lock().unwrap();
+            s.composite_controller = Some(Arc::new(rhythm_core::CompositeController::new()));
+            s.work_tx = Some(tx);
+        }
+
+        let result = do_set_node_time_offset(&state, "room1", 30.0, false);
+
+        assert!(result.is_ok());
+        match rx
+            .recv_timeout(Duration::from_millis(50))
+            .expect("manual preview should queue one periodic tick")
+        {
+            WorkItem::PeriodicNodeTick {
+                node_id,
+                settings_node_id,
+                emit_parent_node_id,
+                ..
+            } => {
+                assert_eq!(node_id, "room1");
+                assert_eq!(settings_node_id, "room1");
+                assert_eq!(emit_parent_node_id, None);
+            }
+            _ => panic!("unexpected work item"),
+        }
+        assert!(
+            matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+            "manual room offset preview must not expand into topology light nodes"
+        );
+    }
+
+    #[test]
+    fn set_time_offset_preview_queues_only_explicit_light_target() {
+        let (state, _rt, _matter_id, _ha_id, hue_one_id, _hue_two_id) =
+            setup_mixed_room_with_hub_groups();
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        {
+            let mut s = state.lock().unwrap();
+            s.composite_controller = Some(Arc::new(rhythm_core::CompositeController::new()));
+            s.work_tx = Some(tx);
+        }
+
+        let result = do_set_node_time_offset(&state, &hue_one_id, 30.0, false);
+
+        assert!(result.is_ok());
+        match rx
+            .recv_timeout(Duration::from_millis(50))
+            .expect("manual preview should queue one periodic tick")
+        {
+            WorkItem::PeriodicNodeTick {
+                node_id,
+                settings_node_id,
+                emit_parent_node_id,
+                ..
+            } => {
+                assert_eq!(node_id, hue_one_id);
+                assert_eq!(settings_node_id, node_id);
+                assert_eq!(emit_parent_node_id.as_deref(), Some("room1"));
+            }
+            _ => panic!("unexpected work item"),
+        }
+        assert!(
+            matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+            "manual light offset preview must not expand into sibling light nodes"
+        );
+    }
+
+    #[test]
+    fn set_time_offset_batch_preview_uses_periodic_targets_not_child_devices() {
+        let (state, rt, matter_id, ha_id, hue_one_id, hue_two_id) =
+            setup_mixed_room_with_hub_groups();
+        let standalone_id = insert_canonical_device(
+            &state,
+            HubKey::new(HubType::new("matter"), "local"),
+            "matter-standalone",
+            "Standalone Lamp",
+            "",
+            "",
+        );
+        rt.snapshots
+            .lock()
+            .unwrap()
+            .push(make_standalone_light_snapshot(&standalone_id));
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(16);
+        {
+            let mut s = state.lock().unwrap();
+            s.composite_controller = Some(Arc::new(rhythm_core::CompositeController::new()));
+            s.topology.ensure_standalone_device(&standalone_id);
+            set_observed_lights_on_in_app(&mut s, "room1", true);
+            s.work_tx = Some(tx);
+        }
+
+        let updates = vec![
+            ("room1".to_string(), 30.0),
+            (matter_id.clone(), 30.0),
+            (ha_id.clone(), 30.0),
+            (hue_one_id.clone(), 30.0),
+            (hue_two_id.clone(), 30.0),
+            (standalone_id.clone(), 30.0),
+        ];
+        let dispatch_count = do_set_node_time_offsets_batch_with_spacing(
+            &state,
+            &updates,
+            false,
+            Duration::from_millis(0),
+        )
+        .unwrap();
+
+        let queued_node_ids: Vec<String> = rx
+            .try_iter()
+            .map(|item| match item {
+                WorkItem::PeriodicNodeTick { node_id, .. } => node_id,
+                _ => panic!("unexpected work item"),
+            })
+            .collect();
+        assert_eq!(queued_node_ids.len(), dispatch_count);
+        assert!(
+            dispatch_count < updates.len(),
+            "batch preview must collapse app-submitted child devices"
+        );
+        assert!(
+            queued_node_ids.contains(&standalone_id),
+            "roomless light devices must still preview on themselves"
+        );
+        assert!(!queued_node_ids.contains(&ha_id));
+        assert!(!queued_node_ids.contains(&hue_one_id));
+        assert!(!queued_node_ids.contains(&hue_two_id));
+        assert_eq!(
+            rt.engine_node_snapshot("room1")
+                .unwrap()
+                .time_offset_minutes,
+            30.0
+        );
+        assert_eq!(
+            rt.engine_node_snapshot(&standalone_id)
+                .unwrap()
+                .time_offset_minutes,
+            30.0
+        );
+        assert_eq!(
+            rt.engine_node_snapshot(&hue_one_id)
+                .unwrap()
+                .time_offset_minutes,
+            0.0
+        );
+    }
+
+    #[test]
+    fn default_time_offset_targets_use_on_rooms_and_roomless_lights() {
+        let (state, rt, _matter_id, ha_id, hue_one_id, hue_two_id) =
+            setup_mixed_room_with_hub_groups();
+        let standalone_id = insert_canonical_device(
+            &state,
+            HubKey::new(HubType::new("matter"), "local"),
+            "matter-standalone",
+            "Standalone Lamp",
+            "",
+            "",
+        );
+        rt.snapshots
+            .lock()
+            .unwrap()
+            .push(make_standalone_light_snapshot(&standalone_id));
+        {
+            let mut s = state.lock().unwrap();
+            s.topology.ensure_standalone_device(&standalone_id);
+            set_observed_lights_on_in_app(&mut s, "room1", true);
+        }
+
+        let mut updates = default_node_time_offset_updates(&state, 20.0).unwrap();
+        updates.sort_by(|left, right| left.0.cmp(&right.0));
+
+        assert_eq!(
+            updates,
+            vec![(standalone_id.clone(), 20.0), ("room1".to_string(), 20.0)]
+        );
+        assert!(!updates.iter().any(|(node_id, _)| node_id == &ha_id));
+        assert!(!updates.iter().any(|(node_id, _)| node_id == &hue_one_id));
+        assert!(!updates.iter().any(|(node_id, _)| node_id == &hue_two_id));
+    }
+
+    #[test]
+    fn set_time_offset_batch_preserves_explicit_child_targets_when_parent_absent() {
+        let (state, rt, _matter_id, _ha_id, hue_one_id, hue_two_id) =
+            setup_mixed_room_with_hub_groups();
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        {
+            let mut s = state.lock().unwrap();
+            s.composite_controller = Some(Arc::new(rhythm_core::CompositeController::new()));
+            s.work_tx = Some(tx);
+        }
+
+        let updates = vec![(hue_one_id.clone(), 15.0), (hue_two_id.clone(), 15.0)];
+        let dispatch_count = do_set_node_time_offsets_batch_with_spacing(
+            &state,
+            &updates,
+            false,
+            Duration::from_millis(0),
+        )
+        .unwrap();
+
+        let queued_node_ids: Vec<String> = rx
+            .try_iter()
+            .map(|item| match item {
+                WorkItem::PeriodicNodeTick { node_id, .. } => node_id,
+                _ => panic!("unexpected work item"),
+            })
+            .collect();
+        assert_eq!(dispatch_count, 2);
+        assert_eq!(
+            queued_node_ids,
+            vec![hue_one_id.clone(), hue_two_id.clone()]
+        );
+        assert_eq!(
+            rt.engine_node_snapshot(&hue_one_id)
+                .unwrap()
+                .time_offset_minutes,
+            15.0
+        );
+        assert_eq!(
+            rt.engine_node_snapshot(&hue_two_id)
+                .unwrap()
+                .time_offset_minutes,
+            15.0
+        );
+    }
+
+    #[test]
+    fn set_time_offset_rejects_non_light_device_node_target() {
+        let mut snapshot = make_snapshot("button1", false, false);
+        snapshot.kind = rhythm_core::LightNodeKind::Button;
+        let (state, _rt) = setup_state(vec![snapshot]);
+        let result = do_set_node_time_offset(&state, "button1", 30.0, false);
+
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("room nodes"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("light-addressable nodes"));
     }
 
     #[test]

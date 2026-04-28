@@ -204,6 +204,25 @@ pub(crate) fn periodic_dispatch_nodes_from_state(
     dispatch_nodes
 }
 
+pub(crate) fn preview_dispatch_node_for_target(
+    target_snap: &rhythm_core::NodeSnapshot,
+) -> Option<PeriodicDispatchNode> {
+    if !target_snap.kind.is_light_addressable() {
+        return None;
+    }
+
+    // Manual/API preview dispatch preserves the explicit target. Topology
+    // fan-out belongs to the periodic scheduler, not to single-target edits.
+    Some(PeriodicDispatchNode {
+        node_id: target_snap.id.clone(),
+        settings_node_id: target_snap.id.clone(),
+        emit_node_id: target_snap
+            .parent_id
+            .clone()
+            .unwrap_or_else(|| target_snap.id.clone()),
+    })
+}
+
 fn summarize_periodic_dispatch(
     node_snapshots: &[rhythm_core::NodeSnapshot],
     dispatch_nodes: &[PeriodicDispatchNode],
@@ -1970,6 +1989,56 @@ mod tests {
                 settings_node_id: room_id,
                 emit_node_id: expected[0].emit_node_id.clone(),
             }]
+        );
+    }
+
+    #[test]
+    fn preview_dispatch_preserves_explicit_light_node_with_composite() {
+        let target = make_node(
+            "attached-light-1",
+            rhythm_core::LightNodeKind::LightDevice,
+            Some("room-a"),
+        );
+
+        assert_eq!(
+            preview_dispatch_node_for_target(&target),
+            Some(PeriodicDispatchNode {
+                node_id: "attached-light-1".to_string(),
+                settings_node_id: "attached-light-1".to_string(),
+                emit_node_id: "room-a".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn preview_dispatch_preserves_explicit_room_with_composite() {
+        let mut state = crate::state::AppState {
+            composite_controller: Some(Arc::new(CompositeController::new())),
+            ..Default::default()
+        };
+
+        let room_id = state.topology.create_room("Kitchen");
+        state
+            .topology
+            .get_mut(&room_id)
+            .unwrap()
+            .upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                hub_key: crate::canonical::identity::HubKey::new(
+                    crate::hub::HubType::new("hue"),
+                    "192.168.1.10",
+                ),
+                hub_room_id: "hue-room-1".to_string(),
+                control_id: "gl-1".to_string(),
+                light_device_ids: vec!["hue-light-1".to_string()],
+            });
+
+        assert_eq!(
+            preview_dispatch_node_for_target(&make_room(&room_id, 0.0)),
+            Some(PeriodicDispatchNode {
+                node_id: room_id.clone(),
+                settings_node_id: room_id.clone(),
+                emit_node_id: room_id,
+            })
         );
     }
 

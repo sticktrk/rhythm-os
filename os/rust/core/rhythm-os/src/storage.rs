@@ -114,10 +114,34 @@ impl StoredLightProfiles {
         *profiles = crate::factory_default_config::factory_default_light_profile_config_map();
         for profile in &self.profiles {
             let mut normalized = profile.clone();
+            normalize_legacy_persisted_builtin_state_profile(&mut normalized);
             rhythm_core::normalize_builtin_state_profile_config(&mut normalized);
             profiles.insert(normalized.id.clone(), normalized);
         }
         runtime_config.solar_noon_hour = self.solar_noon_hour;
+    }
+}
+
+fn normalize_legacy_persisted_builtin_state_profile(config: &mut LightProfileConfig) {
+    if !rhythm_core::is_builtin_state_profile_id(&config.id) {
+        return;
+    }
+
+    let rhythm_core::LightCurveShape::Constant { brightness, .. } = &config.curve else {
+        return;
+    };
+
+    if *brightness > 1.0
+        && config.min_brightness == config.max_brightness
+        && config.min_color_temp == 0
+        && config.max_color_temp == 0
+        && config.max_dim_steps == 1
+        && config.fade_ms.is_auto()
+        && config.motion_timeout_secs.is_auto()
+        && config.rhythm_interval_secs.is_auto()
+    {
+        config.min_brightness = 1;
+        config.max_brightness = 1;
     }
 }
 
@@ -908,6 +932,58 @@ mod tests {
             .expect("day_idle missing");
         assert_eq!(config.min_brightness, 1);
         assert_eq!(config.max_brightness, 1);
+        assert!(matches!(
+            config.curve,
+            rhythm_core::LightCurveShape::Constant {
+                brightness: 1.0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn stored_light_profiles_preserve_normalized_day_idle_constant_override() {
+        let stored = StoredLightProfiles {
+            solar_noon_hour: 12.5,
+            profiles: vec![
+                rhythm_core::default_rhythm_profile(),
+                rhythm_core::default_sleep_profile(),
+                rhythm_core::default_sleep_idle_profile(),
+                rhythm_core::LightProfileConfig {
+                    id: rhythm_core::DAY_IDLE_PROFILE_ID.into(),
+                    name: rhythm_core::DAY_IDLE_PROFILE_NAME.into(),
+                    curve: rhythm_core::LightCurveShape::Constant {
+                        brightness: 1.0,
+                        color_temp: 0.0,
+                        direct_color: Some(rhythm_core::LightDirectColor {
+                            xy: rhythm_core::XyColor {
+                                x: 0.2041,
+                                y: 0.2444,
+                            },
+                            rgb: rhythm_core::Rgb::new(38, 191, 255),
+                        }),
+                    },
+                    min_brightness: 15,
+                    max_brightness: 15,
+                    min_color_temp: 0,
+                    max_color_temp: 0,
+                    max_dim_steps: 1,
+                    fade_ms: rhythm_core::TimerSetting::Auto,
+                    motion_timeout_secs: rhythm_core::TimerSetting::Auto,
+                    rhythm_interval_secs: rhythm_core::TimerSetting::Auto,
+                },
+            ],
+        };
+
+        let mut profiles = std::collections::BTreeMap::new();
+        let mut runtime_config = rhythm_core::RuntimeConfig::default();
+        stored.apply_to_state(&mut profiles, &mut runtime_config);
+
+        let config = profiles
+            .get(rhythm_core::DAY_IDLE_PROFILE_ID)
+            .expect("day_idle missing");
+        assert_eq!(config.min_brightness, 15);
+        assert_eq!(config.max_brightness, 15);
         assert!(matches!(
             config.curve,
             rhythm_core::LightCurveShape::Constant {

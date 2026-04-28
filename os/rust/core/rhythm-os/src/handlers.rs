@@ -62,18 +62,40 @@ fn nodes_response(
     queued: bool,
     spacing: Duration,
 ) -> ApiResponse {
-    let count = results.len();
+    let dispatch_count = queued.then_some(results.len());
+    nodes_response_with_dispatch_count(results, dispatch_count, spacing)
+}
+
+fn nodes_response_with_dispatch_count(
+    results: Vec<crate::api_types::NodeStateDto>,
+    dispatch_count: Option<usize>,
+    spacing: Duration,
+) -> ApiResponse {
+    let queued = dispatch_count.is_some_and(|count| count > 0);
     let body = NodesResponse {
         nodes: results,
         queued: queued.then_some(true),
-        dispatch_count: queued.then_some(count),
+        dispatch_count: queued.then_some(dispatch_count.unwrap_or_default()),
         dispatch_spacing_ms: queued.then_some(spacing.as_millis() as u64),
-        estimated_dispatch_ms: queued
-            .then_some(commands::estimated_dispatch_duration(count, spacing).as_millis() as u64),
+        estimated_dispatch_ms: queued.then_some(
+            commands::estimated_dispatch_duration(dispatch_count.unwrap_or_default(), spacing)
+                .as_millis() as u64,
+        ),
     };
     match serde_json::to_string(&body) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+fn node_time_offset_error_response(e: anyhow::Error) -> ApiResponse {
+    let message = e.to_string();
+    if message.contains("not found in engine") {
+        ApiResponse::not_found(&message)
+    } else if message.contains("Time offsets can only be set") {
+        ApiResponse::bad_request(&message)
+    } else {
+        ApiResponse::server_error(message)
     }
 }
 
@@ -1227,57 +1249,71 @@ pub fn handle_set_time_offset(state: &SharedState, body: &Value, persist: bool) 
     ApiResponse::json_ok(format!(r#"{{"rooms":[{}]}}"#, results.join(",")))
 }
 
-/// Set node time offset. Batch previews are queued and paced on the same
-/// background dispatch path used by periodic ticks.
+/// Set node time offset. Batch previews collapse to periodic-style live
+/// dispatch targets instead of queueing every submitted child device.
 pub fn handle_set_node_time_offset(
     state: &SharedState,
     body: &Value,
     persist: bool,
 ) -> ApiResponse {
-    let items = match mutation_items(body) {
-        Ok(items) => items,
-        Err(e) => return ApiResponse::bad_request(&e),
-    };
+    if !body.is_object() {
+        return ApiResponse::bad_request("Expected object body");
+    }
     let dispatch_spacing = match dispatch_spacing_from_body(body) {
         Ok(spacing) => spacing,
         Err(e) => return ApiResponse::bad_request(&e),
     };
+    let time_offset = match body.get("time_offset").and_then(|v| v.as_f64()) {
+        Some(t) => t as f32,
+        None => return ApiResponse::bad_request("Missing time_offset"),
+    };
+
+    let updates = match body.get("nodes") {
+        Some(Value::Array(nodes)) if !nodes.is_empty() => {
+            let mut seen = std::collections::HashSet::new();
+            let mut updates = Vec::with_capacity(nodes.len());
+            for node in nodes {
+                let raw_node_id = match node.as_str() {
+                    Some(id) if !id.is_empty() => id,
+                    _ => return ApiResponse::bad_request("nodes must be an array of node ids"),
+                };
+                let node_id = commands::resolve_node_id(state, raw_node_id);
+                if seen.insert(node_id.clone()) {
+                    updates.push((node_id, time_offset));
+                }
+            }
+            updates
+        }
+        Some(Value::Array(_)) | None => {
+            match commands::default_node_time_offset_updates(state, time_offset) {
+                Ok(updates) => updates,
+                Err(e) => return node_time_offset_error_response(e),
+            }
+        }
+        Some(_) => return ApiResponse::bad_request("nodes must be an array of node ids"),
+    };
 
     let mut results = Vec::new();
-    let batch = items.len() > 1;
-
-    for item in &items {
-        let raw_node_id = match item.get("node_id").and_then(|v| v.as_str()) {
-            Some(id) => id,
-            None => return ApiResponse::bad_request("Missing node_id"),
-        };
-        let node_id = commands::resolve_node_id(state, raw_node_id);
-        let time_offset = match item.get("time_offset").and_then(|v| v.as_f64()) {
-            Some(t) => t as f32,
-            None => return ApiResponse::bad_request("Missing time_offset"),
-        };
-
-        let per_item_persist = persist && !batch;
-        if let Err(e) = commands::do_set_node_time_offset_with_spacing(
-            state,
-            &node_id,
-            time_offset,
-            per_item_persist,
-            dispatch_spacing,
-        ) {
-            return ApiResponse::server_error(e);
-        }
-        match commands::build_node_state(state, &node_id) {
+    let dispatch_count = match commands::do_set_node_time_offsets_batch_with_spacing(
+        state,
+        &updates,
+        persist,
+        dispatch_spacing,
+    ) {
+        Ok(dispatch_count) => dispatch_count,
+        Err(e) => return node_time_offset_error_response(e),
+    };
+    for (node_id, _) in &updates {
+        match commands::build_node_state(state, node_id) {
             Ok(node) => results.push(node),
+            Err(e) if e.to_string().contains("not found") => {
+                return node_time_offset_error_response(e);
+            }
             Err(e) => return ApiResponse::server_error(e),
         }
     }
 
-    if batch && persist {
-        commands::persist_rooms(state);
-    }
-
-    nodes_response(results, batch, dispatch_spacing)
+    nodes_response_with_dispatch_count(results, Some(dispatch_count), dispatch_spacing)
 }
 
 /// Update room preferences. Accepts single object or array.
@@ -1781,7 +1817,7 @@ mod tests {
     use crate::hub::{ActiveHub, HubType};
     use crate::pairing::{PairingStatus, UnpairingRequest, UnpairingResult};
     use crate::registry::HubDeviceRegistry;
-    use crate::state::{AppState, WorkItem};
+    use crate::state::{AppState, ObservedPowerSource, ObservedPowerState, WorkItem};
     use crate::topology::HubRoomBinding;
     use rhythm_core::runtime::hub_registry::DeviceType;
     use serde_json::json;
@@ -2047,19 +2083,69 @@ mod tests {
     #[test]
     fn node_time_offset_batch_supported() {
         let state = handler_state_with_runtime();
-        let _rx = attach_work_queue(&state);
+        state.lock().unwrap().room_observed_power.insert(
+            "room1".to_string(),
+            ObservedPowerState::new(true, ObservedPowerSource::Command),
+        );
+        let rx = attach_work_queue(&state);
         let r = handle_set_node_time_offset(
             &state,
-            &json!([
-                {"node_id": "room1", "time_offset": -40.0},
-                {"node_id": "room2", "time_offset": -40.0}
-            ]),
+            &json!({"time_offset": -40.0, "nodes": ["room1", "room2"]}),
             false,
         );
         assert_eq!(r.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert_eq!(parsed["queued"], true);
-        assert_eq!(parsed["dispatch_count"], 2);
+        assert_eq!(parsed["dispatch_count"], 1);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            WorkItem::PeriodicNodeTick { .. }
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn node_time_offset_defaults_to_on_periodic_sources_when_nodes_omitted() {
+        let state = handler_state_with_runtime();
+        state.lock().unwrap().room_observed_power.insert(
+            "room1".to_string(),
+            ObservedPowerState::new(true, ObservedPowerSource::Command),
+        );
+        let rx = attach_work_queue(&state);
+
+        let r = handle_set_node_time_offset(&state, &json!({"time_offset": -40.0}), false);
+
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["nodes"][0]["id"], "room1");
+        assert_eq!(parsed["dispatch_count"], 1);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            WorkItem::PeriodicNodeTick { .. }
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn node_time_offset_rejects_legacy_array_body() {
+        let state = handler_state_with_runtime();
+        let r = handle_set_node_time_offset(
+            &state,
+            &json!([
+                {"node_id": "room1", "time_offset": -40.0}
+            ]),
+            false,
+        );
+
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("Expected object body"));
     }
 
     #[test]
