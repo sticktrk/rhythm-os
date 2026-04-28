@@ -23,7 +23,6 @@ pub const SLEEP_IDLE_PROFILE_ID: &str = "sleep_idle";
 pub const SLEEP_IDLE_PROFILE_NAME: &str = "Sleep Idle";
 pub const SLEEP_DEFAULT_BRIGHTNESS: u8 = 20;
 pub const SLEEP_DEFAULT_RGB: Rgb = Rgb { r: 255, g: 0, b: 0 };
-const LEGACY_IDLE_UI_BRIGHTNESS: u8 = 15;
 
 fn constant_red_curve() -> LightCurveShape {
     LightCurveShape::Constant {
@@ -130,15 +129,8 @@ pub fn normalize_builtin_state_profile_config(config: &mut LightProfileConfig) {
         return;
     }
 
-    let reset_to_idle_default = (config.min_brightness == DEFAULT_MIN_BRIGHTNESS
-        && config.max_brightness == DEFAULT_MAX_BRIGHTNESS)
-        || matches!(
-            &config.curve,
-            LightCurveShape::Constant { brightness, .. }
-                if config.min_brightness == LEGACY_IDLE_UI_BRIGHTNESS
-                    && config.max_brightness == LEGACY_IDLE_UI_BRIGHTNESS
-                    && *brightness > 1.0
-        );
+    let reset_to_idle_default = config.min_brightness == DEFAULT_MIN_BRIGHTNESS
+        && config.max_brightness == DEFAULT_MAX_BRIGHTNESS;
 
     let fixed_brightness = if reset_to_idle_default {
         1
@@ -242,42 +234,6 @@ mod tests {
 
         assert_eq!(config.min_brightness, 1);
         assert_eq!(config.max_brightness, 1);
-    }
-
-    #[test]
-    fn normalize_idle_constant_default_fifteen_artifact_to_one_percent() {
-        let mut config = LightProfileConfig {
-            id: DAY_IDLE_PROFILE_ID.into(),
-            name: DAY_IDLE_PROFILE_NAME.into(),
-            curve: LightCurveShape::Constant {
-                brightness: LEGACY_IDLE_UI_BRIGHTNESS as f32,
-                color_temp: 0.0,
-                direct_color: Some(LightDirectColor {
-                    xy: rgb_to_xy(Rgb::new(38, 191, 255)),
-                    rgb: Rgb::new(38, 191, 255),
-                }),
-            },
-            min_brightness: LEGACY_IDLE_UI_BRIGHTNESS,
-            max_brightness: LEGACY_IDLE_UI_BRIGHTNESS,
-            min_color_temp: 0,
-            max_color_temp: 0,
-            max_dim_steps: 1,
-            fade_ms: TimerSetting::Auto,
-            motion_timeout_secs: TimerSetting::Auto,
-            rhythm_interval_secs: TimerSetting::Auto,
-        };
-
-        normalize_builtin_state_profile_config(&mut config);
-
-        assert_eq!(config.min_brightness, 1);
-        assert_eq!(config.max_brightness, 1);
-        assert!(matches!(
-            config.curve,
-            LightCurveShape::Constant {
-                brightness: 1.0,
-                ..
-            }
-        ));
     }
 
     #[test]

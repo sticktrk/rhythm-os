@@ -317,8 +317,8 @@ fn soft_off_uses_explicit_idle_constant_override() {
     let (_, cmd) = &soft_off_calls[0];
     assert!(cmd.is_direct_color, "soft-off should use direct color");
     assert_eq!(
-        cmd.brightness, 1,
-        "idle default brightness should normalize to 1%"
+        cmd.brightness, 15,
+        "explicit idle constant brightness should be preserved"
     );
     assert_eq!(
         cmd.rgb,

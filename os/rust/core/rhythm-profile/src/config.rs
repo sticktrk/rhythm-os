@@ -8,7 +8,7 @@ pub const DEFAULT_MIN_COLOR_TEMP: u16 = 1800;
 pub const DEFAULT_MAX_COLOR_TEMP: u16 = 5500;
 
 /// Default brightness range (percentage)
-pub const DEFAULT_MIN_BRIGHTNESS: u8 = 2;
+pub const DEFAULT_MIN_BRIGHTNESS: u8 = 20;
 pub const DEFAULT_MAX_BRIGHTNESS: u8 = 100;
 
 /// Default dimming steps
@@ -154,6 +154,7 @@ mod tests {
 
     #[test]
     fn test_constants_match_defaults() {
+        assert_eq!(DEFAULT_MIN_BRIGHTNESS, 20);
         let config = CommonCurveConfig::default();
         assert_eq!(config.min_color_temp, DEFAULT_MIN_COLOR_TEMP);
         assert_eq!(config.max_color_temp, DEFAULT_MAX_COLOR_TEMP);

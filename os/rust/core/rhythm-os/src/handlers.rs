@@ -2649,7 +2649,7 @@ mod tests {
     }
 
     #[test]
-    fn put_config_day_idle_default_fifteen_artifact_normalizes_to_one_percent() {
+    fn put_config_day_idle_explicit_fifteen_brightness_is_preserved() {
         let state = handler_state_with_runtime();
         let r = handle_put_config(
             &state,
@@ -2684,8 +2684,8 @@ mod tests {
             .light_profile_config(rhythm_core::DAY_IDLE_PROFILE_ID)
             .unwrap()
             .clone();
-        assert_eq!(stored.min_brightness, 1);
-        assert_eq!(stored.max_brightness, 1);
+        assert_eq!(stored.min_brightness, 15);
+        assert_eq!(stored.max_brightness, 15);
         assert!(matches!(
             stored.curve,
             rhythm_core::LightCurveShape::Constant {

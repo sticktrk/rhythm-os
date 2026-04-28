@@ -366,7 +366,7 @@ These methods expose the module's configured brightness and color temperature ra
 
 | Method | Description | Typical Default |
 |--------|-------------|-----------------|
-| `min_brightness()` | Minimum brightness percentage | 1 |
+| `min_brightness()` | Minimum brightness percentage | 20 |
 | `max_brightness()` | Maximum brightness percentage | 100 |
 | `min_color_temp()` | Warmest color temperature | 500K |
 | `max_color_temp()` | Coolest color temperature | 6500K |
@@ -805,7 +805,7 @@ fn find_time_for_brightness_interpolated(
 pub struct CommonCurveConfig {
     pub min_color_temp: u16,   // Default: 500K
     pub max_color_temp: u16,   // Default: 6500K
-    pub min_brightness: u8,    // Default: 1%
+    pub min_brightness: u8,    // Default: 20%
     pub max_brightness: u8,    // Default: 100%
     pub max_dim_steps: u8,     // Default: 6
 }
