@@ -88,7 +88,18 @@ impl TestHarness {
     /// - `AppState::default()` (no I/O)
     /// - `ActiveHub` with `runtime: None`, `registry: Some(HubDeviceRegistry)`
     /// - `ensure_runtime_fn` creates real `RhythmRuntime<NoOpController, ...>`
+    ///
+    /// Mock time defaults to 2 PM on June 21, 2026. Use `new_at` to vary.
     pub fn new() -> Self {
+        Self::new_at(14.0, 172)
+    }
+
+    /// Like `new()` but with a configurable mock time-of-day.
+    ///
+    /// `hour` is in 24h decimal (e.g. 6.5 = 6:30 AM); `day_of_year` is 1-365.
+    /// Use this to test time-sensitive behavior (sleep boundaries, idle profile,
+    /// low-sun curves) that the default afternoon time hides.
+    pub fn new_at(hour: f32, day_of_year: u32) -> Self {
         let hub_type = HubType::new("mock");
         let hub_key = HubKey::new(hub_type.clone(), "192.168.1.100");
 
@@ -128,7 +139,7 @@ impl TestHarness {
 
             let runtime = RhythmRuntime::new(
                 Arc::new(NoOpController::new()),
-                MockTimeProvider::new(14.0, 172, 2026), // 2 PM, June 21
+                MockTimeProvider::new(hour, day_of_year, 2026),
                 NoOpScheduler::new(),
                 SimpleDeviceRegistry::new(),
                 RuntimeConfig::default(),
@@ -155,7 +166,17 @@ impl TestHarness {
     /// what `LightingCommand` values the engine dispatches.
     ///
     /// Returns `(harness, spy)` where `spy` can be inspected for recorded calls.
+    /// Mock time defaults to 2 PM on June 21, 2026; use `with_spy_controller_at`
+    /// to vary.
     pub fn with_spy_controller() -> (Self, Arc<SpyLightController>) {
+        Self::with_spy_controller_at(14.0, 172)
+    }
+
+    /// Like `with_spy_controller()` but with a configurable mock time-of-day.
+    pub fn with_spy_controller_at(
+        hour: f32,
+        day_of_year: u32,
+    ) -> (Self, Arc<SpyLightController>) {
         let hub_type = HubType::new("mock");
         let hub_key = HubKey::new(hub_type.clone(), "192.168.1.100");
 
@@ -195,7 +216,7 @@ impl TestHarness {
 
             let runtime = RhythmRuntime::new(
                 spy_for_closure.clone(),
-                MockTimeProvider::new(14.0, 172, 2026),
+                MockTimeProvider::new(hour, day_of_year, 2026),
                 NoOpScheduler::new(),
                 SimpleDeviceRegistry::new(),
                 RuntimeConfig::default(),

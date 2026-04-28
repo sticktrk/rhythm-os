@@ -260,6 +260,7 @@ where
                 target_id,
                 command,
             } => {
+                log_manual_command_dispatch(&target_id, &command);
                 self.controller.turn_on(&target_id, command.clone()).await?;
                 let mut engine = self
                     .engine
@@ -272,6 +273,12 @@ where
                 target_id,
                 transition_ms,
             } => {
+                info!(
+                    target: "cmd",
+                    "room_command_dispatch: room={} kind=turn_off transition_ms={:?}",
+                    target_id,
+                    transition_ms,
+                );
                 self.controller.turn_off(&target_id, transition_ms).await?;
                 Ok(())
             }
@@ -309,6 +316,37 @@ where
             .map_err(|e| RuntimeError::Internal(format!("Failed to lock engine: {}", e)))?;
         engine.sync_rooms().await?;
         Ok(())
+    }
+}
+
+fn log_manual_command_dispatch(target_id: &str, command: &crate::lighting::LightingCommand) {
+    if command.is_direct_color {
+        info!(
+            target: "cmd",
+            "room_command_dispatch: room={} bri={} rgb=({},{},{}) xy=({:.3},{:.3}) transition_ms={:?} direct_color=true",
+            target_id,
+            command.brightness,
+            command.rgb.r,
+            command.rgb.g,
+            command.rgb.b,
+            command.xy.x,
+            command.xy.y,
+            command.transition_ms,
+        );
+    } else {
+        info!(
+            target: "cmd",
+            "room_command_dispatch: room={} bri={} kelvin={} rgb=({},{},{}) xy=({:.3},{:.3}) transition_ms={:?} direct_color=false",
+            target_id,
+            command.brightness,
+            command.kelvin,
+            command.rgb.r,
+            command.rgb.g,
+            command.rgb.b,
+            command.xy.x,
+            command.xy.y,
+            command.transition_ms,
+        );
     }
 }
 
