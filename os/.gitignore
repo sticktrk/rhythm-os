@@ -124,3 +124,8 @@ rust/bins/rhythm-esp32/.embuild/
 *.temp
 .cache/
 rhythm-app
+
+# =============================================================================
+# Bug-report triage bundles (downloaded by scripts/triage-bug.sh)
+# =============================================================================
+/.triage/
