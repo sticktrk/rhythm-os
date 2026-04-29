@@ -300,3 +300,33 @@ fn composite_rhythm_off_no_transport_calls() {
     );
     assert_eq!(ha_spy.call_count(), 0, "No HA calls for rhythm_off");
 }
+
+#[test]
+fn composite_off_press_partial_failure_still_dims_working_hub() {
+    // Asymmetric to `composite_partial_failure_succeeds` (which covered Reset).
+    // OffPress is the more important path because soft-off is what the user
+    // expects to "dim everything" — losing one hub's bulbs to a transient
+    // failure must not silently turn the request into a no-op on the working
+    // hub.
+    let (runtime, hue_spy, ha_spy, _composite) = make_composite_pipeline();
+
+    // Establish baseline-on across both hubs, then drop Hue.
+    let on = InputEvent::new("kitchen", rhythm_core::ButtonAction::OnPress);
+    runtime.handle_event(&on).unwrap();
+    hue_spy.reset();
+    ha_spy.reset();
+    hue_spy.set_should_fail(true);
+
+    let off = InputEvent::new("kitchen", rhythm_core::ButtonAction::OffPress);
+    let result = runtime.handle_event(&off);
+    assert!(result.is_ok(), "OffPress must succeed when one hub works");
+
+    // HA must still receive bri=1 even though Hue failed.
+    let ha_calls = ha_spy.calls_for_service("turn_on");
+    assert_eq!(ha_calls.len(), 1, "HA should receive the soft-off");
+    assert_eq!(ha_calls[0].data["area_id"], "ha-kitchen");
+    assert_eq!(
+        ha_calls[0].data["brightness_pct"], 1,
+        "Working hub must still receive 1% brightness"
+    );
+}
