@@ -1568,7 +1568,7 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             command_id,
             node_id,
             command,
-            dispatch_spacing,
+            dispatch_spacing: _,
             dispatch_generation,
         } => {
             if !crate::periodic::light_dispatch_generation_current(state, dispatch_generation) {
@@ -1589,24 +1589,11 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             };
             let Some(runtime) = runtime else { return };
 
-            if !crate::periodic::wait_for_node_dispatch_slot_if_current(
-                state,
-                &command_id,
-                &node_id,
-                dispatch_spacing,
-                dispatch_generation,
-            ) {
-                tracing::debug!(
-                    target: "cmd",
-                    event = "apply_node_command_skipped",
-                    command_id = %command_id,
-                    node_id = %node_id,
-                    dispatch_generation,
-                    reason = "stale_dispatch_generation_after_pace",
-                    "Skipping stale apply_node_command"
-                );
-                return;
-            }
+            // Manual mode-apply commands are paced producer-side by
+            // dispatch_room_commands. We intentionally do not wait on
+            // next_node_dispatch_at here — that slot is shared with periodic
+            // ticks, and a single periodic tick with a long phase_gap could
+            // otherwise stall every queued ApplyNodeCommand behind it.
             crate::commands::log_room_command_dispatch(runtime.as_ref(), &node_id, &command);
             if let Err(e) = runtime.apply_room_command(&node_id, command) {
                 warn!(
@@ -2207,6 +2194,7 @@ mod tests {
     struct PeriodicWorkerTestRuntime {
         snapshots: Vec<RoomSnapshot>,
         periodic_tick_node_calls: Arc<Mutex<Vec<(String, String, f32)>>>,
+        apply_room_command_calls: Arc<AtomicUsize>,
     }
 
     impl RuntimeHandle for PeriodicWorkerTestRuntime {
@@ -2264,6 +2252,7 @@ mod tests {
             _: &str,
             _: rhythm_core::LightingCommand,
         ) -> anyhow::Result<()> {
+            self.apply_room_command_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         fn lights_off_room(&self, _: &str, _: Option<u32>) -> anyhow::Result<()> {
@@ -2659,6 +2648,7 @@ mod tests {
                 profile_settings: RoomProfileSettings::default(),
             }],
             periodic_tick_node_calls: calls.clone(),
+            apply_room_command_calls: Arc::new(AtomicUsize::new(0)),
         });
         let state = make_state_with_runtime(runtime);
         let internal_node_id =
@@ -2702,6 +2692,7 @@ mod tests {
                 profile_settings: RoomProfileSettings::default(),
             }],
             periodic_tick_node_calls: calls.clone(),
+            apply_room_command_calls: Arc::new(AtomicUsize::new(0)),
         });
         let state = make_state_with_runtime(runtime);
         let stale_generation = state.lock().unwrap().light_dispatch_generation;
@@ -2733,6 +2724,64 @@ mod tests {
             .unwrap()
             .pending_periodic_ticks
             .contains_key(internal_node_id));
+    }
+
+    #[test]
+    fn apply_node_command_does_not_wait_on_periodic_dispatch_slot() {
+        // Regression: a periodic tick with a long phase_gap used to push the
+        // shared next_node_dispatch_at slot minutes into the future, stalling
+        // every queued ApplyNodeCommand from a manual mode transition behind
+        // it. ApplyNodeCommand is paced producer-side by dispatch_room_commands
+        // and must not wait on the shared periodic slot.
+        let apply_calls = Arc::new(AtomicUsize::new(0));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(PeriodicWorkerTestRuntime {
+            snapshots: vec![RoomSnapshot {
+                id: "room_a".into(),
+                name: "Room A".into(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                hard_off: false,
+                profile_settings: RoomProfileSettings::default(),
+            }],
+            periodic_tick_node_calls: Arc::new(Mutex::new(Vec::new())),
+            apply_room_command_calls: apply_calls.clone(),
+        });
+        let state = make_state_with_runtime(runtime);
+        let dispatch_generation = state.lock().unwrap().light_dispatch_generation;
+
+        // Simulate periodic having pushed the shared dispatch slot 3 minutes
+        // out (the same scenario as a 1-eligible-node periodic cycle with
+        // cycle_secs=180).
+        {
+            let mut s = state.lock().unwrap();
+            s.next_node_dispatch_at =
+                Some(Instant::now().checked_add(Duration::from_secs(180)).unwrap());
+        }
+
+        let started = Instant::now();
+        process_work_item(
+            &state,
+            WorkItem::ApplyNodeCommand {
+                command_id: "manual-apply".into(),
+                node_id: "room_a".into(),
+                command: rhythm_core::LightingCommand::with_transition(50, 4000, 500),
+                dispatch_spacing: Duration::from_secs(3),
+                dispatch_generation,
+            },
+        );
+        let elapsed = started.elapsed();
+
+        assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "ApplyNodeCommand stalled on periodic slot: elapsed {:?}",
+            elapsed
+        );
     }
 
     #[test]
