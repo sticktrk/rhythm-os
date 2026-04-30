@@ -722,7 +722,10 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     return ((h % 24) + 24) % 24;
   }
 
-  bool get _hasTimeOffset => _timeOffsetMinutes.abs() > 0.5;
+  bool _isSignificantTimeOffset(double offsetMinutes) =>
+      offsetMinutes.abs() > 0.5;
+
+  bool get _hasTimeOffset => _isSignificantTimeOffset(_timeOffsetMinutes);
 
   bool get _showTimeOffsetActions => _hasTimeOffset || _timeOffsetPreviewActive;
 
@@ -832,8 +835,10 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       await _waitForTimeOffsetDispatch(result);
       if (!mounted) return;
       setState(() {
-        _timeOffsetApplied = _hasTimeOffset;
-        _timeOffsetPreviewActive = _hasTimeOffset;
+        _timeOffsetApplied =
+            (_timeOffsetMinutes - previewOffset).abs() <= 0.5 &&
+                _isSignificantTimeOffset(previewOffset);
+        _timeOffsetPreviewActive = _isSignificantTimeOffset(previewOffset);
       });
       AnalyticsService().logLightProfilePreviewAction(
         profile: _selectedProfileId,

@@ -15,6 +15,8 @@ import 'providers/room_page_provider.dart';
 import 'screens/all_rooms_screen.dart';
 import 'screens/sun_position_screen.dart';
 import 'screens/settings/settings_screen.dart';
+import 'screens/settings/sections/lights_devices_section.dart';
+import 'widgets/report_bug_flow.dart';
 import 'widgets/solar_orbit.dart';
 import 'widgets/bottom_nav_overlay.dart';
 import 'widgets/connect_hub_screen.dart';
@@ -140,6 +142,16 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   void _openSunPosition() {
     SunPositionScreen.show(context);
+  }
+
+  void _openAddDevices() {
+    LightsDevicesDetailScreen.show(context);
+  }
+
+  Future<void> _openReportBug() async {
+    final serverHub =
+        context.read<HomeProvider>().getFirstHubOfType(HubType.server);
+    await showReportBugFlow(context, serverHub: serverHub);
   }
 
   void _handleServerHubLifecycle({required bool hasServerHub}) {
@@ -305,6 +317,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
               serverHub: serverHub,
               onSettingsTap: _openSettings,
               onSunPositionTap: _openSunPosition,
+              onAddDevicesTap: _openAddDevices,
+              onReportBugTap: _openReportBug,
             );
           }
 
@@ -320,6 +334,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
             return HubPickerScreen(
               onSettingsTap: _openSettings,
               onSunPositionTap: _openSunPosition,
+              onAddDevicesTap: _openAddDevices,
+              onReportBugTap: _openReportBug,
             );
           }
 
@@ -425,6 +441,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                       pageController: _roomPageController,
                       onSettingsTap: _openSettings,
                       onSunPositionTap: _openSunPosition,
+                      onAddDevicesTap: _openAddDevices,
+                      onReportBugTap: _openReportBug,
                     ),
                   ),
                 ),
@@ -490,6 +508,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                 totalPages: 1,
                 onSettingsTap: _openSettings,
                 onSunPositionTap: _openSunPosition,
+                onAddDevicesTap: _openAddDevices,
+                onReportBugTap: _openReportBug,
               ),
             ),
           ),
@@ -510,7 +530,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
             bottom: false,
             child: ConnectHubScreen(mode: mode),
           ),
-          // Bottom overlay (gear + sun button, no dots)
+          // Bottom overlay (gear + fan, no dots)
           Positioned(
             bottom: 0,
             left: 0,
@@ -521,6 +541,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                 totalPages: 1,
                 onSettingsTap: _openSettings,
                 onSunPositionTap: _openSunPosition,
+                onAddDevicesTap: _openAddDevices,
+                onReportBugTap: _openReportBug,
               ),
             ),
           ),

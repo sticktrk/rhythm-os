@@ -18,11 +18,15 @@ import 'bottom_nav_overlay.dart';
 class HubPickerScreen extends StatefulWidget {
   final VoidCallback onSettingsTap;
   final VoidCallback onSunPositionTap;
+  final VoidCallback? onAddDevicesTap;
+  final VoidCallback? onReportBugTap;
 
   const HubPickerScreen({
     super.key,
     required this.onSettingsTap,
     required this.onSunPositionTap,
+    this.onAddDevicesTap,
+    this.onReportBugTap,
   });
 
   @override
@@ -226,6 +230,8 @@ class _HubPickerScreenState extends State<HubPickerScreen>
                 totalPages: 1,
                 onSettingsTap: widget.onSettingsTap,
                 onSunPositionTap: widget.onSunPositionTap,
+                onAddDevicesTap: widget.onAddDevicesTap,
+                onReportBugTap: widget.onReportBugTap,
               ),
             ),
           ),

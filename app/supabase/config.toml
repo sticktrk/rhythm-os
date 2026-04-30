@@ -28,3 +28,9 @@ enable_anonymous_sign_ins = true
 enable_signup = true
 double_confirm_changes = true
 enable_confirmations = false
+
+[functions.delete-user]
+verify_jwt = false
+
+[functions.report-bug]
+verify_jwt = false

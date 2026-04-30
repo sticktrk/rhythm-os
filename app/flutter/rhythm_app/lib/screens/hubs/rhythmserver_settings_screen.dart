@@ -10,7 +10,6 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmConnectionState,
         RhythmDevice,
         RhythmDeviceType,
-        RhythmApiException,
         RhythmDiagnosticsApi,
         RhythmHubInfo,
         RhythmHubStartupRetry,
@@ -22,10 +21,11 @@ import '../../providers/server_sync_provider.dart';
 import '../../providers/home_provider.dart';
 import '../../providers/room_provider.dart';
 import '../../services/analytics_service.dart';
-import '../../services/debug_bundle_submission_service.dart';
+import '../../services/device_restart_service.dart';
 import '../../services/ota_service.dart';
 import '../../widgets/beta_badge.dart';
 import '../../widgets/device_detail_sheet.dart';
+import '../../widgets/report_bug_flow.dart';
 import 'ha_configurator_screen.dart';
 import 'hue_configurator_screen.dart';
 import 'matter_pairing_flow.dart';
@@ -97,6 +97,7 @@ class RhythmServerSettingsScreen extends StatefulWidget {
 class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     with SingleTickerProviderStateMixin {
   late final RhythmDiagnosticsApi _client;
+  late final DeviceRestartService _restartService;
   final OtaService _otaService = OtaService();
 
   bool _isOnline = false;
@@ -121,18 +122,19 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       _serverContext == 'embedded' || _serverContext == 'esp32';
   bool get _isHaAddon => _serverContext == 'ha_addon';
   bool get _supportsDebugBundle => !_isEmbedded;
+  bool get _supportsRestartEndpoint => !_isEmbedded && !_isHaAddon;
 
   String get _headerTitle =>
       widget.headerTitleOverride ??
       switch (_serverContext) {
         'ha_addon' => 'Rhythm Add-on',
-        'server' => 'RhythmOS Server',
+        'server' || 'rpiz' => 'RhythmOS Server',
         _ => 'LightBox',
       };
 
   IconData get _heroIcon => switch (_serverContext) {
         'ha_addon' => Icons.home_outlined,
-        'server' => Icons.dns_outlined,
+        'server' || 'rpiz' => Icons.dns_outlined,
         _ => Icons.developer_board,
       };
 
@@ -141,6 +143,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     super.initState();
     _client = RhythmDiagnosticsApi(
         host: widget.hub.endpoint.host, port: widget.hub.endpoint.port);
+    _restartService =
+        DeviceRestartService(baseUrl: widget.hub.endpoint.baseUrl);
 
     _glowController = AnimationController(
       duration: const Duration(milliseconds: 2000),
@@ -162,6 +166,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   void dispose() {
     _otaService.removeListener(_onOtaStateChanged);
     _otaService.dispose();
+    _restartService.dispose();
     _glowController.dispose();
     super.dispose();
   }
@@ -366,6 +371,9 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                         _buildDiagnosticsButton(),
                         const SizedBox(height: 12),
                         _buildRebootButton(),
+                        const SizedBox(height: 12),
+                      ] else if (_supportsRestartEndpoint) ...[
+                        _buildRestartButton(),
                         const SizedBox(height: 12),
                       ],
                       _buildResetButton(),
@@ -723,8 +731,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
   Widget _buildDebugSection() {
     final subtitle = _isSubmittingDebugBundle
-        ? 'Generating and uploading a tar.gz snapshot...'
-        : 'Capture logs and redacted state from this server and upload the bundle to support.';
+        ? 'Generating logs and creating a bug report...'
+        : 'Send logs and redacted state from this server to Rhythm support.';
 
     return _buildSection(
       title: 'DEBUG',
@@ -766,7 +774,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           const Text(
-                            'Submit Debug Bundle',
+                            'Report Bug',
                             style: TextStyle(
                               color: CelestialColors.textPrimary,
                               fontSize: 15,
@@ -815,141 +823,14 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
   Future<void> _submitDebugBundle() async {
     if (_isSubmittingDebugBundle) return;
-
-    final summary = await _showDebugBundlePrompt();
-    if (summary == null || !mounted) return;
-
-    final syncProvider = context.read<ServerSyncProvider>();
-    final currentVersion = _otaService.currentVersion != '0.0.0'
-        ? _otaService.currentVersion
-        : syncProvider.firmwareVersion;
-    final serverVersion = currentVersion == '0.0.0'
-        ? 'Unknown'
-        : _formatOtaVersion(currentVersion);
-
     setState(() => _isSubmittingDebugBundle = true);
-    _showDebugBundleProgressDialog();
-
     try {
-      final bundle = await _client.downloadDebugBundle();
-      final submission = await DebugBundleSubmissionService.instance.submit(
-        serverHub: widget.hub,
-        bundle: bundle,
-        serverVersion: serverVersion,
-        serverPlatformContext: syncProvider.serverPlatformContext,
-        summary: summary,
-      );
-
-      if (!mounted) return;
-      Navigator.of(context, rootNavigator: true).pop();
-
-      await _showDebugBundleSubmittedDialog(submission.referenceCode);
-    } catch (error) {
-      if (!mounted) return;
-      Navigator.of(context, rootNavigator: true).pop();
-      final message = switch (error) {
-        RhythmApiException apiError =>
-          apiError.serverMessage ?? apiError.message,
-        DebugBundleSubmissionException submitError => submitError.message,
-        _ => 'Failed to submit the debug bundle.',
-      };
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(message),
-          behavior: SnackBarBehavior.floating,
-          backgroundColor: Colors.red.shade400,
-        ),
-      );
+      await showReportBugFlow(context, serverHub: widget.hub);
     } finally {
       if (mounted) {
         setState(() => _isSubmittingDebugBundle = false);
       }
     }
-  }
-
-  Future<String?> _showDebugBundlePrompt() async {
-    return showDialog<String>(
-      context: context,
-      builder: (ctx) => const _DebugBundlePromptDialog(),
-    );
-  }
-
-  void _showDebugBundleProgressDialog() {
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: CelestialColors.backgroundCard,
-        content: Row(
-          children: [
-            const SizedBox(
-              width: 20,
-              height: 20,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Text(
-                'Generating and uploading debug bundle...',
-                style: const TextStyle(color: CelestialColors.textPrimary),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _showDebugBundleSubmittedDialog(String referenceCode) {
-    return showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: CelestialColors.backgroundCard,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(20),
-        ),
-        title: const Text(
-          'Debug bundle submitted',
-          style: TextStyle(
-            color: CelestialColors.textPrimary,
-            fontSize: 17,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Support can now review this bundle.',
-              style: TextStyle(
-                color: CelestialColors.textSecondary,
-                fontSize: 14,
-              ),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              'Reference: $referenceCode',
-              style: const TextStyle(
-                color: CelestialColors.textPrimary,
-                fontSize: 15,
-                fontWeight: FontWeight.w600,
-                fontFamily: 'monospace',
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text(
-              'Done',
-              style: TextStyle(color: _teal),
-            ),
-          ),
-        ],
-      ),
-    );
   }
 
   List<Widget> _buildOtaStateContent(String currentVersion) {
@@ -1551,6 +1432,118 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
             const SizedBox(width: 10),
             Text(
               _isRebooting ? 'Rebooting...' : 'Reboot $_headerTitle',
+              style: TextStyle(
+                color: buttonColor,
+                fontSize: 15,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _handleRestart() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: CelestialColors.backgroundCard,
+        title: Text(
+          'Restart $_headerTitle',
+          style: const TextStyle(color: CelestialColors.textPrimary),
+        ),
+        content: Text(
+          'This will restart your $_headerTitle. It should come back online within a minute.',
+          style: const TextStyle(color: CelestialColors.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(
+              'Cancel',
+              style: TextStyle(color: CelestialColors.textSecondary),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(
+              'Restart',
+              style: TextStyle(color: Colors.orange.shade400),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _isRebooting = true);
+
+    final result = await _restartService.scheduleRestart();
+
+    if (!mounted) return;
+
+    setState(() => _isRebooting = false);
+
+    if (result.success) {
+      unawaited(context.read<ServerSyncProvider>().connection.reconnect());
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          result.success
+              ? '${result.message}. $_headerTitle will reconnect shortly.'
+              : result.message,
+        ),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: result.success ? null : Colors.red.shade400,
+      ),
+    );
+  }
+
+  Widget _buildRestartButton() {
+    final buttonColor = _isOnline
+        ? Colors.orange.shade400
+        : CelestialColors.textSecondary.withValues(alpha: 0.4);
+
+    return GestureDetector(
+      onTap: (_isOnline && !_isRebooting) ? _handleRestart : null,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(14),
+          color: _isOnline
+              ? Colors.orange.shade400.withValues(alpha: 0.08)
+              : Colors.white.withValues(alpha: 0.02),
+          border: Border.all(
+            color: _isOnline
+                ? Colors.orange.shade400.withValues(alpha: 0.25)
+                : CelestialColors.textSecondary.withValues(alpha: 0.1),
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            if (_isRebooting)
+              SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation(buttonColor),
+                ),
+              )
+            else
+              Icon(
+                Icons.restart_alt_rounded,
+                color: buttonColor,
+                size: 18,
+              ),
+            const SizedBox(width: 10),
+            Text(
+              _isRebooting ? 'Restarting...' : 'Restart $_headerTitle',
               style: TextStyle(
                 color: buttonColor,
                 fontSize: 15,
@@ -2566,108 +2559,6 @@ class _RhythmServerHubManagementSectionState
           ),
         ),
         ...children,
-      ],
-    );
-  }
-}
-
-class _DebugBundlePromptDialog extends StatefulWidget {
-  const _DebugBundlePromptDialog();
-
-  @override
-  State<_DebugBundlePromptDialog> createState() =>
-      _DebugBundlePromptDialogState();
-}
-
-class _DebugBundlePromptDialogState extends State<_DebugBundlePromptDialog> {
-  final TextEditingController _controller = TextEditingController();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      backgroundColor: CelestialColors.backgroundCard,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(20),
-      ),
-      title: const Text(
-        'Submit debug bundle',
-        style: TextStyle(
-          color: CelestialColors.textPrimary,
-          fontSize: 17,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-      content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'This uploads a tar.gz snapshot of recent logs and redacted server state to Rhythm support.',
-              style: TextStyle(
-                color: CelestialColors.textSecondary,
-                fontSize: 14,
-              ),
-            ),
-            const SizedBox(height: 14),
-            TextField(
-              controller: _controller,
-              autofocus: true,
-              maxLines: 4,
-              minLines: 3,
-              maxLength: 500,
-              style: const TextStyle(
-                color: CelestialColors.textPrimary,
-              ),
-              decoration: InputDecoration(
-                hintText: 'What went wrong? (optional)',
-                hintStyle: TextStyle(
-                  color: CelestialColors.textSecondary.withValues(alpha: 0.45),
-                ),
-                filled: true,
-                fillColor: CelestialColors.backgroundDark,
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(
-                    color: CelestialColors.orbitRing.withValues(alpha: 0.35),
-                  ),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(
-                    color: _RhythmServerSettingsScreenState._teal
-                        .withValues(alpha: 0.7),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: Text(
-            'Cancel',
-            style: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.8),
-            ),
-          ),
-        ),
-        ElevatedButton(
-          onPressed: () => Navigator.of(context).pop(_controller.text),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: _RhythmServerSettingsScreenState._teal,
-            foregroundColor: const Color(0xFF0A0F14),
-          ),
-          child: const Text('Submit'),
-        ),
       ],
     );
   }

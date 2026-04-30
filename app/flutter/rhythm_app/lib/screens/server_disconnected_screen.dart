@@ -19,12 +19,16 @@ class ServerDisconnectedScreen extends StatefulWidget {
   final Hub serverHub;
   final VoidCallback onSettingsTap;
   final VoidCallback onSunPositionTap;
+  final VoidCallback? onAddDevicesTap;
+  final VoidCallback? onReportBugTap;
 
   const ServerDisconnectedScreen({
     super.key,
     required this.serverHub,
     required this.onSettingsTap,
     required this.onSunPositionTap,
+    this.onAddDevicesTap,
+    this.onReportBugTap,
   });
 
   @override
@@ -196,6 +200,8 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
                   totalPages: 1,
                   onSettingsTap: widget.onSettingsTap,
                   onSunPositionTap: widget.onSunPositionTap,
+                  onAddDevicesTap: widget.onAddDevicesTap,
+                  onReportBugTap: widget.onReportBugTap,
                 ),
               ),
             ),
