@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Package a rhythm-server desktop release tarball for GitHub releases.
+# Package a rhythm-server desktop release tarball for CDN publishing.
 #
 # Reads dist/bin/<target>/{rhythm-server,rhythm-cli} and produces a tarball
 # laid out for the bootstrap installer at install/pages/install.sh:

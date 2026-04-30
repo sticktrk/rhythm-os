@@ -6,14 +6,14 @@
 #   curl -fsSL https://get.rhythm.lighting/install.sh | bash -s -- --user --port 8080
 #   curl -fsSL https://get.rhythm.lighting/install.sh | bash -s -- --uninstall
 #
-# Detects platform, downloads the matching release tarball from GitHub, verifies
+# Detects platform, downloads the matching release tarball from the Rhythm CDN, verifies
 # its SHA256, and hands off to the install/install.sh bundled inside the tarball
 # (which sets up systemd or launchd).
 #
 # Env overrides (mostly for testing):
 #   RHYTHM_VERSION          Pin a specific tag, e.g. v0.4.176-beta.
 #   RHYTHM_BASE_URL         Pages base (default https://get.rhythm.lighting).
-#   RHYTHM_RELEASE_BASE_URL GitHub release-download base.
+#   RHYTHM_RELEASE_BASE_URL Release-download base.
 #   RHYTHM_NO_TELEMETRY=1   Skip the post-install hit-counter ping.
 #   RHYTHM_NO_START=1       Install but do not start the service.
 
@@ -153,10 +153,14 @@ resolve_version() {
         return
     fi
     local v
-    v="$(curl -fsSL --max-time 10 "${BASE_URL}/latest.txt" || true)"
+    v="$(curl -fsSL --max-time 10 "${RELEASE_BASE_URL}/latest.txt" || true)"
     v="$(printf '%s' "$v" | tr -d '[:space:]')"
     if [ -z "$v" ]; then
-        die "Could not resolve latest version from ${BASE_URL}/latest.txt. Pin one with --version vX.Y.Z-beta."
+        v="$(curl -fsSL --max-time 10 "${BASE_URL}/latest.txt" || true)"
+    fi
+    v="$(printf '%s' "$v" | tr -d '[:space:]')"
+    if [ -z "$v" ]; then
+        die "Could not resolve latest version from ${RELEASE_BASE_URL}/latest.txt or ${BASE_URL}/latest.txt. Pin one with --version vX.Y.Z-beta."
     fi
     echo "$v"
 }

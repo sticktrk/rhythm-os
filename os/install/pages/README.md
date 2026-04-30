@@ -12,7 +12,7 @@ curl -fsSL https://get.rhythm.lighting/install.sh | bash
 | File            | Served as                | Purpose                                        |
 | --------------- | ------------------------ | ---------------------------------------------- |
 | `install.sh`    | `/install.sh`, `/`       | Bootstrap installer (downloaded by curl).      |
-| `latest.txt`    | `/latest.txt`            | Plain text tag (e.g. `v0.4.176-beta`). CI updates this on each tag push; the bootstrap reads it to resolve "latest". |
+| `latest.txt`    | `/latest.txt`            | Legacy fallback plain text tag. The bootstrap now reads the primary latest pointer from `https://dl.rhythm.lighting/server/install/latest.txt`. |
 | `installed.txt` | `/installed.txt`         | 1-byte target for the post-install hit-counter ping. Cloudflare logs the request with its query string. |
 | `_headers`      | (Cloudflare directive)   | Sets `Content-Type` and `Cache-Control`.       |
 | `_redirects`    | (Cloudflare directive)   | Maps `/` to `/install.sh` (302).               |
@@ -44,9 +44,9 @@ GitHub repo via the dashboard. One-time setup:
 ## Updating `latest.txt`
 
 The CI workflow (`.github/workflows/ci.yml`, job `update-latest-pointer`)
-updates this file on every successful release tag and either commits to
-`master` directly or opens an auto-merge PR. Don't edit it by hand unless
-you're debugging.
+publishes the current tag to `https://dl.rhythm.lighting/server/install/latest.txt`
+after all release artifacts have uploaded. `install/pages/latest.txt` remains
+as a Cloudflare Pages fallback and should not drive normal releases.
 
 ## Reading install counts
 

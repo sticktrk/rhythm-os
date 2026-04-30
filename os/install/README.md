@@ -10,7 +10,7 @@ Platform-specific instructions for installing and running Rhythm OS.
 curl -fsSL https://get.rhythm.lighting/install.sh | bash
 ```
 
-The bootstrap installer detects your platform, downloads the matching release tarball from GitHub, verifies its SHA256, and sets up `rhythm-server` as a system service. Pass `--user` for a Linux user-level service, `--port` / `--log-level` to override defaults, `--no-start` to install without starting, or `--uninstall` to remove:
+The bootstrap installer detects your platform, downloads the matching release tarball from the Rhythm CDN, verifies its SHA256, and sets up `rhythm-server` as a system service. Pass `--user` for a Linux user-level service, `--port` / `--log-level` to override defaults, `--no-start` to install without starting, or `--uninstall` to remove:
 
 ```bash
 curl -fsSL https://get.rhythm.lighting/install.sh | bash -s -- --user --port 8080
@@ -30,7 +30,7 @@ Pre-built desktop tarballs live at `https://dl.rhythm.lighting/server/install/<t
 | Linux (x86_64) | `rhythm-server-<version>-linux-amd64.tar.gz` |
 | Linux (ARM64) | `rhythm-server-<version>-linux-aarch64.tar.gz` |
 
-Each tarball contains `bin/rhythm-server`, `bin/rhythm-cli`, and a copy of `install/install.sh` so you can install offline. The current tag is at <https://get.rhythm.lighting/latest.txt>.
+Each tarball contains `bin/rhythm-server`, `bin/rhythm-cli`, and a copy of `install/install.sh` so you can install offline. The current tag is at <https://dl.rhythm.lighting/server/install/latest.txt>.
 
 The Raspberry Pi Zero appliance is not distributed via the desktop installer — it ships as the SD-card image and self-updates via the OTA feed at `https://dl.rhythm.lighting/server/rpiz/manifest.json`.
 
@@ -73,7 +73,7 @@ If you have the repo checked out (or extracted a tarball), the local installer s
 Two install paths to keep straight:
 
 - **`install/install.sh`** — local-repo / extracted-tarball installer. Expects binaries at `dist/bin/<platform>/` or via `--binary <path>`.
-- **`install/pages/install.sh`** — bootstrap installer served at `https://get.rhythm.lighting/install.sh`. Downloads the release tarball from GitHub, verifies SHA256, and hands off to the bundled `install/install.sh`.
+- **`install/pages/install.sh`** — bootstrap installer served at `https://get.rhythm.lighting/install.sh`. Downloads the release tarball from the Rhythm CDN, verifies SHA256, and hands off to the bundled `install/install.sh`.
 
 The server runs on port `54448` by default and advertises via mDNS.
 
