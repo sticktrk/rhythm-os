@@ -51,6 +51,7 @@ pub fn create_router(state: SharedState) -> Router {
                     move || do_update(ota_status.clone())
                 }),
             )
+            .route("/api/restart", post(restart_device))
             .with_state(state)
             .layer(CorsLayer::permissive()),
     )
@@ -262,6 +263,12 @@ fn scan_mdns() -> Vec<serde_json::Value> {
     devices
 }
 
+async fn restart_device() -> Response {
+    log::info!(target: "http", "Restart requested via /api/restart");
+    crate::self_update::schedule_user_initiated_restart();
+    json_ok(r#"{"status":"ok","message":"Restart scheduled"}"#.to_string())
+}
+
 async fn do_update(ota_status: crate::self_update::OtaStatusHandle) -> Response {
     let snapshot = ota_status.snapshot();
     if matches!(
@@ -331,4 +338,49 @@ async fn do_update(ota_status: crate::self_update::OtaStatusHandle) -> Response 
             .unwrap_or(serde_json::Value::Null),
         serde_json::to_string(&apply_result.installed_targets).unwrap_or_else(|_| "[]".to_string())
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use axum::http::{Request, StatusCode};
+    use rhythm_os::state::AppState;
+    use std::sync::{Arc, Mutex, Once};
+    use tower::ServiceExt;
+
+    static DRY_RUN_INIT: Once = Once::new();
+
+    // The restart helper spawns a thread that sleeps 1s then either reboots the
+    // device or calls process::exit(1). Setting this env var keeps the spawned
+    // thread inert so tests can exercise the route without nuking the runner.
+    fn init_restart_dry_run() {
+        DRY_RUN_INIT.call_once(|| std::env::set_var("RHYTHM_RESTART_DRY_RUN", "1"));
+    }
+
+    #[tokio::test]
+    async fn restart_endpoint_returns_ok_and_schedules_restart() {
+        init_restart_dry_run();
+
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let router = create_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/restart")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "POST /api/restart must be registered and return 200"
+        );
+
+        let body_bytes = to_bytes(response.into_body(), 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["message"], "Restart scheduled");
+    }
 }

@@ -1283,11 +1283,23 @@ fn is_appliance_runtime(platform_type: Option<&str>) -> bool {
 }
 
 pub fn schedule_post_update_restart() {
-    std::thread::spawn(|| {
+    schedule_restart("self-update");
+}
+
+pub fn schedule_user_initiated_restart() {
+    schedule_restart("user request");
+}
+
+fn schedule_restart(reason: &'static str) {
+    std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(1));
+        if std::env::var_os("RHYTHM_RESTART_DRY_RUN").is_some() {
+            log::info!(target: "sys", "Restart dry-run ({}); skipping reboot/exit", reason);
+            return;
+        }
         match restart_strategy() {
             RestartStrategy::ApplianceReboot => {
-                log::info!(target: "sys", "Rebooting appliance after self-update...");
+                log::info!(target: "sys", "Rebooting appliance after {}...", reason);
 
                 let reboot_result = Command::new("/sbin/reboot")
                     .status()
@@ -1306,7 +1318,8 @@ pub fn schedule_post_update_restart() {
                     Err(error) => {
                         log::error!(
                             target: "sys",
-                            "Failed to invoke appliance reboot after self-update: {}; falling back to process exit",
+                            "Failed to invoke appliance reboot after {}: {}; falling back to process exit",
+                            reason,
                             error
                         );
                         std::process::exit(1);
@@ -1314,7 +1327,7 @@ pub fn schedule_post_update_restart() {
                 }
             }
             RestartStrategy::SupervisorExit => {
-                log::info!(target: "sys", "Restarting after self-update...");
+                log::info!(target: "sys", "Restarting after {}...", reason);
                 std::process::exit(1);
             }
         }
