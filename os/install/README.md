@@ -4,19 +4,35 @@ Platform-specific instructions for installing and running Rhythm OS.
 
 ## Server (macOS / Linux)
 
-### Download
+### One-line install (macOS / Linux desktop)
 
-Pre-built binaries are available on the [Releases](https://github.com/sticktrk/rhythm-os/releases) page.
+```bash
+curl -fsSL https://get.rhythm.lighting/install.sh | bash
+```
+
+The bootstrap installer detects your platform, downloads the matching release tarball from GitHub, verifies its SHA256, and sets up `rhythm-server` as a system service. Pass `--user` for a Linux user-level service, `--port` / `--log-level` to override defaults, `--no-start` to install without starting, or `--uninstall` to remove:
+
+```bash
+curl -fsSL https://get.rhythm.lighting/install.sh | bash -s -- --user --port 8080
+curl -fsSL https://get.rhythm.lighting/install.sh | bash -s -- --uninstall
+```
+
+Set `RHYTHM_NO_TELEMETRY=1` to skip the post-install hit-counter ping.
+
+### Download manually
+
+Pre-built desktop tarballs live at `https://dl.rhythm.lighting/install/<tag>/`:
 
 | Platform | Download |
 |----------|----------|
-| macOS (Apple Silicon) | `rhythm-server-macos-arm64.tar.gz` |
-| macOS (Intel) | `rhythm-server-macos-x86_64.tar.gz` |
-| Linux (x86_64) | `rhythm-server-linux-amd64.tar.gz` |
-| Linux (ARM64) | `rhythm-server-linux-aarch64.tar.gz` |
-| Raspberry Pi Zero / Zero W | `rhythm-server-rpiz.tar.gz` |
+| macOS (Apple Silicon) | `rhythm-server-<version>-macos-arm64.tar.gz` |
+| macOS (Intel) | `rhythm-server-<version>-macos-x86_64.tar.gz` |
+| Linux (x86_64) | `rhythm-server-<version>-linux-amd64.tar.gz` |
+| Linux (ARM64) | `rhythm-server-<version>-linux-aarch64.tar.gz` |
 
-Each archive contains `rhythm-server` and `rhythm-cli`.
+Each tarball contains `bin/rhythm-server`, `bin/rhythm-cli`, and a copy of `install/install.sh` so you can install offline. The current tag is at <https://get.rhythm.lighting/latest.txt>.
+
+The Raspberry Pi Zero appliance is not distributed via the desktop installer — it ships as the SD-card image and self-updates via the OTA feed at `https://dl.rhythm.lighting/server/rpiz/manifest.json`.
 
 ### Build from source
 
@@ -27,10 +43,11 @@ Each archive contains `rhythm-server` and `rhythm-cli`.
 
 ### Install as a system service
 
-The install script sets up auto-start and auto-restart:
+If you have the repo checked out (or extracted a tarball), the local installer sets up auto-start and auto-restart:
 
 ```bash
-./install/install.sh
+./install/install.sh                                             # uses dist/bin/<platform>/rhythm-server
+./install/install.sh --binary path/to/rhythm-server              # use a specific binary
 ```
 
 | Platform | Service manager | Binary | Data |
@@ -46,9 +63,17 @@ The install script sets up auto-start and auto-restart:
 # Custom port or log level
 ./install/install.sh --port 8080 --log-level debug
 
+# Install without starting the service
+./install/install.sh --no-start            # also via RHYTHM_NO_START=1 or CI=true
+
 # Uninstall
 ./install/install.sh --uninstall
 ```
+
+Two install paths to keep straight:
+
+- **`install/install.sh`** — local-repo / extracted-tarball installer. Expects binaries at `dist/bin/<platform>/` or via `--binary <path>`.
+- **`install/pages/install.sh`** — bootstrap installer served at `https://get.rhythm.lighting/install.sh`. Downloads the release tarball from GitHub, verifies SHA256, and hands off to the bundled `install/install.sh`.
 
 The server runs on port `54448` by default and advertises via mDNS.
 

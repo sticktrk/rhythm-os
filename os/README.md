@@ -38,7 +38,15 @@ Rhythm OS manages your lights through **curves** — continuous functions that d
 
 ## Quick start
 
-Download a pre-built binary from [Releases](https://github.com/sticktrk/rhythm-os/releases), or build from source:
+One-line install on macOS or Linux (x86_64 / arm64):
+
+```bash
+curl -fsSL https://get.rhythm.lighting/install.sh | bash
+```
+
+This downloads the latest release binary, sets up `rhythm-server` as a launchd or systemd service, and starts it on port `54448`. Pass `--user` for a Linux user-level service, `--port`/`--log-level` to override defaults, or `--uninstall` to remove. See [install/pages/install.sh](install/pages/install.sh) for the script.
+
+Or download a pre-built binary from [Releases](https://github.com/sticktrk/rhythm-os/releases), or build from source:
 
 ```bash
 cargo build -p rhythm-server --release

@@ -17,6 +17,8 @@ USER_MODE=false
 UNINSTALL=false
 PORT=""
 LOG_LEVEL=""
+NO_START="${RHYTHM_NO_START:-}"
+[ "${CI:-}" = "true" ] && NO_START=1
 
 PLIST_LABEL="com.rhythm.lighting.server"
 SERVICE_NAME="rhythm-server"
@@ -44,6 +46,10 @@ while [[ $# -gt 0 ]]; do
             UNINSTALL=true
             shift
             ;;
+        --no-start)
+            NO_START=1
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -55,6 +61,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --port PORT         Override default port (54448)"
             echo "  --log-level LEVEL   Override default log level (info)"
             echo "  --uninstall         Remove service, binary (prompts before removing data)"
+            echo "  --no-start          Install but do not start the service (also via RHYTHM_NO_START=1 / CI=true)"
             echo "  -h, --help          Show this help"
             echo ""
             echo "Platforms:"
@@ -141,7 +148,12 @@ confirm_remove_data() {
     fi
     echo ""
     echo "Data directory exists: $data_dir"
-    read -p "Remove data directory? This cannot be undone. [y/N] " -r
+    REPLY=""
+    if [ -t 0 ]; then
+        read -p "Remove data directory? This cannot be undone. [y/N] " -r REPLY || REPLY=""
+    else
+        echo "(non-interactive: keeping data)"
+    fi
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         rm -rf "$data_dir"
         echo "Removed $data_dir"
@@ -228,9 +240,13 @@ macos_install() {
 
     echo "$plist_content" > "$plist_path"
 
-    # Load service
-    echo "Loading service..."
-    launchctl bootstrap "gui/$(id -u)" "$plist_path"
+    if [ -n "$NO_START" ]; then
+        echo "Installed plist (not starting; --no-start)."
+    else
+        # Load service
+        echo "Loading service..."
+        launchctl bootstrap "gui/$(id -u)" "$plist_path"
+    fi
 
     echo ""
     echo "Installed successfully!"
@@ -346,7 +362,11 @@ linux_system_install() {
     # Enable and start
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
-    systemctl start "$SERVICE_NAME"
+    if [ -n "$NO_START" ]; then
+        echo "Enabled but not started (--no-start)."
+    else
+        systemctl start "$SERVICE_NAME"
+    fi
 
     echo ""
     echo "Installed successfully!"
@@ -464,7 +484,11 @@ EOF
     # Enable and start
     systemctl --user daemon-reload
     systemctl --user enable "$SERVICE_NAME"
-    systemctl --user start "$SERVICE_NAME"
+    if [ -n "$NO_START" ]; then
+        echo "Enabled but not started (--no-start)."
+    else
+        systemctl --user start "$SERVICE_NAME"
+    fi
 
     echo ""
     echo "Installed successfully!"
