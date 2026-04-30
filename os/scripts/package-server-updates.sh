@@ -6,6 +6,8 @@
 #   <output>/<target>/v<version>/rhythm-server-<target>.tar.gz
 #   <output>/<target>/v<version>/sdcard.img.gz     (optional rpiz factory image, falls back to sdcard.img)
 #   <output>/<target>/v<version>/rootfs.ext2.gz    (optional rpiz OTA image, falls back to rootfs.ext2)
+#   <output>/<target>/latest/sdcard.img.gz         (optional latest alias)
+#   <output>/<target>/latest/rootfs.ext2.gz        (optional latest alias)
 
 set -euo pipefail
 
@@ -182,6 +184,9 @@ for target in $TARGETS; do
             image_src="$IMAGE_ROOT/$image_name"
             image_dst="$version_dir/$image_name"
             cp "$image_src" "$image_dst"
+            latest_dir="$OUTPUT_DIR/$target/latest"
+            mkdir -p "$latest_dir"
+            cp "$image_src" "$latest_dir/$image_name"
             image_sha="$(sha256_file "$image_dst")"
             image_size="$(file_size "$image_dst")"
             image_kind="disk_image"

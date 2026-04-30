@@ -16,6 +16,8 @@
 # Output:
 #   <output-dir>/rhythm-server-<VERSION>-<target>.tar.gz
 #   <output-dir>/rhythm-server-<VERSION>-<target>.tar.gz.sha256
+#   <output-dir>/rhythm-server-latest-<target>.tar.gz
+#   <output-dir>/rhythm-server-latest-<target>.tar.gz.sha256
 #
 # Usage:
 #   scripts/package-server-release.sh --target macos-arm64 --version v0.4.176-beta --output dist/release-assets
@@ -70,6 +72,7 @@ CLI_BIN="$BIN_DIR/rhythm-cli"
 
 ARCHIVE_NAME="rhythm-server-${VERSION}-${TARGET}"
 ARCHIVE_FILE="${ARCHIVE_NAME}.tar.gz"
+LATEST_ARCHIVE_FILE="rhythm-server-latest-${TARGET}.tar.gz"
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -113,5 +116,14 @@ else
     (cd "$OUTPUT_DIR" && shasum -a 256 "$ARCHIVE_FILE" > "$ARCHIVE_FILE.sha256")
 fi
 
+cp "$OUTPUT_DIR/$ARCHIVE_FILE" "$OUTPUT_DIR/$LATEST_ARCHIVE_FILE"
+if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$OUTPUT_DIR" && sha256sum "$LATEST_ARCHIVE_FILE" > "$LATEST_ARCHIVE_FILE.sha256")
+else
+    (cd "$OUTPUT_DIR" && shasum -a 256 "$LATEST_ARCHIVE_FILE" > "$LATEST_ARCHIVE_FILE.sha256")
+fi
+
 echo "Packaged: $OUTPUT_DIR/$ARCHIVE_FILE"
 echo "         $OUTPUT_DIR/$ARCHIVE_FILE.sha256"
+echo "         $OUTPUT_DIR/$LATEST_ARCHIVE_FILE"
+echo "         $OUTPUT_DIR/$LATEST_ARCHIVE_FILE.sha256"
