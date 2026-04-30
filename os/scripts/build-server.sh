@@ -262,7 +262,10 @@ collect_chipd_feature_args() {
 }
 
 should_use_cross() {
-    [ "$1" = "rpiz" ] || return 1
+    case "$1" in
+        rpiz|linux-amd64|linux-aarch64) ;;
+        *) return 1 ;;
+    esac
     [ "$(uname -s)" = "Linux" ] || return 1
     command -v cross &>/dev/null || return 1
 

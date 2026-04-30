@@ -21,7 +21,7 @@ Set `RHYTHM_NO_TELEMETRY=1` to skip the post-install hit-counter ping.
 
 ### Download manually
 
-Pre-built desktop tarballs live at `https://dl.rhythm.lighting/install/<tag>/`:
+Pre-built desktop tarballs live at `https://dl.rhythm.lighting/server/install/<tag>/`:
 
 | Platform | Download |
 |----------|----------|

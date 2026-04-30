@@ -20,7 +20,7 @@
 set -euo pipefail
 
 DEFAULT_BASE_URL="https://get.rhythm.lighting"
-DEFAULT_RELEASE_BASE_URL="https://dl.rhythm.lighting/install"
+DEFAULT_RELEASE_BASE_URL="https://dl.rhythm.lighting/server/install"
 
 BASE_URL="${RHYTHM_BASE_URL:-$DEFAULT_BASE_URL}"
 RELEASE_BASE_URL="${RHYTHM_RELEASE_BASE_URL:-$DEFAULT_RELEASE_BASE_URL}"
