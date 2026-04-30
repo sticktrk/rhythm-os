@@ -77,11 +77,15 @@ impl LightProfile {
         let long = DEFAULT_MOTION_TIMEOUT_SECS;
         let short = long / 4;
 
+        // The morning band is symmetric around sunrise (±3h) so users who wake
+        // up pre-dawn (e.g. manually transitioning sleep_to_day) still get the
+        // long timeout instead of the late-night short one.
+        let morning_start = sunrise - 3.0;
         let morning_end = sunrise + 3.0;
         let evening_start = sunset - 3.0;
         let night_start = sunset + 1.0;
 
-        if hour >= sunrise && hour < morning_end {
+        if hour >= morning_start && hour < morning_end {
             long
         } else if hour >= morning_end && hour < evening_start {
             short
@@ -645,6 +649,48 @@ mod tests {
         assert!(
             sunset_ramp < 180,
             "Sunset ramp should stay faster than the plateau cadence"
+        );
+    }
+
+    // Regression: pre-dawn within 3h of sunrise must use the long (morning)
+    // motion timeout. From issue #3 — user manually transitioned sleep_to_day
+    // at 05:54 with sunrise at 06:24 and motion lights timed out after 5 min
+    // instead of 20.
+    #[test]
+    fn test_rhythm_motion_timeout_pre_dawn_uses_long_band() {
+        let profile = LightProfile::new(default_rhythm_profile());
+        let sunrise = 6.4;
+        let sunset = 20.0;
+
+        let near_sunrise = profile
+            .calculate(&test_context_with_sun_times(5.9, sunrise, sunset))
+            .motion_timeout_secs;
+        let mid_pre_dawn = profile
+            .calculate(&test_context_with_sun_times(4.0, sunrise, sunset))
+            .motion_timeout_secs;
+        let just_after_sunrise = profile
+            .calculate(&test_context_with_sun_times(7.0, sunrise, sunset))
+            .motion_timeout_secs;
+        let deep_night = profile
+            .calculate(&test_context_with_sun_times(2.0, sunrise, sunset))
+            .motion_timeout_secs;
+
+        assert_eq!(
+            near_sunrise, DEFAULT_MOTION_TIMEOUT_SECS,
+            "Just before sunrise should use the long morning timeout"
+        );
+        assert_eq!(
+            mid_pre_dawn, DEFAULT_MOTION_TIMEOUT_SECS,
+            "Pre-dawn within 3h of sunrise should use the long morning timeout"
+        );
+        assert_eq!(
+            just_after_sunrise, DEFAULT_MOTION_TIMEOUT_SECS,
+            "Just after sunrise should still use the long morning timeout"
+        );
+        assert_eq!(
+            deep_night,
+            DEFAULT_MOTION_TIMEOUT_SECS / 4,
+            "Deep pre-dawn (>3h before sunrise) should still use the short timeout"
         );
     }
 
