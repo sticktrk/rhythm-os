@@ -132,6 +132,18 @@ struct ProcessResourceSnapshot {
     tcp: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tcp6: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    udp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    udp6: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    route: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    net_dev: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wireless: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    arp: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1334,6 +1346,12 @@ fn build_process_resources_json(
             sockstat6: None,
             tcp: None,
             tcp6: None,
+            udp: None,
+            udp6: None,
+            route: None,
+            net_dev: None,
+            wireless: None,
+            arp: None,
         };
 
         snapshot.open_fds = linux_open_fd_snapshot(diagnostics);
@@ -1348,6 +1366,12 @@ fn build_process_resources_json(
         snapshot.sockstat6 = linux_read_optional_proc_file("/proc/net/sockstat6", diagnostics);
         snapshot.tcp = linux_read_optional_proc_file("/proc/net/tcp", diagnostics);
         snapshot.tcp6 = linux_read_optional_proc_file("/proc/net/tcp6", diagnostics);
+        snapshot.udp = linux_read_optional_proc_file("/proc/net/udp", diagnostics);
+        snapshot.udp6 = linux_read_optional_proc_file("/proc/net/udp6", diagnostics);
+        snapshot.route = linux_read_optional_proc_file("/proc/net/route", diagnostics);
+        snapshot.net_dev = linux_read_optional_proc_file("/proc/net/dev", diagnostics);
+        snapshot.wireless = linux_read_optional_proc_file("/proc/net/wireless", diagnostics);
+        snapshot.arp = linux_read_optional_proc_file("/proc/net/arp", diagnostics);
         snapshot
     };
 
@@ -1370,6 +1394,12 @@ fn build_process_resources_json(
             sockstat6: None,
             tcp: None,
             tcp6: None,
+            udp: None,
+            udp6: None,
+            route: None,
+            net_dev: None,
+            wireless: None,
+            arp: None,
         }
     };
 

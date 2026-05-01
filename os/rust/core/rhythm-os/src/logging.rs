@@ -204,6 +204,16 @@ where
                         matched_path = matched_path,
                     )
                 })
+                .on_request(
+                    |_request: &Request<axum::body::Body>, span: &tracing::Span| {
+                        tracing::info!(
+                            target: "http",
+                            parent: span,
+                            event = "http_request_start",
+                            "request started"
+                        );
+                    },
+                )
                 .on_response(
                     |response: &Response, latency: std::time::Duration, span: &tracing::Span| {
                         let status = response.status();

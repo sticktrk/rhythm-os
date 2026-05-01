@@ -136,6 +136,36 @@ log_sdio_inventory() {
     done
 }
 
+disable_wifi_power_save() {
+    local iface="$1"
+    local status
+
+    if command -v iw >/dev/null 2>&1; then
+        if iw dev "$iface" set power_save off 2>/tmp/rhythm-wifi-powersave.err; then
+            status="$(iw dev "$iface" get power_save 2>/dev/null || true)"
+            if [ -n "$status" ]; then
+                log "power_save: $status"
+            else
+                log "power_save: disabled via iw"
+            fi
+            rm -f /tmp/rhythm-wifi-powersave.err
+            return 0
+        fi
+        log "power_save: iw failed: $(cat /tmp/rhythm-wifi-powersave.err 2>/dev/null || true)"
+        rm -f /tmp/rhythm-wifi-powersave.err
+    fi
+
+    if command -v iwconfig >/dev/null 2>&1; then
+        if iwconfig "$iface" power off >/dev/null 2>&1; then
+            log "power_save: disabled via iwconfig"
+            return 0
+        fi
+        log "power_save: iwconfig failed"
+    fi
+
+    log "power_save: no supported tool available"
+}
+
 reprobe_sdio_devices() {
     local path devname
 
@@ -223,6 +253,7 @@ start() {
     log "using interface $iface"
 
     ifconfig "$iface" up 2>/dev/null || true
+    disable_wifi_power_save "$iface"
 
     if ! pid_is_running "$WPA_PIDFILE"; then
         if /usr/sbin/wpa_supplicant -B -i "$iface" -c "$WPA_CONF" -P "$WPA_PIDFILE"; then
