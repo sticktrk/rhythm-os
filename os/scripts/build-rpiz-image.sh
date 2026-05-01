@@ -13,6 +13,7 @@ OUTPUT_DIR="$PROJECT_ROOT/out/rpiz"
 DEFAULT_OUTPUT_DIR="$PROJECT_ROOT/out/rpiz"
 DEFAULT_DOCKER_OUTPUT_DIR="$PROJECT_ROOT/out/rpiz-docker"
 OUTPUT_DIR_EXPLICIT=false
+BUILDROOT_DL_DIR="${RHYTHM_BUILDROOT_DL_DIR:-}"
 BUILD_MODE="release"
 SKIP_SERVER_BUILD=false
 WIFI_SSID="${RHYTHM_WIFI_SSID:-}"
@@ -125,6 +126,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --wifi-country <code>   Wi-Fi regulatory country (default: $WIFI_COUNTRY)"
             echo "Environment:"
             echo "  RHYTHM_DEV_MODE=0       Disable rpiz bring-up mode; default is dev (Dropbear + known root password + Matter attestation bypass)"
+            echo "  RHYTHM_BUILDROOT_DL_DIR Override Buildroot download directory (default: <output-dir>/dl)"
             echo "  --docker                Assemble the image inside dtconcepts/rhythm-rpiz-builder"
             echo "  --docker-image <name>   Docker image ref to use (default: $DOCKER_IMAGE)"
             echo "  --no-pull               Skip docker pull; use the locally cached image"
@@ -353,7 +355,21 @@ fi
 
 EXTERNAL_DIR="$PROJECT_ROOT/install/rpiz/buildroot"
 
-make -C "$BUILDROOT_DIR" BR2_EXTERNAL="$EXTERNAL_DIR" O="$OUTPUT_DIR" rhythm_rpiz_defconfig
+if [ -z "$BUILDROOT_DL_DIR" ]; then
+    BUILDROOT_DL_DIR="$OUTPUT_DIR/dl"
+fi
+mkdir -p "$BUILDROOT_DL_DIR"
+
+buildroot_make() {
+    make \
+        -C "$BUILDROOT_DIR" \
+        BR2_EXTERNAL="$EXTERNAL_DIR" \
+        O="$OUTPUT_DIR" \
+        BR2_DL_DIR="$BUILDROOT_DL_DIR" \
+        "$@"
+}
+
+buildroot_make rhythm_rpiz_defconfig
 if is_truthy "${RHYTHM_DEV_MODE:-}"; then
     DEV_FRAGMENT="$OUTPUT_DIR/rhythm-dev.fragment"
     cat >"$DEV_FRAGMENT" <<'EOF'
@@ -361,13 +377,13 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="rhythm"
 BR2_PACKAGE_DROPBEAR=y
 EOF
     cat "$DEV_FRAGMENT" >> "$OUTPUT_DIR/.config"
-    make -C "$BUILDROOT_DIR" BR2_EXTERNAL="$EXTERNAL_DIR" O="$OUTPUT_DIR" olddefconfig
+    buildroot_make olddefconfig
 fi
 # The prebuilt server comes from dist/bin/rpiz via a local-site package. Force
 # that package to refresh each run so Buildroot does not reuse a stale unpacked
 # copy when the host-side binary changes between image builds.
-make -C "$BUILDROOT_DIR" BR2_EXTERNAL="$EXTERNAL_DIR" O="$OUTPUT_DIR" rhythm-prebuilt-dirclean
-make -C "$BUILDROOT_DIR" BR2_EXTERNAL="$EXTERNAL_DIR" O="$OUTPUT_DIR"
+buildroot_make rhythm-prebuilt-dirclean
+buildroot_make
 
 rm -f "$OUTPUT_DIR/images/rootfs.ext2.gz" "$OUTPUT_DIR/images/sdcard.img.gz"
 if command -v gzip >/dev/null 2>&1; then
