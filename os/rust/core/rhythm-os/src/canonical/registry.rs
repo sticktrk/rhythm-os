@@ -142,6 +142,48 @@ impl CanonicalRegistry {
                         continue;
                     }
 
+                    // Same-hub silent re-key: a hardware match against an existing
+                    // endpoint on the *same* hub with a *different* native_id is the
+                    // same physical device whose hub-side rid has shifted (e.g. the
+                    // Hue motion-sensor service-rid alignment). Update in place
+                    // rather than queueing triage.
+                    let stale_native_id = device
+                        .endpoints
+                        .iter()
+                        .find(|ep| ep.hub_key == *hub_key && ep.native_id != identity.native_id)
+                        .map(|ep| ep.native_id.clone());
+                    if let Some(stale) = stale_native_id {
+                        let device = self.devices.get_mut(&canonical_id).unwrap();
+                        if let Some(ep) = device
+                            .endpoints
+                            .iter_mut()
+                            .find(|ep| ep.hub_key == *hub_key && ep.native_id == stale)
+                        {
+                            ep.native_id = identity.native_id.clone();
+                            ep.last_seen = now;
+                            ep.active = true;
+                            if room_name.is_some() {
+                                ep.source_room_name = room_name.clone();
+                            }
+                        }
+                        for new_hw in &identity.hardware_ids {
+                            if !device.has_hardware_id(new_hw) {
+                                device.hardware_ids.push(new_hw.clone());
+                                self.hw_index
+                                    .insert(new_hw.value().to_string(), canonical_id.clone());
+                            }
+                        }
+                        self.native_index
+                            .remove(&(hub_key.to_string(), stale.clone()));
+                        self.native_index
+                            .insert(native_key.clone(), canonical_id.clone());
+                        info!(target: "canonical",
+                            "Silently re-keyed endpoint on same hub: '{}' (HW: {}, {} → {})",
+                            device.name, hw_id.value(), stale, identity.native_id
+                        );
+                        return ResolveResult::AlreadyKnown { canonical_id };
+                    }
+
                     // Check if this exact merge was previously approved
                     let previously_approved = device.merge_history.iter().any(|m| {
                         m.source_hub == *hub_key && m.source_native_id == identity.native_id

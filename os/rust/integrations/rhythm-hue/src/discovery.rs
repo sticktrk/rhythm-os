@@ -185,8 +185,24 @@ impl<H: HueTransport> HueDiscovery<H> {
                 continue;
             }
 
+            // Motion sensors: align native_id on the motion *service* rid (the
+            // id Hue's SSE protocol emits) so canonical lookup matches at event
+            // time. The parent device rid is still used above for MAC lookup.
+            let native_id = if device_type == DeviceType::Motion {
+                services
+                    .and_then(|svcs| {
+                        svcs.iter()
+                            .find(|s| s.get("rtype").and_then(|v| v.as_str()) == Some("motion"))
+                            .and_then(|s| s.get("rid").and_then(|v| v.as_str()))
+                            .map(String::from)
+                    })
+                    .unwrap_or_else(|| device_id.clone())
+            } else {
+                device_id
+            };
+
             identities.push(DiscoveredIdentity {
-                native_id: device_id,
+                native_id,
                 room_id,
                 room_name,
                 name,

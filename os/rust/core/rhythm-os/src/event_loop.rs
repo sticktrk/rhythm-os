@@ -781,7 +781,24 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             action,
             ref device_id,
         } => {
-            let node_id = resolve_public_node_id(state, hub_key.as_ref(), room_id);
+            // Route via canonical+topology when possible: hub source native_id
+            // → canonical → topology.effective_control_target(Button). Falls
+            // back to the legacy room_id translation if the canonical lookup
+            // misses (e.g. a button event for a device we haven't merged yet).
+            let target_node_id = device_id
+                .as_deref()
+                .and_then(|src| {
+                    commands::resolve_node_control_target(
+                        state,
+                        hub_key.as_ref(),
+                        src,
+                        room_id,
+                        &crate::topology::NodeControlKind::Button,
+                    )
+                    .map(|(_, target)| target)
+                })
+                .unwrap_or_else(|| resolve_public_node_id(state, hub_key.as_ref(), room_id));
+            let node_id = target_node_id;
             let command_id = logging::next_command_id("button");
             tracing::info!(
                 target: "evt",
