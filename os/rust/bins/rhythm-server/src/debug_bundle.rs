@@ -144,6 +144,23 @@ struct ProcessResourceSnapshot {
     wireless: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     arp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mounts: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    partitions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    data_dir_filesystem: Option<DataDirFilesystem>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct DataDirFilesystem {
+    path: String,
+    block_size_bytes: u64,
+    total_bytes: u64,
+    available_bytes: u64,
+    used_bytes: u64,
+    inodes_total: u64,
+    inodes_available: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -556,8 +573,9 @@ pub fn build_debug_bundle(state: &SharedState) -> Result<DebugBundle> {
             .collect(),
     );
     let (host, process) = snapshot_host_and_process_metadata(created_at, &mut diagnostics);
-    let process_resources_json = build_process_resources_json(created_at, &mut diagnostics)
-        .context("building process resource snapshot")?;
+    let process_resources_json =
+        build_process_resources_json(created_at, &runtime.data_dir, &mut diagnostics)
+            .context("building process resource snapshot")?;
 
     let log_artifacts = discover_log_artifacts(&searched_log_dirs, &mut diagnostics);
     let log_summary_json = build_log_summary_json(&log_artifacts, created_at, &mut diagnostics)
@@ -1326,10 +1344,11 @@ fn build_runtime_health_json(state: &SharedState, generated_at: DateTime<Utc>) -
 
 fn build_process_resources_json(
     generated_at: DateTime<Utc>,
+    data_dir: &str,
     diagnostics: &mut BundleDiagnostics,
 ) -> Result<String> {
     #[cfg(target_os = "linux")]
-    let snapshot = {
+    let mut snapshot = {
         let mut snapshot = ProcessResourceSnapshot {
             schema_version: DEBUG_BUNDLE_SCHEMA_VERSION,
             generated_at: generated_at.to_rfc3339(),
@@ -1352,6 +1371,9 @@ fn build_process_resources_json(
             net_dev: None,
             wireless: None,
             arp: None,
+            mounts: None,
+            partitions: None,
+            data_dir_filesystem: None,
         };
 
         snapshot.open_fds = linux_open_fd_snapshot(diagnostics);
@@ -1372,38 +1394,90 @@ fn build_process_resources_json(
         snapshot.net_dev = linux_read_optional_proc_file("/proc/net/dev", diagnostics);
         snapshot.wireless = linux_read_optional_proc_file("/proc/net/wireless", diagnostics);
         snapshot.arp = linux_read_optional_proc_file("/proc/net/arp", diagnostics);
+        snapshot.mounts = linux_read_optional_proc_file("/proc/mounts", diagnostics);
+        snapshot.partitions = linux_read_optional_proc_file("/proc/partitions", diagnostics);
         snapshot
     };
 
     #[cfg(not(target_os = "linux"))]
-    let snapshot = {
-        let _ = diagnostics;
-        ProcessResourceSnapshot {
-            schema_version: DEBUG_BUNDLE_SCHEMA_VERSION,
-            generated_at: generated_at.to_rfc3339(),
-            target_os: std::env::consts::OS.to_string(),
-            open_fd_count: None,
-            open_fds: Vec::new(),
-            thread_count: None,
-            threads: Vec::new(),
-            status: None,
-            limits: None,
-            loadavg: None,
-            meminfo: None,
-            sockstat: None,
-            sockstat6: None,
-            tcp: None,
-            tcp6: None,
-            udp: None,
-            udp6: None,
-            route: None,
-            net_dev: None,
-            wireless: None,
-            arp: None,
-        }
+    let mut snapshot = ProcessResourceSnapshot {
+        schema_version: DEBUG_BUNDLE_SCHEMA_VERSION,
+        generated_at: generated_at.to_rfc3339(),
+        target_os: std::env::consts::OS.to_string(),
+        open_fd_count: None,
+        open_fds: Vec::new(),
+        thread_count: None,
+        threads: Vec::new(),
+        status: None,
+        limits: None,
+        loadavg: None,
+        meminfo: None,
+        sockstat: None,
+        sockstat6: None,
+        tcp: None,
+        tcp6: None,
+        udp: None,
+        udp6: None,
+        route: None,
+        net_dev: None,
+        wireless: None,
+        arp: None,
+        mounts: None,
+        partitions: None,
+        data_dir_filesystem: None,
     };
 
+    snapshot.data_dir_filesystem = unix_data_dir_filesystem(data_dir, diagnostics);
+
     serde_json::to_string_pretty(&snapshot).context("serializing process resource snapshot")
+}
+
+#[cfg(unix)]
+fn unix_data_dir_filesystem(
+    data_dir: &str,
+    diagnostics: &mut BundleDiagnostics,
+) -> Option<DataDirFilesystem> {
+    let path_cstr = match std::ffi::CString::new(data_dir) {
+        Ok(c) => c,
+        Err(err) => {
+            diagnostics.add_warning(format!(
+                "data_dir contains an interior NUL byte; skipping statvfs capture: {err}"
+            ));
+            return None;
+        }
+    };
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(path_cstr.as_ptr(), &mut stat) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        diagnostics.record_file_error("statvfs", data_dir, &err);
+        return None;
+    }
+    let frsize = stat.f_frsize as u64;
+    let bsize = stat.f_bsize as u64;
+    let block_size_bytes = if frsize > 0 { frsize } else { bsize };
+    let blocks = stat.f_blocks as u64;
+    let bavail = stat.f_bavail as u64;
+    let total_bytes = blocks.saturating_mul(block_size_bytes);
+    let available_bytes = bavail.saturating_mul(block_size_bytes);
+    let used_bytes = total_bytes.saturating_sub(available_bytes);
+    Some(DataDirFilesystem {
+        path: data_dir.to_string(),
+        block_size_bytes,
+        total_bytes,
+        available_bytes,
+        used_bytes,
+        inodes_total: stat.f_files as u64,
+        inodes_available: stat.f_favail as u64,
+    })
+}
+
+#[cfg(not(unix))]
+fn unix_data_dir_filesystem(
+    _data_dir: &str,
+    _diagnostics: &mut BundleDiagnostics,
+) -> Option<DataDirFilesystem> {
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -2197,6 +2271,56 @@ mod tests {
         assert_eq!(log_summary["schema_version"], DEBUG_BUNDLE_SCHEMA_VERSION);
         assert_eq!(log_summary["total_lines_scanned"], 2);
         assert_eq!(log_summary["files"].as_array().unwrap().len(), 2);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn process_resources_capture_filesystem_state_for_data_dir() {
+        let root = unique_test_dir("disk-capture");
+        let data_dir = root.join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        let state: SharedState =
+            std::sync::Arc::new(std::sync::Mutex::new(rhythm_os::state::AppState::default()));
+        {
+            let mut guard = state.lock().unwrap();
+            guard.firmware_version = "1.2.3";
+            guard.platform_type = "appliance";
+            guard.platform_context = "rpiz";
+            guard.data_dir = data_dir.display().to_string();
+        }
+
+        let bundle = build_debug_bundle(&state).unwrap();
+        let files = unpack_bundle(&bundle.bytes);
+        let process_resources: Value =
+            serde_json::from_slice(files.get("process_resources.json").unwrap()).unwrap();
+
+        if cfg!(unix) {
+            let fs_info = &process_resources["data_dir_filesystem"];
+            assert!(
+                fs_info.is_object(),
+                "data_dir_filesystem missing on unix: {process_resources}"
+            );
+            assert_eq!(fs_info["path"], data_dir.display().to_string());
+            assert!(fs_info["block_size_bytes"]
+                .as_u64()
+                .is_some_and(|n| n > 0));
+            assert!(fs_info["total_bytes"].as_u64().is_some_and(|n| n > 0));
+            assert!(fs_info["available_bytes"].as_u64().is_some());
+            assert!(fs_info["used_bytes"].as_u64().is_some());
+        }
+
+        if cfg!(target_os = "linux") {
+            assert!(
+                process_resources["mounts"].is_string(),
+                "/proc/mounts capture missing on linux"
+            );
+            assert!(
+                process_resources["partitions"].is_string(),
+                "/proc/partitions capture missing on linux"
+            );
+        }
 
         let _ = fs::remove_dir_all(root);
     }
