@@ -173,10 +173,7 @@ impl TestHarness {
     }
 
     /// Like `with_spy_controller()` but with a configurable mock time-of-day.
-    pub fn with_spy_controller_at(
-        hour: f32,
-        day_of_year: u32,
-    ) -> (Self, Arc<SpyLightController>) {
+    pub fn with_spy_controller_at(hour: f32, day_of_year: u32) -> (Self, Arc<SpyLightController>) {
         let hub_type = HubType::new("mock");
         let hub_key = HubKey::new(hub_type.clone(), "192.168.1.100");
 
@@ -267,13 +264,21 @@ impl TestHarness {
             .expect("sync_from_hub_for_key failed")
     }
 
-    /// Resolve a hub-native room or node alias to the topology node ID used by the engine.
+    /// Resolve a primary-hub room or node alias to the topology node ID used by the engine.
     ///
     /// Tests use short hub-native IDs like `"kitchen"` for readability, but
-    /// the engine uses topology UUIDs. This mirrors what HTTP handlers do
-    /// via `commands::resolve_node_id`.
+    /// the engine uses topology UUIDs. Hub-native aliases are scoped to the
+    /// primary test hub; multi-hub scenarios should call `resolve_for_hub`.
     pub fn resolve(&self, room_id: &str) -> String {
-        commands::resolve_node_id(&self.state, room_id)
+        self.resolve_for_hub(&self.hub_key, room_id)
+    }
+
+    /// Resolve a hub-scoped room or node alias to the topology node ID used by the engine.
+    pub fn resolve_for_hub(&self, hub_key: &HubKey, room_id: &str) -> String {
+        let s = self.state.lock().unwrap();
+        s.topology
+            .resolve_room_alias(Some(hub_key), room_id)
+            .unwrap_or_else(|| room_id.to_string())
     }
 
     /// Mark a room's lights as on or off.
@@ -531,9 +536,19 @@ impl TestHarness {
     /// Get the number of hub targets for a topology room (by hub-native ID).
     pub fn hub_target_count(&self, room_id: &str) -> usize {
         let resolved = self.resolve(room_id);
+        self.hub_target_count_by_topology_id(&resolved)
+    }
+
+    /// Get the number of hub targets for a hub-scoped topology room alias.
+    pub fn hub_target_count_for_hub(&self, hub_key: &HubKey, room_id: &str) -> usize {
+        let resolved = self.resolve_for_hub(hub_key, room_id);
+        self.hub_target_count_by_topology_id(&resolved)
+    }
+
+    fn hub_target_count_by_topology_id(&self, room_id: &str) -> usize {
         let s = self.state.lock().unwrap();
         s.topology
-            .get(&resolved)
+            .get(room_id)
             .map(|r| r.hub_room_bindings.len())
             .unwrap_or(0)
     }

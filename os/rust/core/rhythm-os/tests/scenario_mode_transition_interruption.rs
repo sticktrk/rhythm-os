@@ -63,7 +63,10 @@ fn off_press_during_mode_transition_fade_dims_to_one_percent() {
 
     let calls = spy.turn_on_calls();
     assert_eq!(spy.turn_off_calls().len(), 0);
-    assert!(!calls.is_empty(), "off press post-transition must dispatch turn_on");
+    assert!(
+        !calls.is_empty(),
+        "off press post-transition must dispatch turn_on"
+    );
     assert_eq!(
         calls.last().unwrap().1.brightness,
         1,

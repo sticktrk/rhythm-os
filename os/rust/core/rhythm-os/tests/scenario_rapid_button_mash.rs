@@ -24,7 +24,11 @@ fn five_off_presses_in_a_row_all_dispatch_one_percent() {
 
     let calls = spy.turn_on_calls();
     assert_eq!(spy.turn_off_calls().len(), 0, "no hard-off across mashes");
-    assert!(calls.len() >= 5, "every press should dispatch (got {})", calls.len());
+    assert!(
+        calls.len() >= 5,
+        "every press should dispatch (got {})",
+        calls.len()
+    );
     for (i, (_, cmd)) in calls.iter().enumerate() {
         assert_eq!(
             cmd.brightness, 1,
@@ -59,7 +63,8 @@ fn alternating_on_off_mash_keeps_each_state_correct() {
             "on" => assert!(
                 cmd.brightness > 1,
                 "step {} on should be >1, got {}",
-                i, cmd.brightness
+                i,
+                cmd.brightness
             ),
             "off" => assert_eq!(
                 cmd.brightness, 1,

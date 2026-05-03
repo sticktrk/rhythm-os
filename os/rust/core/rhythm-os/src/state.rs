@@ -755,36 +755,10 @@ impl AppState {
             .collect()
     }
 
-    /// Get topology room IDs that have motion sensors, across all hubs.
-    /// Translates hub-native room IDs to topology IDs.
-    pub fn motion_sensor_room_ids(&self) -> std::collections::HashSet<String> {
-        let mut ids = std::collections::HashSet::new();
-        for (hub_key, hub) in &self.hubs {
-            if let Some(ref reg_arc) = hub.registry {
-                if let Ok(reg) = reg_arc.lock() {
-                    for room_id in reg.rooms_with_motion_sensors() {
-                        let translated = self
-                            .topology
-                            .resolve_room_alias(&self.canonical_registry, Some(hub_key), &room_id)
-                            .unwrap_or(room_id);
-                        ids.insert(translated);
-                    }
-                }
-            }
-        }
-        ids
-    }
-
     /// Get controlled target node IDs for motion sources across the topology.
-    ///
-    /// Falls back to room-based registry mappings when a motion source has not
-    /// been promoted into the topology graph yet.
     pub fn motion_control_target_ids(&self) -> std::collections::HashSet<String> {
-        let mut ids = self
-            .topology
-            .effective_control_targets_for_kind(&NodeControlKind::Motion, &self.canonical_registry);
-        ids.extend(self.motion_sensor_room_ids());
-        ids
+        self.topology
+            .effective_control_targets_for_kind(&NodeControlKind::Motion, &self.canonical_registry)
     }
 
     /// Check if any hub is active.

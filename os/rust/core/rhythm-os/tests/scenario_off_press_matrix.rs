@@ -43,16 +43,16 @@ fn prepare(h: &TestHarness, prior: PriorState) {
 fn off_press_always_dims_to_one_percent_across_matrix() {
     // (hour, day_of_year) — winter morning through summer evening.
     let times = [
-        (2.0_f32, 15_u32),    // 2am winter
-        (6.0, 15),            // 6am winter
-        (12.0, 15),           // noon winter
-        (18.0, 15),           // 6pm winter
-        (6.0, 80),            // 6am spring equinox
-        (6.0, 172),           // 6am summer solstice
-        (12.0, 172),          // noon summer
-        (21.0, 172),          // 9pm summer
-        (6.0, 264),           // 6am fall equinox
-        (6.0, 356),           // 6am winter solstice eve
+        (2.0_f32, 15_u32), // 2am winter
+        (6.0, 15),         // 6am winter
+        (12.0, 15),        // noon winter
+        (18.0, 15),        // 6pm winter
+        (6.0, 80),         // 6am spring equinox
+        (6.0, 172),        // 6am summer solstice
+        (12.0, 172),       // noon summer
+        (21.0, 172),       // 9pm summer
+        (6.0, 264),        // 6am fall equinox
+        (6.0, 356),        // 6am winter solstice eve
     ];
     let states = [
         PriorState::Fresh,

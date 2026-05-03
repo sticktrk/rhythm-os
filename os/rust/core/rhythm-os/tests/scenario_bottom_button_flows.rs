@@ -68,7 +68,11 @@ fn bottom_short_press_when_externally_off_still_soft_offs() {
 
     assert_eq!(spy.turn_off_calls().len(), 0);
     let calls = spy.turn_on_calls();
-    assert_eq!(calls.len(), 1, "off press must dispatch even if cache says off");
+    assert_eq!(
+        calls.len(),
+        1,
+        "off press must dispatch even if cache says off"
+    );
     assert_eq!(calls[0].1.brightness, 1);
 }
 

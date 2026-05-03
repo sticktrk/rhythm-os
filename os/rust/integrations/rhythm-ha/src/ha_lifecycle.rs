@@ -110,10 +110,10 @@ pub fn ensure_ha_runtime<H: crate::transport::HaTransport + 'static>(
     };
 
     let controller = HaLightController::new(transport, registry.clone())
-        .with_capability_source(state.clone(), hub_key);
+        .with_capability_source(state.clone(), hub_key.clone());
 
     rhythm_os::lifecycle::ensure_hub_runtime(
-        state, controller, registry, None, // No TLS warmup for HA
+        state, &hub_key, controller, registry, None, // No TLS warmup for HA
     )
 }
 

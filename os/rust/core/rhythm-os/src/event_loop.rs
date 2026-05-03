@@ -503,28 +503,6 @@ fn spawn_motion_dim_action(state: &SharedState, node_id: String, factor: f32) {
     }
 }
 
-/// Translate a hub-native room/device ID to the public topology node ID if available.
-///
-/// Used at the event boundary so all downstream processing uses public node
-/// IDs consistently.
-///
-/// Tries hub-key-specific lookup first, then falls back to searching all
-/// hubs (for events where hub_key is None, e.g., button_resolve).
-fn resolve_public_node_id(
-    state: &SharedState,
-    hub_key: Option<&crate::canonical::identity::HubKey>,
-    node_id: &str,
-) -> String {
-    state
-        .lock()
-        .ok()
-        .and_then(|s| {
-            s.topology
-                .resolve_room_alias(&s.canonical_registry, hub_key, node_id)
-        })
-        .unwrap_or_else(|| node_id.to_string())
-}
-
 fn spawn_reconnect_sync(state: &SharedState, hub_key: &crate::canonical::identity::HubKey) {
     let discover_devices = state
         .lock()
@@ -781,24 +759,25 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             action,
             ref device_id,
         } => {
-            // Route via canonical+topology when possible: hub source native_id
-            // → canonical → topology.effective_control_target(Button). Falls
-            // back to the legacy room_id translation if the canonical lookup
-            // misses (e.g. a button event for a device we haven't merged yet).
-            let target_node_id = device_id
-                .as_deref()
-                .and_then(|src| {
+            let Some((source_node_id, node_id)) = hub_key
+                .as_ref()
+                .zip(device_id.as_deref())
+                .and_then(|(key, src)| {
                     commands::resolve_node_control_target(
                         state,
-                        hub_key.as_ref(),
+                        key,
                         src,
-                        room_id,
                         &crate::topology::NodeControlKind::Button,
                     )
-                    .map(|(_, target)| target)
                 })
-                .unwrap_or_else(|| resolve_public_node_id(state, hub_key.as_ref(), room_id));
-            let node_id = target_node_id;
+            else {
+                info!(
+                    target: "evt",
+                    "Button event from {:?} could not resolve canonical topology target, ignoring",
+                    device_id.as_deref()
+                );
+                return;
+            };
             let command_id = logging::next_command_id("button");
             tracing::info!(
                 target: "evt",
@@ -806,6 +785,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 command_id = %command_id,
                 action = ?action,
                 node_id = %node_id,
+                source_node_id = %source_node_id,
                 source_room_id = %room_id,
                 device_id = ?device_id.as_deref(),
                 hub_present = hub_key.is_some(),
@@ -842,15 +822,22 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
 
         HubEvent::Motion {
             ref hub_key,
-            ref room_id,
+            room_id: _,
             ref sensor_id,
             detected,
         } => {
+            let Some(hub_key) = hub_key.as_ref() else {
+                info!(
+                    target: "evt",
+                    "Motion: sensor {} has no hub key, ignoring",
+                    sensor_id
+                );
+                return;
+            };
             let Some((source_node_id, target_node_id)) = commands::resolve_node_control_target(
                 state,
-                hub_key.as_ref(),
+                hub_key,
                 sensor_id,
-                room_id,
                 &NodeControlKind::Motion,
             ) else {
                 info!(
@@ -1751,9 +1738,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use crate::canonical::identity::HubKey;
+    use crate::canonical::identity::{DiscoveredIdentity, HardwareId, HubKey};
+    use crate::canonical::registry::ResolveResult;
     use crate::hub::{ActiveHub, HubType};
     use crate::registry::{RegistrySnapshot, SnapshotRoom};
+    use crate::topology::{DevicePlacement, TopologyRoom};
+    use rhythm_core::runtime::hub_registry::DeviceType;
 
     fn motion_source(
         source_node_id: &str,
@@ -2022,6 +2012,49 @@ mod tests {
             },
         );
         Arc::new(Mutex::new(app))
+    }
+
+    fn only_hub_key(state: &SharedState) -> HubKey {
+        state.lock().unwrap().hubs.keys().next().cloned().unwrap()
+    }
+
+    fn add_canonical_control_source(
+        state: &SharedState,
+        hub_key: &HubKey,
+        native_id: &str,
+        room_id: &str,
+        device_type: DeviceType,
+    ) -> String {
+        let identity = DiscoveredIdentity {
+            native_id: native_id.to_string(),
+            room_id: format!("{room_id}_native"),
+            room_name: room_id.to_string(),
+            name: native_id.to_string(),
+            device_type,
+            hardware_ids: vec![HardwareId::matter(native_id)],
+            manufacturer: None,
+            model: None,
+        };
+
+        let mut s = state.lock().unwrap();
+        if s.topology.get(room_id).is_none() {
+            s.topology.insert_room(TopologyRoom::new(room_id, room_id));
+        }
+        let canonical_id = match s.canonical_registry.resolve(&identity, hub_key, 1) {
+            ResolveResult::Created { canonical_id }
+            | ResolveResult::AlreadyKnown { canonical_id } => canonical_id,
+            other => panic!("unexpected resolve result: {:?}", other),
+        };
+        assert!(s
+            .canonical_registry
+            .assign_room(&canonical_id, Some(room_id)));
+        s.topology.ensure_standalone_device(&canonical_id);
+        assert!(s.topology.assign_device(
+            &canonical_id,
+            Some(room_id),
+            DevicePlacement::UserOverride,
+        ));
+        canonical_id
     }
 
     struct MotionTestRuntime {
@@ -2618,15 +2651,17 @@ mod tests {
             turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
         });
         let state = make_state_with_runtime(runtime);
+        let hub_key = only_hub_key(&state);
+        add_canonical_control_source(&state, &hub_key, "button_a", "room_a", DeviceType::Button);
 
         let started = Instant::now();
         handle_hub_event(
             &state,
             crate::hub::HubEvent::Button {
-                hub_key: None,
+                hub_key: Some(hub_key),
                 room_id: "room_a".into(),
                 action: ButtonAction::OnPress,
-                device_id: None,
+                device_id: Some("button_a".into()),
             },
             &mut MotionTimerState::new(),
         );
@@ -2776,8 +2811,11 @@ mod tests {
         // cycle_secs=180).
         {
             let mut s = state.lock().unwrap();
-            s.next_node_dispatch_at =
-                Some(Instant::now().checked_add(Duration::from_secs(180)).unwrap());
+            s.next_node_dispatch_at = Some(
+                Instant::now()
+                    .checked_add(Duration::from_secs(180))
+                    .unwrap(),
+            );
         }
 
         let started = Instant::now();
@@ -2811,13 +2849,15 @@ mod tests {
             turn_on_room_calls: turn_on_room_calls.clone(),
         });
         let state = make_state_with_runtime(runtime);
+        let hub_key = only_hub_key(&state);
+        add_canonical_control_source(&state, &hub_key, "sensor_a", "room_a", DeviceType::Motion);
         let mut motion = MotionTimerState::new();
 
         let started = Instant::now();
         handle_hub_event(
             &state,
             crate::hub::HubEvent::Motion {
-                hub_key: None,
+                hub_key: Some(hub_key),
                 room_id: "room_a".into(),
                 sensor_id: "sensor_a".into(),
                 detected: true,

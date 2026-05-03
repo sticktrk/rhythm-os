@@ -40,7 +40,7 @@ fn room_binding_target_override_merges_third_hub_into_requested_room() {
         .triage_room_binding(0)
         .expect("third hub should queue a room binding proposal");
     let mock_room_id = harness.resolve("mock-kitchen");
-    let ha_room_id = harness.resolve("ha-kitchen");
+    let ha_room_id = harness.resolve_for_hub(&ha_key, "ha-kitchen");
     let chosen_target = if default_target_id == mock_room_id {
         ha_room_id.clone()
     } else {

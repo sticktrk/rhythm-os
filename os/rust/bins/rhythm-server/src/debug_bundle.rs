@@ -2303,9 +2303,7 @@ mod tests {
                 "data_dir_filesystem missing on unix: {process_resources}"
             );
             assert_eq!(fs_info["path"], data_dir.display().to_string());
-            assert!(fs_info["block_size_bytes"]
-                .as_u64()
-                .is_some_and(|n| n > 0));
+            assert!(fs_info["block_size_bytes"].as_u64().is_some_and(|n| n > 0));
             assert!(fs_info["total_bytes"].as_u64().is_some_and(|n| n > 0));
             assert!(fs_info["available_bytes"].as_u64().is_some());
             assert!(fs_info["used_bytes"].as_u64().is_some());

@@ -111,9 +111,9 @@ fn resolve_room_binding_merges_rooms() {
         name
     );
     let source_topology_id = if name == "Kitchen" {
-        harness.resolve("ha-kitchen")
+        harness.resolve_for_hub(&ha_key, "ha-kitchen")
     } else {
-        harness.resolve("ha-living")
+        harness.resolve_for_hub(&ha_key, "ha-living")
     };
     harness.triage_bind(&entry_id).expect("bind should succeed");
 
@@ -218,7 +218,7 @@ fn full_triage_resolution_produces_unified_rooms() {
         "Bedroom should have 1 hub target"
     );
     assert_eq!(
-        harness.hub_target_count("ha-office"),
+        harness.hub_target_count_for_hub(&ha_key, "ha-office"),
         1,
         "Office should have 1 hub target"
     );
@@ -260,7 +260,7 @@ fn re_sync_after_approved_binding_re_applies_silently() {
     // Resolve the Kitchen binding
     let (entry_id, name, _) = harness.triage_room_binding(0).expect("should have binding");
     assert_eq!(name, "Kitchen");
-    let source_topology_id = harness.resolve("ha-kitchen");
+    let source_topology_id = harness.resolve_for_hub(&ha_key, "ha-kitchen");
     harness.triage_bind(&entry_id).expect("bind should succeed");
 
     let room_count_after_bind = harness.topology_room_count();
@@ -353,7 +353,7 @@ fn dismiss_binding_preserves_distinct_rooms() {
         "Hue Kitchen has 1 target"
     );
     assert_eq!(
-        harness.hub_target_count("ha-kitchen"),
+        harness.hub_target_count_for_hub(&ha_key, "ha-kitchen"),
         1,
         "HA Kitchen has 1 target"
     );

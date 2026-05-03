@@ -1118,30 +1118,13 @@ impl RoomTopologyStore {
         self.hub_room_index.get(&key).map(|s| s.as_str())
     }
 
-    /// Translate a hub-native room ID to a Rhythm room ID without requiring a hub key.
-    ///
-    /// Searches all hub room index entries for a matching hub_room_id. This works
-    /// because hub-native room IDs are globally unique (Hue UUIDs, HA area slugs).
-    /// Used for events where hub_key is not available (e.g., button_resolve).
-    pub fn translate_room_id_any_hub(&self, hub_room_id: &str) -> Option<&str> {
-        self.hub_room_index
-            .iter()
-            .find(|((_, hrid), _)| hrid == hub_room_id)
-            .map(|(_, rhythm_id)| rhythm_id.as_str())
-    }
-
     /// Resolve any room-like identifier to the owning topology room ID.
     ///
     /// Accepts:
     /// - topology room IDs
-    /// - bound hub-native room IDs
-    /// - direct hub-native device IDs assigned into a topology room
-    pub fn resolve_room_alias(
-        &self,
-        canonical_registry: &crate::canonical::registry::CanonicalRegistry,
-        hub_key: Option<&HubKey>,
-        room_id: &str,
-    ) -> Option<String> {
+    /// - topology device node IDs
+    /// - bound hub-native room IDs when the caller supplies a hub key
+    pub fn resolve_room_alias(&self, hub_key: Option<&HubKey>, room_id: &str) -> Option<String> {
         if self.rooms.contains_key(room_id) {
             return Some(room_id.to_string());
         }
@@ -1155,23 +1138,7 @@ impl RoomTopologyStore {
                 return Some(topology_id.to_string());
             }
         }
-
-        if let Some(topology_id) = self.translate_room_id_any_hub(room_id) {
-            return Some(topology_id.to_string());
-        }
-
-        self.device_nodes.values().find_map(|node| {
-            canonical_registry
-                .get(&node.canonical_device_id)
-                .is_some_and(|device| {
-                    device.endpoints.iter().any(|endpoint| {
-                        endpoint.active
-                            && endpoint.native_id == room_id
-                            && hub_key.is_none_or(|expected| &endpoint.hub_key == expected)
-                    })
-                })
-                .then(|| node.id.clone())
-        })
+        None
     }
 
     /// Derive the effective control relationships exposed by a public source node.

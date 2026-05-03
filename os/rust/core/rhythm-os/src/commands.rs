@@ -693,7 +693,7 @@ fn node_hub_types_from_topology(s: &AppState, node_id: &str) -> Vec<String> {
     }
 
     s.topology
-        .resolve_room_alias(&s.canonical_registry, None, node_id)
+        .resolve_room_alias(None, node_id)
         .as_deref()
         .map(|topo_id| node_hub_types_from_topology(s, topo_id))
         .unwrap_or_default()
@@ -1477,59 +1477,39 @@ pub(crate) fn sync_active_mode_from_runtime(
 // Room ID translation helpers
 // ============================================================================
 
-/// Resolve a public node ID from an API request or hub-facing alias.
+/// Resolve a public node ID from an API request.
 ///
-/// If the ID is already a topology node ID, returns it unchanged. If it's a
-/// hub-native room/device ID, translates it via the topology store. Falls
-/// through unchanged when no topology alias exists.
+/// Topology room IDs and topology device node IDs are accepted. Hub-native
+/// room/device aliases are not resolved on this no-hub-key path.
 pub fn resolve_node_id(state: &SharedState, node_id: &str) -> String {
     let s = match state.lock() {
         Ok(s) => s,
         Err(_) => return node_id.to_string(),
     };
     s.topology
-        .resolve_room_alias(&s.canonical_registry, None, node_id)
+        .resolve_room_alias(None, node_id)
         .unwrap_or_else(|| node_id.to_string())
-}
-
-fn fallback_source_node_id(hub_key: Option<&HubKey>, source_native_id: &str) -> String {
-    match hub_key {
-        Some(hub_key) => format!("{hub_key}::{source_native_id}"),
-        None => source_native_id.to_string(),
-    }
 }
 
 /// Resolve a topology control target for a source device/native ID.
 ///
 /// The returned tuple is `(source_node_id, target_node_id)`. Explicit topology
 /// control links win. If no explicit link exists, device nodes inherit their
-/// parent room as the default target. As a final fallback, the caller-provided
-/// hub event hint is translated into a public node ID.
+/// parent room as the default target.
 pub(crate) fn resolve_node_control_target(
     state: &SharedState,
-    hub_key: Option<&HubKey>,
+    hub_key: &HubKey,
     source_native_id: &str,
-    fallback_target_hint: &str,
     kind: &NodeControlKind,
 ) -> Option<(String, String)> {
-    let fallback_target_id = resolve_node_id(state, fallback_target_hint);
-
     let s = state.lock().ok()?;
-    let source_node_id = hub_key
-        .and_then(|hub_key| {
-            s.canonical_registry
-                .find_by_native_id(hub_key, source_native_id)
-        })
-        .map(|device| device.id.clone());
-    let target_node_id = source_node_id
-        .as_deref()
-        .and_then(|source_id| s.topology.effective_control_target(source_id, kind))
-        .or_else(|| (!fallback_target_id.is_empty()).then_some(fallback_target_id.clone()))?;
+    let source_node_id = s
+        .canonical_registry
+        .find_by_native_id(hub_key, source_native_id)
+        .map(|device| device.id.clone())?;
+    let target_node_id = s.topology.effective_control_target(&source_node_id, kind)?;
 
-    Some((
-        source_node_id.unwrap_or_else(|| fallback_source_node_id(hub_key, source_native_id)),
-        target_node_id,
-    ))
+    Some((source_node_id, target_node_id))
 }
 
 // ============================================================================
@@ -11162,7 +11142,7 @@ mod tests {
 
     #[test]
     fn build_rooms_state_sensor_no_motion_snapshot_populates_defaults() {
-        // Room has a motion sensor in the registry but no MotionSnapshot yet.
+        // Room has a motion sensor in topology but no MotionSnapshot yet.
         let runtime = Arc::new(MockRuntime::new(
             vec![
                 make_snapshot("sensor_room", false, false),
@@ -11170,9 +11150,6 @@ mod tests {
             ],
             12.0,
         ));
-        let mut registry = crate::registry::HubDeviceRegistry::new();
-        registry.upsert_device("ms1", "sensor_room", &[], DeviceType::Motion);
-        let registry: Arc<Mutex<dyn HubRegistry>> = Arc::new(Mutex::new(registry));
 
         let mut app = AppState::default();
         let hub_type = HubType::parse("mock").unwrap();
@@ -11181,14 +11158,44 @@ mod tests {
             hub_key.clone(),
             ActiveHub {
                 hub_type,
-                hub_key,
+                hub_key: hub_key.clone(),
                 runtime: Some(runtime as Arc<dyn RuntimeHandle>),
                 hub_data: Box::new(()),
-                registry: Some(registry),
+                registry: None,
                 discovery: None,
                 shutdown: Default::default(),
             },
         );
+        app.topology.insert_room(crate::topology::TopologyRoom::new(
+            "sensor_room",
+            "sensor_room",
+        ));
+        let identity = crate::canonical::identity::DiscoveredIdentity {
+            native_id: "ms1".into(),
+            room_id: "sensor_room_native".into(),
+            room_name: "sensor_room".into(),
+            name: "ms1".into(),
+            device_type: DeviceType::Motion,
+            hardware_ids: vec![crate::canonical::identity::HardwareId::matter("ms1")],
+            manufacturer: None,
+            model: None,
+        };
+        let canonical_id = match app.canonical_registry.resolve(&identity, &hub_key, 1) {
+            crate::canonical::registry::ResolveResult::Created { canonical_id }
+            | crate::canonical::registry::ResolveResult::AlreadyKnown { canonical_id } => {
+                canonical_id
+            }
+            other => panic!("unexpected resolve result: {:?}", other),
+        };
+        assert!(app
+            .canonical_registry
+            .assign_room(&canonical_id, Some("sensor_room")));
+        app.topology.ensure_standalone_device(&canonical_id);
+        assert!(app.topology.assign_device(
+            &canonical_id,
+            Some("sensor_room"),
+            crate::topology::DevicePlacement::UserOverride,
+        ));
         let state: SharedState = Arc::new(Mutex::new(app));
 
         let result = build_rooms_state(&state).unwrap();
@@ -13816,7 +13823,8 @@ mod tests {
         // ROOM_B: bound to the Hue-native room HUE_X.
         {
             let mut s = state.lock().unwrap();
-            s.topology.insert_room(TopologyRoom::new("room-a", "Room A"));
+            s.topology
+                .insert_room(TopologyRoom::new("room-a", "Room A"));
             let mut room_b = TopologyRoom::new("room-b", "Room B");
             room_b.upsert_hub_room_binding(HubRoomBinding {
                 hub_key: hub_key.clone(),
@@ -13850,13 +13858,8 @@ mod tests {
         };
         do_canonical_assign_room(&state, &canonical_id, Some("room-a")).unwrap();
 
-        let resolved = resolve_node_control_target(
-            &state,
-            Some(&hub_key),
-            "msvc",
-            "hue-x",
-            &NodeControlKind::Motion,
-        );
+        let resolved =
+            resolve_node_control_target(&state, &hub_key, "msvc", &NodeControlKind::Motion);
 
         let (source_node, target_node) =
             resolved.expect("canonical lookup should resolve a target");
@@ -13882,7 +13885,8 @@ mod tests {
 
         {
             let mut s = state.lock().unwrap();
-            s.topology.insert_room(TopologyRoom::new("room-a", "Room A"));
+            s.topology
+                .insert_room(TopologyRoom::new("room-a", "Room A"));
             let mut room_b = TopologyRoom::new("room-b", "Room B");
             room_b.upsert_hub_room_binding(HubRoomBinding {
                 hub_key: hub_key.clone(),
@@ -13915,13 +13919,8 @@ mod tests {
         };
         do_canonical_assign_room(&state, &canonical_id, Some("room-a")).unwrap();
 
-        let resolved = resolve_node_control_target(
-            &state,
-            Some(&hub_key),
-            "parent-rid",
-            "hue-x",
-            &NodeControlKind::Button,
-        );
+        let resolved =
+            resolve_node_control_target(&state, &hub_key, "parent-rid", &NodeControlKind::Button);
 
         let (source_node, target_node) =
             resolved.expect("canonical lookup should resolve a target");
@@ -13957,9 +13956,7 @@ mod tests {
         let canonical_id = {
             let mut s = state.lock().unwrap();
             match s.canonical_registry.resolve(&legacy, &hub_key, 1) {
-                crate::canonical::registry::ResolveResult::Created { canonical_id } => {
-                    canonical_id
-                }
+                crate::canonical::registry::ResolveResult::Created { canonical_id } => canonical_id,
                 other => panic!("unexpected first resolve result: {:?}", other),
             }
         };
@@ -13983,13 +13980,17 @@ mod tests {
 
         let s = state.lock().unwrap();
         let device = s.canonical_registry.get(&canonical_id).unwrap();
-        assert_eq!(device.endpoints.len(), 1, "endpoint should be re-keyed in place");
+        assert_eq!(
+            device.endpoints.len(),
+            1,
+            "endpoint should be re-keyed in place"
+        );
         assert_eq!(device.endpoints[0].native_id, "msvc-rid");
         assert!(
-            s.canonical_registry.triage().pending_by_kind(
-                crate::canonical::triage::TriageKind::DeviceMerge
-            )
-            .is_empty(),
+            s.canonical_registry
+                .triage()
+                .pending_by_kind(crate::canonical::triage::TriageKind::DeviceMerge)
+                .is_empty(),
             "silent migration must not queue triage"
         );
     }

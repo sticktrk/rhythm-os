@@ -3,7 +3,7 @@
 //! Queries the HA WebSocket API for areas and entities, filters to areas
 //! with light entities, and syncs them into the device registry as rooms.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
@@ -33,6 +33,16 @@ pub struct HaMotionSensor {
     pub entity_id: String,
     /// Area this sensor belongs to.
     pub area_id: String,
+}
+
+/// A HA control source that should become a canonical Button device.
+#[derive(Clone, Debug)]
+struct HaButtonDevice {
+    native_id: String,
+    area_id: String,
+    buttons: Vec<(String, u8)>,
+    name_entity_id: Option<String>,
+    device_id: Option<String>,
 }
 
 /// Result of area discovery including the device→area mapping.
@@ -124,6 +134,8 @@ struct FullRegistryData {
     virtual_entity_ids: std::collections::HashSet<String>,
     /// Motion sensors with current state from `get_states`: (entity_id, area_id, is_active).
     prefetched_motion: Vec<(String, String, bool)>,
+    /// Button/control devices that can emit HA events.
+    button_devices: Vec<HaButtonDevice>,
 }
 
 async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistryData> {
@@ -310,6 +322,7 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
     let mut entity_device_map: HashMap<String, String> = HashMap::new();
     let mut light_entity_areas: HashMap<String, String> = HashMap::new();
     let mut virtual_entity_ids = std::collections::HashSet::new();
+    let mut light_device_ids: HashSet<String> = HashSet::new();
 
     for entity in &entities {
         // Track entity→device mapping for all entities (used by discover_identities)
@@ -343,6 +356,9 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
             });
 
         if let Some(area_id) = area_id {
+            if let Some(device_id) = entity.device_id.as_ref().filter(|d| !d.is_empty()) {
+                light_device_ids.insert(device_id.clone());
+            }
             light_entity_areas.insert(entity.entity_id.clone(), area_id.clone());
             area_lights
                 .entry(area_id)
@@ -392,6 +408,18 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
         })
         .collect();
 
+    let motion_device_ids: HashSet<String> = entities
+        .iter()
+        .filter(|e| {
+            e.entity_id.starts_with("binary_sensor.")
+                && matches!(
+                    e.original_device_class.as_deref(),
+                    Some("motion") | Some("occupancy")
+                )
+        })
+        .filter_map(|e| e.device_id.as_ref().filter(|d| !d.is_empty()).cloned())
+        .collect();
+
     // Build entity_id → area_id for ALL binary_sensor entities.
     // Broader than motion_sensors: some integrations (Hue via HA) don't set
     // original_device_class in the entity registry, so we rely on event-level
@@ -433,6 +461,15 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
         })
         .collect();
 
+    let button_devices = build_button_devices(
+        &entities,
+        &device_area_map,
+        &device_info_map,
+        &event_entity_areas,
+        &light_device_ids,
+        &motion_device_ids,
+    );
+
     // Prefetch motion sensor states from get_states response.
     // Filters states_json for binary_sensors that are in binary_sensor_areas
     // and whose runtime attributes.device_class is "motion" or "occupancy".
@@ -471,6 +508,7 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
         light_entity_areas,
         virtual_entity_ids,
         prefetched_motion,
+        button_devices,
     })
 }
 
@@ -570,7 +608,7 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
 
     fn discover_devices(&self) -> Result<Vec<rhythm_os::discovery::DiscoveredDevice>> {
         let data = self.get_or_fetch()?;
-        Ok(data
+        let mut devices: Vec<_> = data
             .result
             .motion_sensors
             .into_iter()
@@ -580,7 +618,18 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
                 buttons: vec![],
                 device_type: DeviceType::Motion,
             })
-            .collect())
+            .collect();
+
+        devices.extend(data.button_devices.into_iter().map(|button| {
+            rhythm_os::discovery::DiscoveredDevice {
+                device_id: button.native_id,
+                room_id: button.area_id,
+                buttons: button.buttons,
+                device_type: DeviceType::Button,
+            }
+        }));
+
+        Ok(devices)
     }
 
     fn discover_identities(&self) -> Result<Vec<DiscoveredIdentity>> {
@@ -639,6 +688,27 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
             });
         }
 
+        // Button/control devices → DiscoveredIdentity with DeviceType::Button
+        for button in &data.button_devices {
+            let room_name = data
+                .area_names
+                .get(&button.area_id)
+                .cloned()
+                .unwrap_or_default();
+            let (name, hw_ids, manufacturer, model) = button_identity_fields(&data, button);
+
+            identities.push(DiscoveredIdentity {
+                native_id: button.native_id.clone(),
+                room_id: button.area_id.clone(),
+                room_name,
+                name,
+                device_type: DeviceType::Button,
+                hardware_ids: hw_ids,
+                manufacturer,
+                model,
+            });
+        }
+
         let light_count = identities
             .iter()
             .filter(|i| i.device_type == DeviceType::Light)
@@ -647,11 +717,16 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
             .iter()
             .filter(|i| i.device_type == DeviceType::Motion)
             .count();
+        let button_count = identities
+            .iter()
+            .filter(|i| i.device_type == DeviceType::Button)
+            .count();
         info!(
             target: "area_sync",
-            "Discovered {} device identities ({} lights, {} motion) from HA",
+            "Discovered {} device identities ({} lights, {} buttons, {} motion) from HA",
             identities.len(),
             light_count,
+            button_count,
             motion_count
         );
 
@@ -683,6 +758,167 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
 // ---------------------------------------------------------------------------
 // Identity enrichment helpers
 // ---------------------------------------------------------------------------
+
+fn build_button_devices(
+    entities: &[EntityEntry],
+    device_area_map: &HashMap<String, String>,
+    device_info: &HashMap<String, DeviceInfo>,
+    event_entity_areas: &HashMap<String, String>,
+    light_device_ids: &HashSet<String>,
+    motion_device_ids: &HashSet<String>,
+) -> Vec<HaButtonDevice> {
+    let mut by_native: HashMap<String, HaButtonDevice> = HashMap::new();
+    let mut event_parent_device_ids: HashSet<String> = HashSet::new();
+
+    for entity in entities
+        .iter()
+        .filter(|entity| entity.entity_id.starts_with("event."))
+    {
+        let Some(area_id) = event_entity_areas.get(&entity.entity_id) else {
+            continue;
+        };
+        let device_id = entity
+            .device_id
+            .as_ref()
+            .filter(|id| !id.is_empty())
+            .cloned();
+        let native_id = device_id
+            .as_deref()
+            .map(|id| control_native_id_for_device(id, device_info.get(id)))
+            .unwrap_or_else(|| entity.entity_id.clone());
+
+        if let Some(device_id) = &device_id {
+            event_parent_device_ids.insert(device_id.clone());
+        }
+
+        let entry = by_native
+            .entry(native_id.clone())
+            .or_insert_with(|| HaButtonDevice {
+                native_id,
+                area_id: area_id.clone(),
+                buttons: Vec::new(),
+                name_entity_id: Some(entity.entity_id.clone()),
+                device_id: device_id.clone(),
+            });
+        let control_id = parse_event_button_number(&entity.entity_id);
+        if !entry
+            .buttons
+            .iter()
+            .any(|(button_id, _)| button_id == &entity.entity_id)
+        {
+            entry.buttons.push((entity.entity_id.clone(), control_id));
+        }
+        if entry.name_entity_id.is_none() {
+            entry.name_entity_id = Some(entity.entity_id.clone());
+        }
+        if entry.device_id.is_none() {
+            entry.device_id = device_id;
+        }
+    }
+
+    for (device_id, area_id) in device_area_map {
+        if light_device_ids.contains(device_id)
+            || motion_device_ids.contains(device_id)
+            || event_parent_device_ids.contains(device_id)
+        {
+            continue;
+        }
+
+        let info = device_info.get(device_id);
+        if !looks_like_control_device(info) {
+            continue;
+        }
+
+        let native_id = control_native_id_for_device(device_id, info);
+        by_native
+            .entry(native_id.clone())
+            .or_insert_with(|| HaButtonDevice {
+                native_id,
+                area_id: area_id.clone(),
+                buttons: Vec::new(),
+                name_entity_id: None,
+                device_id: Some(device_id.clone()),
+            });
+    }
+
+    let mut devices: Vec<_> = by_native.into_values().collect();
+    for device in &mut devices {
+        device
+            .buttons
+            .sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    }
+    devices.sort_by(|left, right| left.native_id.cmp(&right.native_id));
+    devices
+}
+
+fn parse_event_button_number(entity_id: &str) -> u8 {
+    let name = entity_id.strip_prefix("event.").unwrap_or(entity_id);
+    if let Some(last_underscore) = name.rfind('_') {
+        if let Ok(n) = name[last_underscore + 1..].parse::<u8>() {
+            if (1..=8).contains(&n) {
+                return n;
+            }
+        }
+    }
+    1
+}
+
+fn control_native_id_for_device(device_id: &str, info: Option<&DeviceInfo>) -> String {
+    info.and_then(zha_identifier)
+        .unwrap_or_else(|| device_id.to_string())
+}
+
+fn zha_identifier(info: &DeviceInfo) -> Option<String> {
+    rhythm_core::device::ieee::extract_from_identifiers(&info.identifiers)
+}
+
+fn looks_like_control_device(info: Option<&DeviceInfo>) -> bool {
+    let Some(info) = info else {
+        return false;
+    };
+
+    let mut haystack = info.name.to_lowercase();
+    if let Some(manufacturer) = &info.manufacturer {
+        haystack.push(' ');
+        haystack.push_str(&manufacturer.to_lowercase());
+    }
+    if let Some(model) = &info.model {
+        haystack.push(' ');
+        haystack.push_str(&model.to_lowercase());
+    }
+
+    [
+        "button", "switch", "remote", "dimmer", "dial", "knob", "scene", "shortcut", "tap", "pico",
+    ]
+    .iter()
+    .any(|needle| haystack.contains(needle))
+}
+
+fn button_identity_fields(
+    data: &FullRegistryData,
+    button: &HaButtonDevice,
+) -> (String, Vec<HardwareId>, Option<String>, Option<String>) {
+    if let Some(device_id) = &button.device_id {
+        if let Some(info) = data.device_info.get(device_id) {
+            return (
+                if info.name.is_empty() {
+                    button.native_id.clone()
+                } else {
+                    info.name.clone()
+                },
+                extract_hardware_ids(info),
+                info.manufacturer.clone(),
+                info.model.clone(),
+            );
+        }
+    }
+
+    if let Some(entity_id) = &button.name_entity_id {
+        return enrich_from_device(data, entity_id);
+    }
+
+    (button.native_id.clone(), Vec::new(), None, None)
+}
 
 /// Look up the parent device for an entity and return enriched fields.
 ///
@@ -947,6 +1183,98 @@ mod tests {
         let info = make_device_info(vec![], vec![], None);
         let ids = extract_hardware_ids(&info);
         assert!(ids.is_empty());
+    }
+
+    fn named_device_info(name: &str, model: &str) -> DeviceInfo {
+        DeviceInfo {
+            name: name.to_string(),
+            manufacturer: Some("Test".to_string()),
+            model: Some(model.to_string()),
+            serial_number: None,
+            connections: Vec::new(),
+            identifiers: vec![vec![
+                "zha".to_string(),
+                "00:17:88:01:0a:b2:c3:d4".to_string(),
+            ]],
+        }
+    }
+
+    #[test]
+    fn test_build_button_devices_includes_event_entities() {
+        let entities = vec![EntityEntry {
+            entity_id: "event.hue_dimmer_button_2".to_string(),
+            area_id: None,
+            device_id: Some("device-1".to_string()),
+            original_device_class: None,
+            platform: Some("zha".to_string()),
+        }];
+        let device_area_map = HashMap::from([("device-1".to_string(), "kitchen".to_string())]);
+        let device_info = HashMap::from([(
+            "device-1".to_string(),
+            named_device_info("Hue Dimmer", "RWL022"),
+        )]);
+        let event_entity_areas = HashMap::from([(
+            "event.hue_dimmer_button_2".to_string(),
+            "kitchen".to_string(),
+        )]);
+
+        let devices = build_button_devices(
+            &entities,
+            &device_area_map,
+            &device_info,
+            &event_entity_areas,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].area_id, "kitchen");
+        assert_eq!(
+            devices[0].buttons,
+            vec![("event.hue_dimmer_button_2".to_string(), 2)]
+        );
+    }
+
+    #[test]
+    fn test_build_button_devices_skips_non_control_zha_devices() {
+        let device_area_map = HashMap::from([("temp-1".to_string(), "kitchen".to_string())]);
+        let device_info = HashMap::from([(
+            "temp-1".to_string(),
+            named_device_info("Kitchen Temperature", "Temperature Sensor"),
+        )]);
+
+        let devices = build_button_devices(
+            &[],
+            &device_area_map,
+            &device_info,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+
+        assert!(devices.is_empty());
+    }
+
+    #[test]
+    fn test_build_button_devices_includes_control_named_devices_without_event_entity() {
+        let device_area_map = HashMap::from([("remote-1".to_string(), "kitchen".to_string())]);
+        let device_info = HashMap::from([(
+            "remote-1".to_string(),
+            named_device_info("Kitchen Remote", "Scene Switch"),
+        )]);
+
+        let devices = build_button_devices(
+            &[],
+            &device_area_map,
+            &device_info,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].area_id, "kitchen");
+        assert!(devices[0].buttons.is_empty());
     }
 
     // -----------------------------------------------------------------------

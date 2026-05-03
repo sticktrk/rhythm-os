@@ -697,9 +697,8 @@ fn sync_with_discovery(
                 .filter_map(|ms| {
                     commands::resolve_node_control_target(
                         state,
-                        Some(hub_key),
+                        hub_key,
                         &ms.sensor_id,
-                        &ms.room_id,
                         &crate::topology::NodeControlKind::Motion,
                     )
                 })

@@ -17,8 +17,7 @@ mod harness;
 use harness::*;
 
 use rhythm_core::{
-    ModeTransitionConfig, ModeTransitionTrigger, RhythmMode,
-    DEFAULT_MODE_TRANSITION_DURATION_MS,
+    ModeTransitionConfig, ModeTransitionTrigger, RhythmMode, DEFAULT_MODE_TRANSITION_DURATION_MS,
 };
 use rhythm_os::commands;
 
@@ -37,13 +36,13 @@ fn off_press_while_hard_off_dims_to_one_percent() {
 
     h.action("master", "off").unwrap();
 
-    assert_eq!(
-        spy.turn_off_calls().len(),
-        0,
-        "soft-off must not hard-off"
-    );
+    assert_eq!(spy.turn_off_calls().len(), 0, "soft-off must not hard-off");
     let calls = spy.turn_on_calls();
-    assert_eq!(calls.len(), 1, "off press from hard-off must dispatch one turn_on");
+    assert_eq!(
+        calls.len(),
+        1,
+        "off press from hard-off must dispatch one turn_on"
+    );
     assert_eq!(
         calls[0].1.brightness, 1,
         "off press from hard-off must be 1%, got {}",
@@ -111,7 +110,10 @@ fn off_press_immediately_after_sleep_to_day_transition_dims_to_one_percent() {
         1,
         "exactly one turn_on for master, got {} (all calls: {:?})",
         master_calls.len(),
-        calls.iter().map(|(rid, c)| (rid.clone(), c.brightness)).collect::<Vec<_>>()
+        calls
+            .iter()
+            .map(|(rid, c)| (rid.clone(), c.brightness))
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         master_calls[0].1.brightness, 1,

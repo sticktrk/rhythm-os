@@ -19,7 +19,7 @@ use harness::{rooms_with_lights, TestHarness};
 
 /// Helper: create a harness with two hubs, Kitchen bound to both,
 /// Bedroom on Hue only, Office on HA only.
-fn setup_multi_hub() -> TestHarness {
+fn setup_multi_hub() -> (TestHarness, String) {
     let (rooms, devices) =
         rooms_with_lights(&[("hue-kitchen", "Kitchen"), ("hue-bedroom", "Bedroom")]);
     let mut harness = TestHarness::new().with_discovery(rooms, devices);
@@ -40,9 +40,10 @@ fn setup_multi_hub() -> TestHarness {
     assert_eq!(harness.topology_room_count(), 3);
     assert_eq!(harness.hub_target_count("hue-kitchen"), 2);
     assert_eq!(harness.hub_target_count("hue-bedroom"), 1);
-    assert_eq!(harness.hub_target_count("ha-office"), 1);
+    assert_eq!(harness.hub_target_count_for_hub(&ha_key, "ha-office"), 1);
+    let office_id = harness.resolve_for_hub(&ha_key, "ha-office");
 
-    harness
+    (harness, office_id)
 }
 
 // ============================================================================
@@ -53,7 +54,7 @@ fn setup_multi_hub() -> TestHarness {
 /// it as lights-on. Both hub targets exist in topology.
 #[test]
 fn action_on_cross_hub_room() {
-    let harness = setup_multi_hub();
+    let (harness, office_id) = setup_multi_hub();
 
     // -- Action: turn on Kitchen (cross-hub) --
     harness
@@ -66,10 +67,7 @@ fn action_on_cross_hub_room() {
         !harness.lights_on("hue-bedroom"),
         "Bedroom should still be off"
     );
-    assert!(
-        !harness.lights_on("ha-office"),
-        "Office should still be off"
-    );
+    assert!(!harness.lights_on(&office_id), "Office should still be off");
 
     // Engine snapshot should show rhythm_enabled
     let snap = harness
@@ -88,15 +86,15 @@ fn action_on_cross_hub_room() {
 /// Single-hub rooms should work the same — actions dispatch normally.
 #[test]
 fn action_on_single_hub_room() {
-    let harness = setup_multi_hub();
+    let (harness, office_id) = setup_multi_hub();
 
     // -- Action: turn on Office (HA only) --
     harness
-        .action("ha-office", "on")
+        .action(&office_id, "on")
         .expect("on action should succeed");
 
     // -- Assert: Office is on, others off --
-    assert!(harness.lights_on("ha-office"), "Office should be on");
+    assert!(harness.lights_on(&office_id), "Office should be on");
     assert!(
         !harness.lights_on("hue-kitchen"),
         "Kitchen should still be off"
@@ -110,17 +108,17 @@ fn action_on_single_hub_room() {
 /// Multiple rooms across different hubs can all be turned on independently.
 #[test]
 fn actions_across_hub_types() {
-    let harness = setup_multi_hub();
+    let (harness, office_id) = setup_multi_hub();
 
     // Turn on all rooms
     harness.action("hue-kitchen", "on").unwrap();
     harness.action("hue-bedroom", "on").unwrap();
-    harness.action("ha-office", "on").unwrap();
+    harness.action(&office_id, "on").unwrap();
 
     // All should be on
     assert!(harness.lights_on("hue-kitchen"), "Kitchen on");
     assert!(harness.lights_on("hue-bedroom"), "Bedroom on");
-    assert!(harness.lights_on("ha-office"), "Office on");
+    assert!(harness.lights_on(&office_id), "Office on");
 
     // Turn off just Kitchen
     harness.action("hue-kitchen", "lights_off").unwrap();
@@ -128,7 +126,7 @@ fn actions_across_hub_types() {
     // Kitchen off, others still on
     assert!(!harness.lights_on("hue-kitchen"), "Kitchen should be off");
     assert!(harness.lights_on("hue-bedroom"), "Bedroom still on");
-    assert!(harness.lights_on("ha-office"), "Office still on");
+    assert!(harness.lights_on(&office_id), "Office still on");
 }
 
 // ============================================================================
@@ -138,7 +136,7 @@ fn actions_across_hub_types() {
 /// Setting soft_off on a cross-hub room should update the engine state.
 #[test]
 fn soft_off_on_cross_hub_room() {
-    let harness = setup_multi_hub();
+    let (harness, _office_id) = setup_multi_hub();
 
     // Turn on Kitchen first
     harness.action("hue-kitchen", "on").unwrap();
@@ -165,7 +163,7 @@ fn soft_off_on_cross_hub_room() {
 /// Setting brightness on a cross-hub room should update the engine state.
 #[test]
 fn brightness_on_cross_hub_room() {
-    let harness = setup_multi_hub();
+    let (harness, _office_id) = setup_multi_hub();
 
     // Turn on Kitchen first
     harness.action("hue-kitchen", "on").unwrap();
@@ -190,7 +188,7 @@ fn brightness_on_cross_hub_room() {
 /// User state (rhythm_enabled, soft_off) should survive hub re-sync.
 #[test]
 fn room_state_preserved_through_resync() {
-    let harness = setup_multi_hub();
+    let (harness, _office_id) = setup_multi_hub();
 
     // Turn on Kitchen and set some state
     harness.action("hue-kitchen", "on").unwrap();

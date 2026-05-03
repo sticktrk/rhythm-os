@@ -18,14 +18,18 @@ use rhythm_core::lighting::LightingCommand;
 use rhythm_core::room::Room;
 use rhythm_core::runtime::events::InputEvent;
 use rhythm_core::runtime::handle::RuntimeHandle;
+use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::runtime::orchestrator::RhythmRuntime;
 use rhythm_core::runtime::registry::SimpleDeviceRegistry;
 use rhythm_core::runtime::scheduler::NoOpScheduler;
 use rhythm_core::runtime::time::MockTimeProvider;
 use rhythm_core::runtime::RuntimeConfig;
 use rhythm_core::ButtonAction;
+use rhythm_os::canonical::identity::{DiscoveredIdentity, HardwareId};
+use rhythm_os::canonical::registry::ResolveResult;
 use rhythm_os::event_loop::{handle_hub_event, MotionTimerState};
 use rhythm_os::hub::HubEvent;
+use rhythm_os::topology::DevicePlacement;
 
 fn dispatch_button_event(
     harness: &TestHarness,
@@ -46,6 +50,40 @@ fn dispatch_button_event(
         motion,
     );
     started.elapsed()
+}
+
+fn add_button_source(harness: &TestHarness, native_id: &str, room_id: &str) {
+    let topology_room_id = harness.resolve(room_id);
+    let identity = DiscoveredIdentity {
+        native_id: native_id.to_string(),
+        room_id: room_id.to_string(),
+        room_name: room_id.to_string(),
+        name: native_id.to_string(),
+        device_type: DeviceType::Button,
+        hardware_ids: vec![HardwareId::matter(native_id)],
+        manufacturer: None,
+        model: None,
+    };
+
+    let mut state = harness.state.lock().unwrap();
+    let canonical_id = match state
+        .canonical_registry
+        .resolve(&identity, &harness.hub_key, 1)
+    {
+        ResolveResult::Created { canonical_id } | ResolveResult::AlreadyKnown { canonical_id } => {
+            canonical_id
+        }
+        other => panic!("unexpected resolve result: {:?}", other),
+    };
+    assert!(state
+        .canonical_registry
+        .assign_room(&canonical_id, Some(&topology_room_id)));
+    state.topology.ensure_standalone_device(&canonical_id);
+    assert!(state.topology.assign_device(
+        &canonical_id,
+        Some(&topology_room_id),
+        DevicePlacement::UserOverride,
+    ));
 }
 
 fn wait_until(timeout: Duration, mut predicate: impl FnMut() -> bool, failure: &str) {
@@ -199,6 +237,8 @@ fn slow_controller_does_not_drop_button_events_for_other_rooms() {
     // test snappy but obvious if calls are serialised. Bedroom is fast.
     let kitchen_node = harness.resolve("mock-kitchen");
     let bedroom_node = harness.resolve("mock-bedroom");
+    add_button_source(&harness, "button-kitchen", "mock-kitchen");
+    add_button_source(&harness, "button-bedroom", "mock-bedroom");
     spy.set_turn_on_delay_for_room(&kitchen_node, Duration::from_millis(50));
 
     let mut motion = MotionTimerState::new();
@@ -256,6 +296,7 @@ fn slow_lights_off_does_not_lose_subsequent_on_press() {
     harness.sync();
 
     let mut motion = MotionTimerState::new();
+    add_button_source(&harness, "button-kitchen", "mock-kitchen");
     spy.set_turn_off_delay(Duration::from_millis(300));
 
     harness.action("mock-kitchen", "on").unwrap();
@@ -316,6 +357,7 @@ fn slow_controller_preserves_room_state_across_actions() {
     harness.sync();
 
     spy.set_turn_on_delay(Duration::from_millis(60));
+    add_button_source(&harness, "button-kitchen", "mock-kitchen");
 
     harness.set_room_preferences("mock-kitchen", Some(true), None, Some(false));
     let mut motion = MotionTimerState::new();

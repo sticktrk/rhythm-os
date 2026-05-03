@@ -52,7 +52,11 @@ fn top_press_after_motion_off_resumes_adaptive() {
     h.action("kitchen", "on").unwrap();
 
     let calls = spy.turn_on_calls();
-    assert_eq!(calls.len(), 1, "on after motion-off should dispatch turn_on");
+    assert_eq!(
+        calls.len(),
+        1,
+        "on after motion-off should dispatch turn_on"
+    );
     let cmd = &calls[0].1;
     assert!(
         cmd.brightness > 1 && cmd.brightness <= 100,

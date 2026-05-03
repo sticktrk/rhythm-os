@@ -23,7 +23,11 @@ fn off_press_after_rhythm_off_still_dims_to_one_percent() {
 
     let calls = spy.turn_on_calls();
     assert_eq!(spy.turn_off_calls().len(), 0);
-    assert_eq!(calls.len(), 1, "off press must still dispatch with rhythm disabled");
+    assert_eq!(
+        calls.len(),
+        1,
+        "off press must still dispatch with rhythm disabled"
+    );
     assert_eq!(calls[0].1.brightness, 1);
 }
 
@@ -40,7 +44,10 @@ fn on_press_after_rhythm_off_still_turns_on_adaptive() {
     h.action("kitchen", "on").unwrap();
 
     let calls = spy.turn_on_calls();
-    assert!(!calls.is_empty(), "on press must dispatch even with rhythm off");
+    assert!(
+        !calls.is_empty(),
+        "on press must dispatch even with rhythm off"
+    );
     let cmd = &calls.last().unwrap().1;
     assert!(
         cmd.brightness > 1,

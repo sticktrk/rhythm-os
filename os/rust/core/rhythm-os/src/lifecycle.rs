@@ -150,6 +150,7 @@ fn tag_hub_events(raw_rx: Receiver<HubEvent>, hub_key: HubKey) -> Receiver<HubEv
 #[allow(clippy::type_complexity)]
 pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'static>(
     state: &SharedState,
+    hub_key: &HubKey,
     controller: C,
     registry: Arc<Mutex<HubDeviceRegistry>>,
     warmup: Option<Box<dyn FnOnce(&C)>>,
@@ -157,7 +158,7 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
     use rhythm_core::solar::SolarTime;
     use rhythm_core::{
         DeviceRegistry, HubRegistry, RhythmRuntime, RuntimeConfig, RuntimeHandle,
-        SystemTimeProvider, ThreadScheduler, TimeProvider,
+        SimpleDeviceRegistry, SystemTimeProvider, ThreadScheduler, TimeProvider,
     };
 
     let (
@@ -260,13 +261,20 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
         time_provider,
         ThreadScheduler::new(),
         {
+            let state = state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
             let reg = registry
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Failed to lock registry"))?;
-            let mut rt_reg = HubDeviceRegistry::default();
+            let mut rt_reg = SimpleDeviceRegistry::new();
             for room_id in reg.list_rooms() {
+                let Some(topology_room_id) = state.topology.translate_room_id(hub_key, &room_id)
+                else {
+                    continue;
+                };
                 for device_id in HubRegistry::devices_for_room(&*reg, &room_id) {
-                    rt_reg.register_device(&device_id, &room_id);
+                    rt_reg.register_device(&device_id, topology_room_id);
                 }
             }
             rt_reg
@@ -569,12 +577,13 @@ pub fn ensure_composite_runtime(
             if let Some(ref reg) = hub.registry {
                 if let Ok(reg) = reg.lock() {
                     for room in reg.rooms() {
-                        let topology_room_id = s
-                            .topology
-                            .resolve_room_alias(&s.canonical_registry, Some(hub_key), &room.id)
-                            .unwrap_or_else(|| room.id.clone());
+                        let Some(topology_room_id) =
+                            s.topology.translate_room_id(hub_key, &room.id)
+                        else {
+                            continue;
+                        };
                         for device_id in HubRegistry::devices_for_room(&*reg, &room.id) {
-                            rt_reg.register_device(&device_id, &topology_room_id);
+                            rt_reg.register_device(&device_id, topology_room_id);
                         }
                     }
                 }

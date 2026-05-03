@@ -130,10 +130,11 @@ pub fn ensure_hue_runtime<H: crate::transport::HueTransport + 'static>(
     };
 
     let controller = HueLightController::new(transport, username, registry.clone())
-        .with_capability_source(state.clone(), hub_key);
+        .with_capability_source(state.clone(), hub_key.clone());
 
     rhythm_os::lifecycle::ensure_hub_runtime(
         state,
+        &hub_key,
         controller,
         registry,
         Some(Box::new(|c: &HueLightController<H>| {

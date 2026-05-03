@@ -28,7 +28,11 @@ fn sleep_on_then_bottom_button_dims_to_one_percent() {
         "soft-off in sleep mode must not hard-off"
     );
     let calls = spy.turn_on_calls();
-    assert_eq!(calls.len(), 1, "off press in sleep mode should dispatch turn_on");
+    assert_eq!(
+        calls.len(),
+        1,
+        "off press in sleep mode should dispatch turn_on"
+    );
     assert_eq!(
         calls[0].1.brightness, 1,
         "sleep-mode soft-off brightness must be 1%"

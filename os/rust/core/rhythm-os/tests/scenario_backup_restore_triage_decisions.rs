@@ -63,7 +63,7 @@ fn backup_restore_kept_separate_room_binding_stays_resolved_on_first_sync() {
     restored.sync_all();
 
     let primary_room_id = restored.resolve("mock-kitchen");
-    let secondary_room_id = restored.resolve("ha-kitchen");
+    let secondary_room_id = restored.resolve_for_hub(&ha_key, "ha-kitchen");
     let state = restored.state.lock().unwrap();
 
     assert_eq!(state.topology.room_count(), 2);
@@ -102,7 +102,7 @@ fn backup_restore_dismissed_room_binding_stays_separate_on_first_sync() {
     restored.sync_all();
 
     let primary_room_id = restored.resolve("mock-kitchen");
-    let secondary_room_id = restored.resolve("ha-kitchen");
+    let secondary_room_id = restored.resolve_for_hub(&ha_key, "ha-kitchen");
     let state = restored.state.lock().unwrap();
     let room_binding_entries: Vec<_> = state
         .canonical_registry

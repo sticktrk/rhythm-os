@@ -25,7 +25,11 @@ fn disabled_room_off_press_still_soft_offs() {
 
     let calls = spy.turn_on_calls();
     assert_eq!(spy.turn_off_calls().len(), 0);
-    assert_eq!(calls.len(), 1, "manual off press must dispatch on a disabled room");
+    assert_eq!(
+        calls.len(),
+        1,
+        "manual off press must dispatch on a disabled room"
+    );
     assert_eq!(calls[0].1.brightness, 1, "still soft-off at 1%");
 }
 
@@ -42,7 +46,11 @@ fn disabled_room_on_press_still_turns_on_adaptive() {
     h.action("kitchen", "on").unwrap();
 
     let calls = spy.turn_on_calls();
-    assert_eq!(calls.len(), 1, "manual on press must dispatch on a disabled room");
+    assert_eq!(
+        calls.len(),
+        1,
+        "manual on press must dispatch on a disabled room"
+    );
     assert!(
         calls[0].1.brightness > 1,
         "manual on must lift above 1%, got {}",

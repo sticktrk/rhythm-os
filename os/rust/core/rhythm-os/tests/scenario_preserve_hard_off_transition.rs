@@ -47,7 +47,10 @@ fn preserve_hard_off_transition_keeps_hard_off_then_off_press_soft_offs() {
     h.action("master", "on").unwrap();
     h.action("master", "lights_off").unwrap();
     let pre_snap = h.snapshot("master").unwrap();
-    assert!(pre_snap.hard_off, "setup: hard_off must be true going into transition");
+    assert!(
+        pre_snap.hard_off,
+        "setup: hard_off must be true going into transition"
+    );
     spy.reset();
 
     commands::do_set_active_mode_with_trigger(
