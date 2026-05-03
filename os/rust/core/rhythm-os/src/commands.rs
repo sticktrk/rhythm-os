@@ -3262,6 +3262,7 @@ fn apply_room_mode_defaults(
         .map(|snap| (snap.id.as_str(), snap))
         .collect();
     let mut changed_room_ids = Vec::new();
+    let mut non_hard_off_changed_room_ids = Vec::new();
     let mut hard_off_rooms = Vec::new();
     let mut lights_on_updates = Vec::new();
     let mut missing_rooms = 0usize;
@@ -3302,6 +3303,7 @@ fn apply_room_mode_defaults(
         match room_default.state {
             RoomModeState::Active | RoomModeState::Idle => {
                 lights_on_updates.push((snap.id.clone(), true));
+                non_hard_off_changed_room_ids.push(snap.id.clone());
             }
             RoomModeState::HardOff => {
                 lights_on_updates.push((snap.id.clone(), false));
@@ -3332,6 +3334,18 @@ fn apply_room_mode_defaults(
                 ObservedPowerState::new(lights_on, ObservedPowerSource::SemanticOverride),
             );
         }
+    }
+
+    // Broadcast the engine-state change immediately for non-HardOff targets.
+    // The HardOff branch below emits its own event after queueing the off
+    // dispatch. For Active/Idle targets the lighting command is queued
+    // asynchronously via dispatch_room_commands and only emits its own event
+    // when the worker runs, which can be many seconds later (production logs
+    // show ~9s on a busy mode change). Without this synchronous emit, every
+    // SSE consumer keeps showing the previous state — typically `HardOff` —
+    // until that worker finally fires.
+    for room_id in &non_hard_off_changed_room_ids {
+        emit_node_state_event_after_apply(state, runtime, room_id);
     }
 
     if !hard_off_rooms.is_empty() {
