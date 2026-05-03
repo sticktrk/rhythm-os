@@ -166,6 +166,76 @@ disable_wifi_power_save() {
     log "power_save: no supported tool available"
 }
 
+KEEPALIVE_PIDFILE_PATTERN="/var/run/wifi-keepalive.%s.pid"
+KEEPALIVE_INTERVAL_SECS="${RHYTHM_WIFI_KEEPALIVE_SECS:-30}"
+
+# Periodic outbound poke from the rpiz so upstream bridge/ARP tables don't
+# age out our entry while every TCP flow we hold is outbound-initiated.
+# Without this, the AP's IPv4 ARP entry for our wlan0 IP can go stale even
+# though we're TX'ing to Hue/HA every few seconds, and inbound new TCP
+# (the iOS app, mDNS scanners) is silently dropped at the AP until something
+# triggers a fresh ARP resolution. Gratuitous-ARP is the gold standard;
+# fall back to a unicast ping to the gateway if arping isn't available.
+run_keepalive_loop() {
+    local iface="$1"
+    local ip="$2"
+    local interval="$3"
+    local gw
+
+    while sleep "$interval"; do
+        if ! ifconfig "$iface" 2>/dev/null | grep -q "$ip"; then
+            return 0
+        fi
+
+        if command -v arping >/dev/null 2>&1; then
+            arping -U -I "$iface" -c 1 -w 2 "$ip" >/dev/null 2>&1 || true
+            continue
+        fi
+
+        gw="$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')"
+        if [ -n "$gw" ] && command -v ping >/dev/null 2>&1; then
+            ping -c 1 -W 2 "$gw" >/dev/null 2>&1 || true
+        fi
+    done
+}
+
+start_wifi_keepalive() {
+    local iface="$1"
+    local ip="$2"
+    local pidfile
+
+    # shellcheck disable=SC2059
+    pidfile="$(printf "$KEEPALIVE_PIDFILE_PATTERN" "$iface")"
+
+    if pid_is_running "$pidfile"; then
+        log "keepalive: already running (pid=$(cat "$pidfile"))"
+        return 0
+    fi
+
+    run_keepalive_loop "$iface" "$ip" "$KEEPALIVE_INTERVAL_SECS" &
+    echo $! > "$pidfile"
+
+    if command -v arping >/dev/null 2>&1; then
+        log "keepalive: started arping -U for $ip on $iface every ${KEEPALIVE_INTERVAL_SECS}s (pid=$!)"
+    else
+        log "keepalive: started gateway ping every ${KEEPALIVE_INTERVAL_SECS}s (pid=$!) -- arping unavailable"
+    fi
+}
+
+stop_wifi_keepalive() {
+    local iface="$1"
+    local pidfile
+
+    # shellcheck disable=SC2059
+    pidfile="$(printf "$KEEPALIVE_PIDFILE_PATTERN" "$iface")"
+
+    if pid_is_running "$pidfile"; then
+        kill "$(cat "$pidfile")" 2>/dev/null || true
+        log "keepalive: stopped"
+    fi
+    rm -f "$pidfile"
+}
+
 reprobe_sdio_devices() {
     local path devname
 
@@ -285,6 +355,7 @@ start() {
             else
                 log "connected with IP $ip_addr"
             fi
+            start_wifi_keepalive "$iface" "$ip_addr"
             return 0
         fi
 
@@ -308,6 +379,8 @@ stop() {
     [ -n "$iface" ] || iface="wlan0"
     WPA_PIDFILE="/var/run/wpa_supplicant.${iface}.pid"
     DHCP_PIDFILE="/var/run/udhcpc.${iface}.pid"
+
+    stop_wifi_keepalive "$iface"
 
     if pid_is_running "$DHCP_PIDFILE"; then
         kill "$(cat "$DHCP_PIDFILE")" 2>/dev/null || true
