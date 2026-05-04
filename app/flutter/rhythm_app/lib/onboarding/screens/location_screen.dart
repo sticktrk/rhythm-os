@@ -9,6 +9,7 @@ import '../providers/auth_provider.dart';
 import '../providers/onboarding_provider.dart';
 import '../services/geocoding_service.dart';
 import '../../services/analytics_service.dart';
+import '../../services/location_detection_service.dart';
 
 /// Location screen for setting home location for sunrise/sunset calculations.
 class LocationScreen extends StatefulWidget {
@@ -145,17 +146,10 @@ class _LocationScreenState extends State<LocationScreen>
         return;
       }
 
-      LocationPermission permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-        if (permission == LocationPermission.denied) {
-          setState(() {
-            _errorMessage = 'Location permission denied.';
-            _isLoadingGps = false;
-          });
-          return;
-        }
-      }
+      final permission =
+          await LocationDetectionService.requestPermissionIfNeeded(
+        debugSource: 'OnboardingLocation',
+      );
 
       if (permission == LocationPermission.deniedForever) {
         setState(() {
@@ -166,19 +160,25 @@ class _LocationScreenState extends State<LocationScreen>
         return;
       }
 
-      final position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.low,
-        ),
+      if (!LocationDetectionService.isGranted(permission)) {
+        setState(() {
+          _errorMessage = 'Location permission denied.';
+          _isLoadingGps = false;
+        });
+        return;
+      }
+
+      final detected = await LocationDetectionService.getCurrentPosition(
+        debugSource: 'OnboardingLocation',
       );
+      final position = detected.position;
 
       // Try to reverse geocode for city name
       String? locationName;
       if (GeocodingService.isAvailable) {
-        final place = await _geocodingService.reverseGeocode(
-          position.latitude,
-          position.longitude,
-        );
+        final place = await _geocodingService
+            .reverseGeocode(position.latitude, position.longitude)
+            .timeout(const Duration(seconds: 5), onTimeout: () => null);
         locationName = place?.shortName;
       }
 
@@ -205,12 +205,26 @@ class _LocationScreenState extends State<LocationScreen>
       // Track location method
       AnalyticsService().logOnboardingLocationMethod('gps');
     } catch (e) {
+      debugPrint('OnboardingLocation: failed to detect location: $e');
       if (!mounted) return;
       setState(() {
-        _errorMessage = 'Failed to get location. Please try again.';
+        _errorMessage = _locationErrorMessage(e);
         _isLoadingGps = false;
       });
     }
+  }
+
+  String _locationErrorMessage(Object error) {
+    if (error is LocationServiceDisabledException) {
+      return 'Location services are disabled. Please enable them in settings.';
+    }
+    if (error is PermissionDeniedException) {
+      return 'Location permission denied.';
+    }
+    if (error is TimeoutException) {
+      return 'Could not get a location fix. Check Android Location is on, then try again.';
+    }
+    return 'Failed to get location. Please try again.';
   }
 
   Future<void> _continue() async {

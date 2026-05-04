@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
@@ -8,6 +9,7 @@ import 'package:rhythm_core/rhythm_core.dart';
 import '../providers/home_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../services/analytics_service.dart';
+import '../services/location_detection_service.dart';
 
 /// Location settings screen with clear permission guidance.
 /// GPS-only approach with excellent UX for handling permission states.
@@ -103,12 +105,16 @@ class _LocationSettingsScreenState extends State<LocationSettingsScreen>
 
   Future<void> _checkPermissionStatus() async {
     final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    debugPrint('LocationSettings: service enabled: $serviceEnabled');
+    if (!mounted) return;
     if (!serviceEnabled) {
       setState(() => _permissionState = _PermissionState.serviceDisabled);
       return;
     }
 
     final permission = await Geolocator.checkPermission();
+    debugPrint('LocationSettings: permission status: $permission');
+    if (!mounted) return;
     setState(() {
       _permissionState = switch (permission) {
         LocationPermission.denied => _PermissionState.denied,
@@ -143,24 +149,19 @@ class _LocationSettingsScreenState extends State<LocationSettingsScreen>
         return;
       }
 
-      var permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
+      final permission =
+          await LocationDetectionService.requestPermissionIfNeeded(
+        debugSource: 'LocationSettings',
+      );
 
-      if (permission == LocationPermission.denied) {
+      if (!LocationDetectionService.isGranted(permission)) {
         setState(() {
-          _permissionState = _PermissionState.denied;
-          _statusMessage = 'Location permission is required';
-          _isLoading = false;
-        });
-        return;
-      }
-
-      if (permission == LocationPermission.deniedForever) {
-        setState(() {
-          _permissionState = _PermissionState.deniedForever;
-          _statusMessage = 'Please enable in Settings';
+          _permissionState = permission == LocationPermission.deniedForever
+              ? _PermissionState.deniedForever
+              : _PermissionState.denied;
+          _statusMessage = permission == LocationPermission.deniedForever
+              ? 'Please enable in Settings'
+              : 'Location permission is required';
           _isLoading = false;
         });
         return;
@@ -169,8 +170,10 @@ class _LocationSettingsScreenState extends State<LocationSettingsScreen>
       setState(() => _permissionState = _PermissionState.granted);
       await _detectLocation();
     } catch (e) {
+      debugPrint('LocationSettings: permission/detect failed: $e');
+      if (!mounted) return;
       setState(() {
-        _statusMessage = 'Something went wrong';
+        _statusMessage = _locationFailureMessage(e);
         _isLoading = false;
       });
     }
@@ -185,12 +188,10 @@ class _LocationSettingsScreenState extends State<LocationSettingsScreen>
     });
 
     try {
-      final position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.low,
-          timeLimit: Duration(seconds: 15),
-        ),
+      final detected = await LocationDetectionService.getCurrentPosition(
+        debugSource: 'LocationSettings',
       );
+      final position = detected.position;
 
       final timezone = (await FlutterTimezone.getLocalTimezone()).identifier;
 
@@ -198,9 +199,8 @@ class _LocationSettingsScreenState extends State<LocationSettingsScreen>
       String? placeName;
       try {
         final placemarks = await placemarkFromCoordinates(
-          position.latitude,
-          position.longitude,
-        );
+                position.latitude, position.longitude)
+            .timeout(const Duration(seconds: 5));
         if (placemarks.isNotEmpty) {
           final place = placemarks.first;
           // Format as "City, State" or "City, Country"
@@ -250,17 +250,38 @@ class _LocationSettingsScreenState extends State<LocationSettingsScreen>
         _latitude = position.latitude;
         _longitude = position.longitude;
         _locationName = placeName;
-        _statusMessage = 'Location updated';
+        _statusMessage = detected.fromCache
+            ? 'Location updated from recent fix'
+            : 'Location updated';
         _isLoading = false;
       });
       AnalyticsService().logLocationUpdated(hasPlaceName: placeName != null);
     } catch (e) {
+      debugPrint('LocationSettings: could not get location: $e');
       if (!mounted) return;
       setState(() {
-        _statusMessage = 'Could not get location';
+        _statusMessage = _locationFailureMessage(e);
+        if (e is LocationServiceDisabledException) {
+          _permissionState = _PermissionState.serviceDisabled;
+        } else if (e is PermissionDeniedException) {
+          _permissionState = _PermissionState.denied;
+        }
         _isLoading = false;
       });
     }
+  }
+
+  String _locationFailureMessage(Object error) {
+    if (error is LocationServiceDisabledException) {
+      return 'Please enable location services';
+    }
+    if (error is PermissionDeniedException) {
+      return 'Location permission is required';
+    }
+    if (error is TimeoutException) {
+      return 'Could not get a location fix';
+    }
+    return 'Could not get location';
   }
 
   @override

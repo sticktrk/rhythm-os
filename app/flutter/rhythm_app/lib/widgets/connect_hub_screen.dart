@@ -1,7 +1,15 @@
 import 'dart:async';
-import 'dart:io' show InternetAddress;
+import 'dart:convert';
+import 'dart:io'
+    show
+        HttpClient,
+        HttpStatus,
+        InternetAddress,
+        InternetAddressType,
+        NetworkInterface,
+        Platform;
 import 'package:bonsoir/bonsoir.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -18,6 +26,107 @@ import '../services/analytics_service.dart';
 
 /// Which empty-state variant to show.
 enum ConnectHubMode { rhythmServer, hue }
+
+@visibleForTesting
+const int rhythmServerDefaultPort = 54448;
+
+const _mdnsProbeTimeout = Duration(milliseconds: 900);
+const _mdnsProbeSettleTimeout = Duration(seconds: 2);
+const _subnetProbeTimeout = Duration(milliseconds: 250);
+const _subnetScanBatchSize = 32;
+
+@visibleForTesting
+List<String> rhythmDiscoveryHostCandidates(
+  BonsoirService service, {
+  bool includeGenericHttpServices = true,
+}) {
+  final hosts = <String>{};
+
+  void addHost(String? value, {bool requireResolvableShape = false}) {
+    final host = _normalizeMdnsHost(value);
+    if (host == null) return;
+    if (requireResolvableShape && !_hasResolvableHostShape(host)) return;
+    hosts.add(host);
+  }
+
+  if (includeGenericHttpServices) {
+    addHost(service.attributes['ip']);
+    addHost(service.host);
+    addHost(
+      service.attributes['host'],
+      requireResolvableShape: true,
+    );
+  } else if (rhythmMdnsServiceLooksLikeServer(service)) {
+    addHost(service.host);
+  }
+
+  return List.unmodifiable(hosts);
+}
+
+@visibleForTesting
+bool rhythmMdnsServiceLooksLikeServer(BonsoirService service) {
+  final host = _normalizeMdnsHost(service.host) ?? '';
+  final name = service.name.toLowerCase();
+  return host.startsWith('rhythm-') || name.contains('rhythm');
+}
+
+@visibleForTesting
+List<int> rhythmDiscoveryPortCandidates(
+  BonsoirService service, {
+  bool includeDefaultPort = true,
+}) {
+  final ports = <int>{};
+  if (service.port > 0) ports.add(service.port);
+  if (includeDefaultPort) ports.add(rhythmServerDefaultPort);
+  return List.unmodifiable(ports);
+}
+
+@visibleForTesting
+List<String> rhythmSubnetScanCandidates(Iterable<String> localAddresses) {
+  final candidates = <String>{};
+  for (final address in localAddresses) {
+    final octets = _parseIpv4Octets(address);
+    if (octets == null || !_isPrivateIpv4(octets)) continue;
+
+    final prefix = '${octets[0]}.${octets[1]}.${octets[2]}.';
+    for (var host = 1; host <= 254; host += 1) {
+      if (host == octets[3]) continue;
+      candidates.add('$prefix$host');
+    }
+  }
+  return List.unmodifiable(candidates);
+}
+
+String? _normalizeMdnsHost(String? value) {
+  final trimmed = value?.trim();
+  if (trimmed == null || trimmed.isEmpty) return null;
+  return trimmed.endsWith('.')
+      ? trimmed.substring(0, trimmed.length - 1)
+      : trimmed;
+}
+
+List<int>? _parseIpv4Octets(String value) {
+  final parts = value.split('.');
+  if (parts.length != 4) return null;
+
+  final octets = <int>[];
+  for (final part in parts) {
+    final octet = int.tryParse(part);
+    if (octet == null || octet < 0 || octet > 255) return null;
+    octets.add(octet);
+  }
+  return octets;
+}
+
+bool _isPrivateIpv4(List<int> octets) {
+  return octets[0] == 10 ||
+      (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) ||
+      (octets[0] == 192 && octets[1] == 168);
+}
+
+bool _hasResolvableHostShape(String host) {
+  return InternetAddress.tryParse(host) != null || host.contains('.');
+}
 
 /// Full-screen empty state shown when setup is incomplete.
 ///
@@ -239,10 +348,20 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   /// Native: use Bonsoir (mDNS) to discover devices.
   Future<void> _scanViaBonsoir(List<DiscoveredHub> found) async {
     final seen = <String>{};
+    final pendingProbes = <Future<void>>{};
     try {
       final discovery = BonsoirDiscovery(type: '_http._tcp');
       _bonsoirDiscovery = discovery;
       await discovery.initialize();
+
+      void queueProbe(BonsoirService service) {
+        final probe = _handleResolvedService(service, seen, found)
+            .catchError((Object e, StackTrace stackTrace) {
+          debugPrint('mDNS: probe failed for ${service.name}: $e');
+        });
+        pendingProbes.add(probe);
+        unawaited(probe.whenComplete(() => pendingProbes.remove(probe)));
+      }
 
       discovery.eventStream?.listen((event) {
         switch (event) {
@@ -251,7 +370,9 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
               debugPrint('mDNS: resolve failed for ${event.service.name}: $e');
             });
           case BonsoirDiscoveryServiceResolvedEvent():
-            _handleResolvedService(event.service, seen, found);
+            queueProbe(event.service);
+          case BonsoirDiscoveryServiceUpdatedEvent():
+            queueProbe(event.service);
           default:
             break;
         }
@@ -266,6 +387,17 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       await discovery.start();
       await Future.delayed(const Duration(seconds: 5));
       await discovery.stop();
+      final probes = List<Future<void>>.of(pendingProbes);
+      if (probes.isNotEmpty) {
+        try {
+          await Future.wait(probes).timeout(_mdnsProbeSettleTimeout);
+        } on TimeoutException {
+          debugPrint('mDNS: timed out waiting for health probes');
+        }
+      }
+      if (Platform.isAndroid && found.isEmpty) {
+        await _scanLocalSubnetForRhythmServers(found, seen);
+      }
       _bonsoirDiscovery = null;
     } catch (e) {
       debugPrint('mDNS scan error: $e');
@@ -275,7 +407,8 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   bool _isIgnorableBonsoirResolveError(Object error) {
     return error is PlatformException &&
         error.code == 'discoveryError' &&
-        error.message == 'discoveryServiceResolveFailed';
+        (error.message == 'discoveryServiceResolveFailed' ||
+            error.message == 'discoveryTxtResolveFailed');
   }
 
   Future<void> _handleResolvedService(
@@ -283,45 +416,168 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     Set<String> seen,
     List<DiscoveredHub> found,
   ) async {
-    final host = service.host ?? '';
-    final name = service.name;
-    final isRhythm =
-        host.startsWith('rhythm-') || name.toLowerCase().contains('rhythm');
-    if (!isRhythm) return;
-
-    // Resolve mDNS hostname to IP address
-    String ip;
-    try {
-      final hostname =
-          host.endsWith('.') ? host.substring(0, host.length - 1) : host;
-      final addresses = await InternetAddress.lookup(hostname);
-      ip = addresses.first.address;
-    } catch (_) {
-      debugPrint('mDNS: Could not resolve $host to IP');
-      return;
-    }
-
-    final key = '$ip:${service.port}';
-    if (seen.contains(key)) return;
-    seen.add(key);
-
-    final hub = DiscoveredHub(
-      host: host,
-      port: service.port,
-      address: ip,
-      name: name,
-      type: HubType.server,
+    final hosts = rhythmDiscoveryHostCandidates(
+      service,
+      includeGenericHttpServices: Platform.isAndroid,
     );
+    if (hosts.isEmpty) return;
 
-    // Verify device is actually reachable before showing it
-    final isHealthy =
-        await RhythmDiagnosticsApi(host: ip, port: service.port).healthCheck();
-    if (isHealthy && mounted) {
-      found.add(hub);
+    final ports = rhythmDiscoveryPortCandidates(
+      service,
+      includeDefaultPort: Platform.isAndroid,
+    );
+    for (final host in hosts) {
+      final ip = await _resolveMdnsHost(host);
+      if (ip == null) continue;
+
+      for (final port in ports) {
+        final key = '$ip:$port';
+        if (seen.contains(key)) continue;
+        seen.add(key);
+
+        final isHealthy = await _checkDiscoveredRhythmServer(ip, port);
+
+        if (isHealthy && mounted) {
+          final hub = DiscoveredHub(
+            host: host,
+            port: port,
+            address: ip,
+            name: _friendlyMdnsServiceName(service),
+            type: HubType.server,
+          );
+          found.add(hub);
+          setState(() {
+            _discoveredDevices = List.of(found);
+          });
+          return;
+        }
+      }
+    }
+  }
+
+  Future<void> _scanLocalSubnetForRhythmServers(
+    List<DiscoveredHub> found,
+    Set<String> seen,
+  ) async {
+    final localAddresses = await _localIpv4Addresses();
+    final candidates = rhythmSubnetScanCandidates(localAddresses);
+    if (candidates.isEmpty) return;
+
+    debugPrint('mDNS: scanning local subnet for Rhythm servers');
+    for (var index = 0;
+        index < candidates.length && mounted;
+        index += _subnetScanBatchSize) {
+      final batch = candidates.skip(index).take(_subnetScanBatchSize).toList();
+      final results = await Future.wait(
+        batch.map((ip) async {
+          final key = '$ip:$rhythmServerDefaultPort';
+          if (seen.contains(key)) return null;
+          seen.add(key);
+
+          final isHealthy = await _isRhythmServerHealthy(
+            host: ip,
+            port: rhythmServerDefaultPort,
+            timeout: _subnetProbeTimeout,
+          );
+          return isHealthy ? ip : null;
+        }),
+      );
+
+      final healthyIps = results.whereType<String>().toList();
+      if (healthyIps.isEmpty) continue;
+      for (final ip in healthyIps) {
+        found.add(
+          DiscoveredHub(
+            host: ip,
+            port: rhythmServerDefaultPort,
+            address: ip,
+            name: 'RhythmServer',
+            type: HubType.server,
+          ),
+        );
+      }
       setState(() {
         _discoveredDevices = List.of(found);
       });
+      return;
     }
+  }
+
+  Future<bool> _checkDiscoveredRhythmServer(String host, int port) {
+    if (Platform.isAndroid) {
+      return _isRhythmServerHealthy(
+        host: host,
+        port: port,
+        timeout: _mdnsProbeTimeout,
+      );
+    }
+    return RhythmDiagnosticsApi(host: host, port: port).healthCheck();
+  }
+
+  Future<List<String>> _localIpv4Addresses() async {
+    try {
+      final interfaces = await NetworkInterface.list(
+        includeLoopback: false,
+        type: InternetAddressType.IPv4,
+      );
+      return [
+        for (final interface in interfaces)
+          for (final address in interface.addresses) address.address,
+      ];
+    } catch (e) {
+      debugPrint('mDNS: could not list local network interfaces: $e');
+      return const [];
+    }
+  }
+
+  Future<bool> _isRhythmServerHealthy({
+    required String host,
+    required int port,
+    required Duration timeout,
+  }) async {
+    final client = HttpClient()..connectionTimeout = timeout;
+    try {
+      final request = await client
+          .getUrl(Uri.parse('http://$host:$port/health'))
+          .timeout(timeout);
+      final response = await request.close().timeout(timeout);
+      if (response.statusCode != HttpStatus.ok) {
+        await response.drain();
+        return false;
+      }
+
+      final body = await utf8.decoder.bind(response).join().timeout(timeout);
+      final payload = jsonDecode(body);
+      return payload is Map && payload['status'] == 'healthy';
+    } catch (_) {
+      return false;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<String?> _resolveMdnsHost(String host) async {
+    final literalAddress = InternetAddress.tryParse(host);
+    if (literalAddress != null) return literalAddress.address;
+
+    try {
+      final addresses = await InternetAddress.lookup(host);
+      for (final address in addresses) {
+        if (address.type == InternetAddressType.IPv4) {
+          return address.address;
+        }
+      }
+      if (addresses.isNotEmpty) return addresses.first.address;
+    } catch (_) {
+      debugPrint('mDNS: Could not resolve $host to IP');
+    }
+    return null;
+  }
+
+  String _friendlyMdnsServiceName(BonsoirService service) {
+    final attrHost = service.attributes['host']?.trim();
+    if (attrHost != null && attrHost.isNotEmpty) return attrHost;
+    return service.name.isNotEmpty ? service.name : 'RhythmServer';
   }
 
   /// Submit the inline manual-IP form.
@@ -335,10 +591,10 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     if (input.contains(':')) {
       final parts = input.split(':');
       ip = parts[0];
-      port = int.tryParse(parts[1]) ?? 54448;
+      port = int.tryParse(parts[1]) ?? rhythmServerDefaultPort;
     } else {
       ip = input;
-      port = 54448;
+      port = rhythmServerDefaultPort;
     }
 
     _manualIpFocus.unfocus();
@@ -867,8 +1123,8 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
                                 b,
                               ),
                         border: Border.all(
-                          color:
-                              CelestialColors.backgroundDark.withValues(alpha: 0.9),
+                          color: CelestialColors.backgroundDark
+                              .withValues(alpha: 0.9),
                           width: 1.2,
                         ),
                       ),
@@ -1036,8 +1292,8 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
                   Text(
                     'Guided setup in a few taps',
                     style: TextStyle(
-                      color: CelestialColors.textSecondary
-                          .withValues(alpha: 0.58),
+                      color:
+                          CelestialColors.textSecondary.withValues(alpha: 0.58),
                       fontSize: 11,
                       letterSpacing: 0.1,
                     ),
@@ -1108,8 +1364,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
                 hintStyle: TextStyle(
                   color: hasError
                       ? Colors.red.withValues(alpha: 0.7)
-                      : CelestialColors.textSecondary
-                          .withValues(alpha: 0.42),
+                      : CelestialColors.textSecondary.withValues(alpha: 0.42),
                   fontSize: 12.5,
                   fontFamily: hasError ? null : 'monospace',
                 ),
@@ -1208,4 +1463,3 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     );
   }
 }
-

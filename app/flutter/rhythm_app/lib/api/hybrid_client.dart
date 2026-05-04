@@ -357,7 +357,7 @@ class HybridApiClient implements RhythmApi {
   /// Call this periodically to keep solar calculations accurate.
   Future<void> syncSolarData() async {
     try {
-      await _remote.getTime();
+      await getTime();
       // Calculate day of year from current time
       // The server should ideally provide this
       _dayOfYear = _dayOfYearForDate(_previewDate);
