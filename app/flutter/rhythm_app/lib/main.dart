@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -78,13 +80,8 @@ void main() async {
     // Try hybrid mode first (local brain + remote API)
     client = await HybridApiClient.create(
       storedHubs: LocalDataSource().getAllHubs(),
+      syncSolarDataOnCreate: false,
     );
-
-    // If remote API isn't available, fall back to local-only mode
-    if (!await client.healthCheck()) {
-      debugPrint('Remote API not available, using local-only mode');
-      client = client.toLocalOnly();
-    }
 
     // Fail explicitly if local brain isn't available (except on web,
     // where the app works as a remote client to rhythm-server/ESP32)
@@ -267,6 +264,21 @@ class _AuthGateState extends State<AuthGate> {
     _resetToOnboarding();
   }
 
+  void _refreshAppStateInBackground() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(
+        AppStateRefresh.sync(context).then(
+          (_) {},
+          onError: (Object error, StackTrace stackTrace) {
+            debugPrint('AuthGate: Background app state refresh failed: $error');
+            debugPrint('$stackTrace');
+          },
+        ),
+      );
+    });
+  }
+
   Future<void> _checkAuthState() async {
     // Web platform: skip to designer (no onboarding/auth)
     if (kIsWeb) {
@@ -286,6 +298,9 @@ class _AuthGateState extends State<AuthGate> {
         _showOnboarding = !onboardingComplete;
         _isLoading = false;
       });
+      if (onboardingComplete) {
+        _refreshAppStateInBackground();
+      }
       return;
     }
 
@@ -296,15 +311,11 @@ class _AuthGateState extends State<AuthGate> {
         AnalyticsService().identifyUser(authService.currentUserId!);
       }
 
-      // Trigger app state refresh to load homes/rooms
-      if (!mounted) return;
-      await AppStateRefresh.sync(context);
-      if (!mounted) return;
-
       setState(() {
         _showOnboarding = false;
         _isLoading = false;
       });
+      _refreshAppStateInBackground();
       return;
     }
 
@@ -329,15 +340,11 @@ class _AuthGateState extends State<AuthGate> {
       // Restore onboarding flag
       await SettingsService.instance.setOnboardingComplete(true);
 
-      // Trigger app state refresh to load homes/rooms
-      if (!mounted) return;
-      await AppStateRefresh.sync(context);
-      if (!mounted) return;
-
       setState(() {
         _showOnboarding = false;
         _isLoading = false;
       });
+      _refreshAppStateInBackground();
       return;
     }
 

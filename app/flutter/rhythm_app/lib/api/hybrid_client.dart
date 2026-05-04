@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart'
     show debugPrint, kIsWeb, visibleForTesting;
 import 'package:rhythm_core/rhythm_core.dart';
@@ -12,8 +14,12 @@ import '../providers/home_provider.dart';
 /// - Instant curve updates via local Rust calculations
 /// - Persistence and server sync via REST API
 class HybridApiClient implements RhythmApi {
+  static const Duration _defaultRemoteReadTimeout = Duration(seconds: 2);
+
   final RhythmApi _remote;
   final NativeBrain? _brain;
+  final Duration _remoteReadTimeout;
+  final _LocalOnlyApi _localFallback = _LocalOnlyApi();
 
   // Cached preview/location data for local curve math.
   double _solarNoonHour = 12.0;
@@ -26,8 +32,10 @@ class HybridApiClient implements RhythmApi {
   HybridApiClient._({
     required RhythmApi remote,
     NativeBrain? brain,
+    Duration remoteReadTimeout = _defaultRemoteReadTimeout,
   })  : _remote = remote,
-        _brain = brain;
+        _brain = brain,
+        _remoteReadTimeout = remoteReadTimeout;
 
   /// Create a hybrid client with both remote and local capabilities.
   ///
@@ -35,6 +43,7 @@ class HybridApiClient implements RhythmApi {
   static Future<HybridApiClient> create({
     String? baseUrl,
     Iterable<Hub> storedHubs = const [],
+    bool syncSolarDataOnCreate = true,
   }) async {
     final effectiveBaseUrl = resolveHybridApiBaseUrl(
       baseUrl: baseUrl,
@@ -62,11 +71,14 @@ class HybridApiClient implements RhythmApi {
           'HybridApiClient: No remote base URL configured, starting in local-only mode');
     }
 
-    // Try to sync solar data from server
-    try {
-      await client.syncSolarData();
-    } catch (e) {
-      // Ignore - will use defaults
+    if (syncSolarDataOnCreate) {
+      // Try to sync solar data from server. This is optional; the app can start
+      // with cached/default solar data and reconcile once the server responds.
+      try {
+        await client.syncSolarData();
+      } catch (e) {
+        // Ignore - will use defaults
+      }
     }
 
     return client;
@@ -110,11 +122,30 @@ class HybridApiClient implements RhythmApi {
     return HybridApiClient._(
       remote: _LocalOnlyApi(),
       brain: _brain,
+      remoteReadTimeout: _remoteReadTimeout,
     );
   }
 
   /// Check if local brain is available.
   bool get hasLocalBrain => _brain != null && _brain.isInitialized;
+
+  bool get _remoteIsLocalOnly => _remote is _LocalOnlyApi;
+
+  RhythmApi get _localApi => _remoteIsLocalOnly ? _remote : _localFallback;
+
+  Future<T> _readRemote<T>(Future<T> Function() request) {
+    final future = request();
+    if (_remoteIsLocalOnly) return future;
+    return future.timeout(_remoteReadTimeout);
+  }
+
+  Future<ConfigState> _fallbackConfigState(Object error) async {
+    if (!_remoteIsLocalOnly) {
+      debugPrint(
+          'HybridApiClient: Remote config unavailable, using local config: $error');
+    }
+    return _localApi.getConfigState();
+  }
 
   /// Get the current cached solar noon hour.
   double get solarNoonHour => _solarNoonHour;
@@ -129,10 +160,25 @@ class HybridApiClient implements RhythmApi {
   DateTime get previewDate => _previewDate;
 
   @override
-  Future<ConfigState> getConfigState() => _remote.getConfigState();
+  Future<ConfigState> getConfigState() async {
+    try {
+      return await _readRemote(_remote.getConfigState);
+    } catch (e) {
+      return _fallbackConfigState(e);
+    }
+  }
 
   @override
-  Future<void> saveConfig(RawConfig config) => _remote.saveConfig(config);
+  Future<void> saveConfig(RawConfig config) async {
+    try {
+      await _remote.saveConfig(config);
+    } catch (e) {
+      if (_remoteIsLocalOnly) rethrow;
+      debugPrint(
+          'HybridApiClient: Remote config save failed, saving local copy: $e');
+      await _localApi.saveConfig(config);
+    }
+  }
 
   @override
   Future<CurveData> getCurveData(
@@ -145,7 +191,7 @@ class HybridApiClient implements RhythmApi {
         if (overrides != null) {
           config = overrides;
         } else {
-          final configState = await _remote.getConfigState();
+          final configState = await getConfigState();
           config = ConfigState.rawConfigToDto(configState.config);
           if (configState.latitude != null) _latitude = configState.latitude!;
           if (configState.longitude != null) {
@@ -183,7 +229,9 @@ class HybridApiClient implements RhythmApi {
     }
 
     // Fetch from server when brain unavailable
-    return _remote.getCurveData(month: month, overrides: overrides);
+    return _readRemote(
+      () => _remote.getCurveData(month: month, overrides: overrides),
+    );
   }
 
   int _dayOfYearForDate(DateTime date) {
@@ -247,7 +295,7 @@ class HybridApiClient implements RhythmApi {
     if (_brain != null) {
       try {
         final config = overrides ??
-            ConfigState.rawConfigToDto((await _remote.getConfigState()).config);
+            ConfigState.rawConfigToDto((await getConfigState()).config);
         final targetDate = _curveDateFor(null);
         // Sync call - runs on main thread
         return _brain.getStepSequences(
@@ -266,16 +314,27 @@ class HybridApiClient implements RhythmApi {
       }
     }
 
-    return _remote.getStepSequences(
-      hour: hour,
-      maxSteps: maxSteps,
-      overrides: overrides,
+    return _readRemote(
+      () => _remote.getStepSequences(
+        hour: hour,
+        maxSteps: maxSteps,
+        overrides: overrides,
+      ),
     );
   }
 
   @override
   Future<TimeInfo> getTime() async {
-    final info = await _remote.getTime();
+    TimeInfo info;
+    try {
+      info = await _readRemote(_remote.getTime);
+    } catch (e) {
+      if (!_remoteIsLocalOnly) {
+        debugPrint(
+            'HybridApiClient: Remote time unavailable, using local time: $e');
+      }
+      info = await _localApi.getTime();
+    }
 
     // Update cached values
     // Extract solar data from response if available
@@ -285,7 +344,13 @@ class HybridApiClient implements RhythmApi {
   }
 
   @override
-  Future<bool> healthCheck() => _remote.healthCheck();
+  Future<bool> healthCheck() async {
+    try {
+      return await _readRemote(_remote.healthCheck);
+    } catch (_) {
+      return false;
+    }
+  }
 
   /// Sync solar data from the server.
   ///

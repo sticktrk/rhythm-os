@@ -20,6 +20,7 @@ import 'widgets/report_bug_flow.dart';
 import 'widgets/solar_orbit.dart';
 import 'widgets/bottom_nav_overlay.dart';
 import 'widgets/connect_hub_screen.dart';
+import 'widgets/hardware_gate_screen.dart';
 import 'widgets/hub_picker_screen.dart';
 import 'providers/server_sync_provider.dart';
 import 'screens/server_disconnected_screen.dart';
@@ -525,10 +526,12 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       backgroundColor: CelestialColors.backgroundDark,
       body: Stack(
         children: [
-          // Full-screen connect hub experience
+          // Sales-style hardware gate — asks whether the user already has a
+          // LightBox / RhythmOS device. "Yes" drops into the existing
+          // ConnectHubScreen; "No" routes through the upsell.
           SafeArea(
             bottom: false,
-            child: ConnectHubScreen(mode: mode),
+            child: HardwareOnboardingGate(mode: mode),
           ),
           // Bottom overlay (gear + fan, no dots)
           Positioned(
