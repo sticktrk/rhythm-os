@@ -3793,6 +3793,34 @@ fn resolve_room_command_for_state_at_from_parts(
     ))
 }
 
+/// Snapshots every addressable settings node — rooms plus standalone light
+/// devices (e.g. a roomless Matter bulb). The mode-apply path used to consult
+/// `engine_all_room_snapshots`, which filters to `kind.is_room()` in production
+/// and therefore silently skipped standalone devices, so manual transitions and
+/// mode-config edits only reached them on the next periodic tick.
+fn addressable_root_snapshots(
+    runtime: &Arc<dyn RuntimeHandle>,
+) -> Vec<rhythm_core::RoomSnapshot> {
+    runtime
+        .engine_all_effective_node_snapshots()
+        .into_iter()
+        .filter(|node| node.kind.is_light_addressable() && node.parent_id.is_none())
+        .map(|node| rhythm_core::RoomSnapshot {
+            id: node.id,
+            name: node.name,
+            kind: node.kind,
+            parent_id: node.parent_id,
+            rhythm_enabled: node.rhythm_enabled,
+            disabled: node.disabled,
+            time_offset_minutes: node.time_offset_minutes,
+            brightness_offset: node.brightness_offset,
+            soft_off: node.soft_off,
+            hard_off: node.hard_off,
+            profile_settings: node.profile_settings,
+        })
+        .collect()
+}
+
 fn apply_active_mode_outputs(
     state: &SharedState,
     previous_mode: RhythmMode,
@@ -3862,7 +3890,7 @@ fn apply_active_mode_outputs(
         timezone_name: timezone_name.as_deref(),
         utc_offset,
     };
-    let snapshots = runtime.engine_all_room_snapshots();
+    let snapshots = addressable_root_snapshots(&runtime);
     let room_defaults_changed = apply_room_mode_defaults(
         state,
         &runtime,
@@ -3880,7 +3908,7 @@ fn apply_active_mode_outputs(
         }
     }
     let snapshots = if room_defaults_changed {
-        runtime.engine_all_room_snapshots()
+        addressable_root_snapshots(&runtime)
     } else {
         snapshots
     };
