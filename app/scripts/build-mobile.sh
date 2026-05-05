@@ -9,6 +9,9 @@
 #   --release          Build in release mode
 #   --ipa              Build IPA for TestFlight (implies --release --no-run)
 #   --testflight       Build IPA and upload to TestFlight (implies --clean --release --no-run)
+#   --aab              Build AAB for Google Play (implies --android --release --no-run)
+#   --googleplay       Build AAB and upload to Google Play (implies --clean --release --no-run)
+#   --setup-android-signing  Generate upload keystore + key.properties for release signing
 #   --dmg              Create DMG for macOS distribution (implies --macos --release --no-run)
 #   --sign             Sign and notarize the DMG (implies --dmg)
 #   --build-number N   Override the Flutter build number
@@ -17,9 +20,10 @@
 #   --clean            Clean build artifacts before building
 #
 # IPA/TestFlight build numbers come from the latest TestFlight build for the current app version,
-# plus one. Explicit --build-number or RHYTHM_BUILD_NUMBER values override this. Other release
-# builds use common CI run-number variables, then the +build value in flutter/rhythm_app/pubspec.yaml.
-# The script does not generate timestamp build numbers.
+# plus one. AAB/Google Play build numbers (versionCode) come from the highest version code across
+# all Play Store tracks, plus one. Explicit --build-number or RHYTHM_BUILD_NUMBER values override
+# this. Other release builds use common CI run-number variables, then the +build value in
+# flutter/rhythm_app/pubspec.yaml. The script does not generate timestamp build numbers.
 #
 # First-time setup (iOS):
 #   1. Install CocoaPods: brew install cocoapods
@@ -35,6 +39,21 @@
 #      Users and Access → Integrations → Team Keys → Generate API Key
 #   2. Download the .p8 file (only downloadable once)
 #   3. Run: ./scripts/build-mobile.sh --setup-testflight
+#
+# First-time setup (Android release signing):
+#   Required before any AAB you upload to Play. Without it, Flutter signs
+#   release builds with the debug key and Play rejects the upload.
+#   Run: ./scripts/build-mobile.sh --setup-android-signing
+#   Generates android/app/upload-keystore.jks + android/key.properties.
+#   BACK UP the keystore — losing it means losing the ability to update
+#   the app (recoverable through Play Console support, but painful).
+#
+# First-time setup (Google Play):
+#   1. Create a service account in Google Cloud Console for the Play project
+#   2. In Play Console: Users and permissions → Invite the service account,
+#      grant "Release manager" (or at least Releases + tracks access)
+#   3. Download the JSON key for the service account
+#   4. Run: ./scripts/build-mobile.sh --setup-googleplay
 
 set -e
 
@@ -132,6 +151,98 @@ resolve_testflight_build_number() {
     RESOLVED_BUILD_NUMBER="$((latest_build_number + 1))"
 }
 
+resolve_googleplay_build_number() {
+    if ! command -v fastlane &> /dev/null; then
+        echo "Error: fastlane is required to read the latest Google Play version code."
+        echo "Install with: brew install fastlane"
+        exit 1
+    fi
+
+    if [ ! -f "$GOOGLE_PLAY_JSON_KEY_PATH" ]; then
+        echo "Error: Google Play service account key not configured."
+        echo "Run: ./scripts/build-mobile.sh --setup-googleplay"
+        exit 1
+    fi
+
+    echo "Checking latest Google Play version codes for $ANDROID_PACKAGE_NAME..."
+
+    local highest=0
+    local package_missing=false
+    local any_visible=false
+    local skipped_no_perm=()
+    local empty_tracks=()
+    local track
+    for track in production beta alpha internal; do
+        set +e
+        local fastlane_output
+        fastlane_output=$(FASTLANE_DISABLE_COLORS=1 FASTLANE_SKIP_UPDATE_CHECK=1 fastlane run google_play_track_version_codes \
+            package_name:"$ANDROID_PACKAGE_NAME" \
+            track:"$track" \
+            json_key:"$GOOGLE_PLAY_JSON_KEY_PATH" 2>&1)
+        local fastlane_status=$?
+        set -e
+
+        if [ $fastlane_status -ne 0 ]; then
+            if printf '%s' "$fastlane_output" | grep -q "Package not found"; then
+                package_missing=true
+                continue
+            fi
+            if printf '%s' "$fastlane_output" | grep -qiE "does not have permission|forbidden|insufficient"; then
+                skipped_no_perm+=("$track")
+                continue
+            fi
+            # Fastlane bug (2.233.0+): tracks with zero releases crash on `nil.flat_map`.
+            # See https://github.com/fastlane/fastlane/issues/21500. Treat as empty track.
+            if printf '%s' "$fastlane_output" | grep -qE "undefined method.*flat_map.*nil"; then
+                empty_tracks+=("$track")
+                any_visible=true
+                continue
+            fi
+            echo "$fastlane_output"
+            echo "Error: failed to read Google Play version codes for track '$track'."
+            exit $fastlane_status
+        fi
+
+        any_visible=true
+        local codes
+        codes=$(printf '%s\n' "$fastlane_output" | sed -nE 's/.*Result:[[:space:]]*\[([^]]*)\].*/\1/p' | tail -1)
+        if [ -n "$codes" ]; then
+            local max_in_track
+            max_in_track=$(printf '%s\n' "$codes" | tr ',' '\n' | tr -d ' ' | grep -E '^[0-9]+$' | sort -n | tail -1)
+            if [ -n "$max_in_track" ] && [ "$max_in_track" -gt "$highest" ]; then
+                highest="$max_in_track"
+            fi
+        fi
+    done
+
+    if [ ${#skipped_no_perm[@]} -gt 0 ]; then
+        echo "Note: service account lacks permission for tracks: ${skipped_no_perm[*]}"
+        echo "      (using only the tracks it can see; if higher version codes exist in"
+        echo "      hidden tracks, Play will reject the upload — grant broader access then)"
+    fi
+
+    if [ ${#empty_tracks[@]} -gt 0 ]; then
+        echo "Note: tracks with no releases yet: ${empty_tracks[*]} (treated as empty)"
+    fi
+
+    if [ "$highest" -eq 0 ]; then
+        if [ "$package_missing" = true ] || [ ${#empty_tracks[@]} -gt 0 ]; then
+            BUILD_NUMBER_SOURCE="Google Play first upload (no existing releases, defaulting to 1)"
+            RESOLVED_BUILD_NUMBER="1"
+            return 0
+        fi
+        if [ "$any_visible" = false ]; then
+            echo "Error: service account has no permission to read any Play track for $ANDROID_PACKAGE_NAME."
+            echo "Grant it (at minimum) view access to the internal track in Play Console →"
+            echo "Users and permissions → select the service account → App permissions."
+            exit 1
+        fi
+    fi
+
+    BUILD_NUMBER_SOURCE="Google Play latest version code ($highest) + 1"
+    RESOLVED_BUILD_NUMBER="$((highest + 1))"
+}
+
 resolve_release_build_number() {
     if [ -n "$BUILD_NUMBER_OVERRIDE" ]; then
         BUILD_NUMBER_SOURCE="command line"
@@ -147,6 +258,11 @@ resolve_release_build_number() {
 
     if [ "$PLATFORM" = "ios" ] && [ "$BUILD_IPA" = true ]; then
         resolve_testflight_build_number
+        return 0
+    fi
+
+    if [ "$PLATFORM" = "android" ] && [ "$BUILD_AAB" = true ]; then
+        resolve_googleplay_build_number
         return 0
     fi
 
@@ -197,15 +313,24 @@ APP_NAME="RhythmLighting"
 ASC_API_KEY_PATH="$HOME/.config/rhythm/asc_api_key.json"
 IOS_APP_IDENTIFIER="lighting.rhythm.app"
 
+# Google Play configuration
+GOOGLE_PLAY_JSON_KEY_PATH="$HOME/.config/rhythm/google_play_key.json"
+ANDROID_PACKAGE_NAME="lighting.rhythm.app"
+GOOGLE_PLAY_TRACK="internal"
+
 # Defaults
 PLATFORM=""
 RELEASE=""
 BUILD_IPA=false
+BUILD_AAB=false
 BUILD_DMG=false
 SIGN_APP=false
 SETUP_SIGNING=false
 UPLOAD_TESTFLIGHT=false
 SETUP_TESTFLIGHT=false
+UPLOAD_GOOGLEPLAY=false
+SETUP_GOOGLEPLAY=false
+SETUP_ANDROID_SIGNING=false
 RUN_APP=true
 RUN_CODEGEN=false
 CLEAN=false
@@ -251,6 +376,30 @@ while [[ $# -gt 0 ]]; do
             ;;
         --setup-testflight)
             SETUP_TESTFLIGHT=true
+            shift
+            ;;
+        --aab)
+            BUILD_AAB=true
+            RELEASE="--release"
+            RUN_APP=false
+            PLATFORM="android"
+            shift
+            ;;
+        --googleplay)
+            BUILD_AAB=true
+            UPLOAD_GOOGLEPLAY=true
+            RELEASE="--release"
+            RUN_APP=false
+            PLATFORM="android"
+            CLEAN=true
+            shift
+            ;;
+        --setup-googleplay)
+            SETUP_GOOGLEPLAY=true
+            shift
+            ;;
+        --setup-android-signing)
+            SETUP_ANDROID_SIGNING=true
             shift
             ;;
         --dmg)
@@ -389,6 +538,157 @@ EOF
     echo ""
     echo "API key configuration saved to: $ASC_API_KEY_PATH"
     echo "You can now use --testflight to build and upload to TestFlight."
+    exit 0
+fi
+
+# Setup Google Play service account key
+if [ "$SETUP_GOOGLEPLAY" = true ]; then
+    echo "Setting up Google Play service account key for Play Store uploads..."
+    echo ""
+    echo "You'll need:"
+    echo "  - Path to the service account JSON key file"
+    echo "    (created in Google Cloud Console, granted access in Play Console)"
+    echo ""
+
+    read -p "Path to JSON key file: " JSON_PATH
+
+    JSON_PATH="${JSON_PATH/#\~/$HOME}"
+    if [ ! -f "$JSON_PATH" ]; then
+        echo "Error: File not found: $JSON_PATH"
+        exit 1
+    fi
+
+    mkdir -p "$(dirname "$GOOGLE_PLAY_JSON_KEY_PATH")"
+    cp "$JSON_PATH" "$GOOGLE_PLAY_JSON_KEY_PATH"
+    chmod 600 "$GOOGLE_PLAY_JSON_KEY_PATH"
+
+    echo ""
+    echo "Service account key saved to: $GOOGLE_PLAY_JSON_KEY_PATH"
+    echo "You can now use --googleplay to build and upload to Google Play."
+    exit 0
+fi
+
+# Setup Android upload keystore for release signing
+if [ "$SETUP_ANDROID_SIGNING" = true ]; then
+    KEYSTORE_PATH="$FLUTTER_APP/android/app/upload-keystore.jks"
+    KEY_PROPERTIES_PATH="$FLUTTER_APP/android/key.properties"
+
+    if [ -f "$KEYSTORE_PATH" ] || [ -f "$KEY_PROPERTIES_PATH" ]; then
+        echo "Keystore or key.properties already exists:"
+        [ -f "$KEYSTORE_PATH" ] && echo "  $KEYSTORE_PATH"
+        [ -f "$KEY_PROPERTIES_PATH" ] && echo "  $KEY_PROPERTIES_PATH"
+        echo ""
+        echo "Refusing to overwrite. Move them aside first if you really want a new keystore."
+        echo "WARNING: replacing the keystore breaks future Play uploads unless you go through"
+        echo "Play Console support to reset the upload key."
+        exit 1
+    fi
+
+    KEYTOOL=""
+    for candidate in \
+        "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/keytool" \
+        "/Applications/Android Studio Preview.app/Contents/jbr/Contents/Home/bin/keytool"; do
+        if [ -x "$candidate" ]; then
+            KEYTOOL="$candidate"
+            break
+        fi
+    done
+    if [ -z "$KEYTOOL" ] && [ -x /usr/libexec/java_home ]; then
+        JH="$(/usr/libexec/java_home 2>/dev/null)"
+        if [ -n "$JH" ] && [ -x "$JH/bin/keytool" ]; then
+            KEYTOOL="$JH/bin/keytool"
+        fi
+    fi
+    if [ -z "$KEYTOOL" ] && command -v keytool &> /dev/null; then
+        if keytool -help &> /dev/null; then
+            KEYTOOL="$(command -v keytool)"
+        fi
+    fi
+    if [ -z "$KEYTOOL" ]; then
+        echo "Error: no working keytool found."
+        echo ""
+        echo "macOS ships a /usr/bin/keytool stub but no actual JDK. Install one:"
+        echo "  brew install --cask temurin       # Eclipse Temurin JDK"
+        echo "  brew install openjdk              # or plain OpenJDK"
+        echo "Or install Android Studio (bundles a JDK at"
+        echo "/Applications/Android Studio.app/Contents/jbr)."
+        exit 1
+    fi
+
+    echo "Using keytool: $KEYTOOL"
+    echo ""
+    echo "Generating Android upload keystore..."
+    echo ""
+    echo "You'll be prompted for:"
+    echo "  - A keystore password (remember this — you'll need it for every release)"
+    echo "  - A key password (can be the same as the keystore password)"
+    echo "  - Distinguished name fields (name, org, locale — values don't matter much)"
+    echo ""
+    read -p "Press Enter to continue..."
+
+    "$KEYTOOL" -genkey -v \
+        -keystore "$KEYSTORE_PATH" \
+        -keyalg RSA -keysize 2048 -validity 10000 \
+        -alias upload
+
+    if [ ! -f "$KEYSTORE_PATH" ]; then
+        echo "Error: keystore was not created."
+        exit 1
+    fi
+
+    echo ""
+    echo "Validating keystore password (so we don't write a bad key.properties)..."
+    STORE_PW=""
+    for attempt in 1 2 3; do
+        read -s -p "Re-enter keystore password: " STORE_PW
+        echo
+        if "$KEYTOOL" -list -keystore "$KEYSTORE_PATH" -storepass "$STORE_PW" -alias upload &> /dev/null; then
+            break
+        fi
+        echo "Wrong password. Try again ($((3 - attempt)) attempt(s) left)."
+        STORE_PW=""
+    done
+    if [ -z "$STORE_PW" ]; then
+        echo "Error: keystore password validation failed 3 times."
+        echo "The keystore was created at $KEYSTORE_PATH but key.properties was not written."
+        echo "Re-run --setup-android-signing after deleting that keystore, OR write"
+        echo "$KEY_PROPERTIES_PATH by hand if you remember the password."
+        exit 1
+    fi
+
+    KEY_PW=""
+    for attempt in 1 2 3; do
+        read -s -p "Re-enter key password (blank = same as keystore): " KEY_PW
+        echo
+        [ -z "$KEY_PW" ] && KEY_PW="$STORE_PW"
+        if "$KEYTOOL" -certreq -keystore "$KEYSTORE_PATH" -storepass "$STORE_PW" -keypass "$KEY_PW" -alias upload &> /dev/null; then
+            break
+        fi
+        echo "Wrong key password. Try again ($((3 - attempt)) attempt(s) left)."
+        KEY_PW=""
+    done
+    if [ -z "$KEY_PW" ]; then
+        echo "Error: key password validation failed 3 times."
+        exit 1
+    fi
+
+    cat > "$KEY_PROPERTIES_PATH" <<EOF
+storePassword=$STORE_PW
+keyPassword=$KEY_PW
+keyAlias=upload
+storeFile=app/upload-keystore.jks
+EOF
+    chmod 600 "$KEY_PROPERTIES_PATH"
+
+    echo ""
+    echo "Keystore:       $KEYSTORE_PATH"
+    echo "key.properties: $KEY_PROPERTIES_PATH"
+    echo ""
+    echo "Both are gitignored. BACK UP the keystore now — store it somewhere safe"
+    echo "(1Password, encrypted backup, etc.). Losing it means future updates require"
+    echo "going through Play Console upload-key reset."
+    echo ""
+    echo "You can now use --googleplay to build and upload signed releases."
     exit 0
 fi
 
@@ -639,8 +939,96 @@ else
                 echo "Note: DMG is unsigned. Recipients will need to right-click → Open."
             fi
         fi
-    else
-        flutter build apk $RELEASE $DART_DEFINES $BUILD_METADATA_ARGS
+    elif [ "$PLATFORM" = "android" ]; then
+        if [ "$BUILD_AAB" = true ]; then
+            if [ ! -f "$FLUTTER_APP/android/key.properties" ]; then
+                echo "Error: android/key.properties not found — release builds would be"
+                echo "signed with the debug key and rejected by Play."
+                echo "Run: ./scripts/build-mobile.sh --setup-android-signing"
+                exit 1
+            fi
+            echo "Building AAB for Google Play..."
+            flutter build appbundle $RELEASE $DART_DEFINES $BUILD_METADATA_ARGS
+            echo ""
+            echo "AAB created at: build/app/outputs/bundle/release/"
+
+            if [ "$UPLOAD_GOOGLEPLAY" = true ]; then
+                echo ""
+                echo "Uploading to Google Play ($GOOGLE_PLAY_TRACK track)..."
+
+                if ! command -v fastlane &> /dev/null; then
+                    echo ""
+                    echo "Fastlane not found. Install with:"
+                    echo "  brew install fastlane"
+                    echo ""
+                    read -p "Install Fastlane now? [y/N] " -n 1 -r
+                    echo
+                    if [[ $REPLY =~ ^[Yy]$ ]]; then
+                        brew install fastlane
+                    else
+                        echo "Skipping Google Play upload. Install Fastlane and run again."
+                        exit 1
+                    fi
+                fi
+
+                if [ ! -f "$GOOGLE_PLAY_JSON_KEY_PATH" ]; then
+                    echo "Error: Google Play service account key not configured."
+                    echo "Run: ./scripts/build-mobile.sh --setup-googleplay"
+                    exit 1
+                fi
+
+                AAB_FILE=$(find "$FLUTTER_APP/build/app/outputs/bundle/release" -name "*.aab" -type f | head -1)
+                if [ -z "$AAB_FILE" ]; then
+                    echo "Error: No AAB file found in build/app/outputs/bundle/release/"
+                    exit 1
+                fi
+
+                echo "Uploading: $AAB_FILE"
+                set +e
+                FASTLANE_DISABLE_COLORS=1 FASTLANE_SKIP_UPDATE_CHECK=1 fastlane supply \
+                    --package_name "$ANDROID_PACKAGE_NAME" \
+                    --json_key "$GOOGLE_PLAY_JSON_KEY_PATH" \
+                    --aab "$AAB_FILE" \
+                    --track "$GOOGLE_PLAY_TRACK" \
+                    --skip_upload_metadata \
+                    --skip_upload_changelogs \
+                    --skip_upload_images \
+                    --skip_upload_screenshots 2>&1 | tee /tmp/rhythm_supply_output.log
+                supply_status=${PIPESTATUS[0]}
+                set -e
+
+                if [ $supply_status -ne 0 ]; then
+                    if grep -q "Package not found" /tmp/rhythm_supply_output.log; then
+                        echo ""
+                        echo "Google Play has no record of '$ANDROID_PACKAGE_NAME' yet."
+                        echo ""
+                        echo "Play Console requires the FIRST upload to be made manually through"
+                        echo "the web UI. The API only works for subsequent releases."
+                        echo ""
+                        echo "Next steps:"
+                        echo "  1. Go to Play Console (https://play.google.com/console) and create"
+                        echo "     the app entry for $ANDROID_PACKAGE_NAME."
+                        echo "  2. Testing → Internal testing → Create new release."
+                        echo "  3. Upload this AAB by hand:"
+                        echo "       $AAB_FILE"
+                        echo "  4. Save & roll out."
+                        echo "  5. Future releases: ./scripts/build-mobile.sh --googleplay"
+                    fi
+                    rm -f /tmp/rhythm_supply_output.log
+                    exit $supply_status
+                fi
+                rm -f /tmp/rhythm_supply_output.log
+
+                echo ""
+                echo "Upload complete! Build will appear in Play Console after processing."
+            else
+                echo "Upload to Google Play using:"
+                echo "  - CLI: ./scripts/build-mobile.sh --googleplay"
+                echo "  - Web: Play Console → Testing → Internal testing → Create new release"
+            fi
+        else
+            flutter build apk $RELEASE $DART_DEFINES $BUILD_METADATA_ARGS
+        fi
     fi
     echo ""
     echo "Build complete."

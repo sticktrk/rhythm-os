@@ -56,7 +56,7 @@ Future<bool> showDeviceNodeAssignmentFlow(
     rooms: rooms,
     allowUnassigned: allowNoRoom,
     allowCreateRoom: true,
-    unassignedLabel: 'Unassigned',
+    unassignedLabel: isUnassigned ? 'Unassigned' : 'Remove from Room',
     unassignedSubtitle: isUnassigned
         ? 'Keep this device unassigned.'
         : 'Remove this device from its current room.',
@@ -395,6 +395,15 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   }
 
   Widget _buildMoveButton(BuildContext context) {
+    final syncProvider = context.read<ServerSyncProvider>();
+    final isAssigned = widget.roomId.isNotEmpty;
+    final canLeaveUnassigned = isAssigned && _canLeaveUnassigned(syncProvider);
+    final label = isAssigned
+        ? canLeaveUnassigned
+            ? 'Move or Remove...'
+            : 'Move to Room...'
+        : 'Assign to Room...';
+
     return GestureDetector(
       onTap: () => _showMoveDialog(context),
       child: Container(
@@ -414,10 +423,10 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
               size: 20,
             ),
             const SizedBox(width: 12),
-            const Expanded(
+            Expanded(
               child: Text(
-                'Move to Room...',
-                style: TextStyle(
+                label,
+                style: const TextStyle(
                   color: CelestialColors.textPrimary,
                   fontSize: 15,
                 ),
@@ -586,13 +595,20 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       context,
       device: widget.device,
       currentParentNodeId: widget.roomId,
-      allowNoRoom:
-          _matterNativeId != null && syncProvider.supportsMatterRoomlessDevices,
+      allowNoRoom: _canLeaveUnassigned(syncProvider),
     );
 
     if (success && context.mounted) {
       Navigator.of(context).pop();
     }
+  }
+
+  bool _canLeaveUnassigned(ServerSyncProvider syncProvider) {
+    return switch (widget.device.type) {
+      RhythmDeviceType.button || RhythmDeviceType.motion => true,
+      RhythmDeviceType.light =>
+        _matterNativeId != null && syncProvider.supportsMatterRoomlessDevices,
+    };
   }
 
   Widget _buildGroup(String title, List<Widget> children) {

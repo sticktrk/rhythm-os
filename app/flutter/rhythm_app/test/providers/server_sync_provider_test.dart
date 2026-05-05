@@ -1390,7 +1390,7 @@ void main() {
     expect(headerText.textAlign, TextAlign.center);
   });
 
-  testWidgets('Room card device flow offers Unassigned for Matter bulbs',
+  testWidgets('Room card device flow offers Remove from Room for Matter bulbs',
       (tester) async {
     _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
@@ -1473,14 +1473,14 @@ void main() {
     await tester.tap(find.text('Desk Lamp').last);
     await tester.pumpAndSettle();
 
-    expect(find.text('Move to Room...'), findsOneWidget);
+    expect(find.text('Move or Remove...'), findsOneWidget);
 
-    await tester.tap(find.text('Move to Room...'));
+    await tester.tap(find.text('Move or Remove...'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Unassigned'), findsOneWidget);
+    expect(find.text('Remove from Room'), findsOneWidget);
 
-    await tester.tap(find.text('Unassigned'));
+    await tester.tap(find.text('Remove from Room'));
     await tester.pumpAndSettle();
 
     expect(api.assignDeviceParentCalls, 1);
@@ -1488,6 +1488,100 @@ void main() {
     expect(api.lastAssignedParentId, isNull);
     expect(connection.reconnectCalls, 1);
     expect(find.text('Removed Desk Lamp from its room'), findsOneWidget);
+  });
+
+  testWidgets('Room device flow removes motion sensors from a room',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.binding.setSurfaceSize(const Size(390, 900));
+
+    api.canonicalDevices['sensor-1'] = {
+      'endpoints': [
+        {
+          'hub_key': {'hub_type': 'hue'},
+          'native_id': 'hue-sensor-1',
+          'preferred': true,
+        },
+      ],
+    };
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'hub_types': ['hue'],
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+            'devices': [
+              {
+                'id': 'sensor-1',
+                'type': 'motion',
+                'name': 'Kitchen Motion',
+              },
+            ],
+          },
+        ],
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.hue,
+        deviceIds: ['sensor-1'],
+        rhythmEnabled: false,
+        disabled: false,
+        lightsOn: false,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+
+    await _selectRoomSettingsTab(tester, 'Devices');
+    await tester.tap(find.text('Kitchen Motion').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Move or Remove...'), findsOneWidget);
+
+    await tester.tap(find.text('Move or Remove...'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Remove from Room'), findsOneWidget);
+
+    await tester.tap(find.text('Remove from Room'));
+    await tester.pumpAndSettle();
+
+    expect(api.assignDeviceParentCalls, 1);
+    expect(api.lastAssignedDeviceId, 'sensor-1');
+    expect(api.lastAssignedParentId, isNull);
+    expect(connection.reconnectCalls, 1);
+    expect(find.text('Removed Kitchen Motion from its room'), findsOneWidget);
   });
 
   testWidgets('Delete Room is hidden when the room has Hue bulbs',

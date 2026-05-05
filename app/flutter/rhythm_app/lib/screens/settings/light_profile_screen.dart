@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' as sdk;
+import '../../api/hybrid_client.dart';
 import '../../models/config_model.dart';
 import '../../providers/room_provider.dart';
 import '../../providers/server_sync_provider.dart';
@@ -382,12 +383,51 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     try {
       final id = profileId ?? _selectedProfileId;
       final requestId = ++_curvePreviewRequestId;
+
+      final localData =
+          _tryBuildLocalGaussianCurveData(config ?? _profileConfigs[id]);
+      if (localData != null) {
+        _applyCurveData(localData, requestId);
+        return;
+      }
+
       final preview = await context.read<ServerSyncProvider>().api.getCurveData(
             id: id,
             overrides: config,
           );
       if (preview == null) return;
-      final data = CurveData(
+      _applyCurveData(_curveDataFromSdk(preview), requestId);
+    } catch (e) {
+      debugPrint('LightProfile: Failed to load curve data: $e');
+    }
+  }
+
+  CurveData? _tryBuildLocalGaussianCurveData(sdk.RhythmCurveConfig? config) {
+    if (config == null) return null;
+
+    final curve = config.curve;
+    if (curve is! sdk.RhythmSuperGaussianCurve || curve.directColor != null) {
+      return null;
+    }
+
+    try {
+      final api = context.read<RhythmApi>();
+      if (api is! HybridApiClient) return null;
+
+      final dto = _toCurveConfigDto(config);
+      if (dto == null) return null;
+
+      return api.getCurveDataHighRes(
+        config: dto,
+        samplesPerHour: 4,
+      );
+    } catch (e) {
+      debugPrint('LightProfile: Local Gaussian preview unavailable: $e');
+      return null;
+    }
+  }
+
+  CurveData _curveDataFromSdk(sdk.RhythmCurveData preview) => CurveData(
         hours: preview.hours,
         brightness: preview.brightness,
         kelvin: preview.kelvin,
@@ -413,15 +453,14 @@ class _LightProfileScreenState extends State<LightProfileScreen>
               : null,
         ),
       );
-      if (mounted && requestId == _curvePreviewRequestId) {
-        setState(() {
-          _curveData = data;
-          _compressedPositions = _computeCompressedMapping(data);
-        });
-      }
-    } catch (e) {
-      debugPrint('LightProfile: Failed to load curve data: $e');
-    }
+
+  void _applyCurveData(CurveData data, int requestId) {
+    if (!mounted || requestId != _curvePreviewRequestId) return;
+
+    setState(() {
+      _curveData = data;
+      _compressedPositions = _computeCompressedMapping(data);
+    });
   }
 
   void _onCurveChanged(void Function() update) {
