@@ -669,7 +669,7 @@ struct MockDiscovery {
     /// (id, name, grouped_light_id)
     rooms: Vec<(String, String, String)>,
     /// (device_id, room_id, buttons, device_type)
-    devices: Vec<(String, String, Vec<(String, u8)>, DeviceType)>,
+    devices: Vec<(String, Option<String>, Vec<(String, u8)>, DeviceType)>,
 }
 
 impl MockDiscovery {
@@ -738,7 +738,10 @@ impl HubDiscovery for MockDiscovery {
                 |(did, rid, _, dt)| rhythm_os::canonical::identity::DiscoveredIdentity {
                     native_id: did.clone(),
                     room_id: rid.clone(),
-                    room_name: room_names.get(rid.as_str()).unwrap_or(&"").to_string(),
+                    room_name: rid
+                        .as_deref()
+                        .and_then(|r| room_names.get(r))
+                        .map(|s| s.to_string()),
                     name: did.clone(),
                     device_type: dt.clone(),
                     hardware_ids: vec![],
@@ -764,21 +767,24 @@ pub fn room(id: &str, name: &str) -> DiscoveredRoom {
     }
 }
 
-/// Create a motion sensor `DiscoveredDevice`.
+/// Create a motion sensor `DiscoveredDevice`. An empty `room_id` is interpreted
+/// as roomless (`None`), matching how integration discovery now signals
+/// devices that aren't assigned to any hub room.
 pub fn motion_sensor(device_id: &str, room_id: &str) -> DiscoveredDevice {
     DiscoveredDevice {
         device_id: device_id.to_string(),
-        room_id: room_id.to_string(),
+        room_id: (!room_id.is_empty()).then(|| room_id.to_string()),
         buttons: vec![],
         device_type: DeviceType::Motion,
     }
 }
 
-/// Create a light `DiscoveredDevice`.
+/// Create a light `DiscoveredDevice`. An empty `room_id` is interpreted as
+/// roomless (`None`).
 pub fn light(device_id: &str, room_id: &str) -> DiscoveredDevice {
     DiscoveredDevice {
         device_id: device_id.to_string(),
-        room_id: room_id.to_string(),
+        room_id: (!room_id.is_empty()).then(|| room_id.to_string()),
         buttons: vec![],
         device_type: DeviceType::Light,
     }

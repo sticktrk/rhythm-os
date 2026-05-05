@@ -58,7 +58,7 @@ impl HubDiscovery for ConfiguredDiscovery {
             .iter()
             .map(|(device_id, room_id, device_type)| DiscoveredDevice {
                 device_id: device_id.clone(),
-                room_id: room_id.clone(),
+                room_id: Some(room_id.clone()),
                 buttons: vec![],
                 device_type: device_type.clone(),
             })
@@ -71,8 +71,8 @@ impl HubDiscovery for ConfiguredDiscovery {
             .iter()
             .map(|(device_id, room_id, device_type)| DiscoveredIdentity {
                 native_id: device_id.clone(),
-                room_id: room_id.clone(),
-                room_name: "Kitchen".to_string(),
+                room_id: Some(room_id.clone()),
+                room_name: Some("Kitchen".to_string()),
                 name: device_id.clone(),
                 device_type: device_type.clone(),
                 hardware_ids: vec![],

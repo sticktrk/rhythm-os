@@ -303,10 +303,12 @@ impl CanonicalDevice {
 pub struct DiscoveredIdentity {
     /// Hub-native device ID.
     pub native_id: String,
-    /// Hub-native room ID this device belongs to.
-    pub room_id: String,
-    /// Hub-native room name (for heuristic room matching).
-    pub room_name: String,
+    /// Hub-native room ID this device belongs to. `None` when the device exists
+    /// on the hub but is not assigned to any hub room.
+    pub room_id: Option<String>,
+    /// Hub-native room name (for heuristic room matching). `None` when the
+    /// device has no hub room or the name is not available.
+    pub room_name: Option<String>,
     /// Human-readable device name.
     pub name: String,
     /// Device type.

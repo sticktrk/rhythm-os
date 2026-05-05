@@ -2471,8 +2471,8 @@ mod tests {
         let room_id = app.topology.create_room("Office");
         let identity = DiscoveredIdentity {
             native_id: native_id.to_string(),
-            room_id: native_id.to_string(),
-            room_name: "Office Lamp".to_string(),
+            room_id: Some(native_id.to_string()),
+            room_name: Some("Office Lamp".to_string()),
             name: "Office Lamp".to_string(),
             device_type: DeviceType::Light,
             hardware_ids: vec![HardwareId::matter("100")],
@@ -2891,8 +2891,8 @@ mod tests {
             let room_id = state.topology.create_room("Office");
             let identity = DiscoveredIdentity {
                 native_id: "device-1".to_string(),
-                room_id: "device-1".to_string(),
-                room_name: "Office Lamp".to_string(),
+                room_id: Some("device-1".to_string()),
+                room_name: Some("Office Lamp".to_string()),
                 name: "Office Lamp".to_string(),
                 device_type: DeviceType::Light,
                 hardware_ids: vec![HardwareId::matter("100")],

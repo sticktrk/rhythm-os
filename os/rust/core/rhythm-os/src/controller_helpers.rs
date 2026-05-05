@@ -214,8 +214,8 @@ mod tests {
         let identities = [
             DiscoveredIdentity {
                 native_id: "hue-light-1".to_string(),
-                room_id: "room1".to_string(),
-                room_name: "Living Room".to_string(),
+                room_id: Some("room1".to_string()),
+                room_name: Some("Living Room".to_string()),
                 name: "Color Lamp".to_string(),
                 device_type: DeviceType::Light,
                 hardware_ids: vec![],
@@ -224,8 +224,8 @@ mod tests {
             },
             DiscoveredIdentity {
                 native_id: "hue-light-2".to_string(),
-                room_id: "room1".to_string(),
-                room_name: "Living Room".to_string(),
+                room_id: Some("room1".to_string()),
+                room_name: Some("Living Room".to_string()),
                 name: "White Ambiance Lamp".to_string(),
                 device_type: DeviceType::Light,
                 hardware_ids: vec![],

@@ -31,7 +31,7 @@ fn make_pipeline() -> (Arc<dyn RuntimeHandle>, Arc<SpyHueTransport>) {
         .upsert_room("room1", "Living Room", "gl-room1", &[]);
     registry.lock().unwrap().upsert_device(
         "switch-1",
-        "room1",
+        Some("room1"),
         &[("btn-1".to_string(), 1)],
         DeviceType::Button,
     );

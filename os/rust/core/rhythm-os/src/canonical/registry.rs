@@ -101,11 +101,11 @@ impl CanonicalRegistry {
         hub_key: &HubKey,
         now: u64,
     ) -> ResolveResult {
-        let room_name = if identity.room_name.is_empty() {
-            None
-        } else {
-            Some(identity.room_name.clone())
-        };
+        let room_name = identity
+            .room_name
+            .as_ref()
+            .filter(|n| !n.is_empty())
+            .cloned();
 
         // Phase 1: Native ID lookup (same hub, already known)
         let native_key = (hub_key.to_string(), identity.native_id.clone());
@@ -330,7 +330,11 @@ impl CanonicalRegistry {
         hub_key: &HubKey,
     ) -> Vec<CandidateMatch> {
         let mut candidates = Vec::new();
-        let identity_room_lower = identity.room_name.to_lowercase();
+        let identity_room_lower = identity
+            .room_name
+            .as_deref()
+            .map(str::to_lowercase)
+            .unwrap_or_default();
         let has_room_name = !identity_room_lower.is_empty();
 
         for (id, device) in &self.devices {
@@ -814,8 +818,8 @@ mod tests {
     fn make_identity(native_id: &str, name: &str, hw_ids: Vec<HardwareId>) -> DiscoveredIdentity {
         DiscoveredIdentity {
             native_id: native_id.to_string(),
-            room_id: "room-1".to_string(),
-            room_name: "Kitchen".to_string(),
+            room_id: Some("room-1".to_string()),
+            room_name: Some("Kitchen".to_string()),
             name: name.to_string(),
             device_type: DeviceType::Light,
             hardware_ids: hw_ids,
@@ -916,8 +920,8 @@ mod tests {
         // but DIFFERENT room → heuristic triage + silo device
         let identity2 = DiscoveredIdentity {
             native_id: "light.kitchen_spot_1".to_string(),
-            room_id: "area-1".to_string(),
-            room_name: "Lounge".to_string(),
+            room_id: Some("area-1".to_string()),
+            room_name: Some("Lounge".to_string()),
             name: "Kitchen Spot 1".to_string(),
             device_type: DeviceType::Light,
             hardware_ids: vec![],
@@ -1324,8 +1328,8 @@ mod tests {
     ) -> DiscoveredIdentity {
         DiscoveredIdentity {
             native_id: native_id.to_string(),
-            room_id: "room-1".to_string(),
-            room_name: room_name.to_string(),
+            room_id: Some("room-1".to_string()),
+            room_name: Some(room_name.to_string()),
             name: name.to_string(),
             device_type: DeviceType::Light,
             hardware_ids: hw_ids,
@@ -1427,8 +1431,8 @@ mod tests {
 
         let hue_identity = DiscoveredIdentity {
             native_id: "hue-light-1".to_string(),
-            room_id: "room-1".to_string(),
-            room_name: "Kitchen".to_string(),
+            room_id: Some("room-1".to_string()),
+            room_name: Some("Kitchen".to_string()),
             name: "Hue Bulb".to_string(),
             device_type: DeviceType::Light,
             hardware_ids: vec![],
@@ -1440,8 +1444,8 @@ mod tests {
         // SameRoom(3) only = 3 → at threshold, still queues
         let ha_identity = DiscoveredIdentity {
             native_id: "light.kitchen".to_string(),
-            room_id: "area-1".to_string(),
-            room_name: "Kitchen".to_string(),
+            room_id: Some("area-1".to_string()),
+            room_name: Some("Kitchen".to_string()),
             name: "Kitchen Light".to_string(),
             device_type: DeviceType::Light,
             hardware_ids: vec![],

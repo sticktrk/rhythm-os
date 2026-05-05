@@ -1141,8 +1141,8 @@ mod tests {
         let hub_key = HubKey::new(crate::hub::HubType::new("matter"), "local");
         let identity = crate::canonical::identity::DiscoveredIdentity {
             native_id: "matter-device-1".to_string(),
-            room_id: String::new(),
-            room_name: String::new(),
+            room_id: None,
+            room_name: None,
             name: "Desk Lamp".to_string(),
             device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
             hardware_ids: vec![crate::canonical::identity::HardwareId::matter(

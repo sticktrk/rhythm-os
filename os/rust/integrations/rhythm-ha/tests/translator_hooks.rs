@@ -35,7 +35,7 @@ fn translator_uses_raw_button_hook_for_unknown_hue_event() {
             hook_registry.lock().unwrap().upsert_device(
                 evt.device_hint
                     .expect("HA hue_event should include device_hint"),
-                "living_room",
+                Some("living_room"),
                 &[(
                     evt.button_id.to_string(),
                     evt.fallback_control_id.unwrap_or(1),
@@ -95,7 +95,7 @@ fn translator_uses_motion_hook_for_unknown_state_changed_motion() {
     let on_unknown_motion: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |sensor_id: &str| {
         hook_registry.lock().unwrap().upsert_device(
             sensor_id,
-            "living_room",
+            Some("living_room"),
             &[],
             DeviceType::Motion,
         );

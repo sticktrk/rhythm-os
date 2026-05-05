@@ -40,7 +40,7 @@ fn make_hue_pipeline() -> (
     // Button device: btn-1 has control_id=1
     registry.lock().unwrap().upsert_device(
         "switch-1",
-        "room1",
+        Some("room1"),
         &[("btn-1".to_string(), 1)],
         DeviceType::Button,
     );
@@ -135,7 +135,7 @@ fn sse_button_off_press_sends_soft_off() {
     // Add button 4 (control_id=4 → OffPress on short_release)
     registry.lock().unwrap().upsert_device(
         "switch-1",
-        "room1",
+        Some("room1"),
         &[("btn-1".to_string(), 1), ("btn-4".to_string(), 4)],
         DeviceType::Button,
     );

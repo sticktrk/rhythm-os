@@ -61,25 +61,41 @@ pub trait HubRegistry: Send + Sync {
     // =========================================================================
 
     /// Check if a device already matches the incoming data (dedup check).
+    ///
+    /// `room_id == None` matches a roomless device — one that exists on the
+    /// hub but isn't yet assigned to a room.
     fn device_matches(
         &self,
         device_id: &str,
-        room_id: &str,
+        room_id: Option<&str>,
         buttons: &[(String, u8)],
         device_type: &DeviceType,
     ) -> bool;
 
     /// Upsert a device with button mappings and type.
+    ///
+    /// `room_id == None` registers the device as roomless: button/type
+    /// mappings are recorded but no room mapping is created.
     fn upsert_device(
         &mut self,
         device_id: &str,
-        room_id: &str,
+        room_id: Option<&str>,
         buttons: &[(String, u8)],
         device_type: DeviceType,
     );
 
     /// Remove a device and its button mappings.
     fn remove_device(&mut self, device_id: &str);
+
+    /// Set the room mapping for an already-known device. Preserves
+    /// button/type entries; only mutates the device→room map.
+    ///
+    /// Used after a canonical room-assignment is propagated down to the hub
+    /// registry so subsequent button/motion events route correctly.
+    fn set_device_room(&mut self, device_id: &str, room_id: &str);
+
+    /// Clear the room mapping for a device, preserving button/type entries.
+    fn clear_device_room(&mut self, device_id: &str);
 
     /// Get all devices for a room with their types.
     fn devices_for_room_typed(&self, _room_id: &str) -> Vec<(String, DeviceType)> {

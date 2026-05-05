@@ -1737,8 +1737,8 @@ mod tests {
     ) -> DiscoveredIdentity {
         DiscoveredIdentity {
             native_id: native_id.to_string(),
-            room_id: room_id.to_string(),
-            room_name: room_name.to_string(),
+            room_id: Some(room_id.to_string()),
+            room_name: Some(room_name.to_string()),
             name: name.to_string(),
             device_type,
             hardware_ids: vec![],

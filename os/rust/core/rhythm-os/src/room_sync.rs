@@ -320,10 +320,11 @@ fn sync_with_discovery(
         discovered_device_ids.extend(discovered_devices.iter().map(|d| d.device_id.clone()));
 
         for device in &discovered_devices {
+            let effective_room_id = registry_room_id_for_discovered_device(state, hub_key, device);
             if let Err(e) = commands::do_device_set(
                 state,
                 &device.device_id,
-                &device.room_id,
+                effective_room_id.as_deref(),
                 &device.buttons,
                 device.device_type.clone(),
                 hub_key,
@@ -418,7 +419,7 @@ fn sync_with_discovery(
                         ResolveResult::Created { canonical_id } => canonical_id,
                     };
 
-                    if identity.room_id.is_empty() {
+                    let Some(hub_room_id) = identity.room_id.clone() else {
                         let still_unassigned = s
                             .canonical_registry
                             .get(&canonical_id)
@@ -429,10 +430,10 @@ fn sync_with_discovery(
                             s.topology.ensure_standalone_device(&canonical_id);
                         }
                         continue;
-                    }
+                    };
 
                     canonical_room_devices
-                        .entry(identity.room_id.clone())
+                        .entry(hub_room_id)
                         .or_default()
                         .push(canonical_id);
                 }
@@ -679,7 +680,12 @@ fn sync_with_discovery(
             if let Some(registry) = extract_registry_for(state, hub_key) {
                 if let Ok(mut reg) = registry.lock() {
                     for ms in &motion_states {
-                        reg.upsert_device(&ms.sensor_id, &ms.room_id, &[], DeviceType::Motion);
+                        reg.upsert_device(
+                            &ms.sensor_id,
+                            Some(&ms.room_id),
+                            &[],
+                            DeviceType::Motion,
+                        );
                     }
                 }
             }
@@ -750,6 +756,30 @@ fn sync_with_discovery(
     );
 
     Ok(report)
+}
+
+/// Determine the room mapping to store in the hub registry for a discovered
+/// typed device.
+///
+/// Hub-native rooms stay authoritative when the hub reports one. For roomless
+/// devices, preserve a user-assigned canonical Rhythm room so a later sync does
+/// not clear routing that was created through the assignment endpoint.
+fn registry_room_id_for_discovered_device(
+    state: &SharedState,
+    hub_key: &HubKey,
+    device: &crate::discovery::DiscoveredDevice,
+) -> Option<String> {
+    if device.room_id.is_some() {
+        return device.room_id.clone();
+    }
+
+    state.lock().ok().and_then(|s| {
+        s.canonical_registry
+            .find_by_native_id(hub_key, &device.device_id)
+            .and_then(|canonical| canonical.room_id.as_ref())
+            .filter(|room_id| s.topology.get(room_id).is_some())
+            .cloned()
+    })
 }
 
 /// Extract registry for a specific hub.
@@ -859,6 +889,8 @@ pub fn poll_initial_light_state(state: &SharedState) {
 mod tests {
     use super::*;
     use crate::discovery::{DiscoveredDevice, DiscoveredRoom, HubDiscovery};
+    use crate::hub::{ActiveHub, HubType};
+    use crate::state::AppState;
     use rhythm_core::runtime::hub_registry::DeviceType;
 
     struct MockDiscovery {
@@ -921,13 +953,13 @@ mod tests {
             devices: vec![
                 DiscoveredDevice {
                     device_id: "btn1".to_string(),
-                    room_id: "r1".to_string(),
+                    room_id: Some("r1".to_string()),
                     buttons: vec![("b1".to_string(), 1)],
                     device_type: DeviceType::Button,
                 },
                 DiscoveredDevice {
                     device_id: "ms1".to_string(),
-                    room_id: "r1".to_string(),
+                    room_id: Some("r1".to_string()),
                     buttons: vec![],
                     device_type: DeviceType::Motion,
                 },
@@ -938,5 +970,82 @@ mod tests {
         assert_eq!(devices.len(), 2);
         assert_eq!(devices[0].device_type, DeviceType::Button);
         assert_eq!(devices[1].device_type, DeviceType::Motion);
+    }
+
+    #[test]
+    fn sync_preserves_assigned_room_for_roomless_typed_device() {
+        let hub_type = HubType::new(HubType::HUE);
+        let hub_key = HubKey::new(hub_type.clone(), "bridge-1");
+        let registry: Arc<Mutex<dyn rhythm_core::HubRegistry>> = Arc::new(Mutex::new(
+            crate::registry::HubDeviceRegistry::with_options(false),
+        ));
+
+        let mut app = AppState::default();
+        app.hubs.insert(
+            hub_key.clone(),
+            ActiveHub {
+                hub_type,
+                hub_key: hub_key.clone(),
+                runtime: None,
+                hub_data: Box::new(()),
+                registry: Some(registry),
+                discovery: None,
+                shutdown: Default::default(),
+            },
+        );
+        let state: SharedState = Arc::new(Mutex::new(app));
+
+        let discovery = MockDiscovery {
+            rooms: vec![],
+            devices: vec![DiscoveredDevice {
+                device_id: "motion-svc-1".to_string(),
+                room_id: None,
+                buttons: vec![],
+                device_type: DeviceType::Motion,
+            }],
+        };
+
+        sync_with_discovery(&state, &hub_key, &discovery, true).unwrap();
+
+        let canonical_id = {
+            let s = state.lock().unwrap();
+            s.canonical_registry
+                .find_by_native_id(&hub_key, "motion-svc-1")
+                .expect("roomless motion should create a canonical device")
+                .id
+                .clone()
+        };
+        let room_id = state.lock().unwrap().topology.create_room("Hallway");
+        commands::do_canonical_assign_room(&state, &canonical_id, Some(&room_id)).unwrap();
+
+        assert!(
+            registry_devices_for_room_contains(&state, &hub_key, &room_id, "motion-svc-1"),
+            "assignment should route the motion sensor before the next sync"
+        );
+
+        sync_with_discovery(&state, &hub_key, &discovery, true).unwrap();
+
+        assert!(
+            registry_devices_for_room_contains(&state, &hub_key, &room_id, "motion-svc-1"),
+            "roomless rediscovery must not clear the assigned Rhythm room"
+        );
+    }
+
+    fn registry_devices_for_room_contains(
+        state: &SharedState,
+        hub_key: &HubKey,
+        room_id: &str,
+        device_id: &str,
+    ) -> bool {
+        state
+            .lock()
+            .unwrap()
+            .hub_registry_for(hub_key)
+            .expect("hub registry should exist")
+            .lock()
+            .unwrap()
+            .devices_for_room(room_id)
+            .iter()
+            .any(|id| id == device_id)
     }
 }

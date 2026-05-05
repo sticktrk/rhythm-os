@@ -166,7 +166,7 @@ mod tests {
         reg.upsert_room("room-1", "Living Room", "gl-1", &[]);
         reg.upsert_device(
             "device-1",
-            "room-1",
+            Some("room-1"),
             &[("button-1".to_string(), 1), ("button-4".to_string(), 4)],
             DeviceType::Button,
         );
@@ -252,7 +252,7 @@ mod tests {
             let mut reg = reg_clone.lock().unwrap();
             reg.upsert_device(
                 "new-device",
-                "room-2",
+                Some("room-2"),
                 &[(
                     evt.button_id.to_string(),
                     evt.fallback_control_id.unwrap_or(1),
@@ -472,7 +472,7 @@ mod tests {
                     if let Ok(mut reg) = registry.lock() {
                         reg.upsert_device(
                             "device-1",
-                            "room-1",
+                            Some("room-1"),
                             &[
                                 ("button-1".to_string(), 1),
                                 ("button-4".to_string(), 4),

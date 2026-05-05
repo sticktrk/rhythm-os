@@ -149,12 +149,14 @@ impl Default for TriageDiscoveredDevice {
 
 impl From<&DiscoveredIdentity> for TriageDiscoveredDevice {
     fn from(d: &DiscoveredIdentity) -> Self {
+        // TriageDiscoveredDevice's persistence convention is empty-string-as-None
+        // for room_id/room_name; downstream readers already check `.is_empty()`.
         Self {
             native_id: d.native_id.clone(),
             name: d.name.clone(),
             device_type: d.device_type.clone(),
-            room_id: d.room_id.clone(),
-            room_name: d.room_name.clone(),
+            room_id: d.room_id.clone().unwrap_or_default(),
+            room_name: d.room_name.clone().unwrap_or_default(),
             manufacturer: d.manufacturer.clone(),
             model: d.model.clone(),
         }

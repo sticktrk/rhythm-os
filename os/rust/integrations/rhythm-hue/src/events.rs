@@ -14,6 +14,30 @@ use rhythm_os::button_resolve::RawButtonEvent;
 use rhythm_os::hub::HubEvent;
 use rhythm_os::registry::HubDeviceRegistry;
 
+enum MotionLookup {
+    Room(String),
+    KnownRoomless,
+    Unknown,
+    LockFailed,
+}
+
+fn lookup_motion_room(registry: &Arc<Mutex<HubDeviceRegistry>>, motion_id: &str) -> MotionLookup {
+    let reg = match registry.lock() {
+        Ok(r) => r,
+        Err(_) => return MotionLookup::LockFailed,
+    };
+
+    if let Some(room_id) = reg.get_room_for_motion_sensor(motion_id) {
+        return MotionLookup::Room(room_id);
+    }
+
+    if reg.has_device(motion_id) {
+        MotionLookup::KnownRoomless
+    } else {
+        MotionLookup::Unknown
+    }
+}
+
 fn translate_sse_event_with_hooks(
     registry: &Arc<Mutex<HubDeviceRegistry>>,
     event: crate::sse::HueSseEvent,
@@ -56,29 +80,26 @@ fn translate_sse_event_with_hooks(
                 cb();
             }
 
-            // First lookup — motion sensors are now devices with DeviceType::Motion
-            let room_id = {
-                let reg = match registry.lock() {
-                    Ok(r) => r,
-                    Err(_) => return Vec::new(),
-                };
-                reg.get_room_for_motion_sensor(&motion_id)
-            };
-
             // If not found, try on-demand discovery then re-check
-            let room_id = match room_id {
-                Some(id) => id,
-                None => {
+            let room_id = match lookup_motion_room(registry, &motion_id) {
+                MotionLookup::Room(id) => id,
+                MotionLookup::KnownRoomless => {
+                    info!(target: "evt", "SSE: Motion sensor {} is known but has no room assignment, ignoring", motion_id);
+                    return Vec::new();
+                }
+                MotionLookup::LockFailed => return Vec::new(),
+                MotionLookup::Unknown => {
                     if let Some(cb) = on_unknown_motion {
                         cb(&motion_id);
                     }
-                    let reg = match registry.lock() {
-                        Ok(r) => r,
-                        Err(_) => return Vec::new(),
-                    };
-                    match reg.get_room_for_motion_sensor(&motion_id) {
-                        Some(id) => id,
-                        None => {
+                    match lookup_motion_room(registry, &motion_id) {
+                        MotionLookup::Room(id) => id,
+                        MotionLookup::KnownRoomless => {
+                            info!(target: "evt", "SSE: Motion sensor {} is known but has no room assignment, ignoring", motion_id);
+                            return Vec::new();
+                        }
+                        MotionLookup::LockFailed => return Vec::new(),
+                        MotionLookup::Unknown => {
                             info!(target: "evt", "SSE: Unknown motion sensor {}, ignoring", motion_id);
                             return Vec::new();
                         }
@@ -177,4 +198,83 @@ pub fn start_event_translator(
         "hue-evt",
         None, // on_activity is handled inside the translate closure
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use rhythm_core::runtime::hub_registry::DeviceType;
+
+    #[test]
+    fn known_roomless_motion_does_not_trigger_unknown_discovery() {
+        let registry = Arc::new(Mutex::new(HubDeviceRegistry::new()));
+        registry
+            .lock()
+            .unwrap()
+            .upsert_device("motion-svc-1", None, &[], DeviceType::Motion);
+
+        let unknown_calls = AtomicUsize::new(0);
+        let on_unknown = |_: &str| {
+            unknown_calls.fetch_add(1, Ordering::SeqCst);
+        };
+
+        let events = translate_sse_event(
+            &registry,
+            crate::sse::HueSseEvent::MotionEvent {
+                motion_id: "motion-svc-1".to_string(),
+                motion_detected: true,
+            },
+            None,
+            None,
+            Some(&on_unknown),
+        );
+
+        assert!(events.is_empty());
+        assert_eq!(unknown_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn unknown_motion_still_uses_discovery_hook_then_routes() {
+        let registry = Arc::new(Mutex::new(HubDeviceRegistry::new()));
+        let unknown_calls = AtomicUsize::new(0);
+        let registry_for_hook = registry.clone();
+        let on_unknown = |motion_id: &str| {
+            unknown_calls.fetch_add(1, Ordering::SeqCst);
+            registry_for_hook.lock().unwrap().upsert_device(
+                motion_id,
+                Some("room-1"),
+                &[],
+                DeviceType::Motion,
+            );
+        };
+
+        let events = translate_sse_event(
+            &registry,
+            crate::sse::HueSseEvent::MotionEvent {
+                motion_id: "motion-svc-1".to_string(),
+                motion_detected: true,
+            },
+            None,
+            None,
+            Some(&on_unknown),
+        );
+
+        assert_eq!(unknown_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            HubEvent::Motion {
+                room_id,
+                sensor_id,
+                detected,
+                ..
+            } => {
+                assert_eq!(room_id, "room-1");
+                assert_eq!(sensor_id, "motion-svc-1");
+                assert!(*detected);
+            }
+            other => panic!("expected motion event, got {:?}", other),
+        }
+    }
 }

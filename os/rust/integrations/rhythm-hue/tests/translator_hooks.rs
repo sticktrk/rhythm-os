@@ -35,7 +35,7 @@ fn translator_uses_raw_button_hook_for_unknown_button() {
 
             hook_registry.lock().unwrap().upsert_device(
                 "hue-device-1",
-                "living_room",
+                Some("living_room"),
                 &[(evt.button_id.to_string(), 1)],
                 DeviceType::Button,
             );

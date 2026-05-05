@@ -614,7 +614,7 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
             .into_iter()
             .map(|s| rhythm_os::discovery::DiscoveredDevice {
                 device_id: s.entity_id,
-                room_id: s.area_id,
+                room_id: Some(s.area_id),
                 buttons: vec![],
                 device_type: DeviceType::Motion,
             })
@@ -623,7 +623,7 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
         devices.extend(data.button_devices.into_iter().map(|button| {
             rhythm_os::discovery::DiscoveredDevice {
                 device_id: button.native_id,
-                room_id: button.area_id,
+                room_id: Some(button.area_id),
                 buttons: button.buttons,
                 device_type: DeviceType::Button,
             }
@@ -646,7 +646,7 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
             if data.virtual_entity_ids.contains(entity_id) {
                 continue;
             }
-            let room_name = data.area_names.get(area_id).cloned().unwrap_or_default();
+            let room_name = data.area_names.get(area_id).cloned();
             let (name, hw_ids, manufacturer, model) = enrich_from_device(&data, entity_id);
 
             // Physical lights always have hardware IDs (MAC, ZHA IEEE, serial).
@@ -657,7 +657,7 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
 
             identities.push(DiscoveredIdentity {
                 native_id: entity_id.clone(),
-                room_id: area_id.clone(),
+                room_id: Some(area_id.clone()),
                 room_name,
                 name,
                 device_type: DeviceType::Light,
@@ -669,16 +669,12 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
 
         // Motion sensors → DiscoveredIdentity with DeviceType::Motion
         for sensor in &data.result.motion_sensors {
-            let room_name = data
-                .area_names
-                .get(&sensor.area_id)
-                .cloned()
-                .unwrap_or_default();
+            let room_name = data.area_names.get(&sensor.area_id).cloned();
             let (name, hw_ids, manufacturer, model) = enrich_from_device(&data, &sensor.entity_id);
 
             identities.push(DiscoveredIdentity {
                 native_id: sensor.entity_id.clone(),
-                room_id: sensor.area_id.clone(),
+                room_id: Some(sensor.area_id.clone()),
                 room_name,
                 name,
                 device_type: DeviceType::Motion,
@@ -690,16 +686,12 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
 
         // Button/control devices → DiscoveredIdentity with DeviceType::Button
         for button in &data.button_devices {
-            let room_name = data
-                .area_names
-                .get(&button.area_id)
-                .cloned()
-                .unwrap_or_default();
+            let room_name = data.area_names.get(&button.area_id).cloned();
             let (name, hw_ids, manufacturer, model) = button_identity_fields(&data, button);
 
             identities.push(DiscoveredIdentity {
                 native_id: button.native_id.clone(),
-                room_id: button.area_id.clone(),
+                room_id: Some(button.area_id.clone()),
                 room_name,
                 name,
                 device_type: DeviceType::Button,

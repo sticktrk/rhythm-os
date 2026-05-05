@@ -2027,8 +2027,8 @@ mod tests {
     ) -> String {
         let identity = DiscoveredIdentity {
             native_id: native_id.to_string(),
-            room_id: format!("{room_id}_native"),
-            room_name: room_id.to_string(),
+            room_id: Some(format!("{room_id}_native")),
+            room_name: Some(room_id.to_string()),
             name: native_id.to_string(),
             device_type,
             hardware_ids: vec![HardwareId::matter(native_id)],

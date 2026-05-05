@@ -5520,17 +5520,22 @@ where
 
 /// Upsert a device with button mappings and type in the registry.
 ///
-/// Updates only the specified hub's registry.
+/// Updates only the specified hub's registry. `room_id == None` registers the
+/// device as roomless (no room mapping); button/type mappings are still stored
+/// so SSE events can resolve to a known device while awaiting user assignment.
 pub fn do_device_set(
     state: &SharedState,
     device_id: &str,
-    room_id: &str,
+    room_id: Option<&str>,
     buttons: &[(String, u8)],
     device_type: DeviceType,
     hub_key: &HubKey,
     persist: bool,
 ) -> Result<()> {
-    info!(target: "cmd", "device_set: {} ({:?}) -> room {} ({} buttons)", device_id, device_type, room_id, buttons.len());
+    match room_id {
+        Some(rid) => info!(target: "cmd", "device_set: {} ({:?}) -> room {} ({} buttons)", device_id, device_type, rid, buttons.len()),
+        None => info!(target: "cmd", "device_set: {} ({:?}) -> roomless ({} buttons)", device_id, device_type, buttons.len()),
+    }
 
     let registry = state
         .lock()
@@ -7312,6 +7317,32 @@ fn ensure_synthetic_device_registry_rooms(
     }
 }
 
+/// Propagate a Rhythm room assignment to each endpoint's hub-side
+/// `device_rooms` map so button/motion events route correctly.
+///
+/// `room_id == None` clears the mapping (events go unrouted until a room is
+/// assigned). The hub-native room IDs that arrived via discovery are
+/// overridden with the Rhythm room ID — this is the routing source of truth
+/// for typed devices.
+fn sync_endpoint_device_rooms(
+    s: &mut AppState,
+    endpoints: &[crate::canonical::identity::IntegrationEndpoint],
+    room_id: Option<&str>,
+) {
+    for endpoint in endpoints {
+        if let Some(hub) = s.hubs.get(&endpoint.hub_key) {
+            if let Some(reg) = &hub.registry {
+                if let Ok(mut registry) = reg.lock() {
+                    match room_id {
+                        Some(rid) => registry.set_device_room(&endpoint.native_id, rid),
+                        None => registry.clear_device_room(&endpoint.native_id),
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Assign a canonical device to a Rhythm room (or unassign with None).
 ///
 /// Updates the canonical registry AND the topology so the composite routing
@@ -7393,6 +7424,17 @@ pub fn do_canonical_assign_room(
             &device_name,
             &active_endpoints,
         );
+    }
+
+    // Propagate the assignment to each endpoint's hub-side device_rooms map so
+    // typed-device routing (button/motion) follows the Rhythm room assignment.
+    // Lights are handled via `ensure_synthetic_device_registry_rooms` above —
+    // their device_rooms entries are managed by synthetic-room scaffolding.
+    if !matches!(
+        device_type,
+        rhythm_core::runtime::hub_registry::DeviceType::Light
+    ) {
+        sync_endpoint_device_rooms(&mut s, &active_endpoints, room_id);
     }
 
     persist_canonical(&s);
@@ -8906,8 +8948,8 @@ mod tests {
     ) -> String {
         let identity = crate::canonical::identity::DiscoveredIdentity {
             native_id: native_id.to_string(),
-            room_id: room_id.to_string(),
-            room_name: room_name.to_string(),
+            room_id: Some(room_id.to_string()),
+            room_name: Some(room_name.to_string()),
             name: name.to_string(),
             device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
             hardware_ids: vec![crate::canonical::identity::HardwareId::matter(native_id)],
@@ -11186,8 +11228,8 @@ mod tests {
         ));
         let identity = crate::canonical::identity::DiscoveredIdentity {
             native_id: "ms1".into(),
-            room_id: "sensor_room_native".into(),
-            room_name: "sensor_room".into(),
+            room_id: Some("sensor_room_native".into()),
+            room_name: Some("sensor_room".into()),
             name: "ms1".into(),
             device_type: DeviceType::Motion,
             hardware_ids: vec![crate::canonical::identity::HardwareId::matter("ms1")],
@@ -13486,6 +13528,99 @@ mod tests {
     }
 
     #[test]
+    fn canonical_assign_room_propagates_motion_device_rooms_to_hub_registry() {
+        // A roomless motion sensor — discovered with no Hue room — should land
+        // in the hub registry's device_types map but have no device_rooms
+        // entry. Once the user assigns it a Rhythm room via the canonical
+        // endpoint, device_rooms should be populated so motion events route.
+        // Unassigning should clear the entry.
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+        let room_id = state.lock().unwrap().topology.create_room("Hallway");
+
+        // Seed the hub registry with the motion sensor as roomless (mirroring
+        // what discovery now does).
+        {
+            let s = state.lock().unwrap();
+            let registry = s
+                .hubs
+                .get(&hub_key)
+                .and_then(|hub| hub.registry.as_ref())
+                .expect("hub registry should exist")
+                .clone();
+            drop(s);
+            registry.lock().unwrap().upsert_device(
+                "motion-svc-1",
+                None,
+                &[],
+                rhythm_core::runtime::hub_registry::DeviceType::Motion,
+            );
+        }
+
+        // Create a canonical Motion device for that endpoint.
+        let canonical_id = {
+            let identity = crate::canonical::identity::DiscoveredIdentity {
+                native_id: "motion-svc-1".to_string(),
+                room_id: None,
+                room_name: None,
+                name: "Hallway Motion".to_string(),
+                device_type: rhythm_core::runtime::hub_registry::DeviceType::Motion,
+                hardware_ids: vec![crate::canonical::identity::HardwareId::mac(
+                    "00:17:88:01:0b:c0:ff:ee",
+                )],
+                manufacturer: None,
+                model: None,
+            };
+            let mut s = state.lock().unwrap();
+            match s.canonical_registry.resolve(&identity, &hub_key, 1000) {
+                crate::canonical::registry::ResolveResult::Created { canonical_id }
+                | crate::canonical::registry::ResolveResult::AlreadyKnown { canonical_id } => {
+                    canonical_id
+                }
+                other => panic!("unexpected resolve result: {:?}", other),
+            }
+        };
+
+        // Sanity: registry has no room mapping yet for the endpoint.
+        assert!(!devices_for_room_contains(
+            &state, &hub_key, &room_id, "motion-svc-1"
+        ));
+
+        // Assign — propagation should populate device_rooms.
+        do_canonical_assign_room(&state, &canonical_id, Some(&room_id)).unwrap();
+        assert!(
+            devices_for_room_contains(&state, &hub_key, &room_id, "motion-svc-1"),
+            "assign should propagate the Rhythm room into device_rooms"
+        );
+
+        // Unassign — propagation should clear it.
+        do_canonical_assign_room(&state, &canonical_id, None).unwrap();
+        assert!(
+            !devices_for_room_contains(&state, &hub_key, &room_id, "motion-svc-1"),
+            "unassign should clear the device_rooms entry"
+        );
+    }
+
+    fn devices_for_room_contains(
+        state: &SharedState,
+        hub_key: &HubKey,
+        room_id: &str,
+        native_id: &str,
+    ) -> bool {
+        let s = state.lock().unwrap();
+        let registry = s
+            .hubs
+            .get(hub_key)
+            .and_then(|hub| hub.registry.as_ref())
+            .expect("hub registry should exist")
+            .lock()
+            .unwrap();
+        registry
+            .devices_for_room(room_id)
+            .iter()
+            .any(|d| d == native_id)
+    }
+
+    #[test]
     fn canonical_unassign_keeps_synthetic_registry_room_for_device_queries() {
         let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
         let room_id = state.lock().unwrap().topology.create_room("Office");
@@ -13852,8 +13987,8 @@ mod tests {
         // Discover the motion sensor with native_id=msvc and assign it to ROOM_A.
         let identity = DiscoveredIdentity {
             native_id: "msvc".into(),
-            room_id: "hue-x".into(),
-            room_name: "Room B".into(),
+            room_id: Some("hue-x".into()),
+            room_name: Some("Room B".into()),
             name: "Hallway Motion".into(),
             device_type: DeviceType::Motion,
             hardware_ids: vec![HardwareId::mac("aa:bb:cc:dd:ee:ff")],
@@ -13913,8 +14048,8 @@ mod tests {
 
         let identity = DiscoveredIdentity {
             native_id: "parent-rid".into(),
-            room_id: "hue-x".into(),
-            room_name: "Room B".into(),
+            room_id: Some("hue-x".into()),
+            room_name: Some("Room B".into()),
             name: "Hallway Dimmer".into(),
             device_type: DeviceType::Button,
             hardware_ids: vec![HardwareId::mac("11:22:33:44:55:66")],
@@ -13959,8 +14094,8 @@ mod tests {
         // First discovery: legacy native_id (parent device rid).
         let legacy = DiscoveredIdentity {
             native_id: "legacy-parent-rid".into(),
-            room_id: "hue-x".into(),
-            room_name: "Room B".into(),
+            room_id: Some("hue-x".into()),
+            room_name: Some("Room B".into()),
             name: "Hallway Motion".into(),
             device_type: DeviceType::Motion,
             hardware_ids: vec![HardwareId::mac("aa:bb:cc:dd:ee:ff")],

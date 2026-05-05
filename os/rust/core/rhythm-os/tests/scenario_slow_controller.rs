@@ -56,8 +56,8 @@ fn add_button_source(harness: &TestHarness, native_id: &str, room_id: &str) {
     let topology_room_id = harness.resolve(room_id);
     let identity = DiscoveredIdentity {
         native_id: native_id.to_string(),
-        room_id: room_id.to_string(),
-        room_name: room_id.to_string(),
+        room_id: Some(room_id.to_string()),
+        room_name: Some(room_id.to_string()),
         name: native_id.to_string(),
         device_type: DeviceType::Button,
         hardware_ids: vec![HardwareId::matter(native_id)],

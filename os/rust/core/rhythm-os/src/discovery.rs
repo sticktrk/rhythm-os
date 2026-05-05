@@ -26,8 +26,9 @@ pub struct DiscoveredRoom {
 pub struct DiscoveredDevice {
     /// Unique device identifier.
     pub device_id: String,
-    /// Room this device belongs to.
-    pub room_id: String,
+    /// Hub-native room this device belongs to. `None` when the device exists on
+    /// the hub but is not assigned to any hub room.
+    pub room_id: Option<String>,
     /// Button mappings: (button_resource_id, control_id). Empty for motion sensors.
     pub buttons: Vec<(String, u8)>,
     /// Device type (Button, Motion, etc.).
@@ -69,8 +70,8 @@ pub trait HubDiscovery: Send + Sync {
             .into_iter()
             .map(|d| DiscoveredIdentity {
                 native_id: d.device_id,
-                room_id: d.room_id.clone(),
-                room_name: String::new(), // No room name available in basic discovery
+                room_id: d.room_id,
+                room_name: None,
                 name: String::new(),
                 device_type: d.device_type,
                 hardware_ids: vec![],

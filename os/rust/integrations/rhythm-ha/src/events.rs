@@ -100,7 +100,7 @@ pub(crate) fn register_unknown_button_from_cache(
     };
 
     if let Ok(mut reg) = registry.lock() {
-        reg.upsert_device(&device_id, &area_id, &controls, DeviceType::Button);
+        reg.upsert_device(&device_id, Some(&area_id), &controls, DeviceType::Button);
         if let Some((button_id, control_id)) = controls.first() {
             info!(
                 target: "evt",
@@ -143,7 +143,7 @@ pub(crate) fn register_unknown_motion_from_cache(
     };
 
     if let Ok(mut reg) = registry.lock() {
-        reg.upsert_device(sensor_id, &area_id, &[], DeviceType::Motion);
+        reg.upsert_device(sensor_id, Some(&area_id), &[], DeviceType::Motion);
         info!(
             target: "evt",
             "On-demand registered motion sensor {} for room {}",
@@ -816,7 +816,7 @@ mod tests {
         // Pre-register with synthesized button_id (id:subtype)
         registry.lock().unwrap().upsert_device(
             "ha-dev-1",
-            "living_room",
+            Some("living_room"),
             &[("hue-btn-uuid:4".to_string(), 4)],
             DeviceType::Button,
         );
@@ -913,7 +913,7 @@ mod tests {
         // Pre-register the sensor as a Motion device
         registry.lock().unwrap().upsert_device(
             "binary_sensor.kitchen_motion",
-            "kitchen",
+            Some("kitchen"),
             &[],
             DeviceType::Motion,
         );
@@ -1066,7 +1066,7 @@ mod tests {
         // Pre-register the device
         registry.lock().unwrap().upsert_device(
             "00:17:88:01:aa:bb:cc:dd",
-            "living_room",
+            Some("living_room"),
             &[],
             DeviceType::Button,
         );

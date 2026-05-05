@@ -77,10 +77,10 @@ impl<H: HueTransport> HueDiscovery<H> {
                 None => continue,
             };
 
-            let room_id = match device_to_room.get(&device_id) {
-                Some(id) => id.clone(),
-                None => continue,
-            };
+            // Roomless devices (not children of any Hue room) flow through with
+            // `room_id: None` so the canonical pipeline can surface them for
+            // user assignment.
+            let room_id = device_to_room.get(&device_id).cloned();
 
             let services = dev_json.get("services").and_then(|v| v.as_array());
 
@@ -145,12 +145,12 @@ impl<H: HueTransport> HueDiscovery<H> {
                 None => continue,
             };
 
-            let room_id = match device_to_room.get(&device_id) {
-                Some(id) => id.clone(),
-                None => continue,
-            };
-
-            let room_name = room_names.get(&room_id).cloned().unwrap_or_default();
+            // Roomless devices flow through with `room_id: None` so they
+            // surface in the canonical registry for user assignment.
+            let room_id = device_to_room.get(&device_id).cloned();
+            let room_name = room_id
+                .as_deref()
+                .and_then(|rid| room_names.get(rid).cloned());
 
             let name = dev_json
                 .pointer("/metadata/name")
@@ -591,8 +591,12 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
 /// fetches the individual resource and device resources from the Hue bridge
 /// (tiny responses, ~200-500 bytes each) instead of the full device list (~50KB+).
 ///
-/// Returns `Ok(true)` if the device was registered, `Ok(false)` if the device
-/// is not in any known room (not an error — just a device we don't care about).
+/// Roomless devices are still registered (their button/type mappings are needed
+/// so events can be identified) but with `room_id: None` — routing remains
+/// unrouted until the user assigns a Rhythm room.
+///
+/// Returns `Ok(true)` if the device was registered, `Ok(false)` if the target
+/// service was not found on the device.
 pub fn discover_device<H: HueTransport>(
     transport: &H,
     username: &str,
@@ -611,21 +615,12 @@ pub fn discover_device<H: HueTransport>(
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("{} has no owner device", resource_type))?;
 
-    // Step 2: Check if this device is in a known room
+    // Step 2: Look up the device's room (None for roomless devices).
     let room_id = {
         let reg = registry
             .lock()
             .map_err(|_| anyhow::anyhow!("Registry lock failed"))?;
         reg.get_room_for_device(device_id)
-    };
-
-    let room_id = match room_id {
-        Some(id) => id,
-        None => {
-            info!(target: "hue_discovery", "{} {} belongs to device {} which is not in any known room",
-                resource_type, resource_id, device_id);
-            return Ok(false);
-        }
     };
 
     // Step 3: Fetch the full device resource to get all services
@@ -661,7 +656,7 @@ pub fn discover_device<H: HueTransport>(
                     let mut reg = registry
                         .lock()
                         .map_err(|_| anyhow::anyhow!("Registry lock failed"))?;
-                    reg.upsert_device(rid, &room_id, &[], DeviceType::Motion);
+                    reg.upsert_device(rid, room_id.as_deref(), &[], DeviceType::Motion);
                     if rid == resource_id {
                         found_target = true;
                     }
@@ -684,11 +679,15 @@ pub fn discover_device<H: HueTransport>(
         let mut reg = registry
             .lock()
             .map_err(|_| anyhow::anyhow!("Registry lock failed"))?;
-        reg.upsert_device(device_id, &room_id, &buttons, DeviceType::Button);
+        reg.upsert_device(device_id, room_id.as_deref(), &buttons, DeviceType::Button);
     }
 
-    info!(target: "hue_discovery", "Discovered {} {} on device {} for room {}",
-        resource_type, resource_id, device_id, room_id);
+    match room_id.as_deref() {
+        Some(rid) => info!(target: "hue_discovery", "Discovered {} {} on device {} for room {}",
+            resource_type, resource_id, device_id, rid),
+        None => info!(target: "hue_discovery", "Discovered {} {} on roomless device {} — awaiting room assignment",
+            resource_type, resource_id, device_id),
+    }
     Ok(true)
 }
 
@@ -755,5 +754,91 @@ mod tests {
         let device_id =
             HueDiscovery::<crate::test_support::SpyHueTransport>::extract_device_from_behavior(&bi);
         assert!(device_id.is_none());
+    }
+
+    #[test]
+    fn extract_devices_emits_roomless_motion_sensor() {
+        // A motion sensor device that is not a child of any Hue room.
+        let device_data = vec![serde_json::json!({
+            "id": "roomless-motion-device",
+            "services": [
+                { "rtype": "motion", "rid": "motion-svc-1" }
+            ]
+        })];
+        let device_to_room = HashMap::new(); // empty: no room ownership
+
+        let devices = HueDiscovery::<crate::test_support::SpyHueTransport>::extract_devices(
+            &device_data,
+            &device_to_room,
+        );
+
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device_id, "motion-svc-1");
+        assert_eq!(devices[0].device_type, DeviceType::Motion);
+        assert!(
+            devices[0].room_id.is_none(),
+            "roomless device should have room_id None, got {:?}",
+            devices[0].room_id
+        );
+    }
+
+    #[test]
+    fn extract_devices_emits_roomless_button_device() {
+        let device_data = vec![serde_json::json!({
+            "id": "roomless-button-device",
+            "services": [
+                { "rtype": "button", "rid": "btn-1" },
+                { "rtype": "button", "rid": "btn-2" }
+            ]
+        })];
+        let device_to_room = HashMap::new();
+
+        let devices = HueDiscovery::<crate::test_support::SpyHueTransport>::extract_devices(
+            &device_data,
+            &device_to_room,
+        );
+
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device_type, DeviceType::Button);
+        assert!(devices[0].room_id.is_none());
+        assert_eq!(devices[0].buttons.len(), 2);
+    }
+
+    #[test]
+    fn extract_identities_emits_roomless_motion_with_none_room() {
+        let device_data = vec![serde_json::json!({
+            "id": "roomless-motion-device",
+            "metadata": { "name": "Hallway Motion" },
+            "product_data": {
+                "manufacturer_name": "Signify Netherlands B.V.",
+                "model_id": "SML004"
+            },
+            "services": [
+                { "rtype": "motion", "rid": "motion-svc-1" }
+            ]
+        })];
+        let device_to_room = HashMap::new();
+        let room_names = HashMap::new();
+        let mut zigbee_mac_map = HashMap::new();
+        zigbee_mac_map.insert(
+            "roomless-motion-device".to_string(),
+            "00:17:88:01:0b:c0:ff:ee".to_string(),
+        );
+
+        let identities = HueDiscovery::<crate::test_support::SpyHueTransport>::extract_identities(
+            &device_data,
+            &device_to_room,
+            &room_names,
+            &zigbee_mac_map,
+        );
+
+        assert_eq!(identities.len(), 1);
+        let id = &identities[0];
+        assert_eq!(id.native_id, "motion-svc-1");
+        assert_eq!(id.device_type, DeviceType::Motion);
+        assert!(id.room_id.is_none());
+        assert!(id.room_name.is_none());
+        assert_eq!(id.name, "Hallway Motion");
+        assert_eq!(id.hardware_ids.len(), 1);
     }
 }

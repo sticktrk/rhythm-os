@@ -286,8 +286,8 @@ fn register_canonical_identity(
 
     let identity = rhythm_os::canonical::identity::DiscoveredIdentity {
         native_id: device_id.to_string(),
-        room_id: String::new(),
-        room_name: String::new(),
+        room_id: None,
+        room_name: None,
         name: device_name.to_string(),
         device_type: DeviceType::Light,
         hardware_ids: vec![HardwareId::matter(&device.node_id.to_string())],

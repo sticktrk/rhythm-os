@@ -35,12 +35,29 @@ pub struct SnapshotDevice {
     /// Device ID
     #[serde(rename = "i")]
     pub id: String,
-    /// Room this device belongs to
-    #[serde(rename = "r")]
-    pub room_id: String,
+    /// Hub-native room this device belongs to. `None`/missing for devices
+    /// that exist on the hub but aren't yet assigned to a hub room.
+    #[serde(
+        rename = "r",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_room_id"
+    )]
+    pub room_id: Option<String>,
     /// Device type (button or motion)
     #[serde(rename = "t")]
     pub device_type: DeviceType,
+}
+
+/// Deserialize the snapshot `room_id` accepting either `null`, missing, or a
+/// (possibly empty) string. Empty strings round-trip to `None` so older
+/// snapshots that wrote `"r": ""` are interpreted as roomless.
+fn deserialize_optional_room_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(opt.filter(|s| !s.is_empty()))
 }
 
 /// Serializable registry snapshot for persistence.
@@ -196,15 +213,16 @@ impl HubDeviceRegistry {
     /// Check if a device already matches the incoming data (dedup for persistence writes).
     ///
     /// Compares room mapping, device type, and button set (same IDs, same control_ids, same count).
+    /// `room_id == None` matches a device that has no `device_rooms` entry (roomless).
     pub fn device_matches(
         &self,
         device_id: &str,
-        room_id: &str,
+        room_id: Option<&str>,
         buttons: &[(String, u8)],
         device_type: &DeviceType,
     ) -> bool {
-        // Room mapping must match
-        if self.device_rooms.get(device_id).map(|r| r.as_str()) != Some(room_id) {
+        // Room mapping must match (Option-equality so roomless dedups cleanly)
+        if self.device_rooms.get(device_id).map(|r| r.as_str()) != room_id {
             return false;
         }
 
@@ -311,15 +329,29 @@ impl HubDeviceRegistry {
     }
 
     /// Upsert a device with its button mappings and type.
+    ///
+    /// `room_id == None` registers the device as roomless: button/type mappings
+    /// are still recorded (so SSE events resolve to a known device) but no
+    /// `device_rooms` entry is created, and any pre-existing entry is removed.
+    /// `get_room_for_button` / `get_room_for_motion_sensor` will return `None`
+    /// for roomless devices, so events go unrouted until the user assigns a
+    /// Rhythm room via the canonical assign-room endpoint.
     pub fn upsert_device(
         &mut self,
         device_id: &str,
-        room_id: &str,
+        room_id: Option<&str>,
         buttons: &[(String, u8)],
         device_type: DeviceType,
     ) {
-        self.device_rooms
-            .insert(device_id.to_string(), room_id.to_string());
+        match room_id {
+            Some(rid) => {
+                self.device_rooms
+                    .insert(device_id.to_string(), rid.to_string());
+            }
+            None => {
+                self.device_rooms.remove(device_id);
+            }
+        }
         self.device_types
             .insert(device_id.to_string(), device_type.clone());
 
@@ -329,13 +361,45 @@ impl HubDeviceRegistry {
         }
 
         self.dirty = true;
-        info!(
-            "Registry: upserted device {} ({:?}) -> room {} ({} buttons)",
-            device_id,
-            device_type,
-            room_id,
-            buttons.len()
-        );
+        match room_id {
+            Some(rid) => info!(
+                "Registry: upserted device {} ({:?}) -> room {} ({} buttons)",
+                device_id,
+                device_type,
+                rid,
+                buttons.len()
+            ),
+            None => info!(
+                "Registry: upserted roomless device {} ({:?}) ({} buttons)",
+                device_id,
+                device_type,
+                buttons.len()
+            ),
+        }
+    }
+
+    /// Set or clear the room mapping for an already-known device.
+    ///
+    /// Used after the canonical room-assignment endpoint propagates a Rhythm
+    /// room down to the hub registry. Only mutates `device_rooms`; preserves
+    /// existing button/type entries.
+    pub fn set_device_room(&mut self, device_id: &str, room_id: &str) {
+        self.device_rooms
+            .insert(device_id.to_string(), room_id.to_string());
+        self.dirty = true;
+    }
+
+    /// Remove only the room mapping for a device, preserving button/type entries.
+    pub fn clear_device_room(&mut self, device_id: &str) {
+        if self.device_rooms.remove(device_id).is_some() {
+            self.dirty = true;
+        }
+    }
+
+    /// Check whether the registry has seen a device with this ID, regardless
+    /// of whether it has a room assignment.
+    pub fn has_device(&self, device_id: &str) -> bool {
+        self.device_types.contains_key(device_id)
     }
 
     /// Remove a device and its button mappings from the registry.
@@ -453,19 +517,17 @@ impl HubDeviceRegistry {
     /// Create a compact snapshot for persistence.
     ///
     /// Includes Button and Motion devices in the `"dv"` array (not Light
-    /// devices — those are re-pushed by room sync).
+    /// devices — those are re-pushed by room sync). Roomless devices are
+    /// preserved with `room_id: None` so they survive across restarts.
     pub fn snapshot(&self) -> RegistrySnapshot {
         // Build typed device entries from device_types (Button + Motion only)
         let devices: Vec<SnapshotDevice> = self
             .device_types
             .iter()
-            .filter_map(|(dev_id, dt)| {
-                let room_id = self.device_rooms.get(dev_id)?;
-                Some(SnapshotDevice {
-                    id: dev_id.clone(),
-                    room_id: room_id.clone(),
-                    device_type: dt.clone(),
-                })
+            .map(|(dev_id, dt)| SnapshotDevice {
+                id: dev_id.clone(),
+                room_id: self.device_rooms.get(dev_id).cloned(),
+                device_type: dt.clone(),
             })
             .collect();
 
@@ -511,8 +573,9 @@ impl HubDeviceRegistry {
         self.device_rooms.clear();
         self.device_types.clear();
         for dev in &snapshot.devices {
-            self.device_rooms
-                .insert(dev.id.clone(), dev.room_id.clone());
+            if let Some(rid) = &dev.room_id {
+                self.device_rooms.insert(dev.id.clone(), rid.clone());
+            }
             self.device_types
                 .insert(dev.id.clone(), dev.device_type.clone());
         }
@@ -571,7 +634,7 @@ impl HubRegistry for HubDeviceRegistry {
     fn device_matches(
         &self,
         device_id: &str,
-        room_id: &str,
+        room_id: Option<&str>,
         buttons: &[(String, u8)],
         device_type: &DeviceType,
     ) -> bool {
@@ -581,7 +644,7 @@ impl HubRegistry for HubDeviceRegistry {
     fn upsert_device(
         &mut self,
         device_id: &str,
-        room_id: &str,
+        room_id: Option<&str>,
         buttons: &[(String, u8)],
         device_type: DeviceType,
     ) {
@@ -590,6 +653,14 @@ impl HubRegistry for HubDeviceRegistry {
 
     fn remove_device(&mut self, device_id: &str) {
         self.remove_device(device_id);
+    }
+
+    fn set_device_room(&mut self, device_id: &str, room_id: &str) {
+        self.set_device_room(device_id, room_id);
+    }
+
+    fn clear_device_room(&mut self, device_id: &str) {
+        self.clear_device_room(device_id);
     }
 
     fn devices_for_room_typed(&self, room_id: &str) -> Vec<(String, DeviceType)> {
@@ -766,7 +837,7 @@ mod tests {
 
         // Add a switch device with buttons
         let buttons = vec![("btn1".to_string(), 1u8)];
-        reg.upsert_device("switch1", "r1", &buttons, DeviceType::Button);
+        reg.upsert_device("switch1", Some("r1"), &buttons, DeviceType::Button);
 
         // Re-upsert room with different lights — switch1 should survive
         let lights_v2 = vec!["light2".to_string()];
@@ -784,7 +855,7 @@ mod tests {
         reg.upsert_room("r1", "Room", "gl1", &lights);
 
         // Add a motion sensor as a device
-        reg.upsert_device("ms1", "r1", &[], DeviceType::Motion);
+        reg.upsert_device("ms1", Some("r1"), &[], DeviceType::Motion);
 
         // Re-upsert room with different lights — motion sensor should survive
         let lights_v2 = vec!["light2".to_string()];
@@ -848,7 +919,7 @@ mod tests {
         let mut reg = HubDeviceRegistry::new();
         let devices = vec!["light1".to_string()];
         reg.upsert_room("r1", "Room", "gl1", &devices);
-        reg.upsert_device("ms1", "r1", &[], DeviceType::Motion);
+        reg.upsert_device("ms1", Some("r1"), &[], DeviceType::Motion);
 
         reg.remove_room("r1");
 
@@ -869,7 +940,7 @@ mod tests {
     fn upsert_device_with_buttons() {
         let mut reg = HubDeviceRegistry::new();
         let buttons = vec![("btn1".to_string(), 1u8), ("btn2".to_string(), 2u8)];
-        reg.upsert_device("dev1", "r1", &buttons, DeviceType::Button);
+        reg.upsert_device("dev1", Some("r1"), &buttons, DeviceType::Button);
 
         assert_eq!(reg.device_rooms.get("dev1").unwrap(), "r1");
         assert_eq!(reg.device_types.get("dev1"), Some(&DeviceType::Button));
@@ -881,7 +952,7 @@ mod tests {
     fn remove_device_clears_buttons_and_type() {
         let mut reg = HubDeviceRegistry::new();
         let buttons = vec![("btn1".to_string(), 1u8), ("btn2".to_string(), 2u8)];
-        reg.upsert_device("dev1", "r1", &buttons, DeviceType::Button);
+        reg.upsert_device("dev1", Some("r1"), &buttons, DeviceType::Button);
 
         reg.remove_device("dev1");
 
@@ -895,10 +966,10 @@ mod tests {
     fn upsert_device_replaces_buttons() {
         let mut reg = HubDeviceRegistry::new();
         let buttons_v1 = vec![("btn_old".to_string(), 1u8)];
-        reg.upsert_device("dev1", "r1", &buttons_v1, DeviceType::Button);
+        reg.upsert_device("dev1", Some("r1"), &buttons_v1, DeviceType::Button);
 
         let buttons_v2 = vec![("btn_new".to_string(), 3u8)];
-        reg.upsert_device("dev1", "r1", &buttons_v2, DeviceType::Button);
+        reg.upsert_device("dev1", Some("r1"), &buttons_v2, DeviceType::Button);
 
         // New button present
         assert_eq!(
@@ -920,7 +991,7 @@ mod tests {
         let mut reg = HubDeviceRegistry::new();
         reg.upsert_device(
             "dev1",
-            "r1",
+            Some("r1"),
             &[("btn1".to_string(), 1u8)],
             DeviceType::Button,
         );
@@ -953,7 +1024,7 @@ mod tests {
         let mut reg = HubDeviceRegistry::new();
         reg.upsert_device(
             "dev1",
-            "r1",
+            Some("r1"),
             &[("btn1".to_string(), 3u8)],
             DeviceType::Button,
         );
@@ -967,7 +1038,7 @@ mod tests {
         let mut reg = HubDeviceRegistry::new();
         reg.upsert_device(
             "dev_xyz",
-            "r1",
+            Some("r1"),
             &[("btn_a".to_string(), 1u8)],
             DeviceType::Button,
         );
@@ -987,7 +1058,7 @@ mod tests {
         let mut reg = HubDeviceRegistry::new();
 
         // Upsert as Motion device
-        reg.upsert_device("ms1", "r1", &[], DeviceType::Motion);
+        reg.upsert_device("ms1", Some("r1"), &[], DeviceType::Motion);
         assert_eq!(
             reg.get_room_for_motion_sensor("ms1"),
             Some("r1".to_string())
@@ -1007,9 +1078,9 @@ mod tests {
     #[test]
     fn rooms_with_motion_sensors_deduplicates() {
         let mut reg = HubDeviceRegistry::new();
-        reg.upsert_device("ms1", "r1", &[], DeviceType::Motion);
-        reg.upsert_device("ms2", "r1", &[], DeviceType::Motion);
-        reg.upsert_device("ms3", "r2", &[], DeviceType::Motion);
+        reg.upsert_device("ms1", Some("r1"), &[], DeviceType::Motion);
+        reg.upsert_device("ms2", Some("r1"), &[], DeviceType::Motion);
+        reg.upsert_device("ms3", Some("r2"), &[], DeviceType::Motion);
 
         let rooms = reg.rooms_with_motion_sensors();
         assert_eq!(rooms.len(), 2);
@@ -1020,8 +1091,8 @@ mod tests {
     #[test]
     fn devices_for_room_typed() {
         let mut reg = HubDeviceRegistry::new();
-        reg.upsert_device("btn1", "r1", &[("b1".to_string(), 1)], DeviceType::Button);
-        reg.upsert_device("ms1", "r1", &[], DeviceType::Motion);
+        reg.upsert_device("btn1", Some("r1"), &[("b1".to_string(), 1)], DeviceType::Button);
+        reg.upsert_device("ms1", Some("r1"), &[], DeviceType::Motion);
         reg.upsert_room("r1", "Room", "gl1", &["light1".to_string()]);
 
         let typed = reg.devices_for_room_typed("r1");
@@ -1060,12 +1131,12 @@ mod tests {
         // Add a switch device with buttons
         reg.upsert_device(
             "switch1",
-            "r1",
+            Some("r1"),
             &[("btn1".to_string(), 1u8)],
             DeviceType::Button,
         );
         // Add a motion device
-        reg.upsert_device("ms1", "r1", &[], DeviceType::Motion);
+        reg.upsert_device("ms1", Some("r1"), &[], DeviceType::Motion);
 
         // room_matches should match with only light devices, ignoring managed devices
         assert!(reg.room_matches("r1", "Room", "gl1", &lights));
@@ -1075,27 +1146,27 @@ mod tests {
     fn device_matches_correct() {
         let mut reg = HubDeviceRegistry::new();
         let buttons = vec![("btn1".to_string(), 1u8), ("btn2".to_string(), 2u8)];
-        reg.upsert_device("dev1", "r1", &buttons, DeviceType::Button);
+        reg.upsert_device("dev1", Some("r1"), &buttons, DeviceType::Button);
 
-        assert!(reg.device_matches("dev1", "r1", &buttons, &DeviceType::Button));
+        assert!(reg.device_matches("dev1", Some("r1"), &buttons, &DeviceType::Button));
     }
 
     #[test]
     fn device_matches_wrong_room() {
         let mut reg = HubDeviceRegistry::new();
         let buttons = vec![("btn1".to_string(), 1u8)];
-        reg.upsert_device("dev1", "r1", &buttons, DeviceType::Button);
+        reg.upsert_device("dev1", Some("r1"), &buttons, DeviceType::Button);
 
-        assert!(!reg.device_matches("dev1", "r2", &buttons, &DeviceType::Button));
+        assert!(!reg.device_matches("dev1", Some("r2"), &buttons, &DeviceType::Button));
     }
 
     #[test]
     fn device_matches_wrong_type() {
         let mut reg = HubDeviceRegistry::new();
-        reg.upsert_device("dev1", "r1", &[], DeviceType::Motion);
+        reg.upsert_device("dev1", Some("r1"), &[], DeviceType::Motion);
 
-        assert!(!reg.device_matches("dev1", "r1", &[], &DeviceType::Button));
-        assert!(reg.device_matches("dev1", "r1", &[], &DeviceType::Motion));
+        assert!(!reg.device_matches("dev1", Some("r1"), &[], &DeviceType::Button));
+        assert!(reg.device_matches("dev1", Some("r1"), &[], &DeviceType::Motion));
     }
 
     // =========================================================================
@@ -1109,11 +1180,11 @@ mod tests {
         reg.upsert_room("r2", "Bedroom", "gl2", &["light2".to_string()]);
         reg.upsert_device(
             "switch1",
-            "r1",
+            Some("r1"),
             &[("btn1".to_string(), 1), ("btn2".to_string(), 2)],
             DeviceType::Button,
         );
-        reg.upsert_device("ms1", "r1", &[], DeviceType::Motion);
+        reg.upsert_device("ms1", Some("r1"), &[], DeviceType::Motion);
         reg.set_area_lights("r1", vec!["entity1".to_string()]);
 
         let snapshot = reg.snapshot();
@@ -1163,11 +1234,11 @@ mod tests {
         );
         reg.upsert_device(
             "switch1",
-            "r1",
+            Some("r1"),
             &[("btn1".to_string(), 1)],
             DeviceType::Button,
         );
-        reg.upsert_device("ms1", "r1", &[], DeviceType::Motion);
+        reg.upsert_device("ms1", Some("r1"), &[], DeviceType::Motion);
 
         let snapshot = reg.snapshot();
 
@@ -1239,7 +1310,7 @@ mod tests {
         );
         reg.upsert_device(
             "switch1",
-            "r1",
+            Some("r1"),
             &[("btn1".to_string(), 1)],
             DeviceType::Button,
         );

@@ -47,8 +47,8 @@ impl MatterDiscovery {
     fn device_identity(device: &CommissionedDevice) -> DiscoveredIdentity {
         DiscoveredIdentity {
             native_id: crate::lifecycle::format_device_id(device.node_id, device.light_endpoint),
-            room_id: String::new(),
-            room_name: String::new(),
+            room_id: None,
+            room_name: None,
             name: format!("{} {}", device.vendor_name, device.product_name),
             device_type: DeviceType::Light,
             hardware_ids: vec![HardwareId::matter(&device.node_id.to_string())],
