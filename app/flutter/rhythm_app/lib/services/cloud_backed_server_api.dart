@@ -299,8 +299,9 @@ class CloudBackedServerApi {
   Future<bool> configSet(
     RhythmCurveConfig config, {
     String? id,
+    bool apply = false,
   }) {
-    return _delegate.configSet(config, id: id);
+    return _delegate.configSet(config, id: id, apply: apply);
   }
 
   Future<void> locationSet({

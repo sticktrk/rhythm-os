@@ -92,6 +92,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
 
   // Curve parameters.
   bool _curveConfigDirty = false;
+  bool _isSaving = false;
   double _minColorTemp = 1800;
   double _maxColorTemp = 5500;
   double _minBrightness = 2;
@@ -1184,7 +1185,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
           _buildIdleSection(),
           const SizedBox(height: 24),
           _buildRoomDefaultsSection(),
-          if (_curveConfigDirty) ...[
+          if (_curveConfigDirty || _isSaving) ...[
             const SizedBox(height: 24),
             _buildSaveButton(),
           ],
@@ -3267,22 +3268,34 @@ class _LightProfileScreenState extends State<LightProfileScreen>
 
   Widget _buildSaveButton() {
     return GestureDetector(
-      onTap: _saveCurveConfig,
+      onTap: _isSaving ? null : _saveCurveConfig,
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 14),
         decoration: BoxDecoration(
-          color: _Palette.amber.withValues(alpha: 0.1),
+          color: _Palette.amber.withValues(alpha: _isSaving ? 0.06 : 0.1),
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: _Palette.amber.withValues(alpha: 0.25)),
+          border: Border.all(
+            color: _Palette.amber.withValues(alpha: _isSaving ? 0.18 : 0.25),
+          ),
         ),
-        child: const Row(
+        child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.save_rounded, color: _Palette.amber, size: 18),
-            SizedBox(width: 8),
+            if (_isSaving)
+              const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(_Palette.amber),
+                ),
+              )
+            else
+              const Icon(Icons.save_rounded, color: _Palette.amber, size: 18),
+            const SizedBox(width: 8),
             Text(
-              'Save Changes',
-              style: TextStyle(
+              _isSaving ? 'Applying…' : 'Save Changes',
+              style: const TextStyle(
                 color: _Palette.amber,
                 fontSize: 14,
                 fontWeight: FontWeight.w600,
@@ -3295,90 +3308,113 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   Future<void> _saveCurveConfig() async {
+    if (_isSaving) return;
     final config = _buildDraftConfig();
-    final api = context.read<ServerSyncProvider>().api;
-    setState(() => _curveConfigDirty = false);
-    final profileSaved = await api.configSet(config, id: _selectedProfileId);
-    if (!mounted) return;
-    if (!profileSaved) {
-      setState(() => _curveConfigDirty = true);
-      AnalyticsService().logLightProfileSaveFailed(
-        _selectedProfileId,
-        stage: 'profile',
+    final serverSync = context.read<ServerSyncProvider>();
+    final api = serverSync.api;
+    final activeProfileId = serverSync.activeProfileId;
+    setState(() {
+      _curveConfigDirty = false;
+      _isSaving = true;
+    });
+    try {
+      final profileSaved = await api.configSet(
+        config,
+        id: _selectedProfileId,
+        apply: activeProfileId != null && _selectedProfileId == activeProfileId,
       );
-      _showSaveFeedback(
-        'Failed to save ${_profileTitle.toLowerCase()}.',
-        error: true,
-      );
-      return;
-    }
-
-    // Also save idle config.
-    final idleConfig = _buildIdleDraftConfig();
-    bool idleSaved = true;
-    if (idleConfig != null) {
-      idleSaved = await api.configSet(idleConfig, id: idleConfig.id);
       if (!mounted) return;
-      if (!idleSaved) {
+      if (!profileSaved) {
         setState(() => _curveConfigDirty = true);
         AnalyticsService().logLightProfileSaveFailed(
           _selectedProfileId,
-          stage: 'idle_profile',
+          stage: 'profile',
         );
         _showSaveFeedback(
-          'Saved ${_profileTitle.toLowerCase()}, but failed to save standby settings.',
+          'Failed to save ${_profileTitle.toLowerCase()}.',
           error: true,
         );
         return;
       }
-    }
 
-    final targetIdleProfileId = idleConfig?.id;
-    final currentIdleProfileId = _selectedCustomIdleProfileId;
-    final shouldUpdateIdleModeConfig =
-        currentIdleProfileId != targetIdleProfileId;
-    List<sdk.RhythmModeConfig>? updatedModeConfigs;
-    var idleModeSaved = true;
-    if (shouldUpdateIdleModeConfig) {
-      updatedModeConfigs = _updatedModeConfigsForIdle(targetIdleProfileId);
-      idleModeSaved = await api.modeSet(
-        active: _serverActiveMode,
-        configs: updatedModeConfigs,
-      );
+      // Also save idle config.
+      final idleConfig = _buildIdleDraftConfig();
+      bool idleSaved = true;
+      if (idleConfig != null) {
+        idleSaved = await api.configSet(
+          idleConfig,
+          id: idleConfig.id,
+          apply:
+              activeProfileId != null && idleConfig.id == activeProfileId,
+        );
+        if (!mounted) return;
+        if (!idleSaved) {
+          setState(() => _curveConfigDirty = true);
+          AnalyticsService().logLightProfileSaveFailed(
+            _selectedProfileId,
+            stage: 'idle_profile',
+          );
+          _showSaveFeedback(
+            'Saved ${_profileTitle.toLowerCase()}, but failed to save standby settings.',
+            error: true,
+          );
+          return;
+        }
+      }
+
+      final targetIdleProfileId = idleConfig?.id;
+      final currentIdleProfileId = _selectedCustomIdleProfileId;
+      final shouldUpdateIdleModeConfig =
+          currentIdleProfileId != targetIdleProfileId;
+      List<sdk.RhythmModeConfig>? updatedModeConfigs;
+      var idleModeSaved = true;
+      if (shouldUpdateIdleModeConfig) {
+        updatedModeConfigs = _updatedModeConfigsForIdle(targetIdleProfileId);
+        idleModeSaved = await api.modeSet(
+          active: _serverActiveMode,
+          configs: updatedModeConfigs,
+        );
+        if (!mounted) return;
+        if (!idleModeSaved) {
+          setState(() => _curveConfigDirty = true);
+          AnalyticsService().logLightProfileSaveFailed(
+            _selectedProfileId,
+            stage: 'idle_mode',
+          );
+          _showSaveFeedback(
+            targetIdleProfileId == null
+                ? 'Saved ${_profileTitle.toLowerCase()}, but failed to disable custom standby.'
+                : 'Saved ${_profileTitle.toLowerCase()}, but failed to attach standby settings.',
+            error: true,
+          );
+          return;
+        }
+      }
+
+      _profileConfigs[_selectedProfileId] = config;
+      if (idleConfig != null) {
+        _profileConfigs[idleConfig.id] = idleConfig;
+      }
+      if (updatedModeConfigs != null) {
+        _modeConfigs = updatedModeConfigs;
+      }
+      _applyProfileConfig(config);
+      if (idleConfig != null) {
+        _applyIdleConfig(idleConfig);
+      } else {
+        _applyIdleFallback();
+      }
+      await _syncActiveConfigModel(config);
+      await _loadCurveData(profileId: _selectedProfileId);
       if (!mounted) return;
-      if (!idleModeSaved) {
-        setState(() => _curveConfigDirty = true);
-        AnalyticsService().logLightProfileSaveFailed(
-          _selectedProfileId,
-          stage: 'idle_mode',
-        );
-        _showSaveFeedback(
-          targetIdleProfileId == null
-              ? 'Saved ${_profileTitle.toLowerCase()}, but failed to disable custom standby.'
-              : 'Saved ${_profileTitle.toLowerCase()}, but failed to attach standby settings.',
-          error: true,
-        );
-        return;
+      AnalyticsService().logLightProfileSaved(_selectedProfileId);
+    } finally {
+      if (mounted) {
+        setState(() => _isSaving = false);
+      } else {
+        _isSaving = false;
       }
     }
-
-    _profileConfigs[_selectedProfileId] = config;
-    if (idleConfig != null) {
-      _profileConfigs[idleConfig.id] = idleConfig;
-    }
-    if (updatedModeConfigs != null) {
-      _modeConfigs = updatedModeConfigs;
-    }
-    _applyProfileConfig(config);
-    if (idleConfig != null) {
-      _applyIdleConfig(idleConfig);
-    } else {
-      _applyIdleFallback();
-    }
-    await _syncActiveConfigModel(config);
-    await _loadCurveData(profileId: _selectedProfileId);
-    if (!mounted) return;
-    AnalyticsService().logLightProfileSaved(_selectedProfileId);
   }
 
   Widget _buildResetToDefaultsButton() {
@@ -4284,7 +4320,7 @@ class _AdvancedColorEditorScreenState
                           const SizedBox(height: 24),
                         ],
                         _parent._buildTimeSimulator(),
-                        if (_parent._curveConfigDirty) ...[
+                        if (_parent._curveConfigDirty || _parent._isSaving) ...[
                           const SizedBox(height: 24),
                           _parent._buildSaveButton(),
                         ],

@@ -16,6 +16,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   Future<bool> configSet(
     RhythmCurveConfig config, {
     String? id,
+    bool apply = false,
   }) async {
     configSetCalls++;
     return true;

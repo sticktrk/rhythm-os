@@ -11,6 +11,7 @@
 #   --testflight       Build IPA and upload to TestFlight (implies --clean --release --no-run)
 #   --aab              Build AAB for Google Play (implies --android --release --no-run)
 #   --googleplay       Build AAB and upload to Google Play (implies --clean --release --no-run)
+#   --release-all      Run --testflight then --googleplay (ship to both stores)
 #   --setup-android-signing  Generate upload keystore + key.properties for release signing
 #   --dmg              Create DMG for macOS distribution (implies --macos --release --no-run)
 #   --sign             Sign and notarize the DMG (implies --dmg)
@@ -330,6 +331,7 @@ UPLOAD_TESTFLIGHT=false
 SETUP_TESTFLIGHT=false
 UPLOAD_GOOGLEPLAY=false
 SETUP_GOOGLEPLAY=false
+RELEASE_ALL=false
 SETUP_ANDROID_SIGNING=false
 RUN_APP=true
 RUN_CODEGEN=false
@@ -398,6 +400,10 @@ while [[ $# -gt 0 ]]; do
             SETUP_GOOGLEPLAY=true
             shift
             ;;
+        --release-all)
+            RELEASE_ALL=true
+            shift
+            ;;
         --setup-android-signing)
             SETUP_ANDROID_SIGNING=true
             shift
@@ -451,6 +457,32 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# --release-all: ship to TestFlight and Google Play in one go.
+# Re-exec this script for each store so each pipeline gets its own clean,
+# pub-get, codesigning, and platform-specific build-number resolution.
+# Build numbers are resolved per-platform (TestFlight latest+1, Play latest+1)
+# unless an explicit override was passed.
+if [ "$RELEASE_ALL" = true ]; then
+    echo "Release all: TestFlight + Google Play"
+    echo ""
+
+    EXTRA_ARGS=""
+    if [ -n "$BUILD_NUMBER_OVERRIDE" ]; then
+        EXTRA_ARGS="--build-number $BUILD_NUMBER_OVERRIDE"
+    fi
+
+    echo "==> 1/2  TestFlight"
+    "$0" $EXTRA_ARGS --testflight
+
+    echo ""
+    echo "==> 2/2  Google Play"
+    "$0" $EXTRA_ARGS --googleplay
+
+    echo ""
+    echo "Release all complete: shipped to TestFlight + Google Play."
+    exit 0
+fi
 
 # Auto-detect platform
 if [ -z "$PLATFORM" ]; then
