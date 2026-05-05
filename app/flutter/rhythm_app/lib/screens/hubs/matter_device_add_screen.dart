@@ -110,7 +110,8 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
 
   bool get _supportsQrScan {
     if (kIsWeb) return false;
-    return defaultTargetPlatform == TargetPlatform.iOS ||
+    return defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS ||
         defaultTargetPlatform == TargetPlatform.macOS;
   }
 

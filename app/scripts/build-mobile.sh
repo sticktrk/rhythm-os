@@ -983,19 +983,32 @@ else
                     exit 1
                 fi
 
+                run_supply() {
+                    local release_status="$1"
+                    set +e
+                    FASTLANE_DISABLE_COLORS=1 FASTLANE_SKIP_UPDATE_CHECK=1 fastlane supply \
+                        --package_name "$ANDROID_PACKAGE_NAME" \
+                        --json_key "$GOOGLE_PLAY_JSON_KEY_PATH" \
+                        --aab "$AAB_FILE" \
+                        --track "$GOOGLE_PLAY_TRACK" \
+                        --release_status "$release_status" \
+                        --skip_upload_metadata \
+                        --skip_upload_changelogs \
+                        --skip_upload_images \
+                        --skip_upload_screenshots 2>&1 | tee /tmp/rhythm_supply_output.log
+                    supply_status=${PIPESTATUS[0]}
+                    set -e
+                }
+
                 echo "Uploading: $AAB_FILE"
-                set +e
-                FASTLANE_DISABLE_COLORS=1 FASTLANE_SKIP_UPDATE_CHECK=1 fastlane supply \
-                    --package_name "$ANDROID_PACKAGE_NAME" \
-                    --json_key "$GOOGLE_PLAY_JSON_KEY_PATH" \
-                    --aab "$AAB_FILE" \
-                    --track "$GOOGLE_PLAY_TRACK" \
-                    --skip_upload_metadata \
-                    --skip_upload_changelogs \
-                    --skip_upload_images \
-                    --skip_upload_screenshots 2>&1 | tee /tmp/rhythm_supply_output.log
-                supply_status=${PIPESTATUS[0]}
-                set -e
+                run_supply completed
+
+                if [ $supply_status -ne 0 ] && grep -q "Only releases with status draft may be created on draft app" /tmp/rhythm_supply_output.log; then
+                    echo ""
+                    echo "App is still in draft state in Play Console — retrying with release_status=draft..."
+                    echo ""
+                    run_supply draft
+                fi
 
                 if [ $supply_status -ne 0 ]; then
                     if grep -q "Package not found" /tmp/rhythm_supply_output.log; then
@@ -1016,6 +1029,15 @@ else
                     fi
                     rm -f /tmp/rhythm_supply_output.log
                     exit $supply_status
+                fi
+
+                if grep -q "release_status=draft" /tmp/rhythm_supply_output.log 2>/dev/null || \
+                   grep -q "Only releases with status draft" /tmp/rhythm_supply_output.log 2>/dev/null; then
+                    echo ""
+                    echo "Uploaded as a DRAFT release because the app is still in draft state."
+                    echo "Finish app setup in Play Console (data safety, content rating, target"
+                    echo "audience, store listing, countries), then go to Internal testing and"
+                    echo "click Review release → Start rollout."
                 fi
                 rm -f /tmp/rhythm_supply_output.log
 
