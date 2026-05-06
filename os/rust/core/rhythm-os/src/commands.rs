@@ -7506,6 +7506,17 @@ pub fn do_canonical_assign_room(
         .device_parent_room_id(device_id)
         .map(|id| id.to_string())
         .or_else(|| device.room_id.clone());
+    // Pre-mutation effective motion target so we can clear stale motion-timer
+    // state on the room a motion sensor is leaving (and on the new room if
+    // the effective target also changes there).
+    let old_motion_target = if matches!(device_type, DeviceType::Motion) {
+        Some(
+            s.topology
+                .effective_control_target(device_id, &NodeControlKind::Motion),
+        )
+    } else {
+        None
+    };
 
     if let Some(target_room_id) = room_id {
         if s.topology.get(target_room_id).is_none() {
@@ -7576,9 +7587,25 @@ pub fn do_canonical_assign_room(
         sync_endpoint_device_rooms(&mut s, &active_endpoints, room_id);
     }
 
+    let new_motion_target = old_motion_target.as_ref().map(|_| {
+        s.topology
+            .effective_control_target(device_id, &NodeControlKind::Motion)
+    });
+
     persist_canonical(&s);
     persist_topology(&s);
     drop(s);
+
+    if let (Some(old), Some(new)) = (old_motion_target, new_motion_target) {
+        if old != new {
+            if let Some(old_target) = old {
+                queue_motion_timer_clear(state, &old_target);
+            }
+            if let Some(new_target) = new {
+                queue_motion_timer_clear(state, &new_target);
+            }
+        }
+    }
 
     persist_registry(state);
     reconcile_runtime_from_state(state)?;
@@ -13906,6 +13933,113 @@ mod tests {
             .devices_for_room(room_id)
             .iter()
             .any(|d| d == native_id)
+    }
+
+    #[test]
+    fn canonical_assign_room_clears_motion_timer_when_motion_sensor_unassigned() {
+        // Regression for #31: removing a motion sensor from its room must
+        // clear the room's motion-timer state. Otherwise the countdown that
+        // was started by the (now-detached) sensor keeps running and the
+        // room's lights are turned off when it expires.
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+        let room_id = state.lock().unwrap().topology.create_room("Master");
+
+        let identity = crate::canonical::identity::DiscoveredIdentity {
+            native_id: "motion-svc-master".to_string(),
+            room_id: None,
+            room_name: None,
+            name: "Master Motion".to_string(),
+            device_type: DeviceType::Motion,
+            hardware_ids: vec![crate::canonical::identity::HardwareId::mac(
+                "00:17:88:01:0b:c0:f0:01",
+            )],
+            manufacturer: None,
+            model: None,
+        };
+        let canonical_id = {
+            let mut s = state.lock().unwrap();
+            match s.canonical_registry.resolve(&identity, &hub_key, 1000) {
+                crate::canonical::registry::ResolveResult::Created { canonical_id }
+                | crate::canonical::registry::ResolveResult::AlreadyKnown { canonical_id } => {
+                    canonical_id
+                }
+                other => panic!("unexpected resolve result: {:?}", other),
+            }
+        };
+
+        do_canonical_assign_room(&state, &canonical_id, Some(&room_id)).unwrap();
+        // Assignment to the initial room should not enqueue a clear for the
+        // freshly-attached target.
+        state.lock().unwrap().pending_motion_clear.clear();
+
+        do_canonical_assign_room(&state, &canonical_id, None).unwrap();
+
+        let s = state.lock().unwrap();
+        assert_eq!(
+            s.pending_motion_clear,
+            vec![room_id.clone()],
+            "unassigning a motion sensor must queue a motion-timer clear for \
+             the room it was attached to"
+        );
+    }
+
+    #[test]
+    fn canonical_assign_room_clears_motion_timer_for_old_and_new_room_on_move() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+        let old_room = state.lock().unwrap().topology.create_room("Master");
+        let new_room = state.lock().unwrap().topology.create_room("Mud Room");
+
+        let identity = crate::canonical::identity::DiscoveredIdentity {
+            native_id: "motion-svc-move".to_string(),
+            room_id: None,
+            room_name: None,
+            name: "Roving Motion".to_string(),
+            device_type: DeviceType::Motion,
+            hardware_ids: vec![crate::canonical::identity::HardwareId::mac(
+                "00:17:88:01:0b:c0:f0:02",
+            )],
+            manufacturer: None,
+            model: None,
+        };
+        let canonical_id = {
+            let mut s = state.lock().unwrap();
+            match s.canonical_registry.resolve(&identity, &hub_key, 1000) {
+                crate::canonical::registry::ResolveResult::Created { canonical_id }
+                | crate::canonical::registry::ResolveResult::AlreadyKnown { canonical_id } => {
+                    canonical_id
+                }
+                other => panic!("unexpected resolve result: {:?}", other),
+            }
+        };
+
+        do_canonical_assign_room(&state, &canonical_id, Some(&old_room)).unwrap();
+        state.lock().unwrap().pending_motion_clear.clear();
+
+        do_canonical_assign_room(&state, &canonical_id, Some(&new_room)).unwrap();
+
+        let s = state.lock().unwrap();
+        assert_eq!(
+            s.pending_motion_clear,
+            vec![old_room.clone(), new_room.clone()],
+            "moving a motion sensor between rooms must clear timers for both \
+             the old and the new effective targets"
+        );
+    }
+
+    #[test]
+    fn canonical_assign_room_does_not_clear_motion_timer_for_non_motion_devices() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+        let room_id = state.lock().unwrap().topology.create_room("Office");
+        let device_id =
+            insert_canonical_device(&state, hub_key, "matter-light-1", "Desk Lamp", "", "");
+
+        do_canonical_assign_room(&state, &device_id, Some(&room_id)).unwrap();
+        do_canonical_assign_room(&state, &device_id, None).unwrap();
+
+        assert!(
+            state.lock().unwrap().pending_motion_clear.is_empty(),
+            "non-motion devices must not perturb motion-timer state"
+        );
     }
 
     #[test]
