@@ -150,6 +150,8 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
       ({String event, String? hubType, String? address})>.broadcast();
   final _motionTimerController =
       StreamController<RhythmMotionTimer>.broadcast();
+  final _modeChangedController =
+      StreamController<RhythmModeResource>.broadcast();
   final _connectionStateController =
       StreamController<RhythmConnectionState>.broadcast();
 
@@ -167,6 +169,10 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
   @override
   Stream<RhythmMotionTimer> get motionTimerEvents =>
       _motionTimerController.stream;
+
+  @override
+  Stream<RhythmModeResource> get modeChangedEvents =>
+      _modeChangedController.stream;
 
   @override
   Stream<void> get newNodesDetected => const Stream<void>.empty();
@@ -203,12 +209,17 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
     _motionTimerController.add(timer);
   }
 
+  void emitModeChanged(RhythmModeResource mode) {
+    _modeChangedController.add(mode);
+  }
+
   @override
   void dispose() {
     _helloController.close();
     _rhythmStateController.close();
     _hubEventController.close();
     _motionTimerController.close();
+    _modeChangedController.close();
     _connectionStateController.close();
     super.dispose();
   }
@@ -828,6 +839,39 @@ void main() {
       expect(room.kelvin, 2100);
       expect(room.profileSettings?.profileId, 'sleep');
       expect(room.profileSettings?.fadeMs, 1500);
+    });
+
+    test('applies mode_changed updates to active mode for main pills',
+        () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': const <Map<String, dynamic>>[],
+          'mode': {'active': 'day'},
+          'location': const <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.activeMode, RhythmMode.day);
+
+      connection.emitModeChanged(
+        RhythmModeResource.fromJson({
+          'active': 'sleep',
+          'cause': 'manual',
+          'transition_id': 'day_to_sleep',
+          'epoch_ms': 1778058932588,
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.activeMode, RhythmMode.sleep);
     });
 
     test('applies motion timer SSE updates to room provider and hello rooms',

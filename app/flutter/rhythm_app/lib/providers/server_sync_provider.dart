@@ -50,6 +50,7 @@ class ServerSyncProvider extends ChangeNotifier {
       _hubEventSub;
   StreamSubscription<RoomSourceDto>? _sourceChangedSub;
   StreamSubscription<RhythmMotionTimer>? _motionTimerSub;
+  StreamSubscription<RhythmModeResource>? _modeChangedSub;
   StreamSubscription<void>? _newNodesSub;
   StreamSubscription<Map<String, dynamic>>? _triageChangedSub;
   StreamSubscription<RhythmConnectionState>? _connectionStateSub;
@@ -114,6 +115,9 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Active global mode from the server (`day` / `sleep`).
   RhythmMode? _activeMode;
+
+  /// Bumps whenever the server confirms a global mode event.
+  int _modeChangeGeneration = 0;
 
   /// Saved mode transitions from the server.
   List<RhythmModeTransitionConfig> _modeTransitions = const [];
@@ -509,6 +513,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _rhythmStateSub = _connection.rhythmStateEvents.listen(_onRhythmState);
     _hubEventSub = _connection.hubEvents.listen(_onHubEvent);
     _motionTimerSub = _connection.motionTimerEvents.listen(_onMotionTimer);
+    _modeChangedSub = _connection.modeChangedEvents.listen(_onModeChanged);
     _newNodesSub = _connection.newNodesDetected.listen(_onNewNodesDetected);
     _triageChangedSub =
         _connection.triageChangedEvents.listen(_onTriageChanged);
@@ -855,6 +860,19 @@ class ServerSyncProvider extends ChangeNotifier {
     }
   }
 
+  /// Handle global mode changes from SSE so the main Day/Sleep pills update
+  /// without waiting for a settings refresh or paced per-room node_state events.
+  void _onModeChanged(RhythmModeResource mode) {
+    final previous = _activeMode;
+    _activeMode = mode.active;
+    _modeChangeGeneration++;
+    debugPrint(
+        'ServerSync: mode_changed active=${mode.active.wireValue} cause=${mode.lastChange?.cause ?? ''} transition=${mode.lastChange?.transitionId ?? ''}');
+    if (previous != _activeMode) {
+      notifyListeners();
+    }
+  }
+
   /// Handle new nodes detected in poll — trigger a full re-hello.
   void _onNewNodesDetected(void _) {
     debugPrint('ServerSync: New nodes detected in poll — triggering re-hello');
@@ -1152,10 +1170,17 @@ class ServerSyncProvider extends ChangeNotifier {
       return;
     }
     if (!_connection.connected) return;
+    final previous = _activeMode;
+    final modeChangeGeneration = _modeChangeGeneration;
     _activeMode = mode;
     notifyListeners();
-    await api.setActiveMode(mode);
-    await fullRefresh();
+    final success = await api.modeSet(active: mode);
+    if (!success &&
+        _modeChangeGeneration == modeChangeGeneration &&
+        _activeMode == mode) {
+      _activeMode = previous;
+      notifyListeners();
+    }
   }
 
   /// Update a single mode transition on the server.
@@ -1182,9 +1207,23 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Run a saved transition by ID.
   Future<bool> dispatchRunTransition(String transitionId) async {
     if (!_connection.connected) return false;
+    final previous = _activeMode;
+    final modeChangeGeneration = _modeChangeGeneration;
+    final targetMode = _modeTransitions
+        .where((transition) => transition.id == transitionId)
+        .map((transition) => transition.toMode)
+        .firstOrNull;
+    if (targetMode != null && targetMode != _activeMode) {
+      _activeMode = targetMode;
+      notifyListeners();
+    }
     final success = await api.triggerTransition(transitionId);
-    if (success) {
-      await fullRefresh();
+    if (!success &&
+        _modeChangeGeneration == modeChangeGeneration &&
+        targetMode != null &&
+        _activeMode == targetMode) {
+      _activeMode = previous;
+      notifyListeners();
     }
     return success;
   }
@@ -1904,6 +1943,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _hubEventSub?.cancel();
     _sourceChangedSub?.cancel();
     _motionTimerSub?.cancel();
+    _modeChangedSub?.cancel();
     _newNodesSub?.cancel();
     _triageChangedSub?.cancel();
     _connectionStateSub?.cancel();

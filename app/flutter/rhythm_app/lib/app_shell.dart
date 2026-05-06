@@ -210,7 +210,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         currentMode == null ? null : _defaultTransitionIdForMode(mode);
     if (transitionId == null) {
       await serverSync.dispatchSetActiveMode(mode);
-      await _loadData();
       AnalyticsService().logGlobalModeChanged(
         mode.name,
         source: 'all_rooms_toggle',
@@ -220,7 +219,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
     final success = await serverSync.dispatchRunTransition(transitionId);
     if (!success) return;
-    await _loadData();
     AnalyticsService().logGlobalModeChanged(
       mode.name,
       source: 'all_rooms_toggle',
@@ -273,7 +271,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     final ranTransition = await serverSync
         .dispatchRunTransition(_defaultTransitionIdForMode(mode));
     if (ranTransition) {
-      await _loadData();
       if (mounted) HapticFeedback.heavyImpact();
       return;
     }
