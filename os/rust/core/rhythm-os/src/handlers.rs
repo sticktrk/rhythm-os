@@ -1385,8 +1385,9 @@ pub fn handle_put_room_preferences(
     ApiResponse::json_ok(format!(r#"{{"rooms":[{}]}}"#, results.join(",")))
 }
 
-/// Update node preferences. Batch preference changes are queued and paced on
-/// the background dispatch worker when they can trigger live hub commands.
+/// Update node preferences. All preference changes are queued and paced on
+/// the background dispatch worker so HTTP requests return without waiting
+/// for hub commands to complete.
 pub fn handle_put_node_preferences(
     state: &SharedState,
     body: &Value,
@@ -1401,7 +1402,6 @@ pub fn handle_put_node_preferences(
         Err(e) => return ApiResponse::bad_request(&e),
     };
 
-    let batch = items.len() > 1;
     let mut updates = Vec::with_capacity(items.len());
 
     for item in &items {
@@ -1433,46 +1433,23 @@ pub fn handle_put_node_preferences(
         });
     }
 
-    if batch {
-        let node_ids: Vec<String> = updates
-            .iter()
-            .map(|update| update.node_id.clone())
-            .collect();
-        let mut results = Vec::with_capacity(node_ids.len());
-        for node_id in &node_ids {
-            match commands::build_node_state(state, node_id) {
-                Ok(node) => results.push(node),
-                Err(e) => return ApiResponse::server_error(e),
-            }
-        }
-        if let Err(e) =
-            commands::queue_node_preferences_batch(state, updates, persist, dispatch_spacing)
-        {
-            return ApiResponse::server_error(e);
-        }
-        return nodes_response(results, batch, dispatch_spacing);
-    }
-
-    let mut results = Vec::new();
-    for update in updates {
-        if let Err(e) = commands::do_node_preferences_set(
-            state,
-            &update.node_id,
-            update.rhythm_enabled,
-            update.disabled,
-            update.target_state,
-            update.room_profile.as_ref(),
-            persist,
-        ) {
-            return ApiResponse::server_error(e);
-        }
-        match commands::build_node_state(state, &update.node_id) {
+    let node_ids: Vec<String> = updates
+        .iter()
+        .map(|update| update.node_id.clone())
+        .collect();
+    let mut results = Vec::with_capacity(node_ids.len());
+    for node_id in &node_ids {
+        match commands::build_node_state(state, node_id) {
             Ok(node) => results.push(node),
             Err(e) => return ApiResponse::server_error(e),
         }
     }
-
-    nodes_response(results, batch, dispatch_spacing)
+    if let Err(e) =
+        commands::queue_node_preferences_batch(state, updates, persist, dispatch_spacing)
+    {
+        return ApiResponse::server_error(e);
+    }
+    nodes_response(results, true, dispatch_spacing)
 }
 
 pub fn handle_post_sync(state: &SharedState) -> ApiResponse {
@@ -2172,6 +2149,29 @@ mod tests {
         assert_eq!(r.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert_eq!(parsed["queued"], true);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            WorkItem::SetNodePreferences { .. }
+        ));
+    }
+
+    /// Regression test for issue #36: rapid single-item preference taps must
+    /// not block the HTTP handler on hub dispatch. The single-item path was
+    /// previously synchronous, so a slow Matter device could stall up to ~30s
+    /// per request, piling up taps until the iOS app gave up and disconnected.
+    #[test]
+    fn node_preferences_single_item_queues_dispatch() {
+        let state = handler_state_with_runtime();
+        let rx = attach_work_queue(&state);
+        let r = handle_put_node_preferences(
+            &state,
+            &json!({"node_id": "room1", "state": "active"}),
+            false,
+        );
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["queued"], true);
+        assert_eq!(parsed["dispatch_count"], 1);
         assert!(matches!(
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
             WorkItem::SetNodePreferences { .. }
