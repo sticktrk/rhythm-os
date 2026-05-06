@@ -4340,6 +4340,27 @@ fn do_settings_set_internal(
         }
     }
 
+    if mode_changed || force_reapply_outputs {
+        let epoch_ms = state
+            .lock()
+            .ok()
+            .and_then(|s| s.last_active_mode_change_utc_ms)
+            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+        let (cause, transition_id) = mode_change
+            .as_ref()
+            .map(|change| (change.cause, change.transition_id()))
+            .unwrap_or((ModeChangeCause::Manual, None));
+        crate::state::emit_server_event(
+            state,
+            crate::server_event::ServerEvent::ModeChanged {
+                active: selected_mode,
+                cause,
+                transition_id,
+                epoch_ms,
+            },
+        );
+    }
+
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::SettingsChanged);
 
     build_settings(state)
@@ -12357,6 +12378,46 @@ mod tests {
         assert_ne!(s.light_dispatch_generation, previous_generation);
         assert!(s.pending_periodic_ticks.is_empty());
         assert!(s.next_node_dispatch_at.is_none());
+    }
+
+    #[test]
+    fn active_mode_change_emits_mode_changed_sse_event() {
+        // Regression for issue #32: SettingsChanged carries no payload, so
+        // clients that don't refetch /api/mode never learn the new mode until
+        // the paced per-room ApplyNodeCommand events trickle in (~30s for a
+        // typical 11-room home). Mode flips must broadcast a self-describing
+        // ModeChanged event with the new mode so the displayed mode updates
+        // immediately over SSE.
+        let (state, _rt) = setup_state(vec![]);
+        let (event_tx, mut event_rx) =
+            tokio::sync::broadcast::channel::<crate::server_event::ServerEvent>(16);
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Day;
+            s.event_tx = Some(event_tx);
+        }
+
+        do_set_active_mode(&state, RhythmMode::Sleep).unwrap();
+
+        let mut mode_changed = None;
+        while let Ok(event) = event_rx.try_recv() {
+            if let crate::server_event::ServerEvent::ModeChanged {
+                active,
+                cause,
+                transition_id,
+                epoch_ms,
+            } = event
+            {
+                mode_changed = Some((active, cause, transition_id, epoch_ms));
+                break;
+            }
+        }
+        let (active, cause, transition_id, epoch_ms) =
+            mode_changed.expect("expected ModeChanged SSE event after manual mode flip");
+        assert_eq!(active, RhythmMode::Sleep);
+        assert_eq!(cause, ModeChangeCause::Manual);
+        assert!(transition_id.is_none());
+        assert!(epoch_ms > 0, "expected non-zero last-change epoch_ms");
     }
 
     #[test]

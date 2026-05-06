@@ -655,6 +655,7 @@ async fn sse_events(
                     ServerEvent::MotionTimer { .. } => "motion_timer",
                     ServerEvent::HubStatus { .. } => "hub_status",
                     ServerEvent::SettingsChanged => "settings_changed",
+                    ServerEvent::ModeChanged { .. } => "mode_changed",
                     ServerEvent::ConfigChanged => "config_changed",
                     ServerEvent::NodesChanged => "nodes_changed",
                     ServerEvent::TriageChanged { .. } => "triage_changed",

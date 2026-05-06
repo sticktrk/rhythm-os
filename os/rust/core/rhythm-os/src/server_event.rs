@@ -5,7 +5,7 @@
 
 use serde::Serialize;
 
-use rhythm_core::{NodeSnapshot, RhythmMode, RoomModeState, RoomProfileSettings};
+use rhythm_core::{ModeChangeCause, NodeSnapshot, RhythmMode, RoomModeState, RoomProfileSettings};
 
 use crate::api_types::ObservedPowerDto;
 use crate::state::MotionSnapshot;
@@ -30,6 +30,16 @@ pub enum ServerEvent {
     },
     /// Settings changed (client should refetch).
     SettingsChanged,
+    /// Active mode flipped — carries the new mode + last_change metadata so
+    /// clients can update the displayed mode without an HTTP roundtrip and
+    /// without waiting for the paced per-node `NodeState` events that follow.
+    ModeChanged {
+        active: RhythmMode,
+        cause: ModeChangeCause,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        transition_id: Option<String>,
+        epoch_ms: i64,
+    },
     /// Curve config changed (client should refetch).
     ConfigChanged,
     /// Topology graph changed (client should re-hello).
