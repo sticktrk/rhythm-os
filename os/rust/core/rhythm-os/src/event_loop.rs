@@ -1609,6 +1609,9 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                 return;
             }
 
+            crate::commands::update_lights_on_cache_for_runtime_node(
+                state, &runtime, &node_id, true,
+            );
             crate::commands::emit_node_state_event_after_apply(state, &runtime, &node_id);
         }
         WorkItem::PeriodicNodeTick {

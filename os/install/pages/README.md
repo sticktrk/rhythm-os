@@ -45,8 +45,9 @@ GitHub repo via the dashboard. One-time setup:
 
 The CI workflow (`.github/workflows/ci.yml`, job `update-latest-pointer`)
 publishes the current tag to `https://dl.rhythm.lighting/server/install/latest.txt`
-after all release artifacts have uploaded. `install/pages/latest.txt` remains
-as a Cloudflare Pages fallback and should not drive normal releases.
+after all release artifacts have uploaded, then prunes old `v*` directories so
+the server repo keeps the latest five releases. `install/pages/latest.txt`
+remains as a Cloudflare Pages fallback and should not drive normal releases.
 
 ## Reading install counts
 

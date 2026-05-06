@@ -807,14 +807,32 @@ fn lights_on_from_observed_cache(
     parent_id: Option<&str>,
     semantic_override: Option<bool>,
 ) -> bool {
+    observed_lights_on_from_cache(
+        s,
+        room_observed_power,
+        node_id,
+        kind,
+        parent_id,
+        semantic_override,
+    )
+    .unwrap_or(false)
+}
+
+fn observed_lights_on_from_cache(
+    s: &AppState,
+    room_observed_power: &HashMap<String, ObservedPowerState>,
+    node_id: &str,
+    kind: LightNodeKind,
+    parent_id: Option<&str>,
+    semantic_override: Option<bool>,
+) -> Option<bool> {
     if let Some(lights_on) = semantic_override {
-        return lights_on;
+        return Some(lights_on);
     }
 
     room_observed_power
         .get(effective_lights_on_cache_key(s, node_id, kind, parent_id))
         .map(|observed| observed.lights_on)
-        .unwrap_or(false)
 }
 
 fn update_lights_on_cache_for_node_with_source(
@@ -1015,7 +1033,7 @@ pub(crate) fn refresh_all_lights_on_cache_for_runtime(
     runtime: &Arc<dyn RuntimeHandle>,
     source: ObservedPowerSource,
 ) -> Vec<rhythm_core::RoomSnapshot> {
-    let snapshots = runtime.engine_all_room_snapshots();
+    let snapshots = addressable_root_snapshots(runtime);
     if snapshots.is_empty() {
         return snapshots;
     }
@@ -3431,6 +3449,7 @@ fn apply_room_commands_inline(
             warn!(target: "cmd", "active_mode_apply: room '{}' failed: {}", room_id, e);
             continue;
         }
+        update_lights_on_cache_for_runtime_node(state, runtime, &room_id, true);
         emit_node_state_event_after_apply(state, runtime, &room_id);
         if idx + 1 < room_count && !phase_gap.is_zero() {
             std::thread::sleep(phase_gap);
@@ -3793,14 +3812,12 @@ fn resolve_room_command_for_state_at_from_parts(
     ))
 }
 
-/// Snapshots every addressable settings node — rooms plus standalone light
+/// Snapshots every addressable settings node: rooms plus standalone light
 /// devices (e.g. a roomless Matter bulb). The mode-apply path used to consult
 /// `engine_all_room_snapshots`, which filters to `kind.is_room()` in production
 /// and therefore silently skipped standalone devices, so manual transitions and
 /// mode-config edits only reached them on the next periodic tick.
-fn addressable_root_snapshots(
-    runtime: &Arc<dyn RuntimeHandle>,
-) -> Vec<rhythm_core::RoomSnapshot> {
+fn addressable_root_snapshots(runtime: &Arc<dyn RuntimeHandle>) -> Vec<rhythm_core::RoomSnapshot> {
     runtime
         .engine_all_effective_node_snapshots()
         .into_iter()
@@ -3947,7 +3964,7 @@ fn apply_active_mode_outputs(
             RoomModeState::HardOff => false,
             RoomModeState::Active | RoomModeState::Wake | RoomModeState::Warning => {
                 state.lock().ok().is_some_and(|s| {
-                    lights_on_from_observed_cache(
+                    observed_lights_on_from_cache(
                         &s,
                         &room_observed_power,
                         &snap.id,
@@ -3955,6 +3972,7 @@ fn apply_active_mode_outputs(
                         snap.parent_id.as_deref(),
                         semantic_lights_on_override(snap.hard_off, snap.soft_off),
                     )
+                    .unwrap_or(true)
                 })
             }
         };
@@ -5838,7 +5856,16 @@ pub(crate) fn resolved_motion_timeout_map(
 // ============================================================================
 
 /// Update a light profile config, push it to the runtime, and persist it.
-pub fn do_config_set(state: &SharedState, mut config: LightProfileConfig) -> Result<()> {
+pub fn do_config_set(state: &SharedState, config: LightProfileConfig) -> Result<()> {
+    do_config_set_with_options(state, config, false)
+}
+
+/// Update a light profile config, optionally reapplying active-mode outputs.
+pub fn do_config_set_with_options(
+    state: &SharedState,
+    mut config: LightProfileConfig,
+    apply_active_outputs: bool,
+) -> Result<()> {
     rhythm_core::normalize_builtin_state_profile_config(&mut config);
 
     let curve_desc = match &config.curve {
@@ -5877,23 +5904,56 @@ pub fn do_config_set(state: &SharedState, mut config: LightProfileConfig) -> Res
         config.rhythm_interval_secs,
     );
 
-    let runtime = {
+    let (runtime, should_apply_outputs, active_mode, dispatch_generation) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         if !s.light_profile_configs.contains_key(&config.id) {
             return Err(anyhow::anyhow!("Unknown light profile: {}", config.id));
         }
+        let updates_active_profile = config.id == s.active_mode_profile_id();
         s.set_light_profile_config(config.clone());
-        if config.id == s.active_mode_profile_id() {
+        if updates_active_profile {
             s.sync_active_mode_runtime_overrides();
         }
+        let should_apply_outputs = apply_active_outputs && updates_active_profile;
+        let dispatch_generation = if should_apply_outputs {
+            let dispatch_generation = s.invalidate_queued_light_dispatches();
+            tracing::debug!(
+                target: "cmd",
+                event = "queued_light_dispatches_invalidated",
+                active_mode = ?s.active_mode,
+                profile_id = %config.id,
+                dispatch_generation,
+                "Invalidated queued generated light dispatches for active config apply"
+            );
+            dispatch_generation
+        } else {
+            s.light_dispatch_generation
+        };
+        let active_mode = s.active_mode;
         persist_light_profiles_locked(&s);
-        s.hub_runtime()
+        (
+            s.hub_runtime(),
+            should_apply_outputs,
+            active_mode,
+            dispatch_generation,
+        )
     };
 
-    if let Some(runtime) = runtime {
-        if let Err(e) = runtime.set_light_profile_config(config) {
+    if let Some(runtime) = runtime.as_ref() {
+        if let Err(e) = runtime.set_light_profile_config(config.clone()) {
             warn!(target: "cmd", "Failed to update runtime light profile config: {}", e);
         }
+    }
+
+    if should_apply_outputs {
+        apply_active_mode_outputs(
+            state,
+            active_mode,
+            active_mode,
+            None,
+            ModeOutputApplyScope::all_visible(),
+            dispatch_generation,
+        );
     }
 
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
@@ -12204,6 +12264,65 @@ mod tests {
             state.lock().unwrap().runtime_config.update_interval_secs,
             17
         );
+    }
+
+    #[test]
+    fn active_profile_config_apply_reapplies_current_outputs() {
+        let (state, runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
+        let mut rhythm = rhythm_core::default_rhythm_profile();
+        rhythm.max_brightness = 33;
+
+        do_config_set_with_options(&state, rhythm, true).unwrap();
+
+        let applied = runtime.applied_commands();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].0, "r1");
+        assert!(
+            applied[0].1.brightness <= 33,
+            "reapplied command should use updated active profile, got {}",
+            applied[0].1.brightness
+        );
+        assert_eq!(observed_lights_on(&state.lock().unwrap(), "r1"), Some(true));
+    }
+
+    #[test]
+    fn active_profile_config_save_without_apply_does_not_dispatch() {
+        let (state, runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
+        let mut rhythm = rhythm_core::default_rhythm_profile();
+        rhythm.max_brightness = 33;
+
+        do_config_set_with_options(&state, rhythm, false).unwrap();
+
+        assert!(runtime.applied_commands().is_empty());
+        assert_eq!(observed_lights_on(&state.lock().unwrap(), "r1"), None);
+    }
+
+    #[test]
+    fn active_profile_config_apply_preserves_known_off_nodes() {
+        let (state, runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
+        set_observed_lights_on(&state, "r1", false);
+        let mut rhythm = rhythm_core::default_rhythm_profile();
+        rhythm.max_brightness = 33;
+
+        do_config_set_with_options(&state, rhythm, true).unwrap();
+
+        assert!(runtime.applied_commands().is_empty());
+        assert_eq!(
+            observed_lights_on(&state.lock().unwrap(), "r1"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn inactive_profile_config_apply_does_not_dispatch() {
+        let (state, runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
+        let mut sleep = rhythm_core::default_sleep_profile();
+        sleep.max_brightness = 9;
+
+        do_config_set_with_options(&state, sleep, true).unwrap();
+
+        assert!(runtime.applied_commands().is_empty());
+        assert_eq!(observed_lights_on(&state.lock().unwrap(), "r1"), None);
     }
 
     #[test]

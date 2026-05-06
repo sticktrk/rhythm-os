@@ -629,6 +629,15 @@ pub fn handle_put_config(
     profile_id: Option<&str>,
     body: &Value,
 ) -> ApiResponse {
+    handle_put_config_with_options(state, profile_id, body, false)
+}
+
+pub fn handle_put_config_with_options(
+    state: &SharedState,
+    profile_id: Option<&str>,
+    body: &Value,
+    apply_outputs: bool,
+) -> ApiResponse {
     let mut config: rhythm_core::LightProfileConfig = match serde_json::from_value(body.clone()) {
         Ok(c) => c,
         Err(e) => return ApiResponse::bad_request(&format!("Invalid config: {}", e)),
@@ -636,7 +645,7 @@ pub fn handle_put_config(
     if let Some(id) = profile_id {
         config.id = id.to_string();
     }
-    match commands::do_config_set(state, config) {
+    match commands::do_config_set_with_options(state, config, apply_outputs) {
         Ok(()) => ApiResponse::no_content(),
         Err(e) => ApiResponse::server_error(e),
     }

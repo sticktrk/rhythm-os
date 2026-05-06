@@ -24,6 +24,7 @@ SKIP_BUILDER_REFRESH=false
 MESSAGE=""
 WORKSPACE_VERSION_FILES=("Cargo.toml" "install/rpiz/builder-image.lock")
 BUILDER_LOCK_FILE="install/rpiz/builder-image.lock"
+SERVER_RELEASES_TO_KEEP=5
 
 usage() {
     cat <<EOF
@@ -311,6 +312,21 @@ setup_upload_ssh() {
     ssh-keyscan -H "$RHYTHM_UPDATES_SSH_HOST" > "$known_hosts_path"
 }
 
+prune_uploaded_server_releases() {
+    local ssh_key_path="$TEMP_RELEASE_DIR/id_ed25519"
+    local known_hosts_path="$TEMP_RELEASE_DIR/known_hosts"
+    local remote_base_dir
+
+    printf -v remote_base_dir '%q' "$RHYTHM_UPDATES_BASE_DIR"
+
+    echo ""
+    echo "=== Pruning old server releases ==="
+    ssh -i "$ssh_key_path" -o UserKnownHostsFile="$known_hosts_path" \
+        "$RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST" \
+        "bash -s -- --base-dir $remote_base_dir --keep $SERVER_RELEASES_TO_KEEP" \
+        < "$SCRIPT_DIR/prune-server-releases.sh"
+}
+
 upload_rpiz_feed() {
     local version="$1"
     local artifact_root="$TEMP_RELEASE_DIR/dist/bin"
@@ -356,6 +372,8 @@ upload_rpiz_feed() {
     scp -i "$ssh_key_path" -o UserKnownHostsFile="$known_hosts_path" -r \
         "$output_dir/." \
         "$RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST:$RHYTHM_UPDATES_BASE_DIR/"
+
+    prune_uploaded_server_releases
 
     echo ""
     echo "Uploaded rpiz OTA feed for $version to $RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST:$RHYTHM_UPDATES_BASE_DIR"
@@ -489,6 +507,7 @@ fi
 echo "  rpiz sd image: binary-only (run rpiz-sd-image.yml manually for a full SD-card rebuild)"
 if [ "$UPLOAD" = true ]; then
     echo "  Upload: rpiz OTA feed -> $RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST:$RHYTHM_UPDATES_BASE_DIR"
+    echo "  Retention: keep the latest $SERVER_RELEASES_TO_KEEP server release(s)"
 fi
 echo ""
 
@@ -505,6 +524,7 @@ if [ "$DRY_RUN" = true ]; then
         echo "[dry-run] Would build rpiz release binary: ./scripts/build-server.sh --release --target rpiz"
         echo "[dry-run] Would package rpiz OTA feed from a temporary artifact root"
         echo "[dry-run] Would upload OTA feed to $RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST:$RHYTHM_UPDATES_BASE_DIR"
+        echo "[dry-run] Would prune old server releases, keeping the latest $SERVER_RELEASES_TO_KEEP per release root"
         echo "[dry-run] Would not push branch or tag in --upload mode"
     elif [ "$PUSH" = true ]; then
         echo "[dry-run] Would push branch: git push $REMOTE HEAD:refs/heads/$CURRENT_BRANCH"

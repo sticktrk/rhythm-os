@@ -228,7 +228,8 @@ upload the OTA feed directly instead of going through GitHub Actions.
 - Creates the release commit automatically when those version files change.
 - Pushes the current branch and the new tag to `origin` by default.
 - The GitHub Actions CI workflow turns that tag into the GitHub release with the rpiz OTA tarball.
-- `--upload` is local-only for now: it loads `.env`, builds only `rpiz`, packages only the `rpiz` OTA feed, uploads it over SSH, and leaves the branch/tag unpushed.
+- After a CDN publish, the server repo keeps only the latest five `v*` release directories per release root (`install/`, `rpiz/`, and the desktop target roots).
+- `--upload` is local-only for now: it loads `.env`, builds only `rpiz`, packages only the `rpiz` OTA feed, uploads it over SSH, prunes old server releases, and leaves the branch/tag unpushed.
 - `--upload` accepts either `RHYTHM_UPDATES_SSH_KEY_FILE` or `RHYTHM_UPDATES_SSH_KEY` for the SSH key material.
 
 ### Versioning

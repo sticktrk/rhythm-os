@@ -260,7 +260,16 @@ async fn put_config(
     Query(params): Query<HashMap<String, String>>,
     Json(body): Json<Value>,
 ) -> ApiResponse {
-    handlers::handle_put_config(&state, params.get("id").map(|s| s.as_str()), &body)
+    let apply_outputs = params
+        .get("apply")
+        .and_then(|value| value.parse::<bool>().ok())
+        .unwrap_or(false);
+    handlers::handle_put_config_with_options(
+        &state,
+        params.get("id").map(|s| s.as_str()),
+        &body,
+        apply_outputs,
+    )
 }
 
 async fn absorb_time_offset(
@@ -761,6 +770,7 @@ mod tests {
             _: &str,
             _: rhythm_core::LightingCommand,
         ) -> anyhow::Result<()> {
+            self.record("apply_room_command");
             Ok(())
         }
 
@@ -1012,6 +1022,57 @@ mod tests {
                 .unwrap()
                 .min_brightness,
             factory_rhythm[rhythm_core::RHYTHM_PROFILE_ID].min_brightness
+        );
+    }
+
+    #[tokio::test]
+    async fn put_config_apply_true_reapplies_active_profile() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(ThreadRecordingRuntime {
+            calls: calls.clone(),
+            snapshots: vec![RoomSnapshot {
+                id: "room1".into(),
+                name: "Room 1".into(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                hard_off: false,
+                profile_settings: rhythm_core::RoomProfileSettings::default(),
+            }],
+            current_hour: 12.0,
+        });
+        let state = test_state_with_runtime(runtime, &[]);
+        let app = api_routes().with_state(state);
+
+        let status = call_json_route(
+            app,
+            HttpMethod::PUT,
+            "/api/config?id=rhythm&apply=true",
+            json!({
+                "id": "rhythm",
+                "name": "Day",
+                "curve": { "type": "super-gaussian" },
+                "min_brightness": 8,
+                "max_brightness": 33,
+                "min_color_temp": 1000,
+                "max_color_temp": 3000,
+                "max_dim_steps": 4
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let calls = calls.lock().unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.starts_with("apply_room_command@")),
+            "expected apply_room_command call, saw {:?}",
+            *calls
         );
     }
 
