@@ -192,6 +192,16 @@ where
         Ok(())
     }
 
+    /// Clear the sun times on the engine so it falls back to built-in defaults.
+    pub fn clear_sun_times(&self) -> RuntimeResult<()> {
+        let mut engine = self
+            .engine
+            .write()
+            .map_err(|e| RuntimeError::Internal(format!("Failed to lock engine: {}", e)))?;
+        engine.clear_sun_times();
+        Ok(())
+    }
+
     /// Handle an input event.
     ///
     /// This routes the event to the appropriate RhythmEngine primitive.

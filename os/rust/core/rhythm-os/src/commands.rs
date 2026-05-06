@@ -2907,7 +2907,7 @@ fn restore_backup_location(state: &SharedState, location: Option<StoredLocation>
     };
     let location_to_apply = location.unwrap_or(cleared_location);
 
-    let (runtime, solar_noon, latitude, utc_offset_hours, timezone_name) = {
+    let (runtime, solar_noon, latitude, longitude, utc_offset_hours, timezone_name) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let mut latitude = s.latitude;
         let mut longitude = s.longitude;
@@ -2938,6 +2938,7 @@ fn restore_backup_location(state: &SharedState, location: Option<StoredLocation>
             s.hub_runtime(),
             s.runtime_config.solar_noon_hour,
             s.latitude,
+            s.longitude,
             s.utc_offset_hours,
             s.timezone_name.clone(),
         )
@@ -2961,6 +2962,24 @@ fn restore_backup_location(state: &SharedState, location: Option<StoredLocation>
             day_of_year,
         )) {
             warn!(target: "cmd", "Failed to apply restored solar location: {}", e);
+        }
+        if let (Some(lat), Some(lon), Some(tz_name)) =
+            (latitude, longitude, timezone_name.as_deref())
+        {
+            let tz = rhythm_core::Timezone::new(tz_name);
+            let sun_times = rhythm_core::calculate_sun_times(
+                lat,
+                lon,
+                local_now.date().year(),
+                local_now.date().month(),
+                local_now.date().day(),
+                &tz,
+            );
+            if let Err(e) = runtime.set_sun_times(sun_times) {
+                warn!(target: "cmd", "Failed to apply restored sun times: {}", e);
+            }
+        } else if let Err(e) = runtime.clear_sun_times() {
+            warn!(target: "cmd", "Failed to clear restored sun times: {}", e);
         }
     }
 
@@ -6148,7 +6167,7 @@ pub fn do_location_set(
 
         // Compute solar noon: prefer timezone-aware calculation
         let now = chrono::Utc::now().naive_utc();
-        let (solar_noon, day_of_year) = if let Some(ref tz_name) = timezone_name {
+        let (solar_noon, day_of_year, sun_times) = if let Some(ref tz_name) = timezone_name {
             let tz = rhythm_core::Timezone::new(tz_name);
             let local_now = tz.local_datetime_from_utc(now);
             let (year, month, day) = (
@@ -6162,6 +6181,9 @@ pub fn do_location_set(
             (
                 rhythm_core::calculate_solar_noon(lon, year, month, day, &tz),
                 day_of_year,
+                Some(rhythm_core::calculate_sun_times(
+                    lat, lon, year, month, day, &tz,
+                )),
             )
         } else {
             let local_now = current_local_datetime(s.utc_offset_hours);
@@ -6173,6 +6195,7 @@ pub fn do_location_set(
             (
                 rhythm_core::calculate_solar_noon_from_offset(lon, s.utc_offset_hours, day_of_year),
                 day_of_year,
+                None,
             )
         };
         s.runtime_config.solar_noon_hour = solar_noon;
@@ -6186,6 +6209,13 @@ pub fn do_location_set(
             let solar_time = rhythm_core::SolarTime::new(solar_noon, lat, day_of_year);
             if let Err(e) = runtime.set_solar(solar_time) {
                 warn!(target: "cmd", "Failed to update solar time: {}", e);
+            }
+            if let Some(sun_times) = sun_times {
+                if let Err(e) = runtime.set_sun_times(sun_times) {
+                    warn!(target: "cmd", "Failed to update sun times: {}", e);
+                }
+            } else if let Err(e) = runtime.clear_sun_times() {
+                warn!(target: "cmd", "Failed to clear sun times: {}", e);
             }
         }
 
@@ -8588,6 +8618,7 @@ mod tests {
         config_updates: Mutex<Vec<LightProfileConfig>>,
         restore_calls: Mutex<Vec<(String, bool, bool)>>,
         time_offset_updates: Mutex<Vec<(String, f32)>>,
+        sun_times_updates: Mutex<Vec<Option<rhythm_core::SunTimes>>>,
         light_states: Mutex<HashMap<String, bool>>,
         current_hour: f32,
     }
@@ -8603,6 +8634,7 @@ mod tests {
                 config_updates: Mutex::new(Vec::new()),
                 restore_calls: Mutex::new(Vec::new()),
                 time_offset_updates: Mutex::new(Vec::new()),
+                sun_times_updates: Mutex::new(Vec::new()),
                 light_states: Mutex::new(HashMap::new()),
                 current_hour,
             }
@@ -8683,6 +8715,10 @@ mod tests {
         fn time_offset_updates(&self) -> Vec<(String, f32)> {
             self.time_offset_updates.lock().unwrap().clone()
         }
+
+        fn sun_times_updates(&self) -> Vec<Option<rhythm_core::SunTimes>> {
+            self.sun_times_updates.lock().unwrap().clone()
+        }
     }
 
     impl RuntimeHandle for MockRuntime {
@@ -8703,6 +8739,14 @@ mod tests {
             Ok(())
         }
         fn set_solar(&self, _: rhythm_core::SolarTime) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn set_sun_times(&self, sun_times: rhythm_core::SunTimes) -> anyhow::Result<()> {
+            self.sun_times_updates.lock().unwrap().push(Some(sun_times));
+            Ok(())
+        }
+        fn clear_sun_times(&self) -> anyhow::Result<()> {
+            self.sun_times_updates.lock().unwrap().push(None);
             Ok(())
         }
         fn set_light_profile_config(&self, config: LightProfileConfig) -> anyhow::Result<()> {
@@ -8962,6 +9006,42 @@ mod tests {
         drop(app);
 
         (state, runtime)
+    }
+
+    #[test]
+    fn location_set_pushes_sun_times_to_runtime() {
+        let (state, runtime) = setup_state(Vec::new());
+
+        do_location_set(
+            &state,
+            40.7128,
+            -74.0060,
+            None,
+            Some("America/New_York".into()),
+        )
+        .unwrap();
+
+        let updates = runtime.sun_times_updates();
+        let sun_times = updates
+            .last()
+            .and_then(|update| *update)
+            .expect("location_set should push computed sun times to runtime");
+
+        assert!(
+            (0.0..24.0).contains(&sun_times.sunrise),
+            "sunrise should be a local hour, got {}",
+            sun_times.sunrise
+        );
+        assert!(
+            (0.0..24.0).contains(&sun_times.sunset),
+            "sunset should be a local hour, got {}",
+            sun_times.sunset
+        );
+        assert!(
+            sun_times.day_length > 0.0,
+            "day length should be positive, got {}",
+            sun_times.day_length
+        );
     }
 
     fn setup_state_with_deferred_runtime() -> (SharedState, Arc<MockRuntime>, HubKey) {

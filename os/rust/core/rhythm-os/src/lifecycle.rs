@@ -220,17 +220,19 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
     // Calculate solar noon — prefer timezone-aware when IANA name is available
     let lat = latitude.unwrap_or(35.22);
     let lon = longitude.unwrap_or(-80.84);
-    let (utc_offset, solar_noon, day_of_year) = if let Some(ref tz_name) = timezone_name {
+    let (utc_offset, solar_noon, day_of_year, sun_times) = if let Some(ref tz_name) = timezone_name
+    {
         let tz = rhythm_core::Timezone::new(tz_name);
         let (year, month, day, hour) = tz.local_date_hour_from_utc(chrono::Utc::now().naive_utc());
         let fresh_offset = tz.utc_offset(year, month, day, hour);
         let noon = rhythm_core::calculate_solar_noon(lon, year, month, day, &tz);
+        let sun_times = rhythm_core::calculate_sun_times(lat, lon, year, month, day, &tz);
         let doy = rhythm_core::timezone::day_of_year(year, month, day);
-        (fresh_offset, noon, doy)
+        (fresh_offset, noon, doy, Some(sun_times))
     } else {
         let day_of_year = SystemTimeProvider::new(utc_offset).day_of_year();
         let noon = rhythm_core::calculate_solar_noon_from_offset(lon, utc_offset, day_of_year);
-        (utc_offset, noon, day_of_year)
+        (utc_offset, noon, day_of_year, None)
     };
     let time_provider = SystemTimeProvider::new(utc_offset);
 
@@ -286,6 +288,11 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
     runtime
         .set_solar(solar_time)
         .map_err(|e| anyhow::anyhow!("Failed to set solar: {}", e))?;
+    if let Some(sun_times) = sun_times {
+        runtime
+            .set_sun_times(sun_times)
+            .map_err(|e| anyhow::anyhow!("Failed to set sun times: {}", e))?;
+    }
     for profile in light_profiles {
         runtime
             .set_light_profile_config(profile)
@@ -595,17 +602,19 @@ pub fn ensure_composite_runtime(
     // Calculate solar noon
     let lat = latitude.unwrap_or(35.22);
     let lon = longitude.unwrap_or(-80.84);
-    let (utc_offset, solar_noon, day_of_year) = if let Some(ref tz_name) = timezone_name {
+    let (utc_offset, solar_noon, day_of_year, sun_times) = if let Some(ref tz_name) = timezone_name
+    {
         let tz = rhythm_core::Timezone::new(tz_name);
         let (year, month, day, hour) = tz.local_date_hour_from_utc(chrono::Utc::now().naive_utc());
         let fresh_offset = tz.utc_offset(year, month, day, hour);
         let noon = rhythm_core::calculate_solar_noon(lon, year, month, day, &tz);
+        let sun_times = rhythm_core::calculate_sun_times(lat, lon, year, month, day, &tz);
         let doy = rhythm_core::timezone::day_of_year(year, month, day);
-        (fresh_offset, noon, doy)
+        (fresh_offset, noon, doy, Some(sun_times))
     } else {
         let day_of_year = SystemTimeProvider::new(utc_offset).day_of_year();
         let noon = rhythm_core::calculate_solar_noon_from_offset(lon, utc_offset, day_of_year);
-        (utc_offset, noon, day_of_year)
+        (utc_offset, noon, day_of_year, None)
     };
     let time_provider = SystemTimeProvider::new(utc_offset);
 
@@ -644,6 +653,11 @@ pub fn ensure_composite_runtime(
     runtime
         .set_solar(solar_time)
         .map_err(|e| anyhow::anyhow!("set solar: {}", e))?;
+    if let Some(sun_times) = sun_times {
+        runtime
+            .set_sun_times(sun_times)
+            .map_err(|e| anyhow::anyhow!("set sun times: {}", e))?;
+    }
     for profile in light_profiles {
         runtime
             .set_light_profile_config(profile)

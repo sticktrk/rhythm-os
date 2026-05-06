@@ -626,6 +626,14 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             doy,
             timezone_name.as_deref(),
         );
+        let (solar_noon, _doy, _sun_times) = refresh_runtime_solar_context(
+            &state,
+            solar_noon,
+            lat,
+            lon,
+            utc_offset,
+            timezone_name.as_deref(),
+        );
 
         let time_provider = SystemTimeProvider::new(utc_offset);
         let current_hour = time_provider.current_hour();
@@ -1609,6 +1617,7 @@ pub fn refresh_dst_offset(
     );
 
     let fresh_solar_noon = rhythm_core::calculate_solar_noon(lon, year, month, day, &tz);
+    let fresh_sun_times = rhythm_core::calculate_sun_times(lat, lon, year, month, day, &tz);
     let fresh_doy = rhythm_core::timezone::day_of_year(year, month, day);
 
     // Update state, engine, and persist
@@ -1624,6 +1633,9 @@ pub fn refresh_dst_offset(
             let solar_time = rhythm_core::SolarTime::new(fresh_solar_noon, lat, fresh_doy);
             if let Err(e) = runtime.set_solar(solar_time) {
                 warn!("Failed to update solar time after DST change: {}", e);
+            }
+            if let Err(e) = runtime.set_sun_times(fresh_sun_times) {
+                warn!("Failed to update sun times after DST change: {}", e);
             }
         }
 
@@ -1643,6 +1655,66 @@ pub fn refresh_dst_offset(
     }
 
     (fresh_offset, fresh_solar_noon, fresh_doy)
+}
+
+/// Refresh the runtime's date-specific solar context.
+///
+/// Solar noon, sunrise, and sunset drift every day. The periodic loop keeps the
+/// engine's stored context current so actual room ticks use the same solar data
+/// as API/rendering paths.
+pub fn refresh_runtime_solar_context(
+    state: &SharedState,
+    current_solar_noon: f32,
+    lat: f32,
+    lon: f32,
+    utc_offset: f32,
+    timezone_name: Option<&str>,
+) -> (f32, u32, Option<rhythm_core::SunTimes>) {
+    let Some(tz_name) = timezone_name else {
+        let day_of_year = SystemTimeProvider::new(utc_offset).day_of_year();
+        let runtime = state.lock().ok().and_then(|s| s.hub_runtime());
+        if let Some(runtime) = runtime {
+            let solar_time = rhythm_core::SolarTime::new(current_solar_noon, lat, day_of_year);
+            if let Err(e) = runtime.set_solar(solar_time) {
+                warn!("Failed to refresh fallback solar time: {}", e);
+            }
+            if let Err(e) = runtime.clear_sun_times() {
+                warn!("Failed to clear fallback sun times: {}", e);
+            }
+        }
+        return (current_solar_noon, day_of_year, None);
+    };
+
+    let tz = rhythm_core::Timezone::new(tz_name);
+    let local_now = tz.local_datetime_from_utc(chrono::Utc::now().naive_utc());
+    let year = chrono::Datelike::year(&local_now.date());
+    let month = chrono::Datelike::month(&local_now.date());
+    let day = chrono::Datelike::day(&local_now.date());
+    let day_of_year = rhythm_core::timezone::day_of_year(year, month, day);
+    let solar_noon = rhythm_core::calculate_solar_noon(lon, year, month, day, &tz);
+    let sun_times = rhythm_core::calculate_sun_times(lat, lon, year, month, day, &tz);
+
+    let runtime = {
+        let Ok(mut s) = state.lock() else {
+            return (solar_noon, day_of_year, Some(sun_times));
+        };
+        if (s.runtime_config.solar_noon_hour - solar_noon).abs() > 0.001 {
+            s.runtime_config.solar_noon_hour = solar_noon;
+        }
+        s.hub_runtime()
+    };
+
+    if let Some(runtime) = runtime {
+        let solar_time = rhythm_core::SolarTime::new(solar_noon, lat, day_of_year);
+        if let Err(e) = runtime.set_solar(solar_time) {
+            warn!("Failed to refresh solar time: {}", e);
+        }
+        if let Err(e) = runtime.set_sun_times(sun_times) {
+            warn!("Failed to refresh sun times: {}", e);
+        }
+    }
+
+    (solar_noon, day_of_year, Some(sun_times))
 }
 
 #[cfg(test)]

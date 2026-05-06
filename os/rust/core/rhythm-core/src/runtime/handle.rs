@@ -9,7 +9,7 @@ use crate::light_profile::LightProfileConfig;
 use crate::lighting::LightingCommand;
 use crate::primitives::{ManualDispatchPlan, PeriodicTickPlan};
 use crate::room::{LightNodeKind, ModeConfig, RoomModeState, RoomProfileSettings};
-use crate::solar::SolarTime;
+use crate::solar::{SolarTime, SunTimes};
 use anyhow::Result;
 
 use crate::runtime::events::InputEvent;
@@ -35,6 +35,16 @@ pub trait RuntimeHandle: Send + Sync {
 
     /// Update the solar time parameters.
     fn set_solar(&self, solar: SolarTime) -> Result<()>;
+
+    /// Update the current day's sunrise/sunset times.
+    fn set_sun_times(&self, _sun_times: SunTimes) -> Result<()> {
+        Ok(())
+    }
+
+    /// Clear sunrise/sunset times so fallback values are used.
+    fn clear_sun_times(&self) -> Result<()> {
+        Ok(())
+    }
 
     /// Update a light profile configuration.
     fn set_light_profile_config(&self, config: LightProfileConfig) -> Result<()>;
@@ -359,6 +369,14 @@ where
     fn set_solar(&self, solar: SolarTime) -> Result<()> {
         // Inherent sync method — same name is fine, inherent takes priority.
         Ok(RhythmRuntime::set_solar(self, solar)?)
+    }
+
+    fn set_sun_times(&self, sun_times: SunTimes) -> Result<()> {
+        Ok(RhythmRuntime::set_sun_times(self, sun_times)?)
+    }
+
+    fn clear_sun_times(&self) -> Result<()> {
+        Ok(RhythmRuntime::clear_sun_times(self)?)
     }
 
     fn set_light_profile_config(&self, config: LightProfileConfig) -> Result<()> {
