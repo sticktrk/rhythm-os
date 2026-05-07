@@ -12,7 +12,7 @@ use log::{debug, info, warn};
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::DeviceRegistry;
 use rhythm_os::canonical::identity::{DiscoveredIdentity, HardwareId};
-use rhythm_os::discovery::{DiscoveredDevice, DiscoveredRoom, HubDiscovery};
+use rhythm_os::discovery::{DiscoveredDevice, DiscoveredMotionState, DiscoveredRoom, HubDiscovery};
 use rhythm_os::registry::HubDeviceRegistry;
 
 use crate::transport::HueTransport;
@@ -126,6 +126,51 @@ impl<H: HueTransport> HueDiscovery<H> {
         }
 
         devices
+    }
+
+    /// Extract current motion states from Hue V2 motion resources.
+    fn extract_motion_states(
+        motion_data: &[serde_json::Value],
+        device_to_room: &HashMap<String, String>,
+    ) -> Vec<DiscoveredMotionState> {
+        let mut states = Vec::new();
+
+        for motion_json in motion_data {
+            let sensor_id = match motion_json.get("id").and_then(|v| v.as_str()) {
+                Some(id) => id.to_string(),
+                None => continue,
+            };
+            let owner = match motion_json.get("owner") {
+                Some(owner) => owner,
+                None => continue,
+            };
+            if owner.get("rtype").and_then(|v| v.as_str()) != Some("device") {
+                continue;
+            }
+            let device_id = match owner.get("rid").and_then(|v| v.as_str()) {
+                Some(id) => id,
+                None => continue,
+            };
+            let room_id = match device_to_room.get(device_id) {
+                Some(room_id) => room_id.clone(),
+                None => continue,
+            };
+            let is_active = match motion_json
+                .pointer("/motion/motion")
+                .and_then(|v| v.as_bool())
+            {
+                Some(is_active) => is_active,
+                None => continue,
+            };
+
+            states.push(DiscoveredMotionState {
+                sensor_id,
+                room_id,
+                is_active,
+            });
+        }
+
+        states
     }
 
     /// Extract device identities with hardware IDs from a device JSON array.
@@ -258,13 +303,8 @@ impl<H: HueTransport> HueDiscovery<H> {
 }
 
 impl<H: HueTransport> HueDiscovery<H> {
-    /// Shared implementation: fetch devices and extract typed devices.
-    ///
-    /// Uses the device→room cache if populated by a prior `discover_rooms()` call,
-    /// avoiding a second rooms JSON fetch (~30-50KB saved on constrained
-    /// blocking runtimes). Falls back to fetching rooms if the cache is empty.
-    fn fetch_devices(&self) -> Result<Vec<DiscoveredDevice>> {
-        // Try to use the cached device→room mapping from discover_rooms()
+    /// Return cached device_id -> room_id mapping, fetching rooms on demand.
+    fn cached_or_fetch_device_to_room(&self) -> Result<HashMap<String, String>> {
         let device_to_room = {
             let cache = self
                 .device_to_room_cache
@@ -273,23 +313,30 @@ impl<H: HueTransport> HueDiscovery<H> {
             cache.clone()
         };
 
-        let device_to_room = match device_to_room {
+        match device_to_room {
             Some(cached) => {
                 info!(target: "hue_discovery", "Using cached device→room mapping ({} entries)", cached.len());
-                cached
+                Ok(cached)
             }
             None => {
-                // Fallback: fetch rooms if cache wasn't populated
                 let rooms_resp = self.transport.get_resources(&self.username, "room")?;
                 let empty = Vec::new();
                 let rooms_data = rooms_resp
                     .get("data")
                     .and_then(|v| v.as_array())
                     .unwrap_or(&empty);
-                Self::build_device_to_room(rooms_data)
-                // rooms_resp dropped here
+                Ok(Self::build_device_to_room(rooms_data))
             }
-        };
+        }
+    }
+
+    /// Shared implementation: fetch devices and extract typed devices.
+    ///
+    /// Uses the device→room cache if populated by a prior `discover_rooms()` call,
+    /// avoiding a second rooms JSON fetch (~30-50KB saved on constrained
+    /// blocking runtimes). Falls back to fetching rooms if the cache is empty.
+    fn fetch_devices(&self) -> Result<Vec<DiscoveredDevice>> {
+        let device_to_room = self.cached_or_fetch_device_to_room()?;
 
         let dev_resp = self.transport.get_resources(&self.username, "device")?;
         let empty = Vec::new();
@@ -459,27 +506,7 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
     /// names, manufacturer/model, and MAC addresses from zigbee_connectivity.
     /// Used by the canonical device registry for cross-hub deduplication.
     fn discover_identities(&self) -> Result<Vec<DiscoveredIdentity>> {
-        // Get device→room cache (populated by discover_rooms or fetched on demand)
-        let device_to_room = {
-            let cache = self
-                .device_to_room_cache
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Failed to lock device_to_room cache"))?;
-            cache.clone()
-        };
-
-        let device_to_room = match device_to_room {
-            Some(cached) => cached,
-            None => {
-                let rooms_resp = self.transport.get_resources(&self.username, "room")?;
-                let empty = Vec::new();
-                let rooms_data = rooms_resp
-                    .get("data")
-                    .and_then(|v| v.as_array())
-                    .unwrap_or(&empty);
-                Self::build_device_to_room(rooms_data)
-            }
-        };
+        let device_to_room = self.cached_or_fetch_device_to_room()?;
 
         // Get room names cache
         let room_names = {
@@ -535,6 +562,23 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
             "Discovered {} device identities ({} lights, {} buttons, {} motion) from Hue bridge",
             identities.len(), light_count, button_count, motion_count);
         Ok(identities)
+    }
+
+    fn discover_motion_state(&self) -> Result<Vec<DiscoveredMotionState>> {
+        let device_to_room = self.cached_or_fetch_device_to_room()?;
+        let resp = self.transport.get_resources(&self.username, "motion")?;
+        let empty = Vec::new();
+        let data = resp
+            .get("data")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty);
+
+        let states = Self::extract_motion_states(data, &device_to_room);
+        let active_count = states.iter().filter(|s| s.is_active).count();
+        info!(target: "hue_discovery",
+            "Discovered {} motion states ({} active) from Hue bridge",
+            states.len(), active_count);
+        Ok(states)
     }
 
     fn discover_configured_devices(&self) -> Result<Vec<(String, String)>> {
@@ -685,8 +729,10 @@ pub fn discover_device<H: HueTransport>(
     match room_id.as_deref() {
         Some(rid) => info!(target: "hue_discovery", "Discovered {} {} on device {} for room {}",
             resource_type, resource_id, device_id, rid),
-        None => info!(target: "hue_discovery", "Discovered {} {} on roomless device {} — awaiting room assignment",
-            resource_type, resource_id, device_id),
+        None => {
+            info!(target: "hue_discovery", "Discovered {} {} on roomless device {} — awaiting room assignment",
+            resource_type, resource_id, device_id)
+        }
     }
     Ok(true)
 }
@@ -694,6 +740,61 @@ pub fn discover_device<H: HueTransport>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct StaticHueTransport {
+        resources: HashMap<String, serde_json::Value>,
+    }
+
+    impl StaticHueTransport {
+        fn with_resource(mut self, resource_type: &str, response: serde_json::Value) -> Self {
+            self.resources.insert(resource_type.to_string(), response);
+            self
+        }
+    }
+
+    impl crate::transport::HueTransport for StaticHueTransport {
+        fn test_connection(&self, _username: &str) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+
+        fn warmup_tls(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_grouped_light(
+            &self,
+            _username: &str,
+            _grouped_light_id: &str,
+            _on: bool,
+            _brightness: Option<u8>,
+            _kelvin: Option<u16>,
+            _xy: Option<(f32, f32)>,
+            _fade_ms: Option<u16>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn is_grouped_light_on(
+            &self,
+            _username: &str,
+            _grouped_light_id: &str,
+        ) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        fn get_resources(
+            &self,
+            _username: &str,
+            resource_type: &str,
+        ) -> anyhow::Result<serde_json::Value> {
+            Ok(self
+                .resources
+                .get(resource_type)
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({ "data": [] })))
+        }
+    }
 
     #[test]
     fn extract_device_from_hue_accessories_behavior() {
@@ -754,6 +855,59 @@ mod tests {
         let device_id =
             HueDiscovery::<crate::test_support::SpyHueTransport>::extract_device_from_behavior(&bi);
         assert!(device_id.is_none());
+    }
+
+    #[test]
+    fn discover_motion_state_reads_hue_motion_resources() {
+        let transport = StaticHueTransport::default()
+            .with_resource(
+                "room",
+                serde_json::json!({
+                    "data": [
+                        {
+                            "id": "room-1",
+                            "children": [
+                                { "rtype": "device", "rid": "motion-device-1" }
+                            ],
+                            "services": [
+                                { "rtype": "grouped_light", "rid": "grouped-light-1" }
+                            ],
+                            "metadata": { "name": "Guest room" }
+                        }
+                    ]
+                }),
+            )
+            .with_resource(
+                "motion",
+                serde_json::json!({
+                    "data": [
+                        {
+                            "id": "motion-svc-1",
+                            "owner": {
+                                "rtype": "device",
+                                "rid": "motion-device-1"
+                            },
+                            "motion": { "motion": true }
+                        },
+                        {
+                            "id": "roomless-motion",
+                            "owner": {
+                                "rtype": "device",
+                                "rid": "roomless-device"
+                            },
+                            "motion": { "motion": false }
+                        }
+                    ]
+                }),
+            );
+        let discovery = HueDiscovery::new(Arc::new(transport), "test-user".to_string());
+
+        let states = discovery.discover_motion_state().unwrap();
+
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].sensor_id, "motion-svc-1");
+        assert_eq!(states[0].room_id, "room-1");
+        assert!(states[0].is_active);
     }
 
     #[test]

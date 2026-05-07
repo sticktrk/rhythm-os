@@ -15,7 +15,7 @@ use rhythm_core::{ButtonAction, InputEvent};
 use crate::commands;
 use crate::hub::HubEvent;
 use crate::logging;
-use crate::state::{MotionSnapshot, SharedState, WorkItem};
+use crate::state::{MotionSeedEntry, MotionSnapshot, SharedState, WorkItem};
 use crate::topology::NodeControlKind;
 
 /// How many seconds before timeout to start the warning dim.
@@ -1171,30 +1171,6 @@ pub fn run_event_loop(
     let mut last_motion_check = Instant::now();
     let mut motion_dirty = false;
 
-    // Seed motion state from startup prefetch of binary_sensor states.
-    if let Ok(mut s) = state.lock() {
-        if !s.pending_motion_seed.is_empty() {
-            let seeds = std::mem::take(&mut s.pending_motion_seed);
-            for (source_node_id, target_node_id) in seeds {
-                motion_state.sensors.insert(
-                    source_node_id.clone(),
-                    MotionSourceState {
-                        source_node_id,
-                        target_node_id: target_node_id.clone(),
-                        stopped_at: None,
-                    },
-                );
-                motion_state.motion_owned.insert(target_node_id);
-            }
-            motion_dirty = true;
-            info!(
-                target: "evt",
-                "Motion: seeded {} active sources from startup prefetch",
-                motion_state.sensors.len()
-            );
-        }
-    }
-
     loop {
         let mut processed_hub_event = false;
 
@@ -1226,6 +1202,13 @@ pub fn run_event_loop(
                     motion_dirty = true;
                 }
             }
+        }
+
+        // Apply any motion seeds queued by startup prefetch. Hub bootstrap
+        // populates the queue asynchronously, so this must be inside the
+        // loop — checking once before the loop drops every seed.
+        if apply_pending_motion_seeds(&state, &mut motion_state, Instant::now()) {
+            motion_dirty = true;
         }
 
         // Process hub events from all receivers, removing disconnected ones
@@ -1287,6 +1270,108 @@ fn check_registry_dirty(state: &SharedState) {
         info!(target: "evt", "Registry dirty from on-demand discovery, persisting");
         commands::persist_registry(state);
     }
+}
+
+/// Drain `pending_motion_seed` into the live motion state.
+///
+/// Called from inside the event loop because hub bootstrap finishes
+/// asynchronously — the seed queue can be empty when the loop starts and
+/// populated seconds later. Returns `true` if any seed was applied.
+///
+/// Active sensors land with `stopped_at = None` so the room stays on while
+/// occupied. Inactive sensors wait for observed power before landing with
+/// `stopped_at = Some(now)`: claiming ownership before the initial light poll
+/// can misclassify lit rooms as idle. Seeds for sources that already received
+/// live events are drained without overwriting the live event-stream state.
+pub fn apply_pending_motion_seeds(
+    state: &SharedState,
+    motion: &mut MotionTimerState,
+    now: Instant,
+) -> bool {
+    let seeds: Vec<MotionSeedEntry> = match state.lock() {
+        Ok(mut s) if !s.pending_motion_seed.is_empty() => {
+            std::mem::take(&mut s.pending_motion_seed)
+        }
+        _ => return false,
+    };
+
+    let mut active_count = 0usize;
+    let mut owned_inactive_count = 0usize;
+    let mut idle_count = 0usize;
+    let mut live_count = 0usize;
+    let mut deferred = Vec::new();
+
+    for seed in seeds {
+        let MotionSeedEntry {
+            source_node_id,
+            target_node_id,
+            is_active,
+        } = seed;
+
+        if motion.sensors.contains_key(&source_node_id) {
+            live_count += 1;
+            continue;
+        }
+
+        let observed_lights_on = if is_active {
+            None
+        } else {
+            match observed_room_lights_on(state, &target_node_id) {
+                Some(on) => Some(on),
+                None => {
+                    deferred.push(MotionSeedEntry {
+                        source_node_id,
+                        target_node_id,
+                        is_active,
+                    });
+                    continue;
+                }
+            }
+        };
+
+        let stopped_at = if is_active { None } else { Some(now) };
+        motion.sensors.insert(
+            source_node_id.clone(),
+            MotionSourceState {
+                source_node_id,
+                target_node_id: target_node_id.clone(),
+                stopped_at,
+            },
+        );
+        if is_active {
+            motion.motion_owned.insert(target_node_id);
+            active_count += 1;
+        } else if observed_lights_on.unwrap_or(false) {
+            motion.motion_owned.insert(target_node_id);
+            owned_inactive_count += 1;
+        } else {
+            idle_count += 1;
+        }
+    }
+
+    if !deferred.is_empty() {
+        if let Ok(mut s) = state.lock() {
+            s.pending_motion_seed.extend(deferred);
+        }
+    }
+
+    let applied_count = active_count + owned_inactive_count + idle_count;
+    if applied_count > 0 || live_count > 0 {
+        info!(
+            target: "evt",
+            "Motion: seeded {} active, {} cleared-but-owned, {} idle from startup prefetch ({} live sources kept)",
+            active_count, owned_inactive_count, idle_count, live_count
+        );
+    }
+    applied_count > 0
+}
+
+fn observed_room_lights_on(state: &SharedState, target_node_id: &str) -> Option<bool> {
+    state.lock().ok().and_then(|s| {
+        s.room_observed_power
+            .get(target_node_id)
+            .map(|observed| observed.lights_on)
+    })
 }
 
 /// Sync motion timer snapshots into AppState for API visibility.
@@ -3399,6 +3484,203 @@ mod tests {
 
         // Latest stop was 50s ago, timeout is 120s — should NOT expire
         assert_eq!(motion.sensors.len(), 2);
+        assert!(motion.motion_owned.contains("room_a"));
+    }
+
+    // ========================================================================
+    // apply_pending_motion_seeds tests (issue #38)
+    // ========================================================================
+
+    fn push_seed(state: &SharedState, source: &str, target: &str, is_active: bool) {
+        state
+            .lock()
+            .unwrap()
+            .pending_motion_seed
+            .push(MotionSeedEntry {
+                source_node_id: source.into(),
+                target_node_id: target.into(),
+                is_active,
+            });
+    }
+
+    fn set_observed_lights_on(state: &SharedState, target: &str, on: bool) {
+        let mut s = state.lock().unwrap();
+        s.room_observed_power.insert(
+            target.into(),
+            crate::state::ObservedPowerState::new(on, crate::state::ObservedPowerSource::SyncPoll),
+        );
+    }
+
+    /// Inactive sensor whose target room still has lights on after a restart
+    /// must seed with `stopped_at = Some(now)` and claim ownership so the
+    /// motion timeout fires the auto-off (issue #38).
+    #[test]
+    fn apply_seeds_inactive_sensor_with_lights_on_seeds_owned_countdown() {
+        let state = make_state();
+        set_observed_lights_on(&state, "room_a", true);
+        push_seed(&state, "sensor_1", "room_a", false);
+
+        let mut motion = MotionTimerState::new();
+        let now = Instant::now();
+        let dirty = apply_pending_motion_seeds(&state, &mut motion, now);
+
+        assert!(dirty, "applying a non-empty seed should mark dirty");
+        let source = motion
+            .sensors
+            .get("sensor_1")
+            .expect("seed should land in motion state");
+        assert_eq!(source.target_node_id, "room_a");
+        assert_eq!(
+            source.stopped_at,
+            Some(now),
+            "inactive sensor must start the countdown from boot"
+        );
+        assert!(
+            motion.motion_owned.contains("room_a"),
+            "lights-on rooms must be claimed so OffPress fires after the timeout"
+        );
+        assert!(
+            state.lock().unwrap().pending_motion_seed.is_empty(),
+            "applying seeds must drain the queue"
+        );
+    }
+
+    /// Inactive sensor for a dark room: still tracked so future motion-stop
+    /// events aren't ignored, but ownership is not claimed (no manual lights
+    /// to surprise-off).
+    #[test]
+    fn apply_seeds_inactive_sensor_with_lights_off_does_not_claim_owned() {
+        let state = make_state();
+        set_observed_lights_on(&state, "room_a", false);
+        push_seed(&state, "sensor_1", "room_a", false);
+
+        let mut motion = MotionTimerState::new();
+        apply_pending_motion_seeds(&state, &mut motion, Instant::now());
+
+        assert!(motion.sensors.contains_key("sensor_1"));
+        assert!(
+            !motion.motion_owned.contains("room_a"),
+            "dark rooms must not be claimed at boot — no lights to turn off"
+        );
+    }
+
+    /// Inactive sensors must wait until the initial observed-power poll has
+    /// landed; otherwise lit rooms can be mistaken for dark rooms at startup.
+    #[test]
+    fn apply_seeds_inactive_sensor_without_observed_power_defers() {
+        let state = make_state();
+        push_seed(&state, "sensor_1", "room_a", false);
+
+        let mut motion = MotionTimerState::new();
+        let dirty_before_poll = apply_pending_motion_seeds(&state, &mut motion, Instant::now());
+
+        assert!(
+            !dirty_before_poll,
+            "unknown observed power should defer inactive seeds"
+        );
+        assert!(
+            motion.sensors.is_empty(),
+            "deferred seed must not land in live motion state yet"
+        );
+        assert_eq!(
+            state.lock().unwrap().pending_motion_seed.len(),
+            1,
+            "deferred seed should stay queued for a later event-loop pass"
+        );
+
+        set_observed_lights_on(&state, "room_a", true);
+        let now_after_poll = Instant::now();
+        let dirty_after_poll = apply_pending_motion_seeds(&state, &mut motion, now_after_poll);
+
+        assert!(dirty_after_poll);
+        assert!(state.lock().unwrap().pending_motion_seed.is_empty());
+        let source = motion.sensors.get("sensor_1").unwrap();
+        assert_eq!(source.stopped_at, Some(now_after_poll));
+        assert!(motion.motion_owned.contains("room_a"));
+    }
+
+    /// Active sensor at boot keeps the room on (no countdown started yet)
+    /// and is claimed for ownership, matching the live motion path.
+    #[test]
+    fn apply_seeds_active_sensor_seeds_with_no_countdown_and_owned() {
+        let state = make_state();
+        push_seed(&state, "sensor_1", "room_a", true);
+
+        let mut motion = MotionTimerState::new();
+        apply_pending_motion_seeds(&state, &mut motion, Instant::now());
+
+        let source = motion.sensors.get("sensor_1").unwrap();
+        assert_eq!(source.stopped_at, None);
+        assert!(motion.motion_owned.contains("room_a"));
+    }
+
+    /// A stale startup prefetch must not overwrite a source that already
+    /// received live event-stream state.
+    #[test]
+    fn apply_seeds_does_not_overwrite_live_motion_source() {
+        let state = make_state();
+        set_observed_lights_on(&state, "room_a", true);
+        push_seed(&state, "sensor_1", "room_a", false);
+
+        let mut motion = MotionTimerState::new();
+        motion
+            .sensors
+            .insert("sensor_1".into(), motion_source("sensor_1", "room_b", None));
+        motion.motion_owned.insert("room_b".into());
+
+        let dirty = apply_pending_motion_seeds(&state, &mut motion, Instant::now());
+
+        assert!(
+            !dirty,
+            "skipping a stale seed over live state should not mark motion dirty"
+        );
+        let source = motion.sensors.get("sensor_1").unwrap();
+        assert_eq!(source.target_node_id, "room_b");
+        assert_eq!(source.stopped_at, None);
+        assert!(motion.motion_owned.contains("room_b"));
+        assert!(
+            !motion.motion_owned.contains("room_a"),
+            "stale seed must not claim a new target"
+        );
+        assert!(state.lock().unwrap().pending_motion_seed.is_empty());
+    }
+
+    /// Empty queue is a no-op — the loop calls this every iteration and
+    /// must not pretend work was done.
+    #[test]
+    fn apply_seeds_empty_queue_is_noop() {
+        let state = make_state();
+        let mut motion = MotionTimerState::new();
+        let dirty = apply_pending_motion_seeds(&state, &mut motion, Instant::now());
+
+        assert!(!dirty);
+        assert!(motion.sensors.is_empty());
+    }
+
+    /// Seeds appended after the loop has already started (the real-world
+    /// flow: hub bootstrap completes asynchronously) must be applied on the
+    /// next iteration, not silently dropped. Pre-fix this regressed because
+    /// the seed drain ran exactly once before the loop began.
+    #[test]
+    fn apply_seeds_picks_up_seeds_appended_after_first_call() {
+        let state = make_state();
+        let mut motion = MotionTimerState::new();
+
+        // First iteration: queue empty (loop starts before hub bootstrap).
+        let dirty_first = apply_pending_motion_seeds(&state, &mut motion, Instant::now());
+        assert!(!dirty_first);
+
+        // Hub bootstrap finishes and populates the queue.
+        set_observed_lights_on(&state, "room_a", true);
+        push_seed(&state, "sensor_1", "room_a", false);
+
+        // Next iteration must apply the seed.
+        let dirty_second = apply_pending_motion_seeds(&state, &mut motion, Instant::now());
+        assert!(
+            dirty_second,
+            "seeds appended after the loop started must still be applied"
+        );
+        assert!(motion.sensors.contains_key("sensor_1"));
         assert!(motion.motion_owned.contains("room_a"));
     }
 }

@@ -694,12 +694,13 @@ fn sync_with_discovery(
             for ms in &motion_states {
                 discovered_device_ids.insert(ms.sensor_id.clone());
             }
-            // Seed active sensors into AppState for the event loop to pick up.
-            // Resolve to public source/target node IDs up front so startup
-            // motion state follows the same node-control graph as live events.
-            let active: Vec<(String, String)> = motion_states
+            // Seed every discovered sensor (active or not) into AppState so
+            // the event loop can resume timers for rooms whose lights are
+            // already on at boot. Resolve to public source/target node IDs
+            // up front so startup motion state follows the same node-control
+            // graph as live events.
+            let seeds: Vec<crate::state::MotionSeedEntry> = motion_states
                 .iter()
-                .filter(|ms| ms.is_active)
                 .filter_map(|ms| {
                     commands::resolve_node_control_target(
                         state,
@@ -707,11 +708,18 @@ fn sync_with_discovery(
                         &ms.sensor_id,
                         &crate::topology::NodeControlKind::Motion,
                     )
+                    .map(|(source_node_id, target_node_id)| {
+                        crate::state::MotionSeedEntry {
+                            source_node_id,
+                            target_node_id,
+                            is_active: ms.is_active,
+                        }
+                    })
                 })
                 .collect();
-            if !active.is_empty() {
+            if !seeds.is_empty() {
                 if let Ok(mut s) = state.lock() {
-                    s.pending_motion_seed = active;
+                    s.pending_motion_seed.extend(seeds);
                 }
             }
             info!(target: "room_sync", "Motion prefetch: {} sensors, {} active",

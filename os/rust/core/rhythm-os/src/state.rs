@@ -124,6 +124,19 @@ pub enum WorkItem {
     DeferredPersistState,
 }
 
+/// One motion sensor handed off from startup prefetch to the event loop.
+///
+/// Carries the sensor's current state so the event loop can seed both
+/// active sensors (countdown not started) and inactive sensors (countdown
+/// already ticking, so a room left with lights on after a restart still
+/// auto-offs).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MotionSeedEntry {
+    pub source_node_id: String,
+    pub target_node_id: String,
+    pub is_active: bool,
+}
+
 /// Snapshot of motion timer state for a single controlled target node, exposed via API.
 #[derive(Clone)]
 pub struct MotionSnapshot {
@@ -366,10 +379,13 @@ pub struct AppState {
     pub pending_hub_event_rxs: Vec<std::sync::mpsc::Receiver<HubEvent>>,
     /// Target node IDs whose motion timers should be cleared (picked up by event loop).
     pub pending_motion_clear: Vec<String>,
-    /// Active motion sources from startup prefetch (picked up by event loop).
-    /// Vec of `(source_node_id, target_node_id)` for sources with state="on"
-    /// at boot.
-    pub pending_motion_seed: Vec<(String, String)>,
+    /// Motion sources from startup prefetch (picked up by event loop).
+    ///
+    /// Includes both active and inactive sensors so the event loop can
+    /// resume timing rooms whose lights are on but whose sensor has
+    /// already cleared — without this, restarts would leak motion-driven
+    /// rooms with no auto-off timer.
+    pub pending_motion_seed: Vec<MotionSeedEntry>,
 
     // ---- Composite controller ----
     /// The composite controller shared between AppState (for dynamic registration)

@@ -1091,7 +1091,12 @@ mod tests {
     #[test]
     fn devices_for_room_typed() {
         let mut reg = HubDeviceRegistry::new();
-        reg.upsert_device("btn1", Some("r1"), &[("b1".to_string(), 1)], DeviceType::Button);
+        reg.upsert_device(
+            "btn1",
+            Some("r1"),
+            &[("b1".to_string(), 1)],
+            DeviceType::Button,
+        );
         reg.upsert_device("ms1", Some("r1"), &[], DeviceType::Motion);
         reg.upsert_room("r1", "Room", "gl1", &["light1".to_string()]);
 

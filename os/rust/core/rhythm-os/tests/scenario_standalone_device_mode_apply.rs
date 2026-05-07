@@ -114,11 +114,7 @@ fn manual_transition_dispatches_to_roomless_light_device() {
     )
     .expect("manual transition should succeed");
 
-    let new_calls: Vec<_> = spy
-        .turn_on_calls()
-        .into_iter()
-        .skip(pre_dispatch)
-        .collect();
+    let new_calls: Vec<_> = spy.turn_on_calls().into_iter().skip(pre_dispatch).collect();
     assert!(
         new_calls.iter().any(|(id, _)| id == &standalone_id),
         "manual sleep_to_day transition must dispatch to the standalone \

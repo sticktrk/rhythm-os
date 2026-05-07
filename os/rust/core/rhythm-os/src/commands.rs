@@ -470,9 +470,7 @@ fn clear_removed_node_ephemeral_state(s: &mut AppState, node_id: &str) {
     s.pending_periodic_ticks.remove(node_id);
     s.pending_motion_clear.retain(|pending| pending != node_id);
     s.pending_motion_seed
-        .retain(|(source_node_id, target_node_id)| {
-            source_node_id != node_id && target_node_id != node_id
-        });
+        .retain(|seed| seed.source_node_id != node_id && seed.target_node_id != node_id);
 }
 
 pub(crate) fn reconcile_hub_endpoint_visibility(
@@ -5619,8 +5617,12 @@ pub fn do_device_set(
     persist: bool,
 ) -> Result<()> {
     match room_id {
-        Some(rid) => info!(target: "cmd", "device_set: {} ({:?}) -> room {} ({} buttons)", device_id, device_type, rid, buttons.len()),
-        None => info!(target: "cmd", "device_set: {} ({:?}) -> roomless ({} buttons)", device_id, device_type, buttons.len()),
+        Some(rid) => {
+            info!(target: "cmd", "device_set: {} ({:?}) -> room {} ({} buttons)", device_id, device_type, rid, buttons.len())
+        }
+        None => {
+            info!(target: "cmd", "device_set: {} ({:?}) -> roomless ({} buttons)", device_id, device_type, buttons.len())
+        }
     }
 
     let registry = state
@@ -11220,7 +11222,11 @@ mod tests {
             set_observed_lights_on_in_app(&mut s, "r1", true);
             s.pending_periodic_ticks.insert("r1".into(), 12.0);
             s.pending_motion_clear.push("r1".into());
-            s.pending_motion_seed.push(("sensor-1".into(), "r1".into()));
+            s.pending_motion_seed.push(crate::state::MotionSeedEntry {
+                source_node_id: "sensor-1".into(),
+                target_node_id: "r1".into(),
+                is_active: true,
+            });
             s.canonical_registry.queue_unassigned(&canonical_id, 1000);
         }
 
@@ -13897,7 +13903,10 @@ mod tests {
 
         // Sanity: registry has no room mapping yet for the endpoint.
         assert!(!devices_for_room_contains(
-            &state, &hub_key, &room_id, "motion-svc-1"
+            &state,
+            &hub_key,
+            &room_id,
+            "motion-svc-1"
         ));
 
         // Assign — propagation should populate device_rooms.
@@ -14312,8 +14321,11 @@ mod tests {
             );
             s.pending_periodic_ticks.insert(device_id.clone(), 12.0);
             s.pending_motion_clear.push(device_id.clone());
-            s.pending_motion_seed
-                .push((device_id.clone(), "room1".to_string()));
+            s.pending_motion_seed.push(crate::state::MotionSeedEntry {
+                source_node_id: device_id.clone(),
+                target_node_id: "room1".to_string(),
+                is_active: true,
+            });
         }
 
         do_device_hard_remove(&state, &device_id, None).unwrap();
@@ -14329,7 +14341,7 @@ mod tests {
         assert!(s
             .pending_motion_seed
             .iter()
-            .all(|(source, target)| source != &device_id && target != &device_id));
+            .all(|seed| seed.source_node_id != device_id && seed.target_node_id != device_id));
         drop(s);
 
         assert!(
