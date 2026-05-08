@@ -31,6 +31,7 @@ const APPLIANCE_CMDLINE_PATH: &str = "/boot/cmdline.txt";
 const APPLIANCE_CMDLINE_BACKUP_PATH: &str = "/boot/cmdline.txt.bak";
 const APPLIANCE_BOOT_STATE_PATH: &str = "/boot/rhythm-bootstate.env";
 const APPLIANCE_BOOT_STATE_BACKUP_PATH: &str = "/boot/rhythm-bootstate.env.bak";
+const APPLIANCE_REBOOT_FALLBACK_SECS: u64 = 30;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RestartStrategy {
@@ -1290,6 +1291,10 @@ pub fn schedule_user_initiated_restart() {
     schedule_restart("user request");
 }
 
+pub fn schedule_liveness_restart() {
+    schedule_restart("liveness watchdog");
+}
+
 fn schedule_restart(reason: &'static str) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -1300,6 +1305,7 @@ fn schedule_restart(reason: &'static str) {
         match restart_strategy() {
             RestartStrategy::ApplianceReboot => {
                 log::info!(target: "sys", "Rebooting appliance after {}...", reason);
+                spawn_forced_reboot_fallback(reason);
 
                 let reboot_result = Command::new("/sbin/reboot")
                     .status()
@@ -1332,6 +1338,61 @@ fn schedule_restart(reason: &'static str) {
             }
         }
     });
+}
+
+fn spawn_forced_reboot_fallback(reason: &'static str) {
+    let spawn_result = std::thread::Builder::new()
+        .name("reboot-fallback".to_string())
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(
+                APPLIANCE_REBOOT_FALLBACK_SECS,
+            ));
+            log::error!(
+                target: "sys",
+                "Graceful appliance reboot still running after {}s for {}; forcing reboot",
+                APPLIANCE_REBOOT_FALLBACK_SECS,
+                reason
+            );
+
+            let forced_result = Command::new("/sbin/reboot")
+                .arg("-f")
+                .status()
+                .or_else(|_| Command::new("reboot").arg("-f").status());
+
+            match forced_result {
+                Ok(status) if status.success() => {
+                    log::error!(
+                        target: "sys",
+                        "Forced appliance reboot command returned; exiting process"
+                    );
+                    std::process::exit(1);
+                }
+                Ok(status) => {
+                    log::error!(
+                        target: "sys",
+                        "Forced appliance reboot command exited with status {:?}; exiting process",
+                        status.code()
+                    );
+                    std::process::exit(1);
+                }
+                Err(error) => {
+                    log::error!(
+                        target: "sys",
+                        "Failed to invoke forced appliance reboot: {}; exiting process",
+                        error
+                    );
+                    std::process::exit(1);
+                }
+            }
+        });
+
+    if let Err(error) = spawn_result {
+        log::error!(
+            target: "sys",
+            "Failed to spawn forced reboot fallback: {}",
+            error
+        );
+    }
 }
 
 fn compute_sha256_hex(path: &Path) -> Result<String, String> {

@@ -39,6 +39,7 @@ fn main() -> Result<()> {
         std::env::var("RHYTHM_PLATFORM_TYPE").unwrap_or_else(|_| "desktop".to_string());
     let platform_context =
         std::env::var("RHYTHM_PLATFORM_CONTEXT").unwrap_or_else(|_| "server".to_string());
+    let appliance_runtime = platform_type == "appliance";
 
     logging::init_native_logging(&args.log_level)?;
 
@@ -156,6 +157,10 @@ fn main() -> Result<()> {
                 rhythm_os::periodic::run_periodic_loop(periodic_state, None::<fn()>);
             })
             .expect("Failed to spawn periodic thread");
+    }
+
+    if appliance_runtime {
+        rhythm_server::liveness::spawn_periodic_watchdog(state.clone());
     }
 
     // Start tokio runtime for the async HTTP server + mDNS

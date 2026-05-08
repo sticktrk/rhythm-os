@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use log::{debug, warn};
+use log::{debug, info, warn};
 
 use crate::sse::{drain_sse_lines, HueSseConfig, HueSseEvent, SseParseState};
 
@@ -89,7 +89,7 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
 
     while !shutdown.load(Ordering::Relaxed) {
         connect_count += 1;
-        debug!(target: "sse", "Connecting SSE to {} (conn #{})...", url, connect_count);
+        info!(target: "sse", "Connecting SSE to {} (conn #{})...", url, connect_count);
 
         let client = match build_sse_client() {
             Ok(c) => c,
@@ -147,7 +147,7 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
         let mut line_buf = Vec::with_capacity(4096);
         let mut stream = response.bytes_stream();
 
-        debug!(target: "sse", "SSE connected (conn #{})", connect_count);
+        info!(target: "sse", "SSE connected (conn #{})", connect_count);
         let _ = tx.try_send(HueSseEvent::Connected);
         backoff = Duration::from_secs(1);
         let now = Instant::now();
@@ -194,11 +194,11 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
                     break;
                 }
                 Ok(None) => {
-                    debug!(target: "sse", "SSE stream ended");
+                    warn!(target: "sse", "SSE stream ended");
                     break;
                 }
                 Err(_) => {
-                    debug!(
+                    warn!(
                         target: "sse",
                         "SSE: No bytes for {}s (stall detected), reconnecting",
                         SSE_IDLE_TIMEOUT_SECS
@@ -210,7 +210,7 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
 
         if !shutdown.load(Ordering::Relaxed) {
             let _ = tx.try_send(HueSseEvent::Disconnected("Connection lost".to_string()));
-            debug!(target: "sse", "Reconnecting SSE in {:?}...", backoff);
+            info!(target: "sse", "Reconnecting SSE in {:?}...", backoff);
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(max_backoff);
         }

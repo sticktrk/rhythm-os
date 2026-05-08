@@ -923,7 +923,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
         }
 
         HubEvent::Disconnected { reason, .. } => {
-            debug!(target: "conn", "Hub disconnected: {}", reason);
+            warn!(target: "conn", "Hub disconnected: {}", reason);
 
             // Motion timers are local state (Instant timestamps) — they keep
             // counting regardless of hub connectivity.  Clearing them here
@@ -944,7 +944,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 };
 
                 if let Some(deadline) = pending_deadline {
-                    debug!(
+                    info!(
                         target: "conn",
                         "Hub {} disconnect pending for {}s before app-visible unavailable",
                         key,

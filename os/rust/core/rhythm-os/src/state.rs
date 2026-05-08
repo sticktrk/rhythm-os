@@ -839,8 +839,14 @@ impl AppState {
         self.hub_reconnect_sync_at.remove(key);
     }
 
-    /// Start or refresh the delayed API-visible disconnect deadline.
+    /// Start the delayed API-visible disconnect deadline.
+    ///
+    /// The deadline is intentionally not extended by repeated disconnect events;
+    /// only a reconnect clears it.
     pub fn note_hub_pending_disconnect(&mut self, key: &HubKey, grace: Duration) -> Instant {
+        if let Some(deadline) = self.hub_pending_disconnect_at.get(key) {
+            return *deadline;
+        }
         let deadline = Instant::now() + grace;
         self.hub_pending_disconnect_at.insert(key.clone(), deadline);
         deadline
@@ -957,6 +963,7 @@ mod tests {
         factory_default_active_mode, factory_default_light_profile_config,
         factory_default_mode_transition_configs, factory_default_power_save,
     };
+    use crate::hub::HubType;
     use rhythm_core::config::DEFAULT_MOTION_TIMEOUT_SECS;
     use rhythm_core::runtime::RoomSnapshot;
 
@@ -977,6 +984,21 @@ mod tests {
         assert_eq!(state.firmware_version, "0.0.0");
         assert_eq!(state.platform_type, "desktop");
         assert_eq!(state.platform_context, "server");
+    }
+
+    #[test]
+    fn pending_hub_disconnect_grace_does_not_extend_without_reconnect() {
+        let mut state = AppState::default();
+        let hub_key = HubKey::new(HubType::new("hue"), "192.168.5.221:443");
+
+        let first_deadline = state.note_hub_pending_disconnect(&hub_key, Duration::from_secs(120));
+        std::thread::sleep(Duration::from_millis(5));
+        let second_deadline = state.note_hub_pending_disconnect(&hub_key, Duration::from_secs(120));
+
+        assert_eq!(
+            first_deadline, second_deadline,
+            "repeated disconnects before reconnect must not indefinitely extend grace"
+        );
     }
 
     #[test]

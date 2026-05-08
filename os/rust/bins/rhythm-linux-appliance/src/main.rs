@@ -202,6 +202,7 @@ fn main() -> Result<()> {
             })
             .expect("Failed to spawn periodic thread");
     }
+    rhythm_server::liveness::spawn_periodic_watchdog(state.clone());
 
     let provisioning = ble_provision::ProvisioningManager::new(VERSION.to_string(), state.clone());
     if let Err(e) = provisioning.ensure_running_if_needed("startup") {

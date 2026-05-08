@@ -9,4 +9,5 @@ pub mod bootstate;
 pub mod debug_bundle;
 pub mod http_server;
 pub mod hub;
+pub mod liveness;
 pub mod self_update;
