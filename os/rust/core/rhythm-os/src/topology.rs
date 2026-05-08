@@ -34,10 +34,27 @@ use crate::canonical::identity::HubKey;
 pub enum DevicePlacement {
     /// Auto-assigned from hub room membership, updated on re-sync.
     HubDefault,
-    /// User explicitly placed this device here — survives re-sync.
+    /// User explicitly placed this device here — survives re-sync. Carries
+    /// over even when `parent_id` is `None`, which represents the user
+    /// explicitly removing the device from any room.
     UserOverride,
-    /// Device exists first-class without a parent room.
+    /// Device exists first-class without a parent room. Reached via
+    /// auto-detach (hub stopped reporting the device in its previous room),
+    /// not by an explicit user choice — re-attaches if the hub reports the
+    /// device in a room again.
     Standalone,
+}
+
+/// Resolve the effective placement for a `(parent_id, requested placement)`
+/// pair. `UserOverride` is the only placement that survives `parent_id =
+/// None` — every other placement collapses to `Standalone` when the device
+/// has no parent.
+fn effective_placement_for(parent_id: Option<&str>, placement: &DevicePlacement) -> DevicePlacement {
+    match (parent_id.is_some(), placement) {
+        (true, p) => p.clone(),
+        (false, DevicePlacement::UserOverride) => DevicePlacement::UserOverride,
+        (false, _) => DevicePlacement::Standalone,
+    }
 }
 
 /// Generic node-to-node control relationships.
@@ -552,11 +569,7 @@ impl RoomTopologyStore {
                 self.upsert_device_node(
                     canonical_device_id,
                     parent_id.map(str::to_string),
-                    if parent_id.is_some() {
-                        placement.clone()
-                    } else {
-                        DevicePlacement::Standalone
-                    },
+                    effective_placement_for(parent_id, &placement),
                 );
                 if placement == DevicePlacement::UserOverride {
                     if let Some(room_id) = parent_id {
@@ -571,11 +584,7 @@ impl RoomTopologyStore {
             None => return false,
         };
 
-        let effective_placement = if parent_id.is_some() {
-            placement.clone()
-        } else {
-            DevicePlacement::Standalone
-        };
+        let effective_placement = effective_placement_for(parent_id, &placement);
         if let Some(node) = self.device_nodes.get_mut(canonical_device_id) {
             node.parent_id = parent_id.map(str::to_string);
             node.placement = effective_placement;
@@ -1942,6 +1951,100 @@ mod tests {
         assert!(!device_ids.contains(&dev2.as_str())); // removed (HubDefault, not in new list)
         assert!(device_ids.contains(&"dev-3")); // kept (UserOverride)
         assert!(device_ids.contains(&dev4.as_str())); // added
+    }
+
+    #[test]
+    fn sync_preserves_device_moved_to_different_room() {
+        // Issue #43: motion sensor moved out of its hub-default room kept
+        // reverting to the hub room on the next sync.
+        let mut store = RoomTopologyStore::new();
+        let mut registry = CanonicalRegistry::new();
+
+        // Hue reports a motion sensor in "Balcony"
+        let sensor_id = register_identity(
+            &mut registry,
+            &hue_key(),
+            make_identity(
+                "hue-motion-1",
+                "balcony-hue-id",
+                "Balcony",
+                "Master",
+                DeviceType::Motion,
+            ),
+        );
+
+        // Initial sync: motion sensor lands in Balcony as HubDefault
+        let mut discovered = make_discovered("balcony-hue-id", "Balcony", "balcony-gl");
+        discovered.canonical_device_ids = vec![sensor_id.clone()];
+        let action = store.sync_hub_room_with_registry(&hue_key(), &discovered, &registry);
+        let balcony_id = action.rhythm_room_id().to_string();
+
+        let initial = store.get_device_node(&sensor_id).unwrap();
+        assert_eq!(initial.parent_id.as_deref(), Some(balcony_id.as_str()));
+        assert_eq!(initial.placement, DevicePlacement::HubDefault);
+
+        // User creates a separate Rhythm room and moves the sensor into it.
+        let master_room_id = store.create_room("Master Room");
+        assert!(store.move_device(&sensor_id, &balcony_id, &master_room_id));
+        let after_move = store.get_device_node(&sensor_id).unwrap();
+        assert_eq!(after_move.parent_id.as_deref(), Some(master_room_id.as_str()));
+        assert_eq!(after_move.placement, DevicePlacement::UserOverride);
+
+        // Hue still reports the sensor in Balcony (the user only moved it in
+        // Rhythm). A re-sync of Balcony must not pull the device back.
+        let mut rediscovered = make_discovered("balcony-hue-id", "Balcony", "balcony-gl");
+        rediscovered.canonical_device_ids = vec![sensor_id.clone()];
+        store.sync_hub_room_with_registry(&hue_key(), &rediscovered, &registry);
+
+        let after_resync = store.get_device_node(&sensor_id).unwrap();
+        assert_eq!(
+            after_resync.parent_id.as_deref(),
+            Some(master_room_id.as_str()),
+            "sensor must stay in the user's Rhythm room"
+        );
+        assert_eq!(after_resync.placement, DevicePlacement::UserOverride);
+    }
+
+    #[test]
+    fn sync_preserves_user_move_when_origin_room_becomes_empty() {
+        // Variant of #43 covering the edge case where the device the user
+        // moved out was the room's *only* canonical device. After the move
+        // the source room's projection is empty, which historically tripped
+        // the freshly_created branch of sync_hub_room_with_registry.
+        let mut store = RoomTopologyStore::new();
+        let mut registry = CanonicalRegistry::new();
+
+        let sensor_id = register_identity(
+            &mut registry,
+            &hue_key(),
+            make_identity(
+                "hue-motion-only",
+                "balcony-hue-id",
+                "Balcony",
+                "Master",
+                DeviceType::Motion,
+            ),
+        );
+
+        let mut discovered = make_discovered("balcony-hue-id", "Balcony", "balcony-gl");
+        discovered.canonical_device_ids = vec![sensor_id.clone()];
+        let action = store.sync_hub_room_with_registry(&hue_key(), &discovered, &registry);
+        let balcony_id = action.rhythm_room_id().to_string();
+
+        let master_room_id = store.create_room("Master Room");
+        assert!(store.move_device(&sensor_id, &balcony_id, &master_room_id));
+        assert!(store.get(&balcony_id).unwrap().devices.is_empty());
+
+        let mut rediscovered = make_discovered("balcony-hue-id", "Balcony", "balcony-gl");
+        rediscovered.canonical_device_ids = vec![sensor_id.clone()];
+        store.sync_hub_room_with_registry(&hue_key(), &rediscovered, &registry);
+
+        let after_resync = store.get_device_node(&sensor_id).unwrap();
+        assert_eq!(
+            after_resync.parent_id.as_deref(),
+            Some(master_room_id.as_str())
+        );
+        assert_eq!(after_resync.placement, DevicePlacement::UserOverride);
     }
 
     #[test]

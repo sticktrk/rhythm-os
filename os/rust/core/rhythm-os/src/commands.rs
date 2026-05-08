@@ -7559,11 +7559,15 @@ pub fn do_canonical_assign_room(
             &active_endpoints,
         );
     } else {
+        // Unassignment is an explicit user action, so mark the topology node
+        // as UserOverride with no parent. This keeps a follow-up hub sync
+        // from silently re-attaching the device under whatever room the hub
+        // still reports it in (issue #43).
         s.topology.ensure_standalone_device(device_id);
         s.topology.assign_device(
             device_id,
             None,
-            crate::topology::DevicePlacement::Standalone,
+            crate::topology::DevicePlacement::UserOverride,
         );
         if let Some(old_id) = &old_room_id {
             if let Some(room) = s.topology.get_mut(old_id) {

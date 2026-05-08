@@ -1056,4 +1056,268 @@ mod tests {
             .iter()
             .any(|id| id == device_id)
     }
+
+    /// Discovery that lets the test populate `discover_identities` directly
+    /// instead of relying on the trait's `discover_devices` fallback (which
+    /// produces empty room_name + manufacturer / model and exercises a
+    /// different canonical resolve path).
+    struct IdentityDiscovery {
+        rooms: Vec<DiscoveredRoom>,
+        identities: Vec<crate::canonical::identity::DiscoveredIdentity>,
+    }
+
+    impl HubDiscovery for IdentityDiscovery {
+        fn discover_rooms(&self) -> Result<Vec<DiscoveredRoom>> {
+            Ok(self
+                .rooms
+                .iter()
+                .map(|r| DiscoveredRoom {
+                    id: r.id.clone(),
+                    name: r.name.clone(),
+                    grouped_light_id: r.grouped_light_id.clone(),
+                    device_ids: r.device_ids.clone(),
+                })
+                .collect())
+        }
+
+        fn discover_devices(&self) -> Result<Vec<DiscoveredDevice>> {
+            Ok(self
+                .identities
+                .iter()
+                .map(|d| DiscoveredDevice {
+                    device_id: d.native_id.clone(),
+                    room_id: d.room_id.clone(),
+                    buttons: vec![],
+                    device_type: d.device_type.clone(),
+                })
+                .collect())
+        }
+
+        fn discover_identities(&self) -> Result<Vec<crate::canonical::identity::DiscoveredIdentity>>
+        {
+            Ok(self.identities.clone())
+        }
+    }
+
+    fn make_identity(
+        native_id: &str,
+        hub_room_id: &str,
+        hub_room_name: &str,
+        name: &str,
+        device_type: DeviceType,
+    ) -> crate::canonical::identity::DiscoveredIdentity {
+        crate::canonical::identity::DiscoveredIdentity {
+            native_id: native_id.to_string(),
+            room_id: Some(hub_room_id.to_string()),
+            room_name: Some(hub_room_name.to_string()),
+            name: name.to_string(),
+            device_type,
+            hardware_ids: vec![],
+            manufacturer: None,
+            model: None,
+        }
+    }
+
+    fn install_test_hub() -> (HubKey, SharedState) {
+        let hub_type = HubType::new(HubType::HUE);
+        let hub_key = HubKey::new(hub_type.clone(), "bridge-1");
+        let registry: Arc<Mutex<dyn rhythm_core::HubRegistry>> = Arc::new(Mutex::new(
+            crate::registry::HubDeviceRegistry::with_options(false),
+        ));
+
+        let mut app = AppState::default();
+        app.hubs.insert(
+            hub_key.clone(),
+            ActiveHub {
+                hub_type,
+                hub_key: hub_key.clone(),
+                runtime: None,
+                hub_data: Box::new(()),
+                registry: Some(registry),
+                discovery: None,
+                shutdown: Default::default(),
+            },
+        );
+        let state: SharedState = Arc::new(Mutex::new(app));
+        (hub_key, state)
+    }
+
+    /// Issue #43 reproducer: unassigning a motion sensor (parent=None) marks
+    /// it Standalone, but the next sync re-attaches it to the hub-default
+    /// room as HubDefault — so the user's "remove from room" action silently
+    /// reverts.
+    #[test]
+    fn motion_sensor_unassigned_does_not_get_reattached_by_sync() {
+        let (hub_key, state) = install_test_hub();
+
+        let discovery = IdentityDiscovery {
+            rooms: vec![DiscoveredRoom {
+                id: "balcony-hue-id".to_string(),
+                name: "Balcony".to_string(),
+                grouped_light_id: "balcony-gl".to_string(),
+                device_ids: vec![],
+            }],
+            identities: vec![make_identity(
+                "hue-motion-1",
+                "balcony-hue-id",
+                "Balcony",
+                "Master",
+                DeviceType::Motion,
+            )],
+        };
+
+        sync_with_discovery(&state, &hub_key, &discovery, true).unwrap();
+
+        let canonical_id = state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .find_by_native_id(&hub_key, "hue-motion-1")
+            .expect("master sensor should resolve to a canonical device")
+            .id
+            .clone();
+
+        // User unassigns the device — equivalent to PUT /parent with parent_id: null.
+        commands::do_canonical_assign_room(&state, &canonical_id, None).unwrap();
+
+        {
+            let s = state.lock().unwrap();
+            let node = s
+                .topology
+                .get_device_node(&canonical_id)
+                .expect("master device node after unassign");
+            assert_eq!(node.parent_id, None);
+            // Explicit user-unassign is a UserOverride with no parent, so the
+            // next sync's hub-default re-attach skips it.
+            assert_eq!(
+                node.placement,
+                crate::topology::DevicePlacement::UserOverride
+            );
+        }
+
+        // Next hub sync. Hue still reports the sensor in Balcony.
+        sync_with_discovery(&state, &hub_key, &discovery, true).unwrap();
+
+        let s = state.lock().unwrap();
+        let node = s
+            .topology
+            .get_device_node(&canonical_id)
+            .expect("master device node after resync");
+        assert_eq!(
+            node.parent_id, None,
+            "user's unassignment must not be reverted by hub rediscovery"
+        );
+        assert_eq!(
+            node.placement,
+            crate::topology::DevicePlacement::UserOverride,
+            "placement must stay UserOverride+None after rediscovery"
+        );
+    }
+
+    /// Issue #43: a motion sensor moved out of its hub-default Rhythm room
+    /// should not revert to that room on the next sync from the hub.
+    #[test]
+    fn motion_sensor_moved_out_of_hub_room_stays_put_after_resync() {
+        let (hub_key, state) = install_test_hub();
+
+        let discovery = IdentityDiscovery {
+            rooms: vec![DiscoveredRoom {
+                id: "balcony-hue-id".to_string(),
+                name: "Balcony".to_string(),
+                grouped_light_id: "balcony-gl".to_string(),
+                device_ids: vec![],
+            }],
+            identities: vec![make_identity(
+                "hue-motion-1",
+                "balcony-hue-id",
+                "Balcony",
+                "Master",
+                DeviceType::Motion,
+            )],
+        };
+
+        // Initial sync: motion sensor lands in Balcony as hub-default.
+        sync_with_discovery(&state, &hub_key, &discovery, true).unwrap();
+
+        let canonical_id = state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .find_by_native_id(&hub_key, "hue-motion-1")
+            .expect("master sensor should resolve to a canonical device")
+            .id
+            .clone();
+        let balcony_topology_id = state
+            .lock()
+            .unwrap()
+            .topology
+            .find_by_hub_room(&hub_key, "balcony-hue-id")
+            .expect("balcony should be mapped into topology")
+            .id
+            .clone();
+
+        {
+            let s = state.lock().unwrap();
+            let node = s
+                .topology
+                .get_device_node(&canonical_id)
+                .expect("master device node");
+            assert_eq!(node.parent_id.as_deref(), Some(balcony_topology_id.as_str()));
+            assert_eq!(node.placement, crate::topology::DevicePlacement::HubDefault);
+        }
+
+        // User creates a separate Rhythm room and moves the sensor into it.
+        let master_room_id = state.lock().unwrap().topology.create_room("Master Room");
+        commands::do_canonical_assign_room(&state, &canonical_id, Some(&master_room_id)).unwrap();
+
+        {
+            let s = state.lock().unwrap();
+            let node = s
+                .topology
+                .get_device_node(&canonical_id)
+                .expect("master device node after move");
+            assert_eq!(node.parent_id.as_deref(), Some(master_room_id.as_str()));
+            assert_eq!(
+                node.placement,
+                crate::topology::DevicePlacement::UserOverride
+            );
+            assert_eq!(
+                s.canonical_registry
+                    .get(&canonical_id)
+                    .unwrap()
+                    .room_id
+                    .as_deref(),
+                Some(master_room_id.as_str())
+            );
+        }
+
+        // Hue still reports the sensor in Balcony. The next sync must not
+        // reset the user's chosen Rhythm room.
+        sync_with_discovery(&state, &hub_key, &discovery, true).unwrap();
+
+        let s = state.lock().unwrap();
+        let node = s
+            .topology
+            .get_device_node(&canonical_id)
+            .expect("master device node after resync");
+        assert_eq!(
+            node.parent_id.as_deref(),
+            Some(master_room_id.as_str()),
+            "topology must keep the sensor in the user's chosen room"
+        );
+        assert_eq!(
+            node.placement,
+            crate::topology::DevicePlacement::UserOverride,
+            "placement must stay UserOverride after rediscovery"
+        );
+        assert_eq!(
+            s.canonical_registry
+                .get(&canonical_id)
+                .unwrap()
+                .room_id
+                .as_deref(),
+            Some(master_room_id.as_str()),
+            "canonical room_id must follow topology, not the hub's reported room"
+        );
+    }
 }

@@ -30,7 +30,9 @@ fn unassign_device_keeps_synthetic_registry_room_for_standalone_queries() {
         .get_device_node(&canonical_id)
         .expect("standalone topology device node should exist");
     assert_eq!(node.parent_id, None);
-    assert_eq!(node.placement, DevicePlacement::Standalone);
+    // Explicit user-unassign is a UserOverride with no parent, so the next
+    // sync's hub-default re-attach skips the device (issue #43).
+    assert_eq!(node.placement, DevicePlacement::UserOverride);
     assert_eq!(
         state
             .canonical_registry
