@@ -630,6 +630,56 @@ class DemoServerApi extends RhythmServerApi {
     return true;
   }
 
+  /// Inject a fake Matter device into demo state.
+  ///
+  /// Used by [MatterDeviceAddScreen] when demo mode is on, so the demo user
+  /// experiences a successful pair without a real backend. Notifies
+  /// [changes] so [ServerSyncProvider] refreshes its topology.
+  ///
+  /// Returns the canonical device id assigned to the new node.
+  String addDemoMatterDevice({
+    required String nativeId,
+    String? name,
+    String manufacturer = 'Demo Lighting',
+    String model = 'Matter Bulb',
+  }) {
+    ensureSeeded();
+    final ordinal = _canonicalDevices.keys
+            .where((id) => id.startsWith('demo_matter_'))
+            .length +
+        1;
+    final id = 'demo_matter_$ordinal';
+    final deviceName = name ?? 'Matter Bulb $ordinal';
+
+    _topologyNodes[id] = {
+      'id': id,
+      'name': deviceName,
+      'kind': 'light_device',
+      'parent_id': null,
+      'manufacturer': manufacturer,
+      'model': model,
+    };
+    _canonicalDevices[id] = {
+      'id': id,
+      'name': deviceName,
+      'device_type': 'light',
+      'manufacturer': manufacturer,
+      'model': model,
+      'endpoints': [
+        {
+          'hub_key': const {
+            'hub_type': 'matter',
+            'address': 'demo-matter.local',
+          },
+          'native_id': nativeId,
+          'preferred': true,
+        },
+      ],
+    };
+    _changes.add(null);
+    return id;
+  }
+
   void _addRoom({
     required String roomId,
     required String name,

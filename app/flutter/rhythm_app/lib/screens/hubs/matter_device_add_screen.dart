@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import 'package:rhythm_core/rhythm_core.dart' show HubEndpoint;
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
+import '../../services/demo_server_api.dart';
+import '../../services/hue/hue_service_locator.dart';
 import '../../services/matter_setup_payload.dart';
 import '../../widgets/solar_orbit.dart';
 import 'matter_add_method.dart';
@@ -155,6 +157,11 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       _errorText = null;
     });
 
+    if (HueServiceLocator.isDemoMode) {
+      await _simulateDemoPairing();
+      return;
+    }
+
     if (_usesWifiCommissioningPreflight) {
       final wifiStatus = await _pairingApi.getWifiStatus();
       if (!mounted) return;
@@ -225,6 +232,29 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       'Pairing did not complete.',
       detail:
           result.error ?? 'Unexpected status: ${result.status ?? 'unknown'}',
+    );
+  }
+
+  Future<void> _simulateDemoPairing() async {
+    await Future.delayed(const Duration(milliseconds: 1500));
+    if (!mounted) return;
+
+    final nativeId = 'matter-demo-${DateTime.now().millisecondsSinceEpoch}';
+    const name = 'Matter Bulb';
+    DemoServerApi.instance.addDemoMatterDevice(
+      nativeId: nativeId,
+      name: name,
+    );
+
+    HapticFeedback.heavyImpact();
+    Navigator.of(context).pop(
+      MatterDevicePairingResult(
+        nativeDeviceId: nativeId,
+        name: name,
+        deviceType: 'light',
+        manufacturer: 'Demo Lighting',
+        model: 'Matter Bulb',
+      ),
     );
   }
 

@@ -2,10 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmConnection, RhythmDevice, RhythmDeviceType;
+    show RhythmDevice, RhythmDeviceType;
 
 import '../../providers/home_provider.dart';
 import '../../providers/server_sync_provider.dart';
+import '../../services/hue/hue_service_locator.dart';
 import '../../widgets/device_detail_sheet.dart';
 import 'matter_add_method.dart';
 import 'matter_device_add_screen.dart';
@@ -35,7 +36,11 @@ Future<void> startMatterPairingFlow(
   );
   if (!context.mounted || pairingResult == null) return;
 
-  await syncProvider.connection.reconnect();
+  if (HueServiceLocator.isDemoMode) {
+    await syncProvider.fullRefresh();
+  } else {
+    await syncProvider.connection.reconnect();
+  }
   if (!context.mounted) return;
 
   final resolved = await _resolvePairedMatterDevice(context, pairingResult);
@@ -68,11 +73,10 @@ Future<({RhythmDevice device, String parentNodeId})?>
   BuildContext context,
   MatterDevicePairingResult pairingResult,
 ) async {
-  final connection = context.read<RhythmConnection>();
   final syncProvider = context.read<ServerSyncProvider>();
 
   for (int attempt = 0; attempt < 5; attempt++) {
-    final devices = await connection.api.getCanonicalDevices();
+    final devices = await syncProvider.api.getCanonicalDevices();
     if (!context.mounted) return null;
 
     if (devices != null) {

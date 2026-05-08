@@ -4,6 +4,8 @@
 /// whether demo mode is active.
 library;
 
+import 'dart:async';
+
 import '../demo_server_api.dart';
 import 'demo_hue_bridge_service.dart';
 import 'hue_bridge_service.dart';
@@ -31,22 +33,47 @@ class HueServiceLocator {
 
   static bool _isDemoMode = false;
 
+  static final List<Future<void> Function()> _onEnabled = [];
+  static final List<Future<void> Function()> _onDisabled = [];
+
   /// Whether demo mode is currently active.
   static bool get isDemoMode => _isDemoMode;
+
+  /// Register a callback to run when demo mode flips to enabled.
+  /// Used by [HomeProvider] to seed the demo home + server hub.
+  static void onDemoEnabled(Future<void> Function() callback) {
+    _onEnabled.add(callback);
+  }
+
+  /// Register a callback to run when demo mode flips to disabled.
+  /// Used by [HomeProvider] to clean up demo-seeded data on sign-out.
+  static void onDemoDisabled(Future<void> Function() callback) {
+    _onDisabled.add(callback);
+  }
 
   /// Set demo mode.
   ///
   /// Call with `true` when user signs in with demo credentials.
   /// Call with `false` when user signs out or signs in with real credentials.
   static void setDemoMode(bool enabled) {
+    final changed = _isDemoMode != enabled;
     _isDemoMode = enabled;
     if (enabled) {
       DemoServerApi.instance.ensureSeeded();
-    }
-    if (!enabled) {
+      if (changed) {
+        for (final cb in _onEnabled) {
+          unawaited(cb());
+        }
+      }
+    } else {
       // Clear demo state when exiting demo mode
       DemoServerApi.instance.reset();
       DemoHueBridgeService.instance.reset();
+      if (changed) {
+        for (final cb in _onDisabled) {
+          unawaited(cb());
+        }
+      }
     }
   }
 

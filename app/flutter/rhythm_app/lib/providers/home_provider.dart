@@ -121,6 +121,16 @@ class HomeProvider extends ChangeNotifier {
       // Start watching for changes
       _startWatching();
 
+      // Demo-mode hooks: auto-seed/cleanup the demo home + server hub so the
+      // App Store demo user reaches the same surfaces as a real user without
+      // any manual setup.
+      HueServiceLocator.onDemoEnabled(_seedDemoEnvironment);
+      HueServiceLocator.onDemoDisabled(_clearDemoEnvironment);
+      if (HueServiceLocator.isDemoMode) {
+        // Already in demo mode (e.g. hot restart) — seed now.
+        unawaited(_seedDemoEnvironment());
+      }
+
       _isLoading = false;
       _error = null;
       notifyListeners();
@@ -565,6 +575,55 @@ class HomeProvider extends ChangeNotifier {
   Hub? getFirstHubOfType(HubType type) {
     final hubs = getHubsByType(type);
     return hubs.isNotEmpty ? hubs.first : null;
+  }
+
+  // ============================================================
+  // Demo seeding
+  // ============================================================
+
+  static const _demoHomeOwnerId = 'demo-user';
+  static const _demoServerHost = 'demo.rhythm.local';
+
+  /// Ensure the demo user has a Home + RhythmServer hub so they can reach
+  /// surfaces like Matter pairing without manual setup.
+  Future<void> _seedDemoEnvironment() async {
+    if (_currentHome == null) {
+      final home = await _repository.createHome(
+        name: 'Demo Home',
+        ownerId: _demoHomeOwnerId,
+      );
+      _loadHomes();
+      _setCurrentHome(home);
+    }
+    if (getFirstHubOfType(HubType.server) == null) {
+      await addServerHub(
+        name: 'Demo Rhythm Server',
+        host: _demoServerHost,
+        port: 54448,
+      );
+    }
+  }
+
+  /// Remove demo-seeded data on sign-out so it doesn't leak into the next
+  /// real session. Identifies demo data by the marker ownerId / hostname.
+  Future<void> _clearDemoEnvironment() async {
+    final demoHubs = _repository
+        .getAllHubs()
+        .where((h) => h.endpoint.host == _demoServerHost)
+        .toList(growable: false);
+    for (final hub in demoHubs) {
+      await _repository.deleteHub(hub.id);
+    }
+    final demoHomes = _repository
+        .getAllHomes()
+        .where((h) => h.ownerId == _demoHomeOwnerId)
+        .toList(growable: false);
+    for (final home in demoHomes) {
+      await _repository.deleteHome(home.id);
+    }
+    _loadHomes();
+    _loadCurrentHomeHubs();
+    notifyListeners();
   }
 
   // ============================================================
