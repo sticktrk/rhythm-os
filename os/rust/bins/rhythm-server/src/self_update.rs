@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use tar::Archive;
 
 use crate::bootstate;
+use rhythm_os::server_event::OtaUpdateStage;
 
 const DEFAULT_UPDATE_BASE_URL: &str = "https://dl.rhythm.lighting/server";
 const APPLIANCE_INSTALL_PATH: &str = "/usr/bin/rhythm-server";
@@ -354,8 +355,47 @@ pub struct ApplyResult {
     pub installed_targets: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct UpdateProgress {
+    pub stage: OtaUpdateStage,
+    pub message: String,
+    pub downloaded_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+}
+
+impl UpdateProgress {
+    fn stage(stage: OtaUpdateStage, message: impl Into<String>) -> Self {
+        Self {
+            stage,
+            message: message.into(),
+            downloaded_bytes: None,
+            total_bytes: None,
+        }
+    }
+
+    fn downloading(
+        message: impl Into<String>,
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+    ) -> Self {
+        Self {
+            stage: OtaUpdateStage::Downloading,
+            message: message.into(),
+            downloaded_bytes: Some(downloaded_bytes),
+            total_bytes,
+        }
+    }
+}
+
 impl UpdateInfo {
     pub fn apply_blocking(&self) -> Result<ApplyResult, String> {
+        self.apply_blocking_with_progress(|_| {})
+    }
+
+    pub fn apply_blocking_with_progress<F>(&self, progress: F) -> Result<ApplyResult, String>
+    where
+        F: Fn(UpdateProgress) + Send + Sync,
+    {
         if restart_strategy() == RestartStrategy::ApplianceReboot {
             if let Some(image_asset) = self.preferred_appliance_image_asset() {
                 return apply_appliance_image_blocking(
@@ -363,6 +403,7 @@ impl UpdateInfo {
                     &self.current_version,
                     &self.latest_version,
                     self.expected_sha256.as_deref(),
+                    &progress,
                 );
             }
         }
@@ -381,6 +422,7 @@ impl UpdateInfo {
             asset_name,
             self.expected_sha256.as_deref(),
             &self.resolved_install_targets,
+            &progress,
         )
     }
 
@@ -961,6 +1003,7 @@ fn apply_appliance_image_blocking(
     current_version: &str,
     latest_version: &str,
     fallback_sha256: Option<&str>,
+    progress: &(impl Fn(UpdateProgress) + Send + Sync),
 ) -> Result<ApplyResult, String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("rhythm-server")
@@ -976,11 +1019,31 @@ fn apply_appliance_image_blocking(
 
     let download_path = artifact_staging_path(&image_asset.name);
     remove_if_exists(&download_path);
-    download_release(&client, &image_asset.url, &download_path)?;
+    let download_message = format!("Downloading {}", image_asset.name);
+    progress(UpdateProgress::stage(
+        OtaUpdateStage::Downloading,
+        download_message.clone(),
+    ));
+    download_release_with_progress(
+        &client,
+        &image_asset.url,
+        &download_path,
+        |downloaded, total| {
+            progress(UpdateProgress::downloading(
+                download_message.clone(),
+                downloaded,
+                total,
+            ));
+        },
+    )?;
 
     let expected_sha256 = image_asset.sha256.as_deref().or(fallback_sha256);
     let checksum_verified = match expected_sha256 {
         Some(expected) => {
+            progress(UpdateProgress::stage(
+                OtaUpdateStage::Verifying,
+                "Verifying update image checksum",
+            ));
             let actual = compute_sha256_hex(&download_path)?;
             if actual != expected.to_ascii_lowercase() {
                 remove_if_exists(&download_path);
@@ -995,11 +1058,22 @@ fn apply_appliance_image_blocking(
     };
 
     if let Err(error) = (|| {
+        progress(UpdateProgress::stage(
+            OtaUpdateStage::Installing,
+            format!(
+                "Writing update to inactive rootfs slot {}",
+                target_slot.as_str()
+            ),
+        ));
         write_image_artifact_to_device(
             &download_path,
             Path::new(target_slot.root_device()),
             artifact_uses_gzip(image_asset),
         )?;
+        progress(UpdateProgress::stage(
+            OtaUpdateStage::Finalizing,
+            "Preparing updated boot slot",
+        ));
         update_appliance_cmdline_for_slot(target_slot)?;
         write_appliance_boot_state(current_slot, target_slot, current_version, latest_version)?;
         Ok::<(), String>(())
@@ -1122,6 +1196,7 @@ fn apply_payload_blocking(
     asset_name: &str,
     expected_sha256: Option<&str>,
     install_targets: &[InstallTarget],
+    progress: &(impl Fn(UpdateProgress) + Send + Sync),
 ) -> Result<ApplyResult, String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("rhythm-server")
@@ -1139,10 +1214,30 @@ fn apply_payload_blocking(
     remove_if_exists(&download_path);
     cleanup_install_artifacts(&resolved_targets);
 
-    download_release(&client, download_url, &download_path)?;
+    let download_message = format!("Downloading {}", asset_name);
+    progress(UpdateProgress::stage(
+        OtaUpdateStage::Downloading,
+        download_message.clone(),
+    ));
+    download_release_with_progress(
+        &client,
+        download_url,
+        &download_path,
+        |downloaded, total| {
+            progress(UpdateProgress::downloading(
+                download_message.clone(),
+                downloaded,
+                total,
+            ));
+        },
+    )?;
 
     let checksum_verified = match expected_sha256 {
         Some(expected) => {
+            progress(UpdateProgress::stage(
+                OtaUpdateStage::Verifying,
+                "Verifying update bundle checksum",
+            ));
             let actual = compute_sha256_hex(&download_path)?;
             if actual != expected.to_ascii_lowercase() {
                 remove_if_exists(&download_path);
@@ -1156,16 +1251,28 @@ fn apply_payload_blocking(
         None => None,
     };
 
+    progress(UpdateProgress::stage(
+        OtaUpdateStage::Staging,
+        "Staging update bundle",
+    ));
     let staged_targets = stage_install_targets(&download_path, asset_name, &resolved_targets)
         .inspect_err(|_error| {
             cleanup_install_artifacts(&resolved_targets);
             remove_if_exists(&download_path);
         })?;
+    progress(UpdateProgress::stage(
+        OtaUpdateStage::Installing,
+        "Installing update bundle",
+    ));
     let installed_targets = commit_staged_targets(&staged_targets).inspect_err(|_error| {
         cleanup_staged_files(&staged_targets);
         remove_if_exists(&download_path);
     })?;
 
+    progress(UpdateProgress::stage(
+        OtaUpdateStage::Finalizing,
+        "Cleaning up update artifacts",
+    ));
     remove_if_exists(&download_path);
 
     Ok(ApplyResult {
@@ -1185,6 +1292,15 @@ pub fn download_release(
     download_url: &str,
     destination: &Path,
 ) -> Result<(), String> {
+    download_release_with_progress(client, download_url, destination, |_, _| {})
+}
+
+fn download_release_with_progress(
+    client: &reqwest::blocking::Client,
+    download_url: &str,
+    destination: &Path,
+    progress: impl Fn(u64, Option<u64>),
+) -> Result<(), String> {
     let mut resp = client
         .get(download_url)
         .send()
@@ -1201,10 +1317,35 @@ pub fn download_release(
     {
         let mut file =
             File::create(&tmp).map_err(|e| format!("Failed to create {}: {}", tmp.display(), e))?;
-        if let Err(e) = std::io::copy(&mut resp, &mut file) {
-            drop(file);
-            remove_if_exists(&tmp);
-            return Err(format!("Failed to write download: {}", e));
+        let total_bytes = resp.content_length();
+        let mut downloaded_bytes = 0_u64;
+        let mut next_progress_bytes = 0_u64;
+        let mut buf = [0_u8; 64 * 1024];
+        progress(downloaded_bytes, total_bytes);
+
+        loop {
+            let read = match resp.read(&mut buf) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(e) => {
+                    drop(file);
+                    remove_if_exists(&tmp);
+                    return Err(format!("Failed to write download: {}", e));
+                }
+            };
+
+            if let Err(e) = file.write_all(&buf[..read]) {
+                drop(file);
+                remove_if_exists(&tmp);
+                return Err(format!("Failed to write download: {}", e));
+            }
+
+            downloaded_bytes = downloaded_bytes.saturating_add(read as u64);
+            let reached_total = total_bytes == Some(downloaded_bytes);
+            if downloaded_bytes >= next_progress_bytes || reached_total {
+                progress(downloaded_bytes, total_bytes);
+                next_progress_bytes = downloaded_bytes.saturating_add(512 * 1024);
+            }
         }
         file.flush()
             .map_err(|e| format!("Failed to flush {}: {}", tmp.display(), e))?;
@@ -1758,7 +1899,10 @@ fn remove_if_exists(path: &Path) {
 mod tests {
     use super::*;
     use std::io::Write;
-    use std::sync::Mutex;
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1780,6 +1924,34 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
+    }
+
+    fn spawn_download_fixture(body: Vec<u8>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = [0_u8; 1024];
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+            let _ = stream.read(&mut request);
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(headers.as_bytes());
+            let _ = stream.write_all(&body);
+        });
+        thread::sleep(Duration::from_millis(10));
+        format!("http://127.0.0.1:{}/artifact", port)
+    }
+
+    fn test_client() -> reqwest::blocking::Client {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("client")
     }
 
     #[test]
@@ -1909,6 +2081,41 @@ mod tests {
         let missing = dir.join("nonexistent");
         cleanup_stale_downloads(&missing);
         // Must not panic or error.
+    }
+
+    #[test]
+    fn download_release_with_progress_reports_initial_and_final_bytes() {
+        let payload = b"rhythm-update-payload".to_vec();
+        let payload_len = payload.len() as u64;
+        let url = spawn_download_fixture(payload.clone());
+        let dir = unique_test_dir("download-progress");
+        let dest = dir.join("artifact.download");
+        let progress = Arc::new(Mutex::new(Vec::<(u64, Option<u64>)>::new()));
+
+        download_release_with_progress(&test_client(), &url, &dest, {
+            let progress = progress.clone();
+            move |downloaded, total| progress.lock().unwrap().push((downloaded, total))
+        })
+        .expect("download succeeds");
+
+        assert_eq!(fs::read(&dest).unwrap(), payload);
+        let progress = progress.lock().unwrap();
+        assert!(
+            progress
+                .first()
+                .is_some_and(|(downloaded, total)| *downloaded == 0 && *total == Some(payload_len)),
+            "expected initial 0-byte progress with total, got {:?}",
+            *progress
+        );
+        assert!(
+            progress.last().is_some_and(
+                |(downloaded, total)| *downloaded == payload_len && *total == Some(payload_len)
+            ),
+            "expected final complete progress with total, got {:?}",
+            *progress
+        );
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

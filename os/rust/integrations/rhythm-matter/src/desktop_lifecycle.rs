@@ -243,11 +243,31 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
         params: &serde_json::Value,
     ) -> Result<PairingSession> {
         let request = crate::commissioning::MatterPairingParams::from_value(params)?;
+        rhythm_os::pairing::emit_pairing_progress(
+            state,
+            "matter",
+            request.session_id.as_deref(),
+            rhythm_os::pairing::PairingStatus::Searching,
+            rhythm_os::pairing::PairingStage::HubConnecting,
+            "Preparing Matter hub",
+            None,
+            None,
+        );
         crate::commissioning::ensure_matter_hub_connected(state)?;
 
         let transport = get_transport(state)?;
         let hub_data = get_hub_data(state)?;
 
+        rhythm_os::pairing::emit_pairing_progress(
+            state,
+            "matter",
+            request.session_id.as_deref(),
+            rhythm_os::pairing::PairingStatus::Searching,
+            rhythm_os::pairing::PairingStage::Searching,
+            "Searching for Matter device",
+            None,
+            None,
+        );
         crate::commissioning::pair_device(state, transport, hub_data, &request)
     }
 

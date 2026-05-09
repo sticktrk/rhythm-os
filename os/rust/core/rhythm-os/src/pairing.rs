@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 pub struct PairingRequest {
     /// Which integration handles this pairing (e.g., "matter", "zigbee").
     pub hub_type: String,
+    /// Optional client-generated ID for correlating SSE progress events with
+    /// this request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     /// Protocol-specific pairing parameters.
     ///
     /// Matter: `{ "setup_payload": "3497-011-2332", "network": "wifi", "rendezvous": "on_network" }`
@@ -30,6 +34,31 @@ pub enum PairingStatus {
     Found,
     /// Commissioning / interview in progress.
     Commissioning,
+    /// Pairing completed successfully.
+    Complete,
+    /// Pairing failed.
+    Failed,
+}
+
+/// User-visible stage of a pairing flow.
+///
+/// These stages are intentionally protocol-neutral. Integrations can emit the
+/// closest stage they can know without leaking transport-specific internals.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairingStage {
+    /// Request accepted and queued for processing.
+    Requested,
+    /// Hub/runtime transport is being prepared.
+    HubConnecting,
+    /// Device discovery or rendezvous is in progress.
+    Searching,
+    /// Device was found and a transport connection is being negotiated.
+    Connecting,
+    /// Protocol commissioning/interview is in progress.
+    Commissioning,
+    /// Device was commissioned and local registries are being updated.
+    Finalizing,
     /// Pairing completed successfully.
     Complete,
     /// Pairing failed.
@@ -66,6 +95,32 @@ pub struct PairingSession {
     /// Error message (populated on failure).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// Emit a pairing progress event to SSE clients.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_pairing_progress(
+    state: &crate::state::SharedState,
+    hub_type: &str,
+    session_id: Option<&str>,
+    status: PairingStatus,
+    stage: PairingStage,
+    message: impl Into<String>,
+    device: Option<PairedDeviceInfo>,
+    error: Option<String>,
+) {
+    crate::state::emit_server_event(
+        state,
+        crate::server_event::ServerEvent::PairingProgress {
+            hub_type: hub_type.to_string(),
+            session_id: session_id.map(str::to_string),
+            status,
+            stage,
+            message: message.into(),
+            device,
+            error,
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------

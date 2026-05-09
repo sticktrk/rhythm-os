@@ -41,14 +41,20 @@ pub fn create_router(state: SharedState) -> Router {
                 "/api/ota/check",
                 get({
                     let ota_status = ota_status.clone();
-                    move || check_update(ota_status.clone())
+                    move |State(state): State<SharedState>| {
+                        let ota_status = ota_status.clone();
+                        async move { check_update(state, ota_status).await }
+                    }
                 }),
             )
             .route(
                 "/api/ota/update",
                 post({
                     let ota_status = ota_status.clone();
-                    move || do_update(ota_status.clone())
+                    move |State(state): State<SharedState>| {
+                        let ota_status = ota_status.clone();
+                        async move { do_update(state, ota_status).await }
+                    }
                 }),
             )
             .route("/api/restart", post(restart_device))
@@ -100,6 +106,70 @@ fn tar_gz_attachment(filename: &str, body: Vec<u8>) -> Response {
         .unwrap_or_else(|e| ApiResponse::server_error(e).into_response())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn emit_ota_progress(
+    state: &SharedState,
+    stage: rhythm_os::server_event::OtaUpdateStage,
+    message: impl Into<String>,
+    current_version: Option<String>,
+    target_version: Option<String>,
+    update_available: Option<bool>,
+    downloaded_bytes: Option<u64>,
+    total_bytes: Option<u64>,
+    checksum_verified: Option<bool>,
+    installed_targets: Vec<String>,
+    error: Option<String>,
+) {
+    let percent = match (downloaded_bytes, total_bytes) {
+        (Some(downloaded), Some(total)) if total > 0 => {
+            let percent = downloaded
+                .saturating_mul(100)
+                .saturating_div(total)
+                .min(100);
+            Some(percent as u8)
+        }
+        _ => None,
+    };
+
+    rhythm_os::state::emit_server_event(
+        state,
+        rhythm_os::server_event::ServerEvent::OtaUpdateProgress {
+            stage,
+            message: message.into(),
+            current_version,
+            target_version,
+            update_available,
+            downloaded_bytes,
+            total_bytes,
+            percent,
+            checksum_verified,
+            installed_targets,
+            error,
+        },
+    );
+}
+
+fn emit_ota_apply_progress(
+    state: &SharedState,
+    current_version: &str,
+    target_version: &str,
+    progress: crate::self_update::UpdateProgress,
+) {
+    emit_ota_progress(
+        state,
+        progress.stage,
+        progress.message,
+        Some(current_version.to_string()),
+        Some(target_version.to_string()),
+        Some(true),
+        progress.downloaded_bytes,
+        progress.total_bytes,
+        None,
+        Vec::new(),
+        None,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Server-specific handlers
 // ---------------------------------------------------------------------------
@@ -139,12 +209,57 @@ async fn debug_bundle(State(state): State<SharedState>) -> Response {
     }
 }
 
-async fn check_update(ota_status: crate::self_update::OtaStatusHandle) -> Response {
+async fn check_update(
+    state: SharedState,
+    ota_status: crate::self_update::OtaStatusHandle,
+) -> Response {
     let version = crate::BUILD_VERSION;
     ota_status.mark_checking();
+    emit_ota_progress(
+        &state,
+        rhythm_os::server_event::OtaUpdateStage::Checking,
+        "Checking for updates",
+        Some(version.to_string()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Vec::new(),
+        None,
+    );
     match tokio::task::spawn_blocking(move || crate::self_update::check_blocking(version)).await {
         Ok(Ok(info)) => {
             ota_status.record_check_result(&info);
+            let (stage, message) = if info.update_available {
+                (
+                    rhythm_os::server_event::OtaUpdateStage::UpdateAvailable,
+                    match info.update_reason {
+                        Some(crate::self_update::UpdateReason::ComponentDrift) => {
+                            format!("Repair update available for v{}", info.latest_version)
+                        }
+                        _ => format!("Update available: v{}", info.latest_version),
+                    },
+                )
+            } else {
+                (
+                    rhythm_os::server_event::OtaUpdateStage::UpToDate,
+                    "Already up to date".to_string(),
+                )
+            };
+            emit_ota_progress(
+                &state,
+                stage,
+                message,
+                Some(info.current_version.clone()),
+                Some(info.latest_version.clone()),
+                Some(info.update_available),
+                None,
+                None,
+                None,
+                Vec::new(),
+                None,
+            );
             let json = serde_json::json!({
                 "current_version": info.current_version,
                 "latest_version": info.latest_version,
@@ -157,10 +272,36 @@ async fn check_update(ota_status: crate::self_update::OtaStatusHandle) -> Respon
         }
         Ok(Err(e)) => {
             ota_status.mark_error(e.clone());
+            emit_ota_progress(
+                &state,
+                rhythm_os::server_event::OtaUpdateStage::Failed,
+                "Update check failed",
+                Some(version.to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+                Some(e.clone()),
+            );
             err_500(e)
         }
         Err(e) => {
             ota_status.mark_error(e.to_string());
+            emit_ota_progress(
+                &state,
+                rhythm_os::server_event::OtaUpdateStage::Failed,
+                "Update check failed",
+                Some(version.to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+                Some(e.to_string()),
+            );
             err_500(e)
         }
     }
@@ -269,7 +410,10 @@ async fn restart_device() -> Response {
     json_ok(r#"{"status":"ok","message":"Restart scheduled"}"#.to_string())
 }
 
-async fn do_update(ota_status: crate::self_update::OtaStatusHandle) -> Response {
+async fn do_update(
+    state: SharedState,
+    ota_status: crate::self_update::OtaStatusHandle,
+) -> Response {
     let snapshot = ota_status.snapshot();
     if matches!(
         snapshot.state,
@@ -281,6 +425,19 @@ async fn do_update(ota_status: crate::self_update::OtaStatusHandle) -> Response 
 
     let version = crate::BUILD_VERSION;
     ota_status.mark_checking();
+    emit_ota_progress(
+        &state,
+        rhythm_os::server_event::OtaUpdateStage::Checking,
+        "Checking for updates",
+        Some(version.to_string()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Vec::new(),
+        None,
+    );
 
     // Check for update
     let info = match tokio::task::spawn_blocking(move || {
@@ -291,18 +448,70 @@ async fn do_update(ota_status: crate::self_update::OtaStatusHandle) -> Response 
         Ok(Ok(info)) => info,
         Ok(Err(e)) => {
             ota_status.mark_error(e.clone());
+            emit_ota_progress(
+                &state,
+                rhythm_os::server_event::OtaUpdateStage::Failed,
+                "Update check failed",
+                Some(version.to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+                Some(e.clone()),
+            );
             return err_500(e);
         }
         Err(e) => {
             ota_status.mark_error(e.to_string());
+            emit_ota_progress(
+                &state,
+                rhythm_os::server_event::OtaUpdateStage::Failed,
+                "Update check failed",
+                Some(version.to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+                Some(e.to_string()),
+            );
             return err_500(e);
         }
     };
     ota_status.record_check_result(&info);
 
     if !info.update_available {
+        emit_ota_progress(
+            &state,
+            rhythm_os::server_event::OtaUpdateStage::UpToDate,
+            "Already up to date",
+            Some(info.current_version.clone()),
+            Some(info.latest_version.clone()),
+            Some(false),
+            None,
+            None,
+            None,
+            Vec::new(),
+            None,
+        );
         return json_ok(r#"{"status":"ok","message":"Already up to date"}"#.to_string());
     }
+    emit_ota_progress(
+        &state,
+        rhythm_os::server_event::OtaUpdateStage::UpdateAvailable,
+        format!("Update available: v{}", info.latest_version),
+        Some(info.current_version.clone()),
+        Some(info.latest_version.clone()),
+        Some(true),
+        None,
+        None,
+        None,
+        Vec::new(),
+        None,
+    );
 
     if let Err(e) = ota_status.begin_update(&info.latest_version) {
         return err_409(e);
@@ -310,20 +519,68 @@ async fn do_update(ota_status: crate::self_update::OtaStatusHandle) -> Response 
 
     let latest = info.latest_version.clone();
     let previous = info.current_version.clone();
+    let apply_state = state.clone();
+    let apply_previous = previous.clone();
+    let apply_latest = latest.clone();
 
     // Download and install
-    let apply_result = match tokio::task::spawn_blocking(move || info.apply_blocking()).await {
+    let apply_result = match tokio::task::spawn_blocking(move || {
+        info.apply_blocking_with_progress(move |progress| {
+            emit_ota_apply_progress(&apply_state, &apply_previous, &apply_latest, progress);
+        })
+    })
+    .await
+    {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
             ota_status.mark_error(e.clone());
+            emit_ota_progress(
+                &state,
+                rhythm_os::server_event::OtaUpdateStage::Failed,
+                "Update failed",
+                Some(previous.clone()),
+                Some(latest.clone()),
+                Some(true),
+                None,
+                None,
+                None,
+                Vec::new(),
+                Some(e.clone()),
+            );
             return err_500(e);
         }
         Err(e) => {
             ota_status.mark_error(e.to_string());
+            emit_ota_progress(
+                &state,
+                rhythm_os::server_event::OtaUpdateStage::Failed,
+                "Update failed",
+                Some(previous.clone()),
+                Some(latest.clone()),
+                Some(true),
+                None,
+                None,
+                None,
+                Vec::new(),
+                Some(e.to_string()),
+            );
             return err_500(e);
         }
     };
     ota_status.mark_restarting(&previous, &latest, apply_result.checksum_verified);
+    emit_ota_progress(
+        &state,
+        rhythm_os::server_event::OtaUpdateStage::Restarting,
+        format!("Updated to v{}, restarting...", latest),
+        Some(previous.clone()),
+        Some(latest.clone()),
+        Some(false),
+        None,
+        None,
+        apply_result.checksum_verified,
+        apply_result.installed_targets.clone(),
+        None,
+    );
 
     crate::self_update::schedule_post_update_restart();
 
@@ -356,6 +613,54 @@ mod tests {
     // thread inert so tests can exercise the route without nuking the runner.
     fn init_restart_dry_run() {
         DRY_RUN_INIT.call_once(|| std::env::set_var("RHYTHM_RESTART_DRY_RUN", "1"));
+    }
+
+    #[tokio::test]
+    async fn emit_ota_progress_broadcasts_percent_payload() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(4);
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        state.lock().unwrap().event_tx = Some(tx);
+
+        emit_ota_progress(
+            &state,
+            rhythm_os::server_event::OtaUpdateStage::Downloading,
+            "Downloading update bundle",
+            Some("0.4.192-beta".to_string()),
+            Some("0.4.193-beta".to_string()),
+            Some(true),
+            Some(25),
+            Some(100),
+            None,
+            Vec::new(),
+            None,
+        );
+
+        let event = rx.recv().await.expect("ota progress event");
+        match event {
+            rhythm_os::server_event::ServerEvent::OtaUpdateProgress {
+                stage,
+                message,
+                current_version,
+                target_version,
+                update_available,
+                downloaded_bytes,
+                total_bytes,
+                percent,
+                error,
+                ..
+            } => {
+                assert_eq!(stage, rhythm_os::server_event::OtaUpdateStage::Downloading);
+                assert_eq!(message, "Downloading update bundle");
+                assert_eq!(current_version.as_deref(), Some("0.4.192-beta"));
+                assert_eq!(target_version.as_deref(), Some("0.4.193-beta"));
+                assert_eq!(update_available, Some(true));
+                assert_eq!(downloaded_bytes, Some(25));
+                assert_eq!(total_bytes, Some(100));
+                assert_eq!(percent, Some(25));
+                assert_eq!(error, None);
+            }
+            other => panic!("expected OTA progress event, got {:?}", other),
+        }
     }
 
     #[tokio::test]

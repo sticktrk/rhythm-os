@@ -8,6 +8,9 @@ This directory contains all build and deployment scripts for Rhythm OS.
 # Development
 ./scripts/run-dev.sh                    # Build and run addon locally
 
+# Triage
+./scripts/triage.sh [issue-number]      # Download and summarize app bug-report debug bundle
+
 # Build individual components
 ./scripts/build-server.sh               # Build the server
 ./scripts/build-rust.sh                 # Build Rust addon

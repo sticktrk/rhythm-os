@@ -1500,9 +1500,58 @@ pub fn handle_pair_device(
         logging::summarize_json_for_log(&request.params)
     );
 
-    match start_fn(state, &request.hub_type, &request.params) {
+    crate::pairing::emit_pairing_progress(
+        state,
+        &request.hub_type,
+        request.session_id.as_deref(),
+        crate::pairing::PairingStatus::Searching,
+        crate::pairing::PairingStage::Requested,
+        "Pairing request received",
+        None,
+        None,
+    );
+
+    let params_with_session_id;
+    let params = if let Some(session_id) = request.session_id.as_deref() {
+        if let Some(object) = request.params.as_object() {
+            let mut object = object.clone();
+            object
+                .entry("session_id".to_string())
+                .or_insert_with(|| serde_json::Value::String(session_id.to_string()));
+            params_with_session_id = serde_json::Value::Object(object);
+            &params_with_session_id
+        } else {
+            &request.params
+        }
+    } else {
+        &request.params
+    };
+
+    match start_fn(state, &request.hub_type, params) {
         Ok(session) => {
             log::info!(target: "pair", "Pairing result: status={:?} error={:?}", session.status, session.error);
+            let (stage, message) = match &session.status {
+                crate::pairing::PairingStatus::Complete => {
+                    (crate::pairing::PairingStage::Complete, "Pairing complete")
+                }
+                crate::pairing::PairingStatus::Failed => {
+                    (crate::pairing::PairingStage::Failed, "Pairing failed")
+                }
+                _ => (
+                    crate::pairing::PairingStage::Commissioning,
+                    "Pairing status changed",
+                ),
+            };
+            crate::pairing::emit_pairing_progress(
+                state,
+                &session.hub_type,
+                request.session_id.as_deref(),
+                session.status.clone(),
+                stage,
+                message,
+                session.device.clone(),
+                session.error.clone(),
+            );
             if session.status == crate::pairing::PairingStatus::Complete {
                 // Persist canonical registry changes made during pairing
                 if let Ok(s) = state.lock() {
@@ -1526,6 +1575,16 @@ pub fn handle_pair_device(
         }
         Err(e) => {
             log::error!(target: "pair", "Pairing failed: {}", e);
+            crate::pairing::emit_pairing_progress(
+                state,
+                &request.hub_type,
+                request.session_id.as_deref(),
+                crate::pairing::PairingStatus::Failed,
+                crate::pairing::PairingStage::Failed,
+                "Pairing failed",
+                None,
+                Some(e.to_string()),
+            );
             ApiResponse::server_error(e)
         }
     }
@@ -1801,7 +1860,10 @@ mod tests {
         factory_default_light_profile_config, factory_default_profile_bundle,
     };
     use crate::hub::{ActiveHub, HubType};
-    use crate::pairing::{PairingStatus, UnpairingRequest, UnpairingResult};
+    use crate::pairing::{
+        PairedDeviceInfo, PairingRequest, PairingSession, PairingStage, PairingStatus,
+        UnpairingRequest, UnpairingResult,
+    };
     use crate::registry::HubDeviceRegistry;
     use crate::state::{AppState, ObservedPowerSource, ObservedPowerState, WorkItem};
     use crate::topology::HubRoomBinding;
@@ -1841,6 +1903,84 @@ mod tests {
         let r = ApiResponse::server_error("boom");
         assert_eq!(r.status, 500);
         assert_eq!(r.body, "boom");
+    }
+
+    #[test]
+    fn pair_device_emits_progress_and_passes_session_id_to_integration() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let captured_params = Arc::new(Mutex::new(None::<serde_json::Value>));
+
+        {
+            let captured_params = captured_params.clone();
+            let mut s = state.lock().unwrap();
+            s.event_tx = Some(tx);
+            s.start_pairing_fn = Some(Arc::new(move |_, hub_type, params| {
+                assert_eq!(hub_type, "matter");
+                *captured_params.lock().unwrap() = Some(params.clone());
+                Ok(PairingSession {
+                    hub_type: hub_type.to_string(),
+                    status: PairingStatus::Complete,
+                    device: Some(PairedDeviceInfo {
+                        device_id: "matter-100".to_string(),
+                        name: "Test Matter Bulb".to_string(),
+                        device_type: DeviceType::Light,
+                        manufacturer: Some("Test".to_string()),
+                        model: Some("T100".to_string()),
+                    }),
+                    error: None,
+                })
+            }));
+        }
+
+        let response = handle_pair_device(
+            &state,
+            &PairingRequest {
+                hub_type: "matter".to_string(),
+                session_id: Some("pair-123".to_string()),
+                params: json!({ "setup_payload": "34970112332" }),
+            },
+        );
+
+        assert_eq!(response.status, 200);
+        let forwarded = captured_params.lock().unwrap().clone().unwrap();
+        assert_eq!(forwarded["setup_payload"], "34970112332");
+        assert_eq!(forwarded["session_id"], "pair-123");
+
+        let first = rx.try_recv().expect("requested progress event");
+        match first {
+            crate::server_event::ServerEvent::PairingProgress {
+                session_id,
+                status,
+                stage,
+                ..
+            } => {
+                assert_eq!(session_id.as_deref(), Some("pair-123"));
+                assert_eq!(status, PairingStatus::Searching);
+                assert_eq!(stage, PairingStage::Requested);
+            }
+            other => panic!("expected pairing progress event, got {:?}", other),
+        }
+
+        let second = rx.try_recv().expect("completion progress event");
+        match second {
+            crate::server_event::ServerEvent::PairingProgress {
+                session_id,
+                status,
+                stage,
+                device,
+                ..
+            } => {
+                assert_eq!(session_id.as_deref(), Some("pair-123"));
+                assert_eq!(status, PairingStatus::Complete);
+                assert_eq!(stage, PairingStage::Complete);
+                assert_eq!(
+                    device.as_ref().map(|device| device.device_id.as_str()),
+                    Some("matter-100")
+                );
+            }
+            other => panic!("expected pairing completion event, got {:?}", other),
+        }
     }
 
     // ---- Handler validation (400 paths) ----

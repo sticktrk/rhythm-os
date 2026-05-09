@@ -8,7 +8,34 @@ use serde::Serialize;
 use rhythm_core::{ModeChangeCause, NodeSnapshot, RhythmMode, RoomModeState, RoomProfileSettings};
 
 use crate::api_types::ObservedPowerDto;
+use crate::pairing::{PairedDeviceInfo, PairingStage, PairingStatus};
 use crate::state::MotionSnapshot;
+
+/// User-visible stage of an OTA update flow.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OtaUpdateStage {
+    /// Server is checking the update manifest.
+    Checking,
+    /// A newer or repair update is available.
+    UpdateAvailable,
+    /// The server is already on the latest advertised version.
+    UpToDate,
+    /// Update artifact download is in progress.
+    Downloading,
+    /// Downloaded artifact checksum is being verified.
+    Verifying,
+    /// Artifact payloads are being prepared before install.
+    Staging,
+    /// Payloads are being installed or flashed.
+    Installing,
+    /// Install metadata is being finalized.
+    Finalizing,
+    /// Update completed and the server is restarting.
+    Restarting,
+    /// Update failed.
+    Failed,
+}
 
 /// A server event broadcast to all connected SSE clients.
 #[derive(Clone, Debug, Serialize)]
@@ -56,6 +83,60 @@ pub enum ServerEvent {
         pending_unassigned: usize,
         /// Pending hub-configured device entries.
         pending_hub_configured: usize,
+    },
+    /// Device pairing progress changed.
+    PairingProgress {
+        /// Which integration is handling this pairing.
+        hub_type: String,
+        /// Optional client-generated correlation ID from the pairing request.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        /// Coarse pairing status for compatibility with final pairing results.
+        status: PairingStatus,
+        /// More specific user-visible stage.
+        stage: PairingStage,
+        /// Short user-facing progress text.
+        message: String,
+        /// Device info, populated on completion when available.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        device: Option<PairedDeviceInfo>,
+        /// Error text, populated on failure.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// OTA update progress changed.
+    OtaUpdateProgress {
+        /// More specific user-visible stage.
+        stage: OtaUpdateStage,
+        /// Short user-facing progress text.
+        message: String,
+        /// Server version currently running.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current_version: Option<String>,
+        /// Version being checked or installed.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_version: Option<String>,
+        /// Whether the latest check found an update.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        update_available: Option<bool>,
+        /// Bytes downloaded so far, when known.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        downloaded_bytes: Option<u64>,
+        /// Total bytes expected from the response, when known.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        total_bytes: Option<u64>,
+        /// Integer download percentage from 0-100, when total bytes are known.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        percent: Option<u8>,
+        /// Whether checksum verification completed successfully.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        checksum_verified: Option<bool>,
+        /// Installed target names, populated near restart when available.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        installed_targets: Vec<String>,
+        /// Error text, populated on failure.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 }
 
@@ -218,6 +299,48 @@ mod tests {
         ] {
             assert!(json.contains(field), "missing {} in {}", field, json);
         }
+    }
+
+    #[test]
+    fn server_event_pairing_progress_serializes_stage_and_session() {
+        let event = ServerEvent::PairingProgress {
+            hub_type: "matter".into(),
+            session_id: Some("pair-1".into()),
+            status: PairingStatus::Commissioning,
+            stage: PairingStage::Commissioning,
+            message: "Commissioning Matter device".into(),
+            device: None,
+            error: None,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"pairing_progress\""));
+        assert!(json.contains("\"hub_type\":\"matter\""));
+        assert!(json.contains("\"session_id\":\"pair-1\""));
+        assert!(json.contains("\"status\":\"commissioning\""));
+        assert!(json.contains("\"stage\":\"commissioning\""));
+    }
+
+    #[test]
+    fn server_event_ota_update_progress_serializes_stage_and_percent() {
+        let event = ServerEvent::OtaUpdateProgress {
+            stage: OtaUpdateStage::Downloading,
+            message: "Downloading update bundle".into(),
+            current_version: Some("0.4.192-beta".into()),
+            target_version: Some("0.4.193-beta".into()),
+            update_available: Some(true),
+            downloaded_bytes: Some(50),
+            total_bytes: Some(100),
+            percent: Some(50),
+            checksum_verified: None,
+            installed_targets: Vec::new(),
+            error: None,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"ota_update_progress\""));
+        assert!(json.contains("\"stage\":\"downloading\""));
+        assert!(json.contains("\"percent\":50"));
+        assert!(json.contains("\"current_version\":\"0.4.192-beta\""));
+        assert!(json.contains("\"target_version\":\"0.4.193-beta\""));
     }
 
     #[tokio::test]

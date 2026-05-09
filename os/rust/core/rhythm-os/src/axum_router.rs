@@ -638,6 +638,21 @@ pub async fn get_matter_capture(
 // SSE endpoint
 // ---------------------------------------------------------------------------
 
+fn server_event_name(event: &ServerEvent) -> &'static str {
+    match event {
+        ServerEvent::NodeState { .. } => "node_state",
+        ServerEvent::MotionTimer { .. } => "motion_timer",
+        ServerEvent::HubStatus { .. } => "hub_status",
+        ServerEvent::SettingsChanged => "settings_changed",
+        ServerEvent::ModeChanged { .. } => "mode_changed",
+        ServerEvent::ConfigChanged => "config_changed",
+        ServerEvent::NodesChanged => "nodes_changed",
+        ServerEvent::TriageChanged { .. } => "triage_changed",
+        ServerEvent::PairingProgress { .. } => "pairing_progress",
+        ServerEvent::OtaUpdateProgress { .. } => "ota_update_progress",
+    }
+}
+
 async fn sse_events(
     State(state): State<SharedState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -650,16 +665,7 @@ async fn sse_events(
         let mut rx = rx_opt?;
         match rx.recv().await {
             Ok(event) => {
-                let event_type = match &event {
-                    ServerEvent::NodeState { .. } => "node_state",
-                    ServerEvent::MotionTimer { .. } => "motion_timer",
-                    ServerEvent::HubStatus { .. } => "hub_status",
-                    ServerEvent::SettingsChanged => "settings_changed",
-                    ServerEvent::ModeChanged { .. } => "mode_changed",
-                    ServerEvent::ConfigChanged => "config_changed",
-                    ServerEvent::NodesChanged => "nodes_changed",
-                    ServerEvent::TriageChanged { .. } => "triage_changed",
-                };
+                let event_type = server_event_name(&event);
                 let data = serde_json::to_string(&event).unwrap_or_default();
                 let sse_event = Event::default().event(event_type).data(data);
                 Some((Ok::<_, Infallible>(sse_event), Some(rx)))
@@ -695,6 +701,35 @@ mod tests {
     use crate::canonical::identity::HubKey;
     use crate::hub::{ActiveHub, HubType};
     use crate::routes::SHARED_API_ROUTES;
+
+    #[test]
+    fn sse_event_name_includes_progress_events() {
+        let pairing = ServerEvent::PairingProgress {
+            hub_type: "matter".to_string(),
+            session_id: Some("pair-1".to_string()),
+            status: crate::pairing::PairingStatus::Searching,
+            stage: crate::pairing::PairingStage::Requested,
+            message: "Pairing request received".to_string(),
+            device: None,
+            error: None,
+        };
+        assert_eq!(server_event_name(&pairing), "pairing_progress");
+
+        let ota = ServerEvent::OtaUpdateProgress {
+            stage: crate::server_event::OtaUpdateStage::Downloading,
+            message: "Downloading update bundle".to_string(),
+            current_version: Some("0.4.192-beta".to_string()),
+            target_version: Some("0.4.193-beta".to_string()),
+            update_available: Some(true),
+            downloaded_bytes: Some(10),
+            total_bytes: Some(100),
+            percent: Some(10),
+            checksum_verified: None,
+            installed_targets: Vec::new(),
+            error: None,
+        };
+        assert_eq!(server_event_name(&ota), "ota_update_progress");
+    }
 
     struct ThreadRecordingRuntime {
         calls: Arc<Mutex<Vec<String>>>,

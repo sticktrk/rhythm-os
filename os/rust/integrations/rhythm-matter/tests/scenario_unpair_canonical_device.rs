@@ -17,8 +17,8 @@ fn scenario_unpair_accepts_canonical_device_id() {
         let mut state = rig.state.lock().unwrap();
         let identity = DiscoveredIdentity {
             native_id: "matter-44".to_string(),
-            room_id: "matter-44".to_string(),
-            room_name: "Desk Lamp".to_string(),
+            room_id: Some("matter-44".to_string()),
+            room_name: Some("Desk Lamp".to_string()),
             name: "Desk Lamp".to_string(),
             device_type: DeviceType::Light,
             hardware_ids: vec![HardwareId::matter("44")],

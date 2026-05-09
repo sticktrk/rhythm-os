@@ -1093,8 +1093,9 @@ mod tests {
                 .collect())
         }
 
-        fn discover_identities(&self) -> Result<Vec<crate::canonical::identity::DiscoveredIdentity>>
-        {
+        fn discover_identities(
+            &self,
+        ) -> Result<Vec<crate::canonical::identity::DiscoveredIdentity>> {
             Ok(self.identities.clone())
         }
     }
@@ -1262,7 +1263,10 @@ mod tests {
                 .topology
                 .get_device_node(&canonical_id)
                 .expect("master device node");
-            assert_eq!(node.parent_id.as_deref(), Some(balcony_topology_id.as_str()));
+            assert_eq!(
+                node.parent_id.as_deref(),
+                Some(balcony_topology_id.as_str())
+            );
             assert_eq!(node.placement, crate::topology::DevicePlacement::HubDefault);
         }
 

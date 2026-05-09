@@ -49,7 +49,10 @@ pub enum DevicePlacement {
 /// pair. `UserOverride` is the only placement that survives `parent_id =
 /// None` — every other placement collapses to `Standalone` when the device
 /// has no parent.
-fn effective_placement_for(parent_id: Option<&str>, placement: &DevicePlacement) -> DevicePlacement {
+fn effective_placement_for(
+    parent_id: Option<&str>,
+    placement: &DevicePlacement,
+) -> DevicePlacement {
     match (parent_id.is_some(), placement) {
         (true, p) => p.clone(),
         (false, DevicePlacement::UserOverride) => DevicePlacement::UserOverride,
@@ -1987,7 +1990,10 @@ mod tests {
         let master_room_id = store.create_room("Master Room");
         assert!(store.move_device(&sensor_id, &balcony_id, &master_room_id));
         let after_move = store.get_device_node(&sensor_id).unwrap();
-        assert_eq!(after_move.parent_id.as_deref(), Some(master_room_id.as_str()));
+        assert_eq!(
+            after_move.parent_id.as_deref(),
+            Some(master_room_id.as_str())
+        );
         assert_eq!(after_move.placement, DevicePlacement::UserOverride);
 
         // Hue still reports the sensor in Balcony (the user only moved it in

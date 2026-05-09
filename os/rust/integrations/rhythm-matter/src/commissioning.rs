@@ -7,7 +7,7 @@ use log::{error, info, warn};
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_os::canonical::identity::{HardwareId, HubKey};
 use rhythm_os::hub::HubType;
-use rhythm_os::pairing::{PairedDeviceInfo, PairingSession, PairingStatus};
+use rhythm_os::pairing::{PairedDeviceInfo, PairingSession, PairingStage, PairingStatus};
 use rhythm_os::state::SharedState;
 use serde_json::Value;
 
@@ -22,6 +22,8 @@ use crate::transport::{
 pub struct MatterPairingParams {
     /// Raw Matter setup payload. May be an `MT:` QR payload or a manual code.
     pub setup_payload: String,
+    /// Optional client-generated pairing session ID for SSE correlation.
+    pub session_id: Option<String>,
     /// Matter network being commissioned.
     pub network: MatterCommissioningNetwork,
     /// How the commissioner reaches the device.
@@ -41,6 +43,12 @@ impl MatterPairingParams {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow::anyhow!("Missing 'setup_payload' in pairing params"))?;
+        let session_id = params
+            .get("session_id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
 
         let network = match params.get("network").and_then(|value| value.as_str()) {
             None | Some("wifi") => MatterCommissioningNetwork::Wifi,
@@ -63,6 +71,7 @@ impl MatterPairingParams {
 
         Ok(Self {
             setup_payload: setup_payload.to_string(),
+            session_id,
             network,
             rendezvous,
         })
@@ -126,9 +135,21 @@ pub fn pair_device(
     let wifi_credentials = load_commissioning_wifi_credentials(state)?;
     let node_id = hub_data.reserve_node_id();
     let commission_request = request.to_commission_request(node_id, wifi_credentials);
+    rhythm_os::pairing::emit_pairing_progress(
+        state,
+        "matter",
+        request.session_id.as_deref(),
+        PairingStatus::Commissioning,
+        PairingStage::Commissioning,
+        "Commissioning Matter device",
+        None,
+        None,
+    );
 
     match transport.commission_light(&commission_request) {
-        Ok(device) => build_success_session(state, &hub_data, device),
+        Ok(device) => {
+            build_success_session(state, &hub_data, device, request.session_id.as_deref())
+        }
         Err(error) => {
             error!(target: "pair", "Matter commissioning error: {:#}", error);
             Ok(PairingSession {
@@ -188,7 +209,19 @@ fn build_success_session(
     state: &SharedState,
     hub_data: &Arc<MatterHubData>,
     device: CommissionedDevice,
+    session_id: Option<&str>,
 ) -> Result<PairingSession> {
+    rhythm_os::pairing::emit_pairing_progress(
+        state,
+        "matter",
+        session_id,
+        PairingStatus::Commissioning,
+        PairingStage::Finalizing,
+        "Finalizing paired Matter device",
+        None,
+        None,
+    );
+
     let device_id = crate::lifecycle::format_device_id(device.node_id, device.light_endpoint);
     let device_name = format!("{} {}", device.vendor_name, device.product_name);
     let hub_key = HubKey::new(HubType::new("matter"), "local");
@@ -360,6 +393,17 @@ mod tests {
 
         let parsed = MatterPairingParams::from_value(&params).unwrap();
         assert_eq!(parsed.rendezvous, MatterCommissioningRendezvous::Auto);
+    }
+
+    #[test]
+    fn pairing_params_accept_session_id_for_progress_correlation() {
+        let params = serde_json::json!({
+            "setup_payload": "MT:Y.K908OC16750648G00",
+            "session_id": "pair-1",
+        });
+
+        let parsed = MatterPairingParams::from_value(&params).unwrap();
+        assert_eq!(parsed.session_id.as_deref(), Some("pair-1"));
     }
 
     #[test]
