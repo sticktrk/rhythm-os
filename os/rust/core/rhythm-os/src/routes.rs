@@ -155,6 +155,10 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         path: "/api/devices/canonical/:id/preferred",
         methods: &["PUT"],
     },
+    SharedRoute {
+        path: "/api/devices/canonical/:id/flash",
+        methods: &["POST"],
+    },
     // Triage queue
     SharedRoute {
         path: "/api/triage",

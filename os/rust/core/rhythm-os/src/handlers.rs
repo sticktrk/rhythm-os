@@ -1678,6 +1678,13 @@ pub fn handle_put_device_preferred(
     }
 }
 
+pub fn handle_post_device_flash(state: &SharedState, device_id: &str) -> ApiResponse {
+    match commands::do_flash_canonical_device(state, device_id) {
+        Ok(()) => ApiResponse::no_content(),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Triage handlers
 // ---------------------------------------------------------------------------

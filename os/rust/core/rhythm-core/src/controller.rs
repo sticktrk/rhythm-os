@@ -10,6 +10,7 @@
 
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 
 use crate::lighting::LightingCommand;
@@ -45,6 +46,13 @@ pub enum LightControlError {
 
 /// Result type for light controller operations.
 pub type LightControlResult<T> = Result<T, LightControlError>;
+
+const IDENTIFY_FLASH_PULSES: usize = 1;
+const IDENTIFY_FLASH_ON_MS: u64 = 220;
+const IDENTIFY_FLASH_OFF_MS: u64 = 180;
+const IDENTIFY_FLASH_TRANSITION_MS: u32 = 80;
+const IDENTIFY_FLASH_BRIGHTNESS: u8 = 100;
+const IDENTIFY_FLASH_KELVIN: u16 = 4000;
 
 /// Concrete dispatch target for a single hub controller.
 ///
@@ -204,6 +212,45 @@ pub trait HubLightController: Send + Sync {
     /// Check if any lights are on for the given target.
     async fn any_lights_on_target(&self, target: &HubDispatchTarget) -> LightControlResult<bool>;
 
+    /// Flash the target lights for physical identification.
+    ///
+    /// Integrations can override this with a native identify effect. The
+    /// fallback uses ordinary light commands so every controller has a
+    /// baseline implementation.
+    async fn flash_target(&self, target: &HubDispatchTarget) -> LightControlResult<()> {
+        let was_on = self.any_lights_on_target(target).await?;
+        let flash_command = || {
+            LightingCommand::with_transition(
+                IDENTIFY_FLASH_BRIGHTNESS,
+                IDENTIFY_FLASH_KELVIN,
+                IDENTIFY_FLASH_TRANSITION_MS,
+            )
+        };
+        let off_transition = Some(IDENTIFY_FLASH_TRANSITION_MS);
+
+        for _ in 0..IDENTIFY_FLASH_PULSES {
+            if was_on {
+                self.turn_off_target(target, off_transition).await?;
+                std::thread::sleep(Duration::from_millis(IDENTIFY_FLASH_OFF_MS));
+                self.turn_on_target(target, flash_command()).await?;
+                std::thread::sleep(Duration::from_millis(IDENTIFY_FLASH_ON_MS));
+            } else {
+                self.turn_on_target(target, flash_command()).await?;
+                std::thread::sleep(Duration::from_millis(IDENTIFY_FLASH_ON_MS));
+                self.turn_off_target(target, off_transition).await?;
+                std::thread::sleep(Duration::from_millis(IDENTIFY_FLASH_OFF_MS));
+            }
+        }
+
+        if was_on {
+            self.turn_on_target(target, flash_command()).await?;
+        } else {
+            self.turn_off_target(target, off_transition).await?;
+        }
+
+        Ok(())
+    }
+
     /// Get the name of this controller (for logging/debugging).
     fn name(&self) -> &str;
 }
@@ -239,6 +286,10 @@ where
 
     async fn any_lights_on_target(&self, target: &HubDispatchTarget) -> LightControlResult<bool> {
         (**self).any_lights_on_target(target).await
+    }
+
+    async fn flash_target(&self, target: &HubDispatchTarget) -> LightControlResult<()> {
+        (**self).flash_target(target).await
     }
 
     fn name(&self) -> &str {
@@ -319,6 +370,10 @@ impl HubLightController for NoOpController {
 
     async fn any_lights_on_target(&self, _target: &HubDispatchTarget) -> LightControlResult<bool> {
         Ok(false)
+    }
+
+    async fn flash_target(&self, _target: &HubDispatchTarget) -> LightControlResult<()> {
+        Ok(())
     }
 
     fn name(&self) -> &str {

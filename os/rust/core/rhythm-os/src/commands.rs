@@ -14,10 +14,10 @@ use chrono::{Datelike, Timelike};
 use log::{debug, info, warn};
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::{
-    ButtonAction, InputEvent, LightNodeKind, LightProfileConfig, LightProfileRegistry,
-    LightingCommand, ModeChangeCause, ModeConfig, ModeTransitionConfig, ModeTransitionTrigger,
-    RestoredNodeState, RestoredRoomState, RhythmMode, RoomModeState, RoomProfileSettings,
-    RuntimeHandle, TimerSetting,
+    ButtonAction, HubDispatchTarget, InputEvent, LightNodeKind, LightProfileConfig,
+    LightProfileRegistry, LightingCommand, ModeChangeCause, ModeConfig, ModeTransitionConfig,
+    ModeTransitionTrigger, RestoredNodeState, RestoredRoomState, RhythmMode, RoomModeState,
+    RoomProfileSettings, RuntimeHandle, TimerSetting,
 };
 use serde_json::Value;
 
@@ -7439,6 +7439,77 @@ pub fn build_canonical_device(state: &SharedState, id: &str) -> Result<String> {
     }
 }
 
+/// Flash a canonical light device for physical identification.
+///
+/// The operation dispatches directly to the device's preferred integration
+/// endpoint and intentionally does not mutate Rhythm's runtime or persisted
+/// node state.
+pub fn do_flash_canonical_device(state: &SharedState, device_id: &str) -> Result<()> {
+    let (device_name, hub_key, native_id) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let device = s
+            .canonical_registry
+            .get(device_id)
+            .filter(|device| !device.is_removed())
+            .ok_or_else(|| anyhow::anyhow!("Device not found: {}", device_id))?;
+
+        if device.device_type != DeviceType::Light {
+            return Err(anyhow::anyhow!(
+                "Flash is only supported for light devices: {}",
+                device_id
+            ));
+        }
+
+        let endpoint = device
+            .preferred_endpoint()
+            .ok_or_else(|| anyhow::anyhow!("Device has no active endpoint: {}", device_id))?;
+
+        (
+            device.name.clone(),
+            endpoint.hub_key.clone(),
+            endpoint.native_id.clone(),
+        )
+    };
+
+    let composite = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.composite_controller.clone()
+    };
+
+    let composite = match composite {
+        Some(composite) => composite,
+        None => {
+            try_ensure_runtime(state)?;
+            state
+                .lock()
+                .ok()
+                .and_then(|s| s.composite_controller.clone())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Runtime initialization reported success but no composite controller is available"
+                    )
+                })?
+        }
+    };
+
+    let target = HubDispatchTarget::Devices {
+        native_ids: vec![native_id.clone()],
+    };
+    let hub_key_label = hub_key.to_string();
+
+    info!(
+        target: "cmd",
+        "device_flash: {} ({}) via {}:{}",
+        device_name,
+        device_id,
+        hub_key_label,
+        native_id
+    );
+
+    futures::executor::block_on(composite.flash_target(&hub_key_label, target))
+        .map_err(|e| anyhow::anyhow!("Failed to flash device {}: {}", device_id, e))
+}
+
 /// Per-device synthetic hub-registry rooms.
 ///
 /// Light controllers address standalone (room-less) devices through
@@ -8675,7 +8746,10 @@ mod tests {
     use crate::state::{AppState, MotionSnapshot, ObservedPowerSource, ObservedPowerState};
     use crate::storage::{Storage, StoredLightProfiles, StoredSettings};
     use chrono::{Datelike, Timelike};
-    use rhythm_core::{HubRegistry, LightProfileConfig, RoomSnapshot, RuntimeHandle};
+    use rhythm_core::{
+        HubDispatchTarget, HubLightController, HubRegistry, LightControlResult, LightProfileConfig,
+        Room, RoomSnapshot, RuntimeHandle,
+    };
     use std::sync::{Arc, Mutex};
 
     /// Mock runtime that returns configurable room snapshots and tracks events.
@@ -9001,6 +9075,68 @@ mod tests {
                 ("rhythm".into(), "Rhythm Curve".into()),
                 ("sleep".into(), "Sleep Curve".into()),
             ]
+        }
+    }
+
+    struct RecordingFlashController {
+        calls: Mutex<Vec<(String, String)>>,
+    }
+
+    impl RecordingFlashController {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<(String, String)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HubLightController for RecordingFlashController {
+        async fn turn_on_target(
+            &self,
+            _target: &HubDispatchTarget,
+            _command: rhythm_core::LightingCommand,
+        ) -> LightControlResult<()> {
+            Ok(())
+        }
+
+        async fn turn_off_target(
+            &self,
+            _target: &HubDispatchTarget,
+            _transition_ms: Option<u32>,
+        ) -> LightControlResult<()> {
+            Ok(())
+        }
+
+        async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
+            Ok(Vec::new())
+        }
+
+        async fn is_connected(&self) -> bool {
+            true
+        }
+
+        async fn any_lights_on_target(
+            &self,
+            _target: &HubDispatchTarget,
+        ) -> LightControlResult<bool> {
+            Ok(false)
+        }
+
+        async fn flash_target(&self, target: &HubDispatchTarget) -> LightControlResult<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((self.name().to_string(), target.label()));
+            Ok(())
+        }
+
+        fn name(&self) -> &str {
+            "RecordingFlash"
         }
     }
 
@@ -13428,6 +13564,26 @@ mod tests {
                 .unwrap()
                 .room_id,
             None
+        );
+    }
+
+    #[test]
+    fn flash_canonical_light_dispatches_to_preferred_endpoint() {
+        let (state, _runtime) = setup_state(vec![]);
+        let hub_key = HubKey::new(HubType::new("matter"), "local");
+        let device_id =
+            insert_canonical_device(&state, hub_key.clone(), "matter-100", "Desk Lamp", "", "");
+
+        let composite = Arc::new(rhythm_core::CompositeController::new());
+        let controller = Arc::new(RecordingFlashController::new());
+        composite.register_controller(&hub_key.to_string(), controller.clone());
+        state.lock().unwrap().composite_controller = Some(composite);
+
+        do_flash_canonical_device(&state, &device_id).unwrap();
+
+        assert_eq!(
+            controller.calls(),
+            vec![("RecordingFlash".to_string(), "matter-100".to_string())]
         );
     }
 

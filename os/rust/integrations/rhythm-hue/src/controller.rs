@@ -289,6 +289,38 @@ impl<H: HueTransport> HueLightController<H> {
         );
         Ok(false)
     }
+
+    fn send_devices_turn_on(
+        &self,
+        native_ids: &[String],
+        command: LightingCommand,
+    ) -> LightControlResult<()> {
+        if let Some((room_id, grouped_light_id)) = self.group_target_for_devices(native_ids) {
+            return self.send_group_turn_on(&room_id, &grouped_light_id, command);
+        }
+
+        Err(
+            self.unsupported_device_dispatch(&HubDispatchTarget::Devices {
+                native_ids: native_ids.to_vec(),
+            }),
+        )
+    }
+
+    fn send_devices_turn_off(
+        &self,
+        native_ids: &[String],
+        transition_ms: Option<u32>,
+    ) -> LightControlResult<()> {
+        if let Some((room_id, grouped_light_id)) = self.group_target_for_devices(native_ids) {
+            return self.send_group_turn_off(&room_id, &grouped_light_id, transition_ms);
+        }
+
+        Err(
+            self.unsupported_device_dispatch(&HubDispatchTarget::Devices {
+                native_ids: native_ids.to_vec(),
+            }),
+        )
+    }
 }
 
 #[async_trait]
@@ -303,7 +335,9 @@ impl<H: HueTransport + 'static> HubLightController for HueLightController<H> {
                 room_id,
                 control_id,
             } => self.send_group_turn_on(room_id, control_id, command),
-            HubDispatchTarget::Devices { .. } => Err(self.unsupported_device_dispatch(target)),
+            HubDispatchTarget::Devices { native_ids } => {
+                self.send_devices_turn_on(native_ids, command)
+            }
         }
     }
 
@@ -317,7 +351,9 @@ impl<H: HueTransport + 'static> HubLightController for HueLightController<H> {
                 room_id,
                 control_id,
             } => self.send_group_turn_off(room_id, control_id, transition_ms),
-            HubDispatchTarget::Devices { .. } => Err(self.unsupported_device_dispatch(target)),
+            HubDispatchTarget::Devices { native_ids } => {
+                self.send_devices_turn_off(native_ids, transition_ms)
+            }
         }
     }
 
@@ -577,6 +613,75 @@ mod tests {
         assert!(!calls
             .iter()
             .any(|call| matches!(call, HueTransportCall::IsGroupedLightOn { .. })));
+    }
+
+    #[test]
+    fn turn_on_device_target_uses_matching_grouped_light() {
+        let (controller, registry) = make_spy_controller();
+        registry.lock().unwrap().upsert_room(
+            "room_devices",
+            "Device-backed room",
+            "gl-devices",
+            &["dev1".to_string()],
+        );
+
+        let cmd = LightingCommand::with_transition(80, 4000, 500);
+        block_on(controller.turn_on_target(
+            &HubDispatchTarget::Devices {
+                native_ids: vec!["dev1".to_string()],
+            },
+            cmd,
+        ))
+        .unwrap();
+
+        let calls = controller.client.set_grouped_light_calls();
+        assert_eq!(calls.len(), 1);
+        match &calls[0] {
+            HueTransportCall::SetGroupedLight {
+                grouped_light_id,
+                on,
+                ..
+            } => {
+                assert_eq!(grouped_light_id, "gl-devices");
+                assert!(*on);
+            }
+            other => panic!("Expected SetGroupedLight, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn turn_off_device_target_uses_matching_grouped_light() {
+        let (controller, registry) = make_spy_controller();
+        registry.lock().unwrap().upsert_room(
+            "room_devices",
+            "Device-backed room",
+            "gl-devices",
+            &["dev1".to_string()],
+        );
+
+        block_on(controller.turn_off_target(
+            &HubDispatchTarget::Devices {
+                native_ids: vec!["dev1".to_string()],
+            },
+            Some(80),
+        ))
+        .unwrap();
+
+        let calls = controller.client.set_grouped_light_calls();
+        assert_eq!(calls.len(), 1);
+        match &calls[0] {
+            HueTransportCall::SetGroupedLight {
+                grouped_light_id,
+                on,
+                fade_ms,
+                ..
+            } => {
+                assert_eq!(grouped_light_id, "gl-devices");
+                assert!(!*on);
+                assert_eq!(*fade_ms, Some(80));
+            }
+            other => panic!("Expected SetGroupedLight, got {:?}", other),
+        }
     }
 
     #[test]

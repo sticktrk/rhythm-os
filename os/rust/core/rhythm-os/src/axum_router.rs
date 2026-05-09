@@ -112,6 +112,7 @@ fn shared_routes() -> Router<SharedState> {
             "/api/devices/canonical/:id/preferred",
             put(put_device_preferred),
         )
+        .route("/api/devices/canonical/:id/flash", post(post_device_flash))
         // Triage queue (unified — devices + rooms)
         .route("/api/triage", get(get_triage))
         .route("/api/triage/count", get(get_triage_count))
@@ -168,7 +169,7 @@ async fn get_state(
         .get("authoritative")
         .and_then(|value| value.parse::<bool>().ok())
         .unwrap_or(false);
-    handlers::handle_get_state_with_options(&state, authoritative)
+    run_blocking(move || handlers::handle_get_state_with_options(&state, authoritative)).await
 }
 
 async fn get_profile_bundle(State(state): State<SharedState>) -> ApiResponse {
@@ -374,6 +375,13 @@ async fn put_device_preferred(
     handlers::handle_put_device_preferred(&state, &id, &body)
 }
 
+async fn post_device_flash(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_post_device_flash(&state, &id)).await
+}
+
 // ---------------------------------------------------------------------------
 // Triage handlers
 // ---------------------------------------------------------------------------
@@ -537,6 +545,8 @@ async fn put_light_profile(
 // because reqwest::blocking::Client panics if used inside a tokio runtime.
 // ---------------------------------------------------------------------------
 
+const HTTP_HANDLER_STACK_SIZE: usize = 8 * 1024 * 1024;
+
 /// Run a closure on a dedicated std::thread, returning the result via oneshot.
 async fn run_blocking<F, R>(f: F) -> ApiResponse
 where
@@ -546,6 +556,7 @@ where
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::Builder::new()
         .name("http-handler".to_string())
+        .stack_size(HTTP_HANDLER_STACK_SIZE)
         .spawn(move || {
             let result = f();
             let _ = tx.send(result.into());

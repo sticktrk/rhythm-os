@@ -223,6 +223,30 @@ impl CompositeController {
             .and_then(|labels| labels.get(node_id).cloned());
         format_node_log_label(node_id, node_name.as_deref())
     }
+
+    /// Flash a concrete hub target for physical identification.
+    ///
+    /// This bypasses the runtime state machine intentionally: identification
+    /// flashes should not change Rhythm's persisted room/node state.
+    pub async fn flash_target(
+        &self,
+        hub_key: &str,
+        target: HubDispatchTarget,
+    ) -> LightControlResult<()> {
+        let controller = self
+            .controllers
+            .read()
+            .ok()
+            .and_then(|controllers| controllers.get(hub_key).cloned())
+            .ok_or_else(|| {
+                LightControlError::RoomNotFound(format!(
+                    "No controller registered for hub {}",
+                    hub_key
+                ))
+            })?;
+
+        controller.flash_target(&target).await
+    }
 }
 
 impl Default for CompositeController {

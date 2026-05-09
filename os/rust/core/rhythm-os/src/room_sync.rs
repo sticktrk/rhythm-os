@@ -237,11 +237,14 @@ fn sync_with_discovery(
 
     // Remove stale source rooms from the hub registry.
     //
-    // If the hub has never reported any rooms, treat an empty discovery result
-    // as "this hub doesn't do room discovery" and no-op. If it previously had
-    // rooms, an empty discovery result means all source rooms disappeared and
-    // should be pruned.
-    let should_prune_stale_rooms = !discovered_ids.is_empty() || !current_room_ids.is_empty();
+    // For normal room-aware hubs, an empty discovery result after previously
+    // having source rooms means all source rooms disappeared. Roomless hubs
+    // such as Matter intentionally report no rooms; preserve their existing
+    // synthetic/source room mappings so a transient device probe failure does
+    // not erase persisted routing.
+    let supports_roomless_devices = hub_supports_roomless_devices(state, hub_key);
+    let should_prune_stale_rooms =
+        !discovered_ids.is_empty() || (!current_room_ids.is_empty() && !supports_roomless_devices);
     if should_prune_stale_rooms {
         let stale_ids: Vec<String> = current_room_ids
             .difference(&discovered_ids)
@@ -790,6 +793,19 @@ fn registry_room_id_for_discovered_device(
     })
 }
 
+fn hub_supports_roomless_devices(state: &SharedState, hub_key: &HubKey) -> bool {
+    state
+        .lock()
+        .ok()
+        .map(|s| {
+            s.hub_capabilities.iter().any(|capability| {
+                capability.hub_type == hub_key.hub_type.as_str()
+                    && capability.supports_roomless_devices
+            })
+        })
+        .unwrap_or(false)
+}
+
 /// Extract registry for a specific hub.
 fn extract_registry_for(
     state: &SharedState,
@@ -897,7 +913,7 @@ pub fn poll_initial_light_state(state: &SharedState) {
 mod tests {
     use super::*;
     use crate::discovery::{DiscoveredDevice, DiscoveredRoom, HubDiscovery};
-    use crate::hub::{ActiveHub, HubType};
+    use crate::hub::{ActiveHub, HubIntegrationCapability, HubType};
     use crate::state::AppState;
     use rhythm_core::runtime::hub_registry::DeviceType;
 
@@ -1036,6 +1052,57 @@ mod tests {
         assert!(
             registry_devices_for_room_contains(&state, &hub_key, &room_id, "motion-svc-1"),
             "roomless rediscovery must not clear the assigned Rhythm room"
+        );
+    }
+
+    #[test]
+    fn roomless_hub_empty_room_discovery_preserves_existing_source_rooms() {
+        let hub_type = HubType::new(HubType::MATTER);
+        let hub_key = HubKey::new(hub_type.clone(), "local");
+        let mut registry_impl = crate::registry::HubDeviceRegistry::with_options(false);
+        let device_ids = vec!["matter-102".to_string()];
+        registry_impl.upsert_room("matter-102", "Matter 102", "matter-102", &device_ids);
+        let registry: Arc<Mutex<dyn rhythm_core::HubRegistry>> =
+            Arc::new(Mutex::new(registry_impl));
+
+        let mut app = AppState::default();
+        let mut capability = HubIntegrationCapability::new(HubType::MATTER);
+        capability.supports_roomless_devices = true;
+        app.hub_capabilities.push(capability);
+        app.hubs.insert(
+            hub_key.clone(),
+            ActiveHub {
+                hub_type,
+                hub_key: hub_key.clone(),
+                runtime: None,
+                hub_data: Box::new(()),
+                registry: Some(registry),
+                discovery: None,
+                shutdown: Default::default(),
+            },
+        );
+        let state: SharedState = Arc::new(Mutex::new(app));
+
+        let discovery = MockDiscovery {
+            rooms: vec![],
+            devices: vec![],
+        };
+
+        let report = sync_with_discovery(&state, &hub_key, &discovery, true).unwrap();
+
+        assert_eq!(report.rooms_removed, 0);
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .hub_registry_for(&hub_key)
+                .expect("matter registry should exist")
+                .lock()
+                .unwrap()
+                .rooms()
+                .iter()
+                .any(|room| room.id == "matter-102"),
+            "empty Matter room discovery must not prune existing source rooms"
         );
     }
 

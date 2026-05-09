@@ -101,6 +101,30 @@ impl ChipTransport {
             self.start_sidecar()?;
         }
 
+        match self.initialize_controller() {
+            Ok(()) => Ok(()),
+            Err(first_error)
+                if self.sidecar_config.is_some()
+                    && is_uninitialized_controller_error(&first_error) =>
+            {
+                self.restart_sidecar().with_context(|| {
+                    format!(
+                        "restarting CHIP sidecar after controller init error: {:#}",
+                        first_error
+                    )
+                })?;
+                self.initialize_controller().with_context(|| {
+                    format!(
+                        "CHIP controller init retry failed after restarting sidecar: {:#}",
+                        first_error
+                    )
+                })
+            }
+            Err(first_error) => Err(first_error),
+        }
+    }
+
+    fn initialize_controller(&self) -> Result<()> {
         let response: ChipInitControllerResponse = self.decode_rpc_response(
             self.send_rpc_envelope(ChipRpcRequest::InitController(self.init_request.clone()))?,
         )?;
@@ -118,11 +142,17 @@ impl ChipTransport {
     fn call<T: serde::de::DeserializeOwned>(&self, request: ChipRpcRequest) -> Result<T> {
         self.ensure_sidecar()?;
         match self.send_rpc_envelope(request.clone()) {
-            Ok(response) => self.decode_rpc_response(response),
+            Ok(response) => match self.decode_rpc_response::<T>(response) {
+                Ok(value) => Ok(value),
+                Err(rpc_error) if is_uninitialized_controller_error(&rpc_error) => {
+                    self.recover_uninitialized_controller(request, rpc_error)
+                }
+                Err(rpc_error) => Err(rpc_error),
+            },
             Err(first_error) => {
                 self.initialized.store(false, Ordering::SeqCst);
                 if self.sidecar_config.is_some() {
-                    self.start_sidecar()?;
+                    self.restart_sidecar()?;
                     self.ensure_sidecar()?;
                     self.decode_rpc_response(self.send_rpc_envelope(request)?)
                         .with_context(|| {
@@ -136,6 +166,41 @@ impl ChipTransport {
                 }
             }
         }
+    }
+
+    /// Recover from a chipd that responded with `Incorrect state` /
+    /// `Controller not initialized`: drop the cached `initialized` flag,
+    /// restart the managed sidecar when available, send `InitController`, and
+    /// re-issue the original request once. Without this, a chipd that loses
+    /// `mCommissioner` (e.g. after an OTA reboot) wedges every subsequent
+    /// Matter command.
+    fn recover_uninitialized_controller<T: serde::de::DeserializeOwned>(
+        &self,
+        request: ChipRpcRequest,
+        first_error: anyhow::Error,
+    ) -> Result<T> {
+        self.initialized.store(false, Ordering::SeqCst);
+        if self.sidecar_config.is_some() {
+            self.restart_sidecar().with_context(|| {
+                format!(
+                    "restarting CHIP sidecar after stuck-state error: {:#}",
+                    first_error
+                )
+            })?;
+        }
+        self.ensure_sidecar().with_context(|| {
+            format!(
+                "re-initializing CHIP controller after stuck-state error: {:#}",
+                first_error
+            )
+        })?;
+        self.decode_rpc_response(self.send_rpc_envelope(request)?)
+            .with_context(|| {
+                format!(
+                    "CHIP RPC retry failed after re-initializing controller: {:#}",
+                    first_error
+                )
+            })
     }
 
     fn decode_rpc_response<T: serde::de::DeserializeOwned>(
@@ -214,38 +279,50 @@ impl ChipTransport {
     }
 
     fn start_sidecar(&self) -> Result<()> {
+        self.start_sidecar_inner(false)
+    }
+
+    fn restart_sidecar(&self) -> Result<()> {
+        self.start_sidecar_inner(true)
+    }
+
+    fn start_sidecar_inner(&self, force_socket_reset: bool) -> Result<()> {
         let Some(config) = &self.sidecar_config else {
             return Ok(());
         };
 
-        if self.socket_path.exists() && self.can_connect().is_err() {
+        let mut guard = self
+            .sidecar
+            .lock()
+            .map_err(|_| anyhow::anyhow!("CHIP sidecar process lock poisoned"))?;
+
+        if let Some(mut child) = guard.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+
+        if self.socket_path.exists() && (force_socket_reset || self.can_connect().is_err()) {
             let _ = fs::remove_file(&self.socket_path);
         }
 
-        if let Ok(mut guard) = self.sidecar.lock() {
-            if let Some(mut child) = guard.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+        let (stdout, stderr) = sidecar_stdio(config.log_path.as_deref())?;
+        let child = Command::new(&config.command)
+            .arg("--socket")
+            .arg(&self.socket_path)
+            .current_dir(&config.working_dir)
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr)
+            .spawn()
+            .with_context(|| {
+                format!(
+                    "starting CHIP controller daemon with {}",
+                    config.command.display()
+                )
+            })?;
 
-            let (stdout, stderr) = sidecar_stdio(config.log_path.as_deref())?;
-            let child = Command::new(&config.command)
-                .arg("--socket")
-                .arg(&self.socket_path)
-                .current_dir(&config.working_dir)
-                .stdin(Stdio::null())
-                .stdout(stdout)
-                .stderr(stderr)
-                .spawn()
-                .with_context(|| {
-                    format!(
-                        "starting CHIP controller daemon with {}",
-                        config.command.display()
-                    )
-                })?;
-
-            *guard = Some(child);
-        }
+        *guard = Some(child);
+        drop(guard);
 
         let deadline = Instant::now() + SIDECAR_START_TIMEOUT;
         while Instant::now() < deadline {
@@ -351,6 +428,19 @@ fn open_sidecar_log_file(path: &Path) -> Result<std::fs::File> {
         .append(true)
         .open(path)
         .with_context(|| format!("opening Matter sidecar log file {}", path.display()))
+}
+
+/// Returns true when an RPC error indicates the chipd controller has lost its
+/// `mCommissioner` and a fresh `InitController` is required to recover.
+///
+/// chipd surfaces two distinct shapes:
+///  * the C++ bridge wraps `CHIP_ERROR_INCORRECT_STATE` (0x00000003) — emitted
+///    from `chip_bridge.cc` when `mCommissioner` is null;
+///  * the Rust service emits `Controller not initialized` from
+///    `service::require_initialized` when state was never set.
+fn is_uninitialized_controller_error(error: &anyhow::Error) -> bool {
+    let message = format!("{:#}", error);
+    message.contains("Incorrect state") || message.contains("Controller not initialized")
 }
 
 impl Drop for ChipTransport {
@@ -478,7 +568,10 @@ mod tests {
     use std::os::unix::net::UnixListener;
     use std::thread;
 
-    use crate::chip_rpc::{ChipRpcEmpty, ChipRpcListDevicesResponse, ChipRpcResponseEnvelope};
+    use crate::chip_rpc::{
+        ChipInitControllerResponse, ChipRpcEmpty, ChipRpcListDevicesResponse,
+        ChipRpcResponseEnvelope,
+    };
 
     fn test_temp_root() -> PathBuf {
         std::env::var_os("CARGO_TARGET_TMPDIR")
@@ -609,6 +702,104 @@ mod tests {
             .unwrap();
 
         server.join().unwrap();
+        let _ = fs::remove_file(socket_path);
+    }
+
+    fn spawn_fake_server_multi<F>(
+        socket_path: PathBuf,
+        connection_count: usize,
+        handler: F,
+    ) -> thread::JoinHandle<Vec<ChipRpcRequestEnvelope>>
+    where
+        F: Fn(&ChipRpcRequestEnvelope) -> ChipRpcResponseEnvelope + Send + 'static,
+    {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let handle = thread::spawn(move || {
+            let _ = fs::remove_file(&socket_path);
+            let listener = UnixListener::bind(&socket_path).unwrap();
+            ready_tx.send(()).unwrap();
+            let mut requests = Vec::with_capacity(connection_count);
+            while requests.len() < connection_count {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                let bytes = reader.read_line(&mut line).unwrap();
+                // `can_connect` opens probe connections that close immediately
+                // without sending a payload — skip those rather than treating
+                // them as malformed RPC requests.
+                if bytes == 0 {
+                    continue;
+                }
+                let request: ChipRpcRequestEnvelope =
+                    serde_json::from_str(line.trim_end()).unwrap();
+                let response = handler(&request);
+                let mut stream = reader.into_inner();
+                serde_json::to_writer(&mut stream, &response).unwrap();
+                stream.write_all(b"\n").unwrap();
+                stream.flush().unwrap();
+                requests.push(request);
+            }
+            requests
+        });
+        ready_rx.recv().unwrap();
+        handle
+    }
+
+    /// Regression for issue #48: chipd lost `mCommissioner` after an OTA reboot
+    /// and started returning `CHIP Error 0x00000003: Incorrect state`. The
+    /// transport never reset its `initialized` flag, so every subsequent Matter
+    /// command failed forever. After the fix, an `Incorrect state` reply
+    /// triggers a re-init and a single retry.
+    #[test]
+    fn incorrect_state_error_triggers_reinit_and_retry() {
+        let socket_path = temp_socket_path("recover-incorrect-state");
+        let server =
+            spawn_fake_server_multi(socket_path.clone(), 3, |request| match &request.request {
+                ChipRpcRequest::SetOnOff { .. } => {
+                    // First connection: report the chipd-bridge stuck state.
+                    // Subsequent connections (after re-init) should succeed.
+                    static CALL_COUNT: std::sync::atomic::AtomicUsize =
+                        std::sync::atomic::AtomicUsize::new(0);
+                    let attempt = CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if attempt == 0 {
+                        ChipRpcResponseEnvelope::error(
+                            request.id,
+                            "setting Matter on/off: native/chip_bridge.cc:1014: \
+                         CHIP Error 0x00000003: Incorrect state",
+                        )
+                    } else {
+                        ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+                    }
+                }
+                ChipRpcRequest::InitController(_) => ChipRpcResponseEnvelope::ok(
+                    request.id,
+                    ChipInitControllerResponse {
+                        fabric_id: "test".to_string(),
+                    },
+                ),
+                other => panic!("unexpected RPC during recovery test: {:?}", other),
+            });
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        transport
+            .set_on_off(102, 1, true)
+            .expect("set_on_off should succeed after stuck-state recovery");
+
+        let requests = server.join().unwrap();
+        let kinds: Vec<&'static str> = requests
+            .iter()
+            .map(|envelope| match envelope.request {
+                ChipRpcRequest::SetOnOff { .. } => "set_on_off",
+                ChipRpcRequest::InitController(_) => "init_controller",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["set_on_off", "init_controller", "set_on_off"],
+            "expected the transport to send the original request, then InitController to re-init, then retry the request"
+        );
+
         let _ = fs::remove_file(socket_path);
     }
 
