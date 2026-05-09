@@ -7114,6 +7114,36 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
     Ok(())
 }
 
+fn clear_runtime_node_off_flags(state: &SharedState, node_id: &str) -> Result<()> {
+    let runtime = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.hub_runtime()
+    };
+    let Some(runtime) = runtime else {
+        return Ok(());
+    };
+    let Some(snap) = runtime.engine_node_snapshot(node_id) else {
+        return Ok(());
+    };
+    if !snap.soft_off && !snap.hard_off {
+        return Ok(());
+    }
+
+    runtime.restore_node_state(
+        node_id,
+        RestoredNodeState {
+            rhythm_enabled: snap.rhythm_enabled,
+            disabled: snap.disabled,
+            time_offset_minutes: snap.time_offset_minutes,
+            brightness_offset: snap.brightness_offset,
+            soft_off: false,
+            hard_off: false,
+            profile_settings: snap.profile_settings,
+        },
+    );
+    Ok(())
+}
+
 pub(crate) fn runtime_node_kind_for_device_type(device_type: DeviceType) -> LightNodeKind {
     match device_type {
         DeviceType::Light => LightNodeKind::LightDevice,
@@ -7503,6 +7533,9 @@ pub fn do_canonical_assign_room(
     let active_endpoints: Vec<_> = device.active_endpoints().cloned().collect();
     let device_name = device.name.clone();
     let device_type = device.device_type.clone();
+    let was_topology_standalone = s.topology.device_parent_room_id(device_id).is_none();
+    let assigning_standalone_light_child =
+        room_id.is_some() && was_topology_standalone && matches!(&device_type, DeviceType::Light);
     let old_room_id = s
         .topology
         .device_parent_room_id(device_id)
@@ -7615,6 +7648,10 @@ pub fn do_canonical_assign_room(
 
     persist_registry(state);
     reconcile_runtime_from_state(state)?;
+    if assigning_standalone_light_child {
+        clear_runtime_node_off_flags(state, device_id)?;
+        persist_rooms(state);
+    }
 
     {
         emit_triage_changed(state);
@@ -13518,6 +13555,51 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_runtime_from_state_preserves_persisted_off_flags_for_assigned_light_child() {
+        let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
+        let storage = TestStorage::default();
+        let room_id = state.lock().unwrap().topology.create_room("Office");
+        let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+        let mut rooms = rhythm_core::RoomManager::new();
+        let mut child = rhythm_core::Room::new(&device_id, "Desk Lamp");
+        child.rhythm_enabled = true;
+        child.soft_off = true;
+        child.hard_off = true;
+        rooms.add_room(child);
+        storage.save_rooms(&rooms).unwrap();
+
+        {
+            let mut s = state.lock().unwrap();
+            s.storage = Some(Box::new(storage.clone()));
+            assert!(s.canonical_registry.assign_room(&device_id, Some(&room_id)));
+            s.topology.ensure_standalone_device(&device_id);
+            assert!(s.topology.assign_device(
+                &device_id,
+                Some(&room_id),
+                crate::topology::DevicePlacement::UserOverride,
+            ));
+        }
+
+        reconcile_runtime_from_state(&state).unwrap();
+        persist_rooms(&state);
+
+        let child_snap = runtime
+            .engine_node_snapshot(&device_id)
+            .expect("assigned light child should be materialized");
+        assert_eq!(child_snap.parent_id.as_deref(), Some(room_id.as_str()));
+        assert!(child_snap.soft_off);
+        assert!(child_snap.hard_off);
+
+        let saved = storage.inner.lock().unwrap();
+        let saved_child = saved
+            .rooms
+            .get(&device_id)
+            .expect("assigned light child should be persisted");
+        assert!(saved_child.soft_off);
+        assert!(saved_child.hard_off);
+    }
+
+    #[test]
     fn reconcile_runtime_from_state_prunes_stale_runtime_snapshots() {
         let (state, runtime) = setup_state(vec![make_snapshot("stale-room", false, false)]);
         runtime.add_node(
@@ -13850,6 +13932,56 @@ mod tests {
                 .parent_id,
             None
         );
+    }
+
+    #[test]
+    fn canonical_assign_room_clears_standalone_light_off_flags() {
+        let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
+        let storage = TestStorage::default();
+        state.lock().unwrap().storage = Some(Box::new(storage.clone()));
+        let room_id = state.lock().unwrap().topology.create_room("Office");
+        let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+
+        {
+            let mut s = state.lock().unwrap();
+            s.topology.ensure_standalone_device(&device_id);
+        }
+        reconcile_runtime_from_state(&state).unwrap();
+        runtime.restore_node_state(
+            &device_id,
+            RestoredNodeState {
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: true,
+                hard_off: true,
+                profile_settings: RoomProfileSettings::default(),
+            },
+        );
+        let before = runtime
+            .engine_node_snapshot(&device_id)
+            .expect("standalone light should exist before assignment");
+        assert_eq!(before.parent_id, None);
+        assert!(before.soft_off);
+        assert!(before.hard_off);
+
+        do_canonical_assign_room(&state, &device_id, Some(&room_id)).unwrap();
+
+        let after = runtime
+            .engine_node_snapshot(&device_id)
+            .expect("assigned light child should still exist");
+        assert_eq!(after.parent_id.as_deref(), Some(room_id.as_str()));
+        assert!(!after.soft_off);
+        assert!(!after.hard_off);
+
+        let saved = storage.inner.lock().unwrap();
+        let saved_child = saved
+            .rooms
+            .get(&device_id)
+            .expect("assigned light child should be persisted");
+        assert!(!saved_child.soft_off);
+        assert!(!saved_child.hard_off);
     }
 
     #[test]

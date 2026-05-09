@@ -1444,12 +1444,17 @@ pub fn handle_put_node_preferences(
             Err(e) => return ApiResponse::server_error(e),
         }
     }
+    let queue_dispatch_spacing = if updates.len() <= 1 {
+        Duration::ZERO
+    } else {
+        dispatch_spacing
+    };
     if let Err(e) =
-        commands::queue_node_preferences_batch(state, updates, persist, dispatch_spacing)
+        commands::queue_node_preferences_batch(state, updates, persist, queue_dispatch_spacing)
     {
         return ApiResponse::server_error(e);
     }
-    nodes_response(results, true, dispatch_spacing)
+    nodes_response(results, true, queue_dispatch_spacing)
 }
 
 pub fn handle_post_sync(state: &SharedState) -> ApiResponse {
@@ -2312,10 +2317,13 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert_eq!(parsed["queued"], true);
         assert_eq!(parsed["dispatch_count"], 1);
-        assert!(matches!(
-            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            WorkItem::SetNodePreferences { .. }
-        ));
+        assert_eq!(parsed["dispatch_spacing_ms"], 0);
+        match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            WorkItem::SetNodePreferences {
+                dispatch_spacing, ..
+            } => assert_eq!(dispatch_spacing, Duration::ZERO),
+            other => panic!("unexpected work item: {:?}", std::mem::discriminant(&other)),
+        }
     }
 
     // ---- Simple handlers ----

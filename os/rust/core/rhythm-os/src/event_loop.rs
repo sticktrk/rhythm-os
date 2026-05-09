@@ -1459,7 +1459,7 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                 InputEvent::new(&node_id, action)
             };
 
-            crate::periodic::wait_for_node_dispatch_slot(
+            crate::periodic::wait_for_interactive_node_dispatch_slot(
                 state,
                 &command_id,
                 &node_id,
@@ -1520,7 +1520,7 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             dispatch_spacing,
             persist_after,
         } => {
-            crate::periodic::wait_for_node_dispatch_slot(
+            crate::periodic::wait_for_interactive_node_dispatch_slot(
                 state,
                 &command_id,
                 &node_id,
@@ -1551,7 +1551,7 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             dispatch_spacing,
             persist_after,
         } => {
-            crate::periodic::wait_for_node_dispatch_slot(
+            crate::periodic::wait_for_interactive_node_dispatch_slot(
                 state,
                 &command_id,
                 &node_id,
@@ -2333,11 +2333,15 @@ mod tests {
         snapshots: Vec<RoomSnapshot>,
         periodic_tick_node_calls: Arc<Mutex<Vec<(String, String, f32)>>>,
         apply_room_command_calls: Arc<AtomicUsize>,
+        handle_event_calls: Arc<AtomicUsize>,
+        turn_on_room_calls: Arc<AtomicUsize>,
+        set_room_brightness_calls: Arc<AtomicUsize>,
     }
 
     impl RuntimeHandle for PeriodicWorkerTestRuntime {
         fn handle_event(&self, _: &rhythm_core::InputEvent) -> anyhow::Result<bool> {
-            Ok(false)
+            self.handle_event_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
         }
         fn sync_rooms(&self) -> anyhow::Result<()> {
             Ok(())
@@ -2383,6 +2387,7 @@ mod tests {
             Ok(())
         }
         fn turn_on_room(&self, _: &str) -> anyhow::Result<()> {
+            self.turn_on_room_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         fn apply_room_command(
@@ -2403,6 +2408,8 @@ mod tests {
             false
         }
         fn set_room_brightness(&self, _: &str, _: u8) -> anyhow::Result<()> {
+            self.set_room_brightness_calls
+                .fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         fn set_room_time_offset(&self, _: &str, _: f32) -> anyhow::Result<()> {
@@ -2789,6 +2796,9 @@ mod tests {
             }],
             periodic_tick_node_calls: calls.clone(),
             apply_room_command_calls: Arc::new(AtomicUsize::new(0)),
+            handle_event_calls: Arc::new(AtomicUsize::new(0)),
+            turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
+            set_room_brightness_calls: Arc::new(AtomicUsize::new(0)),
         });
         let state = make_state_with_runtime(runtime);
         let internal_node_id =
@@ -2833,6 +2843,9 @@ mod tests {
             }],
             periodic_tick_node_calls: calls.clone(),
             apply_room_command_calls: Arc::new(AtomicUsize::new(0)),
+            handle_event_calls: Arc::new(AtomicUsize::new(0)),
+            turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
+            set_room_brightness_calls: Arc::new(AtomicUsize::new(0)),
         });
         let state = make_state_with_runtime(runtime);
         let stale_generation = state.lock().unwrap().light_dispatch_generation;
@@ -2890,6 +2903,9 @@ mod tests {
             }],
             periodic_tick_node_calls: Arc::new(Mutex::new(Vec::new())),
             apply_room_command_calls: apply_calls.clone(),
+            handle_event_calls: Arc::new(AtomicUsize::new(0)),
+            turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
+            set_room_brightness_calls: Arc::new(AtomicUsize::new(0)),
         });
         let state = make_state_with_runtime(runtime);
         let dispatch_generation = state.lock().unwrap().light_dispatch_generation;
@@ -2923,6 +2939,163 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(1),
             "ApplyNodeCommand stalled on periodic slot: elapsed {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn queued_node_action_does_not_wait_on_periodic_dispatch_slot() {
+        let handle_event_calls = Arc::new(AtomicUsize::new(0));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(PeriodicWorkerTestRuntime {
+            snapshots: vec![RoomSnapshot {
+                id: "room_a".into(),
+                name: "Room A".into(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                hard_off: false,
+                profile_settings: RoomProfileSettings::default(),
+            }],
+            periodic_tick_node_calls: Arc::new(Mutex::new(Vec::new())),
+            apply_room_command_calls: Arc::new(AtomicUsize::new(0)),
+            handle_event_calls: handle_event_calls.clone(),
+            turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
+            set_room_brightness_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let state = make_state_with_runtime(runtime);
+        {
+            let mut s = state.lock().unwrap();
+            s.next_node_dispatch_at =
+                Some(Instant::now().checked_add(Duration::from_secs(2)).unwrap());
+        }
+
+        let started = Instant::now();
+        process_work_item(
+            &state,
+            WorkItem::QueuedNodeAction {
+                command_id: "app-action".into(),
+                node_id: "room_a".into(),
+                action: ButtonAction::OnPress,
+                device_id: None,
+                dispatch_spacing: Duration::from_secs(3),
+                persist_after: false,
+            },
+        );
+        let elapsed = started.elapsed();
+
+        assert_eq!(handle_event_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "QueuedNodeAction stalled on periodic slot: elapsed {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn set_node_brightness_does_not_wait_on_periodic_dispatch_slot() {
+        let brightness_calls = Arc::new(AtomicUsize::new(0));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(PeriodicWorkerTestRuntime {
+            snapshots: vec![RoomSnapshot {
+                id: "room_a".into(),
+                name: "Room A".into(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                hard_off: false,
+                profile_settings: RoomProfileSettings::default(),
+            }],
+            periodic_tick_node_calls: Arc::new(Mutex::new(Vec::new())),
+            apply_room_command_calls: Arc::new(AtomicUsize::new(0)),
+            handle_event_calls: Arc::new(AtomicUsize::new(0)),
+            turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
+            set_room_brightness_calls: brightness_calls.clone(),
+        });
+        let state = make_state_with_runtime(runtime);
+        {
+            let mut s = state.lock().unwrap();
+            s.next_node_dispatch_at =
+                Some(Instant::now().checked_add(Duration::from_secs(2)).unwrap());
+        }
+
+        let started = Instant::now();
+        process_work_item(
+            &state,
+            WorkItem::SetNodeBrightness {
+                command_id: "app-brightness".into(),
+                node_id: "room_a".into(),
+                brightness: 55,
+                dispatch_spacing: Duration::from_secs(3),
+                persist_after: false,
+            },
+        );
+        let elapsed = started.elapsed();
+
+        assert_eq!(brightness_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "SetNodeBrightness stalled on periodic slot: elapsed {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn set_node_preferences_does_not_wait_on_periodic_dispatch_slot() {
+        let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(PeriodicWorkerTestRuntime {
+            snapshots: vec![RoomSnapshot {
+                id: "room_a".into(),
+                name: "Room A".into(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                hard_off: true,
+                profile_settings: RoomProfileSettings::default(),
+            }],
+            periodic_tick_node_calls: Arc::new(Mutex::new(Vec::new())),
+            apply_room_command_calls: Arc::new(AtomicUsize::new(0)),
+            handle_event_calls: Arc::new(AtomicUsize::new(0)),
+            turn_on_room_calls: turn_on_room_calls.clone(),
+            set_room_brightness_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let state = make_state_with_runtime(runtime);
+        {
+            let mut s = state.lock().unwrap();
+            s.next_node_dispatch_at =
+                Some(Instant::now().checked_add(Duration::from_secs(2)).unwrap());
+        }
+
+        let started = Instant::now();
+        process_work_item(
+            &state,
+            WorkItem::SetNodePreferences {
+                command_id: "app-preferences".into(),
+                node_id: "room_a".into(),
+                rhythm_enabled: None,
+                disabled: None,
+                target_state: Some(rhythm_core::RoomModeState::Active),
+                room_profile: None,
+                dispatch_spacing: Duration::from_secs(3),
+                persist_after: false,
+            },
+        );
+        let elapsed = started.elapsed();
+
+        assert_eq!(turn_on_room_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "SetNodePreferences stalled on periodic slot: elapsed {:?}",
             elapsed
         );
     }

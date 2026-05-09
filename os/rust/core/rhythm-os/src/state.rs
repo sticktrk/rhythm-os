@@ -372,8 +372,10 @@ pub struct AppState {
     /// Incrementing this invalidates already queued periodic and mode-apply
     /// light work so an active-mode change cannot leak stale output commands.
     pub light_dispatch_generation: u64,
-    /// Next reserved dispatch start slot for queued light-node work.
+    /// Next reserved dispatch start slot for generated periodic light-node work.
     pub next_node_dispatch_at: Option<Instant>,
+    /// Next reserved dispatch start slot for app-originated queued node work.
+    pub next_interactive_node_dispatch_at: Option<Instant>,
     /// Pending hub event receivers from hub reconfiguration (picked up by main loop).
     /// Multiple hubs produce multiple receivers — the event loop drains this Vec.
     pub pending_hub_event_rxs: Vec<std::sync::mpsc::Receiver<HubEvent>>,
@@ -559,6 +561,7 @@ impl Default for AppState {
             pending_periodic_ticks: HashMap::new(),
             light_dispatch_generation: 0,
             next_node_dispatch_at: None,
+            next_interactive_node_dispatch_at: None,
             pending_hub_event_rxs: Vec::new(),
             pending_motion_clear: Vec::new(),
             pending_motion_seed: Vec::new(),
@@ -734,6 +737,7 @@ impl AppState {
         self.light_dispatch_generation = self.light_dispatch_generation.wrapping_add(1);
         self.pending_periodic_ticks.clear();
         self.next_node_dispatch_at = None;
+        self.next_interactive_node_dispatch_at = None;
         self.light_dispatch_generation
     }
 

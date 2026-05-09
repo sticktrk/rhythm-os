@@ -368,7 +368,25 @@ pub(crate) fn effective_cycle_duration(
     Duration::from_secs(chosen_secs)
 }
 
-pub(crate) fn wait_for_node_dispatch_slot(
+fn reserve_dispatch_slot(
+    next_dispatch_at: &mut Option<Instant>,
+    spacing: Duration,
+) -> Option<Duration> {
+    let now = Instant::now();
+    match *next_dispatch_at {
+        Some(next) if next > now => {
+            let sleep_for = next.duration_since(now);
+            *next_dispatch_at = Some(next.checked_add(spacing).unwrap_or(next));
+            Some(sleep_for)
+        }
+        _ => {
+            *next_dispatch_at = Some(now.checked_add(spacing).unwrap_or(now));
+            None
+        }
+    }
+}
+
+pub(crate) fn wait_for_interactive_node_dispatch_slot(
     state: &SharedState,
     command_id: &str,
     node_id: &str,
@@ -382,28 +400,17 @@ pub(crate) fn wait_for_node_dispatch_slot(
             return;
         }
 
-        let now = Instant::now();
-        match s.next_node_dispatch_at {
-            Some(next) if next > now => {
-                let sleep_for = next.duration_since(now);
-                s.next_node_dispatch_at = Some(next.checked_add(spacing).unwrap_or(next));
-                Some(sleep_for)
-            }
-            _ => {
-                s.next_node_dispatch_at = Some(now.checked_add(spacing).unwrap_or(now));
-                None
-            }
-        }
+        reserve_dispatch_slot(&mut s.next_interactive_node_dispatch_at, spacing)
     };
 
     if let Some(sleep_for) = sleep_for {
         tracing::debug!(
             target: "sys",
-            event = "node_dispatch_paced",
+            event = "interactive_node_dispatch_paced",
             command_id = %command_id,
             node_id,
             sleep_ms = sleep_for.as_millis(),
-            "Queued node dispatch paced"
+            "Queued interactive node dispatch paced"
         );
         thread::sleep(sleep_for);
     }
@@ -437,18 +444,7 @@ pub(crate) fn wait_for_node_dispatch_slot_if_current(
             return true;
         }
 
-        let now = Instant::now();
-        match s.next_node_dispatch_at {
-            Some(next) if next > now => {
-                let sleep_for = next.duration_since(now);
-                s.next_node_dispatch_at = Some(next.checked_add(spacing).unwrap_or(next));
-                Some(sleep_for)
-            }
-            _ => {
-                s.next_node_dispatch_at = Some(now.checked_add(spacing).unwrap_or(now));
-                None
-            }
-        }
+        reserve_dispatch_slot(&mut s.next_node_dispatch_at, spacing)
     };
 
     if let Some(sleep_for) = sleep_for {
