@@ -1300,6 +1300,7 @@ pub fn apply_pending_motion_seeds(
     let mut idle_count = 0usize;
     let mut live_count = 0usize;
     let mut hard_off_dropped = 0usize;
+    let mut soft_off_dropped = 0usize;
     let mut deferred = Vec::new();
 
     for seed in seeds {
@@ -1314,12 +1315,22 @@ pub fn apply_pending_motion_seeds(
             continue;
         }
 
-        // Hard-off rooms have no motion timers — live mutations clear them
-        // via queue_motion_timer_clear, so boot-time seeding must do the
-        // same or timers reappear after a power cycle (issue #53).
-        if target_room_hard_off(state, &target_node_id) == Some(true) {
-            hard_off_dropped += 1;
-            continue;
+        if let Some((hard_off, soft_off)) = target_room_flags(state, &target_node_id) {
+            // Hard-off rooms have no motion timers — live mutations clear them
+            // via queue_motion_timer_clear, so boot-time seeding must do the
+            // same or timers reappear after a power cycle (issue #53).
+            if hard_off {
+                hard_off_dropped += 1;
+                continue;
+            }
+
+            // Idle/soft-off is also an explicit persisted room state. For
+            // inactive startup-prefetch sensors, the room's semantic
+            // lights_on=true should not be mistaken for motion-owned light.
+            if soft_off && !is_active {
+                soft_off_dropped += 1;
+                continue;
+            }
         }
 
         let observed_lights_on = if is_active {
@@ -1365,11 +1376,11 @@ pub fn apply_pending_motion_seeds(
     }
 
     let applied_count = active_count + owned_inactive_count + idle_count;
-    if applied_count > 0 || live_count > 0 || hard_off_dropped > 0 {
+    if applied_count > 0 || live_count > 0 || hard_off_dropped > 0 || soft_off_dropped > 0 {
         info!(
             target: "evt",
-            "Motion: seeded {} active, {} cleared-but-owned, {} idle from startup prefetch ({} live sources kept, {} hard_off dropped)",
-            active_count, owned_inactive_count, idle_count, live_count, hard_off_dropped
+            "Motion: seeded {} active, {} cleared-but-owned, {} idle from startup prefetch ({} live sources kept, {} hard_off dropped, {} soft_off dropped)",
+            active_count, owned_inactive_count, idle_count, live_count, hard_off_dropped, soft_off_dropped
         );
     }
     applied_count > 0
@@ -1383,11 +1394,11 @@ fn observed_room_lights_on(state: &SharedState, target_node_id: &str) -> Option<
     })
 }
 
-fn target_room_hard_off(state: &SharedState, target_node_id: &str) -> Option<bool> {
+fn target_room_flags(state: &SharedState, target_node_id: &str) -> Option<(bool, bool)> {
     let runtime = state.lock().ok().and_then(|s| s.hub_runtime())?;
     runtime
         .engine_effective_node_snapshot(target_node_id)
-        .map(|snap| snap.hard_off)
+        .map(|snap| (snap.hard_off, snap.soft_off))
 }
 
 /// Sync motion timer snapshots into AppState for API visibility.
@@ -3692,11 +3703,25 @@ mod tests {
             });
     }
 
-    fn set_observed_lights_on(state: &SharedState, target: &str, on: bool) {
+    fn set_observed_lights_on_with_source(
+        state: &SharedState,
+        target: &str,
+        on: bool,
+        source: crate::state::ObservedPowerSource,
+    ) {
         let mut s = state.lock().unwrap();
         s.room_observed_power.insert(
             target.into(),
-            crate::state::ObservedPowerState::new(on, crate::state::ObservedPowerSource::SyncPoll),
+            crate::state::ObservedPowerState::new(on, source),
+        );
+    }
+
+    fn set_observed_lights_on(state: &SharedState, target: &str, on: bool) {
+        set_observed_lights_on_with_source(
+            state,
+            target,
+            on,
+            crate::state::ObservedPowerSource::SyncPoll,
         );
     }
 
@@ -3896,7 +3921,7 @@ mod tests {
         Arc::new(Mutex::new(app))
     }
 
-    fn hard_off_room_snapshot(id: &str) -> RoomSnapshot {
+    fn room_snapshot_with_flags(id: &str, soft_off: bool, hard_off: bool) -> RoomSnapshot {
         RoomSnapshot {
             id: id.into(),
             name: id.into(),
@@ -3906,10 +3931,18 @@ mod tests {
             disabled: false,
             time_offset_minutes: 0.0,
             brightness_offset: 0.0,
-            soft_off: false,
-            hard_off: true,
+            soft_off,
+            hard_off,
             profile_settings: RoomProfileSettings::default(),
         }
+    }
+
+    fn hard_off_room_snapshot(id: &str) -> RoomSnapshot {
+        room_snapshot_with_flags(id, false, true)
+    }
+
+    fn soft_off_room_snapshot(id: &str) -> RoomSnapshot {
+        room_snapshot_with_flags(id, true, false)
     }
 
     /// Boot-time motion seeding must skip rooms persisted as hard_off.
@@ -3942,6 +3975,41 @@ mod tests {
         assert!(
             state.lock().unwrap().pending_motion_seed.is_empty(),
             "hard_off seeds must be dropped, not deferred"
+        );
+    }
+
+    /// Inactive startup motion prefetch must not turn a persisted Idle room
+    /// into a motion-owned countdown. Idle reports semantic lights_on=true for
+    /// display purposes, but that does not mean motion owns the room (#58/#59).
+    #[test]
+    fn apply_seeds_skips_inactive_soft_off_room_with_semantic_lights_on() {
+        let state = make_state_with_room_snapshot(soft_off_room_snapshot("room_a"));
+        set_observed_lights_on_with_source(
+            &state,
+            "room_a",
+            true,
+            crate::state::ObservedPowerSource::SemanticOverride,
+        );
+        push_seed(&state, "sensor_1", "room_a", false);
+
+        let mut motion = MotionTimerState::new();
+        let dirty = apply_pending_motion_seeds(&state, &mut motion, Instant::now());
+
+        assert!(
+            !dirty,
+            "dropping an inactive soft_off seed must not report a state change"
+        );
+        assert!(
+            motion.sensors.is_empty(),
+            "idle room must not get a startup motion countdown"
+        );
+        assert!(
+            motion.motion_owned.is_empty(),
+            "idle room must not be claimed for motion-driven auto-off"
+        );
+        assert!(
+            state.lock().unwrap().pending_motion_seed.is_empty(),
+            "soft_off seeds must be dropped, not deferred"
         );
     }
 
