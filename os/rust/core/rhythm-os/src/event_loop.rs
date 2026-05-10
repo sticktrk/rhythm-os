@@ -912,6 +912,53 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             }
         }
 
+        HubEvent::LightPower {
+            ref hub_key,
+            ref device_id,
+            lights_on,
+        } => {
+            let Some(hub_key) = hub_key.as_ref() else {
+                info!(
+                    target: "evt",
+                    "Light power report for {} has no hub key, ignoring",
+                    device_id
+                );
+                return;
+            };
+            let runtime = {
+                let Ok(s) = state.lock() else { return };
+                s.hub_runtime()
+            };
+            let Some(runtime) = runtime else {
+                return;
+            };
+            let Some(node_id) = commands::update_lights_on_cache_for_native_light_report(
+                state,
+                &runtime,
+                hub_key,
+                device_id,
+                lights_on,
+                crate::state::ObservedPowerSource::LiveSubscription,
+            ) else {
+                info!(
+                    target: "evt",
+                    "Light power report from {:?}:{} could not resolve canonical topology target, ignoring",
+                    hub_key,
+                    device_id
+                );
+                return;
+            };
+            info!(
+                target: "evt",
+                "Light power report from {:?}:{} resolved to {} lights_on={}",
+                hub_key,
+                device_id,
+                node_id,
+                lights_on
+            );
+            commands::emit_node_state_event_after_apply(state, &runtime, &node_id);
+        }
+
         HubEvent::Heartbeat { .. } => {
             let on_heartbeat = {
                 let Ok(s) = state.lock() else { return };

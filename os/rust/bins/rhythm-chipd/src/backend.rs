@@ -3,7 +3,9 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::{Context, Result};
 
 use rhythm_matter::chip_rpc::ChipInitControllerResponse;
-use rhythm_matter::transport::{CommissionedDevice, MatterCommissionRequest};
+use rhythm_matter::transport::{
+    CommissionedDevice, MatterAttributeReport, MatterCommissionRequest, MatterSubscriptionTarget,
+};
 
 use crate::service::CommissioningState;
 
@@ -54,6 +56,13 @@ pub trait ChipControllerBackend {
         transition_ms: Option<u32>,
     ) -> Result<()>;
     fn read_on_off(&mut self, node_id: u64, endpoint: u16) -> Result<bool>;
+    fn subscribe_on_off(
+        &mut self,
+        targets: &[MatterSubscriptionTarget],
+        min_interval_secs: u16,
+        max_interval_secs: u16,
+    ) -> Result<()>;
+    fn drain_attribute_reports(&mut self) -> Result<Vec<MatterAttributeReport>>;
 }
 
 pub fn build_backend_from_env() -> Box<dyn ChipControllerBackend> {
@@ -167,6 +176,20 @@ impl ChipControllerBackend for NativeChipBackend {
 
     fn read_on_off(&mut self, node_id: u64, endpoint: u16) -> Result<bool> {
         self.controller_mut()?.read_on_off(node_id, endpoint)
+    }
+
+    fn subscribe_on_off(
+        &mut self,
+        targets: &[MatterSubscriptionTarget],
+        min_interval_secs: u16,
+        max_interval_secs: u16,
+    ) -> Result<()> {
+        self.controller_mut()?
+            .subscribe_on_off(targets, min_interval_secs, max_interval_secs)
+    }
+
+    fn drain_attribute_reports(&mut self) -> Result<Vec<MatterAttributeReport>> {
+        self.controller_mut()?.drain_attribute_reports()
     }
 }
 
@@ -317,5 +340,21 @@ impl ChipControllerBackend for FakeChipBackend {
     fn read_on_off(&mut self, node_id: u64, endpoint: u16) -> Result<bool> {
         self.require_device(node_id)?;
         Ok(*self.on_off.get(&(node_id, endpoint)).unwrap_or(&false))
+    }
+
+    fn subscribe_on_off(
+        &mut self,
+        targets: &[MatterSubscriptionTarget],
+        _min_interval_secs: u16,
+        _max_interval_secs: u16,
+    ) -> Result<()> {
+        for target in targets {
+            self.require_device(target.node_id)?;
+        }
+        Ok(())
+    }
+
+    fn drain_attribute_reports(&mut self) -> Result<Vec<MatterAttributeReport>> {
+        Ok(Vec::new())
     }
 }

@@ -161,6 +161,8 @@ pub enum ObservedPowerSource {
     Periodic,
     /// Startup or reconnect sync sampled the hub/runtime.
     SyncPoll,
+    /// Live hub subscription reported a changed light attribute.
+    LiveSubscription,
     /// An explicit authoritative API refresh sampled the hub/runtime.
     AuthoritativeRefresh,
     /// Room semantics make power state explicit (`hard_off` / `soft_off`).
@@ -173,6 +175,7 @@ impl ObservedPowerSource {
             Self::Command => "command",
             Self::Periodic => "periodic",
             Self::SyncPoll => "sync_poll",
+            Self::LiveSubscription => "live_subscription",
             Self::AuthoritativeRefresh => "authoritative_refresh",
             Self::SemanticOverride => "semantic_override",
         }

@@ -52,6 +52,12 @@ pub enum HubEvent {
         sensor_id: String,
         detected: bool,
     },
+    /// A light endpoint reported a live power-state change.
+    LightPower {
+        hub_key: Option<HubKey>,
+        device_id: String,
+        lights_on: bool,
+    },
     /// Connection heartbeat.
     Heartbeat { hub_key: Option<HubKey> },
     /// Connection lost.
@@ -87,6 +93,7 @@ impl HubEvent {
             HubEvent::Connected { hub_key } => hub_key.as_ref(),
             HubEvent::Button { hub_key, .. } => hub_key.as_ref(),
             HubEvent::Motion { hub_key, .. } => hub_key.as_ref(),
+            HubEvent::LightPower { hub_key, .. } => hub_key.as_ref(),
             HubEvent::Heartbeat { hub_key } => hub_key.as_ref(),
             HubEvent::Disconnected { hub_key, .. } => hub_key.as_ref(),
             HubEvent::DevicePaired { hub_key, .. } => hub_key.as_ref(),
@@ -100,6 +107,7 @@ impl HubEvent {
             HubEvent::Connected { hub_key } => *hub_key = Some(key),
             HubEvent::Button { hub_key, .. } => *hub_key = Some(key),
             HubEvent::Motion { hub_key, .. } => *hub_key = Some(key),
+            HubEvent::LightPower { hub_key, .. } => *hub_key = Some(key),
             HubEvent::Heartbeat { hub_key } => *hub_key = Some(key),
             HubEvent::Disconnected { hub_key, .. } => *hub_key = Some(key),
             HubEvent::DevicePaired { hub_key, .. } => *hub_key = Some(key),

@@ -740,6 +740,7 @@ fn observed_power_is_fresh(s: &AppState, observed: &ObservedPowerState) -> bool 
         ObservedPowerSource::Command => false,
         ObservedPowerSource::Periodic
         | ObservedPowerSource::SyncPoll
+        | ObservedPowerSource::LiveSubscription
         | ObservedPowerSource::AuthoritativeRefresh => {
             let freshness_window_secs = OBSERVED_POWER_MIN_FRESHNESS_SECS
                 .max(s.runtime_config.update_interval_secs.saturating_mul(2));
@@ -928,6 +929,67 @@ pub(crate) fn update_lights_on_cache_for_runtime_node_with_source(
             source,
         );
     }
+}
+
+pub(crate) fn update_lights_on_cache_for_native_light_report(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    hub_key: &HubKey,
+    native_id: &str,
+    lights_on: bool,
+    source: ObservedPowerSource,
+) -> Option<String> {
+    let (node_id, parent_id) = {
+        let s = state.lock().ok()?;
+        let canonical_id = s
+            .canonical_registry
+            .find_by_native_id(hub_key, native_id)
+            .map(|device| device.id.clone())?;
+        let parent_id = s
+            .topology
+            .get_device_node(&canonical_id)
+            .and_then(|node| node.parent_id.clone());
+        (canonical_id, parent_id)
+    };
+
+    update_lights_on_cache_for_node_with_source(
+        state,
+        &node_id,
+        LightNodeKind::LightDevice,
+        None,
+        lights_on,
+        source,
+    );
+
+    if let Some(parent_id) = parent_id.filter(|parent_id| parent_id != &node_id) {
+        let parent_lights_on = if lights_on {
+            true
+        } else {
+            match runtime.any_lights_on(&parent_id) {
+                Ok(parent_lights_on) => parent_lights_on,
+                Err(e) => {
+                    warn!(
+                        target: "cmd",
+                        "Failed to refresh parent lights_on for '{}' after live report from '{}': {}",
+                        parent_id,
+                        node_id,
+                        e
+                    );
+                    false
+                }
+            }
+        };
+        update_lights_on_cache_for_node_with_source(
+            state,
+            &parent_id,
+            LightNodeKind::Room,
+            None,
+            parent_lights_on,
+            source,
+        );
+    }
+
+    Some(node_id)
 }
 
 pub(crate) fn refresh_lights_on_cache_for_runtime_snapshot_with_source(

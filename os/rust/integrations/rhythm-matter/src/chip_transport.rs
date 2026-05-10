@@ -13,12 +13,13 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use crate::chip_rpc::{
-    ChipInitControllerRequest, ChipInitControllerResponse, ChipRpcCommissionLightResponse,
-    ChipRpcListDevicesResponse, ChipRpcProbeLightResponse, ChipRpcReadOnOffResponse,
-    ChipRpcRequest, ChipRpcRequestEnvelope, ChipRpcResponseEnvelope,
+    ChipInitControllerRequest, ChipInitControllerResponse, ChipRpcAttributeReportsResponse,
+    ChipRpcCommissionLightResponse, ChipRpcListDevicesResponse, ChipRpcProbeLightResponse,
+    ChipRpcReadOnOffResponse, ChipRpcRequest, ChipRpcRequestEnvelope, ChipRpcResponseEnvelope,
 };
 use crate::transport::{
-    CommissionedDevice, MatterCommissionRequest, MatterDeviceInfo, MatterTransport,
+    CommissionedDevice, MatterAttributeReport, MatterCommissionRequest, MatterDeviceInfo,
+    MatterSubscriptionTarget, MatterTransport,
 };
 
 const SOCKET_NAME: &str = "chip-controller.sock";
@@ -569,6 +570,26 @@ impl MatterTransport for ChipTransport {
             self.call(ChipRpcRequest::ReadOnOff { node_id, endpoint })?;
         Ok(response.on)
     }
+
+    fn subscribe_on_off(
+        &self,
+        targets: &[MatterSubscriptionTarget],
+        min_interval_secs: u16,
+        max_interval_secs: u16,
+    ) -> Result<()> {
+        let _: crate::chip_rpc::ChipRpcEmpty = self.call(ChipRpcRequest::SubscribeOnOff {
+            targets: targets.to_vec(),
+            min_interval_secs,
+            max_interval_secs,
+        })?;
+        Ok(())
+    }
+
+    fn drain_attribute_reports(&self) -> Result<Vec<MatterAttributeReport>> {
+        let response: ChipRpcAttributeReportsResponse =
+            self.call(ChipRpcRequest::DrainAttributeReports)?;
+        Ok(response.reports)
+    }
 }
 
 #[cfg(test)]
@@ -578,9 +599,10 @@ mod tests {
     use std::thread;
 
     use crate::chip_rpc::{
-        ChipInitControllerResponse, ChipRpcEmpty, ChipRpcListDevicesResponse,
-        ChipRpcResponseEnvelope,
+        ChipInitControllerResponse, ChipRpcAttributeReportsResponse, ChipRpcEmpty,
+        ChipRpcListDevicesResponse, ChipRpcResponseEnvelope,
     };
+    use crate::transport::MatterAttributeValue;
 
     fn test_temp_root() -> PathBuf {
         std::env::var_os("CARGO_TARGET_TMPDIR")
@@ -731,6 +753,79 @@ mod tests {
 
         let transport = ChipTransport::for_test(socket_path.clone());
         transport.identify_light(7, 1, 1).unwrap();
+
+        server.join().unwrap();
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn subscribe_on_off_uses_rpc_contract() {
+        let socket_path = temp_socket_path("subscribe-on-off");
+        let server = spawn_fake_server(socket_path.clone(), |request| {
+            match request.request {
+                ChipRpcRequest::SubscribeOnOff {
+                    targets,
+                    min_interval_secs,
+                    max_interval_secs,
+                } => {
+                    assert_eq!(
+                        targets,
+                        vec![MatterSubscriptionTarget {
+                            node_id: 7,
+                            endpoint: 2,
+                        }]
+                    );
+                    assert_eq!(min_interval_secs, 1);
+                    assert_eq!(max_interval_secs, 60);
+                }
+                other => panic!("unexpected request: {:?}", other),
+            }
+            ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+        });
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        transport
+            .subscribe_on_off(
+                &[MatterSubscriptionTarget {
+                    node_id: 7,
+                    endpoint: 2,
+                }],
+                1,
+                60,
+            )
+            .unwrap();
+
+        server.join().unwrap();
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn drain_attribute_reports_uses_rpc_contract() {
+        let socket_path = temp_socket_path("drain-attr-reports");
+        let expected = MatterAttributeReport {
+            node_id: 7,
+            endpoint: 2,
+            cluster: crate::clusters::CLUSTER_ON_OFF_U32,
+            attr_id: crate::clusters::ATTR_ON_OFF_U32,
+            value: MatterAttributeValue::Bool(true),
+        };
+        let response_report = expected.clone();
+        let server = spawn_fake_server(socket_path.clone(), move |request| {
+            assert!(matches!(
+                request.request,
+                ChipRpcRequest::DrainAttributeReports
+            ));
+            ChipRpcResponseEnvelope::ok(
+                request.id,
+                ChipRpcAttributeReportsResponse {
+                    reports: vec![response_report.clone()],
+                },
+            )
+        });
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        let reports = transport.drain_attribute_reports().unwrap();
+        assert_eq!(reports, vec![expected]);
 
         server.join().unwrap();
         let _ = fs::remove_file(socket_path);

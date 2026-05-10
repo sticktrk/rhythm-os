@@ -437,6 +437,67 @@ private:
     CopyFn mOnValue;
 };
 
+class OnOffSubscriptionOperation final : public DeviceConnectionOperation
+{
+public:
+    using ReportFn = std::function<void(NodeId, EndpointId, bool)>;
+
+    OnOffSubscriptionOperation(NodeId nodeId, EndpointId endpoint, uint16_t minIntervalSecs, uint16_t maxIntervalSecs,
+                               ReportFn onReport) :
+        DeviceConnectionOperation(nodeId),
+        mNodeId(nodeId), mEndpoint(endpoint), mMinIntervalSecs(minIntervalSecs), mMaxIntervalSecs(maxIntervalSecs),
+        mOnReport(std::move(onReport))
+    {}
+
+protected:
+    CHIP_ERROR HandleConnected(Messaging::ExchangeManager & exchangeMgr, const SessionHandle & sessionHandle) override
+    {
+        ClusterBase cluster(exchangeMgr, sessionHandle, mEndpoint);
+        return cluster.template SubscribeAttribute<OnOff::Attributes::OnOff::TypeInfo>(
+            this, OnReport, OnFailure, mMinIntervalSecs, mMaxIntervalSecs, OnSubscriptionEstablished,
+            OnResubscriptionAttempt, true, true);
+    }
+
+private:
+    static void OnReport(void * context, bool value)
+    {
+        auto * self = static_cast<OnOffSubscriptionOperation *>(context);
+        VerifyOrReturn(self != nullptr);
+        if (self->mOnReport)
+        {
+            self->mOnReport(self->mNodeId, self->mEndpoint, value);
+        }
+    }
+
+    static void OnFailure(void * context, CHIP_ERROR error)
+    {
+        auto * self = static_cast<OnOffSubscriptionOperation *>(context);
+        VerifyOrReturn(self != nullptr);
+        self->Finish(error);
+    }
+
+    static void OnSubscriptionEstablished(void * context, SubscriptionId subscriptionId)
+    {
+        (void) subscriptionId;
+        auto * self = static_cast<OnOffSubscriptionOperation *>(context);
+        VerifyOrReturn(self != nullptr);
+        self->Finish(CHIP_NO_ERROR);
+    }
+
+    static void OnResubscriptionAttempt(void * context, CHIP_ERROR error, uint32_t nextResubscribeIntervalMsec)
+    {
+        (void) context;
+        ChipLogError(Controller, "Matter OnOff resubscription attempt after %" CHIP_ERROR_FORMAT " in %u ms", error.Format(),
+                     nextResubscribeIntervalMsec);
+    }
+
+    NodeId mNodeId;
+    EndpointId mEndpoint;
+    uint16_t mMinIntervalSecs;
+    uint16_t mMaxIntervalSecs;
+    ReportFn mOnReport;
+};
+
 class BlockingPairingDelegate final : public DevicePairingDelegate
 {
 public:
@@ -846,6 +907,52 @@ public:
         return ReadValueAttribute<OnOff::Attributes::OnOff::TypeInfo>(nodeId, endpoint, on);
     }
 
+    CHIP_ERROR SubscribeOnOff(const rhythm_chip_bridge_subscription_target * targets, size_t targetCount,
+                              uint16_t minIntervalSecs, uint16_t maxIntervalSecs)
+    {
+        VerifyOrReturnError(mCommissioner != nullptr, CHIP_ERROR_INCORRECT_STATE);
+        VerifyOrReturnError(targets != nullptr || targetCount == 0, CHIP_ERROR_INVALID_ARGUMENT);
+        VerifyOrReturnError(maxIntervalSecs >= minIntervalSecs, CHIP_ERROR_INVALID_ARGUMENT);
+
+        for (size_t i = 0; i < targetCount; ++i)
+        {
+            NodeId nodeId       = targets[i].node_id;
+            EndpointId endpoint = targets[i].endpoint;
+            if (HasOnOffSubscription(nodeId, endpoint))
+            {
+                continue;
+            }
+
+            auto subscription = std::make_unique<OnOffSubscriptionOperation>(
+                nodeId, endpoint, minIntervalSecs, maxIntervalSecs,
+                [this](NodeId reportNodeId, EndpointId reportEndpoint, bool on) {
+                    this->QueueOnOffReport(reportNodeId, reportEndpoint, on);
+                });
+            ReturnErrorOnFailure(RunConnectionOperation(*subscription));
+            mOnOffSubscriptionKeys.emplace_back(nodeId, endpoint);
+            mOnOffSubscriptions.push_back(std::move(subscription));
+        }
+
+        return CHIP_NO_ERROR;
+    }
+
+    size_t DrainAttributeReports(rhythm_chip_bridge_attribute_report * reports, size_t reportsCapacity)
+    {
+        if (reports == nullptr || reportsCapacity == 0)
+        {
+            return 0;
+        }
+
+        std::lock_guard<std::mutex> lock(mReportMutex);
+        const size_t count = std::min(reportsCapacity, mAttributeReports.size());
+        for (size_t i = 0; i < count; ++i)
+        {
+            reports[i] = mAttributeReports[i];
+        }
+        mAttributeReports.erase(mAttributeReports.begin(), mAttributeReports.begin() + count);
+        return count;
+    }
+
     void Shutdown()
     {
         std::lock_guard<std::mutex> lock(mMutex);
@@ -856,6 +963,8 @@ public:
         }
 
         CHIP_ERROR ignored = ExecuteOnMatterThread([this]() {
+            mOnOffSubscriptions.clear();
+            mOnOffSubscriptionKeys.clear();
             if (mCommissioner != nullptr)
             {
                 mCommissioner->Shutdown();
@@ -1086,6 +1195,31 @@ private:
         return err == CHIP_NO_ERROR ? iterErr : err;
     }
 
+    bool HasOnOffSubscription(NodeId nodeId, EndpointId endpoint) const
+    {
+        return std::any_of(mOnOffSubscriptionKeys.begin(), mOnOffSubscriptionKeys.end(),
+                           [nodeId, endpoint](const auto & key) { return key.first == nodeId && key.second == endpoint; });
+    }
+
+    void QueueOnOffReport(NodeId nodeId, EndpointId endpoint, bool on)
+    {
+        rhythm_chip_bridge_attribute_report report;
+        report.node_id      = nodeId;
+        report.endpoint     = endpoint;
+        report.cluster_id   = OnOff::Id;
+        report.attribute_id = OnOff::Attributes::OnOff::Id;
+        report.value_type   = RHYTHM_CHIP_BRIDGE_ATTRIBUTE_VALUE_BOOL;
+        report.bool_value   = on;
+
+        std::lock_guard<std::mutex> lock(mReportMutex);
+        constexpr size_t kMaxQueuedAttributeReports = 1024;
+        if (mAttributeReports.size() >= kMaxQueuedAttributeReports)
+        {
+            mAttributeReports.erase(mAttributeReports.begin());
+        }
+        mAttributeReports.push_back(report);
+    }
+
     std::mutex mMutex;
     std::unique_ptr<PersistentStorage> mStorage;
     chip::Credentials::GroupDataProviderImpl mGroupDataProvider;
@@ -1095,6 +1229,10 @@ private:
     chip::Crypto::P256Keypair mOperationalKeypair;
     BlockingPairingDelegate mPairingDelegate;
     std::unique_ptr<DeviceCommissioner> mCommissioner;
+    std::vector<std::unique_ptr<OnOffSubscriptionOperation>> mOnOffSubscriptions;
+    std::vector<std::pair<NodeId, EndpointId>> mOnOffSubscriptionKeys;
+    std::mutex mReportMutex;
+    std::vector<rhythm_chip_bridge_attribute_report> mAttributeReports;
     std::string mStoragePath;
     std::string mFabricId;
     uint16_t mControllerVendorId = static_cast<uint16_t>(kDefaultControllerVendorId);
@@ -1237,6 +1375,27 @@ bool rhythm_chip_bridge_read_on_off(uint64_t node_id, uint16_t endpoint, bool * 
     }
 
     return HandleBridgeResult(err, error_message, error_message_size, "reading Matter on/off");
+}
+
+bool rhythm_chip_bridge_subscribe_on_off(const struct rhythm_chip_bridge_subscription_target * targets, size_t target_count,
+                                         uint16_t min_interval_secs, uint16_t max_interval_secs, char * error_message,
+                                         size_t error_message_size)
+{
+    return HandleBridgeResult(gContext.SubscribeOnOff(targets, target_count, min_interval_secs, max_interval_secs),
+                              error_message, error_message_size, "subscribing to Matter on/off attributes");
+}
+
+bool rhythm_chip_bridge_drain_attribute_reports(struct rhythm_chip_bridge_attribute_report * reports, size_t reports_capacity,
+                                                size_t * out_report_count, char * error_message, size_t error_message_size)
+{
+    if (out_report_count == nullptr)
+    {
+        WriteErrorMessage(error_message, error_message_size, "drain_attribute_reports requires output count");
+        return false;
+    }
+
+    *out_report_count = gContext.DrainAttributeReports(reports, reports_capacity);
+    return true;
 }
 
 void rhythm_chip_bridge_shutdown(void)

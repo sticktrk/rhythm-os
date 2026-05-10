@@ -9,21 +9,7 @@ use rhythm_os::hub::HubEvent;
 
 use crate::clusters;
 use crate::lifecycle::format_device_id;
-
-/// A raw attribute report from a Matter subscription.
-#[derive(Debug, Clone)]
-pub struct MatterAttributeReport {
-    /// Source device node ID.
-    pub node_id: u64,
-    /// Endpoint the report came from.
-    pub endpoint: u16,
-    /// Cluster ID.
-    pub cluster: u16,
-    /// Attribute ID.
-    pub attr_id: u16,
-    /// Raw attribute value.
-    pub value: Vec<u8>,
-}
+use crate::transport::{MatterAttributeReport, MatterAttributeValue};
 
 /// Translate a Matter attribute report into a HubEvent.
 ///
@@ -31,18 +17,19 @@ pub struct MatterAttributeReport {
 /// changes are not surfaced as events (Rhythm drives those, not the device).
 pub fn translate_report(report: &MatterAttributeReport) -> Option<HubEvent> {
     match (report.cluster, report.attr_id) {
-        (clusters::CLUSTER_ON_OFF, clusters::ATTR_ON_OFF) => {
-            // On/Off state changed — this could indicate someone used a
-            // physical switch or another controller. No HubEvent emitted
-            // for now; future work may add a DeviceStateChanged event.
-            let is_on = report.value.first().copied().unwrap_or(0) != 0;
+        (clusters::CLUSTER_ON_OFF_U32, clusters::ATTR_ON_OFF_U32) => {
+            let MatterAttributeValue::Bool(is_on) = &report.value;
+            let is_on = *is_on;
             log::debug!(
                 target: "evt",
                 "Matter: node {} on/off changed to {}",
                 report.node_id, is_on
             );
-            // No direct HubEvent for state changes yet — log only.
-            None
+            Some(HubEvent::LightPower {
+                hub_key: None,
+                device_id: format_device_id(report.node_id, report.endpoint),
+                lights_on: is_on,
+            })
         }
         _ => None,
     }
@@ -55,5 +42,34 @@ pub fn device_paired_event(node_id: u64, vendor_name: &str, product_name: &str) 
         device_id: format_device_id(node_id, 1),
         name: format!("{} {}", vendor_name, product_name),
         device_type: DeviceType::Light,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn translates_on_off_report_to_light_power_event() {
+        let event = translate_report(&MatterAttributeReport {
+            node_id: 42,
+            endpoint: 2,
+            cluster: clusters::CLUSTER_ON_OFF_U32,
+            attr_id: clusters::ATTR_ON_OFF_U32,
+            value: MatterAttributeValue::Bool(true),
+        })
+        .expect("on/off report should translate");
+
+        match event {
+            HubEvent::LightPower {
+                device_id,
+                lights_on,
+                ..
+            } => {
+                assert_eq!(device_id, "matter-42-2");
+                assert!(lights_on);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
     }
 }

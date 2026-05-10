@@ -1,8 +1,9 @@
 //! Matter hub lifecycle — connect, disconnect, runtime creation.
 
 use std::collections::HashMap;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
 use log::{info, warn};
@@ -13,7 +14,10 @@ use rhythm_os::registry::HubDeviceRegistry;
 use rhythm_os::state::SharedState;
 
 use crate::hub_state::MatterHubData;
-use crate::transport::{MatterDeviceInfo, MatterTransport};
+use crate::transport::{
+    MatterDeviceInfo, MatterSubscriptionTarget, MatterTransport,
+    DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS, DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
+};
 
 /// Connect to the local Matter fabric.
 pub fn connect_matter(
@@ -22,8 +26,7 @@ pub fn connect_matter(
 ) -> Result<(ActiveHub, Receiver<HubEvent>)> {
     let hub_key = HubKey::new(HubType::new("matter"), "local");
     let commissioned = transport.list_devices().unwrap_or_default();
-    let (initial_device_caps, initial_device_quirks) =
-        load_initial_device_metadata(&transport, &commissioned);
+    let initial_metadata = load_initial_device_metadata(&transport, &commissioned);
     let next_node_id = next_node_id_seed(&commissioned);
     let fabric_id = configured_fabric_id(state, &hub_key);
 
@@ -50,6 +53,12 @@ pub fn connect_matter(
     let _ = event_tx.send(HubEvent::Connected {
         hub_key: Some(hub_key.clone()),
     });
+    start_attribute_report_loop(
+        hub_key.clone(),
+        transport.clone(),
+        initial_metadata.subscription_targets.clone(),
+        event_tx.clone(),
+    );
 
     rhythm_os::lifecycle::connect_hub(
         state,
@@ -71,8 +80,8 @@ pub fn connect_matter(
                 fabric_id: fabric_id_for_closure.clone(),
                 commissioned: std::sync::Mutex::new(commissioned_for_closure.clone()),
                 next_node_id: std::sync::atomic::AtomicU64::new(next_node_id),
-                device_caps: std::sync::Mutex::new(initial_device_caps.clone()),
-                device_quirks: std::sync::Mutex::new(initial_device_quirks.clone()),
+                device_caps: std::sync::Mutex::new(initial_metadata.device_caps.clone()),
+                device_quirks: std::sync::Mutex::new(initial_metadata.device_quirks.clone()),
                 event_tx,
             }))
         },
@@ -98,25 +107,34 @@ fn next_node_id_seed(commissioned: &[MatterDeviceInfo]) -> u64 {
         .saturating_add(1)
 }
 
+#[derive(Clone)]
+struct InitialDeviceMetadata {
+    device_caps: HashMap<String, LightCapabilities>,
+    device_quirks: HashMap<String, Vec<DeviceQuirk>>,
+    subscription_targets: Vec<MatterSubscriptionTarget>,
+}
+
 fn load_initial_device_metadata(
     transport: &Arc<dyn MatterTransport>,
     commissioned: &[MatterDeviceInfo],
-) -> (
-    HashMap<String, LightCapabilities>,
-    HashMap<String, Vec<DeviceQuirk>>,
-) {
-    let mut caps = HashMap::new();
-    let mut quirks = HashMap::new();
+) -> InitialDeviceMetadata {
+    let mut device_caps = HashMap::new();
+    let mut device_quirks = HashMap::new();
+    let mut subscription_targets = Vec::new();
 
     for info in commissioned {
         match transport.probe_light(info.node_id) {
             Ok(device) => {
                 let device_id = format_device_id(device.node_id, device.light_endpoint);
-                caps.insert(
+                subscription_targets.push(MatterSubscriptionTarget {
+                    node_id: device.node_id,
+                    endpoint: device.light_endpoint,
+                });
+                device_caps.insert(
                     device_id.clone(),
                     crate::commissioning::build_device_capabilities(&device),
                 );
-                quirks.insert(
+                device_quirks.insert(
                     device_id,
                     crate::commissioning::build_device_quirks(&device),
                 );
@@ -128,11 +146,78 @@ fn load_initial_device_metadata(
                     info.node_id,
                     error
                 );
+                subscription_targets.push(MatterSubscriptionTarget {
+                    node_id: info.node_id,
+                    endpoint: 1,
+                });
             }
         }
     }
 
-    (caps, quirks)
+    InitialDeviceMetadata {
+        device_caps,
+        device_quirks,
+        subscription_targets,
+    }
+}
+
+fn start_attribute_report_loop(
+    hub_key: HubKey,
+    transport: Arc<dyn MatterTransport>,
+    targets: Vec<MatterSubscriptionTarget>,
+    event_tx: Sender<HubEvent>,
+) {
+    if targets.is_empty() {
+        return;
+    }
+
+    let _ = std::thread::Builder::new()
+        .name("matter-attr-sub".to_string())
+        .spawn(move || {
+            if let Err(error) = transport.subscribe_on_off(
+                &targets,
+                DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
+                DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
+            ) {
+                warn!(
+                    target: "evt",
+                    "Matter: failed to start On/Off attribute subscriptions: {}",
+                    error
+                );
+                return;
+            }
+
+            info!(
+                target: "evt",
+                "Matter: subscribed to On/Off reports for {} endpoint(s)",
+                targets.len()
+            );
+
+            loop {
+                match transport.drain_attribute_reports() {
+                    Ok(reports) => {
+                        for report in reports {
+                            if let Some(event) = crate::events::translate_report(&report) {
+                                if event_tx.send(event.with_hub_key(hub_key.clone())).is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        warn!(
+                            target: "evt",
+                            "Matter: failed to drain attribute reports: {}",
+                            error
+                        );
+                        std::thread::sleep(Duration::from_secs(2));
+                        continue;
+                    }
+                }
+
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        });
 }
 
 /// Format a Matter node ID as a device ID string.

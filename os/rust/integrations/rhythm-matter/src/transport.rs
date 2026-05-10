@@ -9,6 +9,11 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+/// Default minimum interval for Matter attribute subscriptions.
+pub const DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS: u16 = 1;
+/// Default maximum interval for Matter attribute subscriptions.
+pub const DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS: u16 = 60;
+
 /// Matter network type for commissioning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -111,6 +116,51 @@ pub trait MatterTransport: Send + Sync {
 
     /// Read the On/Off state from a light endpoint.
     fn read_on_off(&self, node_id: u64, endpoint: u16) -> Result<bool>;
+
+    /// Subscribe to On/Off attribute reports for the given light endpoints.
+    fn subscribe_on_off(
+        &self,
+        targets: &[MatterSubscriptionTarget],
+        min_interval_secs: u16,
+        max_interval_secs: u16,
+    ) -> Result<()> {
+        let _ = (targets, min_interval_secs, max_interval_secs);
+        anyhow::bail!("Matter On/Off attribute subscriptions are not supported by this transport")
+    }
+
+    /// Drain queued attribute reports from a subscription-capable transport.
+    fn drain_attribute_reports(&self) -> Result<Vec<MatterAttributeReport>> {
+        Ok(Vec::new())
+    }
+}
+
+/// A Matter endpoint whose attributes should be subscribed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatterSubscriptionTarget {
+    pub node_id: u64,
+    pub endpoint: u16,
+}
+
+/// A typed Matter attribute value carried over the local transport.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum MatterAttributeValue {
+    Bool(bool),
+}
+
+/// A raw attribute report from a Matter subscription.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatterAttributeReport {
+    /// Source device node ID.
+    pub node_id: u64,
+    /// Endpoint the report came from.
+    pub endpoint: u16,
+    /// Cluster ID.
+    pub cluster: u32,
+    /// Attribute ID.
+    pub attr_id: u32,
+    /// Decoded attribute value.
+    pub value: MatterAttributeValue,
 }
 
 /// A light that has been commissioned into the local Matter fabric.

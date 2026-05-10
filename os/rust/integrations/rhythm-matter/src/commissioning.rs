@@ -14,7 +14,9 @@ use serde_json::Value;
 use crate::hub_state::MatterHubData;
 use crate::transport::{
     CommissionedDevice, MatterCommissionRequest, MatterCommissioningNetwork,
-    MatterCommissioningRendezvous, MatterCommissioningWifiCredentials, MatterTransport,
+    MatterCommissioningRendezvous, MatterCommissioningWifiCredentials, MatterSubscriptionTarget,
+    MatterTransport, DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
+    DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
 };
 
 /// Parsed Matter pairing request owned by `rhythm-matter`.
@@ -236,6 +238,7 @@ fn build_success_session(
 
     hub_data.record_commissioned_device(&device);
     store_device_metadata(hub_data, &device, &device_id);
+    subscribe_paired_device(hub_data, &device, &device_id);
     if let Err(error) = crate::capture::persist_device_capture(hub_data, &device, "pair") {
         warn!(
             target: "sys",
@@ -268,6 +271,32 @@ fn build_success_session(
         }),
         error: None,
     })
+}
+
+fn subscribe_paired_device(
+    hub_data: &Arc<MatterHubData>,
+    device: &CommissionedDevice,
+    device_id: &str,
+) {
+    let Some(transport) = hub_data.transport.get() else {
+        return;
+    };
+    let target = MatterSubscriptionTarget {
+        node_id: device.node_id,
+        endpoint: device.light_endpoint,
+    };
+    if let Err(error) = transport.subscribe_on_off(
+        &[target],
+        DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
+        DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
+    ) {
+        warn!(
+            target: "sys",
+            "Matter: failed to subscribe paired device {} for live On/Off reports: {}",
+            device_id,
+            error
+        );
+    }
 }
 
 pub(crate) fn store_device_metadata(

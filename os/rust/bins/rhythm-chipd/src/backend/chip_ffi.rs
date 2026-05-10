@@ -1,6 +1,8 @@
 use anyhow::Result;
 
-use rhythm_matter::transport::{CommissionedDevice, MatterCommissionRequest};
+use rhythm_matter::transport::{
+    CommissionedDevice, MatterAttributeReport, MatterCommissionRequest, MatterSubscriptionTarget,
+};
 
 use crate::service::CommissioningState;
 
@@ -190,6 +192,36 @@ impl ChipFfiController {
         }
     }
 
+    pub fn subscribe_on_off(
+        &mut self,
+        targets: &[MatterSubscriptionTarget],
+        min_interval_secs: u16,
+        max_interval_secs: u16,
+    ) -> Result<()> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            ffi_probe::subscribe_on_off(targets, min_interval_secs, max_interval_secs)
+        }
+
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            let _ = (targets, min_interval_secs, max_interval_secs);
+            Err(self.unsupported("subscribe_on_off"))
+        }
+    }
+
+    pub fn drain_attribute_reports(&mut self) -> Result<Vec<MatterAttributeReport>> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            ffi_probe::drain_attribute_reports()
+        }
+
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            Err(self.unsupported("drain_attribute_reports"))
+        }
+    }
+
     #[cfg(not(rhythm_chipd_chip_ffi))]
     fn unsupported(&self, operation: &str) -> anyhow::Error {
         match &self.mode {
@@ -232,7 +264,8 @@ mod ffi_probe {
     use anyhow::{Context, Result};
 
     use rhythm_matter::transport::{
-        CommissionedDevice, MatterColorMode, MatterCommissionRequest, MatterCommissioningRendezvous,
+        CommissionedDevice, MatterAttributeReport, MatterAttributeValue, MatterColorMode,
+        MatterCommissionRequest, MatterCommissioningRendezvous, MatterSubscriptionTarget,
     };
 
     const ERROR_BUFFER_SIZE: usize = 512;
@@ -246,6 +279,8 @@ mod ffi_probe {
     const COLOR_MODE_HUE_SATURATION: u32 = 1 << 0;
     const COLOR_MODE_XY: u32 = 1 << 1;
     const COLOR_MODE_COLOR_TEMPERATURE: u32 = 1 << 2;
+    const ATTRIBUTE_VALUE_BOOL: u8 = 1;
+    const MAX_DRAINED_REPORTS: usize = 128;
 
     #[repr(C)]
     struct ChipBridgeCommissionRequest {
@@ -272,6 +307,24 @@ mod ffi_probe {
         vendor_name: [c_char; STRING_CAPACITY],
         product_name: [c_char; STRING_CAPACITY],
         serial_number: [c_char; STRING_CAPACITY],
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct ChipBridgeSubscriptionTarget {
+        node_id: u64,
+        endpoint: c_ushort,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct ChipBridgeAttributeReport {
+        node_id: u64,
+        endpoint: c_ushort,
+        cluster_id: u32,
+        attribute_id: u32,
+        value_type: c_uchar,
+        bool_value: bool,
     }
 
     unsafe extern "C" {
@@ -358,6 +411,21 @@ mod ffi_probe {
             node_id: u64,
             endpoint: c_ushort,
             out_on: *mut bool,
+            error_message: *mut c_char,
+            error_message_size: usize,
+        ) -> bool;
+        fn rhythm_chip_bridge_subscribe_on_off(
+            targets: *const ChipBridgeSubscriptionTarget,
+            target_count: usize,
+            min_interval_secs: c_ushort,
+            max_interval_secs: c_ushort,
+            error_message: *mut c_char,
+            error_message_size: usize,
+        ) -> bool;
+        fn rhythm_chip_bridge_drain_attribute_reports(
+            reports: *mut ChipBridgeAttributeReport,
+            reports_capacity: usize,
+            out_report_count: *mut usize,
             error_message: *mut c_char,
             error_message_size: usize,
         ) -> bool;
@@ -659,6 +727,68 @@ mod ffi_probe {
         }
     }
 
+    pub fn subscribe_on_off(
+        targets: &[MatterSubscriptionTarget],
+        min_interval_secs: u16,
+        max_interval_secs: u16,
+    ) -> Result<()> {
+        let ffi_targets = targets
+            .iter()
+            .map(|target| ChipBridgeSubscriptionTarget {
+                node_id: target.node_id,
+                endpoint: target.endpoint,
+            })
+            .collect::<Vec<_>>();
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
+        let success = unsafe {
+            rhythm_chip_bridge_subscribe_on_off(
+                ffi_targets.as_ptr(),
+                ffi_targets.len(),
+                min_interval_secs,
+                max_interval_secs,
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        };
+        if success {
+            Ok(())
+        } else {
+            Err(read_error_buffer(&error_buffer))
+        }
+    }
+
+    pub fn drain_attribute_reports() -> Result<Vec<MatterAttributeReport>> {
+        let empty_report = ChipBridgeAttributeReport {
+            node_id: 0,
+            endpoint: 0,
+            cluster_id: 0,
+            attribute_id: 0,
+            value_type: 0,
+            bool_value: false,
+        };
+        let mut reports = vec![empty_report; MAX_DRAINED_REPORTS];
+        let mut report_count = 0usize;
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
+        let success = unsafe {
+            rhythm_chip_bridge_drain_attribute_reports(
+                reports.as_mut_ptr(),
+                reports.len(),
+                &mut report_count,
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        };
+        if !success {
+            return Err(read_error_buffer(&error_buffer));
+        }
+
+        reports
+            .into_iter()
+            .take(report_count)
+            .map(decode_attribute_report)
+            .collect()
+    }
+
     fn zeroed_device() -> ChipBridgeDevice {
         ChipBridgeDevice {
             node_id: 0,
@@ -732,6 +862,21 @@ mod ffi_probe {
             } else {
                 None
             },
+        })
+    }
+
+    fn decode_attribute_report(report: ChipBridgeAttributeReport) -> Result<MatterAttributeReport> {
+        let value = match report.value_type {
+            ATTRIBUTE_VALUE_BOOL => MatterAttributeValue::Bool(report.bool_value),
+            other => anyhow::bail!("unsupported Matter attribute report value type {}", other),
+        };
+
+        Ok(MatterAttributeReport {
+            node_id: report.node_id,
+            endpoint: report.endpoint,
+            cluster: report.cluster_id,
+            attr_id: report.attribute_id,
+            value,
         })
     }
 

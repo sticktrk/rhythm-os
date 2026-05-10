@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use rhythm_matter::chip_rpc::{
-    ChipInitControllerRequest, ChipInitControllerResponse, ChipRpcCommissionLightResponse,
-    ChipRpcEmpty, ChipRpcListDevicesResponse, ChipRpcProbeLightResponse, ChipRpcReadOnOffResponse,
-    ChipRpcRequest,
+    ChipInitControllerRequest, ChipInitControllerResponse, ChipRpcAttributeReportsResponse,
+    ChipRpcCommissionLightResponse, ChipRpcEmpty, ChipRpcListDevicesResponse,
+    ChipRpcProbeLightResponse, ChipRpcReadOnOffResponse, ChipRpcRequest,
 };
 use rhythm_matter::transport::{CommissionedDevice, MatterDeviceInfo};
 
@@ -146,6 +146,23 @@ impl ChipControllerService {
                 self.require_initialized()?;
                 let on = self.backend.read_on_off(node_id, endpoint)?;
                 Ok(serde_json::to_value(ChipRpcReadOnOffResponse { on })?)
+            }
+            ChipRpcRequest::SubscribeOnOff {
+                targets,
+                min_interval_secs,
+                max_interval_secs,
+            } => {
+                self.require_initialized()?;
+                self.backend
+                    .subscribe_on_off(&targets, min_interval_secs, max_interval_secs)?;
+                Ok(serde_json::to_value(ChipRpcEmpty::new())?)
+            }
+            ChipRpcRequest::DrainAttributeReports => {
+                self.require_initialized()?;
+                let reports = self.backend.drain_attribute_reports()?;
+                Ok(serde_json::to_value(ChipRpcAttributeReportsResponse {
+                    reports,
+                })?)
             }
         }
     }

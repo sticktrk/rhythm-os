@@ -4,7 +4,10 @@ use anyhow::Result;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::transport::{CommissionedDevice, MatterCommissionRequest, MatterDeviceInfo};
+use crate::transport::{
+    CommissionedDevice, MatterAttributeReport, MatterCommissionRequest, MatterDeviceInfo,
+    MatterSubscriptionTarget,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChipInitControllerRequest {
@@ -76,6 +79,12 @@ pub enum ChipRpcRequest {
         node_id: u64,
         endpoint: u16,
     },
+    SubscribeOnOff {
+        targets: Vec<MatterSubscriptionTarget>,
+        min_interval_secs: u16,
+        max_interval_secs: u16,
+    },
+    DrainAttributeReports,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +147,11 @@ impl ChipRpcEmpty {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChipRpcReadOnOffResponse {
     pub on: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChipRpcAttributeReportsResponse {
+    pub reports: Vec<MatterAttributeReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

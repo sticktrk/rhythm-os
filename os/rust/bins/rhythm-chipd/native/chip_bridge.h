@@ -53,6 +53,27 @@ struct rhythm_chip_bridge_device
     char serial_number[RHYTHM_CHIP_BRIDGE_STRING_CAPACITY];
 };
 
+enum rhythm_chip_bridge_attribute_value_type
+{
+    RHYTHM_CHIP_BRIDGE_ATTRIBUTE_VALUE_BOOL = 1,
+};
+
+struct rhythm_chip_bridge_subscription_target
+{
+    uint64_t node_id;
+    uint16_t endpoint;
+};
+
+struct rhythm_chip_bridge_attribute_report
+{
+    uint64_t node_id;
+    uint16_t endpoint;
+    uint32_t cluster_id;
+    uint32_t attribute_id;
+    uint8_t value_type;
+    bool bool_value;
+};
+
 const char * rhythm_chip_bridge_link_mode(void);
 bool rhythm_chip_bridge_init(const char * storage_path, const char * fabric_id, bool has_ble_controller,
                              uint16_t ble_controller, uint16_t controller_vendor_id, char * error_message,
@@ -78,6 +99,11 @@ bool rhythm_chip_bridge_set_hue_saturation(uint64_t node_id, uint16_t endpoint, 
                                            size_t error_message_size);
 bool rhythm_chip_bridge_read_on_off(uint64_t node_id, uint16_t endpoint, bool * out_on, char * error_message,
                                     size_t error_message_size);
+bool rhythm_chip_bridge_subscribe_on_off(const struct rhythm_chip_bridge_subscription_target * targets, size_t target_count,
+                                         uint16_t min_interval_secs, uint16_t max_interval_secs, char * error_message,
+                                         size_t error_message_size);
+bool rhythm_chip_bridge_drain_attribute_reports(struct rhythm_chip_bridge_attribute_report * reports, size_t reports_capacity,
+                                                size_t * out_report_count, char * error_message, size_t error_message_size);
 void rhythm_chip_bridge_shutdown(void);
 
 #ifdef __cplusplus
