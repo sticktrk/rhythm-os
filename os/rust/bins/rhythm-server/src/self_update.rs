@@ -1745,6 +1745,7 @@ fn extract_targets_from_archive(
 }
 
 #[cfg(unix)]
+#[allow(clippy::unnecessary_cast)]
 fn available_bytes_for_path(path: &Path) -> Result<u64, String> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -1769,7 +1770,7 @@ fn available_bytes_for_path(path: &Path) -> Result<u64, String> {
         stats.f_frsize
     };
 
-    Ok((stats.f_bavail as u64).saturating_mul(u64::from(fragment_size)))
+    Ok((stats.f_bavail as u64).saturating_mul(fragment_size as u64))
 }
 
 fn commit_staged_targets(staged_targets: &[StagedInstallTarget]) -> Result<Vec<String>, String> {
