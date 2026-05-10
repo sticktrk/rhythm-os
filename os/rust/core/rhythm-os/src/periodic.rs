@@ -118,10 +118,10 @@ fn last_periodic_node_index_by_emit_target(
     indices
 }
 
-fn periodic_settings_node_id<'a>(
-    snapshot: &'a rhythm_core::NodeSnapshot,
+fn periodic_settings_node_id(
+    snapshot: &rhythm_core::NodeSnapshot,
     collapse_attached_light_nodes: bool,
-) -> &'a str {
+) -> &str {
     if collapse_attached_light_nodes {
         snapshot.parent_id.as_deref().unwrap_or(&snapshot.id)
     } else {
@@ -471,53 +471,57 @@ pub(crate) fn wait_for_node_dispatch_slot_if_current(
     light_dispatch_generation_current(state, dispatch_generation)
 }
 
+pub(crate) struct PeriodicTickEnqueue<'a> {
+    pub(crate) command_id: &'a str,
+    pub(crate) node_id: &'a str,
+    pub(crate) settings_node_id: &'a str,
+    pub(crate) dispatch_generation: u64,
+    pub(crate) current_hour: f32,
+    pub(crate) emit_parent_node_id: Option<&'a str>,
+    pub(crate) dispatch_spacing: Duration,
+}
+
 pub(crate) fn enqueue_periodic_tick(
     state: &SharedState,
     tx: &std::sync::mpsc::SyncSender<WorkItem>,
-    command_id: &str,
-    node_id: &str,
-    settings_node_id: &str,
-    dispatch_generation: u64,
-    current_hour: f32,
-    emit_parent_node_id: Option<&str>,
-    dispatch_spacing: Duration,
+    tick: PeriodicTickEnqueue<'_>,
 ) -> bool {
     let should_enqueue = {
         let Ok(mut s) = state.lock() else {
             return false;
         };
-        if s.light_dispatch_generation != dispatch_generation {
+        if s.light_dispatch_generation != tick.dispatch_generation {
             tracing::debug!(
                 target: "sys",
                 event = "periodic_tick_skipped",
-                command_id = %command_id,
-                node_id = %node_id,
-                settings_node_id = %settings_node_id,
-                dispatch_generation,
+                command_id = %tick.command_id,
+                node_id = %tick.node_id,
+                settings_node_id = %tick.settings_node_id,
+                dispatch_generation = tick.dispatch_generation,
                 current_generation = s.light_dispatch_generation,
                 reason = "stale_dispatch_generation",
                 "Periodic tick skipped before enqueue"
             );
             return true;
         }
-        match s.pending_periodic_ticks.entry(node_id.to_string()) {
+        match s.pending_periodic_ticks.entry(tick.node_id.to_string()) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 let previous_hour = *entry.get();
-                entry.insert(current_hour);
+                entry.insert(tick.current_hour);
                 tracing::debug!(
                     target: "sys",
                     event = "periodic_tick_coalesced",
-                    command_id = %command_id,
-                    node_id = %node_id,
-                    settings_node_id = %settings_node_id,
+                    command_id = %tick.command_id,
+                    node_id = %tick.node_id,
+                    settings_node_id = %tick.settings_node_id,
                     previous_hour,
-                    current_hour,
+                    current_hour = tick.current_hour,
                     "Periodic tick already pending"
                 );
                 false
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(current_hour);
+                entry.insert(tick.current_hour);
                 true
             }
         }
@@ -528,18 +532,18 @@ pub(crate) fn enqueue_periodic_tick(
     }
 
     match tx.try_send(WorkItem::PeriodicNodeTick {
-        command_id: command_id.to_string(),
-        node_id: node_id.to_string(),
-        settings_node_id: settings_node_id.to_string(),
-        current_hour,
-        emit_parent_node_id: emit_parent_node_id.map(str::to_string),
-        dispatch_spacing,
-        dispatch_generation,
+        command_id: tick.command_id.to_string(),
+        node_id: tick.node_id.to_string(),
+        settings_node_id: tick.settings_node_id.to_string(),
+        current_hour: tick.current_hour,
+        emit_parent_node_id: tick.emit_parent_node_id.map(str::to_string),
+        dispatch_spacing: tick.dispatch_spacing,
+        dispatch_generation: tick.dispatch_generation,
     }) {
         Ok(()) => true,
         Err(_) => {
             if let Ok(mut s) = state.lock() {
-                s.pending_periodic_ticks.remove(node_id);
+                s.pending_periodic_ticks.remove(tick.node_id);
             }
             false
         }
@@ -828,13 +832,15 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                 if !enqueue_periodic_tick(
                     &state,
                     tx,
-                    &command_id,
-                    &node.node_id,
-                    &node.settings_node_id,
-                    dispatch_generation,
-                    room_hour,
-                    emit_parent_node_id,
-                    phase_gap,
+                    PeriodicTickEnqueue {
+                        command_id: &command_id,
+                        node_id: &node.node_id,
+                        settings_node_id: &node.settings_node_id,
+                        dispatch_generation,
+                        current_hour: room_hour,
+                        emit_parent_node_id,
+                        dispatch_spacing: phase_gap,
+                    },
                 ) {
                     tracing::warn!(
                         target: "sys",
@@ -871,13 +877,15 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                 if !enqueue_periodic_tick(
                     &state,
                     tx,
-                    &command_id,
-                    &node.node_id,
-                    &node.settings_node_id,
-                    dispatch_generation,
-                    room_hour,
-                    emit_parent_node_id,
-                    phase_gap,
+                    PeriodicTickEnqueue {
+                        command_id: &command_id,
+                        node_id: &node.node_id,
+                        settings_node_id: &node.settings_node_id,
+                        dispatch_generation,
+                        current_hour: room_hour,
+                        emit_parent_node_id,
+                        dispatch_spacing: phase_gap,
+                    },
                 ) {
                     tracing::warn!(
                         target: "sys",
@@ -1944,24 +1952,28 @@ mod tests {
         assert!(enqueue_periodic_tick(
             &state,
             &tx,
-            "periodic-test-1",
-            "node-1",
-            "room1",
-            dispatch_generation,
-            10.0,
-            Some("room-parent"),
-            Duration::from_millis(250),
+            PeriodicTickEnqueue {
+                command_id: "periodic-test-1",
+                node_id: "node-1",
+                settings_node_id: "room1",
+                dispatch_generation,
+                current_hour: 10.0,
+                emit_parent_node_id: Some("room-parent"),
+                dispatch_spacing: Duration::from_millis(250),
+            },
         ));
         assert!(enqueue_periodic_tick(
             &state,
             &tx,
-            "periodic-test-2",
-            "node-1",
-            "room1",
-            dispatch_generation,
-            10.5,
-            Some("room-parent"),
-            Duration::from_millis(250),
+            PeriodicTickEnqueue {
+                command_id: "periodic-test-2",
+                node_id: "node-1",
+                settings_node_id: "room1",
+                dispatch_generation,
+                current_hour: 10.5,
+                emit_parent_node_id: Some("room-parent"),
+                dispatch_spacing: Duration::from_millis(250),
+            },
         ));
 
         let item = rx.try_recv().expect("first periodic item should be queued");
@@ -2006,13 +2018,15 @@ mod tests {
         assert!(enqueue_periodic_tick(
             &state,
             &tx,
-            "periodic-test-stale",
-            "node-1",
-            "room1",
-            stale_generation,
-            10.0,
-            Some("room-parent"),
-            Duration::from_millis(250),
+            PeriodicTickEnqueue {
+                command_id: "periodic-test-stale",
+                node_id: "node-1",
+                settings_node_id: "room1",
+                dispatch_generation: stale_generation,
+                current_hour: 10.0,
+                emit_parent_node_id: Some("room-parent"),
+                dispatch_spacing: Duration::from_millis(250),
+            },
         ));
 
         assert!(
@@ -2764,7 +2778,7 @@ mod tests {
         let observed_at = Instant::now();
         {
             let mut s = state.lock().unwrap();
-            s.runtime_config.solar_noon_hour = 13.2264557;
+            s.runtime_config.solar_noon_hour = 13.226_456;
             s.last_check_hour = Some(0.03);
             s.last_check_instant = Some(observed_at - Duration::from_secs(3 * 60));
             s.last_check_utc_offset_hours = Some(-5.0);

@@ -70,6 +70,7 @@ pub fn estimated_dispatch_duration(dispatch_count: usize, dispatch_spacing: Dura
 ///
 /// Uses the provided light profile config, current solar context, and room offsets
 /// to produce the values a client should display.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_room_display_values(
     config: &LightProfileConfig,
     solar_noon: f32,
@@ -1723,27 +1724,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
     let mut node_snapshots: Vec<rhythm_core::NodeSnapshot> = if let Some(ref runtime) = runtime {
         runtime.engine_all_effective_node_snapshots()
     } else {
-        let exported = room_manager_for_export(state);
-        let mut snapshots: Vec<_> = exported
-            .iter()
-            .map(|room| rhythm_core::NodeSnapshot {
-                id: room.id.clone(),
-                name: room.name.clone(),
-                kind: room.kind,
-                parent_id: room.parent_id.clone(),
-                rhythm_enabled: room.rhythm_enabled,
-                disabled: room.disabled,
-                time_offset_minutes: room.time_offset_minutes,
-                brightness_offset: room.brightness_offset,
-                soft_off: room.soft_off,
-                hard_off: room.hard_off,
-                profile_settings: room.profile_settings.clone(),
-            })
-            .collect();
-        if snapshots.is_empty() {
-            snapshots = registry_node_snapshots_from_state(state);
-        }
-        snapshots
+        bootstrap_node_snapshots_from_state(state)
     };
     node_snapshots.sort_by(|left, right| left.id.cmp(&right.id));
 
@@ -2092,27 +2073,7 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
     let mut node_snapshots: Vec<rhythm_core::NodeSnapshot> = if let Some(ref runtime) = runtime {
         runtime.engine_all_effective_node_snapshots()
     } else {
-        let exported = room_manager_for_export(state);
-        let mut snapshots: Vec<_> = exported
-            .iter()
-            .map(|room| rhythm_core::NodeSnapshot {
-                id: room.id.clone(),
-                name: room.name.clone(),
-                kind: room.kind,
-                parent_id: room.parent_id.clone(),
-                rhythm_enabled: room.rhythm_enabled,
-                disabled: room.disabled,
-                time_offset_minutes: room.time_offset_minutes,
-                brightness_offset: room.brightness_offset,
-                soft_off: room.soft_off,
-                hard_off: room.hard_off,
-                profile_settings: room.profile_settings.clone(),
-            })
-            .collect();
-        if snapshots.is_empty() {
-            snapshots = registry_node_snapshots_from_state(state);
-        }
-        snapshots
+        bootstrap_node_snapshots_from_state(state)
     };
     node_snapshots.sort_by(|left, right| left.id.cmp(&right.id));
 
@@ -2526,6 +2487,81 @@ fn source_room_manager_for_export(state: &SharedState) -> rhythm_core::RoomManag
     };
 
     source
+}
+
+fn topology_node_snapshots_from_state(state: &SharedState) -> Vec<rhythm_core::NodeSnapshot> {
+    let Ok(s) = state.lock() else {
+        return Vec::new();
+    };
+
+    let mut nodes = Vec::new();
+
+    let mut room_ids: Vec<_> = s.topology.rooms().map(|room| room.id.clone()).collect();
+    room_ids.sort();
+    for room_id in room_ids {
+        let Some(room) = s.topology.get(&room_id) else {
+            continue;
+        };
+        nodes.push(rhythm_core::NodeSnapshot {
+            id: room.id.clone(),
+            name: room.name.clone(),
+            kind: LightNodeKind::Room,
+            parent_id: None,
+            rhythm_enabled: true,
+            disabled: false,
+            time_offset_minutes: 0.0,
+            brightness_offset: 0.0,
+            soft_off: false,
+            hard_off: false,
+            profile_settings: RoomProfileSettings::default(),
+        });
+    }
+
+    let mut device_node_ids: Vec<_> = s
+        .topology
+        .device_nodes()
+        .map(|node| node.id.clone())
+        .collect();
+    device_node_ids.sort();
+    for node_id in device_node_ids {
+        let Some(node) = s.topology.get_device_node(&node_id) else {
+            continue;
+        };
+        let (name, kind) = s
+            .canonical_registry
+            .get(&node.canonical_device_id)
+            .map(|device| {
+                (
+                    device.name.clone(),
+                    runtime_node_kind_for_device_type(device.device_type.clone()),
+                )
+            })
+            .unwrap_or_else(|| (node.id.clone(), LightNodeKind::OtherDevice));
+
+        nodes.push(rhythm_core::NodeSnapshot {
+            id: node.id.clone(),
+            name,
+            kind,
+            parent_id: node.parent_id.clone(),
+            rhythm_enabled: kind.is_light_addressable(),
+            disabled: false,
+            time_offset_minutes: 0.0,
+            brightness_offset: 0.0,
+            soft_off: false,
+            hard_off: false,
+            profile_settings: RoomProfileSettings::default(),
+        });
+    }
+
+    nodes
+}
+
+fn bootstrap_node_snapshots_from_state(state: &SharedState) -> Vec<rhythm_core::NodeSnapshot> {
+    let mut snapshots = topology_node_snapshots_from_state(state);
+    if snapshots.is_empty() {
+        snapshots = registry_node_snapshots_from_state(state);
+    }
+    snapshots
 }
 
 fn registry_node_snapshots_from_state(state: &SharedState) -> Vec<rhythm_core::NodeSnapshot> {
@@ -4109,6 +4145,52 @@ fn apply_active_mode_outputs(
     }
 }
 
+pub(crate) fn reconcile_scheduled_active_mode_outputs_after_runtime_ready(state: &SharedState) {
+    let (active_mode, transition, dispatch_generation) = {
+        let Ok(mut s) = state.lock() else {
+            return;
+        };
+        if s.startup_active_mode_reconcile_done || s.hub_runtime().is_none() {
+            return;
+        }
+
+        s.startup_active_mode_reconcile_done = true;
+        if s.last_active_mode_cause != ModeChangeCause::Schedule {
+            debug!(
+                target: "cmd",
+                "startup_active_mode_reconcile: skipped for last_change_cause={:?}",
+                s.last_active_mode_cause
+            );
+            return;
+        }
+
+        let active_mode = s.active_mode;
+        let transition = s.last_active_mode_transition_id.as_ref().and_then(|id| {
+            s.mode_transition_configs()
+                .into_iter()
+                .find(|config| config.id.as_str() == id.as_str())
+        });
+        let dispatch_generation = s.invalidate_queued_light_dispatches();
+        (active_mode, transition, dispatch_generation)
+    };
+
+    info!(
+        target: "cmd",
+        "startup_active_mode_reconcile: reapplying {:?} defaults transition_id={:?}",
+        active_mode,
+        transition.as_ref().map(|config| config.id.as_str())
+    );
+    apply_active_mode_outputs(
+        state,
+        active_mode,
+        active_mode,
+        transition,
+        ModeOutputApplyScope::all_visible(),
+        dispatch_generation,
+    );
+    persist_state(state);
+}
+
 fn do_settings_set_internal(
     state: &SharedState,
     power_save: Option<bool>,
@@ -5568,13 +5650,15 @@ where
             if !crate::periodic::enqueue_periodic_tick(
                 state,
                 &tx,
-                &command_id,
-                &node.node_id,
-                &node.settings_node_id,
-                dispatch_generation,
-                current_hour,
-                emit_parent_node_id,
-                dispatch_spacing,
+                crate::periodic::PeriodicTickEnqueue {
+                    command_id: &command_id,
+                    node_id: &node.node_id,
+                    settings_node_id: &node.settings_node_id,
+                    dispatch_generation,
+                    current_hour,
+                    emit_parent_node_id,
+                    dispatch_spacing,
+                },
             ) {
                 return Err(anyhow::anyhow!("Node dispatch queue full"));
             }
@@ -7110,6 +7194,7 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
     }
 
     rebuild_composite_routing(state);
+    reconcile_scheduled_active_mode_outputs_after_runtime_ready(state);
 
     Ok(())
 }
@@ -11707,7 +11792,7 @@ mod tests {
     }
 
     #[test]
-    fn build_state_snapshot_storage_fallback_includes_hub_types_from_topology() {
+    fn build_state_snapshot_bootstrap_includes_hub_types_from_topology() {
         let storage = TestStorage::default();
         let mut rooms = rhythm_core::RoomManager::new();
         rooms.get_or_create("r1", "Room 1");
@@ -11727,6 +11812,47 @@ mod tests {
         assert_eq!(
             parsed["nodes"][0]["hub_types"],
             serde_json::json!(["matter", "mock"])
+        );
+    }
+
+    #[test]
+    fn build_state_snapshot_before_runtime_ignores_persisted_room_graph() {
+        let storage = TestStorage::default();
+        let mut rooms = rhythm_core::RoomManager::new();
+        rooms.get_or_create("stale-room", "Stale Room");
+        rooms.add_node(
+            "stale-child",
+            "Stale Child",
+            LightNodeKind::LightDevice,
+            Some("stale-room".into()),
+        );
+        storage.save_rooms(&rooms).unwrap();
+
+        let app = AppState {
+            storage: Some(Box::new(storage)),
+            ..Default::default()
+        };
+        let state: SharedState = Arc::new(Mutex::new(app));
+        add_topology_room(&state, "office", &["matter"]);
+        activate_topology_room_hubs(&state, "office");
+
+        let result = build_state_snapshot(&state).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let node_ids = parsed["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|node| node["id"].as_str())
+            .collect::<HashSet<_>>();
+
+        assert!(node_ids.contains("office"));
+        assert!(
+            !node_ids.contains("stale-room"),
+            "bootstrap /api/state should not deserialize and expose persisted room graph"
+        );
+        assert!(
+            !node_ids.contains("stale-child"),
+            "bootstrap /api/state should not deserialize and expose persisted child graph"
         );
     }
 
@@ -13262,6 +13388,104 @@ mod tests {
             "room defaults should not apply until mode activation"
         );
         assert!(!snap.hard_off);
+    }
+
+    #[test]
+    fn startup_scheduled_active_mode_reconcile_applies_current_room_defaults_once() {
+        let mut active_room = make_snapshot("active-room", false, true);
+        active_room.rhythm_enabled = true;
+        let hard_off_room = make_snapshot("hard-off-room", false, false);
+        let (state, runtime) = setup_state(vec![active_room, hard_off_room]);
+        let storage = TestStorage::default();
+        let transition =
+            rhythm_core::ModeTransitionConfig::new(RhythmMode::Sleep, RhythmMode::Day, 4_321)
+                .with_trigger(ModeTransitionTrigger::Sunrise);
+
+        {
+            let mut s = state.lock().unwrap();
+            s.storage = Some(Box::new(storage.clone()));
+            s.active_mode = RhythmMode::Day;
+            s.last_active_mode_cause = ModeChangeCause::Schedule;
+            s.set_mode_transition_configs(vec![transition]);
+            s.last_active_mode_transition_id = s
+                .mode_transition_configs()
+                .first()
+                .map(|config| config.id.clone());
+            s.set_mode_configs(vec![ModeConfig {
+                mode: RhythmMode::Day,
+                active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![
+                    rhythm_core::RoomModeDefault {
+                        room_id: "active-room".into(),
+                        state: RoomModeState::Active,
+                    },
+                    rhythm_core::RoomModeDefault {
+                        room_id: "hard-off-room".into(),
+                        state: RoomModeState::HardOff,
+                    },
+                ],
+            }]);
+        }
+
+        reconcile_scheduled_active_mode_outputs_after_runtime_ready(&state);
+        reconcile_scheduled_active_mode_outputs_after_runtime_ready(&state);
+
+        assert_eq!(
+            runtime.restore_calls(),
+            vec![
+                ("active-room".into(), false, false),
+                ("hard-off-room".into(), false, true),
+            ]
+        );
+        assert_eq!(
+            runtime.applied_states(),
+            vec![("active-room".into(), RoomModeState::Active)]
+        );
+        assert_eq!(
+            runtime.lights_off_calls(),
+            vec![("hard-off-room".into(), Some(4_321))]
+        );
+        assert!(state.lock().unwrap().startup_active_mode_reconcile_done);
+
+        let saved = storage.inner.lock().unwrap();
+        let saved_active = saved.rooms.get("active-room").unwrap();
+        assert!(!saved_active.soft_off);
+        assert!(!saved_active.hard_off);
+        let saved_hard_off = saved.rooms.get("hard-off-room").unwrap();
+        assert!(saved_hard_off.hard_off);
+    }
+
+    #[test]
+    fn startup_active_mode_reconcile_preserves_manual_restore() {
+        let mut room = make_snapshot("r1", false, true);
+        room.rhythm_enabled = true;
+        let (state, runtime) = setup_state(vec![room]);
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Day;
+            s.last_active_mode_cause = ModeChangeCause::Manual;
+            s.set_mode_configs(vec![ModeConfig {
+                mode: RhythmMode::Day,
+                active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "r1".into(),
+                    state: RoomModeState::Active,
+                }],
+            }]);
+        }
+
+        reconcile_scheduled_active_mode_outputs_after_runtime_ready(&state);
+
+        assert!(runtime.restore_calls().is_empty());
+        assert!(runtime.applied_commands().is_empty());
+        assert!(runtime.engine_room_snapshot("r1").unwrap().soft_off);
+        assert!(state.lock().unwrap().startup_active_mode_reconcile_done);
     }
 
     #[test]

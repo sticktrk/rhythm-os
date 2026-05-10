@@ -1855,12 +1855,8 @@ fn build_topology_debug_json(
 
     let mut missing_canonical_device_ids: Vec<_> = topology
         .device_nodes()
-        .filter_map(|node| {
-            canonical_registry
-                .get(&node.canonical_device_id)
-                .is_none()
-                .then(|| node.canonical_device_id.clone())
-        })
+        .filter(|node| canonical_registry.get(&node.canonical_device_id).is_none())
+        .map(|node| node.canonical_device_id.clone())
         .collect();
     missing_canonical_device_ids.sort();
     missing_canonical_device_ids.dedup();

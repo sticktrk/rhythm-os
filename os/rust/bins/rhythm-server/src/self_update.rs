@@ -1769,7 +1769,7 @@ fn available_bytes_for_path(path: &Path) -> Result<u64, String> {
         stats.f_frsize
     };
 
-    Ok((stats.f_bavail as u64).saturating_mul(fragment_size as u64))
+    Ok((stats.f_bavail as u64).saturating_mul(fragment_size))
 }
 
 fn commit_staged_targets(staged_targets: &[StagedInstallTarget]) -> Result<Vec<String>, String> {

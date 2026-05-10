@@ -329,6 +329,8 @@ pub struct AppState {
     pub motion_snapshots: HashMap<String, MotionSnapshot>,
     /// Rooms currently transitioning between global modes.
     pub room_mode_transitions: HashMap<String, RoomModeTransition>,
+    /// One-shot guard for startup reconciliation of scheduled active-mode room defaults.
+    pub startup_active_mode_reconcile_done: bool,
     /// Last observed local hour for periodic time-based checks.
     pub last_check_hour: Option<f32>,
     /// Monotonic timestamp of the last periodic time observation.
@@ -545,6 +547,7 @@ impl Default for AppState {
             room_observed_power: HashMap::new(),
             motion_snapshots: HashMap::new(),
             room_mode_transitions: HashMap::new(),
+            startup_active_mode_reconcile_done: false,
             last_check_hour: None,
             last_check_instant: None,
             last_check_utc_offset_hours: None,
