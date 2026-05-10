@@ -846,6 +846,16 @@ fn update_lights_on_cache_for_node_with_source(
 ) {
     if let Ok(mut s) = state.lock() {
         let cache_key = effective_lights_on_cache_key(&s, node_id, kind, parent_id).to_string();
+        if source == ObservedPowerSource::Command {
+            if let Some(existing) = s.room_observed_power.get(&cache_key) {
+                if existing.source == ObservedPowerSource::LiveSubscription
+                    && existing.lights_on == lights_on
+                    && observed_power_is_fresh(&s, existing)
+                {
+                    return;
+                }
+            }
+        }
         s.room_observed_power
             .insert(cache_key, ObservedPowerState::new(lights_on, source));
     }
@@ -9889,6 +9899,58 @@ mod tests {
             .iter()
             .map(|(node_id, observed)| (node_id.clone(), observed.lights_on))
             .collect()
+    }
+
+    #[test]
+    fn command_cache_update_preserves_matching_fresh_live_subscription() {
+        let (state, _runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        {
+            let mut app = state.lock().unwrap();
+            app.room_observed_power.insert(
+                "room1".to_string(),
+                ObservedPowerState::new(true, ObservedPowerSource::LiveSubscription),
+            );
+        }
+
+        update_lights_on_cache_for_node_with_source(
+            &state,
+            "room1",
+            LightNodeKind::Room,
+            None,
+            true,
+            ObservedPowerSource::Command,
+        );
+
+        let app = state.lock().unwrap();
+        let observed = app.room_observed_power.get("room1").unwrap();
+        assert_eq!(observed.lights_on, true);
+        assert_eq!(observed.source, ObservedPowerSource::LiveSubscription);
+    }
+
+    #[test]
+    fn command_cache_update_replaces_live_subscription_when_power_changes() {
+        let (state, _runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        {
+            let mut app = state.lock().unwrap();
+            app.room_observed_power.insert(
+                "room1".to_string(),
+                ObservedPowerState::new(true, ObservedPowerSource::LiveSubscription),
+            );
+        }
+
+        update_lights_on_cache_for_node_with_source(
+            &state,
+            "room1",
+            LightNodeKind::Room,
+            None,
+            false,
+            ObservedPowerSource::Command,
+        );
+
+        let app = state.lock().unwrap();
+        let observed = app.room_observed_power.get("room1").unwrap();
+        assert_eq!(observed.lights_on, false);
+        assert_eq!(observed.source, ObservedPowerSource::Command);
     }
 
     // ========================================================================
