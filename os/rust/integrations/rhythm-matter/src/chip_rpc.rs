@@ -37,6 +37,11 @@ pub enum ChipRpcRequest {
         endpoint: u16,
         on: bool,
     },
+    IdentifyLight {
+        node_id: u64,
+        endpoint: u16,
+        duration_secs: u16,
+    },
     SetBrightness {
         node_id: u64,
         endpoint: u16,

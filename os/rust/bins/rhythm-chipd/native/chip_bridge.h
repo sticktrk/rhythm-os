@@ -65,6 +65,8 @@ bool rhythm_chip_bridge_probe_light(uint64_t node_id, struct rhythm_chip_bridge_
 bool rhythm_chip_bridge_decommission_device(uint64_t node_id, bool force, char * error_message, size_t error_message_size);
 bool rhythm_chip_bridge_set_on_off(uint64_t node_id, uint16_t endpoint, bool on, char * error_message,
                                    size_t error_message_size);
+bool rhythm_chip_bridge_identify_light(uint64_t node_id, uint16_t endpoint, uint16_t duration_secs, char * error_message,
+                                       size_t error_message_size);
 bool rhythm_chip_bridge_set_brightness(uint64_t node_id, uint16_t endpoint, uint8_t level, bool has_transition_ms,
                                        uint32_t transition_ms, char * error_message, size_t error_message_size);
 bool rhythm_chip_bridge_set_color_temperature(uint64_t node_id, uint16_t endpoint, uint16_t kelvin, bool has_transition_ms,

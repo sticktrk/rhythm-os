@@ -794,6 +794,13 @@ public:
         return InvokeCommand(nodeId, endpoint, request);
     }
 
+    CHIP_ERROR IdentifyLight(NodeId nodeId, EndpointId endpoint, uint16_t durationSecs)
+    {
+        Identify::Commands::Identify::Type request;
+        request.identifyTime = durationSecs;
+        return InvokeCommand(nodeId, endpoint, request);
+    }
+
     CHIP_ERROR SetBrightness(NodeId nodeId, EndpointId endpoint, uint8_t level, std::optional<uint32_t> transitionMs)
     {
         LevelControl::Commands::MoveToLevelWithOnOff::Type request;
@@ -1171,6 +1178,13 @@ bool rhythm_chip_bridge_set_on_off(uint64_t node_id, uint16_t endpoint, bool on,
 {
     return HandleBridgeResult(gContext.SetOnOff(node_id, endpoint, on), error_message, error_message_size,
                               "setting Matter on/off");
+}
+
+bool rhythm_chip_bridge_identify_light(uint64_t node_id, uint16_t endpoint, uint16_t duration_secs, char * error_message,
+                                       size_t error_message_size)
+{
+    return HandleBridgeResult(gContext.IdentifyLight(node_id, endpoint, duration_secs), error_message, error_message_size,
+                              "identifying Matter light");
 }
 
 bool rhythm_chip_bridge_set_brightness(uint64_t node_id, uint16_t endpoint, uint8_t level, bool has_transition_ms,

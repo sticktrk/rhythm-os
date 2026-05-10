@@ -81,6 +81,16 @@ impl ChipControllerService {
                 self.backend.set_on_off(node_id, endpoint, on)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
+            ChipRpcRequest::IdentifyLight {
+                node_id,
+                endpoint,
+                duration_secs,
+            } => {
+                self.require_initialized()?;
+                self.backend
+                    .identify_light(node_id, endpoint, duration_secs)?;
+                Ok(serde_json::to_value(ChipRpcEmpty::new())?)
+            }
             ChipRpcRequest::SetBrightness {
                 node_id,
                 endpoint,

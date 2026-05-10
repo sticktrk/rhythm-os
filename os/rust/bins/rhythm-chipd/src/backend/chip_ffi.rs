@@ -81,6 +81,24 @@ impl ChipFfiController {
         }
     }
 
+    pub fn identify_light(
+        &mut self,
+        node_id: u64,
+        endpoint: u16,
+        duration_secs: u16,
+    ) -> Result<()> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            ffi_probe::identify_light(node_id, endpoint, duration_secs)
+        }
+
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            let _ = (node_id, endpoint, duration_secs);
+            Err(self.unsupported("identify_light"))
+        }
+    }
+
     pub fn set_brightness(
         &mut self,
         node_id: u64,
@@ -291,6 +309,13 @@ mod ffi_probe {
             error_message: *mut c_char,
             error_message_size: usize,
         ) -> bool;
+        fn rhythm_chip_bridge_identify_light(
+            node_id: u64,
+            endpoint: c_ushort,
+            duration_secs: c_ushort,
+            error_message: *mut c_char,
+            error_message_size: usize,
+        ) -> bool;
         fn rhythm_chip_bridge_set_brightness(
             node_id: u64,
             endpoint: c_ushort,
@@ -482,6 +507,24 @@ mod ffi_probe {
                 node_id,
                 endpoint,
                 on,
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        };
+        if success {
+            Ok(())
+        } else {
+            Err(read_error_buffer(&error_buffer))
+        }
+    }
+
+    pub fn identify_light(node_id: u64, endpoint: u16, duration_secs: u16) -> Result<()> {
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
+        let success = unsafe {
+            rhythm_chip_bridge_identify_light(
+                node_id,
+                endpoint,
+                duration_secs,
                 error_buffer.as_mut_ptr(),
                 error_buffer.len(),
             )

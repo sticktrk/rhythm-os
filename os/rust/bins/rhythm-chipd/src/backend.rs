@@ -22,6 +22,7 @@ pub trait ChipControllerBackend {
     fn probe_light(&mut self, node_id: u64) -> Result<CommissionedDevice>;
     fn decommission_device(&mut self, node_id: u64, force: bool) -> Result<()>;
     fn set_on_off(&mut self, node_id: u64, endpoint: u16, on: bool) -> Result<()>;
+    fn identify_light(&mut self, node_id: u64, endpoint: u16, duration_secs: u16) -> Result<()>;
     fn set_brightness(
         &mut self,
         node_id: u64,
@@ -108,6 +109,11 @@ impl ChipControllerBackend for NativeChipBackend {
 
     fn set_on_off(&mut self, node_id: u64, endpoint: u16, on: bool) -> Result<()> {
         self.controller_mut()?.set_on_off(node_id, endpoint, on)
+    }
+
+    fn identify_light(&mut self, node_id: u64, endpoint: u16, duration_secs: u16) -> Result<()> {
+        self.controller_mut()?
+            .identify_light(node_id, endpoint, duration_secs)
     }
 
     fn set_brightness(
@@ -252,6 +258,11 @@ impl ChipControllerBackend for FakeChipBackend {
     fn set_on_off(&mut self, node_id: u64, endpoint: u16, on: bool) -> Result<()> {
         self.require_device(node_id)?;
         self.on_off.insert((node_id, endpoint), on);
+        Ok(())
+    }
+
+    fn identify_light(&mut self, node_id: u64, _endpoint: u16, _duration_secs: u16) -> Result<()> {
+        self.require_device(node_id)?;
         Ok(())
     }
 

@@ -68,6 +68,9 @@ pub trait MatterTransport: Send + Sync {
     /// Set the On/Off state of a light endpoint.
     fn set_on_off(&self, node_id: u64, endpoint: u16, on: bool) -> Result<()>;
 
+    /// Ask a light endpoint to identify itself for the given number of seconds.
+    fn identify_light(&self, node_id: u64, endpoint: u16, duration_secs: u16) -> Result<()>;
+
     /// Set a light level using Matter's 0-254 level encoding.
     fn set_brightness(
         &self,

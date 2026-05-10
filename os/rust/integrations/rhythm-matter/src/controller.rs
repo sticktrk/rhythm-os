@@ -21,6 +21,7 @@ pub type MatterDeviceRegistry = rhythm_os::registry::HubDeviceRegistry;
 
 const DISPATCH_INFO_MS: u128 = 250;
 const DISPATCH_WARN_MS: u128 = 1000;
+const MATTER_IDENTIFY_DURATION_SECS: u16 = 1;
 
 /// Light controller implementation using typed Matter light operations.
 pub struct MatterLightController {
@@ -480,6 +481,88 @@ impl MatterLightController {
 
         Ok(())
     }
+
+    fn identify_devices(
+        &self,
+        target_label: &str,
+        device_ids: &[String],
+    ) -> LightControlResult<()> {
+        let started = Instant::now();
+        let mut successful_devices = 0usize;
+        let mut failed_devices = 0usize;
+
+        for device_id in device_ids {
+            let Some((node_id, endpoint)) = Self::parse_device_id(device_id) else {
+                warn!(target: "cmd", "Matter: invalid device ID format: {}", device_id);
+                failed_devices += 1;
+                continue;
+            };
+
+            if let Err(e) =
+                self.transport
+                    .identify_light(node_id, endpoint, MATTER_IDENTIFY_DURATION_SECS)
+            {
+                warn!(
+                    target: "cmd",
+                    "Matter: identify command failed for node {}: {}",
+                    node_id,
+                    e
+                );
+                failed_devices += 1;
+            } else {
+                successful_devices += 1;
+            }
+        }
+
+        if successful_devices == 0 && !device_ids.is_empty() {
+            return Err(LightControlError::CommandFailed(format!(
+                "Matter identify failed for target {} ({} target devices)",
+                target_label, failed_devices,
+            )));
+        }
+
+        let latency_ms = started.elapsed().as_millis();
+        if failed_devices > 0 {
+            tracing::warn!(
+                target: "cmd",
+                event = "matter_identify_partial",
+                target = %target_label,
+                latency_ms,
+                ok = successful_devices,
+                failed = failed_devices,
+                device_count = device_ids.len(),
+                "Matter identify partial"
+            );
+        } else if latency_ms >= DISPATCH_WARN_MS {
+            tracing::warn!(
+                target: "cmd",
+                event = "matter_identify",
+                target = %target_label,
+                latency_ms,
+                device_count = device_ids.len(),
+                "Matter identify slow"
+            );
+        } else if latency_ms >= DISPATCH_INFO_MS {
+            tracing::info!(
+                target: "cmd",
+                event = "matter_identify",
+                target = %target_label,
+                latency_ms,
+                device_count = device_ids.len(),
+                "Matter identify"
+            );
+        } else {
+            debug!(
+                target: "cmd",
+                "Matter identify: target={} devices={} latency_ms={}",
+                target_label,
+                device_ids.len(),
+                latency_ms
+            );
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -502,6 +585,12 @@ impl HubLightController for MatterLightController {
         let target_label = target.label();
         let device_ids = self.target_device_ids_for_target(target)?;
         self.turn_off_devices(&target_label, &device_ids)
+    }
+
+    async fn flash_target(&self, target: &HubDispatchTarget) -> LightControlResult<()> {
+        let target_label = target.label();
+        let device_ids = self.target_device_ids_for_target(target)?;
+        self.identify_devices(&target_label, &device_ids)
     }
 
     async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
@@ -718,6 +807,7 @@ mod tests {
             .iter()
             .map(|operation| match operation {
                 RecordedOperation::SetOnOff { node_id, .. }
+                | RecordedOperation::IdentifyLight { node_id, .. }
                 | RecordedOperation::SetBrightness { node_id, .. }
                 | RecordedOperation::SetColorTemperature { node_id, .. }
                 | RecordedOperation::SetHueSaturation { node_id, .. }
@@ -801,6 +891,52 @@ mod tests {
                 endpoint: 1,
                 on: false,
             }]
+        );
+    }
+
+    #[test]
+    fn flash_direct_device_target_uses_matter_identify() {
+        let (controller, spy, _) = make_controller();
+
+        block_on(controller.flash_target(&HubDispatchTarget::Devices {
+            native_ids: vec!["matter-42".to_string()],
+        }))
+        .unwrap();
+
+        assert_eq!(
+            spy.operations(),
+            vec![RecordedOperation::IdentifyLight {
+                node_id: 42,
+                endpoint: 1,
+                duration_secs: MATTER_IDENTIFY_DURATION_SECS,
+            }]
+        );
+    }
+
+    #[test]
+    fn flash_group_target_fans_out_to_matter_identify() {
+        let (controller, spy, _) = make_controller();
+
+        block_on(controller.flash_target(&HubDispatchTarget::Group {
+            room_id: "kitchen".to_string(),
+            control_id: "kitchen".to_string(),
+        }))
+        .unwrap();
+
+        assert_eq!(
+            spy.operations(),
+            vec![
+                RecordedOperation::IdentifyLight {
+                    node_id: 42,
+                    endpoint: 1,
+                    duration_secs: MATTER_IDENTIFY_DURATION_SECS,
+                },
+                RecordedOperation::IdentifyLight {
+                    node_id: 43,
+                    endpoint: 1,
+                    duration_secs: MATTER_IDENTIFY_DURATION_SECS,
+                },
+            ]
         );
     }
 
@@ -1146,6 +1282,23 @@ mod tests {
                         node_id,
                         endpoint,
                         on,
+                    });
+                Ok(())
+            }
+
+            fn identify_light(
+                &self,
+                node_id: u64,
+                endpoint: u16,
+                duration_secs: u16,
+            ) -> Result<()> {
+                self.operations
+                    .lock()
+                    .unwrap()
+                    .push(RecordedOperation::IdentifyLight {
+                        node_id,
+                        endpoint,
+                        duration_secs,
                     });
                 Ok(())
             }

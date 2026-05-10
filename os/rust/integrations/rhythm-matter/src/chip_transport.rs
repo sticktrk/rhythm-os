@@ -487,6 +487,15 @@ impl MatterTransport for ChipTransport {
         Ok(())
     }
 
+    fn identify_light(&self, node_id: u64, endpoint: u16, duration_secs: u16) -> Result<()> {
+        let _: crate::chip_rpc::ChipRpcEmpty = self.call(ChipRpcRequest::IdentifyLight {
+            node_id,
+            endpoint,
+            duration_secs,
+        })?;
+        Ok(())
+    }
+
     fn set_brightness(
         &self,
         node_id: u64,
@@ -700,6 +709,28 @@ mod tests {
         transport
             .set_hue_saturation(7, 1, 12, 200, Some(500))
             .unwrap();
+
+        server.join().unwrap();
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn identify_light_uses_rpc_contract() {
+        let socket_path = temp_socket_path("identify-light");
+        let server = spawn_fake_server(socket_path.clone(), |request| {
+            assert!(matches!(
+                request.request,
+                ChipRpcRequest::IdentifyLight {
+                    node_id: 7,
+                    endpoint: 1,
+                    duration_secs: 1,
+                }
+            ));
+            ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+        });
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        transport.identify_light(7, 1, 1).unwrap();
 
         server.join().unwrap();
         let _ = fs::remove_file(socket_path);

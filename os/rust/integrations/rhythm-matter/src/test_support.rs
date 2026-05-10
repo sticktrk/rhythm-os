@@ -17,6 +17,11 @@ pub enum RecordedOperation {
         endpoint: u16,
         on: bool,
     },
+    IdentifyLight {
+        node_id: u64,
+        endpoint: u16,
+        duration_secs: u16,
+    },
     SetBrightness {
         node_id: u64,
         endpoint: u16,
@@ -92,6 +97,10 @@ impl MatterTransport for NoOpTransport {
     }
 
     fn set_on_off(&self, _node_id: u64, _endpoint: u16, _on: bool) -> Result<()> {
+        Ok(())
+    }
+
+    fn identify_light(&self, _node_id: u64, _endpoint: u16, _duration_secs: u16) -> Result<()> {
         Ok(())
     }
 
@@ -296,6 +305,18 @@ impl MatterTransport for SpyTransport {
             on,
         });
         self.on_off_state.lock().unwrap().insert(node_id, on);
+        Ok(())
+    }
+
+    fn identify_light(&self, node_id: u64, endpoint: u16, duration_secs: u16) -> Result<()> {
+        if self.should_fail(node_id) {
+            anyhow::bail!("device {} not found in registry", node_id);
+        }
+        self.record(RecordedOperation::IdentifyLight {
+            node_id,
+            endpoint,
+            duration_secs,
+        });
         Ok(())
     }
 
