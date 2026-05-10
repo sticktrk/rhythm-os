@@ -693,6 +693,7 @@ fn node_hub_types_from_topology(s: &AppState, node_id: &str) -> Vec<String> {
 
     s.topology
         .resolve_room_alias(None, node_id)
+        .filter(|topo_id| topo_id != node_id)
         .as_deref()
         .map(|topo_id| node_hub_types_from_topology(s, topo_id))
         .unwrap_or_default()
@@ -14627,6 +14628,38 @@ mod tests {
         assert!(
             device["parent_id"].is_null(),
             "state snapshot should follow topology parent, not stale runtime parent"
+        );
+    }
+
+    #[test]
+    fn build_state_snapshot_handles_topology_device_missing_canonical_metadata() {
+        let (state, runtime) = setup_state(vec![]);
+        let device_id = "orphan-device";
+
+        {
+            let mut s = state.lock().unwrap();
+            s.topology.ensure_standalone_device(device_id);
+        }
+
+        runtime.add_node(
+            device_id,
+            "Orphan Device",
+            rhythm_core::LightNodeKind::LightDevice,
+            None,
+        );
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&build_state_snapshot(&state).unwrap()).unwrap();
+        let device = parsed["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"].as_str() == Some(device_id))
+            .expect("device should appear in state snapshot");
+
+        assert!(
+            device.get("hub_types").is_none(),
+            "empty hub_types should be omitted from the state snapshot"
         );
     }
 
