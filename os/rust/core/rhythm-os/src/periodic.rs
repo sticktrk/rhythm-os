@@ -2213,6 +2213,62 @@ mod tests {
     }
 
     #[test]
+    fn periodic_dispatch_nodes_include_attached_device_routes_without_group_binding() {
+        let mut state = crate::state::AppState {
+            composite_controller: Some(Arc::new(CompositeController::new())),
+            ..Default::default()
+        };
+
+        let room_id = state.topology.create_room("Bookcase");
+        let matter_key =
+            crate::canonical::identity::HubKey::new(crate::hub::HubType::new("matter"), "local");
+        let identity = crate::canonical::identity::DiscoveredIdentity {
+            native_id: "matter-102".to_string(),
+            room_id: None,
+            room_name: None,
+            name: "Bookcase bulb".to_string(),
+            device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+            hardware_ids: vec![],
+            manufacturer: None,
+            model: None,
+        };
+        let light_id = match state
+            .canonical_registry
+            .resolve(&identity, &matter_key, 1000)
+        {
+            crate::canonical::registry::ResolveResult::Created { canonical_id }
+            | crate::canonical::registry::ResolveResult::AlreadyKnown { canonical_id }
+            | crate::canonical::registry::ResolveResult::ReApproved { canonical_id } => {
+                canonical_id
+            }
+            crate::canonical::registry::ResolveResult::Queued { .. } => {
+                panic!("unexpected triage for test identity")
+            }
+        };
+        assert!(state
+            .topology
+            .attach_device_user_override(&room_id, &light_id));
+
+        let snapshots = vec![
+            make_room(&room_id, 0.0),
+            make_node(
+                &light_id,
+                rhythm_core::LightNodeKind::LightDevice,
+                Some(&room_id),
+            ),
+        ];
+
+        assert_eq!(
+            periodic_dispatch_nodes_from_state(&state, &snapshots),
+            vec![PeriodicDispatchNode {
+                node_id: light_id,
+                settings_node_id: room_id.clone(),
+                emit_node_id: room_id,
+            }]
+        );
+    }
+
+    #[test]
     fn preview_dispatch_preserves_explicit_light_node_with_composite() {
         let target = make_node(
             "attached-light-1",

@@ -407,7 +407,7 @@ impl TopologyRoom {
                     plan.node_routes.push(TopologyLightNodeRoute {
                         node: TopologyLightNode {
                             id: device_id.clone(),
-                            source_node_id: device_id.clone(),
+                            source_node_id: self.id.clone(),
                             emit_node_id: self.id.clone(),
                         },
                         hub_key: hub_key.clone(),
@@ -2356,7 +2356,7 @@ mod tests {
             nodes,
             vec![TopologyLightNode {
                 id: light_id.clone(),
-                source_node_id: light_id.clone(),
+                source_node_id: room_id.clone(),
                 emit_node_id: room_id.clone(),
             }]
         );
@@ -2490,6 +2490,20 @@ mod tests {
                 },
             )])
         );
+        let mut expected_nodes = vec![
+            TopologyLightNode {
+                id: light_one_id.clone(),
+                source_node_id: room_id.clone(),
+                emit_node_id: room_id.clone(),
+            },
+            TopologyLightNode {
+                id: light_two_id.clone(),
+                source_node_id: room_id.clone(),
+                emit_node_id: room_id.clone(),
+            },
+        ];
+        expected_nodes.sort_by(|left, right| left.id.cmp(&right.id));
+        assert_eq!(store.periodic_light_nodes(&registry), expected_nodes);
         assert!(!store.attached_light_uses_parent_dispatch(&light_one_id, &registry));
     }
 
