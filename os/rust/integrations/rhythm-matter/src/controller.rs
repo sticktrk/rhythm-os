@@ -240,38 +240,10 @@ impl MatterLightController {
                 Self::maybe_throttle(throttle_ms);
             }
 
-            if let Some(brightness) = adapted.brightness {
-                let level = clusters::brightness_to_level(brightness);
-                if let Err(e) =
-                    self.transport
-                        .set_brightness(node_id, endpoint, level, adapted.transition_ms)
-                {
-                    warn!(
-                        target: "cmd",
-                        "Matter: brightness command failed for node {}: {}",
-                        node_id,
-                        e
-                    );
-                    command_failures += 1;
-                } else {
-                    command_successes += 1;
-                }
-                Self::maybe_throttle(throttle_ms);
-            } else if adapted.on && !already_sent_on {
-                if let Err(e) = self.transport.set_on_off(node_id, endpoint, true) {
-                    warn!(
-                        target: "cmd",
-                        "Matter: on command failed for node {}: {}",
-                        node_id,
-                        e
-                    );
-                    command_failures += 1;
-                } else {
-                    command_successes += 1;
-                }
-                Self::maybe_throttle(throttle_ms);
-            }
-
+            // Color attributes are sent before brightness so that bulbs that
+            // treat MoveToColorTemperature/MoveToColor as a level-resetting
+            // state reload (observed on budget Matter-over-WiFi bulbs)
+            // cannot clobber the user's requested brightness — see #51.
             if let Some((hue, saturation)) = adapted.hue_saturation {
                 if let Err(e) = self.transport.set_hue_saturation(
                     node_id,
@@ -317,6 +289,38 @@ impl MatterLightController {
                     warn!(
                         target: "cmd",
                         "Matter: color temperature command failed for node {}: {}",
+                        node_id,
+                        e
+                    );
+                    command_failures += 1;
+                } else {
+                    command_successes += 1;
+                }
+                Self::maybe_throttle(throttle_ms);
+            }
+
+            if let Some(brightness) = adapted.brightness {
+                let level = clusters::brightness_to_level(brightness);
+                if let Err(e) =
+                    self.transport
+                        .set_brightness(node_id, endpoint, level, adapted.transition_ms)
+                {
+                    warn!(
+                        target: "cmd",
+                        "Matter: brightness command failed for node {}: {}",
+                        node_id,
+                        e
+                    );
+                    command_failures += 1;
+                } else {
+                    command_successes += 1;
+                }
+                Self::maybe_throttle(throttle_ms);
+            } else if adapted.on && !already_sent_on {
+                if let Err(e) = self.transport.set_on_off(node_id, endpoint, true) {
+                    warn!(
+                        target: "cmd",
+                        "Matter: on command failed for node {}: {}",
                         node_id,
                         e
                     );
@@ -768,8 +772,16 @@ mod tests {
         let operations = spy.operations();
         assert_eq!(operations.len(), 4);
 
-        assert_eq!(
+        assert!(matches!(
             operations[0],
+            RecordedOperation::SetColorTemperature {
+                node_id: 42,
+                endpoint: 1,
+                ..
+            }
+        ));
+        assert_eq!(
+            operations[1],
             RecordedOperation::SetBrightness {
                 node_id: 42,
                 endpoint: 1,
@@ -778,21 +790,61 @@ mod tests {
             }
         );
         assert!(matches!(
-            operations[1],
-            RecordedOperation::SetColorTemperature {
-                node_id: 42,
-                endpoint: 1,
-                ..
-            }
-        ));
-        assert!(matches!(
-            operations[3],
+            operations[2],
             RecordedOperation::SetColorTemperature {
                 node_id: 43,
                 endpoint: 1,
                 ..
             }
         ));
+        assert_eq!(
+            operations[3],
+            RecordedOperation::SetBrightness {
+                node_id: 43,
+                endpoint: 1,
+                level: clusters::brightness_to_level(80),
+                transition_ms: None,
+            }
+        );
+    }
+
+    /// Regression for #51: budget Matter-over-WiFi bulbs (Sengled W41-N15A,
+    /// Shenzhen H6004) treat MoveToColorTemperature as a level-resetting
+    /// state reload. If brightness is sent first and color second, the user's
+    /// dim request snaps back to the bulb's last-known max — visible as
+    /// "brightness slider never decreases". The fix is to send brightness
+    /// last, after any color command, so it's the final value the bulb sees.
+    #[test]
+    fn turn_on_sends_brightness_after_color_temperature_so_color_cannot_clobber_level() {
+        let (controller, spy, _) = make_controller();
+        let command = LightingCommand::new(7, 2700);
+
+        block_on(controller.turn_on("kitchen", command)).unwrap();
+
+        let operations = spy.operations();
+        for node_id in [42u64, 43u64] {
+            let ct_idx = operations.iter().position(|operation| {
+                matches!(
+                    operation,
+                    RecordedOperation::SetColorTemperature { node_id: n, .. } if *n == node_id
+                )
+            });
+            let br_idx = operations.iter().position(|operation| {
+                matches!(
+                    operation,
+                    RecordedOperation::SetBrightness { node_id: n, .. } if *n == node_id
+                )
+            });
+
+            let ct_idx =
+                ct_idx.unwrap_or_else(|| panic!("missing SetColorTemperature for node {node_id}"));
+            let br_idx =
+                br_idx.unwrap_or_else(|| panic!("missing SetBrightness for node {node_id}"));
+            assert!(
+                ct_idx < br_idx,
+                "node {node_id}: SetBrightness must follow SetColorTemperature so cheap bulbs don't clobber the level (ct_idx={ct_idx}, br_idx={br_idx})"
+            );
+        }
     }
 
     #[test]
