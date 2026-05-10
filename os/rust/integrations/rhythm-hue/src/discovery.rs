@@ -783,6 +783,10 @@ mod tests {
             Ok(false)
         }
 
+        fn identify_light(&self, _username: &str, _light_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
         fn get_resources(
             &self,
             _username: &str,

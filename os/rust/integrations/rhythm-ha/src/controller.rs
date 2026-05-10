@@ -400,6 +400,39 @@ impl<H: HaTransport + 'static> HubLightController for HaLightController<H> {
         }
     }
 
+    async fn flash_target(&self, target: &HubDispatchTarget) -> LightControlResult<()> {
+        // Use Home Assistant's native `flash` parameter on `light.turn_on`.
+        // HA documents `flash: "short"` / `flash: "long"` as the canonical
+        // identification effect across light platforms — unlike the default
+        // on/off cycling, it does not perturb persisted on/brightness state
+        // and works for any HA-managed light backend.
+        let mut data = match target {
+            HubDispatchTarget::Devices { native_ids } => {
+                if native_ids.is_empty() {
+                    return Err(LightControlError::CommandFailed(
+                        "HA flash: no entity_ids supplied".to_string(),
+                    ));
+                }
+                serde_json::json!({ "entity_id": native_ids })
+            }
+            HubDispatchTarget::Group {
+                room_id: _,
+                control_id,
+            } => serde_json::json!({ "area_id": control_id }),
+        };
+        data["flash"] = serde_json::json!("short");
+
+        self.client
+            .call_service("light", "turn_on", &data)
+            .map_err(|e| {
+                LightControlError::CommandFailed(format!(
+                    "HA flash for target {} failed: {}",
+                    target.label(),
+                    e
+                ))
+            })
+    }
+
     fn name(&self) -> &str {
         "HomeAssistant"
     }
@@ -527,6 +560,47 @@ mod tests {
         let transition = calls[0].data["transition"].as_f64().unwrap();
         // 1000ms -> 1.0 seconds
         assert!((transition - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn flash_target_devices_uses_native_ha_flash_short() {
+        // Regression for https://github.com/sticktrk/rhythm-os/issues/55:
+        // /api/devices/canonical/:id/flash must use HA's native `flash: short`
+        // service parameter rather than cycling on/off through the default
+        // flash impl, which mutates persisted brightness state.
+        let (controller, _) = make_controller();
+
+        block_on(controller.flash_target(&HubDispatchTarget::Devices {
+            native_ids: vec!["light.kitchen_1".to_string()],
+        }))
+        .unwrap();
+
+        let calls = controller.client.calls();
+        assert_eq!(calls.len(), 1, "expected exactly one service call");
+        assert_eq!(calls[0].domain, "light");
+        assert_eq!(calls[0].service, "turn_on");
+        assert_eq!(calls[0].data["flash"], "short");
+        assert_eq!(calls[0].data["entity_id"][0], "light.kitchen_1");
+        // Must not push brightness/color/transition — those would alter state.
+        assert!(calls[0].data.get("brightness_pct").is_none());
+        assert!(calls[0].data.get("transition").is_none());
+    }
+
+    #[test]
+    fn flash_target_group_sends_area_id_with_flash_short() {
+        let (controller, _) = make_controller();
+
+        block_on(controller.flash_target(&HubDispatchTarget::Group {
+            room_id: "living_room".to_string(),
+            control_id: "living_room".to_string(),
+        }))
+        .unwrap();
+
+        let calls = controller.client.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].service, "turn_on");
+        assert_eq!(calls[0].data["area_id"], "living_room");
+        assert_eq!(calls[0].data["flash"], "short");
     }
 
     #[test]

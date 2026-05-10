@@ -375,6 +375,44 @@ impl<H: HueTransport + 'static> HubLightController for HueLightController<H> {
         }
     }
 
+    async fn flash_target(&self, target: &HubDispatchTarget) -> LightControlResult<()> {
+        // Use the Hue V2 native identify action ("breathe") on each light
+        // resource. This is the canonical mechanism Hue exposes for physical
+        // identification — unlike the default on/off flash, it works for any
+        // single light without requiring a grouped_light wrapping the exact
+        // device set, and it does not perturb persisted on/brightness state.
+        let native_ids = match target {
+            HubDispatchTarget::Devices { native_ids } => native_ids.clone(),
+            HubDispatchTarget::Group { room_id, .. } => {
+                let registry = self.registry.lock().map_err(|_| {
+                    LightControlError::CommandFailed(
+                        "Hue registry lock poisoned during identify".to_string(),
+                    )
+                })?;
+                registry.get_light_entities(room_id)
+            }
+        };
+
+        if native_ids.is_empty() {
+            return Err(LightControlError::CommandFailed(format!(
+                "Hue identify: no light resources resolved for target {}",
+                target.label()
+            )));
+        }
+
+        for native_id in &native_ids {
+            self.client
+                .identify_light(&self.username, native_id)
+                .map_err(|e| {
+                    LightControlError::CommandFailed(format!(
+                        "Hue identify_light failed for {}: {}",
+                        native_id, e
+                    ))
+                })?;
+        }
+        Ok(())
+    }
+
     fn name(&self) -> &str {
         "HueV2"
     }
@@ -647,6 +685,66 @@ mod tests {
             }
             other => panic!("Expected SetGroupedLight, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn flash_target_single_light_uses_native_identify() {
+        // Regression for https://github.com/sticktrk/rhythm-os/issues/55:
+        // flashing a single Hue light from /api/devices/canonical/:id/flash
+        // used to fail with "Hue device-addressed dispatch is not implemented"
+        // because the default flash routed through device-addressed turn_on/off
+        // which only succeeds when native_ids match a complete grouped_light.
+        let (controller, _) = make_spy_controller();
+
+        block_on(controller.flash_target(&HubDispatchTarget::Devices {
+            native_ids: vec!["light-uuid-1".to_string()],
+        }))
+        .unwrap();
+
+        let calls = controller.client.calls();
+        let identify_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| matches!(c, HueTransportCall::IdentifyLight { .. }))
+            .collect();
+        assert_eq!(identify_calls.len(), 1, "expected one identify call");
+        match &identify_calls[0] {
+            HueTransportCall::IdentifyLight { light_id } => {
+                assert_eq!(light_id, "light-uuid-1");
+            }
+            _ => unreachable!(),
+        }
+        // Native identify must not toggle on/off — that was the broken path.
+        assert_eq!(controller.client.set_grouped_light_count(), 0);
+    }
+
+    #[test]
+    fn flash_target_group_identifies_each_member_light() {
+        let (controller, registry) = make_spy_controller();
+        registry.lock().unwrap().upsert_room(
+            "room_group",
+            "Living Room",
+            "gl-group",
+            &["light-a".to_string(), "light-b".to_string()],
+        );
+
+        block_on(controller.flash_target(&HubDispatchTarget::Group {
+            room_id: "room_group".to_string(),
+            control_id: "gl-group".to_string(),
+        }))
+        .unwrap();
+
+        let identify_ids: Vec<String> = controller
+            .client
+            .calls()
+            .into_iter()
+            .filter_map(|c| match c {
+                HueTransportCall::IdentifyLight { light_id } => Some(light_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(identify_ids.len(), 2);
+        assert!(identify_ids.contains(&"light-a".to_string()));
+        assert!(identify_ids.contains(&"light-b".to_string()));
     }
 
     #[test]

@@ -42,6 +42,9 @@ impl HueTransport for Arc<SpyHueTransport> {
     fn is_grouped_light_on(&self, username: &str, grouped_light_id: &str) -> anyhow::Result<bool> {
         (**self).is_grouped_light_on(username, grouped_light_id)
     }
+    fn identify_light(&self, username: &str, light_id: &str) -> anyhow::Result<()> {
+        (**self).identify_light(username, light_id)
+    }
     fn get_resources(
         &self,
         username: &str,
@@ -64,6 +67,9 @@ pub enum HueTransportCall {
     },
     IsGroupedLightOn {
         grouped_light_id: String,
+    },
+    IdentifyLight {
+        light_id: String,
     },
     GetResources {
         resource_type: String,
@@ -195,6 +201,19 @@ impl HueTransport for SpyHueTransport {
             anyhow::bail!("spy: is_grouped_light_on failed");
         }
         Ok(*self.is_on.lock().unwrap())
+    }
+
+    fn identify_light(&self, _username: &str, light_id: &str) -> anyhow::Result<()> {
+        if self.should_fail.load(Ordering::Relaxed) {
+            anyhow::bail!("spy: identify_light failed");
+        }
+        self.calls
+            .lock()
+            .unwrap()
+            .push(HueTransportCall::IdentifyLight {
+                light_id: light_id.to_string(),
+            });
+        Ok(())
     }
 
     fn get_resources(

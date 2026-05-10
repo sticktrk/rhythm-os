@@ -137,6 +137,33 @@ impl HueTransport for ReqwestHueTransport {
         Ok(())
     }
 
+    fn identify_light(&self, username: &str, light_id: &str) -> Result<()> {
+        let url = format!("{}/clip/v2/resource/light/{}", self.base_url(), light_id);
+        let body = serde_json::json!({
+            "identify": { "action": "breathe" }
+        });
+
+        let resp = self
+            .client
+            .put(&url)
+            .header("hue-application-key", username)
+            .json(&body)
+            .send()?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "PUT light/{} identify failed with status {}: {}",
+                light_id,
+                status,
+                body
+            ));
+        }
+
+        Ok(())
+    }
+
     fn is_grouped_light_on(&self, username: &str, grouped_light_id: &str) -> Result<bool> {
         let url = format!(
             "{}/clip/v2/resource/grouped_light/{}",

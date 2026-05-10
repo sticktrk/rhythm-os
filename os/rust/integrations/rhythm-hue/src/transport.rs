@@ -36,6 +36,13 @@ pub trait HueTransport: Send + Sync {
     /// Check if a grouped_light (room) has any lights on.
     fn is_grouped_light_on(&self, username: &str, grouped_light_id: &str) -> anyhow::Result<bool>;
 
+    /// Trigger the Hue V2 native identify effect on a single light resource.
+    ///
+    /// Uses `PUT /clip/v2/resource/light/{id}` with `identify.action = "breathe"`,
+    /// which is the canonical mechanism for physical identification on Hue
+    /// hardware and does not perturb the on/brightness state.
+    fn identify_light(&self, username: &str, light_id: &str) -> anyhow::Result<()>;
+
     /// Fetch all resources of a given type from the Hue V2 API.
     ///
     /// Used by discovery to enumerate rooms, devices, and services.
