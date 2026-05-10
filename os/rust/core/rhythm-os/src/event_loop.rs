@@ -1299,6 +1299,7 @@ pub fn apply_pending_motion_seeds(
     let mut owned_inactive_count = 0usize;
     let mut idle_count = 0usize;
     let mut live_count = 0usize;
+    let mut hard_off_dropped = 0usize;
     let mut deferred = Vec::new();
 
     for seed in seeds {
@@ -1310,6 +1311,14 @@ pub fn apply_pending_motion_seeds(
 
         if motion.sensors.contains_key(&source_node_id) {
             live_count += 1;
+            continue;
+        }
+
+        // Hard-off rooms have no motion timers — live mutations clear them
+        // via queue_motion_timer_clear, so boot-time seeding must do the
+        // same or timers reappear after a power cycle (issue #53).
+        if target_room_hard_off(state, &target_node_id) == Some(true) {
+            hard_off_dropped += 1;
             continue;
         }
 
@@ -1356,11 +1365,11 @@ pub fn apply_pending_motion_seeds(
     }
 
     let applied_count = active_count + owned_inactive_count + idle_count;
-    if applied_count > 0 || live_count > 0 {
+    if applied_count > 0 || live_count > 0 || hard_off_dropped > 0 {
         info!(
             target: "evt",
-            "Motion: seeded {} active, {} cleared-but-owned, {} idle from startup prefetch ({} live sources kept)",
-            active_count, owned_inactive_count, idle_count, live_count
+            "Motion: seeded {} active, {} cleared-but-owned, {} idle from startup prefetch ({} live sources kept, {} hard_off dropped)",
+            active_count, owned_inactive_count, idle_count, live_count, hard_off_dropped
         );
     }
     applied_count > 0
@@ -1372,6 +1381,13 @@ fn observed_room_lights_on(state: &SharedState, target_node_id: &str) -> Option<
             .get(target_node_id)
             .map(|observed| observed.lights_on)
     })
+}
+
+fn target_room_hard_off(state: &SharedState, target_node_id: &str) -> Option<bool> {
+    let runtime = state.lock().ok().and_then(|s| s.hub_runtime())?;
+    runtime
+        .engine_effective_node_snapshot(target_node_id)
+        .map(|snap| snap.hard_off)
 }
 
 /// Sync motion timer snapshots into AppState for API visibility.
@@ -3855,5 +3871,93 @@ mod tests {
         );
         assert!(motion.sensors.contains_key("sensor_1"));
         assert!(motion.motion_owned.contains("room_a"));
+    }
+
+    fn make_state_with_room_snapshot(snapshot: RoomSnapshot) -> SharedState {
+        let mut app = crate::state::AppState::default();
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(MotionTestRuntime {
+            snapshots: vec![snapshot],
+            any_lights_on_calls: None,
+        });
+        let hub_type = HubType::new("test");
+        let hub_key = HubKey::new(hub_type.clone(), "hub.local");
+        app.hubs.insert(
+            hub_key.clone(),
+            ActiveHub {
+                hub_type,
+                hub_key,
+                runtime: Some(runtime),
+                hub_data: Box::new(()),
+                registry: None,
+                discovery: None,
+                shutdown: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        Arc::new(Mutex::new(app))
+    }
+
+    fn hard_off_room_snapshot(id: &str) -> RoomSnapshot {
+        RoomSnapshot {
+            id: id.into(),
+            name: id.into(),
+            kind: rhythm_core::LightNodeKind::Room,
+            parent_id: None,
+            rhythm_enabled: true,
+            disabled: false,
+            time_offset_minutes: 0.0,
+            brightness_offset: 0.0,
+            soft_off: false,
+            hard_off: true,
+            profile_settings: RoomProfileSettings::default(),
+        }
+    }
+
+    /// Boot-time motion seeding must skip rooms persisted as hard_off.
+    /// Otherwise a motion timer starts for a room the user has explicitly
+    /// switched off, and the timer survives across power cycles even though
+    /// live mutations clear it via queue_motion_timer_clear (issue #53).
+    #[test]
+    fn apply_seeds_skips_hard_off_room_with_lights_on() {
+        let state = make_state_with_room_snapshot(hard_off_room_snapshot("room_a"));
+        // Without the hard_off gate, lights_on=true would force the seed to
+        // claim ownership and start a countdown. The gate must drop it first.
+        set_observed_lights_on(&state, "room_a", true);
+        push_seed(&state, "sensor_1", "room_a", false);
+
+        let mut motion = MotionTimerState::new();
+        let dirty = apply_pending_motion_seeds(&state, &mut motion, Instant::now());
+
+        assert!(
+            !dirty,
+            "dropping a hard_off seed must not be reported as a state change"
+        );
+        assert!(
+            motion.sensors.is_empty(),
+            "hard_off room must not get a motion sensor entry"
+        );
+        assert!(
+            motion.motion_owned.is_empty(),
+            "hard_off room must not be claimed for motion-driven auto-off"
+        );
+        assert!(
+            state.lock().unwrap().pending_motion_seed.is_empty(),
+            "hard_off seeds must be dropped, not deferred"
+        );
+    }
+
+    /// Active motion sensor on a hard_off room is also dropped — the user
+    /// has overridden adaptive control for the room, so motion shouldn't
+    /// re-engage timers on boot.
+    #[test]
+    fn apply_seeds_skips_hard_off_room_with_active_motion() {
+        let state = make_state_with_room_snapshot(hard_off_room_snapshot("room_a"));
+        push_seed(&state, "sensor_1", "room_a", true);
+
+        let mut motion = MotionTimerState::new();
+        apply_pending_motion_seeds(&state, &mut motion, Instant::now());
+
+        assert!(motion.sensors.is_empty());
+        assert!(motion.motion_owned.is_empty());
+        assert!(state.lock().unwrap().pending_motion_seed.is_empty());
     }
 }
