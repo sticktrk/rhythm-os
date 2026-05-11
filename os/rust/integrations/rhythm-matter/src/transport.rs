@@ -73,6 +73,76 @@ pub trait MatterTransport: Send + Sync {
     /// Set the On/Off state of a light endpoint.
     fn set_on_off(&self, node_id: u64, endpoint: u16, on: bool) -> Result<()>;
 
+    /// Create/update a Matter group and add the requested member endpoints.
+    fn configure_group(&self, group: &MatterGroup) -> Result<()> {
+        let _ = group;
+        anyhow::bail!("Matter groups are not supported by this transport")
+    }
+
+    /// Remove a Matter group from the local controller and member endpoints.
+    fn remove_group(&self, group_id: u16, members: &[MatterGroupMember]) -> Result<()> {
+        let _ = (group_id, members);
+        anyhow::bail!("Matter groups are not supported by this transport")
+    }
+
+    /// Set the On/Off state of a Matter group.
+    fn set_group_on_off(&self, group_id: u16, on: bool) -> Result<()> {
+        let _ = (group_id, on);
+        anyhow::bail!("Matter group On/Off is not supported by this transport")
+    }
+
+    /// Ask a Matter group to identify itself for the given number of seconds.
+    fn identify_group(&self, group_id: u16, duration_secs: u16) -> Result<()> {
+        let _ = (group_id, duration_secs);
+        anyhow::bail!("Matter group Identify is not supported by this transport")
+    }
+
+    /// Set a Matter group level using Matter's 0-254 level encoding.
+    fn set_group_brightness(
+        &self,
+        group_id: u16,
+        level: u8,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        let _ = (group_id, level, transition_ms);
+        anyhow::bail!("Matter group Level Control is not supported by this transport")
+    }
+
+    /// Set a Matter group color temperature in Kelvin.
+    fn set_group_color_temperature(
+        &self,
+        group_id: u16,
+        kelvin: u16,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        let _ = (group_id, kelvin, transition_ms);
+        anyhow::bail!("Matter group Color Control is not supported by this transport")
+    }
+
+    /// Set a Matter group CIE xy color.
+    fn set_group_xy(
+        &self,
+        group_id: u16,
+        x: f32,
+        y: f32,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        let _ = (group_id, x, y, transition_ms);
+        anyhow::bail!("Matter group Color Control is not supported by this transport")
+    }
+
+    /// Set a Matter group hue/saturation color using Matter's 0-254 encoding.
+    fn set_group_hue_saturation(
+        &self,
+        group_id: u16,
+        hue: u8,
+        saturation: u8,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        let _ = (group_id, hue, saturation, transition_ms);
+        anyhow::bail!("Matter group Color Control is not supported by this transport")
+    }
+
     /// Ask a light endpoint to identify itself for the given number of seconds.
     fn identify_light(&self, node_id: u64, endpoint: u16, duration_secs: u16) -> Result<()>;
 
@@ -139,6 +209,21 @@ pub trait MatterTransport: Send + Sync {
 pub struct MatterSubscriptionTarget {
     pub node_id: u64,
     pub endpoint: u16,
+}
+
+/// A single Matter endpoint that belongs to a group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatterGroupMember {
+    pub node_id: u64,
+    pub endpoint: u16,
+}
+
+/// Matter group configuration known by the local controller.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatterGroup {
+    pub group_id: u16,
+    pub name: String,
+    pub members: Vec<MatterGroupMember>,
 }
 
 /// A typed Matter attribute value carried over the local transport.

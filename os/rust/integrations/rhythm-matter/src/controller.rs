@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use rhythm_core::controller::{
     HubDispatchTarget, HubLightController, LightControlError, LightControlResult, LightController,
 };
@@ -22,6 +22,20 @@ pub type MatterDeviceRegistry = rhythm_os::registry::HubDeviceRegistry;
 const DISPATCH_INFO_MS: u128 = 250;
 const DISPATCH_WARN_MS: u128 = 1000;
 const MATTER_IDENTIFY_DURATION_SECS: u16 = 1;
+const MATTER_GROUP_CONTROL_PREFIX: &str = "matter-group-";
+
+/// Format the hub-native control ID used for a Matter group.
+pub fn format_group_control_id(group_id: u16) -> String {
+    format!("{}{}", MATTER_GROUP_CONTROL_PREFIX, group_id)
+}
+
+/// Parse a Matter group control ID.
+pub fn parse_group_control_id(control_id: &str) -> Option<u16> {
+    control_id
+        .strip_prefix(MATTER_GROUP_CONTROL_PREFIX)
+        .and_then(|group_id| group_id.parse::<u16>().ok())
+        .filter(|group_id| *group_id != 0)
+}
 
 /// Light controller implementation using typed Matter light operations.
 pub struct MatterLightController {
@@ -77,6 +91,22 @@ impl MatterLightController {
             HubDispatchTarget::Group { room_id, .. } => self.target_device_ids(room_id),
             HubDispatchTarget::Devices { native_ids } => Ok(native_ids.clone()),
         }
+    }
+
+    fn group_id_for_target(target: &HubDispatchTarget) -> Option<u16> {
+        match target {
+            HubDispatchTarget::Group { control_id, .. } => parse_group_control_id(control_id),
+            HubDispatchTarget::Devices { .. } => None,
+        }
+    }
+
+    fn group_id_for_room(&self, room_id: &str) -> Option<u16> {
+        self.hub_data
+            .registry
+            .lock()
+            .ok()
+            .and_then(|registry| registry.get_grouped_light_id(room_id))
+            .and_then(|control_id| parse_group_control_id(&control_id))
     }
 
     fn device_metadata(
@@ -143,6 +173,27 @@ impl MatterLightController {
                 )
             }
         }
+    }
+
+    fn common_metadata_for_devices(
+        &self,
+        device_ids: &[String],
+    ) -> (LightCapabilities, Vec<DeviceQuirk>) {
+        let mut capabilities = Vec::new();
+        let mut quirks = Vec::new();
+
+        for device_id in device_ids {
+            let Some((node_id, _endpoint)) = Self::parse_device_id(device_id) else {
+                continue;
+            };
+            let (caps, device_quirks) = self.device_metadata(device_id, node_id);
+            capabilities.push(caps);
+            quirks.extend(device_quirks);
+        }
+
+        let common = LightCapabilities::common_for(capabilities.iter())
+            .unwrap_or_else(|| LightCapabilities::defaults_for(LightType::ExtendedColor));
+        (common, quirks)
     }
 
     fn cache_device_metadata(
@@ -413,6 +464,212 @@ impl MatterLightController {
         Ok(())
     }
 
+    fn turn_on_group(
+        &self,
+        target_label: &str,
+        group_id: u16,
+        device_ids: &[String],
+        command: LightingCommand,
+    ) -> LightControlResult<()> {
+        let started = Instant::now();
+        let (caps, quirks) = self.common_metadata_for_devices(device_ids);
+        let adapted = rhythm_os::controller_helpers::adapt_lighting_command(
+            &caps,
+            &command,
+            Self::color_preference(&quirks),
+        );
+        let needs_explicit_on = adapted.on && Self::needs_explicit_on(&quirks);
+        let mut planned_commands = Vec::new();
+        if needs_explicit_on {
+            planned_commands.push("OnOff.On");
+        }
+        if adapted.hue_saturation.is_some() {
+            planned_commands.push("ColorControl.MoveToHueAndSaturation");
+        } else if adapted.xy.is_some() {
+            planned_commands.push("ColorControl.MoveToColor");
+        } else if adapted.kelvin.is_some() {
+            planned_commands.push("ColorControl.MoveToColorTemperature");
+        }
+        if adapted.brightness.is_some() {
+            planned_commands.push("LevelControl.MoveToLevelWithOnOff");
+        } else if adapted.on && !needs_explicit_on {
+            planned_commands.push("OnOff.On");
+        }
+        let planned_commands = planned_commands.join(",");
+        let mut command_successes = 0usize;
+        let mut command_failures = 0usize;
+        let mut already_sent_on = false;
+
+        info!(
+            target: "cmd",
+            "Matter group turn_on dispatch: target={} group_id={} members={} commands={} brightness={} kelvin={} direct_color={} transition_ms={:?}",
+            target_label,
+            group_id,
+            device_ids.len(),
+            planned_commands,
+            command.brightness,
+            command.kelvin,
+            command.is_direct_color,
+            command.transition_ms
+        );
+
+        if needs_explicit_on {
+            if let Err(e) = self.transport.set_group_on_off(group_id, true) {
+                warn!(
+                    target: "cmd",
+                    "Matter: explicit group on command failed for group {}: {}",
+                    group_id,
+                    e
+                );
+                command_failures += 1;
+            } else {
+                command_successes += 1;
+                already_sent_on = true;
+            }
+        }
+
+        if let Some((hue, saturation)) = adapted.hue_saturation {
+            if let Err(e) = self.transport.set_group_hue_saturation(
+                group_id,
+                hue,
+                saturation,
+                adapted.transition_ms,
+            ) {
+                warn!(
+                    target: "cmd",
+                    "Matter: group hue/saturation command failed for group {}: {}",
+                    group_id,
+                    e
+                );
+                command_failures += 1;
+            } else {
+                command_successes += 1;
+            }
+        } else if let Some((x, y)) = adapted.xy {
+            if let Err(e) = self
+                .transport
+                .set_group_xy(group_id, x, y, adapted.transition_ms)
+            {
+                warn!(
+                    target: "cmd",
+                    "Matter: group xy command failed for group {}: {}",
+                    group_id,
+                    e
+                );
+                command_failures += 1;
+            } else {
+                command_successes += 1;
+            }
+        } else if let Some(kelvin) = adapted.kelvin {
+            if let Err(e) =
+                self.transport
+                    .set_group_color_temperature(group_id, kelvin, adapted.transition_ms)
+            {
+                warn!(
+                    target: "cmd",
+                    "Matter: group color temperature command failed for group {}: {}",
+                    group_id,
+                    e
+                );
+                command_failures += 1;
+            } else {
+                command_successes += 1;
+            }
+        }
+
+        if let Some(brightness) = adapted.brightness {
+            let level = clusters::brightness_to_level(brightness);
+            if let Err(e) =
+                self.transport
+                    .set_group_brightness(group_id, level, adapted.transition_ms)
+            {
+                warn!(
+                    target: "cmd",
+                    "Matter: group brightness command failed for group {}: {}",
+                    group_id,
+                    e
+                );
+                command_failures += 1;
+            } else {
+                command_successes += 1;
+            }
+        } else if adapted.on && !already_sent_on {
+            if let Err(e) = self.transport.set_group_on_off(group_id, true) {
+                warn!(
+                    target: "cmd",
+                    "Matter: group on command failed for group {}: {}",
+                    group_id,
+                    e
+                );
+                command_failures += 1;
+            } else {
+                command_successes += 1;
+            }
+        }
+
+        if command_successes == 0 {
+            return Err(LightControlError::CommandFailed(format!(
+                "Matter group turn_on failed for target {} (group {}, {} failures)",
+                target_label, group_id, command_failures,
+            )));
+        }
+
+        let latency_ms = started.elapsed().as_millis();
+        if command_failures > 0 {
+            tracing::warn!(
+                target: "cmd",
+                event = "matter_group_turn_on_partial",
+                target = %target_label,
+                group_id,
+                latency_ms,
+                ok = command_successes,
+                failed = command_failures,
+                member_count = device_ids.len(),
+                "Matter group turn_on partial"
+            );
+        } else if latency_ms >= DISPATCH_WARN_MS {
+            tracing::warn!(
+                target: "cmd",
+                event = "matter_group_turn_on",
+                target = %target_label,
+                group_id,
+                latency_ms,
+                brightness = command.brightness,
+                kelvin = command.kelvin,
+                direct_color = command.is_direct_color,
+                member_count = device_ids.len(),
+                "Matter group turn_on slow"
+            );
+        } else if latency_ms >= DISPATCH_INFO_MS {
+            tracing::info!(
+                target: "cmd",
+                event = "matter_group_turn_on",
+                target = %target_label,
+                group_id,
+                latency_ms,
+                brightness = command.brightness,
+                kelvin = command.kelvin,
+                direct_color = command.is_direct_color,
+                member_count = device_ids.len(),
+                "Matter group turn_on"
+            );
+        } else {
+            info!(
+                target: "cmd",
+                "Matter group turn_on ok: target={} group_id={} members={} commands={} brightness={} kelvin={} latency_ms={}",
+                target_label,
+                group_id,
+                device_ids.len(),
+                planned_commands,
+                command.brightness,
+                command.kelvin,
+                latency_ms
+            );
+        }
+
+        Ok(())
+    }
+
     fn turn_off_devices(
         &self,
         target_label: &str,
@@ -480,6 +737,53 @@ impl MatterLightController {
                 target_label,
                 device_ids.len(),
                 latency_ms
+            );
+        }
+
+        Ok(())
+    }
+
+    fn turn_off_group(&self, target_label: &str, group_id: u16) -> LightControlResult<()> {
+        let started = Instant::now();
+        info!(
+            target: "cmd",
+            "Matter group turn_off dispatch: target={} group_id={} command=OnOff.Off",
+            target_label,
+            group_id
+        );
+        self.transport
+            .set_group_on_off(group_id, false)
+            .map_err(|e| {
+                LightControlError::CommandFailed(format!(
+                    "Matter group turn_off failed for target {} (group {}): {}",
+                    target_label, group_id, e
+                ))
+            })?;
+
+        let latency_ms = started.elapsed().as_millis();
+        if latency_ms >= DISPATCH_WARN_MS {
+            tracing::warn!(
+                target: "cmd",
+                event = "matter_group_turn_off",
+                target = %target_label,
+                group_id,
+                latency_ms,
+                "Matter group turn_off slow"
+            );
+        } else if latency_ms >= DISPATCH_INFO_MS {
+            tracing::info!(
+                target: "cmd",
+                event = "matter_group_turn_off",
+                target = %target_label,
+                group_id,
+                latency_ms,
+                "Matter group turn_off"
+            );
+        } else {
+            info!(
+                target: "cmd",
+                "Matter group turn_off ok: target={} group_id={} latency_ms={}",
+                target_label, group_id, latency_ms
             );
         }
 
@@ -567,6 +871,54 @@ impl MatterLightController {
 
         Ok(())
     }
+
+    fn identify_group(&self, target_label: &str, group_id: u16) -> LightControlResult<()> {
+        let started = Instant::now();
+        info!(
+            target: "cmd",
+            "Matter group identify dispatch: target={} group_id={} duration_secs={} command=Identify.Identify",
+            target_label,
+            group_id,
+            MATTER_IDENTIFY_DURATION_SECS
+        );
+        self.transport
+            .identify_group(group_id, MATTER_IDENTIFY_DURATION_SECS)
+            .map_err(|e| {
+                LightControlError::CommandFailed(format!(
+                    "Matter identify failed for target {} (group {}): {}",
+                    target_label, group_id, e
+                ))
+            })?;
+
+        let latency_ms = started.elapsed().as_millis();
+        if latency_ms >= DISPATCH_WARN_MS {
+            tracing::warn!(
+                target: "cmd",
+                event = "matter_group_identify",
+                target = %target_label,
+                group_id,
+                latency_ms,
+                "Matter group identify slow"
+            );
+        } else if latency_ms >= DISPATCH_INFO_MS {
+            tracing::info!(
+                target: "cmd",
+                event = "matter_group_identify",
+                target = %target_label,
+                group_id,
+                latency_ms,
+                "Matter group identify"
+            );
+        } else {
+            info!(
+                target: "cmd",
+                "Matter group identify ok: target={} group_id={} latency_ms={}",
+                target_label, group_id, latency_ms
+            );
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -578,6 +930,9 @@ impl HubLightController for MatterLightController {
     ) -> LightControlResult<()> {
         let target_label = target.label();
         let device_ids = self.target_device_ids_for_target(target)?;
+        if let Some(group_id) = Self::group_id_for_target(target) {
+            return self.turn_on_group(&target_label, group_id, &device_ids, command);
+        }
         self.turn_on_devices(&target_label, &device_ids, command)
     }
 
@@ -587,12 +942,18 @@ impl HubLightController for MatterLightController {
         _transition_ms: Option<u32>,
     ) -> LightControlResult<()> {
         let target_label = target.label();
+        if let Some(group_id) = Self::group_id_for_target(target) {
+            return self.turn_off_group(&target_label, group_id);
+        }
         let device_ids = self.target_device_ids_for_target(target)?;
         self.turn_off_devices(&target_label, &device_ids)
     }
 
     async fn flash_target(&self, target: &HubDispatchTarget) -> LightControlResult<()> {
         let target_label = target.label();
+        if let Some(group_id) = Self::group_id_for_target(target) {
+            return self.identify_group(&target_label, group_id);
+        }
         let device_ids = self.target_device_ids_for_target(target)?;
         self.identify_devices(&target_label, &device_ids)
     }
@@ -644,12 +1005,18 @@ impl LightController for MatterLightController {
         let room_label =
             rhythm_os::controller_helpers::format_room_label(&self.hub_data.registry, room_id);
         let device_ids = self.target_device_ids(room_id)?;
+        if let Some(group_id) = self.group_id_for_room(room_id) {
+            return self.turn_on_group(&room_label, group_id, &device_ids, command);
+        }
         self.turn_on_devices(&room_label, &device_ids, command)
     }
 
     async fn turn_off(&self, room_id: &str, _transition_ms: Option<u32>) -> LightControlResult<()> {
         let room_label =
             rhythm_os::controller_helpers::format_room_label(&self.hub_data.registry, room_id);
+        if let Some(group_id) = self.group_id_for_room(room_id) {
+            return self.turn_off_group(&room_label, group_id);
+        }
         let device_ids = self.target_device_ids(room_id)?;
         self.turn_off_devices(&room_label, &device_ids)
     }
@@ -741,6 +1108,15 @@ mod tests {
         (controller, spy, registry)
     }
 
+    fn set_kitchen_group(registry: &Arc<Mutex<MatterDeviceRegistry>>, group_id: u16) {
+        registry.lock().unwrap().upsert_room(
+            "kitchen",
+            "Kitchen",
+            &format_group_control_id(group_id),
+            &["matter-42".to_string(), "matter-43".to_string()],
+        );
+    }
+
     #[test]
     fn parse_device_id_basic() {
         assert_eq!(
@@ -760,6 +1136,13 @@ mod tests {
     #[test]
     fn parse_device_id_invalid() {
         assert_eq!(MatterLightController::parse_device_id("hue-abc"), None);
+    }
+
+    #[test]
+    fn parse_group_control_id_rejects_non_matter_groups() {
+        assert_eq!(parse_group_control_id("kitchen"), None);
+        assert_eq!(parse_group_control_id("matter-group-0"), None);
+        assert_eq!(parse_group_control_id("matter-group-4097"), Some(4097));
     }
 
     #[test]
@@ -857,18 +1240,44 @@ mod tests {
         let node_ids: Vec<u64> = spy
             .operations()
             .iter()
-            .map(|operation| match operation {
+            .filter_map(|operation| match operation {
                 RecordedOperation::SetOnOff { node_id, .. }
                 | RecordedOperation::IdentifyLight { node_id, .. }
                 | RecordedOperation::SetBrightness { node_id, .. }
                 | RecordedOperation::SetColorTemperature { node_id, .. }
                 | RecordedOperation::SetHueSaturation { node_id, .. }
                 | RecordedOperation::SetXy { node_id, .. }
-                | RecordedOperation::ReadOnOff { node_id, .. } => *node_id,
+                | RecordedOperation::ReadOnOff { node_id, .. } => Some(*node_id),
+                _ => None,
             })
             .collect();
         assert!(node_ids.contains(&42));
         assert!(node_ids.contains(&43));
+    }
+
+    #[test]
+    fn turn_on_room_with_matter_group_control_uses_group_commands() {
+        let (controller, spy, registry) = make_controller();
+        let group_id = 4097;
+        set_kitchen_group(&registry, group_id);
+
+        block_on(controller.turn_on("kitchen", LightingCommand::new(80, 4000))).unwrap();
+
+        assert_eq!(
+            spy.operations(),
+            vec![
+                RecordedOperation::SetGroupColorTemperature {
+                    group_id,
+                    kelvin: 4000,
+                    transition_ms: None,
+                },
+                RecordedOperation::SetGroupBrightness {
+                    group_id,
+                    level: clusters::brightness_to_level(80),
+                    transition_ms: None,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -921,6 +1330,23 @@ mod tests {
                     on: false,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn turn_off_room_with_matter_group_control_uses_group_on_off() {
+        let (controller, spy, registry) = make_controller();
+        let group_id = 4097;
+        set_kitchen_group(&registry, group_id);
+
+        block_on(controller.turn_off("kitchen", None)).unwrap();
+
+        assert_eq!(
+            spy.operations(),
+            vec![RecordedOperation::SetGroupOnOff {
+                group_id,
+                on: false,
+            }]
         );
     }
 
@@ -989,6 +1415,26 @@ mod tests {
                     duration_secs: MATTER_IDENTIFY_DURATION_SECS,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn flash_group_target_with_matter_group_control_uses_group_identify() {
+        let (controller, spy, _) = make_controller();
+        let group_id = 4097;
+
+        block_on(controller.flash_target(&HubDispatchTarget::Group {
+            room_id: "kitchen".to_string(),
+            control_id: format_group_control_id(group_id),
+        }))
+        .unwrap();
+
+        assert_eq!(
+            spy.operations(),
+            vec![RecordedOperation::IdentifyGroup {
+                group_id,
+                duration_secs: MATTER_IDENTIFY_DURATION_SECS,
+            }]
         );
     }
 

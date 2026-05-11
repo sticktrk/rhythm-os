@@ -1,7 +1,8 @@
 use anyhow::Result;
 
 use rhythm_matter::transport::{
-    CommissionedDevice, MatterAttributeReport, MatterCommissionRequest, MatterSubscriptionTarget,
+    CommissionedDevice, MatterAttributeReport, MatterCommissionRequest, MatterGroup,
+    MatterGroupMember, MatterSubscriptionTarget,
 };
 
 use crate::service::CommissioningState;
@@ -80,6 +81,132 @@ impl ChipFfiController {
         {
             let _ = (node_id, endpoint, on);
             Err(self.unsupported("set_on_off"))
+        }
+    }
+
+    pub fn configure_group(&mut self, group: &MatterGroup) -> Result<()> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            ffi_probe::configure_group(group)
+        }
+
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            let _ = group;
+            Err(self.unsupported("configure_group"))
+        }
+    }
+
+    pub fn remove_group(&mut self, group_id: u16, members: &[MatterGroupMember]) -> Result<()> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            ffi_probe::remove_group(group_id, members)
+        }
+
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            let _ = (group_id, members);
+            Err(self.unsupported("remove_group"))
+        }
+    }
+
+    pub fn set_group_on_off(&mut self, group_id: u16, on: bool) -> Result<()> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            ffi_probe::set_group_on_off(group_id, on)
+        }
+
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            let _ = (group_id, on);
+            Err(self.unsupported("set_group_on_off"))
+        }
+    }
+
+    pub fn identify_group(&mut self, group_id: u16, duration_secs: u16) -> Result<()> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            ffi_probe::identify_group(group_id, duration_secs)
+        }
+
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            let _ = (group_id, duration_secs);
+            Err(self.unsupported("identify_group"))
+        }
+    }
+
+    pub fn set_group_brightness(
+        &mut self,
+        group_id: u16,
+        level: u8,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            ffi_probe::set_group_brightness(group_id, level, transition_ms)
+        }
+
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            let _ = (group_id, level, transition_ms);
+            Err(self.unsupported("set_group_brightness"))
+        }
+    }
+
+    pub fn set_group_color_temperature(
+        &mut self,
+        group_id: u16,
+        kelvin: u16,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            ffi_probe::set_group_color_temperature(group_id, kelvin, transition_ms)
+        }
+
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            let _ = (group_id, kelvin, transition_ms);
+            Err(self.unsupported("set_group_color_temperature"))
+        }
+    }
+
+    pub fn set_group_xy(
+        &mut self,
+        group_id: u16,
+        x: f32,
+        y: f32,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            ffi_probe::set_group_xy(group_id, x, y, transition_ms)
+        }
+
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            let _ = (group_id, x, y, transition_ms);
+            Err(self.unsupported("set_group_xy"))
+        }
+    }
+
+    pub fn set_group_hue_saturation(
+        &mut self,
+        group_id: u16,
+        hue: u8,
+        saturation: u8,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            ffi_probe::set_group_hue_saturation(group_id, hue, saturation, transition_ms)
+        }
+
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            let _ = (group_id, hue, saturation, transition_ms);
+            Err(self.unsupported("set_group_hue_saturation"))
         }
     }
 
@@ -265,7 +392,8 @@ mod ffi_probe {
 
     use rhythm_matter::transport::{
         CommissionedDevice, MatterAttributeReport, MatterAttributeValue, MatterColorMode,
-        MatterCommissionRequest, MatterCommissioningRendezvous, MatterSubscriptionTarget,
+        MatterCommissionRequest, MatterCommissioningRendezvous, MatterGroup, MatterGroupMember,
+        MatterSubscriptionTarget,
     };
 
     const ERROR_BUFFER_SIZE: usize = 512;
@@ -318,6 +446,21 @@ mod ffi_probe {
 
     #[repr(C)]
     #[derive(Clone, Copy)]
+    struct ChipBridgeGroupMember {
+        node_id: u64,
+        endpoint: c_ushort,
+    }
+
+    #[repr(C)]
+    struct ChipBridgeGroup {
+        group_id: c_ushort,
+        name: *const c_char,
+        members: *const ChipBridgeGroupMember,
+        member_count: usize,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
     struct ChipBridgeAttributeReport {
         node_id: u64,
         endpoint: c_ushort,
@@ -359,6 +502,64 @@ mod ffi_probe {
             node_id: u64,
             endpoint: c_ushort,
             on: bool,
+            error_message: *mut c_char,
+            error_message_size: usize,
+        ) -> bool;
+        fn rhythm_chip_bridge_configure_group(
+            group: *const ChipBridgeGroup,
+            error_message: *mut c_char,
+            error_message_size: usize,
+        ) -> bool;
+        fn rhythm_chip_bridge_remove_group(
+            group_id: c_ushort,
+            members: *const ChipBridgeGroupMember,
+            member_count: usize,
+            error_message: *mut c_char,
+            error_message_size: usize,
+        ) -> bool;
+        fn rhythm_chip_bridge_set_group_on_off(
+            group_id: c_ushort,
+            on: bool,
+            error_message: *mut c_char,
+            error_message_size: usize,
+        ) -> bool;
+        fn rhythm_chip_bridge_identify_group(
+            group_id: c_ushort,
+            duration_secs: c_ushort,
+            error_message: *mut c_char,
+            error_message_size: usize,
+        ) -> bool;
+        fn rhythm_chip_bridge_set_group_brightness(
+            group_id: c_ushort,
+            level: u8,
+            has_transition_ms: bool,
+            transition_ms: u32,
+            error_message: *mut c_char,
+            error_message_size: usize,
+        ) -> bool;
+        fn rhythm_chip_bridge_set_group_color_temperature(
+            group_id: c_ushort,
+            kelvin: c_ushort,
+            has_transition_ms: bool,
+            transition_ms: u32,
+            error_message: *mut c_char,
+            error_message_size: usize,
+        ) -> bool;
+        fn rhythm_chip_bridge_set_group_xy(
+            group_id: c_ushort,
+            x: f32,
+            y: f32,
+            has_transition_ms: bool,
+            transition_ms: u32,
+            error_message: *mut c_char,
+            error_message_size: usize,
+        ) -> bool;
+        fn rhythm_chip_bridge_set_group_hue_saturation(
+            group_id: c_ushort,
+            hue: u8,
+            saturation: u8,
+            has_transition_ms: bool,
+            transition_ms: u32,
             error_message: *mut c_char,
             error_message_size: usize,
         ) -> bool;
@@ -586,6 +787,174 @@ mod ffi_probe {
         }
     }
 
+    pub fn configure_group(group: &MatterGroup) -> Result<()> {
+        let name = CString::new(group.name.as_str()).context("encoding Matter group name")?;
+        let members = ffi_group_members(&group.members);
+        let ffi_group = ChipBridgeGroup {
+            group_id: group.group_id,
+            name: name.as_ptr(),
+            members: members.as_ptr(),
+            member_count: members.len(),
+        };
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
+        let success = unsafe {
+            rhythm_chip_bridge_configure_group(
+                &ffi_group,
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        };
+        if success {
+            Ok(())
+        } else {
+            Err(read_error_buffer(&error_buffer))
+        }
+    }
+
+    pub fn remove_group(group_id: u16, members: &[MatterGroupMember]) -> Result<()> {
+        let members = ffi_group_members(members);
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
+        let success = unsafe {
+            rhythm_chip_bridge_remove_group(
+                group_id,
+                members.as_ptr(),
+                members.len(),
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        };
+        if success {
+            Ok(())
+        } else {
+            Err(read_error_buffer(&error_buffer))
+        }
+    }
+
+    pub fn set_group_on_off(group_id: u16, on: bool) -> Result<()> {
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
+        let success = unsafe {
+            rhythm_chip_bridge_set_group_on_off(
+                group_id,
+                on,
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        };
+        if success {
+            Ok(())
+        } else {
+            Err(read_error_buffer(&error_buffer))
+        }
+    }
+
+    pub fn identify_group(group_id: u16, duration_secs: u16) -> Result<()> {
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
+        let success = unsafe {
+            rhythm_chip_bridge_identify_group(
+                group_id,
+                duration_secs,
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        };
+        if success {
+            Ok(())
+        } else {
+            Err(read_error_buffer(&error_buffer))
+        }
+    }
+
+    pub fn set_group_brightness(
+        group_id: u16,
+        level: u8,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
+        let success = unsafe {
+            rhythm_chip_bridge_set_group_brightness(
+                group_id,
+                level,
+                transition_ms.is_some(),
+                transition_ms.unwrap_or_default(),
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        };
+        if success {
+            Ok(())
+        } else {
+            Err(read_error_buffer(&error_buffer))
+        }
+    }
+
+    pub fn set_group_color_temperature(
+        group_id: u16,
+        kelvin: u16,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
+        let success = unsafe {
+            rhythm_chip_bridge_set_group_color_temperature(
+                group_id,
+                kelvin,
+                transition_ms.is_some(),
+                transition_ms.unwrap_or_default(),
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        };
+        if success {
+            Ok(())
+        } else {
+            Err(read_error_buffer(&error_buffer))
+        }
+    }
+
+    pub fn set_group_xy(group_id: u16, x: f32, y: f32, transition_ms: Option<u32>) -> Result<()> {
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
+        let success = unsafe {
+            rhythm_chip_bridge_set_group_xy(
+                group_id,
+                x,
+                y,
+                transition_ms.is_some(),
+                transition_ms.unwrap_or_default(),
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        };
+        if success {
+            Ok(())
+        } else {
+            Err(read_error_buffer(&error_buffer))
+        }
+    }
+
+    pub fn set_group_hue_saturation(
+        group_id: u16,
+        hue: u8,
+        saturation: u8,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
+        let success = unsafe {
+            rhythm_chip_bridge_set_group_hue_saturation(
+                group_id,
+                hue,
+                saturation,
+                transition_ms.is_some(),
+                transition_ms.unwrap_or_default(),
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        };
+        if success {
+            Ok(())
+        } else {
+            Err(read_error_buffer(&error_buffer))
+        }
+    }
+
     pub fn identify_light(node_id: u64, endpoint: u16, duration_secs: u16) -> Result<()> {
         let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
         let success = unsafe {
@@ -602,6 +971,16 @@ mod ffi_probe {
         } else {
             Err(read_error_buffer(&error_buffer))
         }
+    }
+
+    fn ffi_group_members(members: &[MatterGroupMember]) -> Vec<ChipBridgeGroupMember> {
+        members
+            .iter()
+            .map(|member| ChipBridgeGroupMember {
+                node_id: member.node_id,
+                endpoint: member.endpoint,
+            })
+            .collect()
     }
 
     pub fn set_brightness(

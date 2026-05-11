@@ -19,7 +19,7 @@ use crate::chip_rpc::{
 };
 use crate::transport::{
     CommissionedDevice, MatterAttributeReport, MatterCommissionRequest, MatterDeviceInfo,
-    MatterSubscriptionTarget, MatterTransport,
+    MatterGroup, MatterGroupMember, MatterSubscriptionTarget, MatterTransport,
 };
 
 const SOCKET_NAME: &str = "chip-controller.sock";
@@ -485,6 +485,168 @@ impl MatterTransport for ChipTransport {
             endpoint,
             on,
         })?;
+        Ok(())
+    }
+
+    fn configure_group(&self, group: &MatterGroup) -> Result<()> {
+        let _: crate::chip_rpc::ChipRpcEmpty = self.call(ChipRpcRequest::ConfigureGroup {
+            group: group.clone(),
+        })?;
+        tracing::info!(
+            target: "cmd",
+            event = "matter_group_rpc",
+            operation = "configure_group",
+            group_id = group.group_id,
+            name = %group.name,
+            member_count = group.members.len(),
+            "Matter group RPC ok"
+        );
+        Ok(())
+    }
+
+    fn remove_group(&self, group_id: u16, members: &[MatterGroupMember]) -> Result<()> {
+        let _: crate::chip_rpc::ChipRpcEmpty = self.call(ChipRpcRequest::RemoveGroup {
+            group_id,
+            members: members.to_vec(),
+        })?;
+        tracing::info!(
+            target: "cmd",
+            event = "matter_group_rpc",
+            operation = "remove_group",
+            group_id,
+            member_count = members.len(),
+            "Matter group RPC ok"
+        );
+        Ok(())
+    }
+
+    fn set_group_on_off(&self, group_id: u16, on: bool) -> Result<()> {
+        let _: crate::chip_rpc::ChipRpcEmpty =
+            self.call(ChipRpcRequest::SetGroupOnOff { group_id, on })?;
+        tracing::info!(
+            target: "cmd",
+            event = "matter_group_rpc",
+            operation = "set_group_on_off",
+            group_id,
+            on,
+            "Matter group RPC ok"
+        );
+        Ok(())
+    }
+
+    fn identify_group(&self, group_id: u16, duration_secs: u16) -> Result<()> {
+        let _: crate::chip_rpc::ChipRpcEmpty = self.call(ChipRpcRequest::IdentifyGroup {
+            group_id,
+            duration_secs,
+        })?;
+        tracing::info!(
+            target: "cmd",
+            event = "matter_group_rpc",
+            operation = "identify_group",
+            group_id,
+            duration_secs,
+            "Matter group RPC ok"
+        );
+        Ok(())
+    }
+
+    fn set_group_brightness(
+        &self,
+        group_id: u16,
+        level: u8,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        let _: crate::chip_rpc::ChipRpcEmpty = self.call(ChipRpcRequest::SetGroupBrightness {
+            group_id,
+            level,
+            transition_ms,
+        })?;
+        tracing::info!(
+            target: "cmd",
+            event = "matter_group_rpc",
+            operation = "set_group_brightness",
+            group_id,
+            level,
+            transition_ms = ?transition_ms,
+            "Matter group RPC ok"
+        );
+        Ok(())
+    }
+
+    fn set_group_color_temperature(
+        &self,
+        group_id: u16,
+        kelvin: u16,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        let _: crate::chip_rpc::ChipRpcEmpty =
+            self.call(ChipRpcRequest::SetGroupColorTemperature {
+                group_id,
+                kelvin,
+                transition_ms,
+            })?;
+        tracing::info!(
+            target: "cmd",
+            event = "matter_group_rpc",
+            operation = "set_group_color_temperature",
+            group_id,
+            kelvin,
+            transition_ms = ?transition_ms,
+            "Matter group RPC ok"
+        );
+        Ok(())
+    }
+
+    fn set_group_xy(
+        &self,
+        group_id: u16,
+        x: f32,
+        y: f32,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        let _: crate::chip_rpc::ChipRpcEmpty = self.call(ChipRpcRequest::SetGroupXy {
+            group_id,
+            x,
+            y,
+            transition_ms,
+        })?;
+        tracing::info!(
+            target: "cmd",
+            event = "matter_group_rpc",
+            operation = "set_group_xy",
+            group_id,
+            x,
+            y,
+            transition_ms = ?transition_ms,
+            "Matter group RPC ok"
+        );
+        Ok(())
+    }
+
+    fn set_group_hue_saturation(
+        &self,
+        group_id: u16,
+        hue: u8,
+        saturation: u8,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        let _: crate::chip_rpc::ChipRpcEmpty =
+            self.call(ChipRpcRequest::SetGroupHueSaturation {
+                group_id,
+                hue,
+                saturation,
+                transition_ms,
+            })?;
+        tracing::info!(
+            target: "cmd",
+            event = "matter_group_rpc",
+            operation = "set_group_hue_saturation",
+            group_id,
+            hue,
+            saturation,
+            transition_ms = ?transition_ms,
+            "Matter group RPC ok"
+        );
         Ok(())
     }
 

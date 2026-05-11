@@ -18,6 +18,7 @@ pub mod commissioning;
 pub mod controller;
 pub mod discovery;
 pub mod events;
+pub mod groups;
 pub mod hub_state;
 pub mod lifecycle;
 pub mod provider;

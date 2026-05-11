@@ -64,6 +64,20 @@ struct rhythm_chip_bridge_subscription_target
     uint16_t endpoint;
 };
 
+struct rhythm_chip_bridge_group_member
+{
+    uint64_t node_id;
+    uint16_t endpoint;
+};
+
+struct rhythm_chip_bridge_group
+{
+    uint16_t group_id;
+    const char * name;
+    const struct rhythm_chip_bridge_group_member * members;
+    size_t member_count;
+};
+
 struct rhythm_chip_bridge_attribute_report
 {
     uint64_t node_id;
@@ -86,6 +100,22 @@ bool rhythm_chip_bridge_probe_light(uint64_t node_id, struct rhythm_chip_bridge_
 bool rhythm_chip_bridge_decommission_device(uint64_t node_id, bool force, char * error_message, size_t error_message_size);
 bool rhythm_chip_bridge_set_on_off(uint64_t node_id, uint16_t endpoint, bool on, char * error_message,
                                    size_t error_message_size);
+bool rhythm_chip_bridge_configure_group(const struct rhythm_chip_bridge_group * group, char * error_message,
+                                        size_t error_message_size);
+bool rhythm_chip_bridge_remove_group(uint16_t group_id, const struct rhythm_chip_bridge_group_member * members,
+                                     size_t member_count, char * error_message, size_t error_message_size);
+bool rhythm_chip_bridge_set_group_on_off(uint16_t group_id, bool on, char * error_message, size_t error_message_size);
+bool rhythm_chip_bridge_identify_group(uint16_t group_id, uint16_t duration_secs, char * error_message,
+                                       size_t error_message_size);
+bool rhythm_chip_bridge_set_group_brightness(uint16_t group_id, uint8_t level, bool has_transition_ms,
+                                             uint32_t transition_ms, char * error_message, size_t error_message_size);
+bool rhythm_chip_bridge_set_group_color_temperature(uint16_t group_id, uint16_t kelvin, bool has_transition_ms,
+                                                    uint32_t transition_ms, char * error_message, size_t error_message_size);
+bool rhythm_chip_bridge_set_group_xy(uint16_t group_id, float x, float y, bool has_transition_ms, uint32_t transition_ms,
+                                     char * error_message, size_t error_message_size);
+bool rhythm_chip_bridge_set_group_hue_saturation(uint16_t group_id, uint8_t hue, uint8_t saturation,
+                                                 bool has_transition_ms, uint32_t transition_ms, char * error_message,
+                                                 size_t error_message_size);
 bool rhythm_chip_bridge_identify_light(uint64_t node_id, uint16_t endpoint, uint16_t duration_secs, char * error_message,
                                        size_t error_message_size);
 bool rhythm_chip_bridge_set_brightness(uint64_t node_id, uint16_t endpoint, uint8_t level, bool has_transition_ms,

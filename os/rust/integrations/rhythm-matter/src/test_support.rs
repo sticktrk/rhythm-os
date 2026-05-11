@@ -6,7 +6,8 @@ use std::sync::Mutex;
 use anyhow::Result;
 
 use crate::transport::{
-    CommissionedDevice, MatterColorMode, MatterCommissionRequest, MatterDeviceInfo, MatterTransport,
+    CommissionedDevice, MatterColorMode, MatterCommissionRequest, MatterDeviceInfo, MatterGroup,
+    MatterGroupMember, MatterTransport,
 };
 
 /// A recorded typed controller operation for test assertions.
@@ -16,6 +17,43 @@ pub enum RecordedOperation {
         node_id: u64,
         endpoint: u16,
         on: bool,
+    },
+    ConfigureGroup {
+        group: MatterGroup,
+    },
+    RemoveGroup {
+        group_id: u16,
+        members: Vec<MatterGroupMember>,
+    },
+    SetGroupOnOff {
+        group_id: u16,
+        on: bool,
+    },
+    IdentifyGroup {
+        group_id: u16,
+        duration_secs: u16,
+    },
+    SetGroupBrightness {
+        group_id: u16,
+        level: u8,
+        transition_ms: Option<u32>,
+    },
+    SetGroupColorTemperature {
+        group_id: u16,
+        kelvin: u16,
+        transition_ms: Option<u32>,
+    },
+    SetGroupXy {
+        group_id: u16,
+        x: f32,
+        y: f32,
+        transition_ms: Option<u32>,
+    },
+    SetGroupHueSaturation {
+        group_id: u16,
+        hue: u8,
+        saturation: u8,
+        transition_ms: Option<u32>,
     },
     IdentifyLight {
         node_id: u64,
@@ -100,6 +138,60 @@ impl MatterTransport for NoOpTransport {
         Ok(())
     }
 
+    fn configure_group(&self, _group: &MatterGroup) -> Result<()> {
+        Ok(())
+    }
+
+    fn remove_group(&self, _group_id: u16, _members: &[MatterGroupMember]) -> Result<()> {
+        Ok(())
+    }
+
+    fn set_group_on_off(&self, _group_id: u16, _on: bool) -> Result<()> {
+        Ok(())
+    }
+
+    fn identify_group(&self, _group_id: u16, _duration_secs: u16) -> Result<()> {
+        Ok(())
+    }
+
+    fn set_group_brightness(
+        &self,
+        _group_id: u16,
+        _level: u8,
+        _transition_ms: Option<u32>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn set_group_color_temperature(
+        &self,
+        _group_id: u16,
+        _kelvin: u16,
+        _transition_ms: Option<u32>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn set_group_xy(
+        &self,
+        _group_id: u16,
+        _x: f32,
+        _y: f32,
+        _transition_ms: Option<u32>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn set_group_hue_saturation(
+        &self,
+        _group_id: u16,
+        _hue: u8,
+        _saturation: u8,
+        _transition_ms: Option<u32>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     fn identify_light(&self, _node_id: u64, _endpoint: u16, _duration_secs: u16) -> Result<()> {
         Ok(())
     }
@@ -157,6 +249,7 @@ pub struct SpyTransport {
     devices: Mutex<Vec<MatterDeviceInfo>>,
     probes: Mutex<HashMap<u64, CommissionedDevice>>,
     on_off_state: Mutex<HashMap<u64, bool>>,
+    groups: Mutex<HashMap<u16, MatterGroup>>,
     failing_nodes: Mutex<HashSet<u64>>,
     commission_result: Mutex<Result<CommissionedDevice>>,
     commission_requests: Mutex<Vec<MatterCommissionRequest>>,
@@ -170,6 +263,7 @@ impl SpyTransport {
             devices: Mutex::new(Vec::new()),
             probes: Mutex::new(HashMap::new()),
             on_off_state: Mutex::new(HashMap::new()),
+            groups: Mutex::new(HashMap::new()),
             failing_nodes: Mutex::new(HashSet::new()),
             commission_result: Mutex::new(Ok(default_device(99))),
             commission_requests: Mutex::new(Vec::new()),
@@ -305,6 +399,117 @@ impl MatterTransport for SpyTransport {
             on,
         });
         self.on_off_state.lock().unwrap().insert(node_id, on);
+        Ok(())
+    }
+
+    fn configure_group(&self, group: &MatterGroup) -> Result<()> {
+        for member in &group.members {
+            if self.should_fail(member.node_id) {
+                anyhow::bail!("device {} not found in registry", member.node_id);
+            }
+        }
+        self.groups
+            .lock()
+            .unwrap()
+            .insert(group.group_id, group.clone());
+        self.record(RecordedOperation::ConfigureGroup {
+            group: group.clone(),
+        });
+        Ok(())
+    }
+
+    fn remove_group(&self, group_id: u16, members: &[MatterGroupMember]) -> Result<()> {
+        self.groups.lock().unwrap().remove(&group_id);
+        self.record(RecordedOperation::RemoveGroup {
+            group_id,
+            members: members.to_vec(),
+        });
+        Ok(())
+    }
+
+    fn set_group_on_off(&self, group_id: u16, on: bool) -> Result<()> {
+        self.record(RecordedOperation::SetGroupOnOff { group_id, on });
+        if let Some(group) = self.groups.lock().unwrap().get(&group_id).cloned() {
+            for member in group.members {
+                self.on_off_state.lock().unwrap().insert(member.node_id, on);
+            }
+        }
+        Ok(())
+    }
+
+    fn identify_group(&self, group_id: u16, duration_secs: u16) -> Result<()> {
+        self.record(RecordedOperation::IdentifyGroup {
+            group_id,
+            duration_secs,
+        });
+        Ok(())
+    }
+
+    fn set_group_brightness(
+        &self,
+        group_id: u16,
+        level: u8,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        self.record(RecordedOperation::SetGroupBrightness {
+            group_id,
+            level,
+            transition_ms,
+        });
+        if let Some(group) = self.groups.lock().unwrap().get(&group_id).cloned() {
+            for member in group.members {
+                self.on_off_state
+                    .lock()
+                    .unwrap()
+                    .insert(member.node_id, level > 0);
+            }
+        }
+        Ok(())
+    }
+
+    fn set_group_color_temperature(
+        &self,
+        group_id: u16,
+        kelvin: u16,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        self.record(RecordedOperation::SetGroupColorTemperature {
+            group_id,
+            kelvin,
+            transition_ms,
+        });
+        Ok(())
+    }
+
+    fn set_group_xy(
+        &self,
+        group_id: u16,
+        x: f32,
+        y: f32,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        self.record(RecordedOperation::SetGroupXy {
+            group_id,
+            x,
+            y,
+            transition_ms,
+        });
+        Ok(())
+    }
+
+    fn set_group_hue_saturation(
+        &self,
+        group_id: u16,
+        hue: u8,
+        saturation: u8,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        self.record(RecordedOperation::SetGroupHueSaturation {
+            group_id,
+            hue,
+            saturation,
+            transition_ms,
+        });
         Ok(())
     }
 

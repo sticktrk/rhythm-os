@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::transport::{
     CommissionedDevice, MatterAttributeReport, MatterCommissionRequest, MatterDeviceInfo,
-    MatterSubscriptionTarget,
+    MatterGroup, MatterGroupMember, MatterSubscriptionTarget,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +39,47 @@ pub enum ChipRpcRequest {
         node_id: u64,
         endpoint: u16,
         on: bool,
+    },
+    ConfigureGroup {
+        group: MatterGroup,
+    },
+    RemoveGroup {
+        group_id: u16,
+        members: Vec<MatterGroupMember>,
+    },
+    SetGroupOnOff {
+        group_id: u16,
+        on: bool,
+    },
+    IdentifyGroup {
+        group_id: u16,
+        duration_secs: u16,
+    },
+    SetGroupBrightness {
+        group_id: u16,
+        level: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transition_ms: Option<u32>,
+    },
+    SetGroupColorTemperature {
+        group_id: u16,
+        kelvin: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transition_ms: Option<u32>,
+    },
+    SetGroupXy {
+        group_id: u16,
+        x: f32,
+        y: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transition_ms: Option<u32>,
+    },
+    SetGroupHueSaturation {
+        group_id: u16,
+        hue: u8,
+        saturation: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transition_ms: Option<u32>,
     },
     IdentifyLight {
         node_id: u64,

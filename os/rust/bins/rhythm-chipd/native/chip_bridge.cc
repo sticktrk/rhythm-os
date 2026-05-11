@@ -6,6 +6,7 @@
 #include <controller/CHIPDeviceController.h>
 #include <controller/CHIPDeviceControllerFactory.h>
 #include <controller/ExampleOperationalCredentialsIssuer.h>
+#include <controller/InvokeInteraction.h>
 #include <controller/ExamplePersistentStorage.h>
 #include <credentials/GroupDataProviderImpl.h>
 #include <credentials/PersistentStorageOpCertStore.h>
@@ -855,6 +856,203 @@ public:
         return InvokeCommand(nodeId, endpoint, request);
     }
 
+    CHIP_ERROR ConfigureGroup(const rhythm_chip_bridge_group & group)
+    {
+        VerifyOrReturnError(mCommissioner != nullptr, CHIP_ERROR_INCORRECT_STATE);
+        VerifyOrReturnError(group.group_id != kUndefinedGroupId, CHIP_ERROR_INVALID_ARGUMENT);
+        VerifyOrReturnError(group.name != nullptr, CHIP_ERROR_INVALID_ARGUMENT);
+        VerifyOrReturnError(group.members != nullptr || group.member_count == 0, CHIP_ERROR_INVALID_ARGUMENT);
+        VerifyOrReturnError(std::strlen(group.name) <= CHIP_CONFIG_MAX_GROUP_NAME_LENGTH, CHIP_ERROR_INVALID_ARGUMENT);
+
+        const GroupId groupId     = group.group_id;
+        const std::string name    = group.name;
+        const FabricIndex fabric  = mCommissioner->GetFabricIndex();
+        CHIP_ERROR providerStatus = CHIP_NO_ERROR;
+        ChipLogProgress(Controller, "Rhythm Matter group configure: group=%u name=%s members=%zu fabric=%u",
+                        static_cast<unsigned>(groupId), name.c_str(), group.member_count, static_cast<unsigned>(fabric));
+        ReturnErrorOnFailure(ExecuteOnMatterThread([this, fabric, groupId, &name, &providerStatus]() {
+            chip::Credentials::GroupDataProvider::GroupInfo groupInfo(groupId, name.c_str());
+            providerStatus = mGroupDataProvider.SetGroupInfo(fabric, groupInfo);
+            if (providerStatus != CHIP_NO_ERROR)
+            {
+                return;
+            }
+            providerStatus =
+                mGroupDataProvider.SetGroupKey(fabric, groupId,
+                                               chip::Credentials::GroupDataProvider::kIdentityProtectionKeySetId);
+        }));
+        ReturnErrorOnFailure(providerStatus);
+
+        for (size_t i = 0; i < group.member_count; ++i)
+        {
+            const NodeId nodeId       = group.members[i].node_id;
+            const EndpointId endpoint = group.members[i].endpoint;
+
+            CHIP_ERROR endpointStatus = CHIP_NO_ERROR;
+            ReturnErrorOnFailure(ExecuteOnMatterThread([this, fabric, groupId, endpoint, &endpointStatus]() {
+                endpointStatus = mGroupDataProvider.AddEndpoint(fabric, groupId, endpoint);
+            }));
+            ReturnErrorOnFailure(endpointStatus);
+
+            Groups::Commands::AddGroup::Type request;
+            request.groupID   = groupId;
+            request.groupName = chip::CharSpan::fromCharString(name.c_str());
+            ReturnErrorOnFailure(InvokeCommand(nodeId, endpoint, request));
+            ChipLogProgress(Controller, "Rhythm Matter group member added: group=%u node=" ChipLogFormatX64 " endpoint=%u",
+                            static_cast<unsigned>(groupId), ChipLogValueX64(nodeId), static_cast<unsigned>(endpoint));
+        }
+
+        return CHIP_NO_ERROR;
+    }
+
+    CHIP_ERROR RemoveGroup(GroupId groupId, const rhythm_chip_bridge_group_member * members, size_t memberCount)
+    {
+        VerifyOrReturnError(mCommissioner != nullptr, CHIP_ERROR_INCORRECT_STATE);
+        VerifyOrReturnError(groupId != kUndefinedGroupId, CHIP_ERROR_INVALID_ARGUMENT);
+        VerifyOrReturnError(members != nullptr || memberCount == 0, CHIP_ERROR_INVALID_ARGUMENT);
+
+        ChipLogProgress(Controller, "Rhythm Matter group remove: group=%u members=%zu", static_cast<unsigned>(groupId),
+                        memberCount);
+        for (size_t i = 0; i < memberCount; ++i)
+        {
+            Groups::Commands::RemoveGroup::Type request;
+            request.groupID = groupId;
+            ReturnErrorOnFailure(InvokeCommand(members[i].node_id, members[i].endpoint, request));
+            ChipLogProgress(Controller, "Rhythm Matter group member removed: group=%u node=" ChipLogFormatX64 " endpoint=%u",
+                            static_cast<unsigned>(groupId), ChipLogValueX64(members[i].node_id),
+                            static_cast<unsigned>(members[i].endpoint));
+        }
+
+        const FabricIndex fabric = mCommissioner->GetFabricIndex();
+        CHIP_ERROR providerStatus = CHIP_NO_ERROR;
+        ReturnErrorOnFailure(ExecuteOnMatterThread([this, fabric, groupId, &providerStatus]() {
+            providerStatus = RemoveGroupKey(fabric, groupId);
+            if (providerStatus != CHIP_NO_ERROR && providerStatus != CHIP_ERROR_NOT_FOUND)
+            {
+                return;
+            }
+
+            providerStatus = mGroupDataProvider.RemoveGroupInfo(fabric, groupId);
+            if (providerStatus == CHIP_ERROR_NOT_FOUND)
+            {
+                providerStatus = CHIP_NO_ERROR;
+            }
+        }));
+        return providerStatus;
+    }
+
+    CHIP_ERROR SetGroupOnOff(GroupId groupId, bool on)
+    {
+        VerifyOrReturnError(groupId != kUndefinedGroupId, CHIP_ERROR_INVALID_ARGUMENT);
+        if (on)
+        {
+            OnOff::Commands::On::Type request;
+            CHIP_ERROR err = InvokeGroupCommand(groupId, request);
+            if (err == CHIP_NO_ERROR)
+            {
+                ChipLogProgress(Controller, "Rhythm Matter group command: op=on_off group=%u on=true",
+                                static_cast<unsigned>(groupId));
+            }
+            return err;
+        }
+
+        OnOff::Commands::Off::Type request;
+        CHIP_ERROR err = InvokeGroupCommand(groupId, request);
+        if (err == CHIP_NO_ERROR)
+        {
+            ChipLogProgress(Controller, "Rhythm Matter group command: op=on_off group=%u on=false",
+                            static_cast<unsigned>(groupId));
+        }
+        return err;
+    }
+
+    CHIP_ERROR IdentifyGroup(GroupId groupId, uint16_t durationSecs)
+    {
+        VerifyOrReturnError(groupId != kUndefinedGroupId, CHIP_ERROR_INVALID_ARGUMENT);
+        Identify::Commands::Identify::Type request;
+        request.identifyTime = durationSecs;
+        CHIP_ERROR err = InvokeGroupCommand(groupId, request);
+        if (err == CHIP_NO_ERROR)
+        {
+            ChipLogProgress(Controller, "Rhythm Matter group command: op=identify group=%u duration_secs=%u",
+                            static_cast<unsigned>(groupId), static_cast<unsigned>(durationSecs));
+        }
+        return err;
+    }
+
+    CHIP_ERROR SetGroupBrightness(GroupId groupId, uint8_t level, std::optional<uint32_t> transitionMs)
+    {
+        VerifyOrReturnError(groupId != kUndefinedGroupId, CHIP_ERROR_INVALID_ARGUMENT);
+        LevelControl::Commands::MoveToLevelWithOnOff::Type request;
+        request.level          = level;
+        request.transitionTime = transitionMs.has_value() ? chip::app::DataModel::Nullable<uint16_t>(MillisecondsToTenths(*transitionMs))
+                                                          : chip::app::DataModel::Nullable<uint16_t>();
+        CHIP_ERROR err = InvokeGroupCommand(groupId, request);
+        if (err == CHIP_NO_ERROR)
+        {
+            ChipLogProgress(Controller, "Rhythm Matter group command: op=brightness group=%u level=%u transition_ms=%s",
+                            static_cast<unsigned>(groupId), static_cast<unsigned>(level),
+                            transitionMs.has_value() ? std::to_string(*transitionMs).c_str() : "none");
+        }
+        return err;
+    }
+
+    CHIP_ERROR SetGroupColorTemperature(GroupId groupId, uint16_t kelvin, std::optional<uint32_t> transitionMs)
+    {
+        VerifyOrReturnError(groupId != kUndefinedGroupId, CHIP_ERROR_INVALID_ARGUMENT);
+        VerifyOrReturnError(kelvin > 0, CHIP_ERROR_INVALID_ARGUMENT);
+
+        ColorControl::Commands::MoveToColorTemperature::Type request;
+        request.colorTemperatureMireds = KelvinToMireds(kelvin);
+        request.transitionTime         = transitionMs.has_value() ? MillisecondsToTenths(*transitionMs) : 0;
+        CHIP_ERROR err = InvokeGroupCommand(groupId, request);
+        if (err == CHIP_NO_ERROR)
+        {
+            ChipLogProgress(Controller, "Rhythm Matter group command: op=color_temperature group=%u kelvin=%u transition_ms=%s",
+                            static_cast<unsigned>(groupId), static_cast<unsigned>(kelvin),
+                            transitionMs.has_value() ? std::to_string(*transitionMs).c_str() : "none");
+        }
+        return err;
+    }
+
+    CHIP_ERROR SetGroupXy(GroupId groupId, float x, float y, std::optional<uint32_t> transitionMs)
+    {
+        VerifyOrReturnError(groupId != kUndefinedGroupId, CHIP_ERROR_INVALID_ARGUMENT);
+        ColorControl::Commands::MoveToColor::Type request;
+        request.colorX         = XyToMatterCoordinate(x);
+        request.colorY         = XyToMatterCoordinate(y);
+        request.transitionTime = transitionMs.has_value() ? MillisecondsToTenths(*transitionMs) : 0;
+        CHIP_ERROR err = InvokeGroupCommand(groupId, request);
+        if (err == CHIP_NO_ERROR)
+        {
+            ChipLogProgress(Controller, "Rhythm Matter group command: op=xy group=%u x=%.4f y=%.4f transition_ms=%s",
+                            static_cast<unsigned>(groupId), static_cast<double>(x), static_cast<double>(y),
+                            transitionMs.has_value() ? std::to_string(*transitionMs).c_str() : "none");
+        }
+        return err;
+    }
+
+    CHIP_ERROR SetGroupHueSaturation(GroupId groupId, uint8_t hue, uint8_t saturation,
+                                     std::optional<uint32_t> transitionMs)
+    {
+        VerifyOrReturnError(groupId != kUndefinedGroupId, CHIP_ERROR_INVALID_ARGUMENT);
+        ColorControl::Commands::MoveToHueAndSaturation::Type request;
+        request.hue             = hue;
+        request.saturation      = saturation;
+        request.transitionTime  = transitionMs.has_value() ? MillisecondsToTenths(*transitionMs) : 0;
+        request.optionsMask     = chip::BitMask<ColorControl::OptionsBitmap>();
+        request.optionsOverride = chip::BitMask<ColorControl::OptionsBitmap>();
+        CHIP_ERROR err = InvokeGroupCommand(groupId, request);
+        if (err == CHIP_NO_ERROR)
+        {
+            ChipLogProgress(Controller,
+                            "Rhythm Matter group command: op=hue_saturation group=%u hue=%u saturation=%u transition_ms=%s",
+                            static_cast<unsigned>(groupId), static_cast<unsigned>(hue), static_cast<unsigned>(saturation),
+                            transitionMs.has_value() ? std::to_string(*transitionMs).c_str() : "none");
+        }
+        return err;
+    }
+
     CHIP_ERROR IdentifyLight(NodeId nodeId, EndpointId endpoint, uint16_t durationSecs)
     {
         Identify::Commands::Identify::Type request;
@@ -1142,6 +1340,46 @@ private:
         return RunConnectionOperation(operation);
     }
 
+    template <typename RequestT>
+    CHIP_ERROR InvokeGroupCommand(GroupId groupId, const RequestT & request)
+    {
+        VerifyOrReturnError(mCommissioner != nullptr, CHIP_ERROR_INCORRECT_STATE);
+
+        CHIP_ERROR err = CHIP_NO_ERROR;
+        ReturnErrorOnFailure(ExecuteOnMatterThread([this, groupId, &request, &err]() {
+            auto * exchangeMgr = chip::app::InteractionModelEngine::GetInstance()->GetExchangeManager();
+            if (exchangeMgr == nullptr)
+            {
+                err = CHIP_ERROR_INCORRECT_STATE;
+                return;
+            }
+
+            err = chip::Controller::InvokeGroupCommandRequest(exchangeMgr, mCommissioner->GetFabricIndex(), groupId, request);
+        }));
+        return err;
+    }
+
+    CHIP_ERROR RemoveGroupKey(FabricIndex fabric, GroupId groupId)
+    {
+        auto * iter = mGroupDataProvider.IterateGroupKeys(fabric);
+        VerifyOrReturnError(iter != nullptr, CHIP_ERROR_INCORRECT_STATE);
+
+        CHIP_ERROR status = CHIP_ERROR_NOT_FOUND;
+        size_t index      = 0;
+        chip::Credentials::GroupDataProvider::GroupKey groupKey;
+        while (iter->Next(groupKey))
+        {
+            if (groupKey.group_id == groupId)
+            {
+                status = mGroupDataProvider.RemoveGroupKeyAt(fabric, index);
+                break;
+            }
+            index++;
+        }
+        iter->Release();
+        return status;
+    }
+
     template <typename AttributeInfo, typename CopyFn>
     CHIP_ERROR ReadAttribute(NodeId nodeId, EndpointId endpoint, CopyFn onValue)
     {
@@ -1316,6 +1554,72 @@ bool rhythm_chip_bridge_set_on_off(uint64_t node_id, uint16_t endpoint, bool on,
 {
     return HandleBridgeResult(gContext.SetOnOff(node_id, endpoint, on), error_message, error_message_size,
                               "setting Matter on/off");
+}
+
+bool rhythm_chip_bridge_configure_group(const struct rhythm_chip_bridge_group * group, char * error_message,
+                                        size_t error_message_size)
+{
+    if (group == nullptr)
+    {
+        WriteErrorMessage(error_message, error_message_size, "configure_group requires group");
+        return false;
+    }
+
+    return HandleBridgeResult(gContext.ConfigureGroup(*group), error_message, error_message_size,
+                              "configuring Matter group");
+}
+
+bool rhythm_chip_bridge_remove_group(uint16_t group_id, const struct rhythm_chip_bridge_group_member * members,
+                                     size_t member_count, char * error_message, size_t error_message_size)
+{
+    return HandleBridgeResult(gContext.RemoveGroup(group_id, members, member_count), error_message, error_message_size,
+                              "removing Matter group");
+}
+
+bool rhythm_chip_bridge_set_group_on_off(uint16_t group_id, bool on, char * error_message, size_t error_message_size)
+{
+    return HandleBridgeResult(gContext.SetGroupOnOff(group_id, on), error_message, error_message_size,
+                              "setting Matter group on/off");
+}
+
+bool rhythm_chip_bridge_identify_group(uint16_t group_id, uint16_t duration_secs, char * error_message,
+                                       size_t error_message_size)
+{
+    return HandleBridgeResult(gContext.IdentifyGroup(group_id, duration_secs), error_message, error_message_size,
+                              "identifying Matter group");
+}
+
+bool rhythm_chip_bridge_set_group_brightness(uint16_t group_id, uint8_t level, bool has_transition_ms,
+                                             uint32_t transition_ms, char * error_message, size_t error_message_size)
+{
+    const std::optional<uint32_t> transition = has_transition_ms ? std::optional<uint32_t>(transition_ms) : std::nullopt;
+    return HandleBridgeResult(gContext.SetGroupBrightness(group_id, level, transition), error_message, error_message_size,
+                              "setting Matter group brightness");
+}
+
+bool rhythm_chip_bridge_set_group_color_temperature(uint16_t group_id, uint16_t kelvin, bool has_transition_ms,
+                                                    uint32_t transition_ms, char * error_message, size_t error_message_size)
+{
+    const std::optional<uint32_t> transition = has_transition_ms ? std::optional<uint32_t>(transition_ms) : std::nullopt;
+    return HandleBridgeResult(gContext.SetGroupColorTemperature(group_id, kelvin, transition), error_message,
+                              error_message_size, "setting Matter group color temperature");
+}
+
+bool rhythm_chip_bridge_set_group_xy(uint16_t group_id, float x, float y, bool has_transition_ms, uint32_t transition_ms,
+                                     char * error_message, size_t error_message_size)
+{
+    const std::optional<uint32_t> transition = has_transition_ms ? std::optional<uint32_t>(transition_ms) : std::nullopt;
+    return HandleBridgeResult(gContext.SetGroupXy(group_id, x, y, transition), error_message, error_message_size,
+                              "setting Matter group xy color");
+}
+
+bool rhythm_chip_bridge_set_group_hue_saturation(uint16_t group_id, uint8_t hue, uint8_t saturation,
+                                                 bool has_transition_ms, uint32_t transition_ms, char * error_message,
+                                                 size_t error_message_size)
+{
+    const std::optional<uint32_t> transition = has_transition_ms ? std::optional<uint32_t>(transition_ms) : std::nullopt;
+    return HandleBridgeResult(gContext.SetGroupHueSaturation(group_id, hue, saturation, transition), error_message,
+                              error_message_size, "setting Matter group hue/saturation color");
 }
 
 bool rhythm_chip_bridge_identify_light(uint64_t node_id, uint16_t endpoint, uint16_t duration_secs, char * error_message,

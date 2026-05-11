@@ -81,6 +81,70 @@ impl ChipControllerService {
                 self.backend.set_on_off(node_id, endpoint, on)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
+            ChipRpcRequest::ConfigureGroup { group } => {
+                self.require_initialized()?;
+                self.backend.configure_group(&group)?;
+                Ok(serde_json::to_value(ChipRpcEmpty::new())?)
+            }
+            ChipRpcRequest::RemoveGroup { group_id, members } => {
+                self.require_initialized()?;
+                self.backend.remove_group(group_id, &members)?;
+                Ok(serde_json::to_value(ChipRpcEmpty::new())?)
+            }
+            ChipRpcRequest::SetGroupOnOff { group_id, on } => {
+                self.require_initialized()?;
+                self.backend.set_group_on_off(group_id, on)?;
+                Ok(serde_json::to_value(ChipRpcEmpty::new())?)
+            }
+            ChipRpcRequest::IdentifyGroup {
+                group_id,
+                duration_secs,
+            } => {
+                self.require_initialized()?;
+                self.backend.identify_group(group_id, duration_secs)?;
+                Ok(serde_json::to_value(ChipRpcEmpty::new())?)
+            }
+            ChipRpcRequest::SetGroupBrightness {
+                group_id,
+                level,
+                transition_ms,
+            } => {
+                self.require_initialized()?;
+                self.backend
+                    .set_group_brightness(group_id, level, transition_ms)?;
+                Ok(serde_json::to_value(ChipRpcEmpty::new())?)
+            }
+            ChipRpcRequest::SetGroupColorTemperature {
+                group_id,
+                kelvin,
+                transition_ms,
+            } => {
+                self.require_initialized()?;
+                self.backend
+                    .set_group_color_temperature(group_id, kelvin, transition_ms)?;
+                Ok(serde_json::to_value(ChipRpcEmpty::new())?)
+            }
+            ChipRpcRequest::SetGroupXy {
+                group_id,
+                x,
+                y,
+                transition_ms,
+            } => {
+                self.require_initialized()?;
+                self.backend.set_group_xy(group_id, x, y, transition_ms)?;
+                Ok(serde_json::to_value(ChipRpcEmpty::new())?)
+            }
+            ChipRpcRequest::SetGroupHueSaturation {
+                group_id,
+                hue,
+                saturation,
+                transition_ms,
+            } => {
+                self.require_initialized()?;
+                self.backend
+                    .set_group_hue_saturation(group_id, hue, saturation, transition_ms)?;
+                Ok(serde_json::to_value(ChipRpcEmpty::new())?)
+            }
             ChipRpcRequest::IdentifyLight {
                 node_id,
                 endpoint,
