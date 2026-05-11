@@ -1,18 +1,22 @@
 //! Desktop Matter lifecycle using the local CHIP sidecar transport.
 
+use std::collections::HashSet;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 use anyhow::Result;
-use log::info;
+use log::{info, warn};
 use rhythm_core::controller::HubLightController;
+use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::hub::{HubEvent, HubProvider, HubType};
 use rhythm_os::pairing::PairingSession;
 use rhythm_os::state::SharedState;
+use rhythm_os::topology::HubRoomBinding;
 
 use crate::chip_transport::ChipTransport;
-use crate::controller::MatterLightController;
+use crate::controller::{parse_group_control_id, MatterLightController};
+use crate::groups::{MatterGroupController, MatterTopologyGroup};
 use crate::hub_state::MatterHubData;
 use crate::transport::MatterTransport;
 
@@ -118,6 +122,141 @@ pub fn create_controller(
     Ok(Arc::new(MatterLightController::new(transport, hub_data)))
 }
 
+fn topology_group_specs(state: &SharedState, key: &HubKey) -> Result<Vec<MatterTopologyGroup>> {
+    let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let mut specs = Vec::new();
+
+    for room in state.topology.rooms() {
+        let mut member_device_ids = Vec::new();
+        for room_device in &room.devices {
+            let Some(device) = state.canonical_registry.get(&room_device.device_id) else {
+                continue;
+            };
+            if device.device_type != DeviceType::Light {
+                continue;
+            }
+            let Some(endpoint) = device.preferred_endpoint() else {
+                continue;
+            };
+            if &endpoint.hub_key != key {
+                continue;
+            }
+            if crate::lifecycle::parse_device_id(&endpoint.native_id).is_some() {
+                member_device_ids.push(endpoint.native_id.clone());
+            }
+        }
+
+        member_device_ids.sort();
+        member_device_ids.dedup();
+        if member_device_ids.len() >= 2 {
+            specs.push(MatterTopologyGroup {
+                area_id: room.id.clone(),
+                name: room.name.clone(),
+                member_device_ids,
+            });
+        }
+    }
+
+    specs.sort_by(|left, right| left.area_id.cmp(&right.area_id));
+    Ok(specs)
+}
+
+/// Synchronize generated Matter groups and topology bindings from assigned rooms.
+pub fn sync_topology_groups(state: &SharedState, key: &HubKey) -> Result<()> {
+    if key.hub_type.as_str() != "matter" {
+        return Ok(());
+    }
+
+    let specs = topology_group_specs(state, key)?;
+    info!(
+        target: "sys",
+        "Matter group topology sync: hub={} desired_rooms={}",
+        key,
+        specs.len()
+    );
+
+    let transport = get_transport(state)?;
+    let hub_data = get_hub_data(state)?;
+    let controller = MatterGroupController::new(transport, hub_data.registry.clone());
+    let groups = controller
+        .sync_topology_groups(&specs)
+        .map_err(|error| anyhow::anyhow!("Matter group sync failed: {}", error))?;
+    let desired_area_ids = groups
+        .iter()
+        .map(|group| group.area_id.clone())
+        .collect::<HashSet<_>>();
+
+    let (changed, removed_bindings, updated_bindings) = {
+        let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let mut changed = false;
+        let removed_bindings = state
+            .topology
+            .remove_room_bindings_for_hub_where(key, |binding| {
+                parse_group_control_id(&binding.control_id).is_some()
+                    && !desired_area_ids.contains(&binding.hub_room_id)
+            });
+        if !removed_bindings.is_empty() {
+            changed = true;
+        }
+
+        let mut updated_bindings = Vec::new();
+        for group in &groups {
+            let room_exists = state.topology.rooms().any(|room| room.id == group.area_id);
+            let binding = HubRoomBinding {
+                hub_key: key.clone(),
+                hub_room_id: group.area_id.clone(),
+                control_id: group.control_id.clone(),
+                light_device_ids: group.members.clone(),
+            };
+            if state.topology.upsert_room_binding(&group.area_id, binding) {
+                changed = true;
+                updated_bindings.push((
+                    group.area_id.clone(),
+                    group.control_id.clone(),
+                    group.members.len(),
+                ));
+            } else if !room_exists {
+                warn!(
+                    target: "sys",
+                    "Matter group topology sync: skipping missing room={} control_id={} members={}",
+                    group.area_id,
+                    group.control_id,
+                    group.members.len()
+                );
+            }
+        }
+
+        (changed, removed_bindings, updated_bindings)
+    };
+
+    for room_id in &removed_bindings {
+        info!(
+            target: "sys",
+            "Matter group topology sync: removed stale binding room={}",
+            room_id
+        );
+    }
+    for (room_id, control_id, members) in &updated_bindings {
+        info!(
+            target: "sys",
+            "Matter group topology sync: room={} control_id={} members={}",
+            room_id,
+            control_id,
+            members
+        );
+    }
+    info!(
+        target: "sys",
+        "Matter group topology sync complete: hub={} groups={} topology_changed={} stale_bindings={}",
+        key,
+        groups.len(),
+        changed,
+        removed_bindings.len()
+    );
+
+    Ok(())
+}
+
 struct MatterHubProvider;
 
 impl HubProvider for MatterHubProvider {
@@ -193,6 +332,10 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
 
     fn post_connect(&self, _state: &SharedState, _key: &HubKey) {
         // Capability probing is done during pairing and on explicit probe calls.
+    }
+
+    fn sync_topology_groups(&self, state: &SharedState, key: &HubKey) -> Result<()> {
+        sync_topology_groups(state, key)
     }
 
     fn credentials_interceptor(

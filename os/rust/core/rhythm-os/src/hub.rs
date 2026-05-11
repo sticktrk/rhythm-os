@@ -371,6 +371,14 @@ pub trait ExternalLightHubIntegration: Send + Sync {
     /// identifies which hub instance just connected. Default is a no-op.
     fn post_connect(&self, _state: &SharedState, _key: &HubKey) {}
 
+    /// Optional topology-group synchronization for integrations with generated groups.
+    ///
+    /// Called after topology/canonical reconciliation and before composite
+    /// routing is rebuilt. Default is a no-op.
+    fn sync_topology_groups(&self, _state: &SharedState, _key: &HubKey) -> Result<()> {
+        Ok(())
+    }
+
     /// Optional interceptor for auto-filling credentials on specific platforms.
     ///
     /// Called by the HTTP credential handler before normal processing.
@@ -935,6 +943,8 @@ pub struct IntegrationCallbacks {
     pub get_hub_provider_fn: Arc<dyn Fn(HubType) -> &'static (dyn HubProvider) + Send + Sync>,
     /// Create and register a per-hub controller with the composite (desktop only).
     pub register_controller_fn: Arc<dyn Fn(&SharedState, &HubKey) -> Result<()> + Send + Sync>,
+    /// Synchronize integration-managed topology groups.
+    pub sync_topology_groups_fn: Arc<dyn Fn(&SharedState) -> Result<()> + Send + Sync>,
     /// Start a device pairing session (delegates to integration's `start_pairing`).
     pub start_pairing_fn: Arc<
         dyn Fn(&SharedState, &str, &serde_json::Value) -> Result<crate::pairing::PairingSession>
@@ -1000,6 +1010,25 @@ pub fn integration_callbacks(
         Ok(())
     });
 
+    let sync_topology_groups_fn = Arc::new(move |state: &SharedState| -> Result<()> {
+        let active_hubs = {
+            let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            s.hubs
+                .keys()
+                .filter_map(|key| {
+                    find_integration(integrations, key.hub_type.as_str())
+                        .map(|integration| (key.clone(), integration))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        for (key, integration) in active_hubs {
+            integration.sync_topology_groups(state, &key)?;
+        }
+
+        Ok(())
+    });
+
     let start_pairing_fn = Arc::new(
         move |state: &SharedState,
               hub_type: &str,
@@ -1026,6 +1055,7 @@ pub fn integration_callbacks(
         ensure_runtime_fn,
         get_hub_provider_fn,
         register_controller_fn,
+        sync_topology_groups_fn,
         start_pairing_fn,
         start_unpairing_fn,
         hub_capabilities,

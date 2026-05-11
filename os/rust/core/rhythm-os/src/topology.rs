@@ -118,7 +118,7 @@ pub struct TopologyDeviceNode {
 /// This is the authoritative source-side mapping used for room sync, triage,
 /// reverse lookups, and topology persistence. It is not itself the dispatch
 /// model; dispatch targets are rebuilt from canonical room membership.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HubRoomBinding {
     /// Which hub instance this source room belongs to.
     pub hub_key: HubKey,
@@ -983,6 +983,52 @@ impl RoomTopologyStore {
         self.hub_room_index.retain(|(key, hub_room_id), _| {
             key != &hub_str || current_set_owned.contains(hub_room_id)
         });
+
+        affected
+    }
+
+    /// Insert or replace a source room binding on an existing Rhythm room.
+    pub fn upsert_room_binding(&mut self, rhythm_room_id: &str, binding: HubRoomBinding) -> bool {
+        let Some(room) = self.rooms.get_mut(rhythm_room_id) else {
+            return false;
+        };
+
+        let changed =
+            room.binding_for_hub_room(&binding.hub_key, &binding.hub_room_id) != Some(&binding);
+        if changed {
+            room.upsert_hub_room_binding(binding.clone());
+        }
+
+        self.hub_room_index.insert(
+            (binding.hub_key.to_string(), binding.hub_room_id.clone()),
+            rhythm_room_id.to_string(),
+        );
+        changed
+    }
+
+    /// Remove source room bindings for a hub that match an integration-specific predicate.
+    pub fn remove_room_bindings_for_hub_where<F>(
+        &mut self,
+        hub_key: &HubKey,
+        predicate: F,
+    ) -> Vec<String>
+    where
+        F: Fn(&HubRoomBinding) -> bool,
+    {
+        let mut affected = Vec::new();
+
+        for (room_id, room) in &mut self.rooms {
+            let before = room.hub_room_bindings.len();
+            room.hub_room_bindings
+                .retain(|binding| binding.hub_key != *hub_key || !predicate(binding));
+            if room.hub_room_bindings.len() < before {
+                affected.push(room_id.clone());
+            }
+        }
+
+        if !affected.is_empty() {
+            self.rebuild_indices();
+        }
 
         affected
     }

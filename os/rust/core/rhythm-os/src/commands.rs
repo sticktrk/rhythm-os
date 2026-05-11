@@ -7266,10 +7266,33 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
         }
     }
 
+    sync_topology_groups_for_integrations(state);
     rebuild_composite_routing(state);
     reconcile_scheduled_active_mode_outputs_after_runtime_ready(state);
 
     Ok(())
+}
+
+fn sync_topology_groups_for_integrations(state: &SharedState) {
+    let callback = state
+        .lock()
+        .ok()
+        .and_then(|state| state.sync_topology_groups_fn.clone());
+    let Some(callback) = callback else {
+        return;
+    };
+
+    match callback(state) {
+        Ok(()) => {
+            persist_registry(state);
+            if let Ok(state) = state.lock() {
+                persist_topology(&state);
+            }
+        }
+        Err(error) => {
+            warn!(target: "cmd", "Topology group sync failed: {}", error);
+        }
+    }
 }
 
 fn clear_runtime_node_off_flags(state: &SharedState, node_id: &str) -> Result<()> {

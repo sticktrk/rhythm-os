@@ -73,6 +73,7 @@ fn main() -> Result<()> {
         s.ensure_runtime_fn = Some(callbacks.ensure_runtime_fn);
         s.get_hub_provider_fn = Some(callbacks.get_hub_provider_fn);
         s.register_controller_fn = Some(callbacks.register_controller_fn);
+        s.sync_topology_groups_fn = Some(callbacks.sync_topology_groups_fn);
         s.start_pairing_fn = Some(callbacks.start_pairing_fn);
         s.start_unpairing_fn = Some(callbacks.start_unpairing_fn);
         s.hub_capabilities = callbacks.hub_capabilities.clone();
