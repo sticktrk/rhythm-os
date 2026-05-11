@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
@@ -46,6 +47,31 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
   bool _deletingRoom = false;
 
   RoomDto get room => widget.room;
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshLivePreviewState();
+  }
+
+  @override
+  void didUpdateWidget(RoomSettingsSheet oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.room.id != widget.room.id ||
+        oldWidget.enableLivePreview != widget.enableLivePreview) {
+      _refreshLivePreviewState();
+    }
+  }
+
+  void _refreshLivePreviewState() {
+    if (!widget.enableLivePreview) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(
+        context.read<ServerSyncProvider>().ensureRoomPreviewStateFresh(room.id),
+      );
+    });
+  }
 
   @override
   Widget build(BuildContext context) {

@@ -308,6 +308,16 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                   else if (_canonicalData != null) ...[
                     _buildConnectionsSection(),
                     const SizedBox(height: 16),
+                    if (device.type == RhythmDeviceType.light) ...[
+                      _FlashButton(
+                        deviceLabel: device.displayName,
+                        onFlash: () => context
+                            .read<ServerSyncProvider>()
+                            .api
+                            .flashCanonicalDevice(device.id),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
                     _buildMoveButton(context),
                     if (_matterNativeId != null && canUnpairMatter) ...[
                       const SizedBox(height: 12),
@@ -702,6 +712,241 @@ class _InfoRow extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Action button that asks the server to briefly pulse a Light so the user
+/// can see which physical bulb maps to this entry. Plays a layered "sonar"
+/// animation in sync with the request so the on-screen feedback feels
+/// continuous with the bulb pulsing in the room.
+class _FlashButton extends StatefulWidget {
+  final String deviceLabel;
+  final Future<bool> Function() onFlash;
+
+  const _FlashButton({
+    required this.deviceLabel,
+    required this.onFlash,
+  });
+
+  @override
+  State<_FlashButton> createState() => _FlashButtonState();
+}
+
+class _FlashButtonState extends State<_FlashButton>
+    with SingleTickerProviderStateMixin {
+  static const _amber = Color(0xFFFFB74D);
+  static const _hot = Color(0xFFFFE082);
+
+  late final AnimationController _flash;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _flash = AnimationController(
+      duration: const Duration(milliseconds: 950),
+      vsync: this,
+    );
+  }
+
+  @override
+  void dispose() {
+    _flash.dispose();
+    super.dispose();
+  }
+
+  Future<void> _trigger() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    HapticFeedback.mediumImpact();
+    final animFuture = _flash.forward(from: 0);
+    final success = await widget.onFlash();
+    await animFuture;
+    if (!mounted) return;
+    if (!success) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not identify ${widget.deviceLabel}')),
+      );
+    }
+    _flash.value = 0;
+    setState(() => _busy = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: _busy ? null : _trigger,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedBuilder(
+        animation: _flash,
+        builder: (context, _) {
+          final raw = _flash.value;
+          // Bell curve: 0..0.5 ramp up, 0.5..1.0 fade out.
+          final intensity = raw < 0.5
+              ? Curves.easeOutCubic.transform(raw * 2)
+              : Curves.easeInCubic.transform(1 - (raw - 0.5) * 2);
+          return Container(
+            decoration: BoxDecoration(
+              color: CelestialColors.backgroundDark.withValues(alpha: 0.5),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: Color.lerp(
+                  CelestialColors.orbitRing.withValues(alpha: 0.3),
+                  _hot.withValues(alpha: 0.85),
+                  intensity,
+                )!,
+                width: 1.0 + intensity * 0.6,
+              ),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(13),
+              child: Stack(
+                children: [
+                  if (intensity > 0.01)
+                    Positioned.fill(
+                      child: CustomPaint(
+                        painter: _FlashHaloPainter(
+                          progress: raw,
+                          intensity: intensity,
+                          color: _hot,
+                        ),
+                      ),
+                    ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 14,
+                    ),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: Stack(
+                            alignment: Alignment.center,
+                            children: [
+                              Icon(
+                                Icons.lightbulb_outline,
+                                size: 20,
+                                color: _amber.withValues(
+                                  alpha: 0.9 - intensity * 0.5,
+                                ),
+                                shadows: [
+                                  Shadow(
+                                    color: _hot.withValues(
+                                      alpha: 0.7 * intensity,
+                                    ),
+                                    blurRadius: 16 * intensity,
+                                  ),
+                                ],
+                              ),
+                              Opacity(
+                                opacity: intensity,
+                                child: const Icon(
+                                  Icons.lightbulb,
+                                  color: _hot,
+                                  size: 20,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            _busy ? 'Identifying…' : 'Identify',
+                            style: TextStyle(
+                              color: Color.lerp(
+                                CelestialColors.textPrimary,
+                                _hot,
+                                intensity * 0.5,
+                              ),
+                              fontSize: 15,
+                            ),
+                          ),
+                        ),
+                        Opacity(
+                          opacity: 1.0 - intensity,
+                          child: const Icon(
+                            Icons.chevron_right,
+                            color: CelestialColors.textSecondary,
+                            size: 20,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _FlashHaloPainter extends CustomPainter {
+  final double progress;
+  final double intensity;
+  final Color color;
+
+  _FlashHaloPainter({
+    required this.progress,
+    required this.intensity,
+    required this.color,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // Origin is the icon's center: padding 16 + half-icon 10.
+    final origin = Offset(26, size.height / 2);
+    final maxR = size.width;
+
+    // Radial bloom that brightens the whole button from the icon outward.
+    final bloomR = maxR * (0.35 + progress * 1.1);
+    final bloomPaint = Paint()
+      ..shader = RadialGradient(
+        colors: [
+          color.withValues(alpha: 0.30 * intensity),
+          color.withValues(alpha: 0.10 * intensity),
+          color.withValues(alpha: 0.0),
+        ],
+        stops: const [0.0, 0.45, 1.0],
+      ).createShader(Rect.fromCircle(center: origin, radius: bloomR));
+    canvas.drawRect(Offset.zero & size, bloomPaint);
+
+    // Leading sonar ring.
+    _drawRing(canvas, origin, maxR, progress, 0.65, 1.6);
+
+    // Trailing ring (delayed start) for layered depth.
+    if (progress > 0.18) {
+      final p2 = ((progress - 0.18) / 0.82).clamp(0.0, 1.0);
+      _drawRing(canvas, origin, maxR, p2, 0.40, 1.0);
+    }
+  }
+
+  void _drawRing(
+    Canvas canvas,
+    Offset origin,
+    double maxR,
+    double p,
+    double startAlpha,
+    double width,
+  ) {
+    final r = maxR * (0.05 + p * 0.95);
+    final fade = (1 - p) * (1 - p);
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = width * fade
+      ..color = color.withValues(alpha: startAlpha * fade);
+    canvas.drawCircle(origin, r, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _FlashHaloPainter old) =>
+      old.progress != progress ||
+      old.intensity != intensity ||
+      old.color != color;
 }
 
 class _ConnectionRow extends StatelessWidget {

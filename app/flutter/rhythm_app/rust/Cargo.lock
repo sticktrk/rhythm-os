@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-core"
-version = "0.4.191-beta"
+version = "0.4.192-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1278,7 +1278,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-devices"
-version = "0.4.191-beta"
+version = "0.4.192-beta"
 dependencies = [
  "serde",
  "serde_json",
@@ -1286,7 +1286,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-hue"
-version = "0.4.191-beta"
+version = "0.4.192-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1305,7 +1305,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-os"
-version = "0.4.191-beta"
+version = "0.4.192-beta"
 dependencies = [
  "anyhow",
  "axum",
@@ -1328,7 +1328,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-profile"
-version = "0.4.191-beta"
+version = "0.4.192-beta"
 dependencies = [
  "libm",
  "serde",

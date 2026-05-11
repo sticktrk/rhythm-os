@@ -10,24 +10,12 @@ import '../screens/hubs/matter_add_method.dart';
 import '../screens/hubs/matter_pairing_flow.dart';
 import 'beta_badge.dart';
 import 'solar_orbit.dart';
-import 'bottom_nav_overlay.dart';
 
 /// Shown when the server is connected but has no hub paired (hub.type == "none").
 ///
 /// Offers Home Assistant, Hue, and Matter pairing options.
 class HubPickerScreen extends StatefulWidget {
-  final VoidCallback onSettingsTap;
-  final VoidCallback onSunPositionTap;
-  final VoidCallback? onAddDevicesTap;
-  final VoidCallback? onReportBugTap;
-
-  const HubPickerScreen({
-    super.key,
-    required this.onSettingsTap,
-    required this.onSunPositionTap,
-    this.onAddDevicesTap,
-    this.onReportBugTap,
-  });
+  const HubPickerScreen({super.key});
 
   @override
   State<HubPickerScreen> createState() => _HubPickerScreenState();
@@ -210,28 +198,11 @@ class _HubPickerScreenState extends State<HubPickerScreen>
                           showBetaBadge: true,
                           onTap: _configureMatter,
                         ),
-                        // Space for bottom nav
-                        const SizedBox(height: 100),
+                        const SizedBox(height: 24),
                       ],
                     );
                   },
                 ),
-              ),
-            ),
-          ),
-          // Bottom overlay
-          Positioned(
-            bottom: 0,
-            left: 0,
-            right: 0,
-            child: SafeArea(
-              child: BottomNavOverlay(
-                currentPage: 0,
-                totalPages: 1,
-                onSettingsTap: widget.onSettingsTap,
-                onSunPositionTap: widget.onSunPositionTap,
-                onAddDevicesTap: widget.onAddDevicesTap,
-                onReportBugTap: widget.onReportBugTap,
               ),
             ),
           ),

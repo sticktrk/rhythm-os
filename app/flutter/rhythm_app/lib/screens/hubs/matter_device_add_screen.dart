@@ -1,13 +1,18 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart' show HubEndpoint;
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
+import '../../providers/server_sync_provider.dart';
 import '../../services/demo_server_api.dart';
 import '../../services/hue/hue_service_locator.dart';
 import '../../services/matter_setup_payload.dart';
 import '../../widgets/solar_orbit.dart';
+import '../../widgets/stage_timeline.dart';
 import 'matter_add_method.dart';
 import 'matter_qr_scanner_screen.dart';
 
@@ -87,14 +92,19 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   final _setupPayloadController = TextEditingController();
   late final AnimationController _pulseController;
   late final RhythmMatterApi _pairingApi;
+  late final String _sessionId;
 
   _PairingPhase _phase = _PairingPhase.input;
   String? _errorText;
+  StreamSubscription<RhythmPairingProgress>? _progressSub;
+  RhythmPairingProgress? _latestProgress;
 
   @override
   void initState() {
     super.initState();
     _pairingApi = RhythmMatterApi(baseUrl: widget.endpoint.baseUrl);
+    _sessionId =
+        'matter-pair-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2000),
@@ -107,7 +117,28 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     _setupPayloadController.removeListener(_handlePayloadChanged);
     _setupPayloadController.dispose();
     _pulseController.dispose();
+    _progressSub?.cancel();
     super.dispose();
+  }
+
+  void _subscribeToPairingProgress() {
+    _progressSub?.cancel();
+    final connection = context.read<ServerSyncProvider?>()?.connection;
+    if (connection == null) return;
+    _progressSub = connection.pairingProgressEvents.listen((event) {
+      if (!mounted) return;
+      if (event.sessionId != null && event.sessionId != _sessionId) return;
+      if (event.hubType != 'matter') return;
+      setState(() {
+        _latestProgress = event;
+      });
+    });
+  }
+
+  void _clearPairingProgress() {
+    _progressSub?.cancel();
+    _progressSub = null;
+    _latestProgress = null;
   }
 
   bool get _supportsQrScan {
@@ -152,9 +183,11 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
 
     FocusScope.of(context).unfocus();
     HapticFeedback.mediumImpact();
+    _subscribeToPairingProgress();
     setState(() {
       _phase = _PairingPhase.pairing;
       _errorText = null;
+      _latestProgress = null;
     });
 
     if (HueServiceLocator.isDemoMode) {
@@ -188,6 +221,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       rendezvous: 'auto',
       network: 'wifi',
       receiveTimeout: const Duration(seconds: 45),
+      sessionId: _sessionId,
     );
 
     if (!mounted) return;
@@ -259,6 +293,8 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   }
 
   void _showPairingError(String message, {String? detail}) {
+    _progressSub?.cancel();
+    _progressSub = null;
     setState(() {
       _phase = _PairingPhase.failed;
       _errorText =
@@ -267,6 +303,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   }
 
   void _resetToInput() {
+    _clearPairingProgress();
     setState(() {
       _phase = _PairingPhase.input;
       _errorText = null;
@@ -566,130 +603,187 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   }
 
   Widget _buildPairingPhase() {
+    final progress = _latestProgress;
+    final activeIndex = _matterPairingActiveIndex(progress);
+    final activeMessage = _matterPairingActiveMessage(progress);
+
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const SizedBox(height: 60),
-        AnimatedBuilder(
-          animation: _pulseController,
-          builder: (context, child) {
-            final pulse = _pulseController.value;
-            return SizedBox(
-              width: 140,
-              height: 140,
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  Container(
-                    width: 140,
-                    height: 140,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color: _teal.withValues(alpha: 0.1 + pulse * 0.15),
-                        width: 1,
-                      ),
-                    ),
-                  ),
-                  Container(
-                    width: 100,
-                    height: 100,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color: _teal.withValues(alpha: 0.15 + pulse * 0.2),
-                        width: 1.5,
-                      ),
-                    ),
-                  ),
-                  Container(
-                    width: 64,
-                    height: 64,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: [_teal, _tealDeep],
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: _teal.withValues(alpha: 0.3 + pulse * 0.2),
-                          blurRadius: 20 + pulse * 10,
-                          spreadRadius: pulse * 4,
+        const SizedBox(height: 48),
+        Center(
+          child: AnimatedBuilder(
+            animation: _pulseController,
+            builder: (context, child) {
+              final pulse = _pulseController.value;
+              return SizedBox(
+                width: 140,
+                height: 140,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    Container(
+                      width: 140,
+                      height: 140,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: _teal.withValues(alpha: 0.08 + pulse * 0.12),
+                          width: 1,
                         ),
-                      ],
+                      ),
                     ),
-                    child: const Icon(
-                      Icons.memory_outlined,
-                      color: Colors.white,
-                      size: 28,
+                    Container(
+                      width: 100,
+                      height: 100,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: _teal.withValues(alpha: 0.14 + pulse * 0.18),
+                          width: 1.5,
+                        ),
+                      ),
                     ),
-                  ),
-                ],
-              ),
-            );
-          },
-        ),
-        const SizedBox(height: 32),
-        Text(
-          switch (widget.addMethod) {
-            MatterAddMethod.automatic => 'Adding Device...',
-            MatterAddMethod.onNetworkSetupCode => 'Adding Device...',
-            MatterAddMethod.bleWifiCommissioning => 'Adding Device...',
-          },
-          style: TextStyle(
-            color: CelestialColors.textPrimary,
-            fontSize: 20,
-            fontWeight: FontWeight.w600,
+                    Container(
+                      width: 64,
+                      height: 64,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: const LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [_teal, _tealDeep],
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: _teal.withValues(alpha: 0.3 + pulse * 0.2),
+                            blurRadius: 20 + pulse * 10,
+                            spreadRadius: pulse * 4,
+                          ),
+                        ],
+                      ),
+                      child: const Icon(
+                        Icons.memory_outlined,
+                        color: Colors.white,
+                        size: 28,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
           ),
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 28),
         Text(
-          switch (widget.addMethod) {
-            MatterAddMethod.automatic =>
-              'Keep this screen open while Rhythm adds the device.',
-            MatterAddMethod.onNetworkSetupCode =>
-              'Keep this screen open while Rhythm finds the device and adds it.',
-            MatterAddMethod.bleWifiCommissioning =>
-              'Keep this screen open while Rhythm completes setup and adds the device.',
-          },
+          'Adding Device',
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+            color: CelestialColors.textPrimary,
+            fontSize: 22,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.2,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          activeMessage ??
+              switch (widget.addMethod) {
+                MatterAddMethod.automatic =>
+                  'Keep this screen open while Rhythm adds the device.',
+                MatterAddMethod.onNetworkSetupCode =>
+                  'Keep this screen open while Rhythm finds the device and adds it.',
+                MatterAddMethod.bleWifiCommissioning =>
+                  'Keep this screen open while Rhythm completes setup and adds the device.',
+              },
           textAlign: TextAlign.center,
           style: TextStyle(
             color: CelestialColors.textSecondary.withValues(alpha: 0.7),
             fontSize: 14,
-            height: 1.4,
+            height: 1.45,
           ),
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 28),
+        Container(
+          padding: const EdgeInsets.fromLTRB(20, 22, 20, 22),
+          decoration: BoxDecoration(
+            color: CelestialColors.backgroundCard.withValues(alpha: 0.55),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(
+              color: _teal.withValues(alpha: 0.12),
+              width: 1,
+            ),
+          ),
+          child: StageTimeline(
+            stages: const [
+              StageTimelineItem(
+                label: 'Sending request',
+                icon: Icons.outbox_outlined,
+              ),
+              StageTimelineItem(
+                label: 'Searching for device',
+                icon: Icons.radar_outlined,
+              ),
+              StageTimelineItem(
+                label: 'Commissioning',
+                icon: Icons.verified_user_outlined,
+              ),
+              StageTimelineItem(
+                label: 'Finalizing',
+                icon: Icons.check_circle_outline,
+              ),
+            ],
+            activeIndex: activeIndex,
+            activeMessage: progress?.message,
+            failed: progress?.stage == RhythmPairingStage.failed,
+            accent: _teal,
+          ),
+        ),
+        const SizedBox(height: 18),
         Text(
           _setupPayload,
           textAlign: TextAlign.center,
           style: TextStyle(
-            color: CelestialColors.textSecondary.withValues(alpha: 0.48),
-            fontSize: 12,
-            height: 1.35,
+            color: CelestialColors.textSecondary.withValues(alpha: 0.4),
+            fontSize: 11.5,
+            fontFamily: 'monospace',
+            letterSpacing: 0.3,
           ),
         ),
-        const SizedBox(height: 24),
-        _buildInfoCard(
-          title: 'This request is synchronous',
-          lines: [
-            'Adding usually completes in about 15-30 seconds.',
-            'No separate hub connection step is needed in the app.',
-          ],
-        ),
-        const SizedBox(height: 32),
-        SizedBox(
-          width: 20,
-          height: 20,
-          child: CircularProgressIndicator(
-            strokeWidth: 2,
-            valueColor: AlwaysStoppedAnimation(_teal.withValues(alpha: 0.6)),
-          ),
-        ),
-        const SizedBox(height: 40),
+        const SizedBox(height: 28),
       ],
     );
+  }
+
+  /// Map the server's `PairingStage` onto our 4-step UI timeline.
+  ///
+  /// 0 = Sending request, 1 = Searching, 2 = Commissioning, 3 = Finalizing.
+  /// Returns 4 (== stages.length) when complete.
+  int _matterPairingActiveIndex(RhythmPairingProgress? progress) {
+    if (progress == null) return 0;
+    return switch (progress.stage) {
+      RhythmPairingStage.requested => 0,
+      RhythmPairingStage.hubConnecting => 1,
+      RhythmPairingStage.searching => 1,
+      RhythmPairingStage.connecting => 1,
+      RhythmPairingStage.commissioning => 2,
+      RhythmPairingStage.finalizing => 3,
+      RhythmPairingStage.complete => 4,
+      RhythmPairingStage.failed => _matterFailureIndex(progress),
+    };
+  }
+
+  int _matterFailureIndex(RhythmPairingProgress progress) {
+    // We don't know which specific stage failed, so attribute the failure to
+    // the most likely stage based on whether a device was found.
+    return progress.device != null ? 3 : 2;
+  }
+
+  String? _matterPairingActiveMessage(RhythmPairingProgress? progress) {
+    if (progress == null) return null;
+    final trimmed = progress.message.trim();
+    if (trimmed.isEmpty) return null;
+    return trimmed;
   }
 
   Widget _buildFailurePhase() {

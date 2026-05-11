@@ -14,9 +14,12 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmHubInfo,
         RhythmHubStartupRetry,
         RhythmHubStartupRetryStatus,
+        RhythmOtaUpdateProgress,
+        RhythmOtaUpdateStage,
         RhythmRoom,
         RoomModeState;
 import '../../widgets/solar_orbit.dart';
+import '../../widgets/stage_timeline.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../providers/home_provider.dart';
 import '../../providers/room_provider.dart';
@@ -959,7 +962,11 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               );
               _otaService.startUpdate(widget.hub.endpoint.host,
                   port: widget.hub.endpoint.port);
-              _OtaUpdateOverlay.show(context, otaService: _otaService);
+              _OtaUpdateOverlay.show(
+                context,
+                otaService: _otaService,
+                connection: context.read<ServerSyncProvider>().connection,
+              );
             },
           ),
         ];
@@ -2570,15 +2577,22 @@ class _RhythmServerHubManagementSectionState
 
 class _OtaUpdateOverlay extends StatefulWidget {
   final OtaService otaService;
+  final RhythmConnection? connection;
 
-  const _OtaUpdateOverlay({required this.otaService});
+  const _OtaUpdateOverlay({required this.otaService, this.connection});
 
-  static Future<void> show(BuildContext context,
-      {required OtaService otaService}) {
+  static Future<void> show(
+    BuildContext context, {
+    required OtaService otaService,
+    RhythmConnection? connection,
+  }) {
     return Navigator.of(context, rootNavigator: true).push(
       PageRouteBuilder(
         opaque: true,
-        pageBuilder: (_, __, ___) => _OtaUpdateOverlay(otaService: otaService),
+        pageBuilder: (_, __, ___) => _OtaUpdateOverlay(
+          otaService: otaService,
+          connection: connection,
+        ),
         transitionsBuilder: (_, animation, __, child) {
           return FadeTransition(opacity: animation, child: child);
         },
@@ -2597,6 +2611,12 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
   late Animation<double> _pulseAnimation;
   String? _targetVersionLabel;
   bool _isBundleRepair = false;
+  StreamSubscription<RhythmOtaUpdateProgress>? _otaProgressSub;
+  StreamSubscription<RhythmConnectionState>? _connectionStateSub;
+  RhythmOtaUpdateProgress? _latestProgress;
+  RhythmConnectionState? _connectionState;
+  bool _awaitingPostOtaConnection = false;
+  bool _sawPostOtaConnected = false;
 
   static const _teal = Color(0xFF00BCD4);
 
@@ -2605,6 +2625,7 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
     super.initState();
     widget.otaService.addListener(_onStateChanged);
     _syncOverlayMetadata();
+    _syncPostOtaConnectionGate();
 
     _pulseController = AnimationController(
       duration: const Duration(milliseconds: 2000),
@@ -2614,17 +2635,41 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
     _pulseAnimation = Tween<double>(begin: 0.3, end: 0.8).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
+
+    _otaProgressSub =
+        widget.connection?.otaUpdateProgressEvents.listen((event) {
+      if (!mounted) return;
+      setState(() {
+        _latestProgress = event;
+      });
+    });
+
+    _connectionState = widget.connection?.connectionState;
+    _connectionStateSub =
+        widget.connection?.connectionStateStream.listen((state) {
+      if (!mounted) return;
+      setState(() {
+        _connectionState = state;
+        if (_awaitingPostOtaConnection &&
+            state == RhythmConnectionState.connected) {
+          _sawPostOtaConnected = true;
+        }
+      });
+    });
   }
 
   @override
   void dispose() {
     widget.otaService.removeListener(_onStateChanged);
+    _otaProgressSub?.cancel();
+    _connectionStateSub?.cancel();
     _pulseController.dispose();
     super.dispose();
   }
 
   void _onStateChanged() {
     _syncOverlayMetadata();
+    _syncPostOtaConnectionGate();
     if (mounted) setState(() {});
   }
 
@@ -2645,6 +2690,18 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
     }
 
     return null;
+  }
+
+  void _syncPostOtaConnectionGate() {
+    if (widget.connection == null) {
+      _sawPostOtaConnected = true;
+      return;
+    }
+    if (widget.otaService.state == OtaState.complete &&
+        !_awaitingPostOtaConnection) {
+      _awaitingPostOtaConnection = true;
+      _sawPostOtaConnected = false;
+    }
   }
 
   String _buildProgressMessage({required bool isDownloading}) {
@@ -2695,8 +2752,22 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
 
   bool get _isFinished {
     final state = widget.otaService.state;
-    return state == OtaState.complete || state == OtaState.error;
+    return state == OtaState.error ||
+        (state == OtaState.complete && _serverReady);
   }
+
+  bool get _serverReady {
+    final connection = widget.connection;
+    if (connection == null) return true;
+    if (widget.otaService.state == OtaState.complete) {
+      return _sawPostOtaConnected;
+    }
+    return (_connectionState ?? connection.connectionState) ==
+        RhythmConnectionState.connected;
+  }
+
+  bool get _waitingForServerReady =>
+      widget.otaService.state == OtaState.complete && !_serverReady;
 
   void _dismiss() {
     Navigator.of(context).pop();
@@ -2727,268 +2798,261 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
 
   Widget _buildContent() {
     switch (widget.otaService.state) {
-      case OtaState.downloading:
-      case OtaState.uploading:
-        return _buildProgress();
-      case OtaState.flashing:
-        return _buildFlashing();
-      case OtaState.rebooting:
-        return _buildRebooting();
       case OtaState.complete:
+        if (_waitingForServerReady) {
+          return _buildStagedProgress(waitingForServerReady: true);
+        }
         return _buildComplete();
       case OtaState.error:
         return _buildError();
       default:
-        return _buildProgress();
+        return _buildStagedProgress();
     }
   }
 
-  Widget _buildProgress() {
-    final isDownloading = widget.otaService.state == OtaState.downloading;
-    final pct = widget.otaService.progress;
-    const title = 'Updating Device';
-    final message = _buildProgressMessage(isDownloading: isDownloading);
+  /// 5-stage timeline for the server self-update flow:
+  ///   0 = Checking, 1 = Downloading (with %), 2 = Verifying,
+  ///   3 = Installing, 4 = Restarting.
+  int _otaActiveStageIndex() {
+    final progress = _latestProgress;
+    if (progress != null) {
+      final mapped = switch (progress.stage) {
+        RhythmOtaUpdateStage.checking => 0,
+        RhythmOtaUpdateStage.updateAvailable => 0,
+        RhythmOtaUpdateStage.upToDate => 0,
+        RhythmOtaUpdateStage.downloading => 1,
+        RhythmOtaUpdateStage.verifying => 2,
+        RhythmOtaUpdateStage.staging => 3,
+        RhythmOtaUpdateStage.installing => 3,
+        RhythmOtaUpdateStage.finalizing => 3,
+        RhythmOtaUpdateStage.restarting => 4,
+        // Server doesn't echo which stage failed, so attribute it to whatever
+        // we last knew about — that gives the timeline a sensible failed dot.
+        RhythmOtaUpdateStage.failed => _lastObservedActiveIndex,
+      };
+      _lastObservedActiveIndex = mapped;
+      return mapped;
+    }
+    // Fall back to OtaService coarse state.
+    final fromCoarse = switch (widget.otaService.state) {
+      OtaState.checking => 0,
+      OtaState.downloading => 1,
+      OtaState.uploading => 3,
+      OtaState.flashing => 3,
+      OtaState.rebooting => 4,
+      _ => 0,
+    };
+    _lastObservedActiveIndex = fromCoarse;
+    return fromCoarse;
+  }
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        AnimatedBuilder(
-          animation: _pulseAnimation,
-          builder: (context, _) {
-            return Container(
-              width: 80,
-              height: 80,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _teal.withValues(alpha: 0.15),
-                boxShadow: [
-                  BoxShadow(
-                    color:
-                        _teal.withValues(alpha: _pulseAnimation.value * 0.25),
-                    blurRadius: 30,
-                    spreadRadius: 4,
+  int _lastObservedActiveIndex = 0;
+
+  String? _otaActiveMessage(int activeIndex) {
+    final progress = _latestProgress;
+    if (progress != null && progress.message.trim().isNotEmpty) {
+      return progress.message.trim();
+    }
+    // Sensible fallbacks per stage when no SSE event has arrived yet.
+    return switch (activeIndex) {
+      0 => 'Checking for updates',
+      1 => _buildProgressMessage(isDownloading: true),
+      2 => 'Verifying download integrity',
+      3 => _buildProgressMessage(isDownloading: false),
+      4 => _buildRebootingMessage(),
+      _ => null,
+    };
+  }
+
+  String _otaTitle(int activeIndex) {
+    if (activeIndex == 4) return 'Restarting Server';
+    return 'Updating Server';
+  }
+
+  IconData _otaHeroIcon(int activeIndex) {
+    return switch (activeIndex) {
+      0 => Icons.search_rounded,
+      1 => Icons.cloud_download_outlined,
+      2 => Icons.verified_outlined,
+      3 => Icons.system_update,
+      4 => Icons.restart_alt_rounded,
+      _ => Icons.system_update,
+    };
+  }
+
+  /// Format `total / downloaded` bytes as e.g. `45.2 / 62.8 MB`.
+  String? _bytesLabel() {
+    final p = _latestProgress;
+    if (p == null) return null;
+    final downloaded = p.downloadedBytes;
+    final total = p.totalBytes;
+    if (downloaded == null) return null;
+    if (total == null || total <= 0) {
+      return _formatBytes(downloaded);
+    }
+    final d = _formatBytesValue(downloaded, total);
+    final t = _formatBytes(total);
+    return '$d / $t';
+  }
+
+  static const _kb = 1024;
+  static const _mb = 1024 * 1024;
+  static const _gb = 1024 * 1024 * 1024;
+
+  static String _formatBytes(int bytes) {
+    if (bytes >= _gb) return '${(bytes / _gb).toStringAsFixed(2)} GB';
+    if (bytes >= _mb) return '${(bytes / _mb).toStringAsFixed(1)} MB';
+    if (bytes >= _kb) return '${(bytes / _kb).toStringAsFixed(0)} KB';
+    return '$bytes B';
+  }
+
+  static String _formatBytesValue(int value, int total) {
+    if (total >= _gb) return (value / _gb).toStringAsFixed(2);
+    if (total >= _mb) return (value / _mb).toStringAsFixed(1);
+    if (total >= _kb) return (value / _kb).toStringAsFixed(0);
+    return value.toString();
+  }
+
+  Widget _buildStagedProgress({bool waitingForServerReady = false}) {
+    final activeIndex = waitingForServerReady ? 4 : _otaActiveStageIndex();
+    final activeMessage = waitingForServerReady
+        ? 'Waiting for the server connection to finish restoring'
+        : _otaActiveMessage(activeIndex);
+    final title =
+        waitingForServerReady ? 'Reconnecting Server' : _otaTitle(activeIndex);
+    final heroIcon =
+        waitingForServerReady ? Icons.sync_rounded : _otaHeroIcon(activeIndex);
+    final percent = !waitingForServerReady && activeIndex == 1
+        ? _latestProgress?.percent
+        : null;
+    final bytesLabel =
+        !waitingForServerReady && activeIndex == 1 ? _bytesLabel() : null;
+
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Center(
+            child: AnimatedBuilder(
+              animation: _pulseAnimation,
+              builder: (context, _) {
+                return Container(
+                  width: 92,
+                  height: 92,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: RadialGradient(
+                      colors: [
+                        _teal.withValues(alpha: 0.18),
+                        _teal.withValues(alpha: 0.04),
+                      ],
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: _teal.withValues(
+                            alpha: _pulseAnimation.value * 0.28),
+                        blurRadius: 32,
+                        spreadRadius: 4,
+                      ),
+                    ],
                   ),
-                ],
-              ),
-              child: Icon(
-                isDownloading
-                    ? Icons.cloud_download_outlined
-                    : Icons.system_update,
-                color: _teal,
-                size: 36,
-              ),
-            );
-          },
-        ),
-        const SizedBox(height: 32),
-        Text(
-          title,
-          style: TextStyle(
-            color: CelestialColors.textPrimary,
-            fontSize: 22,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          message,
-          style: const TextStyle(
-            color: CelestialColors.textSecondary,
-            fontSize: 15,
-          ),
-        ),
-        const SizedBox(height: 32),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(4),
-          child: LinearProgressIndicator(
-            value: pct != null ? pct / 100.0 : null,
-            backgroundColor: _teal.withValues(alpha: 0.1),
-            valueColor: const AlwaysStoppedAnimation(_teal),
-            minHeight: 8,
-          ),
-        ),
-        if (pct != null) ...[
-          const SizedBox(height: 12),
-          Text(
-            '$pct%',
-            style: const TextStyle(
-              color: _teal,
-              fontSize: 20,
-              fontWeight: FontWeight.w600,
-              fontFamily: 'monospace',
+                  child: Icon(heroIcon, color: _teal, size: 38),
+                );
+              },
             ),
+          ),
+          const SizedBox(height: 28),
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: CelestialColors.textPrimary,
+              fontSize: 22,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.2,
+            ),
+          ),
+          if (_targetVersionLabel != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              _isBundleRepair
+                  ? 'Repairing $_targetVersionLabel'
+                  : 'Installing $_targetVersionLabel',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: _teal.withValues(alpha: 0.85),
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                fontFamily: 'monospace',
+                letterSpacing: 0.4,
+              ),
+            ),
+          ],
+          const SizedBox(height: 28),
+          Container(
+            padding: const EdgeInsets.fromLTRB(20, 22, 20, 22),
+            decoration: BoxDecoration(
+              color: CelestialColors.backgroundCard.withValues(alpha: 0.6),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(
+                color: _teal.withValues(alpha: 0.12),
+                width: 1,
+              ),
+            ),
+            child: StageTimeline(
+              stages: const [
+                StageTimelineItem(
+                  label: 'Checking for updates',
+                  icon: Icons.search_rounded,
+                ),
+                StageTimelineItem(
+                  label: 'Downloading',
+                  icon: Icons.cloud_download_outlined,
+                ),
+                StageTimelineItem(
+                  label: 'Verifying',
+                  icon: Icons.fingerprint_rounded,
+                ),
+                StageTimelineItem(
+                  label: 'Installing',
+                  icon: Icons.settings_suggest_outlined,
+                ),
+                StageTimelineItem(
+                  label: 'Restarting',
+                  icon: Icons.restart_alt_rounded,
+                ),
+              ],
+              activeIndex: activeIndex,
+              activeMessage: activeMessage,
+              activePercent: percent,
+              activeBytesLabel: bytesLabel,
+              failed: !waitingForServerReady &&
+                  _latestProgress?.stage == RhythmOtaUpdateStage.failed,
+              accent: _teal,
+            ),
+          ),
+          const SizedBox(height: 24),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                Icons.info_outline_rounded,
+                color: CelestialColors.textSecondary.withValues(alpha: 0.4),
+                size: 16,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'Do not close the app',
+                style: TextStyle(
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.4),
+                  fontSize: 13,
+                ),
+              ),
+            ],
           ),
         ],
-        const SizedBox(height: 40),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.info_outline_rounded,
-              color: CelestialColors.textSecondary.withValues(alpha: 0.4),
-              size: 16,
-            ),
-            const SizedBox(width: 8),
-            Text(
-              'Do not close the app',
-              style: TextStyle(
-                color: CelestialColors.textSecondary.withValues(alpha: 0.4),
-                fontSize: 13,
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildFlashing() {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        AnimatedBuilder(
-          animation: _pulseAnimation,
-          builder: (context, _) {
-            return Container(
-              width: 80,
-              height: 80,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _teal.withValues(alpha: 0.15),
-                boxShadow: [
-                  BoxShadow(
-                    color:
-                        _teal.withValues(alpha: _pulseAnimation.value * 0.25),
-                    blurRadius: 30,
-                    spreadRadius: 4,
-                  ),
-                ],
-              ),
-              child: Center(
-                child: SizedBox(
-                  width: 32,
-                  height: 32,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 3,
-                    valueColor: AlwaysStoppedAnimation(_teal),
-                  ),
-                ),
-              ),
-            );
-          },
-        ),
-        const SizedBox(height: 32),
-        const Text(
-          'Updating Device',
-          style: TextStyle(
-            color: CelestialColors.textPrimary,
-            fontSize: 22,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          _buildProgressMessage(isDownloading: false),
-          style: const TextStyle(
-            color: CelestialColors.textSecondary,
-            fontSize: 15,
-          ),
-        ),
-        const SizedBox(height: 40),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.info_outline_rounded,
-              color: CelestialColors.textSecondary.withValues(alpha: 0.4),
-              size: 16,
-            ),
-            const SizedBox(width: 8),
-            Text(
-              'Do not close the app',
-              style: TextStyle(
-                color: CelestialColors.textSecondary.withValues(alpha: 0.4),
-                fontSize: 13,
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildRebooting() {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        AnimatedBuilder(
-          animation: _pulseAnimation,
-          builder: (context, _) {
-            return Container(
-              width: 80,
-              height: 80,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _teal.withValues(alpha: 0.15),
-                boxShadow: [
-                  BoxShadow(
-                    color: _teal.withValues(alpha: _pulseAnimation.value * 0.2),
-                    blurRadius: 30,
-                    spreadRadius: 4,
-                  ),
-                ],
-              ),
-              child: Center(
-                child: SizedBox(
-                  width: 32,
-                  height: 32,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 3,
-                    valueColor: AlwaysStoppedAnimation(_teal),
-                  ),
-                ),
-              ),
-            );
-          },
-        ),
-        const SizedBox(height: 32),
-        const Text(
-          'Device restarting',
-          style: TextStyle(
-            color: CelestialColors.textPrimary,
-            fontSize: 22,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          _buildRebootingMessage(),
-          style: const TextStyle(
-            color: CelestialColors.textSecondary,
-            fontSize: 15,
-          ),
-          textAlign: TextAlign.center,
-        ),
-        const SizedBox(height: 40),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.info_outline_rounded,
-              color: CelestialColors.textSecondary.withValues(alpha: 0.4),
-              size: 16,
-            ),
-            const SizedBox(width: 8),
-            Text(
-              'Do not close the app',
-              style: TextStyle(
-                color: CelestialColors.textSecondary.withValues(alpha: 0.4),
-                fontSize: 13,
-              ),
-            ),
-          ],
-        ),
-      ],
+      ),
     );
   }
 

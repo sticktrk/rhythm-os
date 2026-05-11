@@ -4,7 +4,6 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/models/hub.dart';
 import '../widgets/solar_orbit.dart';
-import '../widgets/bottom_nav_overlay.dart';
 import '../providers/home_provider.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
@@ -13,22 +12,13 @@ import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnection, RhythmConnect
 /// Full-screen state shown when a paired rhythm-server is unreachable.
 ///
 /// Displays a broken orbit animation, server address, reconnection status,
-/// and actions to retry or forget the server. Settings remain accessible
-/// via the bottom nav overlay.
+/// and actions to retry or forget the server.
 class ServerDisconnectedScreen extends StatefulWidget {
   final Hub serverHub;
-  final VoidCallback onSettingsTap;
-  final VoidCallback onSunPositionTap;
-  final VoidCallback? onAddDevicesTap;
-  final VoidCallback? onReportBugTap;
 
   const ServerDisconnectedScreen({
     super.key,
     required this.serverHub,
-    required this.onSettingsTap,
-    required this.onSunPositionTap,
-    this.onAddDevicesTap,
-    this.onReportBugTap,
   });
 
   @override
@@ -182,26 +172,9 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
                       _buildRetryButton(),
                       const SizedBox(height: 16),
                       _buildForgetButton(),
-                      const SizedBox(height: 100), // Space for bottom nav
+                      const SizedBox(height: 24),
                     ],
                   ),
-                ),
-              ),
-            ),
-
-            // Bottom nav overlay
-            Positioned(
-              bottom: 0,
-              left: 0,
-              right: 0,
-              child: SafeArea(
-                child: BottomNavOverlay(
-                  currentPage: 0,
-                  totalPages: 1,
-                  onSettingsTap: widget.onSettingsTap,
-                  onSunPositionTap: widget.onSunPositionTap,
-                  onAddDevicesTap: widget.onAddDevicesTap,
-                  onReportBugTap: widget.onReportBugTap,
                 ),
               ),
             ),

@@ -159,7 +159,8 @@ class _HardwareGateScreen extends StatefulWidget {
   final VoidCallback onYes;
   final VoidCallback onNo;
 
-  const _HardwareGateScreen({super.key, required this.onYes, required this.onNo});
+  const _HardwareGateScreen(
+      {super.key, required this.onYes, required this.onNo});
 
   @override
   State<_HardwareGateScreen> createState() => _HardwareGateScreenState();
@@ -218,55 +219,69 @@ class _HardwareGateScreenState extends State<_HardwareGateScreen>
           SafeArea(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(28, 20, 28, 28),
-              child: Column(
-                children: [
-                  _Reveal(
-                    controller: _reveal,
-                    start: 0.0,
-                    child: const _Eyebrow(text: 'STEP 01  ·  HARDWARE'),
-                  ),
-                  const Spacer(flex: 4),
-                  _Reveal(
-                    controller: _reveal,
-                    start: 0.10,
-                    child: AnimatedBuilder(
-                      animation: _pulse,
-                      builder: (context, _) =>
-                          _LightBoxBeaconMini(beat: _pulse.value),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  return SingleChildScrollView(
+                    child: ConstrainedBox(
+                      constraints:
+                          BoxConstraints(minHeight: constraints.maxHeight),
+                      child: IntrinsicHeight(
+                        child: Column(
+                          children: [
+                            _Reveal(
+                              controller: _reveal,
+                              start: 0.0,
+                              child: const _Eyebrow(
+                                text: 'STEP 01  ·  HARDWARE',
+                              ),
+                            ),
+                            const Spacer(flex: 4),
+                            _Reveal(
+                              controller: _reveal,
+                              start: 0.10,
+                              child: AnimatedBuilder(
+                                animation: _pulse,
+                                builder: (context, _) =>
+                                    _LightBoxBeaconMini(beat: _pulse.value),
+                              ),
+                            ),
+                            const SizedBox(height: 36),
+                            _Reveal(
+                              controller: _reveal,
+                              start: 0.22,
+                              child: const _GateHeadline(),
+                            ),
+                            const SizedBox(height: 14),
+                            _Reveal(
+                              controller: _reveal,
+                              start: 0.34,
+                              child: const _GateSub(),
+                            ),
+                            const Spacer(flex: 5),
+                            _Reveal(
+                              controller: _reveal,
+                              start: 0.50,
+                              child: _YesAnswerCard(onTap: widget.onYes),
+                            ),
+                            const SizedBox(height: 12),
+                            _Reveal(
+                              controller: _reveal,
+                              start: 0.62,
+                              child: _NoAnswerCard(onTap: widget.onNo),
+                            ),
+                            const Spacer(flex: 1),
+                            _Reveal(
+                              controller: _reveal,
+                              start: 0.78,
+                              child: _Footnote(),
+                            ),
+                            const SizedBox(height: 8),
+                          ],
+                        ),
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 36),
-                  _Reveal(
-                    controller: _reveal,
-                    start: 0.22,
-                    child: const _GateHeadline(),
-                  ),
-                  const SizedBox(height: 14),
-                  _Reveal(
-                    controller: _reveal,
-                    start: 0.34,
-                    child: const _GateSub(),
-                  ),
-                  const Spacer(flex: 5),
-                  _Reveal(
-                    controller: _reveal,
-                    start: 0.50,
-                    child: _YesAnswerCard(onTap: widget.onYes),
-                  ),
-                  const SizedBox(height: 12),
-                  _Reveal(
-                    controller: _reveal,
-                    start: 0.62,
-                    child: _NoAnswerCard(onTap: widget.onNo),
-                  ),
-                  const Spacer(flex: 1),
-                  _Reveal(
-                    controller: _reveal,
-                    start: 0.78,
-                    child: _Footnote(),
-                  ),
-                  const SizedBox(height: 8),
-                ],
+                  );
+                },
               ),
             ),
           ),
@@ -383,8 +398,8 @@ class _YesAnswerCardState extends State<_YesAnswerCard>
                 ),
                 boxShadow: [
                   BoxShadow(
-                    color:
-                        CelestialColors.sunWarm.withValues(alpha: 0.30 + 0.20 * b),
+                    color: CelestialColors.sunWarm
+                        .withValues(alpha: 0.30 + 0.20 * b),
                     blurRadius: 28 + 8 * b,
                     spreadRadius: -2,
                     offset: const Offset(0, 8),
@@ -611,7 +626,8 @@ class _LightBoxBeaconMini extends StatelessWidget {
     return SizedBox(
       width: 220,
       height: 180,
-      child: CustomPaint(painter: _LightBoxBeaconPainter(beat: beat, mini: true)),
+      child:
+          CustomPaint(painter: _LightBoxBeaconPainter(beat: beat, mini: true)),
     );
   }
 }
@@ -710,8 +726,7 @@ class _GetLightBoxScreenState extends State<_GetLightBoxScreen>
                         _Reveal(
                           controller: _reveal,
                           start: 0.06,
-                          child:
-                              const _Eyebrow(text: 'INTRODUCING'),
+                          child: const _Eyebrow(text: 'INTRODUCING'),
                         ),
                         const SizedBox(height: 18),
                         _Reveal(
@@ -1099,8 +1114,8 @@ class _GetOneButtonState extends State<_GetOneButton>
                 ),
                 boxShadow: [
                   BoxShadow(
-                    color:
-                        CelestialColors.sunWarm.withValues(alpha: 0.32 + 0.20 * b),
+                    color: CelestialColors.sunWarm
+                        .withValues(alpha: 0.32 + 0.20 * b),
                     blurRadius: 32 + 10 * b,
                     spreadRadius: -3,
                     offset: const Offset(0, 10),
@@ -1122,8 +1137,7 @@ class _GetOneButtonState extends State<_GetOneButton>
                   const SizedBox(width: 8),
                   Icon(
                     Icons.north_east_rounded,
-                    color: const Color(0xFF1A1206)
-                        .withValues(alpha: 0.85),
+                    color: const Color(0xFF1A1206).withValues(alpha: 0.85),
                     size: 19,
                   ),
                 ],
@@ -1345,9 +1359,8 @@ class _StarfieldPainter extends CustomPainter {
 
       final paint = Paint()
         ..color = tint.withValues(alpha: alpha)
-        ..maskFilter = radius > 1.2
-            ? const MaskFilter.blur(BlurStyle.normal, 1.2)
-            : null;
+        ..maskFilter =
+            radius > 1.2 ? const MaskFilter.blur(BlurStyle.normal, 1.2) : null;
       canvas.drawCircle(Offset(x, y), radius, paint);
     }
   }
@@ -1443,8 +1456,7 @@ class _LightBoxBeaconPainter extends CustomPainter {
         Offset(x, yLerp),
         r,
         Paint()
-          ..color =
-              CelestialColors.sunWarm.withValues(alpha: a.clamp(0.0, 0.7))
+          ..color = CelestialColors.sunWarm.withValues(alpha: a.clamp(0.0, 0.7))
           ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 1.2),
       );
     }
@@ -1534,8 +1546,7 @@ class _LightBoxBeaconPainter extends CustomPainter {
       pipPos,
       pipR * 2.5,
       Paint()
-        ..color = const Color(0xFF7FD1A0)
-            .withValues(alpha: 0.55 + 0.30 * beat)
+        ..color = const Color(0xFF7FD1A0).withValues(alpha: 0.55 + 0.30 * beat)
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2),
     );
     canvas.drawCircle(

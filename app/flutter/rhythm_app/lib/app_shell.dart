@@ -1,40 +1,41 @@
-import 'dart:io' show Platform;
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart'
+    show
+        RhythmConnection,
+        RhythmConnectionState,
+        RhythmConstantCurve,
+        RhythmCurveConfig,
+        RhythmMode,
+        RhythmModeConfig,
+        RhythmSuperGaussianCurve;
 import 'models/config_model.dart';
 import 'providers/room_provider.dart';
 import 'providers/home_provider.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmConnection, RhythmConnectionState, RhythmMode;
-import 'screens/designer_screen.dart';
-import 'screens/mobile_designer_screen.dart';
 import 'providers/room_page_provider.dart';
-import 'screens/all_rooms_screen.dart';
-import 'screens/sun_position_screen.dart';
-import 'screens/settings/settings_screen.dart';
-import 'screens/settings/sections/lights_devices_section.dart';
-import 'widgets/report_bug_flow.dart';
-import 'widgets/solar_orbit.dart';
-import 'widgets/bottom_nav_overlay.dart';
-import 'widgets/connect_hub_screen.dart';
-import 'widgets/hardware_gate_screen.dart';
-import 'widgets/hub_picker_screen.dart';
 import 'providers/server_sync_provider.dart';
+import 'screens/all_rooms_screen.dart';
 import 'screens/server_disconnected_screen.dart';
+import 'screens/settings/default_transition_editor_screen.dart';
+import 'screens/settings/light_profile_screen.dart';
+import 'screens/settings/settings_screen.dart';
 import 'services/analytics_service.dart';
 import 'services/app_state_refresh.dart';
 import 'services/hue/hue_service_locator.dart';
 import 'utils/room_visibility.dart';
+import 'widgets/connect_hub_screen.dart';
+import 'widgets/hardware_gate_screen.dart';
+import 'widgets/hub_picker_screen.dart';
+import 'widgets/main_bottom_nav.dart';
+import 'widgets/solar_orbit.dart';
 
-/// Main app shell with constellation grid layout.
+/// Main app shell.
 ///
-/// Features:
-/// - Scrollable grid of room orbs (constellation view)
-/// - Settings gear (bottom-left) opening a settings modal
-/// - Falls back to single orbit view when no rooms are synced
+/// Persistent 5-tab bottom navigation bar with an [IndexedStack] body.  Each
+/// tab owns its own [Navigator] so deeper pushes (e.g. Settings → Lights &
+/// Devices) stay inside the body slot and the navbar remains visible.
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
 
@@ -43,10 +44,21 @@ class AppShell extends StatefulWidget {
 }
 
 class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
-  int _currentPage = 0;
+  static const _tabs = [
+    MainNavTab.home,
+    MainNavTab.dailyRhythm,
+    MainNavTab.day,
+    MainNavTab.sleep,
+    MainNavTab.settings,
+  ];
+
+  int _tabIndex = 0;
+  final Set<int> _builtTabIndexes = {0};
+  late final List<GlobalKey<NavigatorState>> _navKeys =
+      List.generate(_tabs.length, (_) => GlobalKey<NavigatorState>());
+
   CurveData? _curveData;
   final PageController _roomPageController = PageController();
-  int _currentRoomPage = 0;
   bool _hadServerHub = false;
   bool _serverRemovalCleanupPending = false;
 
@@ -55,12 +67,13 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   /// the room grid during the brief `connecting` phase of a reconnect cycle.
   bool _serverLostConnection = false;
 
+  MainNavTab get _currentTab => _tabs[_tabIndex];
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _loadData();
-    // Track initial screen view
     AnalyticsService().logScreenView('home');
   }
 
@@ -125,34 +138,47 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     }
   }
 
-  /// Check if we're on a large screen (not macOS/iOS/web)
-  bool _isLargeScreen(BuildContext context) {
-    // Web uses mobile layout (rooms grid + settings)
-    if (kIsWeb) return false;
-    // macOS and iOS use mobile layout (iPad behaves like iPhone)
-    if (Platform.isMacOS || Platform.isIOS) return false;
-    final size = MediaQuery.of(context).size;
-    final shortestSide = size.shortestSide;
-    // Tablet threshold is typically 600dp
-    return shortestSide >= 600;
+  void _handleTabSelected(MainNavTab tab) {
+    final newIndex = _tabs.indexOf(tab);
+    if (newIndex < 0) return;
+
+    if (newIndex == _tabIndex) {
+      // Re-tap of the active tab pops its nested stack to root.
+      _navKeys[newIndex].currentState?.popUntil((route) => route.isFirst);
+      return;
+    }
+
+    setState(() {
+      _tabIndex = newIndex;
+      _builtTabIndexes.add(newIndex);
+    });
+    AnalyticsService().logScreenView(_screenNameFor(tab));
   }
 
-  void _openSettings() {
-    SettingsScreen.show(context);
-  }
+  String _screenNameFor(MainNavTab tab) => switch (tab) {
+        MainNavTab.home => 'home',
+        MainNavTab.dailyRhythm => 'daily_rhythm',
+        MainNavTab.day => 'day_profile',
+        MainNavTab.sleep => 'sleep_profile',
+        MainNavTab.settings => 'settings',
+      };
 
-  void _openSunPosition() {
-    SunPositionScreen.show(context);
-  }
-
-  void _openAddDevices() {
-    LightsDevicesDetailScreen.show(context);
-  }
-
-  Future<void> _openReportBug() async {
-    final serverHub =
-        context.read<HomeProvider>().getFirstHubOfType(HubType.server);
-    await showReportBugFlow(context, serverHub: serverHub);
+  /// Intercepts the system back button:
+  ///   1. pop the active tab's nested stack if possible,
+  ///   2. else fall back to the Home tab,
+  ///   3. else allow the OS to exit the app.
+  Future<void> _handlePopInvoked(bool didPop) async {
+    if (didPop) return;
+    final nav = _navKeys[_tabIndex].currentState;
+    if (nav != null && nav.canPop()) {
+      nav.pop();
+      return;
+    }
+    if (_tabIndex != 0) {
+      setState(() => _tabIndex = 0);
+      return;
+    }
+    await SystemNavigator.pop();
   }
 
   void _handleServerHubLifecycle({required bool hasServerHub}) {
@@ -164,10 +190,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final navigator = Navigator.maybeOf(context, rootNavigator: true);
-      if (navigator != null && navigator.canPop()) {
-        navigator.popUntil((route) => route.isFirst);
-      }
+      // Clear any nested-tab navigation pushed on top of the home tab so the
+      // user lands back on the room grid.
+      _navKeys[0].currentState?.popUntil((route) => route.isFirst);
       _serverRemovalCleanupPending = false;
     });
   }
@@ -194,10 +219,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   }
 
   /// Flip the global mode from the All Rooms toggle.
-  ///
-  /// For the day/sleep toggle we run the default saved transitions so the
-  /// backend applies the canonical transition object rather than a direct mode
-  /// switch.
   Future<void> _setActiveMode(RhythmMode mode) async {
     HapticFeedback.mediumImpact();
     final roomProvider = context.read<RoomProvider>();
@@ -285,14 +306,110 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     );
     _handleServerHubLifecycle(hasServerHub: hasServerHub);
 
-    final showSliders = _isLargeScreen(context);
+    final serverSynced = context.select<ServerSyncProvider, bool>(
+      (s) => s.synced,
+    );
+    final visibleTabs = _computeVisibleTabs(serverSynced: serverSynced);
 
-    // For large screens, show the original bottom nav with sliders
-    if (showSliders) {
-      return _buildLargeScreenLayout();
+    // If the current tab depends on a synced server (e.g. Daily Rhythm) and
+    // the server just went away, bounce the user back to Home.
+    if (!visibleTabs.contains(_currentTab)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        if (!_computeVisibleTabs(
+                serverSynced: context.read<ServerSyncProvider>().synced)
+            .contains(_currentTab)) {
+          setState(() {
+            _tabIndex = 0;
+            _builtTabIndexes.add(0);
+          });
+        }
+      });
     }
 
-    // Mobile: All rooms constellation grid
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) => _handlePopInvoked(didPop),
+      child: Scaffold(
+        backgroundColor: CelestialColors.backgroundDark,
+        body: Stack(
+          fit: StackFit.expand,
+          children: List.generate(
+            _tabs.length,
+            _buildTabSlot,
+          ),
+        ),
+        bottomNavigationBar: _buildBottomNav(visibleTabs: visibleTabs),
+      ),
+    );
+  }
+
+  /// Bottom-nav tab visibility — Daily Rhythm is hidden while no Rhythm
+  /// server is synced because the orbital editor renders without real
+  /// profile data and looks wrong.
+  List<MainNavTab> _computeVisibleTabs({required bool serverSynced}) {
+    return [
+      MainNavTab.home,
+      if (serverSynced) MainNavTab.dailyRhythm,
+      MainNavTab.day,
+      MainNavTab.sleep,
+      MainNavTab.settings,
+    ];
+  }
+
+  Widget _buildTabSlot(int index) {
+    final isActive = index == _tabIndex;
+    return Offstage(
+      offstage: !isActive,
+      child: TickerMode(
+        enabled: isActive,
+        child: _builtTabIndexes.contains(index)
+            ? _TabNavigator(
+                navigatorKey: _navKeys[index],
+                builder: (_) => _buildTabRoot(_tabs[index]),
+              )
+            : const SizedBox.shrink(),
+      ),
+    );
+  }
+
+  Widget _buildTabRoot(MainNavTab tab) {
+    return switch (tab) {
+      MainNavTab.home => _buildHomeTab(),
+      MainNavTab.dailyRhythm => _buildDailyRhythmTab(),
+      MainNavTab.day => const LightProfileScreen(initialProfile: 'rhythm'),
+      MainNavTab.sleep => const LightProfileScreen(initialProfile: 'sleep'),
+      MainNavTab.settings => const SettingsScreen(),
+    };
+  }
+
+  Widget _buildBottomNav({required List<MainNavTab> visibleTabs}) {
+    return MainBottomNav(
+      currentBodyTab: _currentTab,
+      onTabSelected: _handleTabSelected,
+      tabs: visibleTabs,
+    );
+  }
+
+  /// Daily Rhythm tab — wraps the editor in a [Consumer] so [profileColors]
+  /// stays in sync with the active server profiles even if they change while
+  /// the tab is alive.
+  Widget _buildDailyRhythmTab() {
+    return Consumer<ServerSyncProvider>(
+      builder: (context, serverSync, _) {
+        return DefaultTransitionEditorScreen(
+          profileColors: _resolveProfileColors(
+            serverSync.modeConfigs,
+            serverSync.profiles,
+          ),
+        );
+      },
+    );
+  }
+
+  /// Resolves the body for the Home tab through the existing
+  /// connection/rooms state machine.
+  Widget _buildHomeTab() {
     return Consumer3<RoomProvider, HomeProvider, ServerSyncProvider>(
       builder: (context, roomProvider, homeProvider, serverSync, child) {
         final serverHub = homeProvider.getFirstHubOfType(HubType.server);
@@ -306,53 +423,31 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         }
 
         if (serverHub != null) {
-          // ── Server unreachable ──────────────────────────────────
-          // Show the disconnected screen once a reconnect cycle has
-          // started, and keep showing it through subsequent connecting
-          // attempts until the server is fully connected again.
           if (_serverLostConnection) {
-            return ServerDisconnectedScreen(
-              serverHub: serverHub,
-              onSettingsTap: _openSettings,
-              onSunPositionTap: _openSunPosition,
-              onAddDevicesTap: _openAddDevices,
-              onReportBugTap: _openReportBug,
-            );
+            return ServerDisconnectedScreen(serverHub: serverHub);
           }
 
-          // ── Server connected ────────────────────────────────────
           if (state == RhythmConnectionState.connected) {
             if (roomProvider.hasRooms) {
               return _buildRoomGrid(roomProvider);
             }
-
-            // With a connected server but no synced rooms yet, keep the user on
-            // the hub picker so they can add Matter devices immediately and see
-            // which upstream hubs are already connected.
-            return HubPickerScreen(
-              onSettingsTap: _openSettings,
-              onSunPositionTap: _openSunPosition,
-              onAddDevicesTap: _openAddDevices,
-              onReportBugTap: _openReportBug,
-            );
+            return const HubPickerScreen();
           }
 
-          // ── First connection attempt (connecting / initial disconnected) ─
+          // First connection attempt.
           if (!roomProvider.hasRooms) {
             return _buildServerConnectingState();
           }
 
-          // Has cached rooms and server is doing its first connect —
-          // show the room grid while the connection establishes.
           return _buildRoomGrid(roomProvider);
         }
 
-        // ── No server hub paired ───────────────────────────────────
+        // No server hub paired.
         if (!roomProvider.hasRooms) {
           if (HueServiceLocator.isDemoMode) {
             return _buildServerConnectingState();
           }
-          return _buildNoRoomsLayout(roomProvider, ConnectHubMode.rhythmServer);
+          return _buildNoRoomsLayout(ConnectHubMode.rhythmServer);
         }
 
         return _buildRoomGrid(roomProvider);
@@ -360,245 +455,139 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     );
   }
 
-  /// The main room constellation grid with bottom nav overlay.
+  /// The main room constellation grid (Home tab body content).
   Widget _buildRoomGrid(RoomProvider roomProvider) {
     final serverSync = context.watch<ServerSyncProvider>();
-    final roomPageProvider = context.watch<RoomPageProvider>();
     final enabledRooms = roomProvider.enabledRooms;
     final visibleRooms =
         enabledRooms.where(showsInAllRooms).toList(growable: false);
-    final pageCount = roomPageProvider.pageCount;
-    // Clamp current page if page count decreased
-    if (_currentRoomPage >= pageCount) {
-      _currentRoomPage = (pageCount - 1).clamp(0, pageCount - 1);
-    }
 
-    // Reconcile page assignments after frame to avoid notifying during build
+    // Reconcile page assignments after frame to avoid notifying during build.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      context.read<RoomPageProvider>().reconcileRooms(
-            visibleRooms,
-          );
+      context.read<RoomPageProvider>().reconcileRooms(visibleRooms);
     });
 
-    return Scaffold(
-      backgroundColor: CelestialColors.backgroundDark,
-      body: Stack(
-        children: [
-          // Main content - all rooms grid
-          Consumer<ConfigModel>(
-            builder: (context, configModel, _) {
-              return AllRoomsScreen(
-                rooms: visibleRooms,
-                globalConfig: configModel.config,
-                curveData: _curveData,
-                pageController: _roomPageController,
-                activeMode: serverSync.activeMode,
-                pendingMode: roomProvider.anyRoomTransitioning
-                    ? serverSync.activeMode
-                    : null,
-                onModeSelected: _setActiveMode,
-                onActiveModeDoubleTap: _confirmReapplyActiveMode,
-                onPageChanged: (page) {
-                  setState(() => _currentRoomPage = page);
-                },
-              );
-            },
-          ),
-          // Bottom gradient fade + overlay
-          Positioned(
-            bottom: 0,
-            left: 0,
-            right: 0,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // Gradient fade so cards dissolve into the bar
-                Container(
-                  height: 40,
-                  decoration: const BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [
-                        Color(0x00000000),
-                        Color(0x800D1117),
-                      ],
-                    ),
-                  ),
-                ),
-                // Solid bar behind controls
-                Container(
-                  color: const Color(0x800D1117),
-                  child: SafeArea(
-                    top: false,
-                    child: BottomNavOverlay(
-                      currentPage: _currentRoomPage,
-                      totalPages: pageCount,
-                      editMode: roomPageProvider.editMode,
-                      pageController: _roomPageController,
-                      onSettingsTap: _openSettings,
-                      onSunPositionTap: _openSunPosition,
-                      onAddDevicesTap: _openAddDevices,
-                      onReportBugTap: _openReportBug,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
+    return Consumer<ConfigModel>(
+      builder: (context, configModel, _) {
+        return AllRoomsScreen(
+          rooms: visibleRooms,
+          globalConfig: configModel.config,
+          curveData: _curveData,
+          pageController: _roomPageController,
+          activeMode: serverSync.activeMode,
+          pendingMode:
+              roomProvider.anyRoomTransitioning ? serverSync.activeMode : null,
+          onModeSelected: _setActiveMode,
+          onActiveModeDoubleTap: _confirmReapplyActiveMode,
+        );
+      },
     );
   }
 
   /// Server hub is connected/connecting but has no rooms yet (Hue discovery in progress).
   Widget _buildServerConnectingState() {
-    return Scaffold(
-      backgroundColor: CelestialColors.backgroundDark,
-      body: Stack(
-        children: [
-          SafeArea(
-            bottom: false,
-            child: Center(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 40),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _PulsingIcon(
-                      icon: Icons.hub,
-                      color: CelestialColors.accentBlue,
-                    ),
-                    const SizedBox(height: 24),
-                    Text(
-                      'Setting up...',
-                      style: TextStyle(
-                        color: CelestialColors.textPrimary,
-                        fontSize: 22,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    Text(
-                      'Connecting to your lights',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: CelestialColors.textSecondary
-                            .withValues(alpha: 0.7),
-                        fontSize: 15,
-                        height: 1.5,
-                      ),
-                    ),
-                  ],
+    return SafeArea(
+      bottom: false,
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 40),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _PulsingIcon(
+                icon: Icons.hub,
+                color: CelestialColors.accentBlue,
+              ),
+              const SizedBox(height: 24),
+              Text(
+                'Setting up...',
+                style: TextStyle(
+                  color: CelestialColors.textPrimary,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
-            ),
-          ),
-          // Bottom overlay
-          Positioned(
-            bottom: 0,
-            left: 0,
-            right: 0,
-            child: SafeArea(
-              child: BottomNavOverlay(
-                currentPage: 0,
-                totalPages: 1,
-                onSettingsTap: _openSettings,
-                onSunPositionTap: _openSunPosition,
-                onAddDevicesTap: _openAddDevices,
-                onReportBugTap: _openReportBug,
+              const SizedBox(height: 12),
+              Text(
+                'Connecting to your lights',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+                  fontSize: 15,
+                  height: 1.5,
+                ),
               ),
-            ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
 
-  /// Build layout when no rooms are synced.
-  /// Full-screen onboarding centered on connecting a hub.
-  Widget _buildNoRoomsLayout(RoomProvider roomProvider, ConnectHubMode mode) {
-    return Scaffold(
-      backgroundColor: CelestialColors.backgroundDark,
-      body: Stack(
-        children: [
-          // Sales-style hardware gate — asks whether the user already has a
-          // LightBox / RhythmOS device. "Yes" drops into the existing
-          // ConnectHubScreen; "No" routes through the upsell.
-          SafeArea(
-            bottom: false,
-            child: HardwareOnboardingGate(mode: mode),
-          ),
-          // Bottom overlay (gear + fan, no dots)
-          Positioned(
-            bottom: 0,
-            left: 0,
-            right: 0,
-            child: SafeArea(
-              child: BottomNavOverlay(
-                currentPage: 0,
-                totalPages: 1,
-                onSettingsTap: _openSettings,
-                onSunPositionTap: _openSunPosition,
-                onAddDevicesTap: _openAddDevices,
-                onReportBugTap: _openReportBug,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// Build large screen layout with bottom navigation bar.
-  /// Keeps the original design for tablets/web.
-  Widget _buildLargeScreenLayout() {
-    final screens = <Widget>[
-      const MobileDesignerScreen(),
-      const DesignerScreen(),
-    ];
-
-    final navItems = <BottomNavigationBarItem>[
-      const BottomNavigationBarItem(
-        icon: Icon(Icons.wb_sunny),
-        label: 'Orbit',
-      ),
-      const BottomNavigationBarItem(
-        icon: Icon(Icons.tune),
-        label: 'Tuner',
-      ),
-    ];
-
-    // Clamp index if screen size changed
-    final safeIndex = _currentPage.clamp(0, screens.length - 1);
-
-    return Scaffold(
-      backgroundColor: CelestialColors.backgroundDark,
-      body: IndexedStack(
-        index: safeIndex,
-        children: screens,
-      ),
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: safeIndex,
-        onTap: (index) {
-          // Track screen view change
-          AnalyticsService().logScreenView(index == 0 ? 'orbit' : 'tuner');
-          setState(() {
-            _currentPage = index;
-          });
-        },
-        type: BottomNavigationBarType.fixed,
-        backgroundColor: CelestialColors.backgroundCard,
-        selectedItemColor: CelestialColors.accentBlue,
-        unselectedItemColor: CelestialColors.textSecondary,
-        items: navItems,
-      ),
+  /// Onboarding gate shown when no rooms are synced and no server hub paired.
+  Widget _buildNoRoomsLayout(ConnectHubMode mode) {
+    return SafeArea(
+      bottom: false,
+      child: HardwareOnboardingGate(mode: mode),
     );
   }
 }
 
-/// Pulsing icon for the server-disconnected state.
+/// Wraps a single tab in its own [Navigator] so route pushes happen inside
+/// the body slot, leaving the bottom navigation bar untouched.
+class _TabNavigator extends StatelessWidget {
+  final GlobalKey<NavigatorState> navigatorKey;
+  final WidgetBuilder builder;
+
+  const _TabNavigator({
+    required this.navigatorKey,
+    required this.builder,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Navigator(
+      key: navigatorKey,
+      onGenerateRoute: (settings) =>
+          MaterialPageRoute(builder: builder, settings: settings),
+    );
+  }
+}
+
+/// Maps each [RhythmMode] to the dominant color of its active profile, used to
+/// tint controls in [DefaultTransitionEditorScreen].
+Map<RhythmMode, Color> _resolveProfileColors(
+  List<RhythmModeConfig> modeConfigs,
+  List<RhythmCurveConfig> profiles,
+) {
+  final colors = <RhythmMode, Color>{};
+  for (final mc in modeConfigs) {
+    final profile = profiles.cast<RhythmCurveConfig?>().firstWhere(
+          (p) => p!.id == mc.activeProfileId,
+          orElse: () => null,
+        );
+    if (profile == null) continue;
+    colors[mc.mode] = _colorFromProfile(profile);
+  }
+  return colors;
+}
+
+Color _colorFromProfile(RhythmCurveConfig profile) {
+  final curve = profile.curve;
+  if (curve is RhythmConstantCurve && curve.directColor != null) {
+    final rgb = curve.directColor!.rgb;
+    return Color.fromARGB(255, rgb.r, rgb.g, rgb.b);
+  }
+  if (curve is RhythmSuperGaussianCurve && curve.directColor != null) {
+    final rgb = curve.directColor!.rgb;
+    return Color.fromARGB(255, rgb.r, rgb.g, rgb.b);
+  }
+  final midCct = (profile.minColorTemp + profile.maxColorTemp) ~/ 2;
+  return ColorUtils.cctToColor(midCct);
+}
+
+/// Pulsing icon for the server-connecting state.
 class _PulsingIcon extends StatefulWidget {
   final IconData icon;
   final Color color;

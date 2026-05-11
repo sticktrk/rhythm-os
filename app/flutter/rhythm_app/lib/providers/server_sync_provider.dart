@@ -101,6 +101,9 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Tracks the last poll time for debouncing [fullRefresh] and [pollNow].
   DateTime _lastPollTime = DateTime.fromMillisecondsSinceEpoch(0);
 
+  /// Per-node cooldown for preview refreshes triggered by room detail views.
+  final Map<String, DateTime> _lastPreviewRefreshTimeByNode = {};
+
   /// Firmware version reported by server in the hello message.
   String _firmwareVersion = '0.0.0';
 
@@ -614,6 +617,36 @@ class ServerSyncProvider extends ChangeNotifier {
     await _connection.pollNow();
   }
 
+  /// Ensure a room-detail live preview has a recent rhythm tick timestamp.
+  ///
+  /// The top countdown ring in [RoomSettingsSheet] is driven by
+  /// `RoomProvider.getLastTickTime`. If the app missed tick events before the
+  /// sheet opens, that timestamp can be absent or stale until the user performs
+  /// a pull-to-refresh. In that case, request the same authoritative state
+  /// refresh used by pull-to-refresh.
+  Future<void> ensureRoomPreviewStateFresh(String nodeId) async {
+    final node = _roomProvider.getNode(nodeId);
+    if (node == null || !node.rhythmEnabled || !node.lightsOn) return;
+
+    final now = DateTime.now();
+    final lastPreviewRefresh = _lastPreviewRefreshTimeByNode[nodeId];
+    if (lastPreviewRefresh != null &&
+        now.difference(lastPreviewRefresh).inSeconds < 2) {
+      return;
+    }
+
+    final intervalSecs = _rhythmIntervalSecs <= 0 ? 60 : _rhythmIntervalSecs;
+    final staleAfterSecs = intervalSecs + 2 < 10 ? 10 : intervalSecs + 2;
+    final lastTick = _roomProvider.getLastTickTime(nodeId);
+    if (lastTick != null &&
+        now.difference(lastTick) <= Duration(seconds: staleAfterSecs)) {
+      return;
+    }
+
+    _lastPreviewRefreshTimeByNode[nodeId] = now;
+    await fullRefresh();
+  }
+
   // ============================================================================
   // Event handlers (Server → App)
   // ============================================================================
@@ -682,9 +715,9 @@ class ServerSyncProvider extends ChangeNotifier {
       _roomProvider.setMotionSensorNodes(_sensorTargetNodeIds());
       _syncHelloMotionState(hello.nodes);
 
-      // 3. Accept server config as authoritative, push location if different
+      // 3. Accept server config as authoritative, then reconcile location.
       _acceptServerConfig(hello.activeProfile);
-      _pushLocationIfUnset(hello.location);
+      _reconcileLocation(hello.location);
     } finally {
       _isProcessingHello = false;
     }
@@ -1454,13 +1487,40 @@ class ServerSyncProvider extends ChangeNotifier {
     }
   }
 
-  void _pushLocationIfUnset(Map<String, dynamic> serverLocation) {
+  void _reconcileLocation(Map<String, dynamic> serverLocation) {
     final home = _homeProvider.currentHome;
     final loc = home?.location;
-    if (loc == null) return;
 
-    final srvLat = (serverLocation['latitude'] as num?)?.toDouble();
-    final srvLon = (serverLocation['longitude'] as num?)?.toDouble();
+    final srvLat = _locationDouble(
+      serverLocation,
+      const ['latitude', 'lat'],
+    );
+    final srvLon = _locationDouble(
+      serverLocation,
+      const ['longitude', 'lon', 'lng'],
+    );
+    final srvTimezone = _locationString(
+      serverLocation,
+      const ['timezone', 'timezone_name'],
+    );
+
+    if (loc == null) {
+      if (home != null && srvLat != null && srvLon != null) {
+        debugPrint('ServerSync: Accepting server location into local home');
+        unawaited(
+          _homeProvider.updateCurrentHome(
+            home.copyWith(
+              location: HomeLocation(latitude: srvLat, longitude: srvLon),
+              timezone:
+                  _isIanaTimezone(srvTimezone) ? srvTimezone : home.timezone,
+              updatedAt: DateTime.now(),
+              pendingSync: home.pendingSync,
+            ),
+          ),
+        );
+      }
+      return;
+    }
 
     // Only push when the server has no location at all. Location is the
     // *house* location (fixed, tied to the server/hub) — once set, it should
@@ -1469,6 +1529,26 @@ class ServerSyncProvider extends ChangeNotifier {
       debugPrint('ServerSync: Server has no location — pushing app location');
       _pushLocationWithIanaTimezone(loc);
     }
+  }
+
+  double? _locationDouble(Map<String, dynamic> location, List<String> keys) {
+    for (final key in keys) {
+      final value = location[key];
+      if (value is num) return value.toDouble();
+      if (value is String) {
+        final parsed = double.tryParse(value);
+        if (parsed != null) return parsed;
+      }
+    }
+    return null;
+  }
+
+  String? _locationString(Map<String, dynamic> location, List<String> keys) {
+    for (final key in keys) {
+      final value = location[key];
+      if (value is String && value.isNotEmpty) return value;
+    }
+    return null;
   }
 
   /// Push location to server, ensuring a proper IANA timezone name.

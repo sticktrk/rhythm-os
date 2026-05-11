@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_app/app_shell.dart';
+import 'package:rhythm_app/config/platform_capabilities.dart';
 import 'package:rhythm_app/models/config_model.dart';
 import 'package:rhythm_app/providers/home_provider.dart';
 import 'package:rhythm_app/providers/hub_connection_provider.dart';
@@ -48,8 +49,70 @@ class _FakeHomeProvider extends HomeProvider {
 class _FakeRhythmServerApi extends RhythmServerApi {
   _FakeRhythmServerApi() : super(Dio());
 
+  int getModeCallCount = 0;
+  int getProfilesCallCount = 0;
+  int getConfigCallCount = 0;
+  int getCurveDataCallCount = 0;
+
   @override
   Future<Map<String, dynamic>?> getTriageCount() async => null;
+
+  @override
+  Future<RhythmModeResource?> getMode() async {
+    getModeCallCount++;
+    return const RhythmModeResource(
+      active: RhythmMode.day,
+      configs: [
+        RhythmModeConfig(
+          mode: RhythmMode.day,
+          activeProfileId: 'rhythm',
+        ),
+        RhythmModeConfig(
+          mode: RhythmMode.sleep,
+          activeProfileId: 'sleep',
+        ),
+      ],
+    );
+  }
+
+  @override
+  Future<List<RhythmCurveConfig>> getProfiles() async {
+    getProfilesCallCount++;
+    return const [
+      RhythmCurveConfig(id: 'rhythm', name: 'Day Profile'),
+      RhythmCurveConfig(id: 'sleep', name: 'Sleep Profile'),
+    ];
+  }
+
+  @override
+  Future<RhythmCurveConfig?> getConfig({required String id}) async {
+    getConfigCallCount++;
+    return RhythmCurveConfig(id: id, name: id);
+  }
+
+  @override
+  Future<RhythmCurveData?> getCurveData({
+    required String id,
+    RhythmCurveConfig? overrides,
+    DateTime? date,
+    int samplesPerHour = 4,
+    double startHour = 12,
+    int? maxSteps,
+  }) async {
+    getCurveDataCallCount++;
+    return RhythmCurveData(
+      hours: List.generate(24, (i) => i.toDouble()),
+      brightness: List.filled(24, 50),
+      kelvin: List.filled(24, 3000),
+      solar: RhythmSolarInfo(
+        sunrise: 6,
+        sunset: 20,
+        solarNoon: 12,
+        solarMidnight: 0,
+        dayLength: 14,
+      ),
+    );
+  }
 }
 
 class _TestRhythmConnection extends RhythmConnection {
@@ -198,6 +261,15 @@ Future<void> _pumpAppShell(
         ChangeNotifierProvider<ConfigModel>(
           create: (_) => ConfigModel(),
         ),
+        Provider<PlatformCapabilities>.value(
+          value: const PlatformCapabilities(
+            hasAccounts: true,
+            hasHubPairing: true,
+            hasLocationSetup: true,
+            autoImportsRooms: false,
+            hasCloudBackend: true,
+          ),
+        ),
         ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
         ChangeNotifierProvider<HomeProvider>.value(value: homeProvider),
         ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
@@ -261,7 +333,7 @@ void main() {
       serverSync: serverSync,
     );
 
-    expect(find.text('Find Your Rhythm Box'), findsOneWidget);
+    expect(find.text('Do you have\na LightBox?'), findsOneWidget);
   });
 
   testWidgets(
@@ -382,9 +454,9 @@ void main() {
       serverSync: serverSync,
     );
 
-    final appShellContext = tester.element(find.byType(AppShell));
+    final nestedNavigatorContext = tester.element(find.text('Add Hubs'));
     unawaited(
-      Navigator.of(appShellContext).push(
+      Navigator.of(nestedNavigatorContext).push(
         MaterialPageRoute<void>(
           builder: (_) => const Scaffold(body: Text('Pushed route')),
         ),
@@ -397,7 +469,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Pushed route'), findsNothing);
-    expect(find.text('Find Your Rhythm Box'), findsOneWidget);
+    expect(find.text('Do you have\na LightBox?'), findsOneWidget);
   });
 
   testWidgets('shows the room grid when the connected server has rooms',
@@ -481,5 +553,52 @@ void main() {
     );
 
     expect(find.text('Kitchen'), findsOneWidget);
+  });
+
+  testWidgets('lazily mounts bottom-nav editor tabs', (tester) async {
+    final roomProvider = RoomProvider();
+    final homeProvider = _FakeHomeProvider([_serverHub()]);
+    final api = _FakeRhythmServerApi();
+    final connection = _TestRhythmConnection(
+      initialState: RhythmConnectionState.connected,
+      api: api,
+    );
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await _pumpAppShell(
+      tester,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+      serverSync: serverSync,
+    );
+
+    expect(api.getModeCallCount, 0);
+    expect(api.getProfilesCallCount, 0);
+    expect(find.text('Day Profile'), findsNothing);
+
+    await tester.tap(find.text('Day'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(api.getModeCallCount, 1);
+    expect(api.getProfilesCallCount, 1);
+    expect(api.getCurveDataCallCount, 1);
+    expect(find.text('Day Profile'), findsOneWidget);
+
+    await tester.tap(find.text('Sleep'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(api.getModeCallCount, 2);
+    expect(api.getProfilesCallCount, 2);
+    expect(find.text('Sleep Profile'), findsOneWidget);
   });
 }

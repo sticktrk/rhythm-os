@@ -26,7 +26,7 @@ class AllRoomsScreen extends StatefulWidget {
   final CurveConfigDto globalConfig;
   final CurveData? curveData;
   final PageController pageController;
-  final ValueChanged<int> onPageChanged;
+  final ValueChanged<int>? onPageChanged;
   final RhythmMode? activeMode;
   final RhythmMode? pendingMode;
   final ValueChanged<RhythmMode>? onModeSelected;
@@ -38,7 +38,7 @@ class AllRoomsScreen extends StatefulWidget {
     required this.globalConfig,
     this.curveData,
     required this.pageController,
-    required this.onPageChanged,
+    this.onPageChanged,
     this.activeMode,
     this.pendingMode,
     this.onModeSelected,
@@ -73,6 +73,8 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
 
   /// Keys for each card so we can find their positions for drop targeting.
   final Map<String, GlobalKey> _cardKeys = {};
+
+  int _currentPage = 0;
 
   @override
   void dispose() {
@@ -362,6 +364,9 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     final bottomSafeArea = MediaQuery.of(context).padding.bottom;
     final bottomPad = bottomSafeArea + 104.0;
     final pageProvider = context.watch<RoomPageProvider>();
+    final pageCount = pageProvider.pageCount;
+    final clampedPage =
+        pageCount == 0 ? 0 : _currentPage.clamp(0, pageCount - 1);
 
     return Stack(
       children: [
@@ -379,11 +384,14 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
                   builder: (context, powerSave, _) {
                     return PageView.builder(
                       controller: widget.pageController,
-                      onPageChanged: widget.onPageChanged,
+                      onPageChanged: (page) {
+                        setState(() => _currentPage = page);
+                        widget.onPageChanged?.call(page);
+                      },
                       physics: _draggingRoomId != null
                           ? const NeverScrollableScrollPhysics()
                           : null,
-                      itemCount: pageProvider.pageCount,
+                      itemCount: pageCount,
                       itemBuilder: (context, pageIndex) {
                         final pageRooms = pageProvider.getRoomsForPage(
                           pageIndex,
@@ -404,6 +412,17 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
             ],
           ),
         ),
+        if (pageCount > 1)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 12,
+            child: _PageDots(
+              currentPage: clampedPage,
+              totalPages: pageCount,
+              pageController: widget.pageController,
+            ),
+          ),
       ],
     );
   }
@@ -1385,6 +1404,54 @@ class _CurveProfileToggle extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Floating page indicator dots, rendered just above the global bottom nav
+/// over the celestial background — no opaque strip, no own background color.
+class _PageDots extends StatelessWidget {
+  final int currentPage;
+  final int totalPages;
+  final PageController pageController;
+
+  const _PageDots({
+    required this.currentPage,
+    required this.totalPages,
+    required this.pageController,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: List.generate(totalPages, (index) {
+        final isActive = index == currentPage;
+        return GestureDetector(
+          onTap: () {
+            pageController.animateToPage(
+              index,
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeInOut,
+            );
+          },
+          behavior: HitTestBehavior.opaque,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
+              width: isActive ? 8 : 6,
+              height: isActive ? 8 : 6,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: isActive
+                    ? CelestialColors.textPrimary
+                    : CelestialColors.textSecondary.withValues(alpha: 0.4),
+              ),
+            ),
+          ),
+        );
+      }),
     );
   }
 }

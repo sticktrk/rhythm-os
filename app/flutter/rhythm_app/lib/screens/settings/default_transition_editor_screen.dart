@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -9,8 +11,28 @@ import 'package:rhythm_sdk/rhythm_sdk.dart';
 import '../../api/hybrid_client.dart' show sdkCurveConfigToDto;
 import '../../providers/home_provider.dart';
 import '../../providers/server_sync_provider.dart';
+import '../../widgets/info_tooltip.dart';
 import '../../widgets/solar_clock/solar_clock_exports.dart';
 import '../../widgets/solar_orbit.dart';
+
+/// Single accent for page chrome (hero card, accordions, switches, save
+/// bar, reset pill, button section). Stable identity that doesn't shift
+/// with `_selectedMode`. Mode color (Day/Sleep) still lives in the orbital
+/// ring + orbs + anchor markers + Day/Sleep summary chips.
+const Color _chromeAccent = Colors.white;
+
+// Surface tier above `CelestialColors.backgroundCard`. Used for the inner
+// trigger-source cards so they read as elevated above the hero without
+// resorting to stacked white-alpha washes.
+const Color _surfaceElevated = Color(0xFF1F2630);
+// One step below the hero card — used for the disabled/off state of an
+// inner card so it recedes instead of glowing.
+const Color _surfaceRecessed = Color(0xFF11161E);
+// Deterministic hairline stroke shared by all chrome surfaces. Replaces
+// the previous `Colors.white.withValues(alpha: …)` borders that hazed
+// when stacked.
+const Color _hairlineStrong = Color(0xFF2C3441);
+const Color _hairlineSoft = Color(0xFF1E2530);
 
 class DefaultTransitionEditorScreen extends StatefulWidget {
   final Map<RhythmMode, Color> profileColors;
@@ -19,19 +41,6 @@ class DefaultTransitionEditorScreen extends StatefulWidget {
     super.key,
     required this.profileColors,
   });
-
-  static Future<void> show(
-    BuildContext context, {
-    required Map<RhythmMode, Color> profileColors,
-  }) {
-    return Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => DefaultTransitionEditorScreen(
-          profileColors: profileColors,
-        ),
-      ),
-    );
-  }
 
   @override
   State<DefaultTransitionEditorScreen> createState() =>
@@ -46,9 +55,32 @@ class _DefaultTransitionEditorScreenState
   static const double _minDurationSeconds = 10.0;
   static const double _maxDurationSeconds = 300.0;
   static const double _durationStepSeconds = 10.0;
+  // Angular drag on a small orbit translates pixels to many minutes per
+  // degree, so the orb feels twitchy. Quantizing to 5-minute "stops" gives a
+  // sundial-style ratchet without losing precision worth caring about.
+  static const double _dragStepHours = 5.0 / 60.0;
 
   late Map<RhythmMode, RhythmModeTransitionConfig> _transitionConfigs;
   late Map<RhythmMode, RhythmModeTransitionConfig> _savedTransitionConfigs;
+  // Trigger sources are independent toggles — either can be on without the
+  // other, and both can be on at the same time. When both are off, mode
+  // changes only happen by manual app interaction.
+  bool _timeEnabled = true;
+  bool _savedTimeEnabled = true;
+  bool _buttonEnabled = false;
+  // A single physical button acts as a global toggle between Day and Sleep,
+  // shared by both directions when the Button source is enabled. Button-side
+  // state is intentionally not tracked by the save/revert cluster — that
+  // cluster lives inside the Time section and only governs Time edits. The
+  // Button section commits changes inline via its own Listen → Confirm flow.
+  String? _toggleButtonDeviceId;
+  // Listen-flow state. The user taps Listen, the server forwards the next
+  // press, and we surface it for confirmation. `_pendingButton` is the
+  // candidate from the most recent press — not committed until confirm.
+  _ButtonBindState _bindState = _ButtonBindState.idle;
+  _MockButtonDevice? _pendingButton;
+  Timer? _simulatedDetectionTimer;
+  late final AnimationController _listenPulseController;
   late RhythmMode _selectedMode;
   late AnimationController _breatheController;
   late Animation<double> _breatheAnimation;
@@ -57,12 +89,18 @@ class _DefaultTransitionEditorScreenState
   final Map<RhythmMode, double> _handleHours = {};
   final Map<RhythmMode, _ModeCurveVisual> _curveVisuals = {};
   late final ServerSyncProvider _serverSync;
+  late final HomeProvider _homeProvider;
+  String? _profileVisualSignature;
   SolarClockData? _solarClockData;
+  String? _solarLocationKey;
   RhythmMode? _dragMode;
   double? _dragPreviewHour;
   _TriggerAnchor? _proximateAnchor;
   double _anchorProximity = 0.0;
   bool _isSaving = false;
+  // Tracks the last `_serverSync.synced` value so the save pill can be
+  // rebuilt the moment the connection state flips.
+  bool _lastSynced = false;
 
   SunTimesDto? get _sunTimes => _solarClockData?.sunTimes;
   TwilightTimesDto? get _twilightTimes => _solarClockData?.twilightTimes;
@@ -74,6 +112,7 @@ class _DefaultTransitionEditorScreenState
     _serverSync = context.read<ServerSyncProvider>();
     _transitionConfigs = _initialTransitionConfigs();
     _savedTransitionConfigs = Map.of(_transitionConfigs);
+    _savedTimeEnabled = _timeEnabled;
     _selectedMode = RhythmMode.day;
     _breatheController = AnimationController(
       duration: const Duration(milliseconds: 3500),
@@ -93,14 +132,86 @@ class _DefaultTransitionEditorScreenState
       parent: _flowController,
       curve: Curves.easeInOut,
     );
+    _listenPulseController = AnimationController(
+      duration: const Duration(milliseconds: 1800),
+      vsync: this,
+    );
     _loadSolarTimes();
+    _homeProvider = context.read<HomeProvider>();
+    _homeProvider.addListener(_handleHomeChanged);
+    _serverSync.addListener(_handleServerSyncChanged);
+    _lastSynced = _serverSync.synced;
   }
 
   @override
   void dispose() {
+    _serverSync.removeListener(_handleServerSyncChanged);
+    _homeProvider.removeListener(_handleHomeChanged);
     _breatheController.dispose();
     _flowController.dispose();
+    _listenPulseController.dispose();
+    _simulatedDetectionTimer?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(covariant DefaultTransitionEditorScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _refreshProfileVisualsIfNeeded();
+  }
+
+  void _handleServerSyncChanged() {
+    if (!mounted) return;
+
+    final nextTransitionConfigs = _initialTransitionConfigs();
+    final shouldAdoptTransitions = !_hasUnsavedChanges &&
+        !_transitionConfigMapsEqual(
+          _transitionConfigs,
+          nextTransitionConfigs,
+        );
+    final shouldRefreshVisuals =
+        _currentProfileVisualSignature() != _profileVisualSignature;
+    final nextSynced = _serverSync.synced;
+    final shouldRefreshSync = nextSynced != _lastSynced;
+
+    if (!shouldAdoptTransitions &&
+        !shouldRefreshVisuals &&
+        !shouldRefreshSync) {
+      return;
+    }
+
+    setState(() {
+      if (shouldAdoptTransitions) {
+        _transitionConfigs = nextTransitionConfigs;
+        _savedTransitionConfigs = Map.of(nextTransitionConfigs);
+        _handleHours.clear();
+      }
+      if (shouldRefreshVisuals) {
+        _rebuildCurveVisuals();
+      }
+      _lastSynced = nextSynced;
+    });
+  }
+
+  void _refreshProfileVisualsIfNeeded() {
+    final nextSignature = _currentProfileVisualSignature();
+    if (nextSignature == _profileVisualSignature) return;
+
+    setState(_rebuildCurveVisuals);
+  }
+
+  void _handleHomeChanged() {
+    if (!mounted) return;
+    final nextKey = _currentSolarLocationKey();
+    if (nextKey == _solarLocationKey) return;
+    setState(_loadSolarTimes);
+  }
+
+  String? _currentSolarLocationKey() {
+    final home = context.read<HomeProvider>().currentHome;
+    final loc = home?.location;
+    if (loc == null) return null;
+    return '${loc.latitude}:${loc.longitude}:${home?.timezone ?? ''}';
   }
 
   Map<RhythmMode, RhythmModeTransitionConfig> _initialTransitionConfigs() {
@@ -146,7 +257,13 @@ class _DefaultTransitionEditorScreenState
     try {
       final home = context.read<HomeProvider>().currentHome;
       final loc = home?.location;
-      if (loc == null) return;
+      _solarLocationKey = _currentSolarLocationKey();
+      if (loc == null) {
+        _solarClockData = null;
+        _curveVisuals.clear();
+        _profileVisualSignature = _currentProfileVisualSignature();
+        return;
+      }
       final tz =
           home?.timezone ?? SolarUtils.timezoneFromLongitude(loc.longitude);
       final now = DateTime.now();
@@ -170,22 +287,73 @@ class _DefaultTransitionEditorScreenState
         sunTimes: sunTimes,
         twilightTimes: twilightTimes,
       );
-      _curveVisuals
-        ..clear()
-        ..addAll(
-          _buildModeCurveVisuals(
-            latitude: loc.latitude,
-            longitude: loc.longitude,
-            year: now.year,
-            month: now.month,
-            day: now.day,
-            timezone: tz,
-          ),
-        );
+      _rebuildCurveVisuals(
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+        year: now.year,
+        month: now.month,
+        day: now.day,
+        timezone: tz,
+      );
     } catch (_) {
       _solarClockData = null;
       _curveVisuals.clear();
+      _profileVisualSignature = _currentProfileVisualSignature();
     }
+  }
+
+  void _rebuildCurveVisuals({
+    double? latitude,
+    double? longitude,
+    int? year,
+    int? month,
+    int? day,
+    String? timezone,
+  }) {
+    final home = context.read<HomeProvider>().currentHome;
+    final loc = home?.location;
+    if (loc == null) {
+      _curveVisuals.clear();
+      _profileVisualSignature = _currentProfileVisualSignature();
+      return;
+    }
+
+    final now = DateTime.now();
+    _curveVisuals
+      ..clear()
+      ..addAll(
+        _buildModeCurveVisuals(
+          latitude: latitude ?? loc.latitude,
+          longitude: longitude ?? loc.longitude,
+          year: year ?? now.year,
+          month: month ?? now.month,
+          day: day ?? now.day,
+          timezone: timezone ??
+              home?.timezone ??
+              SolarUtils.timezoneFromLongitude(loc.longitude),
+        ),
+      );
+    _profileVisualSignature = _currentProfileVisualSignature();
+  }
+
+  String _currentProfileVisualSignature() {
+    final buffer = StringBuffer();
+    for (final mode in [RhythmMode.day, RhythmMode.sleep]) {
+      final activeProfileId = _activeProfileIdForMode(mode) ?? '';
+      final profile = _activeProfileForMode(mode);
+      final fallbackColor =
+          widget.profileColors[mode] ?? _fallbackModeColor(mode);
+      buffer
+        ..write(mode.name)
+        ..write(':')
+        ..write(activeProfileId)
+        ..write(':')
+        ..write(profile?.hashCode ?? 0)
+        ..write(':')
+        ..write(_colorSignature(fallbackColor))
+        ..write('|');
+    }
+    return buffer.toString();
   }
 
   Map<RhythmMode, _ModeCurveVisual> _buildModeCurveVisuals({
@@ -274,17 +442,20 @@ class _DefaultTransitionEditorScreenState
   }
 
   RhythmCurveConfig? _activeProfileForMode(RhythmMode mode) {
-    String? activeProfileId;
-    for (final modeConfig in _serverSync.modeConfigs) {
-      if (modeConfig.mode == mode) {
-        activeProfileId = modeConfig.activeProfileId;
-        break;
-      }
-    }
+    final activeProfileId = _activeProfileIdForMode(mode);
     if (activeProfileId == null || activeProfileId.isEmpty) return null;
 
     for (final profile in _serverSync.profiles) {
       if (profile.id == activeProfileId) return profile;
+    }
+    return null;
+  }
+
+  String? _activeProfileIdForMode(RhythmMode mode) {
+    for (final modeConfig in _serverSync.modeConfigs) {
+      if (modeConfig.mode == mode) {
+        return modeConfig.activeProfileId;
+      }
     }
     return null;
   }
@@ -302,13 +473,23 @@ class _DefaultTransitionEditorScreenState
   }
 
   void _updateSelectedDuration(TransitionDuration duration) {
-    _updateConfig(
-      _config.copyWith(duration: duration),
-      selectUpdatedMode: false,
-    );
+    // A single duration controls the fade time for BOTH Day and Sleep
+    // transitions — apply the new value to both configs so they stay in sync.
+    setState(() {
+      for (final mode in [RhythmMode.day, RhythmMode.sleep]) {
+        final existing = _transitionConfigs[mode];
+        if (existing != null) {
+          _transitionConfigs[mode] = existing.copyWith(duration: duration);
+        }
+      }
+    });
   }
 
+  /// Dirty-state for the save/revert cluster. Scoped to the Time section
+  /// only — Button-section changes are inline and don't go through this
+  /// pill, so they don't drive its visibility or reset behavior.
   bool get _hasUnsavedChanges {
+    if (_timeEnabled != _savedTimeEnabled) return true;
     for (final mode in [RhythmMode.day, RhythmMode.sleep]) {
       final current = _transitionConfigs[mode];
       final saved = _savedTransitionConfigs[mode];
@@ -321,6 +502,123 @@ class _DefaultTransitionEditorScreenState
       }
     }
     return false;
+  }
+
+  void _setTimeEnabled(bool enabled) {
+    if (_timeEnabled == enabled) return;
+    HapticFeedback.selectionClick();
+    setState(() {
+      _timeEnabled = enabled;
+      // Collapsing the section hides the editor, so any ephemeral orb
+      // edits get thrown away — otherwise unsaved changes would linger
+      // invisibly inside the closed accordion. Drag state is reset too.
+      if (!enabled) {
+        _dragMode = null;
+        _dragPreviewHour = null;
+        _proximateAnchor = null;
+        _anchorProximity = 0.0;
+        _transitionConfigs = Map<RhythmMode, RhythmModeTransitionConfig>.of(
+          _savedTransitionConfigs,
+        );
+        _handleHours.clear();
+      }
+    });
+  }
+
+  void _setButtonEnabled(bool enabled) {
+    if (_buttonEnabled == enabled) return;
+    HapticFeedback.selectionClick();
+    setState(() {
+      _buttonEnabled = enabled;
+      // Collapsing the source aborts an in-flight listen so its ephemeral
+      // state can't leak across an enable/disable cycle.
+      if (!enabled) {
+        _simulatedDetectionTimer?.cancel();
+        _listenPulseController.stop();
+        _bindState = _ButtonBindState.idle;
+        _pendingButton = null;
+      }
+    });
+  }
+
+  // ── Listen flow ──────────────────────────────────────────────────────────
+  // The user taps Listen; the server forwards the next physical press; we
+  // surface it as a pending candidate and ask the user to confirm. The
+  // server-forward step is currently simulated by a short timer — the real
+  // wiring will subscribe to the hub-event stream and call
+  // `_onButtonDetected` with the actual device payload.
+
+  void _startListening() {
+    HapticFeedback.lightImpact();
+    setState(() {
+      _bindState = _ButtonBindState.listening;
+      _pendingButton = null;
+    });
+    _listenPulseController
+      ..reset()
+      ..repeat();
+    _simulatedDetectionTimer?.cancel();
+    _simulatedDetectionTimer = Timer(const Duration(milliseconds: 2400), () {
+      if (!mounted || _bindState != _ButtonBindState.listening) return;
+      _onButtonDetected(_simulateServerForwardedPress());
+    });
+  }
+
+  void _cancelListening() {
+    HapticFeedback.selectionClick();
+    _simulatedDetectionTimer?.cancel();
+    _listenPulseController.stop();
+    setState(() {
+      _bindState = _ButtonBindState.idle;
+      _pendingButton = null;
+    });
+  }
+
+  void _onButtonDetected(_MockButtonDevice device) {
+    HapticFeedback.mediumImpact();
+    _listenPulseController.stop();
+    setState(() {
+      _bindState = _ButtonBindState.detected;
+      _pendingButton = device;
+    });
+  }
+
+  void _confirmDetected() {
+    final pending = _pendingButton;
+    if (pending == null) return;
+    HapticFeedback.mediumImpact();
+    setState(() {
+      _toggleButtonDeviceId = pending.id;
+      _bindState = _ButtonBindState.idle;
+      // Keep `_pendingButton` so the summary chips can resolve a name for
+      // a device that wasn't in the seed list.
+    });
+  }
+
+  _MockButtonDevice _simulateServerForwardedPress() {
+    // Stand-in for the real hub-event payload. Picks a candidate that isn't
+    // already the bound device so the demo doesn't feel like a no-op.
+    final pool = _mockButtonDevices
+        .where((d) => d.id != _toggleButtonDeviceId)
+        .toList();
+    if (pool.isNotEmpty) {
+      return pool[math.Random().nextInt(pool.length)];
+    }
+    return const _MockButtonDevice(
+      id: 'unknown',
+      name: 'Unknown remote',
+      location: 'New device',
+    );
+  }
+
+  _MockButtonDevice? _resolveButtonDevice(String? id) {
+    if (id == null) return null;
+    for (final d in _mockButtonDevices) {
+      if (d.id == id) return d;
+    }
+    final pending = _pendingButton;
+    if (pending != null && pending.id == id) return pending;
+    return null;
   }
 
   bool _transitionConfigEquals(
@@ -336,6 +634,22 @@ class _DefaultTransitionEditorScreenState
         a.trigger.kind == b.trigger.kind &&
         a.trigger.event == b.trigger.event &&
         a.trigger.time == b.trigger.time;
+  }
+
+  bool _transitionConfigMapsEqual(
+    Map<RhythmMode, RhythmModeTransitionConfig> a,
+    Map<RhythmMode, RhythmModeTransitionConfig> b,
+  ) {
+    for (final mode in [RhythmMode.day, RhythmMode.sleep]) {
+      final left = a[mode];
+      final right = b[mode];
+      if (left == null || right == null) {
+        if (left != right) return false;
+        continue;
+      }
+      if (!_transitionConfigEquals(left, right)) return false;
+    }
+    return true;
   }
 
   List<RhythmModeTransitionConfig> _buildTransitionsForSave(
@@ -380,6 +694,7 @@ class _DefaultTransitionEditorScreenState
     final savedSnapshot = Map<RhythmMode, RhythmModeTransitionConfig>.of(
       _transitionConfigs,
     );
+    final savedTimeSnapshot = _timeEnabled;
     final success = await _serverSync.api.setTransitions(
       _buildTransitionsForSave(savedSnapshot),
     );
@@ -393,13 +708,33 @@ class _DefaultTransitionEditorScreenState
       _isSaving = false;
       if (success) {
         _savedTransitionConfigs = savedSnapshot;
+        _savedTimeEnabled = savedTimeSnapshot;
       }
     });
 
     _showSaveFeedback(
-      success ? 'Daily Rhythm saved.' : 'Could not save Daily Rhythm.',
+      success ? 'Transitions saved.' : 'Could not save Transitions.',
       error: !success,
     );
+  }
+
+  /// Throws away in-flight Time-section edits and returns to the last saved
+  /// snapshot. Intentionally does not touch Button-section state — that
+  /// section commits inline through its own Listen → Confirm flow.
+  void _resetChanges() {
+    if (!_hasUnsavedChanges) return;
+    HapticFeedback.mediumImpact();
+    setState(() {
+      _transitionConfigs = Map<RhythmMode, RhythmModeTransitionConfig>.of(
+        _savedTransitionConfigs,
+      );
+      _timeEnabled = _savedTimeEnabled;
+      _handleHours.clear();
+      _dragMode = null;
+      _dragPreviewHour = null;
+      _proximateAnchor = null;
+      _anchorProximity = 0.0;
+    });
   }
 
   void _showSaveFeedback(String message, {required bool error}) {
@@ -497,17 +832,17 @@ class _DefaultTransitionEditorScreenState
                   final compactLayout = constraints.maxHeight < 680;
                   final topSpacing = compactLayout ? 2.0 : 6.0;
                   final sectionSpacing = compactLayout ? 12.0 : 16.0;
-                  final bottomSpacing = compactLayout ? 8.0 : 12.0;
+                  final bottomSpacing = compactLayout ? 14.0 : 18.0;
 
-                  return Padding(
+                  // Whole page scrolls — sections expand to their natural
+                  // content height with no inner scrolling.
+                  return SingleChildScrollView(
                     padding: const EdgeInsets.symmetric(horizontal: 20),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         SizedBox(height: topSpacing),
-                        Expanded(
-                          child: _buildHero(compactLayout: compactLayout),
-                        ),
+                        _buildHero(compactLayout: compactLayout),
                         SizedBox(height: sectionSpacing),
                         _buildDurationRow(compactLayout: compactLayout),
                         SizedBox(height: bottomSpacing),
@@ -517,132 +852,96 @@ class _DefaultTransitionEditorScreenState
                 },
               ),
             ),
-            _buildSaveBar(),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildSaveBar() {
-    final synced = context.select<ServerSyncProvider, bool>((p) => p.synced);
-    final accentColor = widget.profileColors[_selectedMode] ??
-        _fallbackModeColor(_selectedMode);
-    final canSave = synced && _hasUnsavedChanges && !_isSaving;
-    final label = _isSaving
-        ? 'Saving...'
-        : !synced
-            ? 'Connect to Save'
-            : _hasUnsavedChanges
-                ? 'Save Changes'
-                : 'Saved';
-    final icon = _isSaving
-        ? null
-        : !synced
-            ? Icons.cloud_off_rounded
-            : _hasUnsavedChanges
-                ? Icons.save_rounded
-                : Icons.check_rounded;
-
+  Widget _buildHeader(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
-      child: GestureDetector(
-        onTap: canSave ? _saveChanges : null,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          padding: const EdgeInsets.symmetric(vertical: 14),
-          decoration: BoxDecoration(
-            color: canSave
-                ? accentColor.withValues(alpha: 0.12)
-                : CelestialColors.backgroundCard,
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: canSave
-                  ? accentColor.withValues(alpha: 0.26)
-                  : accentColor.withValues(alpha: 0.10),
+      padding: const EdgeInsets.fromLTRB(20, 18, 20, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          const Text(
+            'Transitions',
+            style: TextStyle(
+              color: CelestialColors.textPrimary,
+              fontSize: 19,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.2,
             ),
-            boxShadow: [
-              if (canSave)
-                BoxShadow(
-                  color: accentColor.withValues(alpha: 0.18),
-                  blurRadius: 18,
-                  spreadRadius: 1,
-                ),
-            ],
           ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              if (_isSaving)
-                SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    valueColor: AlwaysStoppedAnimation<Color>(accentColor),
-                  ),
-                )
-              else if (icon != null)
-                Icon(
-                  icon,
-                  color: canSave
-                      ? accentColor
-                      : CelestialColors.textSecondary.withValues(alpha: 0.65),
-                  size: 18,
-                ),
-              const SizedBox(width: 8),
-              Text(
-                label,
-                style: TextStyle(
-                  color: canSave
-                      ? accentColor
-                      : CelestialColors.textSecondary.withValues(alpha: 0.75),
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.2,
-                ),
-              ),
-            ],
+          const SizedBox(height: 4),
+          Text(
+            'How Day and Sleep change hands',
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.62),
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              letterSpacing: 0.3,
+            ),
           ),
-        ),
+        ],
       ),
     );
   }
 
-  Widget _buildHeader(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        children: [
-          GestureDetector(
-            onTap: () => Navigator.of(context).pop(),
-            child: Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: CelestialColors.accentBlue.withValues(alpha: 0.2),
-              ),
-              child: const Icon(
-                Icons.chevron_left,
-                color: CelestialColors.accentBlue,
-                size: 24,
-              ),
+  /// Save + Reset cluster anchored to the bottom of the Time section's
+  /// expanded body. Quiet pair of pills — only mount when there are
+  /// unsaved edits, regardless of the active source. Save commits every
+  /// change on the page; Reset throws every change away.
+  Widget _buildSaveResetSlot() {
+    // Reading `_serverSync` directly (rather than `context.select`) avoids a
+    // Provider assertion when this method runs inside a LayoutBuilder
+    // builder. `_handleServerSyncChanged` calls setState whenever
+    // `_serverSync.synced` flips, so the pill stays in sync.
+    final synced = _serverSync.synced;
+    final showCluster = _hasUnsavedChanges || _isSaving;
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+      alignment: Alignment.topCenter,
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 220),
+        switchInCurve: Curves.easeOutCubic,
+        switchOutCurve: Curves.easeInCubic,
+        transitionBuilder: (child, animation) {
+          return FadeTransition(
+            opacity: animation,
+            child: ScaleTransition(
+              scale: Tween<double>(begin: 0.92, end: 1.0).animate(animation),
+              child: child,
             ),
-          ),
-          const Expanded(
-            child: Text(
-              'Rhythm',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: CelestialColors.textPrimary,
-                fontSize: 18,
-                fontWeight: FontWeight.w600,
+          );
+        },
+        child: showCluster
+            ? Padding(
+                key: const ValueKey('save-reset-on'),
+                padding: const EdgeInsets.fromLTRB(4, 6, 4, 4),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    _ResetPill(
+                      accentColor: _chromeAccent,
+                      onTap: _isSaving ? null : _resetChanges,
+                    ),
+                    const SizedBox(width: 8),
+                    _SavePill(
+                      accentColor: _chromeAccent,
+                      isSaving: _isSaving,
+                      synced: synced,
+                      onTap: (synced && !_isSaving) ? _saveChanges : null,
+                    ),
+                  ],
+                ),
+              )
+            : const SizedBox(
+                key: ValueKey('save-reset-off'),
+                width: double.infinity,
+                height: 0,
               ),
-            ),
-          ),
-          const SizedBox(width: 40),
-        ],
       ),
     );
   }
@@ -652,131 +951,150 @@ class _DefaultTransitionEditorScreenState
         _fallbackModeColor(RhythmMode.day);
     final sleepColor = widget.profileColors[RhythmMode.sleep] ??
         _fallbackModeColor(RhythmMode.sleep);
-    final accentColor = _selectedMode == RhythmMode.day ? dayColor : sleepColor;
 
-    return AnimatedBuilder(
-      animation: _breatheAnimation,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final ultraCompactLayout = constraints.maxHeight < 360;
-          final titleFontSize = ultraCompactLayout ? 18.0 : 20.0;
-          final subtitleFontSize = ultraCompactLayout ? 11.0 : 12.0;
-          final subtitleSpacing = ultraCompactLayout ? 4.0 : 6.0;
-          final clockSpacing = ultraCompactLayout
-              ? 14.0
-              : compactLayout
-                  ? 16.0
-                  : 20.0;
-          final summarySpacing = ultraCompactLayout ? 10.0 : 14.0;
-          final contentPadding = EdgeInsets.fromLTRB(
-            20,
-            ultraCompactLayout
-                ? 18
-                : compactLayout
-                    ? 22
-                    : 28,
-            20,
-            ultraCompactLayout
-                ? 16
-                : compactLayout
-                    ? 18
-                    : 24,
-          );
-
-          return Padding(
-            padding: contentPadding,
-            child: Column(
-              mainAxisSize: MainAxisSize.max,
-              children: [
-                Text(
-                  'Daily Rhythm',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: CelestialColors.textPrimary,
-                    fontSize: titleFontSize,
-                    fontWeight: FontWeight.w300,
-                    letterSpacing: 1.0,
-                  ),
-                ),
-                SizedBox(height: subtitleSpacing),
-                Text(
-                  'Drag handles to set when each mode begins',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color:
-                        CelestialColors.textSecondary.withValues(alpha: 0.62),
-                    fontSize: subtitleFontSize,
-                    fontWeight: FontWeight.w500,
-                    letterSpacing: 0.4,
-                  ),
-                ),
-                SizedBox(height: clockSpacing),
-                Expanded(
-                  child: _solarClockData != null
-                      ? _buildInteractiveTransitionFlow(
-                          dayColor: dayColor,
-                          sleepColor: sleepColor,
-                        )
-                      : _buildNoSolarState(),
-                ),
-                SizedBox(height: summarySpacing),
-                _buildFocusedTransitionSummary(
-                  dayColor: dayColor,
-                  sleepColor: sleepColor,
-                ),
-              ],
-            ),
-          );
-        },
+    // Clean solid surface — no radial orb, no breathe wash. The hero is
+    // just a grouping container for the two trigger sources; the energy
+    // belongs to the orbital editor inside the Time card, not the chrome.
+    return Container(
+      decoration: BoxDecoration(
+        color: CelestialColors.backgroundCard,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: _hairlineSoft, width: 1),
       ),
-      builder: (context, child) {
-        final breathe = _breatheAnimation.value;
-        return Container(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(20),
-            color: CelestialColors.backgroundCard,
+      clipBehavior: Clip.antiAlias,
+      padding: EdgeInsets.fromLTRB(
+        14,
+        compactLayout ? 14 : 16,
+        14,
+        compactLayout ? 14 : 16,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildTimeSection(
+            dayColor: dayColor,
+            sleepColor: sleepColor,
+            compactLayout: compactLayout,
           ),
-          clipBehavior: Clip.antiAlias,
-          child: Stack(
-            children: [
-              Positioned.fill(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: RadialGradient(
-                      center: const Alignment(0, -0.6),
-                      radius: 1.15,
-                      colors: [
-                        accentColor.withValues(alpha: 0.12 + breathe * 0.04),
-                        CelestialColors.backgroundCard,
-                        CelestialColors.backgroundDark,
-                      ],
-                      stops: const [0.0, 0.55, 1.0],
-                    ),
-                  ),
-                ),
-              ),
-              Positioned.fill(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.centerLeft,
-                      end: Alignment.centerRight,
-                      colors: [
-                        sleepColor.withValues(alpha: 0.10 + breathe * 0.04),
-                        Colors.transparent,
-                        Colors.transparent,
-                        dayColor.withValues(alpha: 0.10 + breathe * 0.04),
-                      ],
-                      stops: const [0.0, 0.35, 0.65, 1.0],
-                    ),
-                  ),
-                ),
-              ),
-              child!,
-            ],
+          const SizedBox(height: 10),
+          _buildButtonSection(
+            accentColor: _chromeAccent,
+            compactLayout: compactLayout,
           ),
-        );
-      },
+        ],
+      ),
+    );
+  }
+
+  /// Schedule-based trigger section. Header with an enable switch; when on,
+  /// the orbital editor + reset pill expand below. Section card visibly
+  /// "powers down" when the switch is off.
+  Widget _buildTimeSection({
+    required Color dayColor,
+    required Color sleepColor,
+    required bool compactLayout,
+  }) {
+    return _SourceSectionCard(
+      enabled: _timeEnabled,
+      accent: _chromeAccent,
+      header: _SourceSectionHeader(
+        icon: Icons.access_time_rounded,
+        label: 'Time',
+        sublabel: _timeEnabled
+            ? 'Transitions follow a schedule'
+            : 'Off',
+        accent: _chromeAccent,
+        enabled: _timeEnabled,
+        onChanged: _setTimeEnabled,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.fromLTRB(8, 4, 8, 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(4, 4, 4, 4),
+              child: _buildSourceSummaryChips(
+                source: _SummarySource.time,
+                dayColor: dayColor,
+                sleepColor: sleepColor,
+              ),
+            ),
+            AspectRatio(
+              aspectRatio: 1.0,
+              child: _solarClockData != null
+                  ? _buildInteractiveTransitionFlow(
+                      dayColor: dayColor,
+                      sleepColor: sleepColor,
+                    )
+                  : _buildNoSolarState(),
+            ),
+            // Buffer so orb handles dragged near the bottom of the clock
+            // don't run into the save/reset cluster's hit area when it
+            // animates in.
+            const SizedBox(height: 20),
+            _buildSaveResetSlot(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Physical-button trigger section. Header with an enable switch; when on,
+  /// the device picker + pair CTA expand below.
+  Widget _buildButtonSection({
+    required Color accentColor,
+    required bool compactLayout,
+  }) {
+    return _SourceSectionCard(
+      enabled: _buttonEnabled,
+      accent: _chromeAccent,
+      header: _SourceSectionHeader(
+        icon: Icons.radio_button_checked_rounded,
+        label: 'Button',
+        sublabel: _buttonEnabled
+            ? 'One button toggles Day ⇄ Sleep'
+            : 'Off',
+        accent: _chromeAccent,
+        enabled: _buttonEnabled,
+        onChanged: _setButtonEnabled,
+      ),
+      body: _buildButtonSectionBody(),
+    );
+  }
+
+  Widget _buildButtonSectionBody() {
+    final dayColor = widget.profileColors[RhythmMode.day] ??
+        _fallbackModeColor(RhythmMode.day);
+    final sleepColor = widget.profileColors[RhythmMode.sleep] ??
+        _fallbackModeColor(RhythmMode.sleep);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 4, 10, 14),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 4, 4, 12),
+            child: _buildSourceSummaryChips(
+              source: _SummarySource.button,
+              dayColor: dayColor,
+              sleepColor: sleepColor,
+            ),
+          ),
+          _ButtonListenStage(
+            bindState: _bindState,
+            pulse: _listenPulseController,
+            accent: _chromeAccent,
+            boundDevice: _resolveButtonDevice(_toggleButtonDeviceId),
+            pendingDevice: _pendingButton,
+            onListen: _startListening,
+            onCancel: _cancelListening,
+            onRetry: _startListening,
+            onConfirm: _confirmDetected,
+          ),
+        ],
+      ),
     );
   }
 
@@ -797,9 +1115,9 @@ class _DefaultTransitionEditorScreenState
             showEventMarkers: false,
             showHourLabels: false,
             showLowerArc: false,
-            horizonFactor: 0.56,
+            horizonFactor: 0.58,
             radiusWidthFactor: 0.35,
-            radiusHeightFactor: 0.74,
+            radiusHeightFactor: 0.92,
             underlayBuilder: (context, geometry) => _buildClockRing(
               geometry: geometry,
               dayColor: dayColor,
@@ -831,80 +1149,117 @@ class _DefaultTransitionEditorScreenState
     );
   }
 
-  Widget _buildFocusedTransitionSummary({
+  /// Pair of summary chips for a single source (TIME or BUTTON), rendered
+  /// inside the matching accordion. Each chip shows what *this source*
+  /// contributes for that direction — independent of whether the other
+  /// source is on.
+  Widget _buildSourceSummaryChips({
+    required _SummarySource source,
     required Color dayColor,
     required Color sleepColor,
   }) {
-    final modeColor = _selectedMode == RhythmMode.day ? dayColor : sleepColor;
-    final isDragging = _dragMode != null;
+    return IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(
+            child: _buildModeSummaryChip(
+              mode: RhythmMode.day,
+              modeColor: dayColor,
+              source: source,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: _buildModeSummaryChip(
+              mode: RhythmMode.sleep,
+              modeColor: sleepColor,
+              source: source,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
-    // During drag, show the approaching anchor or current drag position
-    final String triggerLabel;
-    final double? triggerHour;
-    if (isDragging && _proximateAnchor != null && _anchorProximity > 0.5) {
-      triggerLabel = _shortAnchorLabel(_proximateAnchor!);
-      triggerHour = _proximateAnchor!.hour;
-    } else if (isDragging) {
-      triggerLabel = '';
-      triggerHour = _dragPreviewHour;
+  Widget _buildModeSummaryChip({
+    required RhythmMode mode,
+    required Color modeColor,
+    required _SummarySource source,
+  }) {
+    final config = _transitionConfigs[mode];
+    if (config == null) return const SizedBox.shrink();
+    final isDraggingThis = _dragMode == mode;
+
+    final String valueLine;
+    if (source == _SummarySource.time) {
+      String triggerLabel;
+      double? triggerHour;
+      if (isDraggingThis &&
+          _proximateAnchor != null &&
+          _anchorProximity > 0.5) {
+        triggerLabel = _shortAnchorLabel(_proximateAnchor!);
+        triggerHour = _proximateAnchor!.hour;
+      } else if (isDraggingThis) {
+        triggerLabel = '';
+        triggerHour = _dragPreviewHour;
+      } else {
+        triggerLabel = _shortTriggerLabel(config.trigger);
+        triggerHour = _triggerTimeHoursForMode(mode);
+      }
+      final timeText = triggerHour != null ? _fmtTime(triggerHour) : null;
+      if (triggerLabel.isNotEmpty && timeText != null) {
+        valueLine = '$triggerLabel  ·  $timeText';
+      } else {
+        valueLine = timeText ?? triggerLabel;
+      }
     } else {
-      triggerLabel = _shortTriggerLabel(_config.trigger);
-      triggerHour = _triggerTimeHours();
+      // _SummarySource.button — show the same toggle device on both sides
+      // (it's bidirectional). Same device on Day Start AND Sleep Start
+      // reads as "this button starts Day; this same button starts Sleep".
+      final device = _resolveButtonDevice(_toggleButtonDeviceId);
+      valueLine = device?.name ?? 'Pick a button';
     }
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
       decoration: BoxDecoration(
         color: modeColor.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: modeColor.withValues(alpha: 0.15)),
+        border: Border.all(color: modeColor.withValues(alpha: 0.18)),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
-        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(_modeIcon(_selectedMode), size: 16, color: modeColor),
-          const SizedBox(width: 8),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(_modeIcon(mode), size: 14, color: modeColor),
+              const SizedBox(width: 6),
+              Text(
+                '${_modeLabel(mode)} Start',
+                style: TextStyle(
+                  color: modeColor,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.4,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
           Text(
-            '${_modeLabel(_selectedMode)} Start',
+            valueLine,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style: TextStyle(
-              color: modeColor,
-              fontSize: 13,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.3,
+              color: CelestialColors.textPrimary.withValues(alpha: 0.88),
+              fontSize: 12.5,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.1,
             ),
           ),
-          if (triggerLabel.isNotEmpty || triggerHour != null) ...[
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              child: Container(
-                width: 1,
-                height: 16,
-                color: modeColor.withValues(alpha: 0.2),
-              ),
-            ),
-            if (triggerLabel.isNotEmpty)
-              Text(
-                triggerLabel,
-                style: TextStyle(
-                  color: CelestialColors.textPrimary.withValues(alpha: 0.7),
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            if (triggerLabel.isNotEmpty && triggerHour != null)
-              const SizedBox(width: 6),
-            if (triggerHour != null)
-              Text(
-                _fmtTime(triggerHour),
-                style: TextStyle(
-                  color: CelestialColors.textPrimary.withValues(alpha: 0.9),
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.2,
-                ),
-              ),
-          ],
         ],
       ),
     );
@@ -948,16 +1303,41 @@ class _DefaultTransitionEditorScreenState
     final handles = _handleSpecs(dayColor: dayColor, sleepColor: sleepColor);
     final handleByMode = {for (final handle in handles) handle.mode: handle};
 
-    return GestureDetector(
+    // Use a `RawGestureDetector` with an overriding pan recognizer so the
+    // orbit drag always wins the gesture arena. Without this, once the
+    // page's scroll view starts competing for vertical pans (e.g. when the
+    // save/revert cluster expands content past the viewport), the orbs
+    // become un-draggable.
+    return RawGestureDetector(
       behavior: HitTestBehavior.translucent,
-      onTapUp: (details) =>
-          _handleClockTap(details.localPosition, geometry, handleByMode),
-      onPanStart: (details) =>
-          _handleClockPanStart(details.localPosition, geometry, handleByMode),
-      onPanUpdate: (details) =>
-          _handleClockPanUpdate(details.localPosition, geometry),
-      onPanEnd: (_) => _handleClockPanEnd(),
-      onPanCancel: _handleClockPanEnd,
+      gestures: <Type, GestureRecognizerFactory>{
+        _ClockPanGestureRecognizer:
+            GestureRecognizerFactoryWithHandlers<_ClockPanGestureRecognizer>(
+          () => _ClockPanGestureRecognizer(),
+          (recognizer) {
+            recognizer.onStart = (details) {
+              _handleClockPanStart(
+                  details.localPosition, geometry, handleByMode);
+            };
+            recognizer.onUpdate = (details) {
+              _handleClockPanUpdate(details.localPosition, geometry);
+            };
+            recognizer.onEnd = (_) {
+              _handleClockPanEnd();
+            };
+            recognizer.onCancel = _handleClockPanEnd;
+          },
+        ),
+        TapGestureRecognizer:
+            GestureRecognizerFactoryWithHandlers<TapGestureRecognizer>(
+          () => TapGestureRecognizer(),
+          (recognizer) {
+            recognizer.onTapUp = (details) {
+              _handleClockTap(details.localPosition, geometry, handleByMode);
+            };
+          },
+        ),
+      },
       child: Stack(
         clipBehavior: Clip.none,
         children: [
@@ -1172,21 +1552,31 @@ class _DefaultTransitionEditorScreenState
     final mode = _dragMode;
     if (mode == null) return;
 
-    final draggedHour = _clampDraggedHour(
-      mode,
-      geometry.hourFromPosition(position),
-    );
+    final rawHour = geometry.hourFromPosition(position);
+    // Quantize the drag to 5-minute stops so small finger jitter doesn't
+    // shift the time around.
+    final steppedHour =
+        (rawHour / _dragStepHours).round() * _dragStepHours;
+    final draggedHour = _clampDraggedHour(mode, steppedHour);
 
     // Snap visually during drag so the orb locks onto solar events
     final snappedAnchor = _snappedAnchorForMode(mode, draggedHour);
     final displayHour = snappedAnchor?.hour ?? draggedHour;
 
     final previousProximate = _proximateAnchor;
+    final previousDraggedHour = _handleHours[mode];
+    final stepChanged = previousDraggedHour == null ||
+        (draggedHour - previousDraggedHour).abs() > 0.0001;
+
     setState(() {
       _dragPreviewHour = displayHour;
       _handleHours[mode] = draggedHour;
       _computeDragProximity(mode, draggedHour);
     });
+
+    if (stepChanged && snappedAnchor == null && previousDraggedHour != null) {
+      HapticFeedback.selectionClick();
+    }
     if (_proximateAnchor != null &&
         _proximateAnchor != previousProximate &&
         _anchorProximity > 0.75) {
@@ -1375,19 +1765,21 @@ class _DefaultTransitionEditorScreenState
     ];
   }
 
-  double? _triggerTimeHours() {
-    if (_config.trigger.isScheduled) {
-      final scheduledTime = _config.trigger.time;
+  double? _triggerTimeHoursForMode(RhythmMode mode) {
+    final config = _transitionConfigs[mode];
+    if (config == null) return null;
+    if (config.trigger.isScheduled) {
+      final scheduledTime = config.trigger.time;
       if (scheduledTime != null) {
         return _scheduledTimeToHour(scheduledTime);
       }
     }
-    if (_config.trigger.kind == 'manual') {
-      return _handleHourForMode(_selectedMode);
+    if (config.trigger.kind == 'manual') {
+      return _handleHourForMode(mode);
     }
-    final event = _config.trigger.event;
-    if (event == null || _config.trigger.kind != 'solar') return null;
-    return _eventTimeHours(_selectedMode, event);
+    final event = config.trigger.event;
+    if (event == null || config.trigger.kind != 'solar') return null;
+    return _eventTimeHours(mode, event);
   }
 
   double? _eventTimeHours(RhythmMode mode, String event) {
@@ -1431,7 +1823,8 @@ class _DefaultTransitionEditorScreenState
           20, compactLayout ? 12 : 14, 16, compactLayout ? 12 : 14),
       decoration: BoxDecoration(
         color: CelestialColors.backgroundCard,
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: _hairlineSoft, width: 1),
       ),
       child: Column(
         children: [
@@ -1449,13 +1842,24 @@ class _DefaultTransitionEditorScreenState
               ),
               const SizedBox(width: 12),
               Expanded(
-                child: Text(
-                  '${_modeLabel(_selectedMode)} Transition Duration',
-                  style: const TextStyle(
-                    color: CelestialColors.textPrimary,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
-                  ),
+                child: Row(
+                  children: [
+                    const Flexible(
+                      child: Text(
+                        'Transition Duration',
+                        style: TextStyle(
+                          color: CelestialColors.textPrimary,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    const InfoTooltip(
+                      message:
+                          'Applies to both Day and Sleep transitions. This is the light fade time of the transition.',
+                    ),
+                  ],
                 ),
               ),
               GestureDetector(
@@ -1579,6 +1983,1348 @@ class _DefaultTransitionEditorScreenState
                   ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Which source (Time or Button) a Day Start / Sleep Start chip is
+/// summarising. Each accordion renders the pair scoped to its own source.
+enum _SummarySource { time, button }
+
+/// State machine for the Button section's Listen flow. `idle` covers both
+/// "nothing bound yet" and "bound, resting" — the bound device is what
+/// disambiguates them in the UI.
+enum _ButtonBindState { idle, listening, detected }
+
+/// Placeholder model for paired button devices. Will be replaced by whatever
+/// shape the real device API hands back. Kept private so the swap is
+/// contained.
+class _MockButtonDevice {
+  final String id;
+  final String name;
+  final String? location;
+
+  const _MockButtonDevice({
+    required this.id,
+    required this.name,
+    this.location,
+  });
+}
+
+const List<_MockButtonDevice> _mockButtonDevices = [
+  _MockButtonDevice(
+    id: 'nightstand',
+    name: 'Nightstand Button',
+    location: 'Bedroom',
+  ),
+  _MockButtonDevice(
+    id: 'hallway',
+    name: 'Hallway Switch',
+    location: 'Living Room',
+  ),
+];
+
+/// Card-style sub-section inside the hero, with a header (icon + label +
+/// switch) and an animated body that collapses when [enabled] is false.
+class _SourceSectionCard extends StatelessWidget {
+  final bool enabled;
+  final Color accent;
+  final Widget header;
+  final Widget body;
+
+  const _SourceSectionCard({
+    required this.enabled,
+    required this.accent,
+    required this.header,
+    required this.body,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+      decoration: BoxDecoration(
+        color: enabled ? _surfaceElevated : _surfaceRecessed,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: enabled ? _hairlineStrong : _hairlineSoft,
+          width: 1,
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          header,
+          AnimatedSize(
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.topCenter,
+            child: enabled
+                ? body
+                : const SizedBox(width: double.infinity, height: 0),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Row that opens each [_SourceSectionCard]. Tap anywhere on the row to
+/// toggle the source on/off; the switch is the obvious affordance.
+class _SourceSectionHeader extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String sublabel;
+  final Color accent;
+  final bool enabled;
+  final ValueChanged<bool> onChanged;
+
+  const _SourceSectionHeader({
+    required this.icon,
+    required this.label,
+    required this.sublabel,
+    required this.accent,
+    required this.enabled,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final activeColor = enabled
+        ? accent.withValues(alpha: 0.92)
+        : CelestialColors.textSecondary.withValues(alpha: 0.6);
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => onChanged(!enabled),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
+        child: Row(
+          children: [
+            // Glyph in a soft accent disc when enabled.
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 220),
+              width: 30,
+              height: 30,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: enabled
+                    ? CelestialColors.backgroundCard
+                    : _surfaceRecessed,
+                border: Border.all(
+                  color: enabled ? _hairlineStrong : _hairlineSoft,
+                ),
+              ),
+              child: Icon(icon, size: 15, color: activeColor),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  AnimatedDefaultTextStyle(
+                    duration: const Duration(milliseconds: 200),
+                    style: TextStyle(
+                      color: enabled
+                          ? CelestialColors.textPrimary
+                          : CelestialColors.textPrimary.withValues(alpha: 0.6),
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.3,
+                    ),
+                    child: Text(label),
+                  ),
+                  const SizedBox(height: 2),
+                  AnimatedDefaultTextStyle(
+                    duration: const Duration(milliseconds: 200),
+                    style: TextStyle(
+                      color: enabled
+                          ? CelestialColors.textSecondary
+                              .withValues(alpha: 0.75)
+                          : CelestialColors.textSecondary
+                              .withValues(alpha: 0.5),
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w500,
+                      letterSpacing: 0.2,
+                    ),
+                    child: Text(sublabel),
+                  ),
+                ],
+              ),
+            ),
+            _CelestialSwitch(
+              value: enabled,
+              accent: accent,
+              onChanged: onChanged,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Pill-shaped toggle switch tuned to the celestial palette. Accent fill +
+/// soft glow when on, dark with a hairline outline when off.
+class _CelestialSwitch extends StatelessWidget {
+  final bool value;
+  final Color accent;
+  final ValueChanged<bool> onChanged;
+
+  const _CelestialSwitch({
+    required this.value,
+    required this.accent,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const trackWidth = 44.0;
+    const trackHeight = 26.0;
+    const thumbSize = 20.0;
+    final thumbOffset = value ? (trackWidth - thumbSize - 3.0) : 3.0;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => onChanged(!value),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+        width: trackWidth,
+        height: trackHeight,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(trackHeight / 2),
+          color: value ? accent.withValues(alpha: 0.20) : _surfaceRecessed,
+          border: Border.all(
+            color: value
+                ? accent.withValues(alpha: 0.45)
+                : _hairlineStrong,
+            width: 1,
+          ),
+          boxShadow: [
+            if (value)
+              BoxShadow(
+                color: accent.withValues(alpha: 0.22),
+                blurRadius: 12,
+                spreadRadius: -2,
+              ),
+          ],
+        ),
+        child: Stack(
+          children: [
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeOutCubic,
+              top: 2,
+              left: thumbOffset,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 220),
+                width: thumbSize,
+                height: thumbSize,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: value
+                      ? accent.withValues(alpha: 0.92)
+                      : const Color(0xFF4A5260),
+                  boxShadow: [
+                    if (value)
+                      BoxShadow(
+                        color: accent.withValues(alpha: 0.35),
+                        blurRadius: 8,
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Listen-flow stage
+//
+// Four states share a single morphing surface: unbound (no button yet),
+// listening (server forwarding the next press), detected (candidate awaiting
+// confirmation), bound (a button is committed). AnimatedSwitcher + AnimatedSize
+// let the section breathe between states without snapping.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class _ButtonListenStage extends StatelessWidget {
+  final _ButtonBindState bindState;
+  final Animation<double> pulse;
+  final Color accent;
+  final _MockButtonDevice? boundDevice;
+  final _MockButtonDevice? pendingDevice;
+  final VoidCallback onListen;
+  final VoidCallback onCancel;
+  final VoidCallback onRetry;
+  final VoidCallback onConfirm;
+
+  const _ButtonListenStage({
+    required this.bindState,
+    required this.pulse,
+    required this.accent,
+    required this.boundDevice,
+    required this.pendingDevice,
+    required this.onListen,
+    required this.onCancel,
+    required this.onRetry,
+    required this.onConfirm,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeOutCubic,
+      alignment: Alignment.topCenter,
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 240),
+        switchInCurve: Curves.easeOutCubic,
+        switchOutCurve: Curves.easeInCubic,
+        transitionBuilder: (child, animation) {
+          return FadeTransition(
+            opacity: animation,
+            child: SlideTransition(
+              position: Tween<Offset>(
+                begin: const Offset(0, 0.04),
+                end: Offset.zero,
+              ).animate(animation),
+              child: child,
+            ),
+          );
+        },
+        child: _buildState(),
+      ),
+    );
+  }
+
+  Widget _buildState() {
+    switch (bindState) {
+      case _ButtonBindState.listening:
+        return _ListenStateListening(
+          key: const ValueKey('listening'),
+          pulse: pulse,
+          accent: accent,
+          onCancel: onCancel,
+        );
+      case _ButtonBindState.detected:
+        return _ListenStateDetected(
+          key: const ValueKey('detected'),
+          accent: accent,
+          device: pendingDevice,
+          onRetry: onRetry,
+          onConfirm: onConfirm,
+        );
+      case _ButtonBindState.idle:
+        final bound = boundDevice;
+        if (bound != null) {
+          return _ListenStateBound(
+            key: const ValueKey('bound'),
+            accent: accent,
+            device: bound,
+            onListen: onListen,
+          );
+        }
+        return _ListenStateUnbound(
+          key: const ValueKey('unbound'),
+          accent: accent,
+          onListen: onListen,
+        );
+    }
+  }
+}
+
+/// Idle state with no committed button. A quiet sonar stage invites the user
+/// to start listening.
+class _ListenStateUnbound extends StatelessWidget {
+  final Color accent;
+  final VoidCallback onListen;
+
+  const _ListenStateUnbound({
+    super.key,
+    required this.accent,
+    required this.onListen,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      key: const ValueKey('unbound-col'),
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _RadarStage(
+          accent: accent,
+          pulse: null,
+          mode: _RadarStageMode.dormant,
+          diameter: 168,
+        ),
+        const SizedBox(height: 14),
+        _ListenCaption(
+          accent: accent,
+          title: 'No button bound yet',
+          subtitle: 'Tap Listen, then press a remote.',
+        ),
+        const SizedBox(height: 14),
+        _ListenPrimaryCta(
+          accent: accent,
+          icon: Icons.sensors_rounded,
+          label: 'Listen for a press',
+          onTap: onListen,
+        ),
+      ],
+    );
+  }
+}
+
+/// Active listen state — radar pulses outward while we wait for the server
+/// to forward the next button press.
+class _ListenStateListening extends StatelessWidget {
+  final Animation<double> pulse;
+  final Color accent;
+  final VoidCallback onCancel;
+
+  const _ListenStateListening({
+    super.key,
+    required this.pulse,
+    required this.accent,
+    required this.onCancel,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      key: const ValueKey('listening-col'),
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _RadarStage(
+          accent: accent,
+          pulse: pulse,
+          mode: _RadarStageMode.scanning,
+          diameter: 168,
+        ),
+        const SizedBox(height: 14),
+        _ListenCaption(
+          accent: accent,
+          title: 'Listening for a press…',
+          subtitle: 'Press any button on your remote.',
+          live: true,
+        ),
+        const SizedBox(height: 14),
+        _ListenGhostCta(
+          accent: accent,
+          icon: Icons.close_rounded,
+          label: 'Cancel',
+          onTap: onCancel,
+        ),
+      ],
+    );
+  }
+}
+
+/// The server forwarded a press — surface the candidate and ask the user to
+/// confirm. Tries-again drops back to listening, Use-this commits.
+class _ListenStateDetected extends StatelessWidget {
+  final Color accent;
+  final _MockButtonDevice? device;
+  final VoidCallback onRetry;
+  final VoidCallback onConfirm;
+
+  const _ListenStateDetected({
+    super.key,
+    required this.accent,
+    required this.device,
+    required this.onRetry,
+    required this.onConfirm,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      key: const ValueKey('detected-col'),
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _RadarStage(
+          accent: accent,
+          pulse: null,
+          mode: _RadarStageMode.locked,
+          diameter: 132,
+        ),
+        const SizedBox(height: 14),
+        Text(
+          'Got one!',
+          style: TextStyle(
+            color: accent.withValues(alpha: 0.95),
+            fontSize: 13,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 1.6,
+          ),
+        ),
+        const SizedBox(height: 10),
+        _DetectedDeviceCard(accent: accent, device: device),
+        const SizedBox(height: 8),
+        Text(
+          'Is this the right button?',
+          style: TextStyle(
+            color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+            letterSpacing: 0.2,
+          ),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: _ListenGhostCta(
+                accent: accent,
+                icon: Icons.refresh_rounded,
+                label: 'Try again',
+                onTap: onRetry,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _ListenFilledCta(
+                accent: accent,
+                icon: Icons.check_rounded,
+                label: 'Use this button',
+                onTap: onConfirm,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+/// Bound state — a button is committed. A small chip displays it; tapping
+/// the secondary CTA enters listen mode again to rebind.
+class _ListenStateBound extends StatelessWidget {
+  final Color accent;
+  final _MockButtonDevice device;
+  final VoidCallback onListen;
+
+  const _ListenStateBound({
+    super.key,
+    required this.accent,
+    required this.device,
+    required this.onListen,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      key: const ValueKey('bound-col'),
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          padding: const EdgeInsets.fromLTRB(12, 12, 14, 12),
+          decoration: BoxDecoration(
+            color: accent.withValues(alpha: 0.06),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: accent.withValues(alpha: 0.22)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 34,
+                height: 34,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: accent.withValues(alpha: 0.14),
+                  border: Border.all(color: accent.withValues(alpha: 0.42)),
+                  boxShadow: [
+                    BoxShadow(
+                      color: accent.withValues(alpha: 0.18),
+                      blurRadius: 12,
+                      spreadRadius: -3,
+                    ),
+                  ],
+                ),
+                child: Icon(
+                  Icons.check_rounded,
+                  size: 16,
+                  color: accent.withValues(alpha: 0.95),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      device.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color:
+                            CelestialColors.textPrimary.withValues(alpha: 0.95),
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.1,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      device.location ?? 'Paired and ready',
+                      style: TextStyle(
+                        color: CelestialColors.textSecondary
+                            .withValues(alpha: 0.65),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w500,
+                        letterSpacing: 0.2,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Text(
+                'BOUND',
+                style: TextStyle(
+                  color: accent.withValues(alpha: 0.72),
+                  fontSize: 9.5,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 1.4,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        _ListenGhostCta(
+          accent: accent,
+          icon: Icons.sensors_rounded,
+          label: 'Listen for a different button',
+          onTap: onListen,
+        ),
+      ],
+    );
+  }
+}
+
+/// The detected-button card slot. Falls back to a placeholder if the
+/// payload didn't carry name/location yet.
+class _DetectedDeviceCard extends StatelessWidget {
+  final Color accent;
+  final _MockButtonDevice? device;
+
+  const _DetectedDeviceCard({required this.accent, required this.device});
+
+  @override
+  Widget build(BuildContext context) {
+    final name = device?.name ?? 'Detected button';
+    final location = device?.location;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: accent.withValues(alpha: 0.28)),
+        boxShadow: [
+          BoxShadow(
+            color: accent.withValues(alpha: 0.10),
+            blurRadius: 14,
+            spreadRadius: -3,
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 32,
+            height: 32,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: accent.withValues(alpha: 0.16),
+              border: Border.all(color: accent.withValues(alpha: 0.45)),
+            ),
+            child: Icon(
+              Icons.radio_button_checked_rounded,
+              size: 14,
+              color: accent.withValues(alpha: 0.95),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: CelestialColors.textPrimary.withValues(alpha: 0.96),
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.1,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  location ?? 'Forwarded from your hub',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color:
+                        CelestialColors.textSecondary.withValues(alpha: 0.7),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
+                    letterSpacing: 0.2,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Two-line caption block used under the radar stage. A small "LIVE" dot
+/// pulses next to the title while the server is forwarding events.
+class _ListenCaption extends StatelessWidget {
+  final Color accent;
+  final String title;
+  final String subtitle;
+  final bool live;
+
+  const _ListenCaption({
+    required this.accent,
+    required this.title,
+    required this.subtitle,
+    this.live = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (live) ...[
+              _BlinkingDot(color: accent),
+              const SizedBox(width: 8),
+            ],
+            Text(
+              title,
+              style: TextStyle(
+                color: CelestialColors.textPrimary.withValues(alpha: 0.92),
+                fontSize: 13.5,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.2,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          subtitle,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: CelestialColors.textSecondary.withValues(alpha: 0.65),
+            fontSize: 11.5,
+            fontWeight: FontWeight.w500,
+            letterSpacing: 0.2,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _BlinkingDot extends StatefulWidget {
+  final Color color;
+
+  const _BlinkingDot({required this.color});
+
+  @override
+  State<_BlinkingDot> createState() => _BlinkingDotState();
+}
+
+class _BlinkingDotState extends State<_BlinkingDot>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      duration: const Duration(milliseconds: 900),
+      vsync: this,
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (context, _) {
+        final t = Curves.easeInOut.transform(_ctrl.value);
+        return Container(
+          width: 7,
+          height: 7,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: widget.color.withValues(alpha: 0.40 + 0.55 * t),
+            boxShadow: [
+              BoxShadow(
+                color: widget.color.withValues(alpha: 0.35 * t),
+                blurRadius: 8,
+                spreadRadius: -1,
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Primary action — filled accent border + label. The CTA that initiates the
+/// Listen flow when no button is bound.
+class _ListenPrimaryCta extends StatelessWidget {
+  final Color accent;
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _ListenPrimaryCta({
+    required this.accent,
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 18),
+        decoration: BoxDecoration(
+          color: accent.withValues(alpha: 0.10),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: accent.withValues(alpha: 0.40), width: 1),
+          boxShadow: [
+            BoxShadow(
+              color: accent.withValues(alpha: 0.16),
+              blurRadius: 14,
+              spreadRadius: -3,
+            ),
+          ],
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 16, color: accent.withValues(alpha: 0.95)),
+            const SizedBox(width: 8),
+            Text(
+              label,
+              style: TextStyle(
+                color: accent.withValues(alpha: 0.95),
+                fontSize: 13,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.6,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Quieter outline CTA — used for Cancel and "Listen for a different button".
+class _ListenGhostCta extends StatelessWidget {
+  final Color accent;
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _ListenGhostCta({
+    required this.accent,
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 14),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: accent.withValues(alpha: 0.22)),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 14, color: accent.withValues(alpha: 0.82)),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: accent.withValues(alpha: 0.85),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.4,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Filled accent CTA — used for Use-this-button to read as the decisive
+/// action in the confirm row.
+class _ListenFilledCta extends StatelessWidget {
+  final Color accent;
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _ListenFilledCta({
+    required this.accent,
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 14),
+        decoration: BoxDecoration(
+          color: accent.withValues(alpha: 0.94),
+          borderRadius: BorderRadius.circular(14),
+          boxShadow: [
+            BoxShadow(
+              color: accent.withValues(alpha: 0.30),
+              blurRadius: 14,
+              spreadRadius: -3,
+            ),
+          ],
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 14, color: CelestialColors.backgroundDark),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: CelestialColors.backgroundDark,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Visual stage at the top of the listen flow. Three modes:
+/// - dormant: a static halo around the button glyph (idle, unbound)
+/// - scanning: three concentric rings expanding outward and fading
+/// - locked: a tight ring with a crosshair, indicating a captured event
+enum _RadarStageMode { dormant, scanning, locked }
+
+class _RadarStage extends StatelessWidget {
+  final Color accent;
+  final Animation<double>? pulse;
+  final _RadarStageMode mode;
+  final double diameter;
+
+  const _RadarStage({
+    required this.accent,
+    required this.pulse,
+    required this.mode,
+    required this.diameter,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final repaint = pulse;
+    return SizedBox.square(
+      dimension: diameter,
+      child: CustomPaint(
+        painter: _RadarPainter(
+          accent: accent,
+          mode: mode,
+          progress: pulse?.value ?? 0.0,
+          repaint: repaint,
+        ),
+        child: Center(
+          child: _RadarCore(accent: accent, mode: mode),
+        ),
+      ),
+    );
+  }
+}
+
+class _RadarCore extends StatelessWidget {
+  final Color accent;
+  final _RadarStageMode mode;
+
+  const _RadarCore({required this.accent, required this.mode});
+
+  @override
+  Widget build(BuildContext context) {
+    final size = mode == _RadarStageMode.locked ? 48.0 : 52.0;
+    final icon = mode == _RadarStageMode.locked
+        ? Icons.check_rounded
+        : Icons.radio_button_checked_rounded;
+    return Container(
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: accent.withValues(alpha: 0.12),
+        border: Border.all(color: accent.withValues(alpha: 0.55), width: 1.4),
+        boxShadow: [
+          BoxShadow(
+            color: accent.withValues(alpha: 0.28),
+            blurRadius: 18,
+            spreadRadius: -2,
+          ),
+        ],
+      ),
+      child: Icon(icon, size: size * 0.46, color: accent.withValues(alpha: 0.95)),
+    );
+  }
+}
+
+class _RadarPainter extends CustomPainter {
+  final Color accent;
+  final _RadarStageMode mode;
+  final double progress;
+
+  _RadarPainter({
+    required this.accent,
+    required this.mode,
+    required this.progress,
+    super.repaint,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final maxR = size.shortestSide / 2;
+
+    // Always-present dim grid ring — anchors the stage when nothing else is
+    // animating.
+    canvas.drawCircle(
+      center,
+      maxR * 0.95,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 0.8
+        ..color = accent.withValues(alpha: 0.06),
+    );
+
+    switch (mode) {
+      case _RadarStageMode.dormant:
+        _paintDormant(canvas, center, maxR);
+        break;
+      case _RadarStageMode.scanning:
+        _paintScanning(canvas, center, maxR);
+        break;
+      case _RadarStageMode.locked:
+        _paintLocked(canvas, center, maxR);
+        break;
+    }
+  }
+
+  void _paintDormant(Canvas canvas, Offset center, double maxR) {
+    // Two faint static rings inviting the user to "tune in".
+    for (final t in [0.55, 0.78]) {
+      canvas.drawCircle(
+        center,
+        maxR * t,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.8
+          ..color = accent.withValues(alpha: 0.10),
+      );
+    }
+  }
+
+  void _paintScanning(Canvas canvas, Offset center, double maxR) {
+    // Three rings offset in phase so they ripple outward continuously.
+    for (int i = 0; i < 3; i++) {
+      final phase = (progress + i / 3.0) % 1.0;
+      final r = maxR * (0.18 + phase * 0.82);
+      final fade = 1.0 - phase;
+      final alpha = (fade * fade) * 0.55;
+      canvas.drawCircle(
+        center,
+        r,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.2
+          ..color = accent.withValues(alpha: alpha),
+      );
+    }
+    // Sweeping crosshair tick — a single rotating spoke that reads as the
+    // signal direction. Subtle so it doesn't compete with the rings.
+    final angle = progress * 2 * math.pi;
+    final inner = maxR * 0.34;
+    final outer = maxR * 0.92;
+    final tip = Offset(
+      center.dx + math.cos(angle) * outer,
+      center.dy + math.sin(angle) * outer,
+    );
+    final root = Offset(
+      center.dx + math.cos(angle) * inner,
+      center.dy + math.sin(angle) * inner,
+    );
+    canvas.drawLine(
+      root,
+      tip,
+      Paint()
+        ..strokeWidth = 1.4
+        ..strokeCap = StrokeCap.round
+        ..shader = LinearGradient(
+          colors: [
+            accent.withValues(alpha: 0.55),
+            accent.withValues(alpha: 0.0),
+          ],
+        ).createShader(Rect.fromPoints(root, tip)),
+    );
+  }
+
+  void _paintLocked(Canvas canvas, Offset center, double maxR) {
+    // A single tight ring "snaps" around the core, with four crosshair
+    // ticks reading as a target lock.
+    final ringR = maxR * 0.62;
+    canvas.drawCircle(
+      center,
+      ringR,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.4
+        ..color = accent.withValues(alpha: 0.55),
+    );
+    canvas.drawCircle(
+      center,
+      ringR + 4,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 4
+        ..color = accent.withValues(alpha: 0.10)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4),
+    );
+    final tickPaint = Paint()
+      ..strokeWidth = 1.4
+      ..strokeCap = StrokeCap.round
+      ..color = accent.withValues(alpha: 0.65);
+    const tickIn = 4.0;
+    const tickOut = 10.0;
+    for (int i = 0; i < 4; i++) {
+      final angle = i * math.pi / 2;
+      final cos = math.cos(angle);
+      final sin = math.sin(angle);
+      canvas.drawLine(
+        Offset(center.dx + cos * (ringR + tickIn), center.dy + sin * (ringR + tickIn)),
+        Offset(center.dx + cos * (ringR + tickOut), center.dy + sin * (ringR + tickOut)),
+        tickPaint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _RadarPainter old) =>
+      old.progress != progress ||
+      old.mode != mode ||
+      old.accent != accent;
+}
+
+/// Quiet outline pill — left half of the inline save/reset cluster in the
+/// Time section. Reverts in-flight edits back to the last saved snapshot.
+class _ResetPill extends StatelessWidget {
+  final Color accentColor;
+  final VoidCallback? onTap;
+
+  const _ResetPill({
+    required this.accentColor,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onTap != null;
+    final alpha = enabled ? 1.0 : 0.45;
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(11, 7, 13, 7),
+        decoration: BoxDecoration(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: accentColor.withValues(alpha: 0.22 * alpha),
+            width: 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.restart_alt_rounded,
+              size: 13,
+              color: accentColor.withValues(alpha: 0.85 * alpha),
+            ),
+            const SizedBox(width: 5),
+            Text(
+              'Revert',
+              style: TextStyle(
+                color: accentColor.withValues(alpha: 0.85 * alpha),
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.5,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Filled companion pill — right half of the inline save/reset cluster.
+/// Commits every unsaved change on the page. Disabled tap (null `onTap`)
+/// renders muted; `isSaving` swaps the icon for a spinner.
+class _SavePill extends StatelessWidget {
+  final Color accentColor;
+  final bool isSaving;
+  final bool synced;
+  final VoidCallback? onTap;
+
+  const _SavePill({
+    required this.accentColor,
+    required this.isSaving,
+    required this.synced,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onTap != null && synced && !isSaving;
+    final label = isSaving
+        ? 'Saving'
+        : !synced
+            ? 'Offline'
+            : 'Save';
+    final alpha = enabled ? 1.0 : 0.55;
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.fromLTRB(11, 7, 13, 7),
+        decoration: BoxDecoration(
+          color: enabled
+              ? accentColor.withValues(alpha: 0.16)
+              : accentColor.withValues(alpha: 0.05),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: enabled
+                ? accentColor.withValues(alpha: 0.55)
+                : accentColor.withValues(alpha: 0.18),
+            width: 1,
+          ),
+          boxShadow: [
+            if (enabled)
+              BoxShadow(
+                color: accentColor.withValues(alpha: 0.18),
+                blurRadius: 10,
+                spreadRadius: -2,
+              ),
+          ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (isSaving)
+              SizedBox(
+                width: 11,
+                height: 11,
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.6,
+                  valueColor: AlwaysStoppedAnimation<Color>(
+                    accentColor.withValues(alpha: 0.9),
+                  ),
+                ),
+              )
+            else
+              Icon(
+                synced ? Icons.check_rounded : Icons.cloud_off_rounded,
+                size: 13,
+                color: accentColor.withValues(alpha: 0.95 * alpha),
+              ),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: TextStyle(
+                color: accentColor.withValues(alpha: 0.95 * alpha),
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.5,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -2120,10 +3866,14 @@ class _RhythmClockRingPainter extends CustomPainter {
           (isDayHour ? dayVisual : sleepVisual).styleAt(midHour);
       final baseOpacity = isDayHour ? opacity : math.max(opacity, 0.38);
       final isSelectedSegment = isDayHour == selectedIsDay;
+      // Let the curve color render at its natural opacity on both halves so
+      // the ring actually reads as the rhythm curve. Selected gets a small
+      // brightness bump on top; differentiation also comes from the glow +
+      // accent stroke layers below.
       final effectiveOpacity = isSelectedSegment
-          ? math.min(0.98, baseOpacity * 1.08 + 0.12)
-          : math.max(0.18, baseOpacity * 0.62);
-      final accentColor = Color.lerp(color, Colors.white, 0.18)!;
+          ? math.min(0.98, baseOpacity * 1.05 + 0.08)
+          : baseOpacity;
+      final accentColor = Color.lerp(color, Colors.white, 0.10)!;
       final startAngle = geometry.angleForHour(startHour);
 
       if (isSelectedSegment) {
@@ -2328,6 +4078,13 @@ String _modeLabel(RhythmMode mode) => switch (mode) {
       RhythmMode.sleep => 'Sleep',
     };
 
+String _colorSignature(Color color) {
+  return '${(color.a * 255).round()},'
+      '${(color.r * 255).round()},'
+      '${(color.g * 255).round()},'
+      '${(color.b * 255).round()}';
+}
+
 String _formatScheduledTriggerTime(double hour) {
   final totalMinutes =
       (SolarUtils.normalizeHour(hour) * 60).round().clamp(0, 1439);
@@ -2344,4 +4101,15 @@ double? _scheduledTimeToHour(String time) {
   if (hours == null || minutes == null) return null;
   if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
   return hours + minutes / 60.0;
+}
+
+/// A `PanGestureRecognizer` that refuses to lose the gesture arena. Used
+/// for the orbital clock so the orbs stay draggable even when an ancestor
+/// scroll view tries to claim vertical drags (e.g. once the page's content
+/// overflows after the Save/Revert cluster expands).
+class _ClockPanGestureRecognizer extends PanGestureRecognizer {
+  @override
+  void rejectGesture(int pointer) {
+    acceptGesture(pointer);
+  }
 }

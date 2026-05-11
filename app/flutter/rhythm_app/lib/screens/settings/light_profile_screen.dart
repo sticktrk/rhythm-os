@@ -22,42 +22,6 @@ class LightProfileScreen extends StatefulWidget {
 
   const LightProfileScreen({super.key, this.initialProfile});
 
-  static Future<void> show(BuildContext context, {String? initialProfile}) {
-    final profile = switch (initialProfile) {
-      'idle' || 'day_idle' => 'rhythm',
-      'sleep_idle' => 'sleep',
-      final value? => value,
-      null => 'rhythm',
-    };
-    AnalyticsService().logScreenView('light_profile');
-    AnalyticsService().logLightProfileOpened(profile);
-    return Navigator.of(context).push(
-      PageRouteBuilder(
-        opaque: false,
-        barrierColor: Colors.black54,
-        pageBuilder: (context, animation, secondaryAnimation) {
-          return LightProfileScreen(initialProfile: initialProfile);
-        },
-        transitionsBuilder: (context, animation, secondaryAnimation, child) {
-          final curve = CurvedAnimation(
-            parent: animation,
-            curve: Curves.easeOutCubic,
-            reverseCurve: Curves.easeInCubic,
-          );
-          return SlideTransition(
-            position: Tween<Offset>(
-              begin: const Offset(0, 1),
-              end: Offset.zero,
-            ).animate(curve),
-            child: child,
-          );
-        },
-        transitionDuration: const Duration(milliseconds: 350),
-        reverseTransitionDuration: const Duration(milliseconds: 300),
-      ),
-    );
-  }
-
   @override
   State<LightProfileScreen> createState() => _LightProfileScreenState();
 }
@@ -130,6 +94,9 @@ class _LightProfileScreenState extends State<LightProfileScreen>
 
   bool _loading = true;
   bool _connected = false;
+  bool _configLoadInFlight = false;
+  String? _serverConfigSignature;
+  late final ServerSyncProvider _serverSync;
 
   // Time simulator state.
   CurveData? _curveData;
@@ -170,10 +137,11 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       CurvedAnimation(parent: _glowController, curve: Curves.easeInOut),
     );
 
-    _loadConfig();
+    _serverSync = context.read<ServerSyncProvider>();
+    _serverSync.addListener(_handleServerSyncChanged);
+    unawaited(_loadConfig());
   }
 
-  @override
   @override
   void setState(VoidCallback fn) {
     super.setState(fn);
@@ -182,11 +150,84 @@ class _LightProfileScreenState extends State<LightProfileScreen>
 
   @override
   void dispose() {
+    _serverSync.removeListener(_handleServerSyncChanged);
     _roomDefaultsDebounce?.cancel();
     _curvePreviewRefreshTimer?.cancel();
     _glowController.dispose();
     _rebuildNotifier.dispose();
     super.dispose();
+  }
+
+  void _handleServerSyncChanged() {
+    if (!mounted) return;
+
+    final synced = _serverSync.synced;
+    if (synced) {
+      final serverConfigChanged = _connected &&
+          _serverConfigSignature != _currentServerConfigSignature();
+      final canAdoptServerConfig =
+          !_hasLocalDraft && !_configLoadInFlight && !_loading;
+      final shouldLoadConfig =
+          !_connected || (serverConfigChanged && canAdoptServerConfig);
+      if (shouldLoadConfig && !_configLoadInFlight) {
+        if (!_connected) {
+          setState(() => _loading = true);
+        }
+        unawaited(_loadConfig());
+      }
+      return;
+    }
+
+    if (_connected && !_loading) {
+      setState(() {
+        _connected = false;
+        _serverConfigSignature = null;
+      });
+    }
+  }
+
+  bool get _hasLocalDraft =>
+      _curveConfigDirty ||
+      _isSaving ||
+      (_roomDefaultsDebounce?.isActive ?? false);
+
+  String _currentServerConfigSignature() {
+    final buffer = StringBuffer()
+      ..write(_serverSync.activeMode?.name ?? '')
+      ..write('|')
+      ..write(_serverSync.activeProfileId ?? '')
+      ..write('|');
+
+    for (final config in _serverSync.modeConfigs) {
+      buffer
+        ..write(config.mode.name)
+        ..write(':')
+        ..write(config.activeProfileId)
+        ..write(':')
+        ..write(config.idleProfileId ?? '')
+        ..write(':')
+        ..write(config.wakeProfileId ?? '')
+        ..write(':')
+        ..write(config.warningProfileId ?? '');
+      for (final roomDefault in config.roomDefaults) {
+        buffer
+          ..write(',')
+          ..write(roomDefault.roomId)
+          ..write('=')
+          ..write(roomDefault.state);
+      }
+      buffer.write('|');
+    }
+
+    for (final profile in _serverSync.profiles) {
+      buffer
+        ..write(profile.id)
+        ..write(':')
+        ..write(profile.hashCode)
+        ..write('|');
+    }
+
+    return buffer.toString();
   }
 
   bool get _isSleepProfile => _selectedProfileId == 'sleep';
@@ -278,105 +319,134 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   Future<void> _loadConfig({bool checkConnection = true}) async {
-    final syncProvider = context.read<ServerSyncProvider>();
-    if (checkConnection) {
-      _connected = syncProvider.synced;
+    if (_configLoadInFlight) return;
+    _configLoadInFlight = true;
 
-      if (!_connected) {
-        setState(() => _loading = false);
+    try {
+      final syncProvider = _serverSync;
+      if (checkConnection) {
+        _connected = syncProvider.synced;
+
+        if (!_connected) {
+          if (mounted) {
+            setState(() {
+              _loading = false;
+              _serverConfigSignature = null;
+            });
+          }
+          return;
+        }
+      }
+
+      final api = syncProvider.api;
+      final mode = await api.getMode();
+      final cachedModeConfigs = [...syncProvider.modeConfigs];
+      final cachedProfiles = [...syncProvider.profiles];
+      final settingsProfiles = [...await api.getProfiles()];
+      if (!mounted) return;
+
+      _modeConfigs = [...?mode?.configs];
+      if (_modeConfigs.isEmpty) {
+        _modeConfigs = cachedModeConfigs;
+      }
+      _serverActiveMode = mode?.active ?? syncProvider.activeMode;
+      settingsProfiles.sort((a, b) {
+        final ia = _profileOrder.indexOf(a.id);
+        final ib = _profileOrder.indexOf(b.id);
+        final orderA = ia == -1 ? _profileOrder.length : ia;
+        final orderB = ib == -1 ? _profileOrder.length : ib;
+        return orderA.compareTo(orderB);
+      });
+      final profileConfigs = <String, sdk.RhythmCurveConfig>{
+        for (final profile in cachedProfiles)
+          if (profile.id.isNotEmpty) profile.id: profile,
+        for (final profile in settingsProfiles)
+          if (profile.id.isNotEmpty) profile.id: profile,
+      };
+
+      final requestedProfileId = _selectedProfileId;
+      var initialProfileId = requestedProfileId;
+      var selectedConfig = requestedProfileId.isEmpty
+          ? null
+          : profileConfigs[requestedProfileId] ??
+              await api.getConfig(id: requestedProfileId);
+      if (selectedConfig != null && selectedConfig.id.isNotEmpty) {
+        initialProfileId = selectedConfig.id;
+        profileConfigs[selectedConfig.id] = selectedConfig;
+      }
+
+      if (selectedConfig == null) {
+        final fallbackMode =
+            _serverActiveMode ?? syncProvider.activeMode ?? sdk.RhythmMode.day;
+        final fallbackModeConfig = _modeConfigs.firstWhere(
+          (config) => config.mode == fallbackMode,
+          orElse: () => _defaultModeConfigForMode(fallbackMode),
+        );
+        initialProfileId = mode?.activeConfig?.activeProfileId ??
+            fallbackModeConfig.activeProfileId.trim();
+        if (initialProfileId.isEmpty) {
+          initialProfileId = settingsProfiles.firstOrNull?.id ??
+              cachedProfiles.firstOrNull?.id ??
+              'rhythm';
+        }
+        selectedConfig = profileConfigs[initialProfileId] ??
+            await api.getConfig(id: initialProfileId);
+      }
+      if (selectedConfig == null) {
+        setState(() {
+          _selectedProfileId = initialProfileId;
+          _connected = syncProvider.synced;
+          _loading = false;
+          _serverConfigSignature = _currentServerConfigSignature();
+        });
         return;
       }
-    }
 
-    final api = syncProvider.api;
-    final mode = await api.getMode();
-    final cachedModeConfigs = [...syncProvider.modeConfigs];
-    final cachedProfiles = [...syncProvider.profiles];
-    final settingsProfiles = [...await api.getProfiles()];
-    if (!mounted) return;
-
-    _modeConfigs = [...?mode?.configs];
-    if (_modeConfigs.isEmpty) {
-      _modeConfigs = cachedModeConfigs;
-    }
-    _serverActiveMode = mode?.active ?? syncProvider.activeMode;
-    settingsProfiles.sort((a, b) {
-      final ia = _profileOrder.indexOf(a.id);
-      final ib = _profileOrder.indexOf(b.id);
-      final orderA = ia == -1 ? _profileOrder.length : ia;
-      final orderB = ib == -1 ? _profileOrder.length : ib;
-      return orderA.compareTo(orderB);
-    });
-    final profileConfigs = <String, sdk.RhythmCurveConfig>{
-      for (final profile in cachedProfiles)
-        if (profile.id.isNotEmpty) profile.id: profile,
-      for (final profile in settingsProfiles)
-        if (profile.id.isNotEmpty) profile.id: profile,
-    };
-
-    final requestedProfileId = _selectedProfileId;
-    var initialProfileId = requestedProfileId;
-    var selectedConfig = requestedProfileId.isEmpty
-        ? null
-        : profileConfigs[requestedProfileId] ??
-            await api.getConfig(id: requestedProfileId);
-    if (selectedConfig != null && selectedConfig.id.isNotEmpty) {
-      initialProfileId = selectedConfig.id;
       profileConfigs[selectedConfig.id] = selectedConfig;
-    }
-
-    if (selectedConfig == null) {
-      final fallbackMode =
-          _serverActiveMode ?? syncProvider.activeMode ?? sdk.RhythmMode.day;
-      final fallbackModeConfig = _modeConfigs.firstWhere(
-        (config) => config.mode == fallbackMode,
-        orElse: () => _defaultModeConfigForMode(fallbackMode),
-      );
-      initialProfileId = mode?.activeConfig?.activeProfileId ??
-          fallbackModeConfig.activeProfileId.trim();
-      if (initialProfileId.isEmpty) {
-        initialProfileId = settingsProfiles.firstOrNull?.id ??
-            cachedProfiles.firstOrNull?.id ??
-            'rhythm';
+      _profileConfigs
+        ..clear()
+        ..addAll(profileConfigs);
+      _applyProfileConfig(selectedConfig);
+      final idleProfileId = _customIdleProfileIdForProfile(initialProfileId);
+      final idleConfig = idleProfileId != null
+          ? profileConfigs[idleProfileId] ??
+              await api.getConfig(id: idleProfileId)
+          : null;
+      if (idleConfig != null) {
+        profileConfigs[idleConfig.id] = idleConfig;
+        _profileConfigs[idleConfig.id] = idleConfig;
       }
-      selectedConfig = profileConfigs[initialProfileId] ??
-          await api.getConfig(id: initialProfileId);
-    }
-    if (selectedConfig == null) {
+      if (idleConfig != null) {
+        _applyIdleConfig(idleConfig);
+      } else {
+        _applyIdleFallback();
+      }
+      await _loadCurveData(profileId: initialProfileId);
+      if (!mounted) return;
+
       setState(() {
         _selectedProfileId = initialProfileId;
+        _connected = syncProvider.synced;
         _loading = false;
+        _sliderFraction = _hourToNowFraction();
+        _serverConfigSignature = _currentServerConfigSignature();
       });
-      return;
+    } catch (e) {
+      debugPrint('LightProfile: Failed to load config: $e');
+      if (mounted) {
+        setState(() {
+          _connected = _serverSync.synced;
+          _loading = false;
+          _serverConfigSignature =
+              _connected ? _currentServerConfigSignature() : null;
+        });
+      }
+    } finally {
+      _configLoadInFlight = false;
+      if (mounted && _serverSync.synced && !_connected) {
+        _handleServerSyncChanged();
+      }
     }
-
-    profileConfigs[selectedConfig.id] = selectedConfig;
-    _profileConfigs
-      ..clear()
-      ..addAll(profileConfigs);
-    _applyProfileConfig(selectedConfig);
-    final idleProfileId = _customIdleProfileIdForProfile(initialProfileId);
-    final idleConfig = idleProfileId != null
-        ? profileConfigs[idleProfileId] ??
-            await api.getConfig(id: idleProfileId)
-        : null;
-    if (idleConfig != null) {
-      profileConfigs[idleConfig.id] = idleConfig;
-      _profileConfigs[idleConfig.id] = idleConfig;
-    }
-    if (idleConfig != null) {
-      _applyIdleConfig(idleConfig);
-    } else {
-      _applyIdleFallback();
-    }
-    await _loadCurveData(profileId: initialProfileId);
-    if (!mounted) return;
-
-    setState(() {
-      _selectedProfileId = initialProfileId;
-      _loading = false;
-      _sliderFraction = _hourToNowFraction();
-    });
   }
 
   Future<void> _loadCurveData(
@@ -813,15 +883,18 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   Future<void> _syncActiveConfigModel(sdk.RhythmCurveConfig config) async {
-    final activeProfileId = context.read<ServerSyncProvider>().activeProfileId;
-    if (config.id != activeProfileId) return;
+    final serverSync = context.read<ServerSyncProvider>();
+    final activeProfileId = serverSync.activeProfileId;
 
-    final dto = _toCurveConfigDto(config);
-    if (dto != null && mounted) {
-      context.read<ConfigModel>().updateConfig(dto);
+    if (config.id == activeProfileId) {
+      final dto = _toCurveConfigDto(config);
+      if (dto != null && mounted) {
+        context.read<ConfigModel>().updateConfig(dto);
+      }
     }
 
-    await context.read<ServerSyncProvider>().fullRefresh();
+    await serverSync.fullRefresh();
+    _serverConfigSignature = _currentServerConfigSignature();
   }
 
   CurveConfigDto? _toCurveConfigDto(sdk.RhythmCurveConfig config) {
@@ -1073,38 +1146,17 @@ class _LightProfileScreenState extends State<LightProfileScreen>
 
   Widget _buildHeader() {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        children: [
-          GestureDetector(
-            onTap: () => Navigator.of(context).pop(),
-            child: Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _Palette.amber.withValues(alpha: 0.12),
-                border: Border.all(
-                  color: _Palette.amber.withValues(alpha: 0.25),
-                ),
-              ),
-              child: const Icon(Icons.close, color: _Palette.amber, size: 20),
-            ),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+      child: Center(
+        child: Text(
+          _profileTitle,
+          style: const TextStyle(
+            color: _Palette.textPrimary,
+            fontSize: 18,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.3,
           ),
-          Expanded(
-            child: Text(
-              _profileTitle,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                color: _Palette.textPrimary,
-                fontSize: 18,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.3,
-              ),
-            ),
-          ),
-          const SizedBox(width: 40),
-        ],
+        ),
       ),
     );
   }
@@ -3344,8 +3396,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         idleSaved = await api.configSet(
           idleConfig,
           id: idleConfig.id,
-          apply:
-              activeProfileId != null && idleConfig.id == activeProfileId,
+          apply: activeProfileId != null && idleConfig.id == activeProfileId,
         );
         if (!mounted) return;
         if (!idleSaved) {

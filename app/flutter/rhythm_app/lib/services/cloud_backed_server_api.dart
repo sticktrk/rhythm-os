@@ -398,6 +398,10 @@ class CloudBackedServerApi {
     return _delegate.getCanonicalDevices();
   }
 
+  Future<bool> flashCanonicalDevice(String id) {
+    return _delegate.flashCanonicalDevice(id);
+  }
+
   Future<List<Map<String, dynamic>>?> getTriageEntries() {
     return _delegate.getTriageEntries();
   }

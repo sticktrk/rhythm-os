@@ -506,6 +506,12 @@ class DemoServerApi extends RhythmServerApi {
   }
 
   @override
+  Future<bool> flashCanonicalDevice(String id) async {
+    ensureSeeded();
+    return _canonicalDevices.containsKey(id);
+  }
+
+  @override
   Future<List<Map<String, dynamic>>?> getTriageEntries() async {
     ensureSeeded();
     return _triageEntries.values

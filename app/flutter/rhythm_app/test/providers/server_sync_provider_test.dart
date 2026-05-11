@@ -16,9 +16,14 @@ import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 class _TestHomeProvider extends HomeProvider {
-  _TestHomeProvider(this._hubs);
+  _TestHomeProvider(this._hubs, {Home? currentHome})
+      : _currentHome = currentHome;
 
   final List<Hub> _hubs;
+  Home? _currentHome;
+
+  @override
+  Home? get currentHome => _currentHome;
 
   @override
   List<Hub> get currentHomeHubs => _hubs;
@@ -29,6 +34,13 @@ class _TestHomeProvider extends HomeProvider {
       if (hub.type == type) return hub;
     }
     return null;
+  }
+
+  @override
+  Future<bool> updateCurrentHome(Home home) async {
+    _currentHome = home;
+    notifyListeners();
+    return true;
   }
 }
 
@@ -531,6 +543,59 @@ void main() {
     });
   });
 
+  group('ServerSyncProvider location reconciliation', () {
+    late RoomProvider roomProvider;
+    late _FakeRhythmServerApi api;
+    late _HelloRhythmConnection connection;
+
+    setUp(() {
+      roomProvider = RoomProvider();
+      api = _FakeRhythmServerApi();
+      connection = _HelloRhythmConnection(api);
+    });
+
+    tearDown(() {
+      roomProvider.dispose();
+      connection.dispose();
+    });
+
+    test('accepts server location when the local home has none', () async {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'My Home',
+        ownerId: 'user-1',
+      );
+      final homeProvider = _TestHomeProvider(
+        const [],
+        currentHome: home,
+      );
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: homeProvider,
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'rooms': const <Map<String, dynamic>>[],
+          'location': {
+            'latitude': 40.7128,
+            'longitude': -74.0060,
+            'timezone': 'America/New_York',
+          },
+        }),
+      );
+
+      await Future<void>.delayed(Duration.zero);
+
+      final adoptedHome = homeProvider.currentHome!;
+      expect(adoptedHome.location?.latitude, 40.7128);
+      expect(adoptedHome.location?.longitude, -74.0060);
+      expect(adoptedHome.timezone, 'America/New_York');
+    });
+  });
+
   group('ServerSyncProvider topology wiring', () {
     late RoomProvider roomProvider;
     late _FakeRhythmServerApi api;
@@ -1003,6 +1068,103 @@ void main() {
       expect(connection.reconnectCalls, 1);
       expect(connection.lastReconnectAuthoritative, isTrue);
     });
+
+    test('refreshes authoritative state when preview tick is missing',
+        () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      await roomProvider.addRoom(const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.hue,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ));
+
+      await provider.ensureRoomPreviewStateFresh('room-1');
+
+      expect(connection.reconnectCalls, 1);
+      expect(connection.lastReconnectAuthoritative, isTrue);
+    });
+
+    test('skips preview refresh when tick is recent', () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      await roomProvider.addRoom(const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.hue,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ));
+      roomProvider.setLastTickTime('room-1', DateTime.now());
+
+      await provider.ensureRoomPreviewStateFresh('room-1');
+
+      expect(connection.reconnectCalls, 0);
+    });
+  });
+
+  testWidgets('room settings live preview refreshes a missing tick on open',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _FakeRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+
+    const room = RoomDto(
+      id: 'room-1',
+      name: 'Kitchen',
+      source: RoomSourceDto.hue,
+      deviceIds: ['light-1'],
+      rhythmEnabled: true,
+      disabled: false,
+      lightsOn: true,
+      timeOffsetMinutes: 0,
+      brightnessOffset: 0,
+    );
+    await roomProvider.addRoom(room);
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const TickerMode(
+          enabled: false,
+          child: RoomSettingsSheet(room: room),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(connection.reconnectCalls, 1);
+    expect(connection.lastReconnectAuthoritative, isTrue);
   });
 
   testWidgets(
@@ -1056,10 +1218,7 @@ void main() {
       _buildTestApp(
         roomProvider: roomProvider,
         provider: provider,
-        child: HubPickerScreen(
-          onSettingsTap: () {},
-          onSunPositionTap: () {},
-        ),
+        child: const HubPickerScreen(),
       ),
     );
     await tester.pump(const Duration(milliseconds: 10));
