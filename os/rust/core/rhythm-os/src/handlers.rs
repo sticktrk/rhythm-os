@@ -3761,6 +3761,7 @@ mod tests {
                     "from_mode": "day",
                     "to_mode": "sleep",
                     "trigger": {"kind": "scheduled", "time": "22:00"},
+                    "trigger_enabled": false,
                     "duration_ms": {"mode": "fixed", "value": 5000}
                 }]
             }),
@@ -3770,6 +3771,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert_eq!(parsed["transitions"][0]["trigger"]["kind"], "scheduled");
         assert_eq!(parsed["transitions"][0]["trigger"]["time"], "22:00");
+        assert_eq!(parsed["transitions"][0]["trigger_enabled"], false);
         assert_eq!(parsed["transitions"][0]["duration_ms"]["mode"], "fixed");
         assert_eq!(parsed["transitions"][0]["duration_ms"]["value"], 5000);
     }

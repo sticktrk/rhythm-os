@@ -509,6 +509,10 @@ fn default_preserve_hard_off() -> bool {
     true
 }
 
+fn default_trigger_enabled() -> bool {
+    true
+}
+
 fn default_mode_transition_duration_ms() -> TimerSetting {
     TimerSetting::Auto
 }
@@ -528,6 +532,8 @@ pub struct ModeTransitionConfig {
     pub to_mode: RhythmMode,
     #[cfg_attr(feature = "serde", serde(default))]
     pub trigger: ModeTransitionTrigger,
+    #[cfg_attr(feature = "serde", serde(default = "default_trigger_enabled"))]
+    pub trigger_enabled: bool,
     #[cfg_attr(
         feature = "serde",
         serde(default = "default_mode_transition_duration_ms")
@@ -545,6 +551,7 @@ impl ModeTransitionConfig {
             from_mode,
             to_mode,
             trigger: ModeTransitionTrigger::Manual,
+            trigger_enabled: true,
             duration_ms: TimerSetting::Fixed { value: duration_ms },
             preserve_hard_off: true,
         }
@@ -557,6 +564,11 @@ impl ModeTransitionConfig {
 
     pub fn with_trigger(mut self, trigger: ModeTransitionTrigger) -> Self {
         self.trigger = trigger;
+        self
+    }
+
+    pub fn with_trigger_enabled(mut self, trigger_enabled: bool) -> Self {
+        self.trigger_enabled = trigger_enabled;
         self
     }
 
@@ -1376,6 +1388,7 @@ mod tests {
         assert!(configs
             .iter()
             .all(|config| config.duration_ms == TimerSetting::Auto));
+        assert!(configs.iter().all(|config| config.trigger_enabled));
         assert_eq!(configs[0].id, "sleep_to_day");
         assert_eq!(configs[1].id, "day_to_sleep");
         assert_eq!(configs[0].label, "Sleep to Day");
@@ -1625,6 +1638,20 @@ mod tests {
             let config: ModeTransitionConfig = serde_json::from_str(json).unwrap();
             assert_eq!(config.duration_ms, TimerSetting::Auto);
             assert!(config.preserve_hard_off);
+            assert!(config.trigger_enabled);
+        }
+
+        #[test]
+        fn test_mode_transition_deserialize_trigger_enabled() {
+            let json = r#"{
+                "from_mode": "sleep",
+                "to_mode": "day",
+                "trigger": "sunrise",
+                "trigger_enabled": false
+            }"#;
+
+            let config: ModeTransitionConfig = serde_json::from_str(json).unwrap();
+            assert!(!config.trigger_enabled);
         }
 
         #[test]
@@ -1653,6 +1680,7 @@ mod tests {
                 json["duration_ms"]["value"],
                 DEFAULT_MODE_TRANSITION_DURATION_MS
             );
+            assert_eq!(json["trigger_enabled"], true);
         }
 
         #[test]
@@ -1772,6 +1800,7 @@ mod tests {
                 from_mode: RhythmMode::Day,
                 to_mode: RhythmMode::Sleep,
                 trigger: ModeTransitionTrigger::NauticalTwilight,
+                trigger_enabled: true,
                 duration_ms: TimerSetting::Fixed { value: 2_000 },
                 preserve_hard_off: true,
             }]);
@@ -1824,6 +1853,7 @@ mod tests {
                     from_mode: RhythmMode::Day,
                     to_mode: RhythmMode::Sleep,
                     trigger: ModeTransitionTrigger::Manual,
+                    trigger_enabled: true,
                     duration_ms: TimerSetting::Fixed { value: 1_000 },
                     preserve_hard_off: true,
                 },
@@ -1835,6 +1865,7 @@ mod tests {
                     trigger: ModeTransitionTrigger::Scheduled(
                         ModeTransitionTime::from_hour_minute(22, 0).unwrap(),
                     ),
+                    trigger_enabled: true,
                     duration_ms: TimerSetting::Fixed { value: 2_000 },
                     preserve_hard_off: true,
                 },
@@ -1854,6 +1885,7 @@ mod tests {
                     from_mode: RhythmMode::Day,
                     to_mode: RhythmMode::Sleep,
                     trigger: ModeTransitionTrigger::Manual,
+                    trigger_enabled: true,
                     duration_ms: TimerSetting::Fixed { value: 1_000 },
                     preserve_hard_off: true,
                 },
@@ -1863,6 +1895,7 @@ mod tests {
                     from_mode: RhythmMode::Day,
                     to_mode: RhythmMode::Sleep,
                     trigger: ModeTransitionTrigger::NauticalTwilight,
+                    trigger_enabled: true,
                     duration_ms: TimerSetting::Fixed { value: 2_000 },
                     preserve_hard_off: true,
                 },

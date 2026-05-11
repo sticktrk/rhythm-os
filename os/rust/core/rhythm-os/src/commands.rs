@@ -303,7 +303,10 @@ fn matching_mode_transition(
 ) -> Option<ModeTransitionConfig> {
     let Ok(s) = state.lock() else { return None };
     s.mode_transition_configs().into_iter().find(|config| {
-        config.from_mode == from_mode && config.to_mode == to_mode && config.trigger == trigger
+        config.from_mode == from_mode
+            && config.to_mode == to_mode
+            && config.trigger == trigger
+            && (trigger.is_manual() || config.trigger_enabled)
     })
 }
 
@@ -13379,6 +13382,32 @@ mod tests {
     }
 
     #[test]
+    fn mode_transition_disabled_scheduled_change_has_no_active_context() {
+        let (state, _runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Sleep;
+            set_observed_lights_on_in_app(&mut s, "r1", true);
+            s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
+                RhythmMode::Sleep,
+                RhythmMode::Day,
+                4_000,
+            )
+            .with_trigger(ModeTransitionTrigger::Sunrise)
+            .with_trigger_enabled(false)]);
+        }
+
+        do_set_active_mode_with_trigger(&state, RhythmMode::Day, ModeTransitionTrigger::Sunrise)
+            .unwrap();
+
+        let s = state.lock().unwrap();
+        assert_eq!(s.active_mode, RhythmMode::Day);
+        assert_eq!(s.last_active_mode_cause, ModeChangeCause::Schedule);
+        assert_eq!(s.last_active_mode_transition_id, None);
+        assert!(s.room_mode_transitions.is_empty());
+    }
+
+    #[test]
     fn mode_transition_staggers_periodic_resume_per_room() {
         let (state, runtime) = setup_state(vec![
             make_snapshot("r1", false, false),
@@ -13625,6 +13654,43 @@ mod tests {
             s.last_active_mode_transition_id.as_deref(),
             Some(transition_id.as_str())
         );
+    }
+
+    #[test]
+    fn mode_transition_trigger_by_id_works_when_trigger_disabled() {
+        let (state, runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
+        let transition_id = {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Sleep;
+            set_observed_lights_on_in_app(&mut s, "r1", true);
+            s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
+                RhythmMode::Sleep,
+                RhythmMode::Day,
+                4_000,
+            )
+            .with_trigger(ModeTransitionTrigger::Sunrise)
+            .with_trigger_enabled(false)]);
+            s.mode_transition_configs()[0].id.clone()
+        };
+
+        let json = do_trigger_transition(&state, &transition_id).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["active"], "day");
+        assert_eq!(parsed["last_change"]["cause"], "manual");
+        assert_eq!(parsed["last_change"]["transition_id"], transition_id);
+
+        let applied = runtime.applied_commands();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].0, "r1");
+        assert_eq!(applied[0].1.transition_ms, Some(4_000));
+
+        let s = state.lock().unwrap();
+        assert_eq!(s.last_active_mode_cause, ModeChangeCause::Manual);
+        assert_eq!(
+            s.last_active_mode_transition_id.as_deref(),
+            Some(transition_id.as_str())
+        );
+        assert!(s.room_mode_transitions.contains_key("r1"));
     }
 
     #[test]

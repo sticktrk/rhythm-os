@@ -1389,11 +1389,9 @@ fn resolved_replayed_mode_transition(
             break;
         };
 
-        for config in ctx
-            .configs
-            .iter()
-            .filter(|config| config.trigger != rhythm_core::ModeTransitionTrigger::Manual)
-        {
+        for config in ctx.configs.iter().filter(|config| {
+            config.trigger_enabled && config.trigger != rhythm_core::ModeTransitionTrigger::Manual
+        }) {
             let Some(trigger_hour) =
                 trigger_hour_for_local_date(config.trigger, config.to_mode, ctx.solar, date)
             else {
@@ -1525,6 +1523,7 @@ pub fn check_mode_transitions(state: &SharedState, last_hour: f32, current_hour:
 
         s.mode_transition_configs().into_iter().find_map(|config| {
             if config.from_mode != active_mode
+                || !config.trigger_enabled
                 || config.trigger == rhythm_core::ModeTransitionTrigger::Manual
             {
                 return None;
@@ -2978,6 +2977,31 @@ mod tests {
     }
 
     #[test]
+    fn disabled_trigger_does_not_switch_mode() {
+        let state = make_state();
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = rhythm_core::RhythmMode::Day;
+            s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
+                rhythm_core::RhythmMode::Day,
+                rhythm_core::RhythmMode::Sleep,
+                1_000,
+            )
+            .with_trigger(rhythm_core::ModeTransitionTrigger::Scheduled(
+                rhythm_core::ModeTransitionTime::from_hour_minute(22, 0).unwrap(),
+            ))
+            .with_trigger_enabled(false)]);
+        }
+
+        check_mode_transitions(&state, 21.9, 22.1);
+
+        assert_eq!(
+            state.lock().unwrap().active_mode,
+            rhythm_core::RhythmMode::Day
+        );
+    }
+
+    #[test]
     fn resolved_replay_applies_missed_astronomical_dawn_transition() {
         let tz_name = "America/New_York";
         let tz = rhythm_core::Timezone::new(tz_name);
@@ -3098,6 +3122,50 @@ mod tests {
                 rhythm_core::ModeTransitionTime::from_hour_minute(22, 0).unwrap(),
             )
         );
+    }
+
+    #[test]
+    fn resolved_replay_skips_disabled_transition() {
+        let tz_name = "America/New_York";
+        let tz = rhythm_core::Timezone::new(tz_name);
+        let start_local = NaiveDate::from_ymd_opt(2026, 4, 8)
+            .unwrap()
+            .and_hms_opt(21, 0, 0)
+            .unwrap();
+        let end_local = NaiveDate::from_ymd_opt(2026, 4, 8)
+            .unwrap()
+            .and_hms_opt(23, 0, 0)
+            .unwrap();
+        let start_utc = tz.utc_datetime_from_local(start_local).unwrap();
+        let end_utc = tz.utc_datetime_from_local(end_local).unwrap();
+
+        let configs = vec![rhythm_core::ModeTransitionConfig::new(
+            rhythm_core::RhythmMode::Day,
+            rhythm_core::RhythmMode::Sleep,
+            1_000,
+        )
+        .with_trigger(rhythm_core::ModeTransitionTrigger::Scheduled(
+            rhythm_core::ModeTransitionTime::from_hour_minute(22, 0).unwrap(),
+        ))
+        .with_trigger_enabled(false)];
+
+        let resolved = resolved_replayed_mode_transition(
+            rhythm_core::RhythmMode::Day,
+            start_utc,
+            end_utc,
+            ReplayTransitionContext {
+                solar: SolarTriggerContext {
+                    solar_noon: 12.5,
+                    latitude: Some(35.804102),
+                    longitude: Some(-78.799_3),
+                    timezone_name: Some(tz_name),
+                },
+                utc_offset: -4.0,
+                configs: &configs,
+            },
+        );
+
+        assert_eq!(resolved, None);
     }
 
     #[test]
