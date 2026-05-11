@@ -12,6 +12,7 @@
 #include <credentials/PersistentStorageOpCertStore.h>
 #include <credentials/attestation_verifier/DefaultDeviceAttestationVerifier.h>
 #include <credentials/attestation_verifier/DeviceAttestationVerifier.h>
+#include <crypto/CHIPCryptoPAL.h>
 #include <crypto/RawKeySessionKeystore.h>
 #include <data-model-providers/codegen/Instance.h>
 #include <lib/core/CHIPCallback.h>
@@ -26,6 +27,7 @@
 #include <setup_payload/QRCodeSetupPayloadParser.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -62,6 +64,10 @@ constexpr std::chrono::seconds kCommissioningTimeout(180);
 constexpr EndpointId kRootEndpoint = kRootEndpointId;
 constexpr VendorId kDefaultControllerVendorId = VendorId::TestVendor1;
 constexpr const char * kBypassAttestationEnv = "RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION";
+constexpr KeysetId kRhythmGroupKeySetId = 0x5201;
+constexpr uint64_t kRhythmGroupEpochStartTime = 1;
+constexpr const char * kRhythmGroupEpochKeyStorageKey = "rhythm:matter-group-epoch-key:v1";
+using RhythmGroupEpochKey = std::array<uint8_t, chip::Credentials::GroupDataProvider::EpochKey::kLengthBytes>;
 
 // DEV-ONLY attestation verifier that waves every device through.
 // Use only on a trusted LAN during rpiz bring-up; production must use
@@ -436,6 +442,64 @@ private:
 
     EndpointId mEndpoint;
     CopyFn mOnValue;
+};
+
+template <typename AttributeInfo>
+class BlockingWriteAttributeOperation final : public DeviceConnectionOperation
+{
+public:
+    using ValueType = typename AttributeInfo::Type;
+
+    BlockingWriteAttributeOperation(NodeId nodeId, EndpointId endpoint, const ValueType & value) :
+        DeviceConnectionOperation(nodeId), mEndpoint(endpoint), mValue(value)
+    {}
+
+protected:
+    CHIP_ERROR HandleConnected(Messaging::ExchangeManager & exchangeMgr, const SessionHandle & sessionHandle) override
+    {
+        ClusterBase cluster(exchangeMgr, sessionHandle, mEndpoint);
+        return cluster.template WriteAttribute<AttributeInfo>(mValue, this, OnSuccess, OnFailure, OnDone);
+    }
+
+private:
+    static void OnSuccess(void * context)
+    {
+        (void) context;
+    }
+
+    static void OnFailure(void * context, CHIP_ERROR error)
+    {
+        auto * self = static_cast<BlockingWriteAttributeOperation *>(context);
+        VerifyOrReturn(self != nullptr);
+        self->RecordFailure(error);
+    }
+
+    static void OnDone(void * context)
+    {
+        auto * self = static_cast<BlockingWriteAttributeOperation *>(context);
+        VerifyOrReturn(self != nullptr);
+        self->Finish(self->CurrentStatus());
+    }
+
+    void RecordFailure(CHIP_ERROR error)
+    {
+        std::lock_guard<std::mutex> lock(mWriteMutex);
+        if (mWriteStatus == CHIP_NO_ERROR)
+        {
+            mWriteStatus = error;
+        }
+    }
+
+    CHIP_ERROR CurrentStatus()
+    {
+        std::lock_guard<std::mutex> lock(mWriteMutex);
+        return mWriteStatus;
+    }
+
+    EndpointId mEndpoint;
+    ValueType mValue;
+    std::mutex mWriteMutex;
+    CHIP_ERROR mWriteStatus = CHIP_NO_ERROR;
 };
 
 class OnOffSubscriptionOperation final : public DeviceConnectionOperation
@@ -870,6 +934,7 @@ public:
         CHIP_ERROR providerStatus = CHIP_NO_ERROR;
         ChipLogProgress(Controller, "Rhythm Matter group configure: group=%u name=%s members=%zu fabric=%u",
                         static_cast<unsigned>(groupId), name.c_str(), group.member_count, static_cast<unsigned>(fabric));
+        ReturnErrorOnFailure(EnsureControllerRhythmGroupKeySet(fabric));
         ReturnErrorOnFailure(ExecuteOnMatterThread([this, fabric, groupId, &name, &providerStatus]() {
             chip::Credentials::GroupDataProvider::GroupInfo groupInfo(groupId, name.c_str());
             providerStatus = mGroupDataProvider.SetGroupInfo(fabric, groupInfo);
@@ -877,16 +942,19 @@ public:
             {
                 return;
             }
-            providerStatus =
-                mGroupDataProvider.SetGroupKey(fabric, groupId,
-                                               chip::Credentials::GroupDataProvider::kIdentityProtectionKeySetId);
+            providerStatus = mGroupDataProvider.SetGroupKey(fabric, groupId, kRhythmGroupKeySetId);
         }));
         ReturnErrorOnFailure(providerStatus);
+        ChipLogProgress(Controller, "Rhythm Matter group key bound: group=%u keyset=%u fabric=%u",
+                        static_cast<unsigned>(groupId), static_cast<unsigned>(kRhythmGroupKeySetId),
+                        static_cast<unsigned>(fabric));
 
         for (size_t i = 0; i < group.member_count; ++i)
         {
             const NodeId nodeId       = group.members[i].node_id;
             const EndpointId endpoint = group.members[i].endpoint;
+
+            ReturnErrorOnFailure(ProvisionGroupKeyOnDevice(nodeId, groupId));
 
             CHIP_ERROR endpointStatus = CHIP_NO_ERROR;
             ReturnErrorOnFailure(ExecuteOnMatterThread([this, fabric, groupId, endpoint, &endpointStatus]() {
@@ -1340,6 +1408,13 @@ private:
         return RunConnectionOperation(operation);
     }
 
+    template <typename AttributeInfo>
+    CHIP_ERROR WriteAttribute(NodeId nodeId, EndpointId endpoint, const typename AttributeInfo::Type & value)
+    {
+        BlockingWriteAttributeOperation<AttributeInfo> operation(nodeId, endpoint, value);
+        return RunConnectionOperation(operation);
+    }
+
     template <typename RequestT>
     CHIP_ERROR InvokeGroupCommand(GroupId groupId, const RequestT & request)
     {
@@ -1378,6 +1453,178 @@ private:
         }
         iter->Release();
         return status;
+    }
+
+    CHIP_ERROR LoadOrCreateRhythmGroupEpochKey(RhythmGroupEpochKey & epochKey)
+    {
+        VerifyOrReturnError(mStorage != nullptr, CHIP_ERROR_INCORRECT_STATE);
+
+        uint16_t size = static_cast<uint16_t>(epochKey.size());
+        CHIP_ERROR err = mStorage->SyncGetKeyValue(kRhythmGroupEpochKeyStorageKey, epochKey.data(), size);
+        if (err == CHIP_NO_ERROR && size == epochKey.size())
+        {
+            ChipLogProgress(Controller, "Rhythm Matter group epoch key loaded: storage_key=%s bytes=%u",
+                            kRhythmGroupEpochKeyStorageKey, static_cast<unsigned>(epochKey.size()));
+            return CHIP_NO_ERROR;
+        }
+
+        if (err != CHIP_NO_ERROR && err != CHIP_ERROR_PERSISTED_STORAGE_VALUE_NOT_FOUND &&
+            err != CHIP_ERROR_BUFFER_TOO_SMALL)
+        {
+            return err;
+        }
+
+        ReturnErrorOnFailure(chip::Crypto::DRBG_get_bytes(epochKey.data(), epochKey.size()));
+        ReturnErrorOnFailure(mStorage->SyncSetKeyValue(kRhythmGroupEpochKeyStorageKey, epochKey.data(),
+                                                       static_cast<uint16_t>(epochKey.size())));
+        ChipLogProgress(Controller, "Rhythm Matter group epoch key created: storage_key=%s bytes=%u",
+                        kRhythmGroupEpochKeyStorageKey, static_cast<unsigned>(epochKey.size()));
+        return CHIP_NO_ERROR;
+    }
+
+    CHIP_ERROR EnsureControllerRhythmGroupKeySet(FabricIndex fabric)
+    {
+        VerifyOrReturnError(mCommissioner != nullptr, CHIP_ERROR_INCORRECT_STATE);
+
+        RhythmGroupEpochKey epochKey;
+        ReturnErrorOnFailure(LoadOrCreateRhythmGroupEpochKey(epochKey));
+
+        CHIP_ERROR providerStatus = CHIP_NO_ERROR;
+        ReturnErrorOnFailure(ExecuteOnMatterThread([this, fabric, &epochKey, &providerStatus]() {
+            uint8_t compressedFabricId[sizeof(uint64_t)] = { 0 };
+            chip::MutableByteSpan compressedFabricIdSpan(compressedFabricId);
+            providerStatus = mCommissioner->GetCompressedFabricIdBytes(compressedFabricIdSpan);
+            if (providerStatus != CHIP_NO_ERROR)
+            {
+                return;
+            }
+
+            chip::Credentials::GroupDataProvider::KeySet keySet(
+                kRhythmGroupKeySetId, chip::Credentials::GroupDataProvider::SecurityPolicy::kTrustFirst, 1);
+            keySet.epoch_keys[0].start_time = kRhythmGroupEpochStartTime;
+            std::memcpy(keySet.epoch_keys[0].key, epochKey.data(), epochKey.size());
+            providerStatus = mGroupDataProvider.SetKeySet(fabric, compressedFabricIdSpan, keySet);
+        }));
+        ReturnErrorOnFailure(providerStatus);
+
+        ChipLogProgress(Controller, "Rhythm Matter group controller keyset ready: keyset=%u fabric=%u epoch_start=%llu",
+                        static_cast<unsigned>(kRhythmGroupKeySetId), static_cast<unsigned>(fabric),
+                        static_cast<unsigned long long>(kRhythmGroupEpochStartTime));
+        return CHIP_NO_ERROR;
+    }
+
+    CHIP_ERROR ReadGroupKeyMap(NodeId nodeId,
+                               std::vector<GroupKeyManagement::Structs::GroupKeyMapStruct::Type> & out)
+    {
+        CHIP_ERROR iterErr = CHIP_NO_ERROR;
+        CHIP_ERROR err = ReadAttribute<GroupKeyManagement::Attributes::GroupKeyMap::TypeInfo>(
+            nodeId, kRootEndpoint, [&out, &iterErr](const auto & value) {
+                out.clear();
+                auto iter = value.begin();
+                while (iter.Next())
+                {
+                    out.push_back(iter.GetValue());
+                }
+                iterErr = iter.GetStatus();
+            });
+        return err == CHIP_NO_ERROR ? iterErr : err;
+    }
+
+    CHIP_ERROR ProvisionGroupKeyOnDevice(NodeId nodeId, GroupId groupId)
+    {
+        VerifyOrReturnError(mCommissioner != nullptr, CHIP_ERROR_INCORRECT_STATE);
+
+        const FabricIndex fabric = mCommissioner->GetFabricIndex();
+        RhythmGroupEpochKey epochKey;
+        ReturnErrorOnFailure(LoadOrCreateRhythmGroupEpochKey(epochKey));
+
+        GroupKeyManagement::Commands::KeySetWrite::Type keySetWrite;
+        keySetWrite.groupKeySet.groupKeySetID          = kRhythmGroupKeySetId;
+        keySetWrite.groupKeySet.groupKeySecurityPolicy = GroupKeyManagement::GroupKeySecurityPolicyEnum::kTrustFirst;
+        keySetWrite.groupKeySet.epochKey0.SetNonNull(chip::ByteSpan(epochKey.data(), epochKey.size()));
+        keySetWrite.groupKeySet.epochStartTime0.SetNonNull(kRhythmGroupEpochStartTime);
+        keySetWrite.groupKeySet.epochKey1.SetNull();
+        keySetWrite.groupKeySet.epochStartTime1.SetNull();
+        keySetWrite.groupKeySet.epochKey2.SetNull();
+        keySetWrite.groupKeySet.epochStartTime2.SetNull();
+        keySetWrite.groupKeySet.groupKeyMulticastPolicy = GroupKeyManagement::GroupKeyMulticastPolicyEnum::kPerGroupID;
+
+        CHIP_ERROR keySetStatus = InvokeCommand(nodeId, kRootEndpoint, keySetWrite);
+        if (keySetStatus != CHIP_NO_ERROR)
+        {
+            ChipLogError(Controller,
+                         "Rhythm Matter group keyset write failed: group=%u node=" ChipLogFormatX64
+                         " keyset=%u error=%" CHIP_ERROR_FORMAT,
+                         static_cast<unsigned>(groupId), ChipLogValueX64(nodeId),
+                         static_cast<unsigned>(kRhythmGroupKeySetId), keySetStatus.Format());
+            return keySetStatus;
+        }
+        ChipLogProgress(Controller,
+                        "Rhythm Matter group keyset written: group=%u node=" ChipLogFormatX64
+                        " keyset=%u endpoint=%u epoch_start=%llu",
+                        static_cast<unsigned>(groupId), ChipLogValueX64(nodeId),
+                        static_cast<unsigned>(kRhythmGroupKeySetId), static_cast<unsigned>(kRootEndpoint),
+                        static_cast<unsigned long long>(kRhythmGroupEpochStartTime));
+
+        std::vector<GroupKeyManagement::Structs::GroupKeyMapStruct::Type> currentMap;
+        CHIP_ERROR mapReadStatus = ReadGroupKeyMap(nodeId, currentMap);
+        if (mapReadStatus != CHIP_NO_ERROR)
+        {
+            ChipLogError(Controller,
+                         "Rhythm Matter group key map read failed: group=%u node=" ChipLogFormatX64
+                         " keyset=%u error=%" CHIP_ERROR_FORMAT,
+                         static_cast<unsigned>(groupId), ChipLogValueX64(nodeId),
+                         static_cast<unsigned>(kRhythmGroupKeySetId), mapReadStatus.Format());
+            return mapReadStatus;
+        }
+
+        std::vector<GroupKeyManagement::Structs::GroupKeyMapStruct::Type> updatedMap;
+        updatedMap.reserve(currentMap.size() + 1);
+        bool mapped = false;
+        for (auto entry : currentMap)
+        {
+            if (entry.groupId == groupId)
+            {
+                if (!mapped)
+                {
+                    entry.groupKeySetID = kRhythmGroupKeySetId;
+                    entry.fabricIndex   = fabric;
+                    updatedMap.push_back(entry);
+                    mapped = true;
+                }
+                continue;
+            }
+            updatedMap.push_back(entry);
+        }
+
+        if (!mapped)
+        {
+            GroupKeyManagement::Structs::GroupKeyMapStruct::Type mapping;
+            mapping.groupId       = groupId;
+            mapping.groupKeySetID = kRhythmGroupKeySetId;
+            mapping.fabricIndex   = fabric;
+            updatedMap.push_back(mapping);
+        }
+
+        GroupKeyManagement::Attributes::GroupKeyMap::TypeInfo::Type mapWrite(updatedMap.data(), updatedMap.size());
+        CHIP_ERROR mapWriteStatus =
+            WriteAttribute<GroupKeyManagement::Attributes::GroupKeyMap::TypeInfo>(nodeId, kRootEndpoint, mapWrite);
+        if (mapWriteStatus != CHIP_NO_ERROR)
+        {
+            ChipLogError(Controller,
+                         "Rhythm Matter group key map write failed: group=%u node=" ChipLogFormatX64
+                         " keyset=%u entries=%zu error=%" CHIP_ERROR_FORMAT,
+                         static_cast<unsigned>(groupId), ChipLogValueX64(nodeId),
+                         static_cast<unsigned>(kRhythmGroupKeySetId), updatedMap.size(), mapWriteStatus.Format());
+            return mapWriteStatus;
+        }
+
+        ChipLogProgress(Controller,
+                        "Rhythm Matter group key map written: group=%u node=" ChipLogFormatX64
+                        " keyset=%u entries=%zu fabric=%u",
+                        static_cast<unsigned>(groupId), ChipLogValueX64(nodeId),
+                        static_cast<unsigned>(kRhythmGroupKeySetId), updatedMap.size(), static_cast<unsigned>(fabric));
+        return CHIP_NO_ERROR;
     }
 
     template <typename AttributeInfo, typename CopyFn>
