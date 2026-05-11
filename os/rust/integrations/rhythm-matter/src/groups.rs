@@ -215,11 +215,58 @@ impl MatterGroupController {
             .map(|(_, group)| group.area_id.as_str())
             .collect();
         let stale_groups: Vec<ExistingMatterGroup> = existing
-            .into_iter()
+            .iter()
+            .cloned()
             .filter(|group| !desired_area_ids.contains(group.area_id.as_str()))
             .collect();
 
-        for (matter_group, _) in &planned {
+        for (matter_group, light_group) in &planned {
+            if let Some(previous) = existing
+                .iter()
+                .find(|group| group.area_id == light_group.area_id)
+            {
+                let stale_members = previous
+                    .members
+                    .iter()
+                    .filter(|member| !matter_group.members.contains(member))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !stale_members.is_empty() {
+                    info!(
+                        target: "sys",
+                        "Matter group sync: removing stale members group_id={} control_id={} room={} stale_members={} endpoints=[{}]",
+                        previous.group_id,
+                        previous.control_id,
+                        previous.area_id,
+                        stale_members.len(),
+                        Self::format_members(&stale_members)
+                    );
+                    if let Err(error) = self
+                        .transport
+                        .remove_group(previous.group_id, &stale_members)
+                    {
+                        warn!(
+                            target: "sys",
+                            "Matter group stale member removal failed: group_id={} control_id={} room={} stale_members={} error={}",
+                            previous.group_id,
+                            previous.control_id,
+                            previous.area_id,
+                            stale_members.len(),
+                            error
+                        );
+                        return Err(GroupError::Communication(error.to_string()));
+                    }
+                    info!(
+                        target: "sys",
+                        "Matter group sync: removed stale members group_id={} control_id={} room={} stale_members={}",
+                        previous.group_id,
+                        previous.control_id,
+                        previous.area_id,
+                        stale_members.len()
+                    );
+                }
+            }
+
             info!(
                 target: "sys",
                 "Matter group sync: configuring group_id={} control_id={} name={} members={} endpoints=[{}]",
@@ -516,6 +563,169 @@ mod tests {
                 );
             }
             other => panic!("expected ConfigureGroup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sync_topology_groups_reuses_existing_group_and_removes_stale_members() {
+        let transport = Arc::new(SpyTransport::new());
+        let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
+        registry.lock().unwrap().upsert_room(
+            "kitchen",
+            "Kitchen",
+            "matter-group-32769",
+            &["matter-42".to_string(), "matter-43".to_string()],
+        );
+        let controller = MatterGroupController::new(transport.clone(), registry.clone());
+
+        let groups = controller
+            .sync_topology_groups(&[MatterTopologyGroup {
+                area_id: "kitchen".to_string(),
+                name: "Kitchen".to_string(),
+                member_device_ids: vec!["matter-43".to_string(), "matter-44".to_string()],
+            }])
+            .unwrap();
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].control_id, "matter-group-32769");
+        assert_eq!(
+            groups[0].members,
+            vec!["matter-43".to_string(), "matter-44".to_string()]
+        );
+        assert_eq!(
+            registry.lock().unwrap().get_light_entities("kitchen"),
+            vec!["matter-43".to_string(), "matter-44".to_string()]
+        );
+
+        let operations = transport.operations();
+        assert_eq!(operations.len(), 2);
+        match &operations[0] {
+            RecordedOperation::RemoveGroup { group_id, members } => {
+                assert_eq!(*group_id, 32769);
+                assert_eq!(
+                    members,
+                    &vec![MatterGroupMember {
+                        node_id: 42,
+                        endpoint: 1,
+                    }]
+                );
+            }
+            other => panic!("expected stale-member RemoveGroup, got {other:?}"),
+        }
+        match &operations[1] {
+            RecordedOperation::ConfigureGroup { group } => {
+                assert_eq!(group.group_id, 32769);
+                assert_eq!(
+                    group.members,
+                    vec![
+                        MatterGroupMember {
+                            node_id: 43,
+                            endpoint: 1,
+                        },
+                        MatterGroupMember {
+                            node_id: 44,
+                            endpoint: 1,
+                        },
+                    ]
+                );
+            }
+            other => panic!("expected ConfigureGroup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sync_topology_groups_reconfigures_existing_group_without_member_churn() {
+        let transport = Arc::new(SpyTransport::new());
+        let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
+        registry.lock().unwrap().upsert_room(
+            "kitchen",
+            "Kitchen",
+            "matter-group-32769",
+            &["matter-42".to_string(), "matter-43".to_string()],
+        );
+        let controller = MatterGroupController::new(transport.clone(), registry);
+
+        let groups = controller
+            .sync_topology_groups(&[MatterTopologyGroup {
+                area_id: "kitchen".to_string(),
+                name: "Kitchen Island".to_string(),
+                member_device_ids: vec!["matter-43".to_string(), "matter-42".to_string()],
+            }])
+            .unwrap();
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].control_id, "matter-group-32769");
+
+        let operations = transport.operations();
+        assert_eq!(operations.len(), 1);
+        match &operations[0] {
+            RecordedOperation::ConfigureGroup { group } => {
+                assert_eq!(group.group_id, 32769);
+                assert_eq!(group.name, group_name_for_area("Kitchen Island"));
+                assert_eq!(
+                    group.members,
+                    vec![
+                        MatterGroupMember {
+                            node_id: 42,
+                            endpoint: 1,
+                        },
+                        MatterGroupMember {
+                            node_id: 43,
+                            endpoint: 1,
+                        },
+                    ]
+                );
+            }
+            other => panic!("expected ConfigureGroup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sync_topology_groups_removes_group_when_room_drops_below_two_members() {
+        let transport = Arc::new(SpyTransport::new());
+        let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
+        registry.lock().unwrap().upsert_room(
+            "kitchen",
+            "Kitchen",
+            "matter-group-32769",
+            &["matter-42".to_string(), "matter-43".to_string()],
+        );
+        let controller = MatterGroupController::new(transport.clone(), registry.clone());
+
+        let groups = controller
+            .sync_topology_groups(&[MatterTopologyGroup {
+                area_id: "kitchen".to_string(),
+                name: "Kitchen".to_string(),
+                member_device_ids: vec!["matter-42".to_string()],
+            }])
+            .unwrap();
+
+        assert!(groups.is_empty());
+        assert_eq!(
+            registry.lock().unwrap().get_grouped_light_id("kitchen"),
+            None
+        );
+
+        let operations = transport.operations();
+        assert_eq!(operations.len(), 1);
+        match &operations[0] {
+            RecordedOperation::RemoveGroup { group_id, members } => {
+                assert_eq!(*group_id, 32769);
+                assert_eq!(
+                    members,
+                    &vec![
+                        MatterGroupMember {
+                            node_id: 42,
+                            endpoint: 1,
+                        },
+                        MatterGroupMember {
+                            node_id: 43,
+                            endpoint: 1,
+                        },
+                    ]
+                );
+            }
+            other => panic!("expected RemoveGroup, got {other:?}"),
         }
     }
 

@@ -8931,6 +8931,7 @@ mod tests {
         HubDispatchTarget, HubLightController, HubRegistry, LightControlResult, LightProfileConfig,
         Room, RoomSnapshot, RuntimeHandle,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// Mock runtime that returns configurable room snapshots and tracks events.
@@ -14904,6 +14905,43 @@ mod tests {
             runtime.engine_room_snapshot(&room_id).is_none(),
             "deleted room should be removed from runtime"
         );
+    }
+
+    #[test]
+    fn topology_lifecycle_mutations_sync_group_integrations() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+
+        let created: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Office").unwrap()).unwrap();
+        let room_id = created["id"].as_str().unwrap().to_string();
+        let device_one =
+            insert_canonical_device(&state, hub_key.clone(), "matter-100", "Desk Lamp", "", "");
+        let device_two =
+            insert_canonical_device(&state, hub_key, "matter-101", "Table Lamp", "", "");
+
+        let sync_count = Arc::new(AtomicUsize::new(0));
+        {
+            let sync_count = sync_count.clone();
+            state.lock().unwrap().sync_topology_groups_fn = Some(Arc::new(move |_| {
+                sync_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }));
+        }
+
+        do_canonical_assign_room(&state, &device_one, Some(&room_id)).unwrap();
+        assert_eq!(sync_count.load(Ordering::SeqCst), 1);
+
+        do_canonical_assign_room(&state, &device_two, Some(&room_id)).unwrap();
+        assert_eq!(sync_count.load(Ordering::SeqCst), 2);
+
+        do_canonical_assign_room(&state, &device_one, None).unwrap();
+        assert_eq!(sync_count.load(Ordering::SeqCst), 3);
+
+        do_topology_delete_room(&state, &room_id).unwrap();
+        assert_eq!(sync_count.load(Ordering::SeqCst), 4);
+
+        do_device_hard_remove(&state, &device_two, None).unwrap();
+        assert_eq!(sync_count.load(Ordering::SeqCst), 5);
     }
 
     #[test]

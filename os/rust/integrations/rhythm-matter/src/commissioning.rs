@@ -381,7 +381,9 @@ fn materialize_unassigned_canonical_device(
 
     drop(state_guard);
 
-    if !already_assigned {
+    if already_assigned {
+        rhythm_os::commands::reconcile_runtime_from_state(state)?;
+    } else {
         rhythm_os::commands::do_canonical_assign_room(state, &canonical_id, None)?;
     }
 
