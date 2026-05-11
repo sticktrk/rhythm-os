@@ -23,9 +23,9 @@ use serde_json::Value;
 
 use crate::api_types::{
     ActiveProfileDto, ActiveProfileEffectiveDto, ApiCapabilitiesDto, HubCapabilityDto, HubDto,
-    HubStartupRetryDto, LocationDto, ModeLastChangeDto, ModeSettingsDto, ModeTransitionsDto,
-    NodeStateDto, NodesPollResponse, ObservedPowerDto, PreferredEndpointDto, ProfilesDto,
-    ReviewCountsDto, ReviewEntryDto, ReviewHubDto, ReviewSummaryDto, RoomPollState,
+    HubStartupRetryDto, InputBindingsDto, LocationDto, ModeLastChangeDto, ModeSettingsDto,
+    ModeTransitionsDto, NodeStateDto, NodesPollResponse, ObservedPowerDto, PreferredEndpointDto,
+    ProfilesDto, ReviewCountsDto, ReviewEntryDto, ReviewHubDto, ReviewSummaryDto, RoomPollState,
     RoomRhythmState, RoomsPollResponse, SettingsDto, StateSnapshot, TopologyNodeControlDto,
     TopologyNodeDto,
 };
@@ -46,7 +46,9 @@ use crate::state::{
     SharedState, WorkItem,
 };
 use crate::storage::StoredLocation;
-use crate::topology::NodeControlKind;
+use crate::topology::{
+    AutomationAction, InputBinding, InputBindingPreset, ModeTransitionSelection, NodeControlKind,
+};
 
 pub const DEFAULT_HTTP_BATCH_DISPATCH_SPACING_MS: u64 = 500;
 
@@ -303,6 +305,155 @@ fn matching_mode_transition(
     s.mode_transition_configs().into_iter().find(|config| {
         config.from_mode == from_mode && config.to_mode == to_mode && config.trigger == trigger
     })
+}
+
+fn auto_mode_transition(
+    state: &SharedState,
+    from_mode: RhythmMode,
+    to_mode: RhythmMode,
+) -> Option<ModeTransitionConfig> {
+    let Ok(s) = state.lock() else { return None };
+    let transitions = s.mode_transition_configs();
+
+    transitions
+        .iter()
+        .find(|config| {
+            config.from_mode == from_mode
+                && config.to_mode == to_mode
+                && config.trigger == ModeTransitionTrigger::Manual
+        })
+        .cloned()
+        .or_else(|| {
+            transitions
+                .iter()
+                .find(|config| config.from_mode == from_mode && config.to_mode == to_mode)
+                .cloned()
+        })
+}
+
+fn selected_mode_transition(
+    state: &SharedState,
+    from_mode: RhythmMode,
+    to_mode: RhythmMode,
+    selection: &ModeTransitionSelection,
+) -> Result<Option<ModeTransitionConfig>> {
+    match selection {
+        ModeTransitionSelection::None => Ok(None),
+        ModeTransitionSelection::Auto => Ok(auto_mode_transition(state, from_mode, to_mode)),
+        ModeTransitionSelection::Exact { id } => {
+            let transition = {
+                let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+                s.mode_transition_configs()
+                    .into_iter()
+                    .find(|config| config.id == *id)
+            }
+            .ok_or_else(|| anyhow::anyhow!("Unknown transition '{}'", id))?;
+
+            if transition.from_mode != from_mode || transition.to_mode != to_mode {
+                return Err(anyhow::anyhow!(
+                    "Transition '{}' is {:?}->{:?}, expected {:?}->{:?}",
+                    id,
+                    transition.from_mode,
+                    transition.to_mode,
+                    from_mode,
+                    to_mode
+                ));
+            }
+
+            Ok(Some(transition))
+        }
+    }
+}
+
+fn apply_mode_action(
+    state: &SharedState,
+    target_mode: RhythmMode,
+    transition_selection: &ModeTransitionSelection,
+) -> Result<()> {
+    let previous_mode = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .active_mode;
+    let transition =
+        selected_mode_transition(state, previous_mode, target_mode, transition_selection)?;
+    let force_reapply_outputs = transition.is_some();
+    let mode_change = ModeChangeContext::new(ModeChangeCause::Manual, transition);
+
+    do_settings_set_internal(
+        state,
+        None,
+        Some(target_mode),
+        None,
+        None,
+        Some(mode_change),
+        force_reapply_outputs,
+    )
+    .map(|_| ())
+}
+
+fn next_mode_in_cycle(active_mode: RhythmMode, modes: &[RhythmMode]) -> Result<RhythmMode> {
+    if modes.len() < 2 {
+        return Err(anyhow::anyhow!(
+            "mode_cycle action requires at least two modes"
+        ));
+    }
+    let target_index = modes
+        .iter()
+        .position(|mode| *mode == active_mode)
+        .map(|index| (index + 1) % modes.len())
+        .unwrap_or(0);
+    Ok(modes[target_index])
+}
+
+fn validate_automation_action(action: &AutomationAction) -> Result<()> {
+    if let AutomationAction::ModeCycle { modes, .. } = action {
+        if modes.len() < 2 {
+            return Err(anyhow::anyhow!(
+                "mode_cycle action requires at least two modes"
+            ));
+        }
+        for (index, mode) in modes.iter().enumerate() {
+            if modes[..index].contains(mode) {
+                return Err(anyhow::anyhow!(
+                    "mode_cycle action contains duplicate mode {:?}",
+                    mode
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn do_execute_automation_action(state: &SharedState, action: &AutomationAction) -> Result<()> {
+    match action {
+        AutomationAction::ModeCycle { modes, transition } => {
+            let active_mode = state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("lock"))?
+                .active_mode;
+            let target_mode = next_mode_in_cycle(active_mode, modes)?;
+            apply_mode_action(state, target_mode, transition)
+        }
+        AutomationAction::ModeToggle {
+            first_mode,
+            second_mode,
+            transition,
+        } => {
+            let active_mode = state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("lock"))?
+                .active_mode;
+            let target_mode = if active_mode == *first_mode {
+                *second_mode
+            } else {
+                *first_mode
+            };
+            apply_mode_action(state, target_mode, transition)
+        }
+        AutomationAction::ModeSet { mode, transition } => {
+            apply_mode_action(state, *mode, transition)
+        }
+    }
 }
 
 fn resolved_active_profile_id_for_mode_from_parts(
@@ -1602,6 +1753,124 @@ pub(crate) fn resolve_node_control_target(
     Some((source_node_id, target_node_id))
 }
 
+/// Resolve a hub-native input source to its canonical topology node ID.
+pub(crate) fn resolve_input_source_node_id(
+    state: &SharedState,
+    hub_key: &HubKey,
+    source_native_id: &str,
+) -> Option<String> {
+    let s = state.lock().ok()?;
+    s.canonical_registry
+        .find_by_native_id(hub_key, source_native_id)
+        .map(|device| device.id.clone())
+}
+
+/// Resolve an already-known source node to its effective topology control target.
+pub(crate) fn resolve_node_control_target_for_source(
+    state: &SharedState,
+    source_node_id: &str,
+    kind: &NodeControlKind,
+) -> Option<String> {
+    let s = state.lock().ok()?;
+    s.topology.effective_control_target(source_node_id, kind)
+}
+
+/// Return the high-level binding action for a physical button event, if one is configured.
+pub(crate) fn matching_button_input_binding_action(
+    state: &SharedState,
+    source_node_id: &str,
+    action: ButtonAction,
+) -> Option<AutomationAction> {
+    let s = state.lock().ok()?;
+    s.topology
+        .matching_button_input_binding(source_node_id, action)
+        .map(|binding| binding.action.clone())
+}
+
+fn validate_input_binding_source(s: &AppState, source_node_id: &str) -> Result<()> {
+    if !s.topology.has_public_node(source_node_id) {
+        return Err(anyhow::anyhow!(
+            "Source node '{}' not found",
+            source_node_id
+        ));
+    }
+
+    let Some(node) = s.topology.get_device_node(source_node_id) else {
+        return Err(anyhow::anyhow!(
+            "Source node '{}' must be a button device",
+            source_node_id
+        ));
+    };
+    let Some(device) = s.canonical_registry.get(&node.canonical_device_id) else {
+        return Err(anyhow::anyhow!(
+            "Source node '{}' has no canonical device",
+            source_node_id
+        ));
+    };
+    if device.device_type != DeviceType::Button {
+        return Err(anyhow::anyhow!(
+            "Source node '{}' must be a button device",
+            source_node_id
+        ));
+    }
+
+    Ok(())
+}
+
+/// Add or replace one persisted physical input binding.
+pub fn do_input_binding_set(state: &SharedState, mut binding: InputBinding) -> Result<String> {
+    binding.source_node_id = resolve_node_id(state, &binding.source_node_id);
+    {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        validate_input_binding_source(&s, &binding.source_node_id)?;
+        validate_automation_action(&binding.action)?;
+        s.topology.set_input_binding(binding);
+        persist_topology(&s);
+    }
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
+    build_input_bindings(state)
+}
+
+/// Add or replace a preset-backed physical input binding with an explicit ID.
+pub fn do_preset_input_binding_set(
+    state: &SharedState,
+    binding_id: &str,
+    preset: InputBindingPreset,
+    source_node_id: &str,
+    button_action: Option<ButtonAction>,
+    enabled: bool,
+) -> Result<String> {
+    let mut binding = InputBinding::from_preset(binding_id, preset, source_node_id, button_action);
+    binding.enabled = enabled;
+    do_input_binding_set(state, binding)
+}
+
+/// Create or replace a preset-backed physical input binding with a stable generated ID.
+pub fn do_preset_input_binding_create(
+    state: &SharedState,
+    preset: InputBindingPreset,
+    source_node_id: &str,
+    button_action: Option<ButtonAction>,
+    enabled: bool,
+) -> Result<String> {
+    let resolved_source_node_id = resolve_node_id(state, source_node_id);
+    let id = InputBinding::preset_binding_id(preset, &resolved_source_node_id, button_action);
+    let mut binding = InputBinding::from_preset(id, preset, resolved_source_node_id, button_action);
+    binding.enabled = enabled;
+    do_input_binding_set(state, binding)
+}
+
+/// Remove a persisted physical input binding.
+pub fn do_input_binding_delete(state: &SharedState, binding_id: &str) -> Result<String> {
+    {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.topology.remove_input_binding(binding_id);
+        persist_topology(&s);
+    }
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
+    build_input_bindings(state)
+}
+
 // ============================================================================
 // State snapshots (for GET endpoints)
 // ============================================================================
@@ -1639,6 +1908,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         settings_dto,
         mode_dto,
         transitions_dto,
+        input_bindings_dto,
         profiles_dto,
         firmware_version,
         platform_type,
@@ -1768,6 +2038,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             build_settings_dto_inner(&s),
             build_mode_dto_inner(&s),
             build_transitions_dto_inner(&s),
+            build_input_bindings_dto_inner(&s),
             build_profiles_dto_inner(&s),
             s.firmware_version,
             s.platform_type,
@@ -1858,6 +2129,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         settings: settings_dto,
         mode: mode_dto,
         transitions: transitions_dto.transitions,
+        input_bindings: input_bindings_dto.bindings,
         profiles: profiles_dto.profiles,
         review: review_dto,
         nodes,
@@ -2489,6 +2761,13 @@ fn build_transitions_dto_inner(s: &AppState) -> ModeTransitionsDto {
     }
 }
 
+/// Build `InputBindingsDto` from an already-locked `AppState`.
+fn build_input_bindings_dto_inner(s: &AppState) -> InputBindingsDto {
+    InputBindingsDto {
+        bindings: s.topology.input_bindings().to_vec(),
+    }
+}
+
 /// Build `ProfilesDto` from an already-locked `AppState`.
 fn build_profiles_dto_inner(s: &AppState) -> ProfilesDto {
     ProfilesDto {
@@ -2530,6 +2809,18 @@ pub fn build_transitions_dto(state: &SharedState) -> Result<ModeTransitionsDto> 
 pub fn build_transitions(state: &SharedState) -> Result<String> {
     let dto = build_transitions_dto(state)?;
     serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize transitions: {}", e))
+}
+
+/// Build the current physical input binding policy.
+pub fn build_input_bindings_dto(state: &SharedState) -> Result<InputBindingsDto> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    Ok(build_input_bindings_dto_inner(&s))
+}
+
+/// Build the current physical input binding policy as a JSON string.
+pub fn build_input_bindings(state: &SharedState) -> Result<String> {
+    let dto = build_input_bindings_dto(state)?;
+    serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize input bindings: {}", e))
 }
 
 /// Build the current light profile list.
@@ -8926,6 +9217,7 @@ mod tests {
     use crate::hub::{ActiveHub, HubCredentials, HubProvider, HubType};
     use crate::state::{AppState, MotionSnapshot, ObservedPowerSource, ObservedPowerState};
     use crate::storage::{Storage, StoredLightProfiles, StoredSettings};
+    use crate::topology::InputBindingPreset;
     use chrono::{Datelike, Timelike};
     use rhythm_core::{
         HubDispatchTarget, HubLightController, HubRegistry, LightControlResult, LightProfileConfig,
@@ -9394,6 +9686,31 @@ mod tests {
         drop(app);
 
         (state, runtime)
+    }
+
+    fn add_button_device_node(state: &SharedState, native_id: &str) -> String {
+        let hub_key = state.lock().unwrap().hubs.keys().next().cloned().unwrap();
+        let identity = crate::canonical::identity::DiscoveredIdentity {
+            native_id: native_id.to_string(),
+            room_id: None,
+            room_name: None,
+            name: native_id.to_string(),
+            device_type: DeviceType::Button,
+            hardware_ids: vec![crate::canonical::identity::HardwareId::serial(native_id)],
+            manufacturer: None,
+            model: None,
+        };
+
+        let mut s = state.lock().unwrap();
+        let canonical_id = match s.canonical_registry.resolve(&identity, &hub_key, 1000) {
+            crate::canonical::registry::ResolveResult::Created { canonical_id }
+            | crate::canonical::registry::ResolveResult::AlreadyKnown { canonical_id } => {
+                canonical_id
+            }
+            other => panic!("unexpected resolve result: {:?}", other),
+        };
+        s.topology.ensure_standalone_device(&canonical_id);
+        canonical_id
     }
 
     #[test]
@@ -10117,6 +10434,50 @@ mod tests {
         let result = do_node_action(&state, "room1", "on", false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No runtime"));
+    }
+
+    #[test]
+    fn preset_input_binding_create_persists_button_binding() {
+        let (state, _runtime) = setup_state(vec![]);
+        let button_id = add_button_device_node(&state, "button-native-1");
+
+        let json = do_preset_input_binding_create(
+            &state,
+            InputBindingPreset::DaySleepToggle,
+            &button_id,
+            Some(ButtonAction::OnPress),
+            true,
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let binding_id = parsed["bindings"][0]["id"].as_str().unwrap();
+        assert!(binding_id.starts_with("day_sleep_toggle:"));
+        assert_eq!(parsed["bindings"][0]["source_node_id"], button_id);
+        assert_eq!(parsed["bindings"][0]["preset"], "day_sleep_toggle");
+        assert_eq!(parsed["bindings"][0]["action"]["kind"], "mode_cycle");
+
+        let s = state.lock().unwrap();
+        let binding = s
+            .topology
+            .matching_button_input_binding(&button_id, ButtonAction::OnPress)
+            .expect("binding should match selected button");
+        assert_eq!(binding.id, binding_id);
+    }
+
+    #[test]
+    fn automation_mode_cycle_uses_matching_pair_transition() {
+        let (state, _runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        state.lock().unwrap().active_mode = RhythmMode::Sleep;
+
+        let binding = InputBinding::day_sleep_toggle("button-1", None);
+        do_execute_automation_action(&state, &binding.action).unwrap();
+
+        let s = state.lock().unwrap();
+        assert_eq!(s.active_mode, RhythmMode::Day);
+        assert_eq!(
+            s.last_active_mode_transition_id.as_deref(),
+            Some("sleep_to_day")
+        );
     }
 
     // ========================================================================

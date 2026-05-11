@@ -23,7 +23,7 @@
 use std::collections::{HashMap, HashSet};
 
 use log::{debug, info};
-use rhythm_core::{runtime::hub_registry::DeviceType, HubDispatchTarget};
+use rhythm_core::{runtime::hub_registry::DeviceType, ButtonAction, HubDispatchTarget, RhythmMode};
 use serde::{Deserialize, Serialize};
 
 use crate::canonical::identity::HubKey;
@@ -88,6 +88,196 @@ pub struct NodeControlLink {
     pub source_id: String,
     pub target_id: String,
     pub kind: NodeControlKind,
+}
+
+/// Built-in input binding preset for cycling between day and sleep modes.
+pub const DAY_SLEEP_TOGGLE_INPUT_BINDING_PRESET: &str = "day_sleep_toggle";
+
+/// Server-known preset that expands to a normal trigger/action binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputBindingPreset {
+    DaySleepToggle,
+}
+
+impl InputBindingPreset {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DaySleepToggle => DAY_SLEEP_TOGGLE_INPUT_BINDING_PRESET,
+        }
+    }
+}
+
+/// Source event kind that can trigger a persisted input binding.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputTriggerKind {
+    Button,
+}
+
+/// Event filter for a physical input binding.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputBindingTrigger {
+    pub kind: InputTriggerKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub button_action: Option<ButtonAction>,
+}
+
+impl InputBindingTrigger {
+    pub fn button(button_action: Option<ButtonAction>) -> Self {
+        Self {
+            kind: InputTriggerKind::Button,
+            button_action,
+        }
+    }
+
+    pub fn matches_button(&self, action: ButtonAction) -> bool {
+        self.kind == InputTriggerKind::Button
+            && self
+                .button_action
+                .map(|expected| expected == action)
+                .unwrap_or(true)
+    }
+}
+
+/// How a mode-changing action should pick its fade/transition policy.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ModeTransitionSelection {
+    #[default]
+    Auto,
+    None,
+    Exact {
+        id: String,
+    },
+}
+
+/// Reusable high-level action for physical inputs and future automation triggers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AutomationAction {
+    ModeCycle {
+        modes: Vec<RhythmMode>,
+        #[serde(default)]
+        transition: ModeTransitionSelection,
+    },
+    ModeSet {
+        mode: RhythmMode,
+        #[serde(default)]
+        transition: ModeTransitionSelection,
+    },
+    /// Backward-compatible two-mode alias; new presets emit `mode_cycle`.
+    ModeToggle {
+        first_mode: RhythmMode,
+        second_mode: RhythmMode,
+        #[serde(default)]
+        transition: ModeTransitionSelection,
+    },
+}
+
+/// Persisted binding from one source input node to a high-level action.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputBinding {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<InputBindingPreset>,
+    pub source_node_id: String,
+    pub trigger: InputBindingTrigger,
+    pub action: AutomationAction,
+    #[serde(default = "default_input_binding_enabled")]
+    pub enabled: bool,
+}
+
+fn default_input_binding_enabled() -> bool {
+    true
+}
+
+impl InputBinding {
+    pub fn from_preset(
+        id: impl Into<String>,
+        preset: InputBindingPreset,
+        source_node_id: impl Into<String>,
+        button_action: Option<ButtonAction>,
+    ) -> Self {
+        let action = match preset {
+            InputBindingPreset::DaySleepToggle => AutomationAction::ModeCycle {
+                modes: vec![RhythmMode::Day, RhythmMode::Sleep],
+                transition: ModeTransitionSelection::Auto,
+            },
+        };
+        Self {
+            id: id.into(),
+            preset: Some(preset),
+            source_node_id: source_node_id.into(),
+            trigger: InputBindingTrigger::button(button_action),
+            action,
+            enabled: true,
+        }
+    }
+
+    pub fn preset_binding_id(
+        preset: InputBindingPreset,
+        source_node_id: &str,
+        button_action: Option<ButtonAction>,
+    ) -> String {
+        let source = input_binding_id_part(source_node_id);
+        let action = button_action.map(button_action_id_part).unwrap_or("any");
+        format!("{}:{}:{}", preset.as_str(), source, action)
+    }
+
+    pub fn day_sleep_toggle(
+        source_node_id: impl Into<String>,
+        button_action: Option<ButtonAction>,
+    ) -> Self {
+        let source_node_id = source_node_id.into();
+        let id = Self::preset_binding_id(
+            InputBindingPreset::DaySleepToggle,
+            &source_node_id,
+            button_action,
+        );
+        Self::from_preset(
+            id,
+            InputBindingPreset::DaySleepToggle,
+            source_node_id,
+            button_action,
+        )
+    }
+
+    pub fn matches_button(&self, source_node_id: &str, action: ButtonAction) -> bool {
+        self.enabled && self.source_node_id == source_node_id && self.trigger.matches_button(action)
+    }
+}
+
+fn input_binding_id_part(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn button_action_id_part(action: ButtonAction) -> &'static str {
+    match action {
+        ButtonAction::OnPress => "on_press",
+        ButtonAction::Toggle => "toggle",
+        ButtonAction::OffPress => "off_press",
+        ButtonAction::Reset => "reset",
+        ButtonAction::UpPress => "up_press",
+        ButtonAction::DownPress => "down_press",
+        ButtonAction::UpHold => "up_hold",
+        ButtonAction::DownHold => "down_hold",
+        ButtonAction::Stop => "stop",
+        ButtonAction::RhythmOn => "rhythm_on",
+        ButtonAction::RhythmOff => "rhythm_off",
+        ButtonAction::LightsOff => "lights_off",
+        ButtonAction::SleepOn => "sleep_on",
+        ButtonAction::SleepOff => "sleep_off",
+    }
 }
 
 /// A device assigned to a Rhythm room.
@@ -464,6 +654,9 @@ pub struct RoomTopologyStore {
     /// Explicit node-to-node control overrides.
     #[serde(default)]
     control_links: Vec<NodeControlLink>,
+    /// Persisted physical input bindings to high-level actions.
+    #[serde(default)]
+    input_bindings: Vec<InputBinding>,
     /// Approved cross-hub room bindings (survives re-sync).
     #[serde(default)]
     approved_bindings: Vec<RoomBindingRecord>,
@@ -478,6 +671,7 @@ impl RoomTopologyStore {
             rooms: HashMap::new(),
             device_nodes: HashMap::new(),
             control_links: Vec::new(),
+            input_bindings: Vec::new(),
             approved_bindings: Vec::new(),
             hub_room_index: HashMap::new(),
         }
@@ -1104,6 +1298,50 @@ impl RoomTopologyStore {
     /// Get all persisted explicit control links.
     pub fn control_links(&self) -> &[NodeControlLink] {
         &self.control_links
+    }
+
+    /// Get all persisted physical input bindings.
+    pub fn input_bindings(&self) -> &[InputBinding] {
+        &self.input_bindings
+    }
+
+    /// Find a persisted physical input binding by ID.
+    pub fn input_binding(&self, id: &str) -> Option<&InputBinding> {
+        self.input_bindings.iter().find(|binding| binding.id == id)
+    }
+
+    /// Find the first enabled input binding matching a button event.
+    pub fn matching_button_input_binding(
+        &self,
+        source_node_id: &str,
+        action: ButtonAction,
+    ) -> Option<&InputBinding> {
+        self.input_bindings
+            .iter()
+            .find(|binding| binding.matches_button(source_node_id, action))
+    }
+
+    /// Add or replace a persisted physical input binding.
+    pub fn set_input_binding(&mut self, binding: InputBinding) -> bool {
+        if let Some(existing) = self
+            .input_bindings
+            .iter_mut()
+            .find(|existing| existing.id == binding.id)
+        {
+            let changed = *existing != binding;
+            *existing = binding;
+            changed
+        } else {
+            self.input_bindings.push(binding);
+            true
+        }
+    }
+
+    /// Remove a persisted physical input binding.
+    pub fn remove_input_binding(&mut self, id: &str) -> bool {
+        let before = self.input_bindings.len();
+        self.input_bindings.retain(|binding| binding.id != id);
+        self.input_bindings.len() != before
     }
 
     /// Find an explicit control target for a source node and control kind.
@@ -2847,5 +3085,43 @@ mod tests {
             Some(office_id.as_str()),
             "syncing HA should not strip Hue defaults from a bound room"
         );
+    }
+
+    #[test]
+    fn input_binding_matches_button_source_and_action() {
+        let mut store = RoomTopologyStore::new();
+        let binding = InputBinding::day_sleep_toggle("button-1", Some(ButtonAction::OnPress));
+        let binding_id = binding.id.clone();
+
+        assert!(store.set_input_binding(binding.clone()));
+        assert_eq!(store.input_binding(&binding_id), Some(&binding));
+        assert!(store
+            .matching_button_input_binding("button-1", ButtonAction::OnPress)
+            .is_some());
+        assert!(store
+            .matching_button_input_binding("button-1", ButtonAction::OffPress)
+            .is_none());
+        assert!(store
+            .matching_button_input_binding("button-2", ButtonAction::OnPress)
+            .is_none());
+    }
+
+    #[test]
+    fn input_binding_roundtrips_with_topology() {
+        let mut store = RoomTopologyStore::new();
+        let binding = InputBinding::day_sleep_toggle("button-1", None);
+        let binding_id = binding.id.clone();
+        store.set_input_binding(binding);
+
+        let json = serde_json::to_value(&store).unwrap();
+        let mut loaded: RoomTopologyStore = serde_json::from_value(json).unwrap();
+        loaded.rebuild_indices();
+
+        let binding = loaded
+            .input_binding(&binding_id)
+            .expect("binding should roundtrip");
+        assert_eq!(binding.source_node_id, "button-1");
+        assert_eq!(binding.preset, Some(InputBindingPreset::DaySleepToggle));
+        assert!(binding.matches_button("button-1", ButtonAction::DownHold));
     }
 }

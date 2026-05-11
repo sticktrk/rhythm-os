@@ -96,6 +96,14 @@ fn shared_routes() -> Router<SharedState> {
             "/api/transitions/:id/trigger",
             post(post_transition_trigger),
         )
+        .route(
+            "/api/input-bindings",
+            get(get_input_bindings).post(post_input_binding),
+        )
+        .route(
+            "/api/input-bindings/:id",
+            put(put_input_binding).delete(delete_input_binding),
+        )
         .route("/api/profiles", get(get_profiles))
         .route(
             "/api/hub/credentials",
@@ -323,6 +331,32 @@ async fn post_transition_trigger(
     Path(id): Path<String>,
 ) -> ApiResponse {
     run_blocking(move || handlers::handle_post_transition_trigger(&state, &id)).await
+}
+
+async fn get_input_bindings(State(state): State<SharedState>) -> ApiResponse {
+    handlers::handle_get_input_bindings(&state)
+}
+
+async fn post_input_binding(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_post_input_binding(&state, &body)).await
+}
+
+async fn put_input_binding(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_put_input_binding(&state, &id, &body)).await
+}
+
+async fn delete_input_binding(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_delete_input_binding(&state, &id)).await
 }
 
 async fn get_profiles(State(state): State<SharedState>) -> ApiResponse {

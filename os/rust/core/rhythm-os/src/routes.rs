@@ -110,6 +110,14 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["POST"],
     },
     SharedRoute {
+        path: "/api/input-bindings",
+        methods: &["GET", "POST"],
+    },
+    SharedRoute {
+        path: "/api/input-bindings/:id",
+        methods: &["PUT", "DELETE"],
+    },
+    SharedRoute {
         path: "/api/profiles",
         methods: &["GET"],
     },

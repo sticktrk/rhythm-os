@@ -11,7 +11,7 @@ use rhythm_core::{
 use serde::Serialize;
 
 use crate::canonical::triage::{TriageKind, TriageStatus};
-use crate::topology::{DevicePlacement, HubRoomBinding, NodeControlKind};
+use crate::topology::{DevicePlacement, HubRoomBinding, InputBinding, NodeControlKind};
 
 // ---------------------------------------------------------------------------
 // Room state structs
@@ -120,6 +120,7 @@ pub struct StateSnapshot {
     pub settings: SettingsDto,
     pub mode: ModeSettingsDto,
     pub transitions: Vec<ModeTransitionConfig>,
+    pub input_bindings: Vec<InputBinding>,
     pub profiles: Vec<LightProfileConfig>,
     pub review: ReviewSummaryDto,
     pub nodes: Vec<NodeStateDto>,
@@ -295,6 +296,12 @@ pub struct ProfilesDto {
 #[derive(Debug, Serialize)]
 pub struct ModeTransitionsDto {
     pub transitions: Vec<ModeTransitionConfig>,
+}
+
+/// Physical input bindings in `GET /api/input-bindings`.
+#[derive(Debug, Serialize)]
+pub struct InputBindingsDto {
+    pub bindings: Vec<InputBinding>,
 }
 
 /// Active profile in `GET /api/state`, including persisted config plus
@@ -1078,6 +1085,7 @@ mod tests {
                 configs: rhythm_core::default_mode_configs(),
             },
             transitions: rhythm_core::default_mode_transition_configs(),
+            input_bindings: vec![],
             profiles: vec![
                 rhythm_core::default_rhythm_profile(),
                 rhythm_core::default_sleep_profile(),
@@ -1106,6 +1114,7 @@ mod tests {
         assert_eq!(json["location"]["solar_midnight_local_time"], "00:00:00");
         assert_eq!(json["location"]["current_solar_time"], 18.0);
         assert_eq!(json["transitions"].as_array().unwrap().len(), 2);
+        assert!(json["input_bindings"].as_array().unwrap().is_empty());
         assert!(json["review"].is_object());
     }
 
@@ -1181,6 +1190,7 @@ mod tests {
                 configs: rhythm_core::default_mode_configs(),
             },
             transitions: rhythm_core::default_mode_transition_configs(),
+            input_bindings: vec![],
             profiles: vec![
                 rhythm_core::default_rhythm_profile(),
                 rhythm_core::default_sleep_profile(),

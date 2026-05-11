@@ -463,6 +463,82 @@ fn spawn_button_ingress_action(
     }
 }
 
+fn run_input_binding_action(
+    state: &SharedState,
+    source_node_id: &str,
+    action: crate::topology::AutomationAction,
+    device_id: Option<&str>,
+    command_id: &str,
+) {
+    let started = Instant::now();
+    match crate::commands::do_execute_automation_action(state, &action) {
+        Ok(()) => {
+            tracing::info!(
+                target: "evt",
+                event = "input_binding_action_applied",
+                command_id = %command_id,
+                source_node_id = %source_node_id,
+                device_id = ?device_id,
+                action = ?action,
+                latency_ms = started.elapsed().as_millis(),
+                "Input binding action applied"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "evt",
+                event = "input_binding_action_failed",
+                command_id = %command_id,
+                source_node_id = %source_node_id,
+                device_id = ?device_id,
+                action = ?action,
+                latency_ms = started.elapsed().as_millis(),
+                error = %error,
+                "Input binding action failed"
+            );
+        }
+    }
+}
+
+fn spawn_input_binding_action(
+    state: &SharedState,
+    source_node_id: String,
+    action: crate::topology::AutomationAction,
+    device_id: Option<String>,
+    command_id: String,
+) {
+    let builder = std::thread::Builder::new().name("evt-input-binding".to_string());
+
+    let state_clone = state.clone();
+    let source_node_id_clone = source_node_id.clone();
+    let action_clone = action.clone();
+    let device_id_clone = device_id.clone();
+    let command_id_clone = command_id.clone();
+
+    if let Err(error) = builder.spawn(move || {
+        run_input_binding_action(
+            &state_clone,
+            &source_node_id_clone,
+            action_clone,
+            device_id_clone.as_deref(),
+            &command_id_clone,
+        );
+    }) {
+        warn!(
+            target: "evt",
+            "Failed to spawn input binding dispatch thread: {}",
+            error
+        );
+        run_input_binding_action(
+            state,
+            &source_node_id,
+            action,
+            device_id.as_deref(),
+            &command_id,
+        );
+    }
+}
+
 fn run_motion_turn_on_action(state: &SharedState, node_id: &str) {
     // Motion ingress is fast lane for occupancy responsiveness.
     turn_on_node_inline(state, node_id);
@@ -759,18 +835,67 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             action,
             ref device_id,
         } => {
-            let Some((source_node_id, node_id)) = hub_key
-                .as_ref()
-                .zip(device_id.as_deref())
-                .and_then(|(key, src)| {
-                    commands::resolve_node_control_target(
-                        state,
-                        key,
-                        src,
-                        &crate::topology::NodeControlKind::Button,
-                    )
-                })
+            let Some((key, native_device_id)) = hub_key.as_ref().zip(device_id.as_deref()) else {
+                info!(
+                    target: "evt",
+                    "Button event from {:?} has no hub key/native device id, ignoring",
+                    device_id.as_deref()
+                );
+                return;
+            };
+            let Some(source_node_id) =
+                commands::resolve_input_source_node_id(state, key, native_device_id)
             else {
+                info!(
+                    target: "evt",
+                    "Button event from {:?} could not resolve canonical source node, ignoring",
+                    device_id.as_deref()
+                );
+                return;
+            };
+            let command_id = logging::next_command_id("button");
+
+            if let Some(binding_action) =
+                commands::matching_button_input_binding_action(state, &source_node_id, action)
+            {
+                tracing::info!(
+                    target: "evt",
+                    event = "button_binding_ingress",
+                    command_id = %command_id,
+                    action = ?action,
+                    source_node_id = %source_node_id,
+                    source_room_id = %room_id,
+                    device_id = ?device_id.as_deref(),
+                    "Button event matched input binding"
+                );
+                if !motion.admit_button(&source_node_id, action, device_id.as_deref()) {
+                    tracing::info!(
+                        target: "evt",
+                        event = "button_binding_debounced",
+                        command_id = %command_id,
+                        action = ?action,
+                        source_node_id = %source_node_id,
+                        device_id = ?device_id.as_deref(),
+                        debounce_ms = BUTTON_DEBOUNCE_WINDOW.as_millis() as u64,
+                        "Dropping bounce-duplicate input binding event"
+                    );
+                    return;
+                }
+                spawn_input_binding_action(
+                    state,
+                    source_node_id,
+                    binding_action,
+                    device_id.clone(),
+                    command_id,
+                );
+                return;
+            }
+
+            let Some(node_id) = commands::resolve_node_control_target_for_source(
+                state,
+                &source_node_id,
+                &crate::topology::NodeControlKind::Button,
+            ) else {
                 info!(
                     target: "evt",
                     "Button event from {:?} could not resolve canonical topology target, ignoring",
@@ -778,7 +903,6 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 );
                 return;
             };
-            let command_id = logging::next_command_id("button");
             tracing::info!(
                 target: "evt",
                 event = "button_ingress",

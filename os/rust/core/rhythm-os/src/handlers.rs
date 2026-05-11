@@ -26,7 +26,8 @@ use crate::api_types::{HubCredentialsResponse, NodesResponse, SyncResponse};
 use crate::commands::{self};
 use crate::logging;
 use crate::state::SharedState;
-use crate::topology::NodeControlKind;
+use crate::topology::{InputBinding, InputBindingPreset, NodeControlKind};
+use rhythm_core::ButtonAction;
 
 fn mutation_items(body: &Value) -> Result<Vec<Value>, String> {
     if let Some(items) = body.get("items").and_then(|v| v.as_array()) {
@@ -923,6 +924,171 @@ pub fn handle_post_transition_trigger(state: &SharedState, transition_id: &str) 
         Err(e) if e.to_string().contains("Unknown transition") => {
             ApiResponse::bad_request(&e.to_string())
         }
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_get_input_bindings(state: &SharedState) -> ApiResponse {
+    match commands::build_input_bindings(state) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+fn parse_optional_button_action(body: &Value) -> Result<Option<ButtonAction>, String> {
+    let Some(value) = body.get("button_action") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    if let Some(action) = value.as_str() {
+        if action == "on" {
+            return Ok(Some(ButtonAction::OnPress));
+        }
+        if action == "off" {
+            return Ok(Some(ButtonAction::OffPress));
+        }
+        if action == "toggle" {
+            return Ok(Some(ButtonAction::Toggle));
+        }
+        if let Some(action) = ButtonAction::from_service_name(action) {
+            return Ok(Some(action));
+        }
+    }
+    serde_json::from_value::<ButtonAction>(value.clone())
+        .map(Some)
+        .map_err(|_| "Invalid button_action".to_string())
+}
+
+fn parse_input_binding_preset(body: &Value) -> Result<Option<InputBindingPreset>, String> {
+    let Some(value) = body.get("preset") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value::<InputBindingPreset>(value.clone())
+        .map(Some)
+        .map_err(|_| "Invalid input binding preset".to_string())
+}
+
+fn input_binding_source_node_id(body: &Value) -> Result<&str, ApiResponse> {
+    match body.get("source_node_id").and_then(|value| value.as_str()) {
+        Some(source_node_id) if !source_node_id.is_empty() => Ok(source_node_id),
+        _ => Err(ApiResponse::bad_request("Missing source_node_id")),
+    }
+}
+
+fn input_binding_enabled(body: &Value) -> bool {
+    body.get("enabled")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true)
+}
+
+fn input_binding_button_action(body: &Value) -> Result<Option<ButtonAction>, ApiResponse> {
+    parse_optional_button_action(body).map_err(|e| ApiResponse::bad_request(&e))
+}
+
+pub fn handle_post_input_binding(state: &SharedState, body: &Value) -> ApiResponse {
+    if body.get("action").is_some() || body.get("trigger").is_some() {
+        let Some(binding_id) = body.get("id").and_then(|value| value.as_str()) else {
+            return ApiResponse::bad_request("Generic input bindings require id");
+        };
+        if binding_id.is_empty() {
+            return ApiResponse::bad_request("Generic input binding id cannot be empty");
+        }
+        let binding = match serde_json::from_value::<InputBinding>(body.clone()) {
+            Ok(binding) => binding,
+            Err(e) => return ApiResponse::bad_request(&format!("Invalid input binding: {}", e)),
+        };
+        return match commands::do_input_binding_set(state, binding) {
+            Ok(json) => ApiResponse::json_ok(json),
+            Err(e) => ApiResponse::bad_request(&e.to_string()),
+        };
+    }
+
+    let preset = match parse_input_binding_preset(body) {
+        Ok(Some(preset)) => preset,
+        Ok(None) => return ApiResponse::bad_request("Missing input binding preset"),
+        Err(e) => return ApiResponse::bad_request(&e),
+    };
+    let source_node_id = match input_binding_source_node_id(body) {
+        Ok(source_node_id) => source_node_id,
+        Err(response) => return response,
+    };
+    let button_action = match input_binding_button_action(body) {
+        Ok(action) => action,
+        Err(response) => return response,
+    };
+
+    match commands::do_preset_input_binding_create(
+        state,
+        preset,
+        source_node_id,
+        button_action,
+        input_binding_enabled(body),
+    ) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::bad_request(&e.to_string()),
+    }
+}
+
+pub fn handle_put_input_binding(
+    state: &SharedState,
+    binding_id: &str,
+    body: &Value,
+) -> ApiResponse {
+    if body.get("action").is_some() || body.get("trigger").is_some() {
+        let mut binding_body = body.clone();
+        let Some(object) = binding_body.as_object_mut() else {
+            return ApiResponse::bad_request("Invalid input binding: expected object");
+        };
+        object.insert("id".to_string(), Value::String(binding_id.to_string()));
+        let binding = match serde_json::from_value::<InputBinding>(binding_body) {
+            Ok(binding) => binding,
+            Err(e) => return ApiResponse::bad_request(&format!("Invalid input binding: {}", e)),
+        };
+        return match commands::do_input_binding_set(state, binding) {
+            Ok(json) => ApiResponse::json_ok(json),
+            Err(e) => ApiResponse::bad_request(&e.to_string()),
+        };
+    }
+
+    let preset = match parse_input_binding_preset(body) {
+        Ok(Some(preset)) => preset,
+        Ok(None) => {
+            return ApiResponse::bad_request(
+                "Preset input bindings require a preset field; generic bindings require trigger and action fields",
+            )
+        }
+        Err(e) => return ApiResponse::bad_request(&e),
+    };
+    let source_node_id = match input_binding_source_node_id(body) {
+        Ok(source_node_id) => source_node_id,
+        Err(response) => return response,
+    };
+    let button_action = match input_binding_button_action(body) {
+        Ok(action) => action,
+        Err(response) => return response,
+    };
+
+    match commands::do_preset_input_binding_set(
+        state,
+        binding_id,
+        preset,
+        source_node_id,
+        button_action,
+        input_binding_enabled(body),
+    ) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::bad_request(&e.to_string()),
+    }
+}
+
+pub fn handle_delete_input_binding(state: &SharedState, binding_id: &str) -> ApiResponse {
+    match commands::do_input_binding_delete(state, binding_id) {
+        Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
     }
 }
@@ -1999,6 +2165,30 @@ mod tests {
 
     fn test_state() -> SharedState {
         Arc::new(Mutex::new(AppState::default()))
+    }
+
+    fn add_button_node(state: &SharedState, native_id: &str) -> String {
+        let hub_key = HubKey::new(HubType::new("hue"), "local");
+        let identity = DiscoveredIdentity {
+            native_id: native_id.to_string(),
+            room_id: None,
+            room_name: None,
+            name: native_id.to_string(),
+            device_type: DeviceType::Button,
+            hardware_ids: vec![HardwareId::serial(native_id)],
+            manufacturer: None,
+            model: None,
+        };
+
+        let mut state = state.lock().unwrap();
+        let canonical_id = match state.canonical_registry.resolve(&identity, &hub_key, 1) {
+            ResolveResult::AlreadyKnown { canonical_id }
+            | ResolveResult::ReApproved { canonical_id }
+            | ResolveResult::Created { canonical_id } => canonical_id,
+            ResolveResult::Queued { .. } => panic!("unexpected triage for test button"),
+        };
+        state.topology.ensure_standalone_device(&canonical_id);
+        canonical_id
     }
 
     fn attach_work_queue(state: &SharedState) -> std::sync::mpsc::Receiver<WorkItem> {
@@ -3138,6 +3328,93 @@ mod tests {
         );
         assert_eq!(r.status, 400);
         assert!(r.body.contains("Invalid control kind"));
+    }
+
+    #[test]
+    fn put_preset_input_binding_accepts_selected_button() {
+        let state = test_state();
+        let button_id = add_button_node(&state, "button-native-1");
+
+        let r = handle_put_input_binding(
+            &state,
+            "bedroom_day_sleep",
+            &json!({
+                "preset": "day_sleep_toggle",
+                "source_node_id": button_id,
+                "button_action": "on"
+            }),
+        );
+
+        assert_eq!(r.status, 200);
+        let body: Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(body["bindings"][0]["id"], "bedroom_day_sleep");
+        assert_eq!(body["bindings"][0]["source_node_id"], button_id);
+        assert_eq!(body["bindings"][0]["preset"], "day_sleep_toggle");
+        assert_eq!(body["bindings"][0]["action"]["kind"], "mode_cycle");
+        assert_eq!(body["bindings"][0]["trigger"]["button_action"], "on_press");
+    }
+
+    #[test]
+    fn post_day_sleep_input_binding_generates_per_button_ids() {
+        let state = test_state();
+        let first_button_id = add_button_node(&state, "button-native-1");
+        let second_button_id = add_button_node(&state, "button-native-2");
+
+        let first = handle_post_input_binding(
+            &state,
+            &json!({
+                "preset": "day_sleep_toggle",
+                "source_node_id": first_button_id,
+                "button_action": "on"
+            }),
+        );
+        assert_eq!(first.status, 200);
+
+        let second = handle_post_input_binding(
+            &state,
+            &json!({
+                "preset": "day_sleep_toggle",
+                "source_node_id": second_button_id,
+                "button_action": "on"
+            }),
+        );
+        assert_eq!(second.status, 200);
+
+        let body: Value = serde_json::from_str(&second.body).unwrap();
+        let bindings = body["bindings"].as_array().unwrap();
+        assert_eq!(bindings.len(), 2);
+        assert_ne!(bindings[0]["id"], bindings[1]["id"]);
+        assert!(bindings
+            .iter()
+            .all(|binding| binding["preset"] == "day_sleep_toggle"));
+    }
+
+    #[test]
+    fn put_generic_input_binding_uses_path_id() {
+        let state = test_state();
+        let button_id = add_button_node(&state, "button-native-2");
+
+        let r = handle_put_input_binding(
+            &state,
+            "custom_sleep_button",
+            &json!({
+                "source_node_id": button_id,
+                "trigger": {
+                    "kind": "button",
+                    "button_action": "off_press"
+                },
+                "action": {
+                    "kind": "mode_cycle",
+                    "modes": ["day", "sleep"],
+                    "transition": { "kind": "none" }
+                }
+            }),
+        );
+
+        assert_eq!(r.status, 200);
+        let body: Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(body["bindings"][0]["id"], "custom_sleep_button");
+        assert_eq!(body["bindings"][0]["source_node_id"], button_id);
     }
 
     #[test]
