@@ -687,6 +687,7 @@ fn server_event_name(event: &ServerEvent) -> &'static str {
     match event {
         ServerEvent::NodeState { .. } => "node_state",
         ServerEvent::MotionTimer { .. } => "motion_timer",
+        ServerEvent::InputEvent(_) => "input_event",
         ServerEvent::HubStatus { .. } => "hub_status",
         ServerEvent::SettingsChanged => "settings_changed",
         ServerEvent::ModeChanged { .. } => "mode_changed",
@@ -749,6 +750,19 @@ mod tests {
 
     #[test]
     fn sse_event_name_includes_progress_events() {
+        let input = ServerEvent::InputEvent(crate::server_event::InputEventResource::Motion {
+            epoch_ms: 1778058932588,
+            route: crate::server_event::InputEventRoute::NodeControl,
+            hub_type: Some("test".to_string()),
+            address: Some("hub.local".to_string()),
+            source_node_id: Some("sensor-1".to_string()),
+            target_node_id: Some("room-1".to_string()),
+            source_room_id: Some("native-room-1".to_string()),
+            native_sensor_id: "sensor-native-1".to_string(),
+            detected: true,
+        });
+        assert_eq!(server_event_name(&input), "input_event");
+
         let pairing = ServerEvent::PairingProgress {
             hub_type: "matter".to_string(),
             session_id: Some("pair-1".to_string()),

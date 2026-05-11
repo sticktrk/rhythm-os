@@ -12,9 +12,11 @@ use std::time::{Duration, Instant};
 use log::{debug, info, warn};
 use rhythm_core::{ButtonAction, InputEvent};
 
+use crate::canonical::identity::HubKey;
 use crate::commands;
 use crate::hub::HubEvent;
 use crate::logging;
+use crate::server_event::{InputEventResource, InputEventRoute, ServerEvent};
 use crate::state::{MotionSeedEntry, MotionSnapshot, SharedState, WorkItem};
 use crate::topology::NodeControlKind;
 
@@ -71,6 +73,80 @@ pub struct MotionTimerState {
 /// double-tapping a button (which is normally measured against a separate
 /// short_release / long_release boundary, not raw event arrivals).
 pub const BUTTON_DEBOUNCE_WINDOW: Duration = Duration::from_millis(150);
+
+fn input_event_epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+fn hub_event_fields(hub_key: Option<&HubKey>) -> (Option<String>, Option<String>) {
+    match hub_key {
+        Some(key) => (
+            Some(key.hub_type.as_str().to_string()),
+            Some(key.address.clone()),
+        ),
+        None => (None, None),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_button_input_event(
+    state: &SharedState,
+    hub_key: Option<&HubKey>,
+    source_node_id: Option<&str>,
+    target_node_id: Option<&str>,
+    source_room_id: Option<&str>,
+    native_device_id: Option<&str>,
+    native_button_id: Option<&str>,
+    action: Option<ButtonAction>,
+    route: InputEventRoute,
+) {
+    let (hub_type, address) = hub_event_fields(hub_key);
+    crate::state::emit_server_event(
+        state,
+        ServerEvent::InputEvent(InputEventResource::Button {
+            epoch_ms: input_event_epoch_ms(),
+            route,
+            hub_type,
+            address,
+            source_node_id: source_node_id.map(str::to_string),
+            target_node_id: target_node_id.map(str::to_string),
+            source_room_id: source_room_id.map(str::to_string),
+            native_device_id: native_device_id.map(str::to_string),
+            native_button_id: native_button_id.map(str::to_string),
+            button_action: action,
+        }),
+    );
+}
+
+fn emit_motion_input_event(
+    state: &SharedState,
+    hub_key: Option<&HubKey>,
+    source_node_id: Option<&str>,
+    target_node_id: Option<&str>,
+    source_room_id: Option<&str>,
+    native_sensor_id: &str,
+    detected: bool,
+    route: InputEventRoute,
+) {
+    let (hub_type, address) = hub_event_fields(hub_key);
+    crate::state::emit_server_event(
+        state,
+        ServerEvent::InputEvent(InputEventResource::Motion {
+            epoch_ms: input_event_epoch_ms(),
+            route,
+            hub_type,
+            address,
+            source_node_id: source_node_id.map(str::to_string),
+            target_node_id: target_node_id.map(str::to_string),
+            source_room_id: source_room_id.map(str::to_string),
+            native_sensor_id: native_sensor_id.to_string(),
+            detected,
+        }),
+    );
+}
 
 impl Default for MotionTimerState {
     fn default() -> Self {
@@ -836,6 +912,17 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             ref device_id,
         } => {
             let Some((key, native_device_id)) = hub_key.as_ref().zip(device_id.as_deref()) else {
+                emit_button_input_event(
+                    state,
+                    hub_key.as_ref(),
+                    None,
+                    None,
+                    Some(room_id.as_str()),
+                    device_id.as_deref(),
+                    None,
+                    Some(action),
+                    InputEventRoute::Unresolved,
+                );
                 info!(
                     target: "evt",
                     "Button event from {:?} has no hub key/native device id, ignoring",
@@ -846,6 +933,17 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             let Some(source_node_id) =
                 commands::resolve_input_source_node_id(state, key, native_device_id)
             else {
+                emit_button_input_event(
+                    state,
+                    hub_key.as_ref(),
+                    None,
+                    None,
+                    Some(room_id.as_str()),
+                    Some(native_device_id),
+                    None,
+                    Some(action),
+                    InputEventRoute::Unresolved,
+                );
                 info!(
                     target: "evt",
                     "Button event from {:?} could not resolve canonical source node, ignoring",
@@ -858,6 +956,17 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             if let Some(binding_action) =
                 commands::matching_button_input_binding_action(state, &source_node_id, action)
             {
+                emit_button_input_event(
+                    state,
+                    hub_key.as_ref(),
+                    Some(source_node_id.as_str()),
+                    None,
+                    Some(room_id.as_str()),
+                    Some(native_device_id),
+                    None,
+                    Some(action),
+                    InputEventRoute::InputBinding,
+                );
                 tracing::info!(
                     target: "evt",
                     event = "button_binding_ingress",
@@ -896,6 +1005,17 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 &source_node_id,
                 &crate::topology::NodeControlKind::Button,
             ) else {
+                emit_button_input_event(
+                    state,
+                    hub_key.as_ref(),
+                    Some(source_node_id.as_str()),
+                    None,
+                    Some(room_id.as_str()),
+                    Some(native_device_id),
+                    None,
+                    Some(action),
+                    InputEventRoute::Unroutable,
+                );
                 info!(
                     target: "evt",
                     "Button event from {:?} could not resolve canonical topology target, ignoring",
@@ -903,6 +1023,17 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 );
                 return;
             };
+            emit_button_input_event(
+                state,
+                hub_key.as_ref(),
+                Some(source_node_id.as_str()),
+                Some(node_id.as_str()),
+                Some(room_id.as_str()),
+                Some(native_device_id),
+                None,
+                Some(action),
+                InputEventRoute::NodeControl,
+            );
             tracing::info!(
                 target: "evt",
                 event = "button_ingress",
@@ -946,11 +1077,21 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
 
         HubEvent::Motion {
             ref hub_key,
-            room_id: _,
+            ref room_id,
             ref sensor_id,
             detected,
         } => {
             let Some(hub_key) = hub_key.as_ref() else {
+                emit_motion_input_event(
+                    state,
+                    None,
+                    None,
+                    None,
+                    Some(room_id.as_str()),
+                    sensor_id,
+                    detected,
+                    InputEventRoute::Unresolved,
+                );
                 info!(
                     target: "evt",
                     "Motion: sensor {} has no hub key, ignoring",
@@ -958,12 +1099,41 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 );
                 return;
             };
-            let Some((source_node_id, target_node_id)) = commands::resolve_node_control_target(
+            let Some(source_node_id) =
+                commands::resolve_input_source_node_id(state, hub_key, sensor_id)
+            else {
+                emit_motion_input_event(
+                    state,
+                    Some(hub_key),
+                    None,
+                    None,
+                    Some(room_id.as_str()),
+                    sensor_id,
+                    detected,
+                    InputEventRoute::Unresolved,
+                );
+                info!(
+                    target: "evt",
+                    "Motion: sensor {} could not resolve canonical source node, ignoring",
+                    sensor_id
+                );
+                return;
+            };
+            let Some(target_node_id) = commands::resolve_node_control_target_for_source(
                 state,
-                hub_key,
-                sensor_id,
+                &source_node_id,
                 &NodeControlKind::Motion,
             ) else {
+                emit_motion_input_event(
+                    state,
+                    Some(hub_key),
+                    Some(source_node_id.as_str()),
+                    None,
+                    Some(room_id.as_str()),
+                    sensor_id,
+                    detected,
+                    InputEventRoute::Unroutable,
+                );
                 info!(
                     target: "evt",
                     "Motion: sensor {} has no control target, ignoring",
@@ -971,6 +1141,16 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 );
                 return;
             };
+            emit_motion_input_event(
+                state,
+                Some(hub_key),
+                Some(source_node_id.as_str()),
+                Some(target_node_id.as_str()),
+                Some(room_id.as_str()),
+                sensor_id,
+                detected,
+                InputEventRoute::NodeControl,
+            );
             if detected {
                 if motion.warning_active.remove(&target_node_id) {
                     info!(
@@ -1146,6 +1326,17 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             ref device_id,
             ref button_id,
         } => {
+            emit_button_input_event(
+                state,
+                hub_key.as_ref(),
+                None,
+                None,
+                None,
+                device_id.as_deref(),
+                Some(button_id.as_str()),
+                None,
+                InputEventRoute::Unroutable,
+            );
             // Try to create an UnassignedDevice triage entry so the user knows
             // a switch needs attention. Requires the device to be in the
             // canonical registry (populated during room sync).
@@ -2028,7 +2219,7 @@ mod tests {
     use crate::canonical::registry::ResolveResult;
     use crate::hub::{ActiveHub, HubType};
     use crate::registry::{RegistrySnapshot, SnapshotRoom};
-    use crate::topology::{DevicePlacement, TopologyRoom};
+    use crate::topology::{DevicePlacement, InputBinding, TopologyRoom};
     use rhythm_core::runtime::hub_registry::DeviceType;
 
     fn motion_source(
@@ -2304,6 +2495,14 @@ mod tests {
         state.lock().unwrap().hubs.keys().next().cloned().unwrap()
     }
 
+    fn subscribe_events(
+        state: &SharedState,
+    ) -> tokio::sync::broadcast::Receiver<crate::server_event::ServerEvent> {
+        let (event_tx, event_rx) = tokio::sync::broadcast::channel(16);
+        state.lock().unwrap().event_tx = Some(event_tx);
+        event_rx
+    }
+
     fn add_canonical_control_source(
         state: &SharedState,
         hub_key: &HubKey,
@@ -2340,6 +2539,33 @@ mod tests {
             Some(room_id),
             DevicePlacement::UserOverride,
         ));
+        canonical_id
+    }
+
+    fn add_canonical_standalone_control_source(
+        state: &SharedState,
+        hub_key: &HubKey,
+        native_id: &str,
+        device_type: DeviceType,
+    ) -> String {
+        let identity = DiscoveredIdentity {
+            native_id: native_id.to_string(),
+            room_id: None,
+            room_name: None,
+            name: native_id.to_string(),
+            device_type,
+            hardware_ids: vec![HardwareId::matter(native_id)],
+            manufacturer: None,
+            model: None,
+        };
+
+        let mut s = state.lock().unwrap();
+        let canonical_id = match s.canonical_registry.resolve(&identity, hub_key, 1) {
+            ResolveResult::Created { canonical_id }
+            | ResolveResult::AlreadyKnown { canonical_id } => canonical_id,
+            other => panic!("unexpected resolve result: {:?}", other),
+        };
+        s.topology.ensure_standalone_device(&canonical_id);
         canonical_id
     }
 
@@ -2935,6 +3161,275 @@ mod tests {
     }
 
     #[test]
+    fn button_event_broadcasts_normalized_input_event() {
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
+            handle_event_delay: Duration::ZERO,
+            turn_on_room_delay: Duration::ZERO,
+            handle_event_calls: Arc::new(AtomicUsize::new(0)),
+            turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let state = make_state_with_runtime(runtime);
+        let hub_key = only_hub_key(&state);
+        let source_id = add_canonical_control_source(
+            &state,
+            &hub_key,
+            "button_a",
+            "room_a",
+            DeviceType::Button,
+        );
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        state.lock().unwrap().event_tx = Some(event_tx);
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Button {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                action: ButtonAction::OnPress,
+                device_id: Some("button_a".into()),
+            },
+            &mut MotionTimerState::new(),
+        );
+
+        let event = event_rx.try_recv().expect("expected input event broadcast");
+        match event {
+            crate::server_event::ServerEvent::InputEvent(InputEventResource::Button {
+                route,
+                source_node_id,
+                target_node_id,
+                native_device_id,
+                button_action,
+                ..
+            }) => {
+                assert_eq!(route, InputEventRoute::NodeControl);
+                assert_eq!(source_node_id.as_deref(), Some(source_id.as_str()));
+                assert_eq!(target_node_id.as_deref(), Some("room_a"));
+                assert_eq!(native_device_id.as_deref(), Some("button_a"));
+                assert_eq!(button_action, Some(ButtonAction::OnPress));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn button_event_broadcasts_input_binding_route_before_automation_dispatch() {
+        let handle_event_calls = Arc::new(AtomicUsize::new(0));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
+            handle_event_delay: Duration::ZERO,
+            turn_on_room_delay: Duration::ZERO,
+            handle_event_calls: handle_event_calls.clone(),
+            turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let state = make_state_with_runtime(runtime);
+        let hub_key = only_hub_key(&state);
+        let source_id = add_canonical_control_source(
+            &state,
+            &hub_key,
+            "button_a",
+            "room_a",
+            DeviceType::Button,
+        );
+        {
+            let mut s = state.lock().unwrap();
+            s.topology.set_input_binding(InputBinding::day_sleep_toggle(
+                source_id.clone(),
+                Some(ButtonAction::OnPress),
+            ));
+        }
+        let mut event_rx = subscribe_events(&state);
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Button {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                action: ButtonAction::OnPress,
+                device_id: Some("button_a".into()),
+            },
+            &mut MotionTimerState::new(),
+        );
+
+        let event = event_rx.try_recv().expect("expected input event broadcast");
+        match event {
+            crate::server_event::ServerEvent::InputEvent(InputEventResource::Button {
+                epoch_ms,
+                route,
+                hub_type,
+                address,
+                source_node_id,
+                target_node_id,
+                source_room_id,
+                native_device_id,
+                native_button_id,
+                button_action,
+            }) => {
+                assert!(epoch_ms > 0);
+                assert_eq!(route, InputEventRoute::InputBinding);
+                assert_eq!(hub_type.as_deref(), Some("test"));
+                assert_eq!(address.as_deref(), Some("hub.local"));
+                assert_eq!(source_node_id.as_deref(), Some(source_id.as_str()));
+                assert_eq!(target_node_id, None);
+                assert_eq!(source_room_id.as_deref(), Some("room_a"));
+                assert_eq!(native_device_id.as_deref(), Some("button_a"));
+                assert_eq!(native_button_id, None);
+                assert_eq!(button_action, Some(ButtonAction::OnPress));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+        assert_eq!(
+            handle_event_calls.load(Ordering::SeqCst),
+            0,
+            "input binding should not fall through to ordinary node control"
+        );
+    }
+
+    #[test]
+    fn button_event_for_known_source_without_target_broadcasts_unroutable() {
+        let handle_event_calls = Arc::new(AtomicUsize::new(0));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
+            handle_event_delay: Duration::ZERO,
+            turn_on_room_delay: Duration::ZERO,
+            handle_event_calls: handle_event_calls.clone(),
+            turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let state = make_state_with_runtime(runtime);
+        let hub_key = only_hub_key(&state);
+        let source_id = add_canonical_standalone_control_source(
+            &state,
+            &hub_key,
+            "button_a",
+            DeviceType::Button,
+        );
+        let mut event_rx = subscribe_events(&state);
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Button {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                action: ButtonAction::OffPress,
+                device_id: Some("button_a".into()),
+            },
+            &mut MotionTimerState::new(),
+        );
+
+        let event = event_rx.try_recv().expect("expected input event broadcast");
+        match event {
+            crate::server_event::ServerEvent::InputEvent(InputEventResource::Button {
+                route,
+                hub_type,
+                address,
+                source_node_id,
+                target_node_id,
+                source_room_id,
+                native_device_id,
+                button_action,
+                ..
+            }) => {
+                assert_eq!(route, InputEventRoute::Unroutable);
+                assert_eq!(hub_type.as_deref(), Some("test"));
+                assert_eq!(address.as_deref(), Some("hub.local"));
+                assert_eq!(source_node_id.as_deref(), Some(source_id.as_str()));
+                assert_eq!(target_node_id, None);
+                assert_eq!(source_room_id.as_deref(), Some("room_a"));
+                assert_eq!(native_device_id.as_deref(), Some("button_a"));
+                assert_eq!(button_action, Some(ButtonAction::OffPress));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+        assert_eq!(handle_event_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn button_event_for_unknown_source_broadcasts_unresolved() {
+        let handle_event_calls = Arc::new(AtomicUsize::new(0));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
+            handle_event_delay: Duration::ZERO,
+            turn_on_room_delay: Duration::ZERO,
+            handle_event_calls: handle_event_calls.clone(),
+            turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let state = make_state_with_runtime(runtime);
+        let hub_key = only_hub_key(&state);
+        let mut event_rx = subscribe_events(&state);
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Button {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                action: ButtonAction::Reset,
+                device_id: Some("missing_button".into()),
+            },
+            &mut MotionTimerState::new(),
+        );
+
+        let event = event_rx.try_recv().expect("expected input event broadcast");
+        match event {
+            crate::server_event::ServerEvent::InputEvent(InputEventResource::Button {
+                route,
+                hub_type,
+                address,
+                source_node_id,
+                target_node_id,
+                source_room_id,
+                native_device_id,
+                button_action,
+                ..
+            }) => {
+                assert_eq!(route, InputEventRoute::Unresolved);
+                assert_eq!(hub_type.as_deref(), Some("test"));
+                assert_eq!(address.as_deref(), Some("hub.local"));
+                assert_eq!(source_node_id, None);
+                assert_eq!(target_node_id, None);
+                assert_eq!(source_room_id.as_deref(), Some("room_a"));
+                assert_eq!(native_device_id.as_deref(), Some("missing_button"));
+                assert_eq!(button_action, Some(ButtonAction::Reset));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+        assert_eq!(handle_event_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn unroutable_button_event_broadcasts_native_button_id() {
+        let state = make_state();
+        let hub_key = HubKey::new(HubType::new("test"), "hub.local");
+        let mut event_rx = subscribe_events(&state);
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::UnroutableButton {
+                hub_key: Some(hub_key),
+                device_id: Some("button_device".into()),
+                button_id: "button_resource".into(),
+            },
+            &mut MotionTimerState::new(),
+        );
+
+        let event = event_rx.try_recv().expect("expected input event broadcast");
+        match event {
+            crate::server_event::ServerEvent::InputEvent(InputEventResource::Button {
+                route,
+                hub_type,
+                address,
+                native_device_id,
+                native_button_id,
+                button_action,
+                ..
+            }) => {
+                assert_eq!(route, InputEventRoute::Unroutable);
+                assert_eq!(hub_type.as_deref(), Some("test"));
+                assert_eq!(address.as_deref(), Some("hub.local"));
+                assert_eq!(native_device_id.as_deref(), Some("button_device"));
+                assert_eq!(native_button_id.as_deref(), Some("button_resource"));
+                assert_eq!(button_action, None);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
     fn button_event_dispatches_without_blocking_event_ingress() {
         let handle_event_calls = Arc::new(AtomicUsize::new(0));
         let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
@@ -3296,6 +3791,229 @@ mod tests {
             "SetNodePreferences stalled on periodic slot: elapsed {:?}",
             elapsed
         );
+    }
+
+    #[test]
+    fn motion_event_broadcasts_normalized_input_event() {
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
+            handle_event_delay: Duration::ZERO,
+            turn_on_room_delay: Duration::ZERO,
+            handle_event_calls: Arc::new(AtomicUsize::new(0)),
+            turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let state = make_state_with_runtime(runtime);
+        let hub_key = only_hub_key(&state);
+        let source_id = add_canonical_control_source(
+            &state,
+            &hub_key,
+            "sensor_a",
+            "room_a",
+            DeviceType::Motion,
+        );
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        state.lock().unwrap().event_tx = Some(event_tx);
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                sensor_id: "sensor_a".into(),
+                detected: true,
+            },
+            &mut MotionTimerState::new(),
+        );
+
+        let event = event_rx.try_recv().expect("expected input event broadcast");
+        match event {
+            crate::server_event::ServerEvent::InputEvent(InputEventResource::Motion {
+                route,
+                source_node_id,
+                target_node_id,
+                native_sensor_id,
+                detected,
+                ..
+            }) => {
+                assert_eq!(route, InputEventRoute::NodeControl);
+                assert_eq!(source_node_id.as_deref(), Some(source_id.as_str()));
+                assert_eq!(target_node_id.as_deref(), Some("room_a"));
+                assert_eq!(native_sensor_id, "sensor_a");
+                assert!(detected);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn motion_clear_event_broadcasts_detected_false_before_timer_routing() {
+        let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
+            handle_event_delay: Duration::ZERO,
+            turn_on_room_delay: Duration::ZERO,
+            handle_event_calls: Arc::new(AtomicUsize::new(0)),
+            turn_on_room_calls: turn_on_room_calls.clone(),
+        });
+        let state = make_state_with_runtime(runtime);
+        let hub_key = only_hub_key(&state);
+        let source_id = add_canonical_control_source(
+            &state,
+            &hub_key,
+            "sensor_a",
+            "room_a",
+            DeviceType::Motion,
+        );
+        let mut event_rx = subscribe_events(&state);
+        let mut motion = MotionTimerState::new();
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                sensor_id: "sensor_a".into(),
+                detected: false,
+            },
+            &mut motion,
+        );
+
+        let event = event_rx.try_recv().expect("expected input event broadcast");
+        match event {
+            crate::server_event::ServerEvent::InputEvent(InputEventResource::Motion {
+                route,
+                hub_type,
+                address,
+                source_node_id,
+                target_node_id,
+                source_room_id,
+                native_sensor_id,
+                detected,
+                ..
+            }) => {
+                assert_eq!(route, InputEventRoute::NodeControl);
+                assert_eq!(hub_type.as_deref(), Some("test"));
+                assert_eq!(address.as_deref(), Some("hub.local"));
+                assert_eq!(source_node_id.as_deref(), Some(source_id.as_str()));
+                assert_eq!(target_node_id.as_deref(), Some("room_a"));
+                assert_eq!(source_room_id.as_deref(), Some("room_a"));
+                assert_eq!(native_sensor_id, "sensor_a");
+                assert!(!detected);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+        assert!(motion.sensors.is_empty());
+        assert_eq!(turn_on_room_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn motion_event_for_known_source_without_target_broadcasts_unroutable() {
+        let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
+            handle_event_delay: Duration::ZERO,
+            turn_on_room_delay: Duration::ZERO,
+            handle_event_calls: Arc::new(AtomicUsize::new(0)),
+            turn_on_room_calls: turn_on_room_calls.clone(),
+        });
+        let state = make_state_with_runtime(runtime);
+        let hub_key = only_hub_key(&state);
+        let source_id = add_canonical_standalone_control_source(
+            &state,
+            &hub_key,
+            "sensor_a",
+            DeviceType::Motion,
+        );
+        let mut event_rx = subscribe_events(&state);
+        let mut motion = MotionTimerState::new();
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                sensor_id: "sensor_a".into(),
+                detected: true,
+            },
+            &mut motion,
+        );
+
+        let event = event_rx.try_recv().expect("expected input event broadcast");
+        match event {
+            crate::server_event::ServerEvent::InputEvent(InputEventResource::Motion {
+                route,
+                hub_type,
+                address,
+                source_node_id,
+                target_node_id,
+                source_room_id,
+                native_sensor_id,
+                detected,
+                ..
+            }) => {
+                assert_eq!(route, InputEventRoute::Unroutable);
+                assert_eq!(hub_type.as_deref(), Some("test"));
+                assert_eq!(address.as_deref(), Some("hub.local"));
+                assert_eq!(source_node_id.as_deref(), Some(source_id.as_str()));
+                assert_eq!(target_node_id, None);
+                assert_eq!(source_room_id.as_deref(), Some("room_a"));
+                assert_eq!(native_sensor_id, "sensor_a");
+                assert!(detected);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+        assert!(motion.sensors.is_empty());
+        assert_eq!(turn_on_room_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn motion_event_for_unknown_source_broadcasts_unresolved() {
+        let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
+            handle_event_delay: Duration::ZERO,
+            turn_on_room_delay: Duration::ZERO,
+            handle_event_calls: Arc::new(AtomicUsize::new(0)),
+            turn_on_room_calls: turn_on_room_calls.clone(),
+        });
+        let state = make_state_with_runtime(runtime);
+        let hub_key = only_hub_key(&state);
+        let mut event_rx = subscribe_events(&state);
+        let mut motion = MotionTimerState::new();
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                sensor_id: "missing_sensor".into(),
+                detected: true,
+            },
+            &mut motion,
+        );
+
+        let event = event_rx.try_recv().expect("expected input event broadcast");
+        match event {
+            crate::server_event::ServerEvent::InputEvent(InputEventResource::Motion {
+                route,
+                hub_type,
+                address,
+                source_node_id,
+                target_node_id,
+                source_room_id,
+                native_sensor_id,
+                detected,
+                ..
+            }) => {
+                assert_eq!(route, InputEventRoute::Unresolved);
+                assert_eq!(hub_type.as_deref(), Some("test"));
+                assert_eq!(address.as_deref(), Some("hub.local"));
+                assert_eq!(source_node_id, None);
+                assert_eq!(target_node_id, None);
+                assert_eq!(source_room_id.as_deref(), Some("room_a"));
+                assert_eq!(native_sensor_id, "missing_sensor");
+                assert!(detected);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+        assert!(motion.sensors.is_empty());
+        assert_eq!(turn_on_room_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]

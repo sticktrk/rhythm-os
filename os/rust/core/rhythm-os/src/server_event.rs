@@ -5,7 +5,9 @@
 
 use serde::Serialize;
 
-use rhythm_core::{ModeChangeCause, NodeSnapshot, RhythmMode, RoomModeState, RoomProfileSettings};
+use rhythm_core::{
+    ButtonAction, ModeChangeCause, NodeSnapshot, RhythmMode, RoomModeState, RoomProfileSettings,
+};
 
 use crate::api_types::ObservedPowerDto;
 use crate::pairing::{PairedDeviceInfo, PairingStage, PairingStatus};
@@ -45,6 +47,8 @@ pub enum ServerEvent {
     NodeState { nodes: Vec<NodeStateEvent> },
     /// Motion timer state changed.
     MotionTimer { timers: Vec<MotionTimerEvent> },
+    /// Raw physical input observed from a hub before/while it is routed.
+    InputEvent(InputEventResource),
     /// Hub connected/disconnected (per-hub status).
     HubStatus {
         /// Which hub type this status is for (e.g. "hue", "homeassistant").
@@ -137,6 +141,62 @@ pub enum ServerEvent {
         /// Error text, populated on failure.
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+    },
+}
+
+/// How a physical input event was routed by the server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputEventRoute {
+    /// The event matched an automation/input binding.
+    InputBinding,
+    /// The event routed to ordinary node control behavior.
+    NodeControl,
+    /// The hub delivered an event for a known device with no usable target.
+    Unroutable,
+    /// The event could not be resolved enough to route.
+    Unresolved,
+}
+
+/// Physical input observed from an integration and normalized for app clients.
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InputEventResource {
+    Button {
+        epoch_ms: i64,
+        route: InputEventRoute,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hub_type: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        address: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_node_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_node_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_room_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        native_device_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        native_button_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        button_action: Option<ButtonAction>,
+    },
+    Motion {
+        epoch_ms: i64,
+        route: InputEventRoute,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hub_type: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        address: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_node_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_node_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_room_id: Option<String>,
+        native_sensor_id: String,
+        detected: bool,
     },
 }
 
@@ -265,6 +325,63 @@ mod tests {
         assert!(json.contains("\"type\":\"hub_status\""));
         assert!(json.contains("\"hub_type\":\"hue\""));
         assert!(json.contains("\"connected\":true"));
+    }
+
+    #[test]
+    fn server_event_input_button_serializes_as_generic_input_event() {
+        let event = ServerEvent::InputEvent(InputEventResource::Button {
+            epoch_ms: 1778058932588,
+            route: InputEventRoute::NodeControl,
+            hub_type: Some("hue".into()),
+            address: Some("192.168.1.20:443".into()),
+            source_node_id: Some("button-1".into()),
+            target_node_id: Some("room-1".into()),
+            source_room_id: Some("hue-room-1".into()),
+            native_device_id: Some("hue-button-native".into()),
+            native_button_id: None,
+            button_action: Some(ButtonAction::OnPress),
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "input_event");
+        assert_eq!(parsed["data"]["kind"], "button");
+        assert_eq!(parsed["data"]["route"], "node_control");
+        assert_eq!(parsed["data"]["hub_type"], "hue");
+        assert_eq!(parsed["data"]["address"], "192.168.1.20:443");
+        assert_eq!(parsed["data"]["source_node_id"], "button-1");
+        assert_eq!(parsed["data"]["target_node_id"], "room-1");
+        assert_eq!(parsed["data"]["source_room_id"], "hue-room-1");
+        assert_eq!(parsed["data"]["native_device_id"], "hue-button-native");
+        assert_eq!(parsed["data"]["button_action"], "on_press");
+        assert!(parsed["data"].get("native_button_id").is_none(), "{}", json);
+        assert!(parsed["data"].get("event").is_none(), "{}", json);
+    }
+
+    #[test]
+    fn server_event_input_motion_serializes_as_generic_input_event() {
+        let event = ServerEvent::InputEvent(InputEventResource::Motion {
+            epoch_ms: 1778058932588,
+            route: InputEventRoute::Unroutable,
+            hub_type: Some("ha".into()),
+            address: Some("homeassistant.local".into()),
+            source_node_id: Some("motion-1".into()),
+            target_node_id: None,
+            source_room_id: Some("ha-area-1".into()),
+            native_sensor_id: "binary_sensor.motion_1".into(),
+            detected: false,
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "input_event");
+        assert_eq!(parsed["data"]["kind"], "motion");
+        assert_eq!(parsed["data"]["route"], "unroutable");
+        assert_eq!(parsed["data"]["hub_type"], "ha");
+        assert_eq!(parsed["data"]["address"], "homeassistant.local");
+        assert_eq!(parsed["data"]["source_node_id"], "motion-1");
+        assert!(parsed["data"].get("target_node_id").is_none(), "{}", json);
+        assert_eq!(parsed["data"]["source_room_id"], "ha-area-1");
+        assert_eq!(parsed["data"]["native_sensor_id"], "binary_sensor.motion_1");
+        assert_eq!(parsed["data"]["detected"], false);
     }
 
     #[test]
