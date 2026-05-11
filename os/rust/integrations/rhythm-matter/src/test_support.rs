@@ -251,6 +251,7 @@ pub struct SpyTransport {
     on_off_state: Mutex<HashMap<u64, bool>>,
     groups: Mutex<HashMap<u16, MatterGroup>>,
     failing_nodes: Mutex<HashSet<u64>>,
+    failing_groups: Mutex<HashSet<u16>>,
     commission_result: Mutex<Result<CommissionedDevice>>,
     commission_requests: Mutex<Vec<MatterCommissionRequest>>,
     decommissioned: Mutex<Vec<(u64, bool)>>,
@@ -265,6 +266,7 @@ impl SpyTransport {
             on_off_state: Mutex::new(HashMap::new()),
             groups: Mutex::new(HashMap::new()),
             failing_nodes: Mutex::new(HashSet::new()),
+            failing_groups: Mutex::new(HashSet::new()),
             commission_result: Mutex::new(Ok(default_device(99))),
             commission_requests: Mutex::new(Vec::new()),
             decommissioned: Mutex::new(Vec::new()),
@@ -312,6 +314,10 @@ impl SpyTransport {
         self.failing_nodes.lock().unwrap().insert(node_id);
     }
 
+    pub fn fail_group_commands(&self, group_id: u16) {
+        self.failing_groups.lock().unwrap().insert(group_id);
+    }
+
     pub fn set_commission_result(&self, result: Result<CommissionedDevice>) {
         *self.commission_result.lock().unwrap() = result;
     }
@@ -326,6 +332,10 @@ impl SpyTransport {
 
     fn should_fail(&self, node_id: u64) -> bool {
         self.failing_nodes.lock().unwrap().contains(&node_id)
+    }
+
+    fn should_fail_group(&self, group_id: u16) -> bool {
+        self.failing_groups.lock().unwrap().contains(&group_id)
     }
 
     fn record(&self, operation: RecordedOperation) {
@@ -429,6 +439,9 @@ impl MatterTransport for SpyTransport {
 
     fn set_group_on_off(&self, group_id: u16, on: bool) -> Result<()> {
         self.record(RecordedOperation::SetGroupOnOff { group_id, on });
+        if self.should_fail_group(group_id) {
+            anyhow::bail!("group {} command failed", group_id);
+        }
         if let Some(group) = self.groups.lock().unwrap().get(&group_id).cloned() {
             for member in group.members {
                 self.on_off_state.lock().unwrap().insert(member.node_id, on);
@@ -442,6 +455,9 @@ impl MatterTransport for SpyTransport {
             group_id,
             duration_secs,
         });
+        if self.should_fail_group(group_id) {
+            anyhow::bail!("group {} command failed", group_id);
+        }
         Ok(())
     }
 
@@ -456,6 +472,9 @@ impl MatterTransport for SpyTransport {
             level,
             transition_ms,
         });
+        if self.should_fail_group(group_id) {
+            anyhow::bail!("group {} command failed", group_id);
+        }
         if let Some(group) = self.groups.lock().unwrap().get(&group_id).cloned() {
             for member in group.members {
                 self.on_off_state
@@ -478,6 +497,9 @@ impl MatterTransport for SpyTransport {
             kelvin,
             transition_ms,
         });
+        if self.should_fail_group(group_id) {
+            anyhow::bail!("group {} command failed", group_id);
+        }
         Ok(())
     }
 
@@ -494,6 +516,9 @@ impl MatterTransport for SpyTransport {
             y,
             transition_ms,
         });
+        if self.should_fail_group(group_id) {
+            anyhow::bail!("group {} command failed", group_id);
+        }
         Ok(())
     }
 
@@ -510,6 +535,9 @@ impl MatterTransport for SpyTransport {
             saturation,
             transition_ms,
         });
+        if self.should_fail_group(group_id) {
+            anyhow::bail!("group {} command failed", group_id);
+        }
         Ok(())
     }
 

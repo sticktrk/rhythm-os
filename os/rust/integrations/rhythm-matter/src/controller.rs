@@ -109,6 +109,10 @@ impl MatterLightController {
             .and_then(|control_id| parse_group_control_id(&control_id))
     }
 
+    fn group_fallback_target_label(target_label: &str, group_id: u16) -> String {
+        format!("{target_label} fallback-from-group-{group_id}")
+    }
+
     fn device_metadata(
         &self,
         device_id: &str,
@@ -608,10 +612,25 @@ impl MatterLightController {
         }
 
         if command_successes == 0 {
-            return Err(LightControlError::CommandFailed(format!(
-                "Matter group turn_on failed for target {} (group {}, {} failures)",
-                target_label, group_id, command_failures,
-            )));
+            if device_ids.is_empty() {
+                return Err(LightControlError::CommandFailed(format!(
+                    "Matter group turn_on failed for target {} (group {}, {} failures, no fallback members)",
+                    target_label, group_id, command_failures,
+                )));
+            }
+
+            let fallback_target_label = Self::group_fallback_target_label(target_label, group_id);
+            tracing::warn!(
+                target: "cmd",
+                event = "matter_group_turn_on_fallback",
+                target = %target_label,
+                fallback_target = %fallback_target_label,
+                group_id,
+                failed = command_failures,
+                member_count = device_ids.len(),
+                "Matter group turn_on failed; falling back to member fan-out"
+            );
+            return self.turn_on_devices(&fallback_target_label, device_ids, command);
         }
 
         let latency_ms = started.elapsed().as_millis();
@@ -743,7 +762,12 @@ impl MatterLightController {
         Ok(())
     }
 
-    fn turn_off_group(&self, target_label: &str, group_id: u16) -> LightControlResult<()> {
+    fn turn_off_group(
+        &self,
+        target_label: &str,
+        group_id: u16,
+        device_ids: &[String],
+    ) -> LightControlResult<()> {
         let started = Instant::now();
         info!(
             target: "cmd",
@@ -751,14 +775,27 @@ impl MatterLightController {
             target_label,
             group_id
         );
-        self.transport
-            .set_group_on_off(group_id, false)
-            .map_err(|e| {
-                LightControlError::CommandFailed(format!(
-                    "Matter group turn_off failed for target {} (group {}): {}",
+        if let Err(e) = self.transport.set_group_on_off(group_id, false) {
+            if device_ids.is_empty() {
+                return Err(LightControlError::CommandFailed(format!(
+                    "Matter group turn_off failed for target {} (group {}, no fallback members): {}",
                     target_label, group_id, e
-                ))
-            })?;
+                )));
+            }
+
+            let fallback_target_label = Self::group_fallback_target_label(target_label, group_id);
+            tracing::warn!(
+                target: "cmd",
+                event = "matter_group_turn_off_fallback",
+                target = %target_label,
+                fallback_target = %fallback_target_label,
+                group_id,
+                member_count = device_ids.len(),
+                error = %e,
+                "Matter group turn_off failed; falling back to member fan-out"
+            );
+            return self.turn_off_devices(&fallback_target_label, device_ids);
+        }
 
         let latency_ms = started.elapsed().as_millis();
         if latency_ms >= DISPATCH_WARN_MS {
@@ -872,7 +909,12 @@ impl MatterLightController {
         Ok(())
     }
 
-    fn identify_group(&self, target_label: &str, group_id: u16) -> LightControlResult<()> {
+    fn identify_group(
+        &self,
+        target_label: &str,
+        group_id: u16,
+        device_ids: &[String],
+    ) -> LightControlResult<()> {
         let started = Instant::now();
         info!(
             target: "cmd",
@@ -881,14 +923,30 @@ impl MatterLightController {
             group_id,
             MATTER_IDENTIFY_DURATION_SECS
         );
-        self.transport
+        if let Err(e) = self
+            .transport
             .identify_group(group_id, MATTER_IDENTIFY_DURATION_SECS)
-            .map_err(|e| {
-                LightControlError::CommandFailed(format!(
-                    "Matter identify failed for target {} (group {}): {}",
+        {
+            if device_ids.is_empty() {
+                return Err(LightControlError::CommandFailed(format!(
+                    "Matter identify failed for target {} (group {}, no fallback members): {}",
                     target_label, group_id, e
-                ))
-            })?;
+                )));
+            }
+
+            let fallback_target_label = Self::group_fallback_target_label(target_label, group_id);
+            tracing::warn!(
+                target: "cmd",
+                event = "matter_group_identify_fallback",
+                target = %target_label,
+                fallback_target = %fallback_target_label,
+                group_id,
+                member_count = device_ids.len(),
+                error = %e,
+                "Matter group identify failed; falling back to member fan-out"
+            );
+            return self.identify_devices(&fallback_target_label, device_ids);
+        }
 
         let latency_ms = started.elapsed().as_millis();
         if latency_ms >= DISPATCH_WARN_MS {
@@ -942,19 +1000,19 @@ impl HubLightController for MatterLightController {
         _transition_ms: Option<u32>,
     ) -> LightControlResult<()> {
         let target_label = target.label();
-        if let Some(group_id) = Self::group_id_for_target(target) {
-            return self.turn_off_group(&target_label, group_id);
-        }
         let device_ids = self.target_device_ids_for_target(target)?;
+        if let Some(group_id) = Self::group_id_for_target(target) {
+            return self.turn_off_group(&target_label, group_id, &device_ids);
+        }
         self.turn_off_devices(&target_label, &device_ids)
     }
 
     async fn flash_target(&self, target: &HubDispatchTarget) -> LightControlResult<()> {
         let target_label = target.label();
-        if let Some(group_id) = Self::group_id_for_target(target) {
-            return self.identify_group(&target_label, group_id);
-        }
         let device_ids = self.target_device_ids_for_target(target)?;
+        if let Some(group_id) = Self::group_id_for_target(target) {
+            return self.identify_group(&target_label, group_id, &device_ids);
+        }
         self.identify_devices(&target_label, &device_ids)
     }
 
@@ -1014,10 +1072,10 @@ impl LightController for MatterLightController {
     async fn turn_off(&self, room_id: &str, _transition_ms: Option<u32>) -> LightControlResult<()> {
         let room_label =
             rhythm_os::controller_helpers::format_room_label(&self.hub_data.registry, room_id);
-        if let Some(group_id) = self.group_id_for_room(room_id) {
-            return self.turn_off_group(&room_label, group_id);
-        }
         let device_ids = self.target_device_ids(room_id)?;
+        if let Some(group_id) = self.group_id_for_room(room_id) {
+            return self.turn_off_group(&room_label, group_id, &device_ids);
+        }
         self.turn_off_devices(&room_label, &device_ids)
     }
 
@@ -1281,6 +1339,62 @@ mod tests {
     }
 
     #[test]
+    fn turn_on_group_target_with_matter_group_control_falls_back_to_devices_when_group_fails() {
+        let (controller, spy, _) = make_controller();
+        let group_id = 4097;
+        spy.fail_group_commands(group_id);
+
+        block_on(controller.turn_on_target(
+            &HubDispatchTarget::Group {
+                room_id: "kitchen".to_string(),
+                control_id: format_group_control_id(group_id),
+            },
+            LightingCommand::new(80, 4000),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            spy.operations(),
+            vec![
+                RecordedOperation::SetGroupColorTemperature {
+                    group_id,
+                    kelvin: 4000,
+                    transition_ms: None,
+                },
+                RecordedOperation::SetGroupBrightness {
+                    group_id,
+                    level: clusters::brightness_to_level(80),
+                    transition_ms: None,
+                },
+                RecordedOperation::SetColorTemperature {
+                    node_id: 42,
+                    endpoint: 1,
+                    kelvin: 4000,
+                    transition_ms: None,
+                },
+                RecordedOperation::SetBrightness {
+                    node_id: 42,
+                    endpoint: 1,
+                    level: clusters::brightness_to_level(80),
+                    transition_ms: None,
+                },
+                RecordedOperation::SetColorTemperature {
+                    node_id: 43,
+                    endpoint: 1,
+                    kelvin: 4000,
+                    transition_ms: None,
+                },
+                RecordedOperation::SetBrightness {
+                    node_id: 43,
+                    endpoint: 1,
+                    level: clusters::brightness_to_level(80),
+                    transition_ms: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn turn_on_direct_device_target_succeeds() {
         let (controller, spy, _) = make_controller();
 
@@ -1347,6 +1461,42 @@ mod tests {
                 group_id,
                 on: false,
             }]
+        );
+    }
+
+    #[test]
+    fn turn_off_group_target_with_matter_group_control_falls_back_to_devices_when_group_fails() {
+        let (controller, spy, _) = make_controller();
+        let group_id = 4097;
+        spy.fail_group_commands(group_id);
+
+        block_on(controller.turn_off_target(
+            &HubDispatchTarget::Group {
+                room_id: "kitchen".to_string(),
+                control_id: format_group_control_id(group_id),
+            },
+            None,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            spy.operations(),
+            vec![
+                RecordedOperation::SetGroupOnOff {
+                    group_id,
+                    on: false,
+                },
+                RecordedOperation::SetOnOff {
+                    node_id: 42,
+                    endpoint: 1,
+                    on: false,
+                },
+                RecordedOperation::SetOnOff {
+                    node_id: 43,
+                    endpoint: 1,
+                    on: false,
+                },
+            ]
         );
     }
 
@@ -1435,6 +1585,39 @@ mod tests {
                 group_id,
                 duration_secs: MATTER_IDENTIFY_DURATION_SECS,
             }]
+        );
+    }
+
+    #[test]
+    fn flash_group_target_with_matter_group_control_falls_back_to_devices_when_group_fails() {
+        let (controller, spy, _) = make_controller();
+        let group_id = 4097;
+        spy.fail_group_commands(group_id);
+
+        block_on(controller.flash_target(&HubDispatchTarget::Group {
+            room_id: "kitchen".to_string(),
+            control_id: format_group_control_id(group_id),
+        }))
+        .unwrap();
+
+        assert_eq!(
+            spy.operations(),
+            vec![
+                RecordedOperation::IdentifyGroup {
+                    group_id,
+                    duration_secs: MATTER_IDENTIFY_DURATION_SECS,
+                },
+                RecordedOperation::IdentifyLight {
+                    node_id: 42,
+                    endpoint: 1,
+                    duration_secs: MATTER_IDENTIFY_DURATION_SECS,
+                },
+                RecordedOperation::IdentifyLight {
+                    node_id: 43,
+                    endpoint: 1,
+                    duration_secs: MATTER_IDENTIFY_DURATION_SECS,
+                },
+            ]
         );
     }
 
