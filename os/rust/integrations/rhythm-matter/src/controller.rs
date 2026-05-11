@@ -23,6 +23,7 @@ const DISPATCH_INFO_MS: u128 = 250;
 const DISPATCH_WARN_MS: u128 = 1000;
 const MATTER_IDENTIFY_DURATION_SECS: u16 = 1;
 const MATTER_GROUP_CONTROL_PREFIX: &str = "matter-group-";
+const MATTER_GROUP_SAFETY_FANOUT_ENV: &str = "RHYTHM_MATTER_GROUP_SAFETY_FANOUT";
 
 /// Format the hub-native control ID used for a Matter group.
 pub fn format_group_control_id(group_id: u16) -> String {
@@ -111,6 +112,40 @@ impl MatterLightController {
 
     fn group_fallback_target_label(target_label: &str, group_id: u16) -> String {
         format!("{target_label} fallback-from-group-{group_id}")
+    }
+
+    fn group_safety_fanout_enabled() -> bool {
+        std::env::var(MATTER_GROUP_SAFETY_FANOUT_ENV)
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                !matches!(normalized.as_str(), "0" | "false" | "off" | "no")
+            })
+            .unwrap_or(true)
+    }
+
+    fn log_group_safety_fanout(
+        operation: &'static str,
+        target_label: &str,
+        fallback_target_label: &str,
+        group_id: u16,
+        member_count: usize,
+        group_commands_ok: usize,
+        group_commands_failed: usize,
+    ) {
+        tracing::info!(
+            target: "cmd",
+            event = "matter_group_safety_fanout",
+            operation,
+            target = %target_label,
+            fallback_target = %fallback_target_label,
+            group_id,
+            member_count,
+            group_commands_ok,
+            group_commands_failed,
+            reason = "groupcast_delivery_unverified",
+            disable_env = MATTER_GROUP_SAFETY_FANOUT_ENV,
+            "Matter group command safety fan-out"
+        );
     }
 
     fn device_metadata(
@@ -675,7 +710,7 @@ impl MatterLightController {
         } else {
             info!(
                 target: "cmd",
-                "Matter group turn_on ok: target={} group_id={} members={} commands={} brightness={} kelvin={} latency_ms={}",
+                "Matter group turn_on sent: target={} group_id={} members={} commands={} brightness={} kelvin={} latency_ms={}",
                 target_label,
                 group_id,
                 device_ids.len(),
@@ -684,6 +719,20 @@ impl MatterLightController {
                 command.kelvin,
                 latency_ms
             );
+        }
+
+        if Self::group_safety_fanout_enabled() && !device_ids.is_empty() {
+            let fallback_target_label = Self::group_fallback_target_label(target_label, group_id);
+            Self::log_group_safety_fanout(
+                "turn_on",
+                target_label,
+                &fallback_target_label,
+                group_id,
+                device_ids.len(),
+                command_successes,
+                command_failures,
+            );
+            return self.turn_on_devices(&fallback_target_label, device_ids, command);
         }
 
         Ok(())
@@ -819,9 +868,23 @@ impl MatterLightController {
         } else {
             info!(
                 target: "cmd",
-                "Matter group turn_off ok: target={} group_id={} latency_ms={}",
+                "Matter group turn_off sent: target={} group_id={} latency_ms={}",
                 target_label, group_id, latency_ms
             );
+        }
+
+        if Self::group_safety_fanout_enabled() && !device_ids.is_empty() {
+            let fallback_target_label = Self::group_fallback_target_label(target_label, group_id);
+            Self::log_group_safety_fanout(
+                "turn_off",
+                target_label,
+                &fallback_target_label,
+                group_id,
+                device_ids.len(),
+                1,
+                0,
+            );
+            return self.turn_off_devices(&fallback_target_label, device_ids);
         }
 
         Ok(())
@@ -970,9 +1033,23 @@ impl MatterLightController {
         } else {
             info!(
                 target: "cmd",
-                "Matter group identify ok: target={} group_id={} latency_ms={}",
+                "Matter group identify sent: target={} group_id={} latency_ms={}",
                 target_label, group_id, latency_ms
             );
+        }
+
+        if Self::group_safety_fanout_enabled() && !device_ids.is_empty() {
+            let fallback_target_label = Self::group_fallback_target_label(target_label, group_id);
+            Self::log_group_safety_fanout(
+                "identify",
+                target_label,
+                &fallback_target_label,
+                group_id,
+                device_ids.len(),
+                1,
+                0,
+            );
+            return self.identify_devices(&fallback_target_label, device_ids);
         }
 
         Ok(())
@@ -1314,7 +1391,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_on_room_with_matter_group_control_uses_group_commands() {
+    fn turn_on_room_with_matter_group_control_sends_group_commands_then_safety_fanout() {
         let (controller, spy, registry) = make_controller();
         let group_id = 4097;
         set_kitchen_group(&registry, group_id);
@@ -1331,6 +1408,30 @@ mod tests {
                 },
                 RecordedOperation::SetGroupBrightness {
                     group_id,
+                    level: clusters::brightness_to_level(80),
+                    transition_ms: None,
+                },
+                RecordedOperation::SetColorTemperature {
+                    node_id: 42,
+                    endpoint: 1,
+                    kelvin: 4000,
+                    transition_ms: None,
+                },
+                RecordedOperation::SetBrightness {
+                    node_id: 42,
+                    endpoint: 1,
+                    level: clusters::brightness_to_level(80),
+                    transition_ms: None,
+                },
+                RecordedOperation::SetColorTemperature {
+                    node_id: 43,
+                    endpoint: 1,
+                    kelvin: 4000,
+                    transition_ms: None,
+                },
+                RecordedOperation::SetBrightness {
+                    node_id: 43,
+                    endpoint: 1,
                     level: clusters::brightness_to_level(80),
                     transition_ms: None,
                 },
@@ -1448,7 +1549,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_off_room_with_matter_group_control_uses_group_on_off() {
+    fn turn_off_room_with_matter_group_control_sends_group_on_off_then_safety_fanout() {
         let (controller, spy, registry) = make_controller();
         let group_id = 4097;
         set_kitchen_group(&registry, group_id);
@@ -1457,10 +1558,22 @@ mod tests {
 
         assert_eq!(
             spy.operations(),
-            vec![RecordedOperation::SetGroupOnOff {
-                group_id,
-                on: false,
-            }]
+            vec![
+                RecordedOperation::SetGroupOnOff {
+                    group_id,
+                    on: false,
+                },
+                RecordedOperation::SetOnOff {
+                    node_id: 42,
+                    endpoint: 1,
+                    on: false,
+                },
+                RecordedOperation::SetOnOff {
+                    node_id: 43,
+                    endpoint: 1,
+                    on: false,
+                },
+            ]
         );
     }
 
@@ -1569,7 +1682,7 @@ mod tests {
     }
 
     #[test]
-    fn flash_group_target_with_matter_group_control_uses_group_identify() {
+    fn flash_group_target_with_matter_group_control_sends_group_identify_then_safety_fanout() {
         let (controller, spy, _) = make_controller();
         let group_id = 4097;
 
@@ -1581,10 +1694,22 @@ mod tests {
 
         assert_eq!(
             spy.operations(),
-            vec![RecordedOperation::IdentifyGroup {
-                group_id,
-                duration_secs: MATTER_IDENTIFY_DURATION_SECS,
-            }]
+            vec![
+                RecordedOperation::IdentifyGroup {
+                    group_id,
+                    duration_secs: MATTER_IDENTIFY_DURATION_SECS,
+                },
+                RecordedOperation::IdentifyLight {
+                    node_id: 42,
+                    endpoint: 1,
+                    duration_secs: MATTER_IDENTIFY_DURATION_SECS,
+                },
+                RecordedOperation::IdentifyLight {
+                    node_id: 43,
+                    endpoint: 1,
+                    duration_secs: MATTER_IDENTIFY_DURATION_SECS,
+                },
+            ]
         );
     }
 
