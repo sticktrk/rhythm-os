@@ -319,6 +319,10 @@ pub struct AppState {
     pub canonical_registry: CanonicalRegistry,
     /// Room topology store (Rhythm's own room hierarchy).
     pub topology: RoomTopologyStore,
+    /// Background topology-group sync worker is currently running.
+    pub topology_group_sync_in_progress: bool,
+    /// Topology-group sync request waiting for the worker to process it.
+    pub topology_group_sync_pending: bool,
 
     // ---- Room state (all keyed by topology room IDs) ----
     /// Typed observed-power cache for API, poll, and SSE projections.
@@ -553,6 +557,8 @@ impl Default for AppState {
             hub_capabilities: Vec::new(),
             canonical_registry: CanonicalRegistry::new(),
             topology: RoomTopologyStore::new(),
+            topology_group_sync_in_progress: false,
+            topology_group_sync_pending: false,
             room_observed_power: HashMap::new(),
             motion_snapshots: HashMap::new(),
             room_mode_transitions: HashMap::new(),

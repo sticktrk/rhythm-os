@@ -7560,14 +7560,14 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
         }
     }
 
-    sync_topology_groups_for_integrations(state);
     rebuild_composite_routing(state);
+    schedule_topology_group_sync_for_integrations(state);
     reconcile_scheduled_active_mode_outputs_after_runtime_ready(state);
 
     Ok(())
 }
 
-fn sync_topology_groups_for_integrations(state: &SharedState) {
+fn run_topology_group_sync_for_integrations(state: &SharedState) {
     let callback = state
         .lock()
         .ok()
@@ -7586,6 +7586,62 @@ fn sync_topology_groups_for_integrations(state: &SharedState) {
         Err(error) => {
             warn!(target: "cmd", "Topology group sync failed: {}", error);
         }
+    }
+}
+
+fn schedule_topology_group_sync_for_integrations(state: &SharedState) {
+    let should_spawn = {
+        let Ok(mut state) = state.lock() else {
+            return;
+        };
+        if state.sync_topology_groups_fn.is_none() {
+            return;
+        }
+
+        state.topology_group_sync_pending = true;
+        if state.topology_group_sync_in_progress {
+            false
+        } else {
+            state.topology_group_sync_in_progress = true;
+            true
+        }
+    };
+
+    if !should_spawn {
+        return;
+    }
+
+    let worker_state = state.clone();
+    let spawn_result = std::thread::Builder::new()
+        .name("topology-group-sync".to_string())
+        .spawn(move || loop {
+            let should_run = {
+                let Ok(mut state) = worker_state.lock() else {
+                    return;
+                };
+                if state.sync_topology_groups_fn.is_none() {
+                    state.topology_group_sync_pending = false;
+                    state.topology_group_sync_in_progress = false;
+                    return;
+                }
+                if !state.topology_group_sync_pending {
+                    state.topology_group_sync_in_progress = false;
+                    return;
+                }
+                state.topology_group_sync_pending = false;
+                true
+            };
+
+            if should_run {
+                run_topology_group_sync_for_integrations(&worker_state);
+            }
+        });
+
+    if let Err(error) = spawn_result {
+        if let Ok(mut state) = state.lock() {
+            state.topology_group_sync_in_progress = false;
+        }
+        warn!(target: "cmd", "Failed to start topology group sync worker: {}", error);
     }
 }
 
@@ -9228,6 +9284,23 @@ mod tests {
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    fn wait_for_sync_count(sync_count: &AtomicUsize, expected: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let actual = sync_count.load(Ordering::SeqCst);
+            if actual == expected {
+                return;
+            }
+            if actual > expected {
+                panic!("topology group sync count exceeded {expected}: {actual}");
+            }
+            if std::time::Instant::now() >= deadline {
+                assert_eq!(actual, expected);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     /// Mock runtime that returns configurable room snapshots and tracks events.
     struct MockRuntime {
@@ -15335,7 +15408,7 @@ mod tests {
     }
 
     #[test]
-    fn topology_lifecycle_mutations_sync_group_integrations() {
+    fn topology_lifecycle_mutations_schedule_group_integrations() {
         let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
 
         let created: serde_json::Value =
@@ -15356,19 +15429,53 @@ mod tests {
         }
 
         do_canonical_assign_room(&state, &device_one, Some(&room_id)).unwrap();
-        assert_eq!(sync_count.load(Ordering::SeqCst), 1);
+        wait_for_sync_count(&sync_count, 1);
 
         do_canonical_assign_room(&state, &device_two, Some(&room_id)).unwrap();
-        assert_eq!(sync_count.load(Ordering::SeqCst), 2);
+        wait_for_sync_count(&sync_count, 2);
 
         do_canonical_assign_room(&state, &device_one, None).unwrap();
-        assert_eq!(sync_count.load(Ordering::SeqCst), 3);
+        wait_for_sync_count(&sync_count, 3);
 
         do_topology_delete_room(&state, &room_id).unwrap();
-        assert_eq!(sync_count.load(Ordering::SeqCst), 4);
+        wait_for_sync_count(&sync_count, 4);
 
         do_device_hard_remove(&state, &device_two, None).unwrap();
-        assert_eq!(sync_count.load(Ordering::SeqCst), 5);
+        wait_for_sync_count(&sync_count, 5);
+    }
+
+    #[test]
+    fn canonical_assign_room_does_not_wait_for_topology_group_sync() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+
+        let created: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Office").unwrap()).unwrap();
+        let room_id = created["id"].as_str().unwrap().to_string();
+        let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+
+        let sync_started = Arc::new(AtomicUsize::new(0));
+        let sync_finished = Arc::new(AtomicUsize::new(0));
+        {
+            let sync_started = sync_started.clone();
+            let sync_finished = sync_finished.clone();
+            state.lock().unwrap().sync_topology_groups_fn = Some(Arc::new(move |_| {
+                sync_started.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(750));
+                sync_finished.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }));
+        }
+
+        let started_at = std::time::Instant::now();
+        do_canonical_assign_room(&state, &device_id, Some(&room_id)).unwrap();
+        let elapsed = started_at.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "room assignment waited for topology group sync: {elapsed:?}"
+        );
+        wait_for_sync_count(&sync_started, 1);
+        wait_for_sync_count(&sync_finished, 1);
     }
 
     #[test]
