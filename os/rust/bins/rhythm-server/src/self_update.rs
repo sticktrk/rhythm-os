@@ -2283,13 +2283,25 @@ mod tests {
     fn component_drift_ignores_optional_cli() {
         let dir = unique_test_dir("drift-optional");
         let install_root = dir.join("rhythm-server");
-        let chipd_path = dir.join("rhythm-chipd");
+        let cli_path = dir.join("rhythm-cli");
         write_executable(&install_root, "#!/bin/sh\necho \"rhythm-server 0.4.146\"\n");
-        write_executable(&chipd_path, "#!/bin/sh\necho \"rhythm-chipd 0.4.146\"\n");
 
-        let mut targets = default_bundle_install_targets(&install_root);
-        targets[2].required = false;
+        let mut targets = vec![
+            InstallTarget {
+                archive_path: "rhythm-server".to_string(),
+                destination: install_root.clone(),
+                required: true,
+            },
+            InstallTarget {
+                archive_path: "rhythm-cli".to_string(),
+                destination: cli_path,
+                required: false,
+            },
+        ];
         assert!(!detect_component_drift("0.4.146", &install_root, &targets));
+
+        targets[1].required = true;
+        assert!(detect_component_drift("0.4.146", &install_root, &targets));
 
         let _ = fs::remove_dir_all(dir);
     }
