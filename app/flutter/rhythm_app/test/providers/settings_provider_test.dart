@@ -1,13 +1,12 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:rhythm_app/providers/settings_provider.dart';
+import 'package:rhythm_core/rhythm_core.dart';
 
 void main() {
   group('SettingsProvider', () {
     late SettingsProvider provider;
 
-    setUp(() async {
-      SharedPreferences.setMockInitialValues({});
+    setUp(() {
       provider = SettingsProvider();
     });
 
@@ -37,24 +36,24 @@ void main() {
     });
 
     group('loadSettings', () {
-      test('loads saved preferences', () async {
-        SharedPreferences.setMockInitialValues({
-          'use24HourFormat': true,
-          'latitude': 35.0,
-          'longitude': -78.5,
-          'locationName': 'Raleigh, NC',
-          'bedtimeHour': 23,
-          'bedtimeMinute': 0,
-          'wakeTimeHour': 7,
-          'wakeTimeMinute': 0,
-          'hub_ha_verified': true,
-          'hub_ha_host': 'homeassistant.local',
-          'hub_ha_port': 8123,
-          'hue_verified': true,
-          'hue_bridge_ip': '192.168.1.100',
-        });
-
-        provider = SettingsProvider();
+      test('uses current home and hubs', () async {
+        provider.updateFromHome(
+          _home(
+            location: const HomeLocation(
+              latitude: 35.0,
+              longitude: -78.5,
+              cityName: 'Raleigh, NC',
+            ),
+            sleepSchedule: const SleepSchedule(
+              bedtime: 23.0,
+              wakeTime: 7.0,
+            ),
+          ),
+          [
+            _haHub(),
+            _hueHub(),
+          ],
+        );
         await provider.loadSettings();
 
         expect(provider.latitude, equals(35.0));
@@ -90,13 +89,15 @@ void main() {
 
     group('getSleepDuration', () {
       test('returns formatted duration string', () async {
-        SharedPreferences.setMockInitialValues({
-          'bedtimeHour': 22,
-          'bedtimeMinute': 0,
-          'wakeTimeHour': 6,
-          'wakeTimeMinute': 0,
-        });
-        provider = SettingsProvider();
+        provider.updateFromHome(
+          _home(
+            sleepSchedule: const SleepSchedule(
+              bedtime: 22.0,
+              wakeTime: 6.0,
+            ),
+          ),
+          const [],
+        );
         await provider.loadSettings();
 
         final duration = provider.getSleepDuration();
@@ -106,13 +107,15 @@ void main() {
       });
 
       test('handles overnight sleep correctly', () async {
-        SharedPreferences.setMockInitialValues({
-          'bedtimeHour': 23,
-          'bedtimeMinute': 30,
-          'wakeTimeHour': 7,
-          'wakeTimeMinute': 0,
-        });
-        provider = SettingsProvider();
+        provider.updateFromHome(
+          _home(
+            sleepSchedule: const SleepSchedule(
+              bedtime: 23.5,
+              wakeTime: 7.0,
+            ),
+          ),
+          const [],
+        );
         await provider.loadSettings();
 
         final duration = provider.getSleepDuration();
@@ -123,3 +126,33 @@ void main() {
     });
   });
 }
+
+Home _home({
+  HomeLocation? location,
+  SleepSchedule? sleepSchedule,
+}) {
+  return Home.create(
+    id: 'home-1',
+    name: 'Home',
+    ownerId: 'user-1',
+    location: location,
+    sleepSchedule: sleepSchedule,
+  );
+}
+
+Hub _haHub() => Hub.homeAssistant(
+      id: 'ha-1',
+      homeId: 'home-1',
+      name: 'Home Assistant',
+      host: 'homeassistant.local',
+      port: 8123,
+      token: 'test-token',
+    );
+
+Hub _hueHub() => Hub.hue(
+      id: 'hue-1',
+      homeId: 'home-1',
+      name: 'Hue',
+      bridgeIp: '192.168.1.100',
+      appKey: 'test-user',
+    );

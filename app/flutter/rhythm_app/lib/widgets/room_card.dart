@@ -186,8 +186,9 @@ class _RoomCardState extends State<RoomCard> {
 
         final idleLikeState = roomState == RoomModeState.idle ||
             roomState == RoomModeState.warning;
-        final showIdlePill =
-            idleLikeState && room.kind != RoomNodeKind.lightDevice;
+        final showIdlePill = !widget.powerSave &&
+            idleLikeState &&
+            room.kind != RoomNodeKind.lightDevice;
         final mode = switch (roomState) {
           RoomModeState.hardOff => RoomMode.off,
           RoomModeState.idle ||

@@ -82,9 +82,14 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   /// Notifier bumped on every setState so child screens can rebuild.
   final _rebuildNotifier = ValueNotifier<int>(0);
 
-  // Sleep profile state: fixed direct color plus a single brightness level.
+  // Sleep profile state: optional fixed color + optional fixed brightness.
+  // When neither toggle is on, sleep inherits CCT + brightness from the wake
+  // (rhythm) profile's min_color_temp and min_brightness.
   double _sleepHue = 10;
   double _sleepBrightness = 20;
+  bool _sleepCustomBri = false;
+  bool _sleepCustomColor = false;
+  bool _sleepExpanded = false;
 
   // Idle profile state (folded into day/sleep profiles).
   bool _idleCustomBri = false;
@@ -619,16 +624,40 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       ).hue;
     }
 
-    _sleepBrightness = switch (curve) {
-      sdk.RhythmConstantCurve(:final brightness) => (config.minBrightness +
-              (config.maxBrightness - config.minBrightness) * brightness)
-          .toDouble()
-          .clamp(1, 100),
-      _ => config.maxBrightness.toDouble().clamp(1, 100),
-    };
+    if (config.id == 'sleep') {
+      final wakeMinBri = _wakeMinBrightness;
+      _sleepCustomColor = directColor != null;
+      _sleepCustomBri = config.maxBrightness != wakeMinBri ||
+          config.minBrightness != wakeMinBri;
+      _sleepBrightness = _sleepCustomBri
+          ? config.maxBrightness.toDouble().clamp(1, 100)
+          : wakeMinBri.toDouble().clamp(1, 100);
+      _sleepExpanded = _sleepCustomBri || _sleepCustomColor;
+    } else {
+      _sleepBrightness = switch (curve) {
+        sdk.RhythmConstantCurve(:final brightness) => (config.minBrightness +
+                (config.maxBrightness - config.minBrightness) * brightness)
+            .toDouble()
+            .clamp(1, 100),
+        _ => config.maxBrightness.toDouble().clamp(1, 100),
+      };
+    }
 
     _curveConfigDirty = false;
   }
+
+  /// Wake (rhythm) profile's min brightness — used as the sleep default when
+  /// the user hasn't enabled Custom Brightness. Falls back to the SDK default
+  /// (20) until the wake config has loaded.
+  int get _wakeMinBrightness =>
+      _profileConfigs['rhythm']?.minBrightness ??
+      sdk.RhythmCurveConfig.defaultMinBrightness;
+
+  /// Wake (rhythm) profile's min color temp — used as the sleep CCT default
+  /// when the user hasn't enabled Custom Color (direct color overrides CCT).
+  int get _wakeMinColorTemp =>
+      _profileConfigs['rhythm']?.minColorTemp ??
+      sdk.RhythmCurveConfig.defaultMinColorTemp;
 
   void _applyIdleConfig(sdk.RhythmCurveConfig config) {
     final curve = config.curve;
@@ -664,12 +693,16 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     }
 
     if (_isSleepProfile) {
-      final brightness = _sleepBrightness.round().clamp(1, 100);
+      final wakeMinBri = _wakeMinBrightness;
+      final wakeMinCct = _wakeMinColorTemp;
+      final brightness =
+          _sleepCustomBri ? _sleepBrightness.round().clamp(1, 100) : wakeMinBri;
+      final directColor = _sleepCustomColor ? _sleepDirectColor : null;
       return sdk.RhythmCurveConfig(
         id: base.id,
         name: base.name,
-        minColorTemp: 0,
-        maxColorTemp: 0,
+        minColorTemp: wakeMinCct,
+        maxColorTemp: wakeMinCct,
         minBrightness: brightness,
         maxBrightness: brightness,
         maxDimSteps: base.maxDimSteps,
@@ -677,9 +710,9 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         motionTimeoutSecs: _motionTimeoutAuto ? null : _motionTimeoutSecs,
         rhythmIntervalSecs: _intervalAuto ? null : _intervalSecs.round(),
         curve: sdk.RhythmConstantCurve(
-          brightness: 1,
+          brightness: 0,
           colorTemp: 0,
-          directColor: _sleepDirectColor,
+          directColor: directColor,
         ),
       );
     }
@@ -1229,9 +1262,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
           _buildHeroIcon(),
           const SizedBox(height: 24),
           if (_isSleepProfile) ...[
-            _buildSleepColorCard(),
-            const SizedBox(height: 16),
-            _buildSleepBrightnessCard(),
+            _buildSleepPrimarySettingsCard(),
           ] else ...[
             _buildAdvancedColorEditorItem(),
           ],
@@ -1253,72 +1284,310 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   // ---------------------------------------------------------------------------
-  // Sleep Profile Color Picker
+  // Sleep Profile — Primary Settings
+  //
+  // Mirrors the Standby Settings widget. Both Custom Color and Custom
+  // Brightness are optional toggles; when neither is on the sleep profile
+  // inherits CCT + brightness from the wake (rhythm) profile's
+  // min_color_temp and min_brightness.
   // ---------------------------------------------------------------------------
 
-  Widget _buildSleepColorCard() {
-    final activeColor = _sleepSelectedColor;
+  Widget _buildSleepPrimarySettingsCard() {
+    final isDefault = !_sleepCustomBri && !_sleepCustomColor;
+    final briColor = _sleepCustomBri ? _Palette.amber : _Palette.idle;
+    final colorColor =
+        _sleepCustomColor ? _sleepSelectedColor : _Palette.idle;
+    final expanded = _sleepExpanded;
 
-    return Container(
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
       padding: const EdgeInsets.fromLTRB(18, 18, 18, 18),
       decoration: BoxDecoration(
         color: _Palette.card,
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: _Palette.border),
+        border: Border.all(
+          color: expanded
+              ? _Palette.amber.withValues(alpha: 0.25)
+              : _Palette.border,
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: activeColor.withValues(alpha: 0.2),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => setState(() => _sleepExpanded = !_sleepExpanded),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 36,
+                      height: 36,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: _Palette.amber.withValues(alpha: 0.12),
+                      ),
+                      child: Icon(
+                        Icons.nights_stay_rounded,
+                        color: _Palette.amber.withValues(alpha: 0.7),
+                        size: 18,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    const Expanded(
+                      child: Text(
+                        'Primary Settings',
+                        style: TextStyle(
+                          color: _Palette.textPrimary,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: -0.1,
+                        ),
+                      ),
+                    ),
+                    if (!expanded && isDefault)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: _Palette.idle.withValues(alpha: 0.06),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          'Auto',
+                          style: TextStyle(
+                            color: _Palette.idle.withValues(alpha: 0.5),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    if (!expanded && _sleepCustomBri) ...[
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: _Palette.amber.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                              color: _Palette.amber.withValues(alpha: 0.2)),
+                        ),
+                        child: Text(
+                          '${_sleepBrightness.round()}%',
+                          style: TextStyle(
+                            color: _Palette.amber.withValues(alpha: 0.8),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            fontFeatures: const [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (!expanded && _sleepCustomColor) ...[
+                      if (_sleepCustomBri) const SizedBox(width: 6),
+                      Container(
+                        width: 26,
+                        height: 26,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: _sleepSelectedColor,
+                          border: Border.all(
+                            color: _sleepSelectedColor.withValues(alpha: 0.4),
+                            width: 2,
+                          ),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(width: 6),
+                    AnimatedRotation(
+                      turns: expanded ? 0.5 : 0,
+                      duration: const Duration(milliseconds: 250),
+                      curve: Curves.easeOutCubic,
+                      child: Icon(
+                        Icons.keyboard_arrow_down_rounded,
+                        color: _Palette.textSecondary.withValues(alpha: 0.3),
+                        size: 20,
+                      ),
+                    ),
+                  ],
                 ),
-                child:
-                    Icon(Icons.palette_rounded, color: activeColor, size: 18),
-              ),
-              const SizedBox(width: 12),
-              const Expanded(
-                child: Text(
-                  'Fixed Color',
-                  style: TextStyle(
-                    color: _Palette.textPrimary,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: -0.1,
-                  ),
-                ),
-              ),
-              Container(
-                width: 28,
-                height: 28,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: activeColor.withValues(alpha: 0.85),
-                  border: Border.all(
-                    color: Colors.white.withValues(alpha: 0.18),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          Padding(
-            padding: const EdgeInsets.only(top: 18),
-            child: _buildFixedColorPicker(
-              hue: _sleepHue,
-              selectedColor: activeColor,
-              isPresetSelected: _isSleepPresetSelected,
-              onHueChanged: (hue) {
-                setState(() {
-                  _sleepHue = hue;
-                  _curveConfigDirty = true;
-                });
-              },
+              ],
             ),
+          ),
+          AnimatedSize(
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.topCenter,
+            child: expanded
+                ? Column(
+                    children: [
+                      const SizedBox(height: 18),
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.brightness_medium_rounded,
+                            color: briColor.withValues(
+                                alpha: _sleepCustomBri ? 0.8 : 0.35),
+                            size: 16,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              'Custom Brightness',
+                              style: TextStyle(
+                                color: _sleepCustomBri
+                                    ? _Palette.textPrimary
+                                    : _Palette.textSecondary
+                                        .withValues(alpha: 0.5),
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                          if (_sleepCustomBri)
+                            Padding(
+                              padding: const EdgeInsets.only(right: 8),
+                              child: Text(
+                                '${_sleepBrightness.round()}%',
+                                style: TextStyle(
+                                  color: briColor.withValues(alpha: 0.7),
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                  fontFeatures: const [
+                                    FontFeature.tabularFigures()
+                                  ],
+                                ),
+                              ),
+                            ),
+                          SizedBox(
+                            height: 28,
+                            child: Switch.adaptive(
+                              value: _sleepCustomBri,
+                              onChanged: (v) {
+                                setState(() {
+                                  _sleepCustomBri = v;
+                                  if (v && _sleepBrightness < 1) {
+                                    _sleepBrightness = 1;
+                                  }
+                                  _curveConfigDirty = true;
+                                });
+                              },
+                              activeTrackColor: briColor,
+                              activeThumbColor: _Palette.textPrimary,
+                            ),
+                          ),
+                        ],
+                      ),
+                      AnimatedSize(
+                        duration: const Duration(milliseconds: 300),
+                        curve: Curves.easeOutCubic,
+                        alignment: Alignment.topCenter,
+                        child: _sleepCustomBri
+                            ? Padding(
+                                padding:
+                                    const EdgeInsets.only(top: 8, left: 26),
+                                child: SliderTheme(
+                                  data: SliderThemeData(
+                                    activeTrackColor: briColor,
+                                    inactiveTrackColor:
+                                        briColor.withValues(alpha: 0.12),
+                                    thumbColor: briColor,
+                                    overlayColor:
+                                        briColor.withValues(alpha: 0.12),
+                                    trackHeight: 4,
+                                    thumbShape: const RoundSliderThumbShape(
+                                        enabledThumbRadius: 7),
+                                    overlayShape: const RoundSliderOverlayShape(
+                                        overlayRadius: 16),
+                                  ),
+                                  child: Slider(
+                                    value: _sleepBrightness.clamp(1, 100),
+                                    min: 1,
+                                    max: 100,
+                                    divisions: 99,
+                                    onChanged: (v) {
+                                      setState(() {
+                                        _sleepBrightness = v;
+                                        _curveConfigDirty = true;
+                                      });
+                                    },
+                                  ),
+                                ),
+                              )
+                            : const SizedBox.shrink(),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        child: Divider(
+                          height: 1,
+                          color: _Palette.border.withValues(alpha: 0.5),
+                        ),
+                      ),
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.palette_outlined,
+                            color: colorColor.withValues(
+                                alpha: _sleepCustomColor ? 0.8 : 0.35),
+                            size: 16,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              'Custom Color',
+                              style: TextStyle(
+                                color: _sleepCustomColor
+                                    ? _Palette.textPrimary
+                                    : _Palette.textSecondary
+                                        .withValues(alpha: 0.5),
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                          SizedBox(
+                            height: 28,
+                            child: Switch.adaptive(
+                              value: _sleepCustomColor,
+                              onChanged: (v) {
+                                setState(() {
+                                  _sleepCustomColor = v;
+                                  _curveConfigDirty = true;
+                                });
+                              },
+                              activeTrackColor: colorColor,
+                              activeThumbColor: _Palette.textPrimary,
+                            ),
+                          ),
+                        ],
+                      ),
+                      AnimatedSize(
+                        duration: const Duration(milliseconds: 350),
+                        curve: Curves.easeOutCubic,
+                        alignment: Alignment.topCenter,
+                        child: _sleepCustomColor
+                            ? Padding(
+                                padding: const EdgeInsets.only(top: 16),
+                                child: _buildFixedColorPicker(
+                                  hue: _sleepHue,
+                                  selectedColor: _sleepSelectedColor,
+                                  isPresetSelected: _isSleepPresetSelected,
+                                  onHueChanged: (hue) {
+                                    setState(() {
+                                      _sleepHue = hue;
+                                      _curveConfigDirty = true;
+                                    });
+                                  },
+                                ),
+                              )
+                            : const SizedBox.shrink(),
+                      ),
+                    ],
+                  )
+                : const SizedBox.shrink(),
           ),
         ],
       ),
@@ -1640,80 +1909,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     return (selected.r - presetColor.r).abs() < 0.04 &&
         (selected.g - presetColor.g).abs() < 0.04 &&
         (selected.b - presetColor.b).abs() < 0.04;
-  }
-
-  Widget _buildSleepBrightnessCard() {
-    const color = _Palette.amber;
-    final brightness = _sleepBrightness.round();
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(18, 18, 18, 10),
-      decoration: BoxDecoration(
-        color: _Palette.card,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: _Palette.border),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: color.withValues(alpha: 0.12),
-                ),
-                child:
-                    const Icon(Icons.wb_sunny_rounded, color: color, size: 18),
-              ),
-              const SizedBox(width: 12),
-              const Expanded(
-                child: Text(
-                  'Brightness',
-                  style: TextStyle(
-                    color: _Palette.textPrimary,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: -0.1,
-                  ),
-                ),
-              ),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
-                  color: color.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: color.withValues(alpha: 0.25)),
-                ),
-                child: Text(
-                  '$brightness%',
-                  style: const TextStyle(
-                    color: color,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700,
-                    fontFeatures: [FontFeature.tabularFigures()],
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          _buildInlineSlider(
-            label: 'Level',
-            value: _sleepBrightness,
-            min: 1,
-            max: 100,
-            divisions: 99,
-            format: (v) => '${v.round()}%',
-            color: color,
-            onChanged: (v) => _onCurveChanged(() => _sleepBrightness = v),
-          ),
-        ],
-      ),
-    );
   }
 
   // Shared presets for all fixed/direct-color pickers.

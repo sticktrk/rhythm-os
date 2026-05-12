@@ -1,4 +1,3 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/widgets/solar_clock/solar_clock_geometry.dart';
 

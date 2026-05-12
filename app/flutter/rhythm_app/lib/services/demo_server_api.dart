@@ -52,7 +52,7 @@ class DemoServerApi extends RhythmServerApi {
 
   bool _seeded = false;
   int _nextRoomOrdinal = 1;
-  bool _powerSave = false;
+  bool _powerSave = true;
   RhythmMode _activeMode = RhythmMode.day;
 
   Stream<void> get changes => _changes.stream;
@@ -87,7 +87,7 @@ class DemoServerApi extends RhythmServerApi {
 
   void reset() {
     _seeded = true;
-    _powerSave = false;
+    _powerSave = true;
     _activeMode = RhythmMode.day;
     _nextRoomOrdinal = 5;
     _nodeStates.clear();
@@ -495,6 +495,16 @@ class DemoServerApi extends RhythmServerApi {
     ensureSeeded();
     if (powerSave != null) {
       _powerSave = powerSave;
+      for (final room in _nodeStates.values) {
+        if (room['state'] == RoomModeState.idle.wireValue) {
+          if (powerSave) {
+            room['state'] = RoomModeState.hardOff.wireValue;
+            room['lights_on'] = false;
+          } else {
+            room['lights_on'] = true;
+          }
+        }
+      }
       _changes.add(null);
     }
     return true;

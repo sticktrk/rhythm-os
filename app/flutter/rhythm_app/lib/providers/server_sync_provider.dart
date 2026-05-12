@@ -51,6 +51,7 @@ class ServerSyncProvider extends ChangeNotifier {
   StreamSubscription<RoomSourceDto>? _sourceChangedSub;
   StreamSubscription<RhythmMotionTimer>? _motionTimerSub;
   StreamSubscription<RhythmModeResource>? _modeChangedSub;
+  StreamSubscription<RhythmSettings>? _settingsChangedSub;
   StreamSubscription<void>? _newNodesSub;
   StreamSubscription<Map<String, dynamic>>? _triageChangedSub;
   StreamSubscription<RhythmConnectionState>? _connectionStateSub;
@@ -114,7 +115,7 @@ class ServerSyncProvider extends ChangeNotifier {
   String _serverPlatformContext = 'server';
 
   /// Whether power-save mode is active on the server.
-  bool _powerSave = false;
+  bool _powerSave = true;
 
   /// Active global mode from the server (`day` / `sleep`).
   RhythmMode? _activeMode;
@@ -566,6 +567,8 @@ class ServerSyncProvider extends ChangeNotifier {
     _hubEventSub = _connection.hubEvents.listen(_onHubEvent);
     _motionTimerSub = _connection.motionTimerEvents.listen(_onMotionTimer);
     _modeChangedSub = _connection.modeChangedEvents.listen(_onModeChanged);
+    _settingsChangedSub =
+        _connection.settingsChangedEvents.listen(_onSettingsChanged);
     _newNodesSub = _connection.newNodesDetected.listen(_onNewNodesDetected);
     _triageChangedSub =
         _connection.triageChangedEvents.listen(_onTriageChanged);
@@ -721,7 +724,7 @@ class ServerSyncProvider extends ChangeNotifier {
         debugPrint('ServerSync: Failed to parse active profile config: $e');
       }
     }
-    _powerSave = hello.settings?.powerSave ?? false;
+    _powerSave = hello.settings?.powerSave ?? true;
     _activeMode = hello.mode?.active;
     _modeTransitions = [...hello.transitions];
     _inputBindings = [...hello.inputBindings];
@@ -956,6 +959,14 @@ class ServerSyncProvider extends ChangeNotifier {
     }
   }
 
+  /// Handle settings updates with payloads so power-save UI updates without
+  /// waiting for the compatibility re-hello path.
+  void _onSettingsChanged(RhythmSettings settings) {
+    if (_powerSave == settings.powerSave) return;
+    _powerSave = settings.powerSave;
+    notifyListeners();
+  }
+
   /// Handle new nodes detected in poll — trigger a full re-hello.
   void _onNewNodesDetected(void _) {
     debugPrint('ServerSync: New nodes detected in poll — triggering re-hello');
@@ -1074,7 +1085,7 @@ class ServerSyncProvider extends ChangeNotifier {
       _firmwareVersion = '0.0.0';
       _serverPlatformType = 'desktop';
       _serverPlatformContext = 'server';
-      _powerSave = false;
+      _powerSave = true;
       _activeMode = null;
       _activeProfileId = null;
       _helloNodes = [];
@@ -1270,6 +1281,27 @@ class ServerSyncProvider extends ChangeNotifier {
       _activeMode = previous;
       notifyListeners();
     }
+  }
+
+  /// Set power-save mode on the server with an optimistic local cache update.
+  Future<bool> setPowerSave(bool enabled) async {
+    final previous = _powerSave;
+    if (_powerSave != enabled) {
+      _powerSave = enabled;
+      notifyListeners();
+    }
+
+    final success = HueServiceLocator.isDemoMode
+        ? await DemoServerApi.instance.settingsSet(powerSave: enabled)
+        : _connection.connected
+            ? await api.settingsSet(powerSave: enabled)
+            : false;
+
+    if (!success && _powerSave == enabled) {
+      _powerSave = previous;
+      notifyListeners();
+    }
+    return success;
   }
 
   /// Update a single mode transition on the server.
@@ -1750,7 +1782,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _firmwareVersion = DemoServerApi.firmwareVersion;
     _serverPlatformType = DemoServerApi.serverPlatformType;
     _serverPlatformContext = DemoServerApi.serverPlatformContext;
-    _powerSave = settings?.powerSave ?? false;
+    _powerSave = settings?.powerSave ?? true;
     _activeMode = mode?.active;
     _activeProfileId = null;
     _modeTransitions = await DemoServerApi.instance.getTransitions();
@@ -2137,6 +2169,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _sourceChangedSub?.cancel();
     _motionTimerSub?.cancel();
     _modeChangedSub?.cancel();
+    _settingsChangedSub?.cancel();
     _newNodesSub?.cancel();
     _triageChangedSub?.cancel();
     _connectionStateSub?.cancel();

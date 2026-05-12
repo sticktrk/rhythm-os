@@ -46,10 +46,11 @@ class PreferencesScreen extends StatefulWidget {
 class _PreferencesScreenState extends State<PreferencesScreen>
     with SingleTickerProviderStateMixin {
   // Current slider values.
-  bool _powerSave = false;
+  bool _powerSave = true;
 
   bool _loading = true;
   bool _connected = false;
+  bool _savingPowerSave = false;
 
   // Glow animation for the header icon.
   late AnimationController _glowController;
@@ -79,6 +80,7 @@ class _PreferencesScreenState extends State<PreferencesScreen>
   Future<void> _loadSettings() async {
     final syncProvider = context.read<ServerSyncProvider>();
     _connected = syncProvider.synced;
+    _powerSave = syncProvider.powerSave;
 
     if (!_connected) {
       setState(() => _loading = false);
@@ -94,11 +96,19 @@ class _PreferencesScreenState extends State<PreferencesScreen>
     if (mounted) setState(() => _loading = false);
   }
 
-  void _onPowerSaveChanged(bool value) {
-    setState(() => _powerSave = value);
-    context.read<ServerSyncProvider>().api.settingsSet(
-          powerSave: value,
-        );
+  Future<void> _onPowerSaveChanged(bool value) async {
+    final previous = _powerSave;
+    setState(() {
+      _powerSave = value;
+      _savingPowerSave = true;
+    });
+    final success =
+        await context.read<ServerSyncProvider>().setPowerSave(value);
+    if (!mounted) return;
+    setState(() {
+      if (!success) _powerSave = previous;
+      _savingPowerSave = false;
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -226,7 +236,7 @@ class _PreferencesScreenState extends State<PreferencesScreen>
             color: _Palette.green,
             title: 'Power Save',
             value: _powerSave,
-            onChanged: _onPowerSaveChanged,
+            onChanged: _savingPowerSave ? null : _onPowerSaveChanged,
           ),
           const SizedBox(height: 28),
           _buildResetButton(),
@@ -274,7 +284,7 @@ class _PreferencesScreenState extends State<PreferencesScreen>
     required Color color,
     required String title,
     required bool value,
-    required ValueChanged<bool> onChanged,
+    required ValueChanged<bool>? onChanged,
   }) {
     return Container(
       padding: const EdgeInsets.fromLTRB(18, 18, 18, 18),
@@ -396,21 +406,21 @@ class _PreferencesScreenState extends State<PreferencesScreen>
   }
 
   Future<void> _resetToDefaults() async {
-    final api = context.read<ServerSyncProvider>().api;
+    final serverSync = context.read<ServerSyncProvider>();
+    final api = serverSync.api;
     final rhythmApi = context.read<RhythmApi>();
     final configModel = context.read<ConfigModel>();
 
     await Future.wait([
-      api.settingsSet(
-        powerSave: false,
-      ),
+      serverSync.setPowerSave(true),
       api.resetConfig(id: 'rhythm'),
       api.resetConfig(id: 'sleep'),
       api.resetConfig(id: 'idle'),
     ]);
 
+    if (!mounted) return;
     setState(() {
-      _powerSave = false;
+      _powerSave = true;
     });
 
     final configState = await rhythmApi.getConfigState();

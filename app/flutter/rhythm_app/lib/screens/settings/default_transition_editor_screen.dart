@@ -1171,6 +1171,11 @@ class _DefaultTransitionEditorScreenState
             accentColor: _chromeAccent,
             compactLayout: compactLayout,
           ),
+          // Save/Reset cluster lives at hero scope (not inside the Time
+          // section's collapsible body) so toggling Time off can still be
+          // committed — otherwise the switch flips, the body hides, and the
+          // user has no way to push trigger_enabled=false to the backend.
+          _buildSaveResetSlot(),
         ],
       ),
     );
@@ -1216,11 +1221,6 @@ class _DefaultTransitionEditorScreenState
                     )
                   : _buildNoSolarState(),
             ),
-            // Buffer so orb handles dragged near the bottom of the clock
-            // don't run into the save/reset cluster's hit area when it
-            // animates in.
-            const SizedBox(height: 20),
-            _buildSaveResetSlot(),
           ],
         ),
       ),

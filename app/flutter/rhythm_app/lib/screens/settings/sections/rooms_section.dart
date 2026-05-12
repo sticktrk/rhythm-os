@@ -6,6 +6,7 @@ import '../../../widgets/settings_row.dart';
 import '../../../widgets/beta_badge.dart';
 import '../../../widgets/solar_orbit.dart';
 import '../../../providers/room_provider.dart';
+import '../../../providers/server_sync_provider.dart';
 
 /// Rooms section for managing synced rooms.
 ///

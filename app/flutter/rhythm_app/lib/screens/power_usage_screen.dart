@@ -116,8 +116,9 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
   double? _rate;
   late final TextEditingController _rateController;
 
-  bool _powerSave = false;
+  bool _powerSave = true;
   bool _powerSaveLoading = true;
+  bool _powerSaveSaving = false;
 
   @override
   void initState() {
@@ -317,6 +318,7 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
 
   Future<void> _loadPowerSave() async {
     final syncProvider = context.read<ServerSyncProvider>();
+    _powerSave = syncProvider.powerSave;
     if (!syncProvider.synced) {
       if (mounted) setState(() => _powerSaveLoading = false);
       return;
@@ -332,13 +334,25 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
     }
   }
 
-  void _onPowerSaveChanged(bool value) {
-    setState(() => _powerSave = value);
-    context.read<ServerSyncProvider>().api.settingsSet(powerSave: value);
-    AnalyticsService().logPowerSaveToggled(
-      enabled: value,
-      source: 'power_usage',
-    );
+  Future<void> _onPowerSaveChanged(bool value) async {
+    final previous = _powerSave;
+    setState(() {
+      _powerSave = value;
+      _powerSaveSaving = true;
+    });
+    final success =
+        await context.read<ServerSyncProvider>().setPowerSave(value);
+    if (!mounted) return;
+    setState(() {
+      if (!success) _powerSave = previous;
+      _powerSaveSaving = false;
+    });
+    if (success) {
+      AnalyticsService().logPowerSaveToggled(
+        enabled: value,
+        source: 'power_usage',
+      );
+    }
   }
 
   @override
@@ -528,7 +542,7 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
             ),
           ),
           const SizedBox(width: 12),
-          if (_powerSaveLoading)
+          if (_powerSaveLoading || _powerSaveSaving)
             const SizedBox(
               width: 20,
               height: 20,

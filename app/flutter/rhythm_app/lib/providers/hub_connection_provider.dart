@@ -25,6 +25,14 @@ enum ConnectionStatus {
 /// Note: Hub credentials are now stored in Hub model (via HomeProvider).
 /// This provider manages the active connection state.
 class HubConnectionProvider extends ChangeNotifier {
+  HubConnectionProvider({
+    HaWebSocketProvider Function(HomeAssistantConfig config)?
+        haWebSocketFactory,
+  }) : _haWebSocketFactory =
+            haWebSocketFactory ?? ((config) => HaWebSocketProvider(config)) {
+    _startAutoRefresh();
+  }
+
   // Active hub configuration
   HubConnectionType _activeHubType = HubConnectionType.none;
   ConnectionStatus _connectionStatus = ConnectionStatus.disconnected;
@@ -36,6 +44,8 @@ class HubConnectionProvider extends ChangeNotifier {
   String? _hueLastError;
 
   // WebSocket connection for Home Assistant
+  final HaWebSocketProvider Function(HomeAssistantConfig config)
+      _haWebSocketFactory;
   HaWebSocketProvider? _haWebSocket;
   StreamSubscription<HaEvent>? _eventSubscription;
 
@@ -60,12 +70,14 @@ class HubConnectionProvider extends ChangeNotifier {
 
   /// Whether any hub is connected (HA or Hue).
   bool get hasActiveHub =>
-      (_activeHubType == HubConnectionType.homeAssistant && _connectionStatus == ConnectionStatus.connected) ||
+      (_activeHubType == HubConnectionType.homeAssistant &&
+          _connectionStatus == ConnectionStatus.connected) ||
       _hueConnectionStatus == ConnectionStatus.connected;
 
   /// Whether Home Assistant is specifically connected.
   bool get isHaConnected =>
-      _activeHubType == HubConnectionType.homeAssistant && _connectionStatus == ConnectionStatus.connected;
+      _activeHubType == HubConnectionType.homeAssistant &&
+      _connectionStatus == ConnectionStatus.connected;
 
   /// Whether Hue is specifically connected.
   bool get isHueConnected => _hueConnectionStatus == ConnectionStatus.connected;
@@ -79,17 +91,17 @@ class HubConnectionProvider extends ChangeNotifier {
   ConnectionStatus get hueConnectionStatus => _hueConnectionStatus;
   String? get hueLastError => _hueLastError;
 
-  HubConnectionProvider() {
-    _startAutoRefresh();
-  }
-
   /// Configure hubs from HomeProvider data.
   ///
   /// Call this when HomeProvider has loaded hub data.
   /// Only notifies listeners if the configuration actually changed.
   void configureHubs(List<Hub> hubs) {
-    final newHaHub = hubs.where((h) => h.type == HubType.homeAssistant && h.hasCredentials).firstOrNull;
-    final newHueHub = hubs.where((h) => h.type == HubType.hue && h.hasCredentials).firstOrNull;
+    final newHaHub = hubs
+        .where((h) => h.type == HubType.homeAssistant && h.hasCredentials)
+        .firstOrNull;
+    final newHueHub = hubs
+        .where((h) => h.type == HubType.hue && h.hasCredentials)
+        .firstOrNull;
 
     // Check if anything changed
     final haHubChanged = newHaHub?.id != _haHub?.id;
@@ -191,7 +203,7 @@ class HubConnectionProvider extends ChangeNotifier {
         token: _haHub!.token!,
         useSsl: _haHub!.endpoint.useSsl,
       );
-      _haWebSocket = HaWebSocketProvider(config);
+      _haWebSocket = _haWebSocketFactory(config);
 
       final connected = await _haWebSocket!.connect();
       if (!connected) {
@@ -284,7 +296,8 @@ class HubConnectionProvider extends ChangeNotifier {
     final delay = Duration(seconds: (2 << _retryCount).clamp(2, 30));
     _retryCount++;
 
-    debugPrint('HubConnectionProvider: Retry $_retryCount/$maxRetries in ${delay.inSeconds}s');
+    debugPrint(
+        'HubConnectionProvider: Retry $_retryCount/$maxRetries in ${delay.inSeconds}s');
 
     _retryTimer = Timer(delay, () async {
       final success = await verifyConnection();

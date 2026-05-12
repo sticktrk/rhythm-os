@@ -1,13 +1,11 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:rhythm_app/providers/hub_connection_provider.dart';
+import 'package:rhythm_core/rhythm_core.dart';
 
 void main() {
   late HubConnectionProvider provider;
 
-  setUp(() async {
-    SharedPreferences.setMockInitialValues({});
-  });
+  setUp(() {});
 
   tearDown(() {
     provider.dispose();
@@ -16,7 +14,6 @@ void main() {
   group('HubConnectionProvider', () {
     group('initial state', () {
       test('starts with no active hub', () async {
-        SharedPreferences.setMockInitialValues({});
         provider = HubConnectionProvider();
 
         // Allow async initialization
@@ -26,7 +23,6 @@ void main() {
       });
 
       test('starts disconnected', () async {
-        SharedPreferences.setMockInitialValues({});
         provider = HubConnectionProvider();
 
         await Future.delayed(const Duration(milliseconds: 100));
@@ -36,7 +32,6 @@ void main() {
       });
 
       test('hasActiveHub is false when not connected', () async {
-        SharedPreferences.setMockInitialValues({});
         provider = HubConnectionProvider();
 
         await Future.delayed(const Duration(milliseconds: 100));
@@ -45,21 +40,18 @@ void main() {
       });
 
       test('lastError is null initially', () async {
-        SharedPreferences.setMockInitialValues({});
         provider = HubConnectionProvider();
 
         expect(provider.lastError, isNull);
       });
 
       test('lastVerified is null initially', () async {
-        SharedPreferences.setMockInitialValues({});
         provider = HubConnectionProvider();
 
         expect(provider.lastVerified, isNull);
       });
 
       test('retryCount starts at 0', () async {
-        SharedPreferences.setMockInitialValues({});
         provider = HubConnectionProvider();
 
         expect(provider.retryCount, equals(0));
@@ -67,16 +59,9 @@ void main() {
     });
 
     group('loadSavedHub', () {
-      test('loads HA hub when verified', () async {
-        SharedPreferences.setMockInitialValues({
-          'hub_ha_verified': true,
-          'hub_ha_host': 'homeassistant.local',
-          'hub_ha_port': 8123,
-          'hub_ha_token': 'test_token',
-        });
-
+      test('uses configured HA hub', () async {
         provider = HubConnectionProvider();
-        await Future.delayed(const Duration(milliseconds: 100));
+        provider.configureHubs([_haHub()]);
 
         expect(provider.activeHubType, equals(HubConnectionType.homeAssistant));
         // Note: actual connection not verified in test since it needs real HA
@@ -84,40 +69,25 @@ void main() {
             provider.connectionStatus, equals(ConnectionStatus.disconnected));
       });
 
-      test('loads Hue hub when verified and no HA', () async {
-        SharedPreferences.setMockInitialValues({
-          'hue_verified': true,
-          'hue_bridge_ip': '192.168.1.100',
-          'hue_username': 'test_user',
-        });
-
+      test('uses configured Hue hub when no HA', () async {
         provider = HubConnectionProvider();
-        await Future.delayed(const Duration(milliseconds: 100));
+        provider.configureHubs([_hueHub()]);
 
         // Hue should be active when no HA is configured
         expect(provider.activeHubType, equals(HubConnectionType.hue));
       });
 
       test('prefers HA over Hue when both configured', () async {
-        SharedPreferences.setMockInitialValues({
-          'hub_ha_verified': true,
-          'hub_ha_host': 'homeassistant.local',
-          'hue_verified': true,
-          'hue_bridge_ip': '192.168.1.100',
-        });
-
         provider = HubConnectionProvider();
-        await Future.delayed(const Duration(milliseconds: 100));
+        provider.configureHubs([_haHub(), _hueHub()]);
 
         // HA takes precedence
         expect(provider.activeHubType, equals(HubConnectionType.homeAssistant));
       });
 
       test('remains none when nothing configured', () async {
-        SharedPreferences.setMockInitialValues({});
-
         provider = HubConnectionProvider();
-        await Future.delayed(const Duration(milliseconds: 100));
+        provider.configureHubs(const []);
 
         expect(provider.activeHubType, equals(HubConnectionType.none));
       });
@@ -125,7 +95,6 @@ void main() {
 
     group('verifyConnection', () {
       test('returns false when no hub configured', () async {
-        SharedPreferences.setMockInitialValues({});
         provider = HubConnectionProvider();
         await Future.delayed(const Duration(milliseconds: 100));
 
@@ -136,16 +105,11 @@ void main() {
       });
 
       test('sets connecting status during verification', () async {
-        SharedPreferences.setMockInitialValues({
-          'hub_ha_verified': true,
-          'hub_ha_host': 'homeassistant.local',
-          'hub_ha_port': 8123,
-          'hub_ha_token': 'test_token',
-        });
-        provider = HubConnectionProvider();
-        await Future.delayed(const Duration(milliseconds: 100));
+        provider = HubConnectionProvider(
+          haWebSocketFactory: _FailingHaWebSocketProvider.new,
+        );
+        provider.configureHubs([_haHub()]);
 
-        // Start verification (will fail since no real HA)
         final future = provider.verifyConnection();
 
         // Status might be connecting during the operation
@@ -165,11 +129,8 @@ void main() {
 
     group('disconnect', () {
       test('sets status to disconnected', () async {
-        SharedPreferences.setMockInitialValues({
-          'hub_ha_verified': true,
-        });
         provider = HubConnectionProvider();
-        await Future.delayed(const Duration(milliseconds: 100));
+        provider.configureHubs([_haHub()]);
 
         await provider.disconnect();
 
@@ -178,7 +139,6 @@ void main() {
       });
 
       test('resets retry count', () async {
-        SharedPreferences.setMockInitialValues({});
         provider = HubConnectionProvider();
         await Future.delayed(const Duration(milliseconds: 100));
 
@@ -188,7 +148,6 @@ void main() {
       });
 
       test('notifies listeners', () async {
-        SharedPreferences.setMockInitialValues({});
         provider = HubConnectionProvider();
         await Future.delayed(const Duration(milliseconds: 100));
 
@@ -203,11 +162,8 @@ void main() {
 
     group('reload', () {
       test('disconnects and reloads saved hub', () async {
-        SharedPreferences.setMockInitialValues({
-          'hub_ha_verified': true,
-        });
         provider = HubConnectionProvider();
-        await Future.delayed(const Duration(milliseconds: 100));
+        provider.configureHubs([_haHub()]);
 
         await provider.reload();
 
@@ -220,7 +176,6 @@ void main() {
 
     group('retryConnection', () {
       test('resets retry count', () async {
-        SharedPreferences.setMockInitialValues({});
         provider = HubConnectionProvider();
         await Future.delayed(const Duration(milliseconds: 100));
 
@@ -232,7 +187,6 @@ void main() {
 
     group('connection status helpers', () {
       test('isConnected reflects connection status', () async {
-        SharedPreferences.setMockInitialValues({});
         provider = HubConnectionProvider();
         await Future.delayed(const Duration(milliseconds: 100));
 
@@ -240,7 +194,6 @@ void main() {
       });
 
       test('isConnecting reflects connection status', () async {
-        SharedPreferences.setMockInitialValues({});
         provider = HubConnectionProvider();
         await Future.delayed(const Duration(milliseconds: 100));
 
@@ -248,21 +201,15 @@ void main() {
       });
 
       test('isHaConnected is false when not connected', () async {
-        SharedPreferences.setMockInitialValues({
-          'hub_ha_verified': true,
-        });
         provider = HubConnectionProvider();
-        await Future.delayed(const Duration(milliseconds: 100));
+        provider.configureHubs([_haHub()]);
 
         expect(provider.isHaConnected, isFalse);
       });
 
       test('isHueConnected is false when not connected', () async {
-        SharedPreferences.setMockInitialValues({
-          'hue_verified': true,
-        });
         provider = HubConnectionProvider();
-        await Future.delayed(const Duration(milliseconds: 100));
+        provider.configureHubs([_hueHub()]);
 
         expect(provider.isHueConnected, isFalse);
       });
@@ -270,7 +217,6 @@ void main() {
 
     group('Hue-specific', () {
       test('hueConnectionStatus starts disconnected', () async {
-        SharedPreferences.setMockInitialValues({});
         provider = HubConnectionProvider();
         await Future.delayed(const Duration(milliseconds: 100));
 
@@ -285,7 +231,6 @@ void main() {
       });
 
       test('hueLastError is null initially', () async {
-        SharedPreferences.setMockInitialValues({});
         provider = HubConnectionProvider();
 
         expect(provider.hueLastError, isNull);
@@ -297,4 +242,37 @@ void main() {
       }, skip: 'Requires HTTP mocking to avoid network calls');
     });
   });
+}
+
+Hub _haHub() => Hub.homeAssistant(
+      id: 'ha-1',
+      homeId: 'home-1',
+      name: 'Home Assistant',
+      host: 'homeassistant.local',
+      port: 8123,
+      token: 'test-token',
+    );
+
+Hub _hueHub() => Hub.hue(
+      id: 'hue-1',
+      homeId: 'home-1',
+      name: 'Hue',
+      bridgeIp: '192.168.1.100',
+      appKey: 'test-user',
+    );
+
+class _FailingHaWebSocketProvider extends HaWebSocketProvider {
+  _FailingHaWebSocketProvider(super.config);
+
+  @override
+  bool get isConnected => false;
+
+  @override
+  String? get lastError => 'Fake connection failed';
+
+  @override
+  Future<bool> connect() async => false;
+
+  @override
+  Future<void> dispose() async {}
 }
