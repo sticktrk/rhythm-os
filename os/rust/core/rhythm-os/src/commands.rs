@@ -7091,6 +7091,7 @@ pub fn do_node_preferences_set(
     let prev_hard_off = snap.hard_off;
     let rhythm_enabled = rhythm_enabled.unwrap_or(snap.rhythm_enabled);
     let disabled = disabled.unwrap_or(snap.disabled);
+    let explicit_state_request = target_state.is_some();
     let requested_state = target_state
         .unwrap_or_else(|| persistent_room_state_from_flags(snap.hard_off, snap.soft_off));
     let persistent_state = room_state_for_power_save(power_save, requested_state);
@@ -7127,6 +7128,9 @@ pub fn do_node_preferences_set(
         },
     );
     clear_room_mode_transition(state, node_id);
+    if explicit_state_request {
+        queue_motion_timer_clear(state, node_id);
+    }
 
     let entered_hard_off = hard_off && !prev_hard_off;
     let left_hard_off = !hard_off && prev_hard_off;
@@ -13315,6 +13319,81 @@ mod tests {
             state.lock().unwrap().pending_motion_clear,
             vec!["r1".to_string()]
         );
+    }
+
+    #[test]
+    fn room_preferences_active_queues_motion_timer_clear() {
+        let snap = make_snapshot("r1", false, false);
+        let (state, runtime) = setup_state(vec![snap]);
+        state.lock().unwrap().motion_snapshots.insert(
+            "r1".into(),
+            MotionSnapshot {
+                motion_active: false,
+                motion_owned: true,
+                remaining_secs: Some(45),
+                timeout_secs: 300,
+                warning_active: true,
+            },
+        );
+
+        let result = do_node_preferences_set(
+            &state,
+            "r1",
+            Some(true),
+            None,
+            Some(RoomModeState::Active),
+            None,
+            false,
+        );
+
+        assert!(result.is_ok());
+        assert!(runtime.events().is_empty());
+        assert_eq!(
+            state.lock().unwrap().pending_motion_clear,
+            vec!["r1".to_string()]
+        );
+        let snap = runtime.engine_room_snapshot("r1").unwrap();
+        assert!(!snap.soft_off);
+        assert!(!snap.hard_off);
+    }
+
+    #[test]
+    fn room_preferences_idle_queues_motion_timer_clear() {
+        let snap = make_snapshot("r1", false, false);
+        let (state, runtime) = setup_state(vec![snap]);
+        {
+            let mut s = state.lock().unwrap();
+            s.power_save = false;
+            s.motion_snapshots.insert(
+                "r1".into(),
+                MotionSnapshot {
+                    motion_active: false,
+                    motion_owned: true,
+                    remaining_secs: Some(45),
+                    timeout_secs: 300,
+                    warning_active: true,
+                },
+            );
+        }
+
+        let result = do_node_preferences_set(
+            &state,
+            "r1",
+            Some(true),
+            None,
+            Some(RoomModeState::Idle),
+            None,
+            false,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(
+            state.lock().unwrap().pending_motion_clear,
+            vec!["r1".to_string()]
+        );
+        let snap = runtime.engine_room_snapshot("r1").unwrap();
+        assert!(snap.soft_off);
+        assert!(!snap.hard_off);
     }
 
     // ========================================================================
