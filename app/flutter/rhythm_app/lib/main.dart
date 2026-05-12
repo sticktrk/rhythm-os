@@ -1,10 +1,13 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
+import 'package:flutter/foundation.dart' show debugPrint, kDebugMode, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart'
+    show Level, RhythmConnection, RhythmSdk;
+
 import 'app_shell.dart';
 import 'backend/backend.dart';
 import 'models/config_model.dart';
@@ -20,12 +23,14 @@ import 'providers/room_provider.dart';
 import 'providers/room_page_provider.dart';
 import 'providers/home_provider.dart';
 import 'providers/server_sync_provider.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnection;
 import 'config/platform_capabilities.dart';
 import 'config/supabase_config.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (kDebugMode) {
+    RhythmSdk.enableLogging(level: Level.FINE);
+  }
 
   final caps = PlatformCapabilities.fromPlatform();
 

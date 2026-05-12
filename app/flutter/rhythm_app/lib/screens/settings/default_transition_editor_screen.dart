@@ -568,7 +568,7 @@ class _DefaultTransitionEditorScreenState
       merged.add(transition);
     }
 
-    final success = await _serverSync.api.setTransitions(merged);
+    final success = await _serverSync.dispatchSetTransitions(merged);
     if (!success || !mounted) return;
     setState(() {
       for (final mode in [RhythmMode.day, RhythmMode.sleep]) {
@@ -634,6 +634,12 @@ class _DefaultTransitionEditorScreenState
         _handleHours.clear();
       }
     });
+    unawaited(
+      _persistTimeChanges(
+        haptic: false,
+        showSuccessFeedback: false,
+      ),
+    );
   }
 
   /// Restore the saved trigger on each transition config while keeping the
@@ -869,14 +875,21 @@ class _DefaultTransitionEditorScreenState
     return merged;
   }
 
-  Future<void> _saveChanges() async {
+  Future<void> _saveChanges() => _persistTimeChanges();
+
+  Future<void> _persistTimeChanges({
+    bool haptic = true,
+    bool showSuccessFeedback = true,
+  }) async {
     if (_isSaving || !_hasUnsavedChanges) return;
     if (!_serverSync.synced) {
       _showSaveFeedback('Connect to the server to save changes.', error: true);
       return;
     }
 
-    HapticFeedback.mediumImpact();
+    if (haptic) {
+      HapticFeedback.mediumImpact();
+    }
     setState(() => _isSaving = true);
 
     final savedTimeSnapshot = _timeEnabled;
@@ -885,10 +898,8 @@ class _DefaultTransitionEditorScreenState
       transitionsForSave,
       defaultTriggerEnabled: savedTimeSnapshot,
     );
-    final success = await _serverSync.api.setTransitions(transitionsForSave);
-    if (success) {
-      await _serverSync.fullRefresh();
-    }
+    final success =
+        await _serverSync.dispatchSetTransitions(transitionsForSave);
 
     if (!mounted) return;
 
@@ -901,10 +912,12 @@ class _DefaultTransitionEditorScreenState
       }
     });
 
-    _showSaveFeedback(
-      success ? 'Transitions saved.' : 'Could not save Transitions.',
-      error: !success,
-    );
+    if (showSuccessFeedback || !success) {
+      _showSaveFeedback(
+        success ? 'Transitions saved.' : 'Could not save Transitions.',
+        error: !success,
+      );
+    }
   }
 
   /// Throws away in-flight Time-section edits and returns to the last saved

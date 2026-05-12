@@ -72,6 +72,10 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   RhythmButtonAction? lastInputBindingButtonAction;
   RhythmInputBinding? lastSetInputBinding;
   String? lastDeletedInputBindingId;
+  List<RhythmModeTransitionConfig> transitions = const [];
+  List<RhythmModeTransitionConfig>? lastSetTransitions;
+  int setTransitionsCalls = 0;
+  bool setTransitionsResult = true;
 
   @override
   Future<void> hubCredentials({
@@ -104,6 +108,21 @@ class _FakeRhythmServerApi extends RhythmServerApi {
 
   @override
   Future<List<RhythmInputBinding>> getInputBindings() async => inputBindings;
+
+  @override
+  Future<List<RhythmModeTransitionConfig>> getTransitions() async =>
+      List<RhythmModeTransitionConfig>.unmodifiable(transitions);
+
+  @override
+  Future<bool> setTransitions(
+    List<RhythmModeTransitionConfig> transitions,
+  ) async {
+    setTransitionsCalls++;
+    lastSetTransitions = List<RhythmModeTransitionConfig>.from(transitions);
+    if (!setTransitionsResult) return false;
+    this.transitions = List<RhythmModeTransitionConfig>.from(transitions);
+    return true;
+  }
 
   @override
   Future<List<RhythmInputBinding>> createDaySleepToggleInputBinding({
@@ -1398,6 +1417,120 @@ void main() {
       await provider.ensureRoomPreviewStateFresh('room-1');
 
       expect(connection.reconnectCalls, 0);
+    });
+  });
+
+  group('ServerSyncProvider transition saves', () {
+    late RoomProvider roomProvider;
+    late _FakeRhythmServerApi api;
+    late _HelloRhythmConnection connection;
+
+    setUp(() {
+      roomProvider = RoomProvider();
+      api = _FakeRhythmServerApi();
+      connection = _HelloRhythmConnection(api);
+    });
+
+    tearDown(() {
+      roomProvider.dispose();
+      connection.dispose();
+    });
+
+    List<RhythmModeTransitionConfig> seedTransitions() {
+      return const [
+        RhythmModeTransitionConfig(
+          id: 'sleep_to_day',
+          label: 'Sleep to Day',
+          fromMode: RhythmMode.sleep,
+          toMode: RhythmMode.day,
+          trigger: RhythmTransitionTrigger.solar('sunrise'),
+          duration: TransitionDuration.auto(),
+          preserveHardOff: true,
+        ),
+        RhythmModeTransitionConfig(
+          id: 'day_to_sleep',
+          label: 'Day to Sleep',
+          fromMode: RhythmMode.day,
+          toMode: RhythmMode.sleep,
+          trigger: RhythmTransitionTrigger.solar('sunset'),
+          duration: TransitionDuration.auto(),
+          preserveHardOff: true,
+        ),
+      ];
+    }
+
+    test('stores trigger-enabled edits in the server and local cache',
+        () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      final initial = seedTransitions();
+      api.transitions = initial;
+      connection.emitHello(RhythmHello.fromJson({
+        'rooms': const <Map<String, dynamic>>[],
+        'location': const <String, dynamic>{},
+        'transitions':
+            initial.map((transition) => transition.toJson()).toList(),
+      }));
+      await Future<void>.delayed(Duration.zero);
+
+      final disabled = [
+        for (final transition in provider.modeTransitions)
+          transition.copyWith(triggerEnabled: false),
+      ];
+
+      final success = await provider.dispatchSetTransitions(disabled);
+
+      expect(success, isTrue);
+      expect(api.setTransitionsCalls, 1);
+      expect(
+        api.lastSetTransitions!
+            .every((transition) => !transition.triggerEnabled),
+        isTrue,
+      );
+      expect(
+        provider.modeTransitions
+            .every((transition) => !transition.triggerEnabled),
+        isTrue,
+      );
+      expect(connection.reconnectCalls, 0);
+    });
+
+    test('rolls back optimistic transition cache on server failure', () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      final initial = seedTransitions();
+      api.transitions = initial;
+      connection.emitHello(RhythmHello.fromJson({
+        'rooms': const <Map<String, dynamic>>[],
+        'location': const <String, dynamic>{},
+        'transitions':
+            initial.map((transition) => transition.toJson()).toList(),
+      }));
+      await Future<void>.delayed(Duration.zero);
+
+      api.setTransitionsResult = false;
+
+      final success = await provider.dispatchSetTransitions([
+        for (final transition in provider.modeTransitions)
+          transition.copyWith(triggerEnabled: false),
+      ]);
+
+      expect(success, isFalse);
+      expect(
+        provider.modeTransitions
+            .every((transition) => transition.triggerEnabled),
+        isTrue,
+      );
     });
   });
 

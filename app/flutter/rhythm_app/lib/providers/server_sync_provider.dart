@@ -1304,10 +1304,42 @@ class ServerSyncProvider extends ChangeNotifier {
     return success;
   }
 
+  /// Replace mode transitions on the server with an optimistic local cache
+  /// update. Callers should use this instead of `api.setTransitions` directly
+  /// so local transition state cannot drift when a throttled refresh is skipped.
+  Future<bool> dispatchSetTransitions(
+    List<RhythmModeTransitionConfig> transitions,
+  ) async {
+    if (!HueServiceLocator.isDemoMode && !_connection.connected) return false;
+    final previous = _modeTransitions;
+    final next = List<RhythmModeTransitionConfig>.unmodifiable(transitions);
+    _modeTransitions = next;
+    notifyListeners();
+
+    final serverApi = api;
+    final success = await serverApi.setTransitions(next);
+    if (!success) {
+      if (identical(_modeTransitions, next)) {
+        _modeTransitions = previous;
+        notifyListeners();
+      }
+      return false;
+    }
+
+    final refreshed = await serverApi.getTransitions();
+    if (refreshed.isNotEmpty || next.isEmpty) {
+      _modeTransitions = List<RhythmModeTransitionConfig>.unmodifiable(
+        refreshed,
+      );
+      notifyListeners();
+    }
+
+    return true;
+  }
+
   /// Update a single mode transition on the server.
   Future<bool> dispatchUpdateTransition(
       RhythmModeTransitionConfig updated) async {
-    if (!HueServiceLocator.isDemoMode && !_connection.connected) return false;
     final newList = _modeTransitions.map((t) {
       if (t.id == updated.id ||
           (t.id.isEmpty &&
@@ -1318,11 +1350,7 @@ class ServerSyncProvider extends ChangeNotifier {
       }
       return t;
     }).toList();
-    _modeTransitions = newList;
-    notifyListeners();
-    final success = await api.setTransitions(newList);
-    if (success) await fullRefresh();
-    return success;
+    return dispatchSetTransitions(newList);
   }
 
   /// Run a saved transition by ID.
