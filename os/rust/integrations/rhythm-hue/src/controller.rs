@@ -376,7 +376,7 @@ impl<H: HueTransport + 'static> HubLightController for HueLightController<H> {
     }
 
     async fn flash_target(&self, target: &HubDispatchTarget) -> LightControlResult<()> {
-        // Use the Hue V2 native identify action ("breathe") on each light
+        // Use the Hue V2 native identify action on each light
         // resource. This is the canonical mechanism Hue exposes for physical
         // identification — unlike the default on/off flash, it works for any
         // single light without requiring a grouped_light wrapping the exact

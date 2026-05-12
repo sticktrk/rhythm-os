@@ -12,6 +12,13 @@ use anyhow::Result;
 
 const HUE_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const HUE_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const HUE_IDENTIFY_ACTION: &str = "identify";
+
+fn identify_light_body() -> serde_json::Value {
+    serde_json::json!({
+        "identify": { "action": HUE_IDENTIFY_ACTION }
+    })
+}
 
 /// Hue bridge transport using `reqwest` with rustls.
 ///
@@ -139,9 +146,7 @@ impl HueTransport for ReqwestHueTransport {
 
     fn identify_light(&self, username: &str, light_id: &str) -> Result<()> {
         let url = format!("{}/clip/v2/resource/light/{}", self.base_url(), light_id);
-        let body = serde_json::json!({
-            "identify": { "action": "breathe" }
-        });
+        let body = identify_light_body();
 
         let resp = self
             .client
@@ -216,5 +221,20 @@ impl HueTransport for ReqwestHueTransport {
         }
 
         Ok(resp.json()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identify_light_body_uses_hue_identify_action_enum() {
+        assert_eq!(
+            identify_light_body(),
+            serde_json::json!({
+                "identify": { "action": "identify" }
+            })
+        );
     }
 }

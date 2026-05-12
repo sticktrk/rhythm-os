@@ -38,9 +38,9 @@ pub trait HueTransport: Send + Sync {
 
     /// Trigger the Hue V2 native identify effect on a single light resource.
     ///
-    /// Uses `PUT /clip/v2/resource/light/{id}` with `identify.action = "breathe"`,
-    /// which is the canonical mechanism for physical identification on Hue
-    /// hardware and does not perturb the on/brightness state.
+    /// Uses `PUT /clip/v2/resource/light/{id}` with `identify.action = "identify"`,
+    /// which triggers Hue's physical identification sequence without
+    /// perturbing the on/brightness state.
     fn identify_light(&self, username: &str, light_id: &str) -> anyhow::Result<()>;
 
     /// Fetch all resources of a given type from the Hue V2 API.
