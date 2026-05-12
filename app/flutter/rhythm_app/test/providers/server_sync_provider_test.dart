@@ -63,6 +63,15 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   String? lastDeletedRoomId;
   bool topologyDeleteRoomResult = true;
   final Map<String, Map<String, dynamic>?> canonicalDevices = {};
+  List<RhythmInputBinding> inputBindings = const [];
+  int createDaySleepToggleInputBindingCalls = 0;
+  int setInputBindingCalls = 0;
+  int deleteInputBindingCalls = 0;
+  bool createReplacesPresetBindings = false;
+  String? lastInputBindingSourceNodeId;
+  RhythmButtonAction? lastInputBindingButtonAction;
+  RhythmInputBinding? lastSetInputBinding;
+  String? lastDeletedInputBindingId;
 
   @override
   Future<void> hubCredentials({
@@ -92,6 +101,64 @@ class _FakeRhythmServerApi extends RhythmServerApi {
 
   @override
   Future<List<RhythmTopologyNode>> getTopologyNodes() async => topologyNodes;
+
+  @override
+  Future<List<RhythmInputBinding>> getInputBindings() async => inputBindings;
+
+  @override
+  Future<List<RhythmInputBinding>> createDaySleepToggleInputBinding({
+    required String sourceNodeId,
+    RhythmButtonAction? buttonAction = RhythmButtonAction.onPress,
+    bool enabled = true,
+  }) async {
+    createDaySleepToggleInputBindingCalls++;
+    lastInputBindingSourceNodeId = sourceNodeId;
+    lastInputBindingButtonAction = buttonAction;
+    final binding = RhythmInputBinding(
+      id: 'day_sleep_toggle:$sourceNodeId:${buttonAction?.wireValue ?? 'any'}',
+      preset: RhythmInputBindingPreset.daySleepToggle,
+      sourceNodeId: sourceNodeId,
+      trigger: RhythmInputBindingTrigger.button(buttonAction: buttonAction),
+      action: const RhythmModeCycleAction(
+        modes: [RhythmMode.day, RhythmMode.sleep],
+      ),
+      enabled: enabled,
+    );
+    inputBindings = [
+      ...inputBindings.where((existing) {
+        if (existing.id == binding.id) return false;
+        return !createReplacesPresetBindings ||
+            existing.preset != RhythmInputBindingPreset.daySleepToggle;
+      }),
+      binding,
+    ];
+    return inputBindings;
+  }
+
+  @override
+  Future<List<RhythmInputBinding>> setInputBinding(
+    RhythmInputBinding binding,
+  ) async {
+    setInputBindingCalls++;
+    lastSetInputBinding = binding;
+    inputBindings = [
+      for (final existing in inputBindings)
+        if (existing.id == binding.id) binding else existing,
+      if (!inputBindings.any((existing) => existing.id == binding.id)) binding,
+    ];
+    return inputBindings;
+  }
+
+  @override
+  Future<List<RhythmInputBinding>> deleteInputBinding(String id) async {
+    deleteInputBindingCalls++;
+    lastDeletedInputBindingId = id;
+    inputBindings = [
+      for (final binding in inputBindings)
+        if (binding.id != id) binding,
+    ];
+    return inputBindings;
+  }
 
   @override
   Future<bool> assignDeviceParent(String deviceId, String? parentId) async {
@@ -770,6 +837,217 @@ void main() {
     });
   });
 
+  group('ServerSyncProvider input bindings', () {
+    late RoomProvider roomProvider;
+    late _FakeRhythmServerApi api;
+    late _HelloRhythmConnection connection;
+
+    setUp(() {
+      roomProvider = RoomProvider();
+      api = _FakeRhythmServerApi();
+      connection = _HelloRhythmConnection(api);
+    });
+
+    tearDown(() {
+      roomProvider.dispose();
+      connection.dispose();
+    });
+
+    test('reads day/sleep toggle bindings from hello', () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'input_bindings': [
+            {
+              'id': 'day_sleep_toggle:button-1:on_press',
+              'preset': 'day_sleep_toggle',
+              'source_node_id': 'button-1',
+              'trigger': {
+                'kind': 'button',
+                'button_action': 'on_press',
+              },
+              'action': {
+                'kind': 'mode_cycle',
+                'modes': ['day', 'sleep'],
+                'transition': {'kind': 'auto'},
+              },
+              'enabled': true,
+            },
+          ],
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.daySleepToggleInputBinding?.sourceNodeId, 'button-1');
+      expect(provider.daySleepToggleInputBinding?.enabled, isTrue);
+    });
+
+    test('binds one selected button as the day/sleep toggle', () async {
+      api.inputBindings = [
+        RhythmInputBinding(
+          id: 'day_sleep_toggle:old:on_press',
+          preset: RhythmInputBindingPreset.daySleepToggle,
+          sourceNodeId: 'old',
+          trigger: const RhythmInputBindingTrigger.button(
+            buttonAction: RhythmButtonAction.onPress,
+          ),
+          action: const RhythmModeCycleAction(
+            modes: [RhythmMode.day, RhythmMode.sleep],
+          ),
+        ),
+      ];
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'input_bindings': api.inputBindings
+              .map((binding) => binding.toJson())
+              .toList(growable: false),
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final ok = await provider.bindDaySleepToggleButton('button-2');
+
+      expect(ok, isTrue);
+      expect(api.createDaySleepToggleInputBindingCalls, 1);
+      expect(api.lastInputBindingSourceNodeId, 'button-2');
+      expect(api.deleteInputBindingCalls, 1);
+      expect(api.lastDeletedInputBindingId, 'day_sleep_toggle:old:on_press');
+      expect(provider.daySleepToggleInputBinding?.sourceNodeId, 'button-2');
+    });
+
+    test('preserves the selected button action when binding', () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(RhythmHello.fromJson({}));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final ok = await provider.bindDaySleepToggleButton(
+        'button-2',
+        buttonAction: RhythmButtonAction.offPress,
+      );
+
+      expect(ok, isTrue);
+      expect(api.lastInputBindingSourceNodeId, 'button-2');
+      expect(api.lastInputBindingButtonAction, RhythmButtonAction.offPress);
+      expect(
+        provider.daySleepToggleInputBinding?.trigger.buttonAction,
+        RhythmButtonAction.offPress,
+      );
+    });
+
+    test('does not delete stale binding when create already replaced it',
+        () async {
+      api.createReplacesPresetBindings = true;
+      api.inputBindings = [
+        RhythmInputBinding(
+          id: 'day_sleep_toggle:old:on_press',
+          preset: RhythmInputBindingPreset.daySleepToggle,
+          sourceNodeId: 'old',
+          trigger: const RhythmInputBindingTrigger.button(
+            buttonAction: RhythmButtonAction.onPress,
+          ),
+          action: const RhythmModeCycleAction(
+            modes: [RhythmMode.day, RhythmMode.sleep],
+          ),
+        ),
+      ];
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'input_bindings': api.inputBindings
+              .map((binding) => binding.toJson())
+              .toList(growable: false),
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final ok = await provider.bindDaySleepToggleButton('button-2');
+
+      expect(ok, isTrue);
+      expect(api.deleteInputBindingCalls, 0);
+      expect(provider.daySleepToggleInputBinding?.sourceNodeId, 'button-2');
+    });
+
+    test('toggles the persisted day/sleep binding enabled flag', () async {
+      final binding = RhythmInputBinding(
+        id: 'day_sleep_toggle:button-1:on_press',
+        preset: RhythmInputBindingPreset.daySleepToggle,
+        sourceNodeId: 'button-1',
+        trigger: const RhythmInputBindingTrigger.button(
+          buttonAction: RhythmButtonAction.onPress,
+        ),
+        action: const RhythmModeCycleAction(
+          modes: [RhythmMode.day, RhythmMode.sleep],
+        ),
+      );
+      api.inputBindings = [binding];
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'input_bindings': api.inputBindings
+              .map((entry) => entry.toJson())
+              .toList(growable: false),
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final ok = await provider.setDaySleepToggleButtonEnabled(false);
+
+      expect(ok, isTrue);
+      expect(api.setInputBindingCalls, 1);
+      expect(api.lastSetInputBinding?.enabled, isFalse);
+      expect(provider.daySleepToggleInputBinding?.enabled, isFalse);
+    });
+
+    test('treats missing binding enable toggles as successful no-ops',
+        () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(RhythmHello.fromJson({}));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final ok = await provider.setDaySleepToggleButtonEnabled(false);
+
+      expect(ok, isTrue);
+      expect(api.setInputBindingCalls, 0);
+    });
+  });
+
   group('ServerSyncProvider SSE sync', () {
     late RoomProvider roomProvider;
     late _FakeRhythmServerApi api;
@@ -1313,6 +1591,46 @@ void main() {
       expect(provider.deviceSummaryForRoom('hue_demo_2'), '3 lights');
       expect(provider.triagePendingDevices, 0);
       expect(provider.triagePendingCount, 1);
+    });
+
+    test('stores demo transition trigger enabled updates', () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider([
+          Hub.create(
+            id: 'demo-server',
+            homeId: 'home-1',
+            type: HubType.server,
+            name: 'Demo Server',
+            endpoint: const HubEndpoint(host: '127.0.0.1', port: 54448),
+          ),
+        ]),
+      );
+      addTearDown(provider.dispose);
+
+      provider.connectIfAvailable();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(provider.modeTransitions, hasLength(2));
+      expect(
+        provider.modeTransitions
+            .every((transition) => transition.triggerEnabled),
+        isTrue,
+      );
+
+      final success = await provider.api.setTransitions([
+        for (final transition in provider.modeTransitions)
+          transition.copyWith(triggerEnabled: false),
+      ]);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(success, isTrue);
+      expect(
+        provider.modeTransitions
+            .every((transition) => transition.triggerEnabled),
+        isFalse,
+      );
     });
   });
 

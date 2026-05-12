@@ -47,6 +47,8 @@ class DemoServerApi extends RhythmServerApi {
   final Map<String, Map<String, dynamic>> _topologyNodes = {};
   final Map<String, Map<String, dynamic>> _canonicalDevices = {};
   final Map<String, Map<String, dynamic>> _triageEntries = {};
+  final Map<String, RhythmInputBinding> _inputBindings = {};
+  List<RhythmModeTransitionConfig> _modeTransitions = const [];
 
   bool _seeded = false;
   int _nextRoomOrdinal = 1;
@@ -54,6 +56,29 @@ class DemoServerApi extends RhythmServerApi {
   RhythmMode _activeMode = RhythmMode.day;
 
   Stream<void> get changes => _changes.stream;
+
+  List<RhythmModeTransitionConfig> _defaultModeTransitions() {
+    return const [
+      RhythmModeTransitionConfig(
+        id: 'sleep_to_day',
+        label: 'Sleep to Day',
+        fromMode: RhythmMode.sleep,
+        toMode: RhythmMode.day,
+        trigger: RhythmTransitionTrigger.solar('astronomical_twilight'),
+        duration: TransitionDuration.auto(),
+        preserveHardOff: true,
+      ),
+      RhythmModeTransitionConfig(
+        id: 'day_to_sleep',
+        label: 'Day to Sleep',
+        fromMode: RhythmMode.day,
+        toMode: RhythmMode.sleep,
+        trigger: RhythmTransitionTrigger.solar('nautical_twilight'),
+        duration: TransitionDuration.auto(),
+        preserveHardOff: true,
+      ),
+    ];
+  }
 
   void ensureSeeded() {
     if (_seeded) return;
@@ -69,6 +94,8 @@ class DemoServerApi extends RhythmServerApi {
     _topologyNodes.clear();
     _canonicalDevices.clear();
     _triageEntries.clear();
+    _inputBindings.clear();
+    _modeTransitions = _defaultModeTransitions();
 
     _addRoom(
       roomId: 'hue_demo_1',
@@ -490,6 +517,22 @@ class DemoServerApi extends RhythmServerApi {
   }
 
   @override
+  Future<List<RhythmModeTransitionConfig>> getTransitions() async {
+    ensureSeeded();
+    return List<RhythmModeTransitionConfig>.unmodifiable(_modeTransitions);
+  }
+
+  @override
+  Future<bool> setTransitions(
+    List<RhythmModeTransitionConfig> transitions,
+  ) async {
+    ensureSeeded();
+    _modeTransitions = List<RhythmModeTransitionConfig>.from(transitions);
+    _changes.add(null);
+    return true;
+  }
+
+  @override
   Future<Map<String, dynamic>?> getCanonicalDevice(String id) async {
     ensureSeeded();
     final device = _canonicalDevices[id];
@@ -537,6 +580,64 @@ class DemoServerApi extends RhythmServerApi {
 
   @override
   Future<List<RhythmTopologyNode>> getTopologyNodes() async => topologyNodes;
+
+  @override
+  Future<List<RhythmInputBinding>> getInputBindings() async {
+    ensureSeeded();
+    return _inputBindings.values.toList(growable: false);
+  }
+
+  @override
+  Future<List<RhythmInputBinding>> createDaySleepToggleInputBinding({
+    required String sourceNodeId,
+    RhythmButtonAction? buttonAction = RhythmButtonAction.onPress,
+    bool enabled = true,
+  }) {
+    return createPresetInputBinding(
+      preset: RhythmInputBindingPreset.daySleepToggle,
+      sourceNodeId: sourceNodeId,
+      buttonAction: buttonAction,
+      enabled: enabled,
+    );
+  }
+
+  @override
+  Future<List<RhythmInputBinding>> createPresetInputBinding({
+    required RhythmInputBindingPreset preset,
+    required String sourceNodeId,
+    RhythmButtonAction? buttonAction,
+    bool enabled = true,
+  }) async {
+    ensureSeeded();
+    final binding = _presetBinding(
+      id: _presetBindingId(preset, sourceNodeId, buttonAction),
+      preset: preset,
+      sourceNodeId: sourceNodeId,
+      buttonAction: buttonAction,
+      enabled: enabled,
+    );
+    _inputBindings[binding.id] = binding;
+    _changes.add(null);
+    return getInputBindings();
+  }
+
+  @override
+  Future<List<RhythmInputBinding>> setInputBinding(
+    RhythmInputBinding binding,
+  ) async {
+    ensureSeeded();
+    _inputBindings[binding.id] = binding;
+    _changes.add(null);
+    return getInputBindings();
+  }
+
+  @override
+  Future<List<RhythmInputBinding>> deleteInputBinding(String id) async {
+    ensureSeeded();
+    _inputBindings.remove(id);
+    _changes.add(null);
+    return getInputBindings();
+  }
 
   @override
   Future<bool> topologyRenameRoom(String roomId, String name) async {
@@ -799,4 +900,36 @@ class DemoServerApi extends RhythmServerApi {
         RhythmNodePlacement.standalone => RoomNodePlacement.standalone,
         null => null,
       };
+
+  RhythmInputBinding _presetBinding({
+    required String id,
+    required RhythmInputBindingPreset preset,
+    required String sourceNodeId,
+    required RhythmButtonAction? buttonAction,
+    required bool enabled,
+  }) {
+    return RhythmInputBinding(
+      id: id,
+      preset: preset,
+      sourceNodeId: sourceNodeId,
+      trigger: RhythmInputBindingTrigger.button(buttonAction: buttonAction),
+      action: const RhythmModeCycleAction(
+        modes: [RhythmMode.day, RhythmMode.sleep],
+        transition: RhythmModeTransitionSelection.auto(),
+      ),
+      enabled: enabled,
+    );
+  }
+
+  String _presetBindingId(
+    RhythmInputBindingPreset preset,
+    String sourceNodeId,
+    RhythmButtonAction? buttonAction,
+  ) {
+    final source = sourceNodeId
+        .split('')
+        .map((char) => RegExp(r'[A-Za-z0-9_-]').hasMatch(char) ? char : '_')
+        .join();
+    return '${preset.wireValue}:$source:${buttonAction?.wireValue ?? 'any'}';
+  }
 }

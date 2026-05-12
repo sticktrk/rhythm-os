@@ -52,9 +52,15 @@ class _DefaultTransitionEditorScreenState
   static const double _eventSnapThresholdHours = 0.25;
   static const double _minimumHandleGapHours = 0.25;
   static const double _maxEditableHour = 23.99;
-  static const double _minDurationSeconds = 10.0;
+  // Piecewise duration scale. Below the bend, the slider steps 1s at a time
+  // so short transitions (think a quick room cue) are tunable; above the bend
+  // it falls back to 10s steps so the long end stays reachable without 270
+  // ticks across the track.
+  static const double _minDurationSeconds = 1.0;
+  static const double _bendDurationSeconds = 30.0;
   static const double _maxDurationSeconds = 300.0;
-  static const double _durationStepSeconds = 10.0;
+  static const double _fineDurationStepSeconds = 1.0;
+  static const double _coarseDurationStepSeconds = 10.0;
   // Angular drag on a small orbit translates pixels to many minutes per
   // degree, so the orb feels twitchy. Quantizing to 5-minute "stops" gives a
   // sundial-style ratchet without losing precision worth caring about.
@@ -74,12 +80,15 @@ class _DefaultTransitionEditorScreenState
   // cluster lives inside the Time section and only governs Time edits. The
   // Button section commits changes inline via its own Listen → Confirm flow.
   String? _toggleButtonDeviceId;
+  String _lastButtonBindingSignature = 'none';
+  String _lastButtonDevicesSignature = '';
   // Listen-flow state. The user taps Listen, the server forwards the next
   // press, and we surface it for confirmation. `_pendingButton` is the
   // candidate from the most recent press — not committed until confirm.
   _ButtonBindState _bindState = _ButtonBindState.idle;
   _MockButtonDevice? _pendingButton;
   Timer? _simulatedDetectionTimer;
+  StreamSubscription<RhythmInputEvent>? _inputEventSub;
   late final AnimationController _listenPulseController;
   late RhythmMode _selectedMode;
   late AnimationController _breatheController;
@@ -111,6 +120,7 @@ class _DefaultTransitionEditorScreenState
     super.initState();
     _serverSync = context.read<ServerSyncProvider>();
     _transitionConfigs = _initialTransitionConfigs();
+    _timeEnabled = _timeEnabledFor(_transitionConfigs.values);
     _savedTransitionConfigs = Map.of(_transitionConfigs);
     _savedTimeEnabled = _timeEnabled;
     _selectedMode = RhythmMode.day;
@@ -140,7 +150,11 @@ class _DefaultTransitionEditorScreenState
     _homeProvider = context.read<HomeProvider>();
     _homeProvider.addListener(_handleHomeChanged);
     _serverSync.addListener(_handleServerSyncChanged);
+    _inputEventSub = _serverSync.inputEvents.listen(_handleInputEvent);
     _lastSynced = _serverSync.synced;
+    _syncButtonBindingFromServer();
+    _lastButtonBindingSignature = _serverSync.daySleepToggleBindingSignature;
+    _lastButtonDevicesSignature = _buttonDevicesSignature();
   }
 
   @override
@@ -151,6 +165,7 @@ class _DefaultTransitionEditorScreenState
     _flowController.dispose();
     _listenPulseController.dispose();
     _simulatedDetectionTimer?.cancel();
+    _inputEventSub?.cancel();
     super.dispose();
   }
 
@@ -164,19 +179,30 @@ class _DefaultTransitionEditorScreenState
     if (!mounted) return;
 
     final nextTransitionConfigs = _initialTransitionConfigs();
+    final nextTimeEnabled = _timeEnabledFor(nextTransitionConfigs.values);
     final shouldAdoptTransitions = !_hasUnsavedChanges &&
-        !_transitionConfigMapsEqual(
-          _transitionConfigs,
-          nextTransitionConfigs,
-        );
+        (!_transitionConfigMapsEqual(
+              _transitionConfigs,
+              nextTransitionConfigs,
+            ) ||
+            _timeEnabled != nextTimeEnabled);
     final shouldRefreshVisuals =
         _currentProfileVisualSignature() != _profileVisualSignature;
     final nextSynced = _serverSync.synced;
     final shouldRefreshSync = nextSynced != _lastSynced;
+    final nextButtonBindingSignature =
+        _serverSync.daySleepToggleBindingSignature;
+    final shouldRefreshButtonBinding =
+        nextButtonBindingSignature != _lastButtonBindingSignature;
+    final nextButtonDevicesSignature = _buttonDevicesSignature();
+    final shouldRefreshButtonDevices =
+        nextButtonDevicesSignature != _lastButtonDevicesSignature;
 
     if (!shouldAdoptTransitions &&
         !shouldRefreshVisuals &&
-        !shouldRefreshSync) {
+        !shouldRefreshSync &&
+        !shouldRefreshButtonBinding &&
+        !shouldRefreshButtonDevices) {
       return;
     }
 
@@ -184,10 +210,19 @@ class _DefaultTransitionEditorScreenState
       if (shouldAdoptTransitions) {
         _transitionConfigs = nextTransitionConfigs;
         _savedTransitionConfigs = Map.of(nextTransitionConfigs);
+        _timeEnabled = nextTimeEnabled;
+        _savedTimeEnabled = nextTimeEnabled;
         _handleHours.clear();
       }
       if (shouldRefreshVisuals) {
         _rebuildCurveVisuals();
+      }
+      if (shouldRefreshButtonBinding) {
+        _syncButtonBindingFromServer();
+        _lastButtonBindingSignature = nextButtonBindingSignature;
+      }
+      if (shouldRefreshButtonDevices) {
+        _lastButtonDevicesSignature = nextButtonDevicesSignature;
       }
       _lastSynced = nextSynced;
     });
@@ -215,7 +250,13 @@ class _DefaultTransitionEditorScreenState
   }
 
   Map<RhythmMode, RhythmModeTransitionConfig> _initialTransitionConfigs() {
-    final transitions = _serverSync.modeTransitions;
+    return _transitionConfigsFrom(_serverSync.modeTransitions);
+  }
+
+  Map<RhythmMode, RhythmModeTransitionConfig> _transitionConfigsFrom(
+    Iterable<RhythmModeTransitionConfig> transitions, {
+    bool defaultTriggerEnabled = true,
+  }) {
     final configs = <RhythmMode, RhythmModeTransitionConfig>{};
 
     for (final transition in transitions) {
@@ -226,13 +267,22 @@ class _DefaultTransitionEditorScreenState
 
     configs.putIfAbsent(
       RhythmMode.day,
-      () => _defaultTransitionForMode(RhythmMode.day),
+      () => _defaultTransitionForMode(RhythmMode.day)
+          .copyWith(triggerEnabled: defaultTriggerEnabled),
     );
     configs.putIfAbsent(
       RhythmMode.sleep,
-      () => _defaultTransitionForMode(RhythmMode.sleep),
+      () => _defaultTransitionForMode(RhythmMode.sleep)
+          .copyWith(triggerEnabled: defaultTriggerEnabled),
     );
     return configs;
+  }
+
+  bool _timeEnabledFor(Iterable<RhythmModeTransitionConfig> transitions) {
+    return transitions.where(_isSupportedTransition).any(
+          (transition) =>
+              !transition.trigger.isManual && transition.triggerEnabled,
+        );
   }
 
   bool _isSupportedTransition(RhythmModeTransitionConfig transition) {
@@ -485,9 +535,58 @@ class _DefaultTransitionEditorScreenState
     });
   }
 
-  /// Dirty-state for the save/revert cluster. Scoped to the Time section
-  /// only — Button-section changes are inline and don't go through this
-  /// pill, so they don't drive its visibility or reset behavior.
+  /// Commit any pending duration edits to the server inline. Duration lives
+  /// outside the Time accordion's save/revert cluster (see [_hasUnsavedChanges])
+  /// and instead commits the way the Button section does — silently on the
+  /// commit event (slider release / Auto toggle). Sends only the saved
+  /// trigger fields alongside the new duration so an in-flight Time edit
+  /// doesn't ride along.
+  Future<void> _commitDurationInline() async {
+    if (!_serverSync.synced) return;
+    bool durationDirty = false;
+    for (final mode in [RhythmMode.day, RhythmMode.sleep]) {
+      final current = _transitionConfigs[mode];
+      final saved = _savedTransitionConfigs[mode];
+      if (current == null || saved == null) continue;
+      if (current.durationMs != saved.durationMs ||
+          current.duration.isAuto != saved.duration.isAuto) {
+        durationDirty = true;
+        break;
+      }
+    }
+    if (!durationDirty) return;
+
+    final merged = <RhythmModeTransitionConfig>[];
+    for (final transition in _serverSync.modeTransitions) {
+      if (_isSupportedTransition(transition)) {
+        final draft = _transitionConfigs[transition.toMode];
+        if (draft != null) {
+          merged.add(transition.copyWith(duration: draft.duration));
+          continue;
+        }
+      }
+      merged.add(transition);
+    }
+
+    final success = await _serverSync.api.setTransitions(merged);
+    if (!success || !mounted) return;
+    setState(() {
+      for (final mode in [RhythmMode.day, RhythmMode.sleep]) {
+        final current = _transitionConfigs[mode];
+        final saved = _savedTransitionConfigs[mode];
+        if (current == null || saved == null) continue;
+        _savedTransitionConfigs[mode] =
+            saved.copyWith(duration: current.duration);
+      }
+    });
+  }
+
+  /// Dirty-state for the save/revert cluster. Scoped strictly to the Time
+  /// section — the only edits this cluster governs are the trigger time
+  /// (orb drags) and the section's enable toggle. Button-section changes
+  /// commit inline via Listen → Confirm; duration changes commit inline on
+  /// slider release, so neither participates in this cluster's visibility
+  /// or reset behavior.
   bool get _hasUnsavedChanges {
     if (_timeEnabled != _savedTimeEnabled) return true;
     for (final mode in [RhythmMode.day, RhythmMode.sleep]) {
@@ -497,11 +596,23 @@ class _DefaultTransitionEditorScreenState
         if (current != saved) return true;
         continue;
       }
-      if (!_transitionConfigEquals(current, saved)) {
+      if (!_timeTriggerEquals(current, saved)) {
         return true;
       }
     }
     return false;
+  }
+
+  /// Compares only the Time-accordion fields (the trigger). Duration lives
+  /// outside the accordion and is excluded so duration edits don't drive
+  /// the save/revert cluster.
+  bool _timeTriggerEquals(
+    RhythmModeTransitionConfig a,
+    RhythmModeTransitionConfig b,
+  ) {
+    return a.trigger.kind == b.trigger.kind &&
+        a.trigger.event == b.trigger.event &&
+        a.trigger.time == b.trigger.time;
   }
 
   void _setTimeEnabled(bool enabled) {
@@ -512,17 +623,36 @@ class _DefaultTransitionEditorScreenState
       // Collapsing the section hides the editor, so any ephemeral orb
       // edits get thrown away — otherwise unsaved changes would linger
       // invisibly inside the closed accordion. Drag state is reset too.
+      // Duration lives outside the accordion, so its in-flight edit is
+      // preserved.
       if (!enabled) {
         _dragMode = null;
         _dragPreviewHour = null;
         _proximateAnchor = null;
         _anchorProximity = 0.0;
-        _transitionConfigs = Map<RhythmMode, RhythmModeTransitionConfig>.of(
-          _savedTransitionConfigs,
-        );
+        _revertTimeFieldsToSaved();
         _handleHours.clear();
       }
     });
+  }
+
+  /// Restore the saved trigger on each transition config while keeping the
+  /// live duration intact. Used by both [_setTimeEnabled] (collapse) and
+  /// [_resetChanges] (Revert pill) so they don't clobber duration edits.
+  void _revertTimeFieldsToSaved() {
+    for (final mode in [RhythmMode.day, RhythmMode.sleep]) {
+      final current = _transitionConfigs[mode];
+      final saved = _savedTransitionConfigs[mode];
+      if (current == null || saved == null) continue;
+      _transitionConfigs[mode] = current.copyWith(trigger: saved.trigger);
+    }
+  }
+
+  void _syncButtonBindingFromServer() {
+    final binding = _serverSync.daySleepToggleInputBinding;
+    if (_bindState != _ButtonBindState.idle) return;
+    _buttonEnabled = binding?.enabled ?? false;
+    _toggleButtonDeviceId = binding?.sourceNodeId;
   }
 
   void _setButtonEnabled(bool enabled) {
@@ -539,17 +669,24 @@ class _DefaultTransitionEditorScreenState
         _pendingButton = null;
       }
     });
+    unawaited(_serverSync.setDaySleepToggleButtonEnabled(enabled).then((ok) {
+      if (!mounted || ok) return;
+      setState(() => _syncButtonBindingFromServer());
+      _showSaveFeedback('Could not update Button trigger.', error: true);
+    }));
   }
 
   // ── Listen flow ──────────────────────────────────────────────────────────
   // The user taps Listen; the server forwards the next physical press; we
   // surface it as a pending candidate and ask the user to confirm. The
-  // server-forward step is currently simulated by a short timer — the real
-  // wiring will subscribe to the hub-event stream and call
-  // `_onButtonDetected` with the actual device payload.
+  // backend binding is committed only after confirmation.
 
   void _startListening() {
     HapticFeedback.lightImpact();
+    if (_serverSync.isDemoMode && _buttonDevices.isEmpty) {
+      _showSaveFeedback('No button devices found.', error: true);
+      return;
+    }
     setState(() {
       _bindState = _ButtonBindState.listening;
       _pendingButton = null;
@@ -558,10 +695,12 @@ class _DefaultTransitionEditorScreenState
       ..reset()
       ..repeat();
     _simulatedDetectionTimer?.cancel();
-    _simulatedDetectionTimer = Timer(const Duration(milliseconds: 2400), () {
-      if (!mounted || _bindState != _ButtonBindState.listening) return;
-      _onButtonDetected(_simulateServerForwardedPress());
-    });
+    if (_serverSync.isDemoMode) {
+      _simulatedDetectionTimer = Timer(const Duration(milliseconds: 2400), () {
+        if (!mounted || _bindState != _ButtonBindState.listening) return;
+        _onButtonDetected(_simulateServerForwardedPress());
+      });
+    }
   }
 
   void _cancelListening() {
@@ -576,6 +715,7 @@ class _DefaultTransitionEditorScreenState
 
   void _onButtonDetected(_MockButtonDevice device) {
     HapticFeedback.mediumImpact();
+    _simulatedDetectionTimer?.cancel();
     _listenPulseController.stop();
     setState(() {
       _bindState = _ButtonBindState.detected;
@@ -583,42 +723,89 @@ class _DefaultTransitionEditorScreenState
     });
   }
 
+  void _handleInputEvent(RhythmInputEvent event) {
+    if (!mounted || _bindState != _ButtonBindState.listening) return;
+    if (event is! RhythmButtonInputEvent) return;
+    final sourceNodeId = event.sourceNodeId;
+    if (sourceNodeId == null || sourceNodeId.isEmpty) return;
+
+    final known = _resolveButtonDevice(sourceNodeId);
+    _onButtonDetected(
+      _MockButtonDevice(
+        id: sourceNodeId,
+        name: known?.name ??
+            event.nativeDeviceId ??
+            event.nativeButtonId ??
+            'Button',
+        location: known?.location ?? event.hubType,
+        buttonAction: event.buttonAction,
+      ),
+    );
+  }
+
   void _confirmDetected() {
     final pending = _pendingButton;
     if (pending == null) return;
     HapticFeedback.mediumImpact();
+    unawaited(_confirmDetectedAsync(pending));
+  }
+
+  Future<void> _confirmDetectedAsync(_MockButtonDevice pending) async {
+    final success = await _serverSync.bindDaySleepToggleButton(
+      pending.id,
+      buttonAction: pending.buttonAction ?? RhythmButtonAction.onPress,
+    );
+    if (!mounted) return;
+    if (!success) {
+      _showSaveFeedback('Could not bind Button trigger.', error: true);
+      return;
+    }
     setState(() {
+      _buttonEnabled = true;
       _toggleButtonDeviceId = pending.id;
       _bindState = _ButtonBindState.idle;
       // Keep `_pendingButton` so the summary chips can resolve a name for
       // a device that wasn't in the seed list.
     });
+    _lastButtonBindingSignature = _serverSync.daySleepToggleBindingSignature;
   }
 
   _MockButtonDevice _simulateServerForwardedPress() {
-    // Stand-in for the real hub-event payload. Picks a candidate that isn't
-    // already the bound device so the demo doesn't feel like a no-op.
-    final pool = _mockButtonDevices
-        .where((d) => d.id != _toggleButtonDeviceId)
-        .toList();
+    final pool =
+        _buttonDevices.where((d) => d.id != _toggleButtonDeviceId).toList();
     if (pool.isNotEmpty) {
       return pool[math.Random().nextInt(pool.length)];
     }
-    return const _MockButtonDevice(
-      id: 'unknown',
-      name: 'Unknown remote',
-      location: 'New device',
-    );
+    return _buttonDevices.first;
   }
 
   _MockButtonDevice? _resolveButtonDevice(String? id) {
     if (id == null) return null;
-    for (final d in _mockButtonDevices) {
+    for (final d in _buttonDevices) {
       if (d.id == id) return d;
     }
     final pending = _pendingButton;
     if (pending != null && pending.id == id) return pending;
     return null;
+  }
+
+  List<_MockButtonDevice> get _buttonDevices {
+    return _serverSync.buttonTopologyNodes.map((node) {
+      final parentName = node.parentId == null
+          ? null
+          : _serverSync.topologyNodeById(node.parentId!)?.name;
+      return _MockButtonDevice(
+        id: node.id,
+        name: node.name.isEmpty ? 'Button' : node.name,
+        location: parentName,
+      );
+    }).toList(growable: false);
+  }
+
+  String _buttonDevicesSignature() {
+    return _serverSync.buttonTopologyNodes
+        .map((node) => '${node.id}:${node.name}:${node.parentId ?? ''}')
+        .join('|');
   }
 
   bool _transitionConfigEquals(
@@ -633,7 +820,8 @@ class _DefaultTransitionEditorScreenState
         a.durationMs == b.durationMs &&
         a.trigger.kind == b.trigger.kind &&
         a.trigger.event == b.trigger.event &&
-        a.trigger.time == b.trigger.time;
+        a.trigger.time == b.trigger.time &&
+        a.triggerEnabled == b.triggerEnabled;
   }
 
   bool _transitionConfigMapsEqual(
@@ -662,7 +850,7 @@ class _DefaultTransitionEditorScreenState
       if (_isSupportedTransition(transition)) {
         final replacement = drafts[transition.toMode];
         if (replacement != null) {
-          merged.add(replacement);
+          merged.add(replacement.copyWith(triggerEnabled: _timeEnabled));
           includedModes.add(transition.toMode);
           continue;
         }
@@ -674,7 +862,7 @@ class _DefaultTransitionEditorScreenState
       if (includedModes.contains(mode)) continue;
       final transition = drafts[mode];
       if (transition != null) {
-        merged.add(transition);
+        merged.add(transition.copyWith(triggerEnabled: _timeEnabled));
       }
     }
 
@@ -691,13 +879,13 @@ class _DefaultTransitionEditorScreenState
     HapticFeedback.mediumImpact();
     setState(() => _isSaving = true);
 
-    final savedSnapshot = Map<RhythmMode, RhythmModeTransitionConfig>.of(
-      _transitionConfigs,
-    );
     final savedTimeSnapshot = _timeEnabled;
-    final success = await _serverSync.api.setTransitions(
-      _buildTransitionsForSave(savedSnapshot),
+    final transitionsForSave = _buildTransitionsForSave(_transitionConfigs);
+    final savedSnapshot = _transitionConfigsFrom(
+      transitionsForSave,
+      defaultTriggerEnabled: savedTimeSnapshot,
     );
+    final success = await _serverSync.api.setTransitions(transitionsForSave);
     if (success) {
       await _serverSync.fullRefresh();
     }
@@ -707,6 +895,7 @@ class _DefaultTransitionEditorScreenState
     setState(() {
       _isSaving = false;
       if (success) {
+        _transitionConfigs = Map.of(savedSnapshot);
         _savedTransitionConfigs = savedSnapshot;
         _savedTimeEnabled = savedTimeSnapshot;
       }
@@ -720,14 +909,14 @@ class _DefaultTransitionEditorScreenState
 
   /// Throws away in-flight Time-section edits and returns to the last saved
   /// snapshot. Intentionally does not touch Button-section state — that
-  /// section commits inline through its own Listen → Confirm flow.
+  /// section commits inline through its own Listen → Confirm flow. Duration
+  /// also commits inline (on slider release / Auto toggle) and lives
+  /// outside this accordion, so it is preserved across a Revert too.
   void _resetChanges() {
     if (!_hasUnsavedChanges) return;
     HapticFeedback.mediumImpact();
     setState(() {
-      _transitionConfigs = Map<RhythmMode, RhythmModeTransitionConfig>.of(
-        _savedTransitionConfigs,
-      );
+      _revertTimeFieldsToSaved();
       _timeEnabled = _savedTimeEnabled;
       _handleHours.clear();
       _dragMode = null;
@@ -1001,9 +1190,7 @@ class _DefaultTransitionEditorScreenState
       header: _SourceSectionHeader(
         icon: Icons.access_time_rounded,
         label: 'Time',
-        sublabel: _timeEnabled
-            ? 'Transitions follow a schedule'
-            : 'Off',
+        sublabel: _timeEnabled ? 'Transitions follow a schedule' : 'Off',
         accent: _chromeAccent,
         enabled: _timeEnabled,
         onChanged: _setTimeEnabled,
@@ -1016,7 +1203,6 @@ class _DefaultTransitionEditorScreenState
             Padding(
               padding: const EdgeInsets.fromLTRB(4, 4, 4, 4),
               child: _buildSourceSummaryChips(
-                source: _SummarySource.time,
                 dayColor: dayColor,
                 sleepColor: sleepColor,
               ),
@@ -1053,9 +1239,7 @@ class _DefaultTransitionEditorScreenState
       header: _SourceSectionHeader(
         icon: Icons.radio_button_checked_rounded,
         label: 'Button',
-        sublabel: _buttonEnabled
-            ? 'One button toggles Day ⇄ Sleep'
-            : 'Off',
+        sublabel: _buttonEnabled ? 'One button toggles Day ⇄ Sleep' : 'Off',
         accent: _chromeAccent,
         enabled: _buttonEnabled,
         onChanged: _setButtonEnabled,
@@ -1076,10 +1260,11 @@ class _DefaultTransitionEditorScreenState
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(4, 4, 4, 12),
-            child: _buildSourceSummaryChips(
-              source: _SummarySource.button,
+            child: _ButtonToggleBridgeChip(
               dayColor: dayColor,
               sleepColor: sleepColor,
+              deviceName: _resolveButtonDevice(_toggleButtonDeviceId)?.name ??
+                  _pendingButton?.name,
             ),
           ),
           _ButtonListenStage(
@@ -1149,12 +1334,10 @@ class _DefaultTransitionEditorScreenState
     );
   }
 
-  /// Pair of summary chips for a single source (TIME or BUTTON), rendered
-  /// inside the matching accordion. Each chip shows what *this source*
-  /// contributes for that direction — independent of whether the other
-  /// source is on.
+  /// Pair of summary chips for the TIME source, rendered inside the time
+  /// accordion. The BUTTON source uses [_ButtonToggleBridgeChip] instead
+  /// because a single button drives both directions.
   Widget _buildSourceSummaryChips({
-    required _SummarySource source,
     required Color dayColor,
     required Color sleepColor,
   }) {
@@ -1166,7 +1349,6 @@ class _DefaultTransitionEditorScreenState
             child: _buildModeSummaryChip(
               mode: RhythmMode.day,
               modeColor: dayColor,
-              source: source,
             ),
           ),
           const SizedBox(width: 8),
@@ -1174,7 +1356,6 @@ class _DefaultTransitionEditorScreenState
             child: _buildModeSummaryChip(
               mode: RhythmMode.sleep,
               modeColor: sleepColor,
-              source: source,
             ),
           ),
         ],
@@ -1185,40 +1366,29 @@ class _DefaultTransitionEditorScreenState
   Widget _buildModeSummaryChip({
     required RhythmMode mode,
     required Color modeColor,
-    required _SummarySource source,
   }) {
     final config = _transitionConfigs[mode];
     if (config == null) return const SizedBox.shrink();
     final isDraggingThis = _dragMode == mode;
 
-    final String valueLine;
-    if (source == _SummarySource.time) {
-      String triggerLabel;
-      double? triggerHour;
-      if (isDraggingThis &&
-          _proximateAnchor != null &&
-          _anchorProximity > 0.5) {
-        triggerLabel = _shortAnchorLabel(_proximateAnchor!);
-        triggerHour = _proximateAnchor!.hour;
-      } else if (isDraggingThis) {
-        triggerLabel = '';
-        triggerHour = _dragPreviewHour;
-      } else {
-        triggerLabel = _shortTriggerLabel(config.trigger);
-        triggerHour = _triggerTimeHoursForMode(mode);
-      }
-      final timeText = triggerHour != null ? _fmtTime(triggerHour) : null;
-      if (triggerLabel.isNotEmpty && timeText != null) {
-        valueLine = '$triggerLabel  ·  $timeText';
-      } else {
-        valueLine = timeText ?? triggerLabel;
-      }
+    String triggerLabel;
+    double? triggerHour;
+    if (isDraggingThis && _proximateAnchor != null && _anchorProximity > 0.5) {
+      triggerLabel = _shortAnchorLabel(_proximateAnchor!);
+      triggerHour = _proximateAnchor!.hour;
+    } else if (isDraggingThis) {
+      triggerLabel = '';
+      triggerHour = _dragPreviewHour;
     } else {
-      // _SummarySource.button — show the same toggle device on both sides
-      // (it's bidirectional). Same device on Day Start AND Sleep Start
-      // reads as "this button starts Day; this same button starts Sleep".
-      final device = _resolveButtonDevice(_toggleButtonDeviceId);
-      valueLine = device?.name ?? 'Pick a button';
+      triggerLabel = _shortTriggerLabel(config.trigger);
+      triggerHour = _triggerTimeHoursForMode(mode);
+    }
+    final timeText = triggerHour != null ? _fmtTime(triggerHour) : null;
+    final String valueLine;
+    if (triggerLabel.isNotEmpty && timeText != null) {
+      valueLine = '$triggerLabel  ·  $timeText';
+    } else {
+      valueLine = timeText ?? triggerLabel;
     }
 
     return Container(
@@ -1233,17 +1403,20 @@ class _DefaultTransitionEditorScreenState
         mainAxisSize: MainAxisSize.min,
         children: [
           Row(
-            mainAxisSize: MainAxisSize.min,
             children: [
               Icon(_modeIcon(mode), size: 14, color: modeColor),
               const SizedBox(width: 6),
-              Text(
-                '${_modeLabel(mode)} Start',
-                style: TextStyle(
-                  color: modeColor,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.4,
+              Flexible(
+                child: Text(
+                  '${_modeLabel(mode)} Start',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: modeColor,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.4,
+                  ),
                 ),
               ),
             ],
@@ -1555,8 +1728,7 @@ class _DefaultTransitionEditorScreenState
     final rawHour = geometry.hourFromPosition(position);
     // Quantize the drag to 5-minute stops so small finger jitter doesn't
     // shift the time around.
-    final steppedHour =
-        (rawHour / _dragStepHours).round() * _dragStepHours;
+    final steppedHour = (rawHour / _dragStepHours).round() * _dragStepHours;
     final draggedHour = _clampDraggedHour(mode, steppedHour);
 
     // Snap visually during drag so the orb locks onto solar events
@@ -1807,6 +1979,35 @@ class _DefaultTransitionEditorScreenState
 
   bool get _durationAuto => _config.duration.isAuto;
 
+  int get _fineDurationSteps =>
+      ((_bendDurationSeconds - _minDurationSeconds) / _fineDurationStepSeconds)
+          .round();
+  int get _coarseDurationSteps =>
+      ((_maxDurationSeconds - _bendDurationSeconds) /
+              _coarseDurationStepSeconds)
+          .round();
+  int get _totalDurationSteps => _fineDurationSteps + _coarseDurationSteps;
+
+  double _durationStepToSeconds(int step) {
+    if (step <= _fineDurationSteps) {
+      return _minDurationSeconds + step * _fineDurationStepSeconds;
+    }
+    return _bendDurationSeconds +
+        (step - _fineDurationSteps) * _coarseDurationStepSeconds;
+  }
+
+  int _durationSecondsToStep(double seconds) {
+    if (seconds <= _bendDurationSeconds) {
+      return ((seconds - _minDurationSeconds) / _fineDurationStepSeconds)
+          .round()
+          .clamp(0, _fineDurationSteps);
+    }
+    return (_fineDurationSteps +
+            (seconds - _bendDurationSeconds) / _coarseDurationStepSeconds)
+        .round()
+        .clamp(0, _totalDurationSteps);
+  }
+
   Widget _buildDurationRow({required bool compactLayout}) {
     final accentColor = widget.profileColors[_selectedMode] ??
         _fallbackModeColor(_selectedMode);
@@ -1814,9 +2015,7 @@ class _DefaultTransitionEditorScreenState
     final clampedDurationSeconds = (_config.durationMs / 1000.0)
         .clamp(_minDurationSeconds, _maxDurationSeconds)
         .toDouble();
-    final sliderSeconds =
-        (clampedDurationSeconds / _durationStepSeconds).round() *
-            _durationStepSeconds;
+    final sliderStep = _durationSecondsToStep(clampedDurationSeconds);
 
     return Container(
       padding: EdgeInsets.fromLTRB(
@@ -1872,6 +2071,7 @@ class _DefaultTransitionEditorScreenState
                   } else {
                     _updateSelectedDuration(const TransitionDuration.auto());
                   }
+                  unawaited(_commitDurationInline());
                 },
                 child: Container(
                   padding:
@@ -1919,10 +2119,11 @@ class _DefaultTransitionEditorScreenState
                             activeTrackColor: accentColor,
                             inactiveTrackColor:
                                 accentColor.withValues(alpha: 0.12),
-                            activeTickMarkColor:
-                                accentColor.withValues(alpha: 0.45),
-                            inactiveTickMarkColor:
-                                accentColor.withValues(alpha: 0.24),
+                            // Tick marks are suppressed because the piecewise
+                            // step count (~56) would otherwise stripe the
+                            // track. The bend point is communicated via the
+                            // end labels instead.
+                            tickMarkShape: SliderTickMarkShape.noTickMark,
                             thumbColor: accentColor,
                             overlayColor: accentColor.withValues(alpha: 0.12),
                             trackHeight: 4,
@@ -1935,38 +2136,48 @@ class _DefaultTransitionEditorScreenState
                           ),
                           child: Slider(
                             key: ValueKey('duration-slider-$modeKey'),
-                            value: sliderSeconds,
-                            min: _minDurationSeconds,
-                            max: _maxDurationSeconds,
-                            divisions:
-                                ((_maxDurationSeconds - _minDurationSeconds) /
-                                        _durationStepSeconds)
-                                    .round(),
+                            value: sliderStep.toDouble(),
+                            min: 0,
+                            max: _totalDurationSteps.toDouble(),
+                            divisions: _totalDurationSteps,
                             onChanged: (v) {
-                              final roundedSeconds =
-                                  (v / _durationStepSeconds).round() *
-                                      _durationStepSeconds;
+                              final seconds = _durationStepToSeconds(v.round());
                               _updateSelectedDuration(
                                 TransitionDuration.fixed(
-                                  (roundedSeconds * 1000).round(),
+                                  (seconds * 1000).round(),
                                 ),
                               );
+                            },
+                            onChangeEnd: (_) {
+                              unawaited(_commitDurationInline());
                             },
                           ),
                         ),
                         Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 6),
                           child: Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
                               Text(
-                                '10s',
+                                '1s',
                                 style: TextStyle(
                                   color: CelestialColors.textSecondary
                                       .withValues(alpha: 0.4),
                                   fontSize: 11,
                                 ),
                               ),
+                              const Spacer(),
+                              // Bend hint sits at the 30s waypoint to signal
+                              // the granular→coarse handoff without on-track
+                              // tick marks.
+                              Text(
+                                '30s',
+                                style: TextStyle(
+                                  color: CelestialColors.textSecondary
+                                      .withValues(alpha: 0.35),
+                                  fontSize: 11,
+                                ),
+                              ),
+                              const Spacer(),
                               Text(
                                 '5m',
                                 style: TextStyle(
@@ -1988,42 +2199,25 @@ class _DefaultTransitionEditorScreenState
   }
 }
 
-/// Which source (Time or Button) a Day Start / Sleep Start chip is
-/// summarising. Each accordion renders the pair scoped to its own source.
-enum _SummarySource { time, button }
-
 /// State machine for the Button section's Listen flow. `idle` covers both
 /// "nothing bound yet" and "bound, resting" — the bound device is what
 /// disambiguates them in the UI.
 enum _ButtonBindState { idle, listening, detected }
 
-/// Placeholder model for paired button devices. Will be replaced by whatever
-/// shape the real device API hands back. Kept private so the swap is
-/// contained.
+/// Page-local view model for button devices surfaced by server topology.
 class _MockButtonDevice {
   final String id;
   final String name;
   final String? location;
+  final RhythmButtonAction? buttonAction;
 
   const _MockButtonDevice({
     required this.id,
     required this.name,
     this.location,
+    this.buttonAction,
   });
 }
-
-const List<_MockButtonDevice> _mockButtonDevices = [
-  _MockButtonDevice(
-    id: 'nightstand',
-    name: 'Nightstand Button',
-    location: 'Bedroom',
-  ),
-  _MockButtonDevice(
-    id: 'hallway',
-    name: 'Hallway Switch',
-    location: 'Living Room',
-  ),
-];
 
 /// Card-style sub-section inside the hero, with a header (icon + label +
 /// switch) and an animated body that collapses when [enabled] is false.
@@ -2111,9 +2305,8 @@ class _SourceSectionHeader extends StatelessWidget {
               alignment: Alignment.center,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: enabled
-                    ? CelestialColors.backgroundCard
-                    : _surfaceRecessed,
+                color:
+                    enabled ? CelestialColors.backgroundCard : _surfaceRecessed,
                 border: Border.all(
                   color: enabled ? _hairlineStrong : _hairlineSoft,
                 ),
@@ -2199,9 +2392,7 @@ class _CelestialSwitch extends StatelessWidget {
           borderRadius: BorderRadius.circular(trackHeight / 2),
           color: value ? accent.withValues(alpha: 0.20) : _surfaceRecessed,
           border: Border.all(
-            color: value
-                ? accent.withValues(alpha: 0.45)
-                : _hairlineStrong,
+            color: value ? accent.withValues(alpha: 0.45) : _hairlineStrong,
             width: 1,
           ),
           boxShadow: [
@@ -2241,6 +2432,252 @@ class _CelestialSwitch extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Button toggle bridge chip
+//
+// Replaces the paired Day Start / Sleep Start chips inside the Button source
+// accordion. A single button is wired to toggle BOTH starts, so showing two
+// separate chips here implies two distinct triggers and misleads. Instead,
+// this widget renders one card with Day Start on the left, Sleep Start on
+// the right, and an explicit `⇄` bridge between them carrying the device
+// name — visually communicating "one press flips Day ⇄ Sleep".
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class _ButtonToggleBridgeChip extends StatelessWidget {
+  final Color dayColor;
+  final Color sleepColor;
+  final String? deviceName;
+
+  const _ButtonToggleBridgeChip({
+    required this.dayColor,
+    required this.sleepColor,
+    required this.deviceName,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final bound = deviceName != null && deviceName!.trim().isNotEmpty;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(4, 10, 4, 10),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        // The horizontal gradient is the load-bearing visual cue: a tinted
+        // wash flowing day → sleep makes the card read as one continuous
+        // surface that *both* modes share, instead of two halves sitting
+        // next to each other.
+        gradient: LinearGradient(
+          begin: Alignment.centerLeft,
+          end: Alignment.centerRight,
+          colors: [
+            dayColor.withValues(alpha: 0.10),
+            Color.lerp(dayColor, sleepColor, 0.5)!.withValues(alpha: 0.05),
+            sleepColor.withValues(alpha: 0.10),
+          ],
+          stops: const [0.0, 0.5, 1.0],
+        ),
+        border: Border.all(
+          color: Color.lerp(dayColor, sleepColor, 0.5)!.withValues(alpha: 0.22),
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(
+                child: _BridgeEnd(
+                  mode: RhythmMode.day,
+                  color: dayColor,
+                  alignEnd: false,
+                ),
+              ),
+              _BridgeConnector(
+                dayColor: dayColor,
+                sleepColor: sleepColor,
+              ),
+              Expanded(
+                child: _BridgeEnd(
+                  mode: RhythmMode.sleep,
+                  color: sleepColor,
+                  alignEnd: true,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          // When a button is bound, surface its name in a plate centered
+          // under the connector. When unbound, drop the plate entirely (it
+          // read as a tappable target) and replace it with a non-interactive
+          // caption pointing at the Listen action right below.
+          if (bound)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(10, 5, 10, 6),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.04),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: Color.lerp(dayColor, sleepColor, 0.5)!
+                        .withValues(alpha: 0.28),
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      Icons.radio_button_checked_rounded,
+                      size: 12,
+                      color: Color.lerp(dayColor, sleepColor, 0.5)!
+                          .withValues(alpha: 0.85),
+                    ),
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: Text(
+                        deviceName!.trim(),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: CelestialColors.textPrimary
+                              .withValues(alpha: 0.92),
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.1,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          if (bound) const SizedBox(height: 4),
+          // Footer doubles as the prompt-to-act when unbound; once bound it
+          // reverts to describing the toggle behavior.
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              if (!bound) ...[
+                Icon(
+                  Icons.south_rounded,
+                  size: 11,
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.55),
+                ),
+                const SizedBox(width: 5),
+              ],
+              Text(
+                bound
+                    ? 'One press toggles Day ⇄ Sleep'
+                    : 'Listen below to bind a button',
+                style: TextStyle(
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.55),
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One end of the bridge — Day on the left, Sleep on the right. Renders the
+/// mode icon + `MODE START` label in the mode's accent color so the chip's
+/// edges still telegraph which mode they correspond to.
+class _BridgeEnd extends StatelessWidget {
+  final RhythmMode mode;
+  final Color color;
+  final bool alignEnd;
+
+  const _BridgeEnd({
+    required this.mode,
+    required this.color,
+    required this.alignEnd,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final children = <Widget>[
+      Icon(_modeIcon(mode), size: 14, color: color),
+      const SizedBox(width: 6),
+      Flexible(
+        child: Text(
+          '${_modeLabel(mode).toUpperCase()} START',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            color: color,
+            fontSize: 11.5,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 0.6,
+          ),
+        ),
+      ),
+    ];
+    return Padding(
+      padding: alignEnd
+          ? const EdgeInsets.only(right: 10)
+          : const EdgeInsets.only(left: 10),
+      child: Row(
+        mainAxisAlignment:
+            alignEnd ? MainAxisAlignment.end : MainAxisAlignment.start,
+        children: alignEnd ? children.reversed.toList() : children,
+      ),
+    );
+  }
+}
+
+/// Pill in the dead center of the bridge carrying the `⇄` glyph. This is
+/// the visual hinge that says "these two ends share a single trigger".
+class _BridgeConnector extends StatelessWidget {
+  final Color dayColor;
+  final Color sleepColor;
+
+  const _BridgeConnector({
+    required this.dayColor,
+    required this.sleepColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final blend = Color.lerp(dayColor, sleepColor, 0.5)!;
+    return Container(
+      width: 30,
+      height: 22,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        shape: BoxShape.rectangle,
+        borderRadius: BorderRadius.circular(11),
+        gradient: LinearGradient(
+          colors: [
+            dayColor.withValues(alpha: 0.22),
+            sleepColor.withValues(alpha: 0.22),
+          ],
+        ),
+        border: Border.all(color: blend.withValues(alpha: 0.40)),
+        boxShadow: [
+          BoxShadow(
+            color: blend.withValues(alpha: 0.18),
+            blurRadius: 10,
+            spreadRadius: -2,
+          ),
+        ],
+      ),
+      child: Icon(
+        Icons.compare_arrows_rounded,
+        size: 14,
+        color: blend.withValues(alpha: 0.95),
       ),
     );
   }
@@ -2679,8 +3116,7 @@ class _DetectedDeviceCard extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    color:
-                        CelestialColors.textSecondary.withValues(alpha: 0.7),
+                    color: CelestialColors.textSecondary.withValues(alpha: 0.7),
                     fontSize: 11,
                     fontWeight: FontWeight.w500,
                     letterSpacing: 0.2,
@@ -3004,7 +3440,7 @@ class _RadarStage extends StatelessWidget {
           repaint: repaint,
         ),
         child: Center(
-          child: _RadarCore(accent: accent, mode: mode),
+          child: _RadarCore(accent: accent, mode: mode, pulse: pulse),
         ),
       ),
     );
@@ -3014,32 +3450,70 @@ class _RadarStage extends StatelessWidget {
 class _RadarCore extends StatelessWidget {
   final Color accent;
   final _RadarStageMode mode;
+  // Provided while listening so the target itself breathes in sync with the
+  // outgoing rings. Null in dormant/locked states keeps it perfectly still.
+  final Animation<double>? pulse;
 
-  const _RadarCore({required this.accent, required this.mode});
+  const _RadarCore({
+    required this.accent,
+    required this.mode,
+    required this.pulse,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final activePulse = mode == _RadarStageMode.scanning ? pulse : null;
+    if (activePulse == null) {
+      return _buildCore(scale: 1.0, glowAlpha: 0.28, fillAlpha: 0.12);
+    }
+    return AnimatedBuilder(
+      animation: activePulse,
+      builder: (context, _) {
+        // Single-pulse-per-cycle breath, peaking mid-cycle so the target
+        // visibly "ticks" with each ring emission.
+        final wave = math.sin(activePulse.value * math.pi);
+        return _buildCore(
+          scale: 1.0 + wave * 0.07,
+          glowAlpha: 0.28 + wave * 0.20,
+          fillAlpha: 0.12 + wave * 0.08,
+        );
+      },
+    );
+  }
+
+  Widget _buildCore({
+    required double scale,
+    required double glowAlpha,
+    required double fillAlpha,
+  }) {
     final size = mode == _RadarStageMode.locked ? 48.0 : 52.0;
     final icon = mode == _RadarStageMode.locked
         ? Icons.check_rounded
         : Icons.radio_button_checked_rounded;
-    return Container(
-      width: size,
-      height: size,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: accent.withValues(alpha: 0.12),
-        border: Border.all(color: accent.withValues(alpha: 0.55), width: 1.4),
-        boxShadow: [
-          BoxShadow(
-            color: accent.withValues(alpha: 0.28),
-            blurRadius: 18,
-            spreadRadius: -2,
-          ),
-        ],
+    return Transform.scale(
+      scale: scale,
+      child: Container(
+        width: size,
+        height: size,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: accent.withValues(alpha: fillAlpha),
+          border: Border.all(color: accent.withValues(alpha: 0.55), width: 1.4),
+          boxShadow: [
+            BoxShadow(
+              color: accent.withValues(alpha: glowAlpha),
+              blurRadius: 18,
+              spreadRadius: -2,
+            ),
+          ],
+        ),
+        child: Icon(
+          icon,
+          size: size * 0.46,
+          color: accent.withValues(alpha: 0.95),
+        ),
       ),
-      child: Icon(icon, size: size * 0.46, color: accent.withValues(alpha: 0.95)),
     );
   }
 }
@@ -3115,32 +3589,6 @@ class _RadarPainter extends CustomPainter {
           ..color = accent.withValues(alpha: alpha),
       );
     }
-    // Sweeping crosshair tick — a single rotating spoke that reads as the
-    // signal direction. Subtle so it doesn't compete with the rings.
-    final angle = progress * 2 * math.pi;
-    final inner = maxR * 0.34;
-    final outer = maxR * 0.92;
-    final tip = Offset(
-      center.dx + math.cos(angle) * outer,
-      center.dy + math.sin(angle) * outer,
-    );
-    final root = Offset(
-      center.dx + math.cos(angle) * inner,
-      center.dy + math.sin(angle) * inner,
-    );
-    canvas.drawLine(
-      root,
-      tip,
-      Paint()
-        ..strokeWidth = 1.4
-        ..strokeCap = StrokeCap.round
-        ..shader = LinearGradient(
-          colors: [
-            accent.withValues(alpha: 0.55),
-            accent.withValues(alpha: 0.0),
-          ],
-        ).createShader(Rect.fromPoints(root, tip)),
-    );
   }
 
   void _paintLocked(Canvas canvas, Offset center, double maxR) {
@@ -3175,8 +3623,10 @@ class _RadarPainter extends CustomPainter {
       final cos = math.cos(angle);
       final sin = math.sin(angle);
       canvas.drawLine(
-        Offset(center.dx + cos * (ringR + tickIn), center.dy + sin * (ringR + tickIn)),
-        Offset(center.dx + cos * (ringR + tickOut), center.dy + sin * (ringR + tickOut)),
+        Offset(center.dx + cos * (ringR + tickIn),
+            center.dy + sin * (ringR + tickIn)),
+        Offset(center.dx + cos * (ringR + tickOut),
+            center.dy + sin * (ringR + tickOut)),
         tickPaint,
       );
     }
@@ -3184,9 +3634,7 @@ class _RadarPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _RadarPainter old) =>
-      old.progress != progress ||
-      old.mode != mode ||
-      old.accent != accent;
+      old.progress != progress || old.mode != mode || old.accent != accent;
 }
 
 /// Quiet outline pill — left half of the inline save/reset cluster in the

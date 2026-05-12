@@ -584,6 +584,14 @@ void main() {
     expect(api.getProfilesCallCount, 0);
     expect(find.text('Day Profile'), findsNothing);
 
+    await tester.tap(find.text('Transitions'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(find.text('How Day and Sleep change hands'), findsOneWidget);
+    expect(api.getModeCallCount, 0);
+    expect(api.getProfilesCallCount, 0);
+
     await tester.tap(find.text('Day'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 10));

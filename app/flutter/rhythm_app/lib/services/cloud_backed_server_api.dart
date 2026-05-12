@@ -451,6 +451,76 @@ class CloudBackedServerApi {
     return _delegate.triggerTransition(id);
   }
 
+  Future<List<RhythmInputBinding>> getInputBindings() {
+    return _delegate.getInputBindings();
+  }
+
+  Future<List<RhythmInputBinding>> createPresetInputBinding({
+    required RhythmInputBindingPreset preset,
+    required String sourceNodeId,
+    RhythmButtonAction? buttonAction,
+    bool enabled = true,
+  }) {
+    return _delegate.createPresetInputBinding(
+      preset: preset,
+      sourceNodeId: sourceNodeId,
+      buttonAction: buttonAction,
+      enabled: enabled,
+    );
+  }
+
+  Future<List<RhythmInputBinding>> createDaySleepToggleInputBinding({
+    required String sourceNodeId,
+    RhythmButtonAction? buttonAction = RhythmButtonAction.onPress,
+    bool enabled = true,
+  }) {
+    return _delegate.createDaySleepToggleInputBinding(
+      sourceNodeId: sourceNodeId,
+      buttonAction: buttonAction,
+      enabled: enabled,
+    );
+  }
+
+  Future<List<RhythmInputBinding>> setPresetInputBinding({
+    required String id,
+    required RhythmInputBindingPreset preset,
+    required String sourceNodeId,
+    RhythmButtonAction? buttonAction,
+    bool enabled = true,
+  }) {
+    return _delegate.setPresetInputBinding(
+      id: id,
+      preset: preset,
+      sourceNodeId: sourceNodeId,
+      buttonAction: buttonAction,
+      enabled: enabled,
+    );
+  }
+
+  Future<List<RhythmInputBinding>> setDaySleepToggleInputBinding({
+    required String id,
+    required String sourceNodeId,
+    RhythmButtonAction? buttonAction = RhythmButtonAction.onPress,
+    bool enabled = true,
+  }) {
+    return _delegate.setDaySleepToggleInputBinding(
+      id: id,
+      sourceNodeId: sourceNodeId,
+      buttonAction: buttonAction,
+      enabled: enabled,
+    );
+  }
+
+  Future<List<RhythmInputBinding>> setInputBinding(
+    RhythmInputBinding binding,
+  ) {
+    return _delegate.setInputBinding(binding);
+  }
+
+  Future<List<RhythmInputBinding>> deleteInputBinding(String id) {
+    return _delegate.deleteInputBinding(id);
+  }
+
   Future<Map<String, dynamic>?> resolveTriageNewResult(String entryId) {
     return _delegate.resolveTriageNewResult(entryId);
   }

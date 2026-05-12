@@ -62,9 +62,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   bool _hadServerHub = false;
   bool _serverRemovalCleanupPending = false;
 
-  /// Sticky flag: true once the server enters [RhythmConnectionState.reconnecting],
-  /// cleared when [RhythmConnectionState.connected] is reached.  Prevents flashing
-  /// the room grid during the brief `connecting` phase of a reconnect cycle.
+  /// Sticky flag governing the [ServerDisconnectedScreen]. Set true when we
+  /// can't reach the server *and* have never completed a hello with it (so
+  /// we don't flash the disconnect screen during the transient reconnect
+  /// that fires after every save action). Cleared on [RhythmConnectionState.connected].
   bool _serverLostConnection = false;
 
   MainNavTab get _currentTab => _tabs[_tabIndex];
@@ -306,18 +307,25 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     );
     _handleServerHubLifecycle(hasServerHub: hasServerHub);
 
+    // `hasBeenSynced` is the sticky flag (true once a hello has completed,
+    // false only on full hub unpair). Reading the non-sticky `synced` here
+    // would dip false during transient SSE/poll reconnects — including the
+    // reconnect that fires right after any HTTP action against the server
+    // (e.g. toggling the Time/Button trigger switches or starting a listen
+    // for a button press), evicting the user from the Transitions tab back
+    // to Home mid-interaction.
     final serverSynced = context.select<ServerSyncProvider, bool>(
-      (s) => s.synced,
+      (s) => s.hasBeenSynced,
     );
     final visibleTabs = _computeVisibleTabs(serverSynced: serverSynced);
 
     // If the current tab depends on a synced server (e.g. Daily Rhythm) and
-    // the server just went away, bounce the user back to Home.
+    // the server hub was actually unpaired, bounce the user back to Home.
     if (!visibleTabs.contains(_currentTab)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         if (!_computeVisibleTabs(
-                serverSynced: context.read<ServerSyncProvider>().synced)
+                serverSynced: context.read<ServerSyncProvider>().hasBeenSynced)
             .contains(_currentTab)) {
           setState(() {
             _tabIndex = 0;
@@ -344,9 +352,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     );
   }
 
-  /// Bottom-nav tab visibility — Daily Rhythm is hidden while no Rhythm
-  /// server is synced because the orbital editor renders without real
-  /// profile data and looks wrong.
+  /// Bottom-nav tab visibility — Daily Rhythm is hidden until the Rhythm
+  /// server has completed at least one hello (otherwise the orbital editor
+  /// renders without real profile data and looks wrong). Uses a sticky
+  /// `hasBeenSynced` signal so the tab does not flicker out during
+  /// transient reconnects (e.g. pull-to-refresh).
   List<MainNavTab> _computeVisibleTabs({required bool serverSynced}) {
     return [
       MainNavTab.home,
@@ -415,11 +425,22 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         final serverHub = homeProvider.getFirstHubOfType(HubType.server);
         final state = serverSync.connectionState;
 
-        // Track server connection loss across rebuild cycles.
-        if (state == RhythmConnectionState.reconnecting) {
-          _serverLostConnection = true;
-        } else if (state == RhythmConnectionState.connected) {
+        // Govern the disconnect screen:
+        //   • `connected`              → clear the flag, show the room grid.
+        //   • `disconnected`           → flag it, hub is truly gone.
+        //   • `reconnecting` (initial, never synced)  → flag it (hub looks
+        //     unreachable from cold start).
+        //   • `reconnecting` (after a clean sync)     → do NOT flag — this
+        //     is the transient blip that fires after every HTTP action and
+        //     would otherwise flash the disconnect screen on every save.
+        //   • `connecting` (first-attempt phase)      → leave alone so the
+        //     "Setting up…" connecting state can render.
+        if (state == RhythmConnectionState.connected) {
           _serverLostConnection = false;
+        } else if (state == RhythmConnectionState.disconnected ||
+            (state == RhythmConnectionState.reconnecting &&
+                !serverSync.hasBeenSynced)) {
+          _serverLostConnection = true;
         }
 
         if (serverHub != null) {

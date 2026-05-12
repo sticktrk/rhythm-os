@@ -125,6 +125,9 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Saved mode transitions from the server.
   List<RhythmModeTransitionConfig> _modeTransitions = const [];
 
+  /// Physical input bindings from the server.
+  List<RhythmInputBinding> _inputBindings = const [];
+
   /// Mode configs from the server (profile routing per mode).
   List<RhythmModeConfig> _modeConfigs = const [];
 
@@ -153,6 +156,15 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Whether we're currently connected and synced.
   bool get synced => _connection.connected || HueServiceLocator.isDemoMode;
+
+  /// Sticky flag: true once we've completed at least one hello with the
+  /// currently paired server hub. Stays true across transient reconnects
+  /// (e.g. pull-to-refresh), and resets only when the hub is unpaired and
+  /// the connection drops to `disconnected`. Used by UI surfaces that should
+  /// not flicker out during reconnect — like the Transitions bottom-nav tab.
+  bool _hasBeenSynced = false;
+  bool get hasBeenSynced =>
+      _hasBeenSynced || _connection.connected || HueServiceLocator.isDemoMode;
 
   /// Whether the server can dispatch room actions.
   bool get canDispatchActions =>
@@ -189,6 +201,31 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Saved mode transitions.
   List<RhythmModeTransitionConfig> get modeTransitions => _modeTransitions;
+
+  /// Physical input bindings.
+  List<RhythmInputBinding> get inputBindings => _inputBindings;
+
+  /// Current day/sleep toggle binding, if configured.
+  RhythmInputBinding? get daySleepToggleInputBinding {
+    for (final binding in _inputBindings) {
+      if (binding.preset == RhythmInputBindingPreset.daySleepToggle) {
+        return binding;
+      }
+    }
+    return null;
+  }
+
+  /// Stable summary for page widgets that need to detect binding changes.
+  String get daySleepToggleBindingSignature {
+    final binding = daySleepToggleInputBinding;
+    if (binding == null) return 'none';
+    return [
+      binding.id,
+      binding.sourceNodeId,
+      binding.trigger.buttonAction?.wireValue ?? '',
+      binding.enabled.toString(),
+    ].join('|');
+  }
 
   /// Mode configs (profile routing per mode).
   List<RhythmModeConfig> get modeConfigs => _modeConfigs;
@@ -410,6 +447,12 @@ class ServerSyncProvider extends ChangeNotifier {
 
   bool isNodeRoom(String nodeId) => nodeById(nodeId)?.kind.isRoom ?? true;
 
+  List<RhythmTopologyNode> get buttonTopologyNodes => _topologyNodes
+      .where((node) =>
+          node.kind == RhythmNodeKind.button ||
+          node.kind == RhythmNodeKind.switchDevice)
+      .toList(growable: false);
+
   RhythmDevice? deviceForNode(String nodeId) {
     final topologyNode = topologyNodeById(nodeId);
     if (topologyNode == null || !topologyNode.isDevice) return null;
@@ -496,6 +539,12 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// The underlying SDK connection (for SSE debug props, ping, etc.).
   RhythmConnection get connection => _connection;
+
+  /// Whether the provider is backed by the in-memory demo server.
+  bool get isDemoMode => HueServiceLocator.isDemoMode;
+
+  /// Raw physical input events forwarded by the server.
+  Stream<RhythmInputEvent> get inputEvents => _connection.inputEvents;
 
   /// The server API client (available after connect).
   CloudBackedServerApi get api => CloudBackedServerApi(
@@ -675,6 +724,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _powerSave = hello.settings?.powerSave ?? false;
     _activeMode = hello.mode?.active;
     _modeTransitions = [...hello.transitions];
+    _inputBindings = [...hello.inputBindings];
     _modeConfigs = [...?hello.mode?.configs];
     _profiles = [...hello.profiles];
     _activeProfileId = hello.activeProfile['id'] as String? ??
@@ -1010,6 +1060,12 @@ class ServerSyncProvider extends ChangeNotifier {
     final previous = _previousConnectionState;
     _previousConnectionState = current;
 
+    if (current == RhythmConnectionState.connected) {
+      _hasBeenSynced = true;
+    } else if (current == RhythmConnectionState.disconnected) {
+      _hasBeenSynced = false;
+    }
+
     if (current != previous &&
         (current == RhythmConnectionState.disconnected ||
             current == RhythmConnectionState.reconnecting)) {
@@ -1219,7 +1275,7 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Update a single mode transition on the server.
   Future<bool> dispatchUpdateTransition(
       RhythmModeTransitionConfig updated) async {
-    if (!_connection.connected) return false;
+    if (!HueServiceLocator.isDemoMode && !_connection.connected) return false;
     final newList = _modeTransitions.map((t) {
       if (t.id == updated.id ||
           (t.id.isEmpty &&
@@ -1259,6 +1315,62 @@ class ServerSyncProvider extends ChangeNotifier {
       notifyListeners();
     }
     return success;
+  }
+
+  Future<bool> bindDaySleepToggleButton(
+    String sourceNodeId, {
+    RhythmButtonAction buttonAction = RhythmButtonAction.onPress,
+  }) async {
+    if (!HueServiceLocator.isDemoMode && !_connection.connected) return false;
+    bool isRequestedBinding(RhythmInputBinding binding) {
+      return binding.preset == RhythmInputBindingPreset.daySleepToggle &&
+          binding.sourceNodeId == sourceNodeId &&
+          binding.trigger.buttonAction == buttonAction &&
+          binding.enabled;
+    }
+
+    final existing = [
+      for (final binding in _inputBindings)
+        if (binding.preset == RhythmInputBindingPreset.daySleepToggle) binding,
+    ];
+
+    final updated = await api.createDaySleepToggleInputBinding(
+      sourceNodeId: sourceNodeId,
+      buttonAction: buttonAction,
+      enabled: true,
+    );
+    if (!updated.any(isRequestedBinding)) return false;
+
+    var nextBindings = updated;
+    for (final binding in existing) {
+      if (binding.sourceNodeId == sourceNodeId &&
+          binding.trigger.buttonAction == buttonAction) {
+        continue;
+      }
+      if (!nextBindings.any((candidate) => candidate.id == binding.id)) {
+        continue;
+      }
+      final afterDelete = await api.deleteInputBinding(binding.id);
+      if (!afterDelete.any(isRequestedBinding)) return false;
+      nextBindings = afterDelete;
+    }
+    _inputBindings = nextBindings;
+    notifyListeners();
+    return true;
+  }
+
+  Future<bool> setDaySleepToggleButtonEnabled(bool enabled) async {
+    if (!HueServiceLocator.isDemoMode && !_connection.connected) return false;
+    final binding = daySleepToggleInputBinding;
+    if (binding == null) return true;
+
+    final updated = await api.setInputBinding(
+      binding.copyWith(enabled: enabled),
+    );
+    if (updated.isEmpty) return false;
+    _inputBindings = updated;
+    notifyListeners();
+    return true;
   }
 
   /// Activate sleep mode on the server.
@@ -1641,7 +1753,8 @@ class ServerSyncProvider extends ChangeNotifier {
     _powerSave = settings?.powerSave ?? false;
     _activeMode = mode?.active;
     _activeProfileId = null;
-    _modeTransitions = const [];
+    _modeTransitions = await DemoServerApi.instance.getTransitions();
+    _inputBindings = await DemoServerApi.instance.getInputBindings();
     _modeConfigs = const [];
     _profiles = const [];
     _rhythmIntervalSecs = 60;

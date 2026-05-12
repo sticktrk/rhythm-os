@@ -161,7 +161,11 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   void _handleServerSyncChanged() {
     if (!mounted) return;
 
-    final synced = _serverSync.synced;
+    // Use `hasBeenSynced` (sticky across reconnects), not `synced`. Reading
+    // `synced` would dip false during the transient reconnect that fires
+    // after every HTTP action (e.g. save), causing this screen to flash its
+    // "Device Not Connected" state for one frame before snapping back.
+    final synced = _serverSync.hasBeenSynced;
     if (synced) {
       final serverConfigChanged = _connected &&
           _serverConfigSignature != _currentServerConfigSignature();
@@ -325,7 +329,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     try {
       final syncProvider = _serverSync;
       if (checkConnection) {
-        _connected = syncProvider.synced;
+        _connected = syncProvider.hasBeenSynced;
 
         if (!_connected) {
           if (mounted) {
@@ -395,7 +399,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       if (selectedConfig == null) {
         setState(() {
           _selectedProfileId = initialProfileId;
-          _connected = syncProvider.synced;
+          _connected = syncProvider.hasBeenSynced;
           _loading = false;
           _serverConfigSignature = _currentServerConfigSignature();
         });
@@ -426,7 +430,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
 
       setState(() {
         _selectedProfileId = initialProfileId;
-        _connected = syncProvider.synced;
+        _connected = syncProvider.hasBeenSynced;
         _loading = false;
         _sliderFraction = _hourToNowFraction();
         _serverConfigSignature = _currentServerConfigSignature();
@@ -435,7 +439,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       debugPrint('LightProfile: Failed to load config: $e');
       if (mounted) {
         setState(() {
-          _connected = _serverSync.synced;
+          _connected = _serverSync.hasBeenSynced;
           _loading = false;
           _serverConfigSignature =
               _connected ? _currentServerConfigSignature() : null;
@@ -443,7 +447,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       }
     } finally {
       _configLoadInFlight = false;
-      if (mounted && _serverSync.synced && !_connected) {
+      if (mounted && _serverSync.hasBeenSynced && !_connected) {
         _handleServerSyncChanged();
       }
     }
