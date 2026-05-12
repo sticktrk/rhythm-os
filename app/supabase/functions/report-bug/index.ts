@@ -270,11 +270,36 @@ async function createGitHubIssue({
 }
 
 function buildIssueTitle(submission: DebugBundleSubmission): string {
-  const serverName = submission.server_name?.trim() || 'App'
-  return truncate(
-    `[Bug Report] ${submission.reference_code} - ${serverName}`,
-    256,
-  )
+  const prefix = 'app-report: '
+  const suffix = ` (${submission.reference_code})`
+  const maxDetailLength = 256 - prefix.length - suffix.length
+  const titleDetail =
+    summaryTitleDetail(submission.summary) ??
+    fallbackTitleDetail(submission)
+
+  return `${prefix}${truncate(titleDetail, maxDetailLength)}${suffix}`
+}
+
+function summaryTitleDetail(summary: string | null): string | null {
+  const firstLine = summary
+    ?.trim()
+    .split(/\r?\n/)
+    .map((line) => compactWhitespace(line))
+    .find((line) => line.length > 0)
+
+  if (!firstLine) return null
+  const titleDetail = stripTrailingSentencePunctuation(firstLine)
+  return titleDetail.length > 0 ? titleDetail : null
+}
+
+function fallbackTitleDetail(submission: DebugBundleSubmission): string {
+  const serverName = submission.server_name?.trim()
+  if (serverName) return `${serverName} report`
+
+  const appPlatform = submission.app_platform?.trim()
+  if (appPlatform) return `${appPlatform} app report`
+
+  return 'App report'
 }
 
 function buildIssueBody(
@@ -396,6 +421,14 @@ function quoteBlock(value: string): string {
     .split('\n')
     .map((line) => `> ${line}`)
     .join('\n')
+}
+
+function compactWhitespace(value: string): string {
+  return value.replace(/\s+/g, ' ').trim()
+}
+
+function stripTrailingSentencePunctuation(value: string): string {
+  return value.replace(/[.!?]+$/, '').trim()
 }
 
 function valueOrUnknown(value: string | null): string {
