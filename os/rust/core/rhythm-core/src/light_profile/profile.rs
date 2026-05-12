@@ -61,39 +61,13 @@ impl LightProfile {
     /// Calculate motion timeout at the given hour.
     ///
     /// For [`TimerSetting::Fixed`] and [`TimerSetting::Scheduled`], resolves
-    /// directly. For [`TimerSetting::Auto`], uses time-of-day bands based on
-    /// sunrise/sunset.
+    /// directly. For [`TimerSetting::Auto`], uses the system default.
     fn calculate_motion_timeout(&self, ctx: &CurveContext) -> u16 {
         if let Some(val) = self.config.motion_timeout_secs.resolve(ctx.current_hour) {
             return val as u16;
         }
 
-        // Auto: time-of-day bands
-        let sun_times_ref = ctx.sun_times.as_ref();
-        let sunrise = Self::get_sunrise(sun_times_ref);
-        let sunset = Self::get_sunset(sun_times_ref);
-        let hour = ctx.current_hour;
-
-        let long = DEFAULT_MOTION_TIMEOUT_SECS;
-        let short = long / 4;
-
-        // The morning band is symmetric around sunrise (±3h) so users who wake
-        // up pre-dawn (e.g. manually transitioning sleep_to_day) still get the
-        // long timeout instead of the late-night short one.
-        let morning_start = sunrise - 3.0;
-        let morning_end = sunrise + 3.0;
-        let evening_start = sunset - 3.0;
-        let night_start = sunset + 1.0;
-
-        if hour >= morning_start && hour < morning_end {
-            long
-        } else if hour >= morning_end && hour < evening_start {
-            short
-        } else if hour >= evening_start && hour < night_start {
-            long
-        } else {
-            short
-        }
+        DEFAULT_MOTION_TIMEOUT_SECS
     }
 
     fn calculate_brightness_value(&self, ctx: &CurveContext) -> f32 {
@@ -548,7 +522,7 @@ mod tests {
     use super::*;
     use crate::light_profile::defaults::{
         default_day_idle_profile, default_rhythm_profile, default_sleep_idle_profile,
-        default_sleep_profile, SLEEP_DEFAULT_BRIGHTNESS, SLEEP_DEFAULT_RGB,
+        default_sleep_profile,
     };
     use rhythm_profile::{solar::SolarTime, TimerSetting};
 
@@ -652,73 +626,51 @@ mod tests {
         );
     }
 
-    // Regression: pre-dawn within 3h of sunrise must use the long (morning)
-    // motion timeout. From issue #3 — user manually transitioned sleep_to_day
-    // at 05:54 with sunrise at 06:24 and motion lights timed out after 5 min
-    // instead of 20.
     #[test]
-    fn test_rhythm_motion_timeout_pre_dawn_uses_long_band() {
+    fn test_rhythm_auto_motion_timeout_is_constant_default() {
         let profile = LightProfile::new(default_rhythm_profile());
         let sunrise = 6.4;
         let sunset = 20.0;
 
-        let near_sunrise = profile
-            .calculate(&test_context_with_sun_times(5.9, sunrise, sunset))
-            .motion_timeout_secs;
-        let mid_pre_dawn = profile
-            .calculate(&test_context_with_sun_times(4.0, sunrise, sunset))
-            .motion_timeout_secs;
-        let just_after_sunrise = profile
-            .calculate(&test_context_with_sun_times(7.0, sunrise, sunset))
-            .motion_timeout_secs;
-        let deep_night = profile
-            .calculate(&test_context_with_sun_times(2.0, sunrise, sunset))
-            .motion_timeout_secs;
-
-        assert_eq!(
-            near_sunrise, DEFAULT_MOTION_TIMEOUT_SECS,
-            "Just before sunrise should use the long morning timeout"
-        );
-        assert_eq!(
-            mid_pre_dawn, DEFAULT_MOTION_TIMEOUT_SECS,
-            "Pre-dawn within 3h of sunrise should use the long morning timeout"
-        );
-        assert_eq!(
-            just_after_sunrise, DEFAULT_MOTION_TIMEOUT_SECS,
-            "Just after sunrise should still use the long morning timeout"
-        );
-        assert_eq!(
-            deep_night,
-            DEFAULT_MOTION_TIMEOUT_SECS / 4,
-            "Deep pre-dawn (>3h before sunrise) should still use the short timeout"
-        );
+        for hour in [2.0, 4.0, 5.9, 7.0, 12.0, 18.0, 21.0] {
+            let timeout = profile
+                .calculate(&test_context_with_sun_times(hour, sunrise, sunset))
+                .motion_timeout_secs;
+            assert_eq!(
+                timeout, DEFAULT_MOTION_TIMEOUT_SECS,
+                "Auto motion timeout should stay constant at hour {hour}"
+            );
+        }
     }
 
     // ── Sleep profile tests ─────────────────────────────────────
 
     #[test]
-    fn test_sleep_uses_direct_color() {
+    fn test_sleep_uses_color_temperature() {
         let profile = LightProfile::new(default_sleep_profile());
         let values = profile.calculate(&test_context(12.0));
-        assert!(values.is_direct_color);
+        assert!(!values.is_direct_color);
     }
 
     #[test]
-    fn test_sleep_brightness_is_constant_default_brightness() {
+    fn test_sleep_brightness_is_constant_wake_minimum() {
         let profile = LightProfile::new(default_sleep_profile());
+        let wake = default_rhythm_profile();
         let noon = profile.calculate(&test_context(12.0));
         let midnight = profile.calculate(&test_context(0.0));
-        assert_eq!(noon.brightness, SLEEP_DEFAULT_BRIGHTNESS);
-        assert_eq!(midnight.brightness, SLEEP_DEFAULT_BRIGHTNESS);
+        assert_eq!(noon.brightness, wake.min_brightness);
+        assert_eq!(midnight.brightness, wake.min_brightness);
     }
 
     #[test]
-    fn test_sleep_color_is_constant_red() {
+    fn test_sleep_color_temperature_is_constant_wake_minimum() {
         let profile = LightProfile::new(default_sleep_profile());
+        let wake = default_rhythm_profile();
         let noon = profile.calculate(&test_context(12.0));
         let midnight = profile.calculate(&test_context(0.0));
-        assert_eq!(noon.rgb, SLEEP_DEFAULT_RGB);
-        assert_eq!(midnight.rgb, SLEEP_DEFAULT_RGB);
+        assert_eq!(noon.kelvin, wake.min_color_temp);
+        assert_eq!(midnight.kelvin, wake.min_color_temp);
+        assert_eq!(noon.rgb, midnight.rgb);
         assert_eq!(noon.xy, midnight.xy);
     }
 

@@ -71,9 +71,8 @@ pub use light_profile::{
     normalize_builtin_state_profile_config, CommonCurveConfig, CurveContext, HourBreakpoint,
     LightCurveShape, LightDirectColor, LightPaletteKeyframe, LightProfile, LightProfileConfig,
     LightProfileModule, LightProfileRegistry, TimerSetting, DAY_IDLE_PROFILE_ID,
-    DAY_IDLE_PROFILE_NAME, RHYTHM_PROFILE_ID, RHYTHM_PROFILE_NAME, SLEEP_DEFAULT_BRIGHTNESS,
-    SLEEP_DEFAULT_RGB, SLEEP_IDLE_PROFILE_ID, SLEEP_IDLE_PROFILE_NAME, SLEEP_PROFILE_ID,
-    SLEEP_PROFILE_NAME,
+    DAY_IDLE_PROFILE_NAME, RHYTHM_PROFILE_ID, RHYTHM_PROFILE_NAME, SLEEP_IDLE_PROFILE_ID,
+    SLEEP_IDLE_PROFILE_NAME, SLEEP_PROFILE_ID, SLEEP_PROFILE_NAME,
 };
 pub use lighting::LightingCommand;
 pub use midpoint::MidpointValue;

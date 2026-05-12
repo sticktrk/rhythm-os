@@ -1,16 +1,16 @@
 //! Factory-default developer-owned profile bundle.
 //!
-//! The server defaults live in a checked-in JSON bundle so developers
-//! can tune shipped lighting behavior without editing Rust code. Runtime and
-//! storage code clone from this module when they need the baseline profile,
-//! power-save, or transition configuration.
+//! Built-in profile configs live in `rhythm-core` so there is one source of
+//! truth for profile behavior. This module reads the checked-in JSON bundle
+//! for factory metadata, power-save, and transition configuration, then injects
+//! the core built-in profiles for runtime, storage, and API exports.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use anyhow::{anyhow, Context, Result};
 use rhythm_core::{
-    is_builtin_state_profile_id, normalize_builtin_state_profile_config,
+    default_builtin_profiles, is_builtin_state_profile_id, normalize_builtin_state_profile_config,
     normalize_mode_transition_configs, LightProfileConfig, ModeConfig, ModeTransitionConfig,
     RhythmMode, DAY_IDLE_PROFILE_ID, RHYTHM_PROFILE_ID, SLEEP_IDLE_PROFILE_ID, SLEEP_PROFILE_ID,
 };
@@ -27,7 +27,7 @@ static FACTORY_DEFAULT_MODE_CONFIGS: OnceLock<BTreeMap<RhythmMode, ModeConfig>> 
 static FACTORY_DEFAULT_MODE_TRANSITIONS: OnceLock<Vec<ModeTransitionConfig>> = OnceLock::new();
 
 fn parse_factory_default_profile_bundle() -> Result<ProfileBundle> {
-    let bundle: ProfileBundle = serde_json::from_str(FACTORY_DEFAULT_PROFILE_BUNDLE_JSON)
+    let mut bundle: ProfileBundle = serde_json::from_str(FACTORY_DEFAULT_PROFILE_BUNDLE_JSON)
         .context("failed to parse factory-default profile bundle JSON")?;
 
     if bundle.schema_version != BUNDLE_SCHEMA_VERSION {
@@ -43,6 +43,14 @@ fn parse_factory_default_profile_bundle() -> Result<ProfileBundle> {
             "factory-default profile bundle must use kind=profile_bundle"
         ));
     }
+
+    if !bundle.profile.profiles.is_empty() {
+        return Err(anyhow!(
+            "factory-default profile bundle must not define profiles; built-in profiles come from rhythm-core"
+        ));
+    }
+
+    bundle.profile.profiles = default_builtin_profiles().into();
 
     let mut seen_ids = std::collections::HashSet::new();
     for profile in &bundle.profile.profiles {
@@ -223,17 +231,18 @@ mod tests {
 
         let sleep = profiles.get(SLEEP_PROFILE_ID).unwrap();
         assert_eq!(sleep.name, "Sleep");
-        assert_eq!(sleep.min_brightness, 20);
-        assert_eq!(sleep.max_brightness, 20);
+        assert_eq!(sleep.min_brightness, rhythm.min_brightness);
+        assert_eq!(sleep.max_brightness, rhythm.min_brightness);
+        assert_eq!(sleep.min_color_temp, rhythm.min_color_temp);
+        assert_eq!(sleep.max_color_temp, rhythm.min_color_temp);
         assert!(matches!(
             sleep.curve,
             rhythm_core::LightCurveShape::Constant {
                 brightness,
                 color_temp,
-                direct_color: Some(ref direct_color),
-            } if (brightness - 1.0).abs() < f32::EPSILON
+                direct_color: None,
+            } if brightness.abs() < f32::EPSILON
                 && color_temp.abs() < f32::EPSILON
-                && direct_color.rgb == rhythm_core::Rgb::new(255, 0, 0)
         ));
 
         let mode_configs = factory_default_mode_config_map();

@@ -4,10 +4,8 @@
 //! `rhythm` (adaptive lighting), `sleep` (constant night light),
 //! `day_idle` (inherit-active soft-off), and `sleep_idle` (inherit-active soft-off).
 
-use rhythm_profile::color::rgb_to_xy;
-use rhythm_profile::curve_shape::{LightCurveShape, LightDirectColor};
+use rhythm_profile::curve_shape::LightCurveShape;
 use rhythm_profile::profile_config::{LightProfileConfig, TimerSetting};
-use rhythm_profile::Rgb;
 use rhythm_profile::{
     DEFAULT_MAX_BRIGHTNESS, DEFAULT_MAX_COLOR_TEMP, DEFAULT_MAX_DIM_STEPS, DEFAULT_MIN_BRIGHTNESS,
     DEFAULT_MIN_COLOR_TEMP,
@@ -21,35 +19,6 @@ pub const DAY_IDLE_PROFILE_ID: &str = "day_idle";
 pub const DAY_IDLE_PROFILE_NAME: &str = "Day Idle";
 pub const SLEEP_IDLE_PROFILE_ID: &str = "sleep_idle";
 pub const SLEEP_IDLE_PROFILE_NAME: &str = "Sleep Idle";
-pub const SLEEP_DEFAULT_BRIGHTNESS: u8 = 20;
-pub const SLEEP_DEFAULT_RGB: Rgb = Rgb { r: 255, g: 0, b: 0 };
-
-fn constant_red_curve() -> LightCurveShape {
-    LightCurveShape::Constant {
-        brightness: 1.0,
-        color_temp: 0.0,
-        direct_color: Some(LightDirectColor {
-            xy: rgb_to_xy(SLEEP_DEFAULT_RGB),
-            rgb: SLEEP_DEFAULT_RGB,
-        }),
-    }
-}
-
-fn constant_red_profile(id: &str, name: &str) -> LightProfileConfig {
-    LightProfileConfig {
-        id: id.into(),
-        name: name.into(),
-        curve: constant_red_curve(),
-        min_brightness: SLEEP_DEFAULT_BRIGHTNESS,
-        max_brightness: SLEEP_DEFAULT_BRIGHTNESS,
-        min_color_temp: 0,
-        max_color_temp: 0,
-        max_dim_steps: 1,
-        fade_ms: TimerSetting::Auto,
-        motion_timeout_secs: TimerSetting::Auto,
-        rhythm_interval_secs: TimerSetting::Auto,
-    }
-}
 
 fn inherit_active_idle_profile(id: &str, name: &str) -> LightProfileConfig {
     LightProfileConfig {
@@ -86,7 +55,25 @@ pub fn default_rhythm_profile() -> LightProfileConfig {
 
 /// Create the default sleep profile config.
 pub fn default_sleep_profile() -> LightProfileConfig {
-    constant_red_profile(SLEEP_PROFILE_ID, SLEEP_PROFILE_NAME)
+    let wake = default_rhythm_profile();
+
+    LightProfileConfig {
+        id: SLEEP_PROFILE_ID.into(),
+        name: SLEEP_PROFILE_NAME.into(),
+        curve: LightCurveShape::Constant {
+            brightness: 0.0,
+            color_temp: 0.0,
+            direct_color: None,
+        },
+        min_brightness: wake.min_brightness,
+        max_brightness: wake.min_brightness,
+        min_color_temp: wake.min_color_temp,
+        max_color_temp: wake.min_color_temp,
+        max_dim_steps: 1,
+        fade_ms: TimerSetting::Auto,
+        motion_timeout_secs: TimerSetting::Auto,
+        rhythm_interval_secs: TimerSetting::Auto,
+    }
 }
 
 /// Create the default day idle (soft-off) profile config.
@@ -154,6 +141,9 @@ pub fn normalize_builtin_state_profile_config(config: &mut LightProfileConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rhythm_profile::color::rgb_to_xy;
+    use rhythm_profile::curve_shape::LightDirectColor;
+    use rhythm_profile::Rgb;
 
     #[test]
     fn test_rhythm_profile_defaults() {
@@ -174,16 +164,21 @@ mod tests {
     #[test]
     fn test_sleep_profile_defaults() {
         let p = default_sleep_profile();
+        let wake = default_rhythm_profile();
         assert_eq!(p.id, "sleep");
         assert!(matches!(
             p.curve,
             LightCurveShape::Constant {
-                direct_color: Some(_),
-                ..
-            }
+                brightness,
+                color_temp,
+                direct_color: None,
+            } if brightness.abs() < f32::EPSILON
+                && color_temp.abs() < f32::EPSILON
         ));
-        assert_eq!(p.min_brightness, SLEEP_DEFAULT_BRIGHTNESS);
-        assert_eq!(p.max_brightness, SLEEP_DEFAULT_BRIGHTNESS);
+        assert_eq!(p.min_brightness, wake.min_brightness);
+        assert_eq!(p.max_brightness, wake.min_brightness);
+        assert_eq!(p.min_color_temp, wake.min_color_temp);
+        assert_eq!(p.max_color_temp, wake.min_color_temp);
         assert!(p.rhythm_interval_secs.is_auto());
     }
 

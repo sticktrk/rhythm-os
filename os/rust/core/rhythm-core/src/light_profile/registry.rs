@@ -586,6 +586,7 @@ mod tests {
                 rgb: crate::Rgb::new(38, 82, 255),
             }),
         };
+        let expected_kelvin = sleep.min_color_temp;
         assert!(registry.set_profile_config(sleep));
 
         let ctx = test_context(12.0);
@@ -595,7 +596,7 @@ mod tests {
 
         assert_eq!(idle.brightness, 1);
         assert_eq!(idle.rgb, crate::Rgb::new(38, 82, 255));
-        assert_eq!(idle.kelvin, 0);
+        assert_eq!(idle.kelvin, expected_kelvin);
         assert!(idle.is_direct_color);
     }
 

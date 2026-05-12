@@ -42,7 +42,7 @@ pub struct HourBreakpoint {
 pub enum TimerSetting {
     /// System-computed. Behavior depends on which field uses this setting:
     /// - `rhythm_interval_secs`: curve rate-of-change prediction, future AI
-    /// - `motion_timeout_secs`: time-of-day-aware calculation, future AI
+    /// - `motion_timeout_secs`: system default timeout
     /// - `fade_ms`: constant default (500 ms) for now
     #[cfg_attr(feature = "serde", serde(rename = "auto"))]
     Auto,
