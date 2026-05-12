@@ -15,7 +15,7 @@ use crate::light_profile::{
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-pub const DEFAULT_MODE_TRANSITION_DURATION_MS: u32 = 30_000;
+pub const DEFAULT_MODE_TRANSITION_DURATION_MS: u32 = 10_000;
 
 /// High-level global mode selected by the user.
 ///
