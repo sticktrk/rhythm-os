@@ -40,6 +40,7 @@ fn mode_default_flip_emits_node_state_event_synchronously() {
     let (h, _spy) = TestHarness::with_spy_controller_at(6.04, 118);
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     let master_id = h.resolve("master");
 

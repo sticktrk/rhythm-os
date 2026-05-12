@@ -38,6 +38,7 @@ fn top_short_press_from_soft_off_resumes_adaptive() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "on").unwrap();
     h.action("kitchen", "off").unwrap();

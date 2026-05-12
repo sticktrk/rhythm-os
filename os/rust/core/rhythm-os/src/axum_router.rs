@@ -689,7 +689,7 @@ fn server_event_name(event: &ServerEvent) -> &'static str {
         ServerEvent::MotionTimer { .. } => "motion_timer",
         ServerEvent::InputEvent(_) => "input_event",
         ServerEvent::HubStatus { .. } => "hub_status",
-        ServerEvent::SettingsChanged => "settings_changed",
+        ServerEvent::SettingsChanged { .. } => "settings_changed",
         ServerEvent::ModeChanged { .. } => "mode_changed",
         ServerEvent::ConfigChanged => "config_changed",
         ServerEvent::NodesChanged => "nodes_changed",

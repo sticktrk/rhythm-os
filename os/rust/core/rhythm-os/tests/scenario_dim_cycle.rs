@@ -14,6 +14,7 @@ fn dim_up_at_max_caps_at_one_hundred() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "on").unwrap();
 
@@ -54,6 +55,7 @@ fn dim_up_after_soft_off_lifts_off_one_percent() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "on").unwrap();
     h.action("kitchen", "off").unwrap();

@@ -44,6 +44,7 @@ fn setup_bound_kitchen() -> (TestHarness, rhythm_os::canonical::identity::HubKey
 #[test]
 fn room_state_survives_hub_resync() {
     let (harness, _ha_key) = setup_bound_kitchen();
+    harness.set_settings(Some(false));
 
     // -- Setup: modify room state --
     harness.action("hue-kitchen", "on").unwrap();

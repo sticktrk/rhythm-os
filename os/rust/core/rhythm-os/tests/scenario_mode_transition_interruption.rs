@@ -3,8 +3,9 @@
 //! When sleep→day fires for a room that was lit during sleep, the engine
 //! issues a fade-in command (the "expired_transitions" counter in periodic
 //! logs counts these). If the user presses the bottom button while that fade
-//! is playing on the bulb, the OffPress must dispatch 1% and *that* must be
-//! the last command — no later automatic dispatch should overwrite it.
+//! is playing on the bulb, the non-powersave OffPress must dispatch 1% and
+//! *that* must be the last command — no later automatic dispatch should
+//! overwrite it.
 
 mod harness;
 
@@ -22,6 +23,7 @@ fn off_press_during_mode_transition_fade_dims_to_one_percent() {
     let (h, spy) = TestHarness::with_spy_controller_at(6.04, 118);
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.set_mode_configs(default_mode_configs());
     {

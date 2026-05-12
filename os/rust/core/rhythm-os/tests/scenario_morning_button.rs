@@ -3,7 +3,8 @@
 //! Real bug report: pressing the bottom button on a Hue dimmer in the morning
 //! produced lights that were "not dim". The default scenario harness fixes time
 //! at 14:00 on June 21, so existing coverage misses every other hour of the
-//! day. These tests pin OffPress → 1% across a representative slice of times.
+//! day. These tests pin non-powersave OffPress → 1% across a representative
+//! slice of times.
 //!
 //! If any of these fail, the engine has a time-dependent regression. If they
 //! all pass, the bug lives in the platform layer (button-press classification
@@ -18,6 +19,7 @@ fn assert_off_dims_to_one_percent(hour: f32, day_of_year: u32, label: &str) {
     let (h, spy) = TestHarness::with_spy_controller_at(hour, day_of_year);
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "on").unwrap();
     spy.reset();

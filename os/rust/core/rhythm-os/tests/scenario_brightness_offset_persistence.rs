@@ -16,6 +16,7 @@ fn dim_up_offset_survives_off_then_on_cycle() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "on").unwrap();
     let baseline = spy.turn_on_calls().last().unwrap().1.brightness;
@@ -43,6 +44,7 @@ fn reset_clears_offset_after_off_cycle() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "on").unwrap();
     let baseline = spy.turn_on_calls().last().unwrap().1.brightness;

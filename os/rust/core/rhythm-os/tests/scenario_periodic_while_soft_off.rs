@@ -1,5 +1,5 @@
-//! A periodic tick after `OffPress` must keep the room at 1%, not bounce it
-//! back to adaptive brightness.
+//! A periodic tick after non-powersave `OffPress` must keep the room at 1%,
+//! not bounce it back to adaptive brightness.
 //!
 //! This is the highest-value coverage gap from the morning-bug investigation:
 //! periodic runs every 60s, so any silent regression that ignores `soft_off`
@@ -15,6 +15,7 @@ fn periodic_tick_after_off_press_keeps_room_at_one_percent() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "on").unwrap();
     h.action("kitchen", "off").unwrap();
@@ -44,6 +45,7 @@ fn multiple_periodic_ticks_after_off_press_stay_at_one_percent() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "on").unwrap();
     h.action("kitchen", "off").unwrap();

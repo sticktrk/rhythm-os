@@ -285,10 +285,8 @@ fn slow_controller_does_not_drop_button_events_for_other_rooms() {
 
 #[test]
 fn slow_lights_off_does_not_lose_subsequent_on_press() {
-    // Hard-off (`lights_off`) is the only action that drives `turn_off` in
-    // the engine — `off` is a soft-off implemented as a low-brightness
-    // turn_on. Drive a slow turn_off then an on press and verify both
-    // reach the controller and the room ends up on.
+    // Drive an explicit hard-off through a slow turn_off, then an on press, and
+    // verify both reach the controller and the room ends up on.
     let (rooms, devices) = rooms_with_lights(&[("mock-kitchen", "Kitchen")]);
 
     let (harness, spy) = TestHarness::with_spy_controller();

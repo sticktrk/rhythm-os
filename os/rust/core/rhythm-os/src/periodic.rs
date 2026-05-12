@@ -275,6 +275,9 @@ fn periodic_room_state(
     if !room.rhythm_enabled || room.hard_off {
         return None;
     }
+    if room.soft_off && power_save {
+        return None;
+    }
 
     Some(if room.soft_off && !power_save {
         rhythm_core::RoomModeState::Idle

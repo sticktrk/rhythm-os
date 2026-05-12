@@ -2,8 +2,8 @@
 //!
 //! Sleep mode swaps the active light profile to `sleep` and turns lights off
 //! (`SleepOn`) or back to rhythm and on (`SleepOff`). Button presses inside
-//! sleep mode must still respect their semantics — bottom = soft-off, top =
-//! adaptive on — without leaking state across the mode toggle.
+//! sleep mode must still respect their non-powersave semantics — bottom =
+//! soft-off, top = adaptive on — without leaking state across the mode toggle.
 
 mod harness;
 
@@ -15,6 +15,7 @@ fn sleep_on_then_bottom_button_dims_to_one_percent() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "on").unwrap();
     h.action("kitchen", "sleep_on").unwrap();
@@ -45,6 +46,7 @@ fn sleep_cycle_preserves_button_behavior() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "on").unwrap();
 

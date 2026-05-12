@@ -1,8 +1,8 @@
 //! Rapid button mashing must not produce inconsistent dispatch state.
 //!
 //! The morning bundle showed three OffPress events in 17 seconds. Pinning that
-//! every dispatch in a fast burst stays at 1% catches any state machine that
-//! interleaves Active/Idle on rapid input.
+//! every non-powersave dispatch in a fast burst stays at 1% catches any state
+//! machine that interleaves Active/Idle on rapid input.
 
 mod harness;
 
@@ -14,6 +14,7 @@ fn five_off_presses_in_a_row_all_dispatch_one_percent() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "on").unwrap();
     spy.reset();
@@ -48,6 +49,7 @@ fn alternating_on_off_mash_keeps_each_state_correct() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     let sequence = ["on", "off", "on", "off", "on", "off"];
     for action in sequence.iter() {

@@ -9,8 +9,8 @@
 //! These tests exercise that specific state shape: hard-off entering the press,
 //! and the same shape after a mode transition (which under the dispatch-queue
 //! invalidator should drop any stale sleep-era queued commands). If a regression
-//! lets a non-1% command land for `OffPress` here, this is the test that should
-//! catch it.
+//! lets a non-1% command land for non-powersave `OffPress` here, this is the
+//! test that should catch it.
 
 mod harness;
 
@@ -27,6 +27,7 @@ fn off_press_while_hard_off_dims_to_one_percent() {
     let (h, spy) = TestHarness::with_spy_controller_at(6.04, 118); // 06:02 EDT, late April
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     // Establish hard-off — same state the room was in coming out of Sleep mode
     // before the user's press.
@@ -60,6 +61,7 @@ fn off_press_immediately_after_sleep_to_day_transition_dims_to_one_percent() {
     let (h, spy) = TestHarness::with_spy_controller_at(6.04, 118);
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     // Seed Sleep mode and a Sleep→Day sunrise transition, mirroring the user's config.
     {

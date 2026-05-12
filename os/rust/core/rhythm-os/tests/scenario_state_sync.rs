@@ -138,6 +138,7 @@ fn preferences_reflected_in_snapshots() {
         vec![],
     );
     harness.sync();
+    harness.set_settings(Some(false));
 
     // -- Action: set soft_off on kitchen --
     harness.action("kitchen", "on").unwrap();

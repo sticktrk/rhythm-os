@@ -191,6 +191,7 @@ struct ModeDefaultApplyContext<'a> {
     transition: Option<&'a ModeTransitionConfig>,
     transition_started_at: chrono::NaiveDateTime,
     dispatch_generation: u64,
+    power_save: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -598,6 +599,14 @@ fn room_flags_for_target_state(state: RoomModeState) -> Result<(bool, bool)> {
     }
 }
 
+fn room_state_for_power_save(power_save: bool, state: RoomModeState) -> RoomModeState {
+    if power_save && matches!(state, RoomModeState::Idle) {
+        RoomModeState::HardOff
+    } else {
+        state
+    }
+}
+
 fn clear_room_mode_transition(state: &SharedState, room_id: &str) {
     if let Ok(mut s) = state.lock() {
         if s.room_mode_transitions.remove(room_id).is_some() {
@@ -863,8 +872,10 @@ fn light_node_uses_parent_dispatch(s: &AppState, node_id: &str, kind: LightNodeK
             .attached_light_uses_parent_dispatch(node_id, &s.canonical_registry)
 }
 
-fn semantic_lights_on_override(hard_off: bool, soft_off: bool) -> Option<bool> {
+fn semantic_lights_on_override(power_save: bool, hard_off: bool, soft_off: bool) -> Option<bool> {
     if hard_off {
+        Some(false)
+    } else if soft_off && power_save {
         Some(false)
     } else if soft_off {
         Some(true)
@@ -1166,7 +1177,8 @@ pub(crate) fn refresh_lights_on_cache_for_runtime_snapshot_with_source(
         return;
     }
 
-    let semantic_override = semantic_lights_on_override(snap.hard_off, snap.soft_off);
+    let power_save = state.lock().ok().is_some_and(|s| s.power_save);
+    let semantic_override = semantic_lights_on_override(power_save, snap.hard_off, snap.soft_off);
     let observation_source = if semantic_override.is_some() {
         ObservedPowerSource::SemanticOverride
     } else {
@@ -1270,7 +1282,9 @@ pub(crate) fn refresh_all_lights_on_cache_for_runtime(
             continue;
         }
 
-        let semantic_override = semantic_lights_on_override(snap.hard_off, snap.soft_off);
+        let power_save = state.lock().ok().is_some_and(|s| s.power_save);
+        let semantic_override =
+            semantic_lights_on_override(power_save, snap.hard_off, snap.soft_off);
         let lights_on = if let Some(lights_on) = semantic_override {
             lights_on
         } else {
@@ -1396,7 +1410,7 @@ fn build_node_state_dto_from_snapshot_parts(
         &snap.id,
         snap.kind,
         effective_parent_id.as_deref(),
-        semantic_lights_on_override(snap.hard_off, snap.soft_off),
+        semantic_lights_on_override(ctx.state.power_save, snap.hard_off, snap.soft_off),
     );
     let (brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
         RoomLightingContext {
@@ -1501,7 +1515,7 @@ pub fn build_node_state_event(
             &snap.id,
             snap.kind,
             snap.parent_id.as_deref(),
-            semantic_lights_on_override(snap.hard_off, snap.soft_off),
+            semantic_lights_on_override(s.power_save, snap.hard_off, snap.soft_off),
         );
         let transitioning = room_mode_transition_active(&s.room_mode_transitions, &snap.id, now);
         let hub_types = node_hub_types_from_topology(&s, &snap.id);
@@ -2530,7 +2544,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                 &snap.id,
                 snap.kind,
                 snap.parent_id.as_deref(),
-                semantic_lights_on_override(snap.hard_off, snap.soft_off),
+                semantic_lights_on_override(s.power_save, snap.hard_off, snap.soft_off),
             );
             let room_state = room_mode_state_from_flags(
                 snap.hard_off,
@@ -2685,7 +2699,7 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
             room_id,
             snap.kind,
             snap.parent_id.as_deref(),
-            semantic_lights_on_override(snap.hard_off, snap.soft_off),
+            semantic_lights_on_override(s.power_save, snap.hard_off, snap.soft_off),
         )
     };
     let (curve_brightness, kelvin) = {
@@ -3711,12 +3725,13 @@ fn apply_room_mode_defaults(
             continue;
         };
 
+        let target_state = room_state_for_power_save(ctx.power_save, room_default.state);
         let current_state = persistent_room_state_from_flags(snap.hard_off, snap.soft_off);
-        if current_state == room_default.state {
+        if current_state == target_state {
             continue;
         }
 
-        let Ok((soft_off, hard_off)) = room_flags_for_target_state(room_default.state) else {
+        let Ok((soft_off, hard_off)) = room_flags_for_target_state(target_state) else {
             warn!(
                 target: "cmd",
                 "active_mode_apply: ignoring invalid room default state for room '{}'",
@@ -3738,7 +3753,7 @@ fn apply_room_mode_defaults(
             },
         );
 
-        match room_default.state {
+        match target_state {
             RoomModeState::Active | RoomModeState::Idle => {
                 lights_on_updates.push((snap.id.clone(), true));
                 non_hard_off_changed_room_ids.push(snap.id.clone());
@@ -4336,6 +4351,7 @@ fn apply_active_mode_outputs(
             transition: transition.as_ref(),
             transition_started_at,
             dispatch_generation,
+            power_save,
         },
         &snapshots,
     );
@@ -4390,7 +4406,7 @@ fn apply_active_mode_outputs(
                         &snap.id,
                         snap.kind,
                         snap.parent_id.as_deref(),
-                        semantic_lights_on_override(snap.hard_off, snap.soft_off),
+                        semantic_lights_on_override(power_save, snap.hard_off, snap.soft_off),
                     )
                     .unwrap_or(true)
                 })
@@ -4577,7 +4593,7 @@ fn do_settings_set_internal(
         .as_ref()
         .and_then(|change| change.transition.clone());
     let (
-        rooms_to_off,
+        power_save_refresh_rooms,
         runtimes,
         active_profile_id,
         updated_mode_configs,
@@ -4596,13 +4612,13 @@ fn do_settings_set_internal(
             .find(|config| config.mode == previous_mode)
             .unwrap_or_else(|| ModeConfig::default_for_mode(previous_mode));
 
-        let mut rooms_to_off = Vec::new();
+        let mut power_save_refresh_rooms = Vec::new();
         if let Some(ps) = power_save {
             s.power_save = ps;
             info!(target: "cmd", "settings: power_save={}", ps);
 
             if let Some(runtime) = s.hub_runtime() {
-                rooms_to_off = runtime.set_power_save(ps);
+                power_save_refresh_rooms = runtime.set_power_save(ps);
             }
         }
 
@@ -4668,7 +4684,7 @@ fn do_settings_set_internal(
 
         persist_settings_locked(&s);
         (
-            rooms_to_off,
+            power_save_refresh_rooms,
             runtimes,
             active_profile_id,
             updated_mode_configs,
@@ -4701,13 +4717,13 @@ fn do_settings_set_internal(
         );
     }
 
-    if !rooms_to_off.is_empty() {
+    if power_save == Some(true) && !power_save_refresh_rooms.is_empty() {
         let runtime = {
             let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
             s.hub_runtime()
         };
         if let Some(runtime) = runtime {
-            let work_items: Vec<_> = rooms_to_off
+            let work_items: Vec<_> = power_save_refresh_rooms
                 .iter()
                 .map(|room_id| WorkItem::QueuedNodeAction {
                     command_id: crate::logging::next_command_id("power-save-off"),
@@ -4735,8 +4751,8 @@ fn do_settings_set_internal(
                 }
             };
 
-            for room_id in &rooms_to_off {
-                info!(target: "cmd", "Turning off idle room '{}' (power_save ON)", room_id);
+            for room_id in &power_save_refresh_rooms {
+                info!(target: "cmd", "Converting idle room '{}' to hard_off (power_save ON)", room_id);
                 if queued {
                     update_lights_on_cache_for_runtime_node(state, &runtime, room_id, false);
                     emit_node_state_event_after_apply(state, &runtime, room_id);
@@ -4750,9 +4766,11 @@ fn do_settings_set_internal(
                             );
                             emit_node_state_event_after_apply(state, &runtime, room_id);
                         }
-                        Err(e) => {
-                            warn!(target: "cmd", "Failed to turn off room '{}': {}", room_id, e)
-                        }
+                        Err(e) => warn!(
+                            target: "cmd",
+                            "Failed to turn off room '{}': {}",
+                            room_id, e
+                        ),
                     }
                 }
             }
@@ -4827,9 +4845,15 @@ fn do_settings_set_internal(
         );
     }
 
-    crate::state::emit_server_event(state, crate::server_event::ServerEvent::SettingsChanged);
+    let settings = build_settings_dto(state)?;
+    crate::state::emit_server_event(
+        state,
+        crate::server_event::ServerEvent::SettingsChanged {
+            settings: settings.clone(),
+        },
+    );
 
-    build_settings(state)
+    serde_json::to_string(&settings).map_err(|e| anyhow::anyhow!("serialize: {}", e))
 }
 
 /// Update global settings (partial: only provided fields are changed).
@@ -5418,9 +5442,9 @@ pub fn do_room_set(
     }
 
     // Always apply params (whether runtime was just created or pre-existing)
-    let runtime = {
+    let (runtime, power_save) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.hub_runtime()
+        (s.hub_runtime(), s.power_save)
     };
     if runtime.is_none() {
         let has_any_hub = state
@@ -5437,7 +5461,10 @@ pub fn do_room_set(
         let existing = runtime.engine_room_snapshot(&engine_room_id);
         let had_existing = existing.is_some();
         runtime.add_room(&engine_room_id, &params.name);
-        let state_flags = params.state.map(room_flags_for_target_state).transpose()?;
+        let state_flags = params
+            .state
+            .map(|state| room_flags_for_target_state(room_state_for_power_save(power_save, state)))
+            .transpose()?;
         let (rhythm_enabled, time_offset, bri_offset, soft_off, hard_off, profile_settings) =
             existing
                 .map(|snap| {
@@ -5973,7 +6000,7 @@ fn time_offset_preview_room_is_on(s: &AppState, snap: &rhythm_core::NodeSnapshot
         &snap.id,
         snap.kind,
         snap.parent_id.as_deref(),
-        semantic_lights_on_override(snap.hard_off, snap.soft_off),
+        semantic_lights_on_override(s.power_save, snap.hard_off, snap.soft_off),
     )
 }
 
@@ -7045,15 +7072,18 @@ pub fn do_node_preferences_set(
     let snap = runtime
         .engine_node_snapshot(node_id)
         .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
-    let lights_on = {
+    let (lights_on, power_save) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        lights_on_from_observed_cache(
-            &s,
-            &s.room_observed_power,
-            &snap.id,
-            snap.kind,
-            snap.parent_id.as_deref(),
-            semantic_lights_on_override(snap.hard_off, snap.soft_off),
+        (
+            lights_on_from_observed_cache(
+                &s,
+                &s.room_observed_power,
+                &snap.id,
+                snap.kind,
+                snap.parent_id.as_deref(),
+                semantic_lights_on_override(s.power_save, snap.hard_off, snap.soft_off),
+            ),
+            s.power_save,
         )
     };
 
@@ -7061,8 +7091,9 @@ pub fn do_node_preferences_set(
     let prev_hard_off = snap.hard_off;
     let rhythm_enabled = rhythm_enabled.unwrap_or(snap.rhythm_enabled);
     let disabled = disabled.unwrap_or(snap.disabled);
-    let persistent_state = target_state
+    let requested_state = target_state
         .unwrap_or_else(|| persistent_room_state_from_flags(snap.hard_off, snap.soft_off));
+    let persistent_state = room_state_for_power_save(power_save, requested_state);
     let (soft_off, hard_off) = room_flags_for_target_state(persistent_state)?;
     let mut profile_settings = snap.profile_settings.clone();
     if let Some(patch) = room_profile {
@@ -13111,6 +13142,7 @@ mod tests {
         let mut snap = make_snapshot("r1", false, false);
         snap.rhythm_enabled = false;
         let (state, _rt) = setup_state(vec![snap]);
+        state.lock().unwrap().power_save = false;
         let result = do_node_preferences_set(
             &state,
             "r1",
@@ -13126,8 +13158,40 @@ mod tests {
     }
 
     #[test]
+    fn room_preferences_idle_maps_to_hard_off_when_power_save_enabled() {
+        let mut snap = make_snapshot("r1", false, false);
+        snap.rhythm_enabled = false;
+        let (state, runtime) = setup_state(vec![snap]);
+        set_observed_lights_on(&state, "r1", true);
+
+        let result = do_node_preferences_set(
+            &state,
+            "r1",
+            Some(false),
+            None,
+            Some(RoomModeState::Idle),
+            None,
+            false,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(
+            observed_lights_on(&state.lock().unwrap(), "r1"),
+            Some(false)
+        );
+        assert_eq!(
+            runtime.events(),
+            vec![("r1".into(), ButtonAction::LightsOff)]
+        );
+        let snap = runtime.engine_room_snapshot("r1").unwrap();
+        assert!(!snap.soft_off);
+        assert!(snap.hard_off);
+    }
+
+    #[test]
     fn room_preferences_idle_updates_parent_lights_on_for_attached_light() {
         let (state, rt, device_id) = setup_attached_hue_light_with_group_dispatch();
+        state.lock().unwrap().power_save = false;
         if let Some(child) = rt
             .snapshots
             .lock()
@@ -13157,6 +13221,7 @@ mod tests {
     #[test]
     fn room_preferences_idle_updates_parent_lights_on_without_group_dispatch() {
         let (state, rt, device_id) = setup_attached_matter_light_without_group_dispatch();
+        state.lock().unwrap().power_save = false;
         if let Some(child) = rt
             .snapshots
             .lock()
@@ -13263,6 +13328,25 @@ mod tests {
         assert!(state.lock().unwrap().power_save);
         do_settings_set(&state, Some(false), None, None, None).unwrap();
         assert!(!state.lock().unwrap().power_save);
+    }
+
+    #[test]
+    fn settings_power_save_emits_settings_changed_payload() {
+        let (state, _rt) = setup_state(vec![]);
+        let (event_tx, mut event_rx) =
+            tokio::sync::broadcast::channel::<crate::server_event::ServerEvent>(16);
+        state.lock().unwrap().event_tx = Some(event_tx);
+
+        do_settings_set(&state, Some(true), None, None, None).unwrap();
+
+        let mut power_save = None;
+        while let Ok(event) = event_rx.try_recv() {
+            if let crate::server_event::ServerEvent::SettingsChanged { settings } = event {
+                power_save = Some(settings.power_save);
+                break;
+            }
+        }
+        assert_eq!(power_save, Some(true));
     }
 
     #[test]
@@ -13384,12 +13468,9 @@ mod tests {
 
     #[test]
     fn active_mode_change_emits_mode_changed_sse_event() {
-        // Regression for issue #32: SettingsChanged carries no payload, so
-        // clients that don't refetch /api/mode never learn the new mode until
-        // the paced per-room ApplyNodeCommand events trickle in (~30s for a
-        // typical 11-room home). Mode flips must broadcast a self-describing
-        // ModeChanged event with the new mode so the displayed mode updates
-        // immediately over SSE.
+        // Regression for issue #32: settings_changed is settings-scoped, so
+        // clients that don't refetch /api/mode need a self-describing
+        // ModeChanged event with the new mode.
         let (state, _rt) = setup_state(vec![]);
         let (event_tx, mut event_rx) =
             tokio::sync::broadcast::channel::<crate::server_event::ServerEvent>(16);
@@ -13853,6 +13934,7 @@ mod tests {
         let (state, runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
         {
             let mut s = state.lock().unwrap();
+            s.power_save = false;
             s.active_mode = RhythmMode::Day;
             set_observed_lights_on_in_app(&mut s, "r1", true);
             s.set_mode_configs(vec![ModeConfig {

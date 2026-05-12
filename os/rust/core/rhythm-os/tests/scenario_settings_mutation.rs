@@ -7,7 +7,7 @@
 //! ## API journey
 //!
 //! 1. User opens Settings → Preferences
-//! 2. Toggles Power Save on → soft-off rooms turn truly off
+//! 2. Toggles Power Save on → soft-off rooms become hard-off
 //! 3. Adjusts Soft Off brightness slider → engine picks up new value
 //! 4. Changes fade_ms / interval → room state is unaffected
 
@@ -20,8 +20,8 @@ use rhythm_core::{default_day_idle_profile, LightCurveShape, LightPaletteKeyfram
 // Scenario: Enabling power_save turns off rooms that were in soft-off
 // ============================================================================
 
-/// When power_save is toggled ON, any rooms currently in soft-off state
-/// should be turned truly off (hard off via the controller).
+/// When power_save is toggled ON, any rooms currently in soft-off state should
+/// become hard-off and be turned truly off via the controller.
 #[test]
 fn power_save_on_turns_off_soft_off_rooms() {
     let (harness, spy) = TestHarness::with_spy_controller();
@@ -35,7 +35,9 @@ fn power_save_on_turns_off_soft_off_rooms() {
     harness.action("kitchen", "on").unwrap();
     harness.action("bedroom", "on").unwrap();
 
-    // Put kitchen into soft-off (power_save defaults false, so "off" = soft-off)
+    harness.set_settings(Some(false));
+
+    // Put kitchen into soft-off (power_save OFF, so "off" = standby)
     harness.action("kitchen", "off").unwrap();
     let snap = harness.snapshot("kitchen").unwrap();
     assert!(snap.soft_off, "kitchen should be in soft-off state");
@@ -52,11 +54,14 @@ fn power_save_on_turns_off_soft_off_rooms() {
         "power_save ON should turn off soft-off room (kitchen)"
     );
 
-    // Kitchen's soft_off flag should be cleared by the engine
     let snap = harness.snapshot("kitchen").unwrap();
     assert!(
-        !snap.soft_off,
-        "soft_off should be cleared after power_save ON"
+        !snap.soft_off && snap.hard_off,
+        "soft_off should become hard_off after power_save ON"
+    );
+    assert!(
+        !harness.lights_on("kitchen"),
+        "power_save ON should report hard-off rooms as lights off"
     );
 
     // Bedroom (was ON, not soft-off) should be unaffected
@@ -79,8 +84,7 @@ fn power_save_off_enables_soft_off_behavior() {
     let harness = harness.with_discovery(vec![room("kitchen", "Kitchen")], vec![]);
     harness.sync();
 
-    // Enable power_save — "off" should be a hard off
-    harness.set_settings(Some(true));
+    // power_save defaults on — "off" should be a hard off
     harness.action("kitchen", "on").unwrap();
     spy.reset();
     harness.action("kitchen", "off").unwrap();
@@ -94,10 +98,29 @@ fn power_save_off_enables_soft_off_behavior() {
         "power_save ON: off should not send turn_on"
     );
     let snap = harness.snapshot("kitchen").unwrap();
-    assert!(!snap.soft_off, "power_save ON: should not enter soft_off");
+    assert!(snap.hard_off, "power_save ON: off should enter hard_off");
+    assert!(
+        !snap.soft_off,
+        "power_save ON: off should not enter standby idle"
+    );
+    assert!(
+        !harness.lights_on("kitchen"),
+        "power_save ON: hard_off should report lights off"
+    );
 
-    // Now disable power_save — "off" should be soft-off (turn_on at low brightness)
+    // Now disable power_save — existing hard-off rooms stay hard-off.
+    spy.reset();
     harness.set_settings(Some(false));
+    assert!(
+        spy.turn_on_count() == 0,
+        "power_save OFF: existing hard_off room should not restore standby output"
+    );
+    assert!(
+        !harness.lights_on("kitchen"),
+        "power_save OFF: hard_off should remain lights off"
+    );
+
+    // New off actions with power_save disabled should also soft-off.
     harness.action("kitchen", "on").unwrap();
     spy.reset();
     harness.action("kitchen", "off").unwrap();
@@ -191,6 +214,7 @@ fn soft_off_uses_idle_profile() {
     let (harness, spy) = TestHarness::with_spy_controller();
     let harness = harness.with_discovery(vec![room("kitchen", "Kitchen")], vec![]);
     harness.sync();
+    harness.set_settings(Some(false));
 
     // Turn on, then off — the idle profile is used for soft-off color
     harness.action("kitchen", "on").unwrap();
@@ -220,6 +244,7 @@ fn soft_off_uses_explicit_idle_palette_override() {
     let (harness, spy) = TestHarness::with_spy_controller();
     let harness = harness.with_discovery(vec![room("kitchen", "Kitchen")], vec![]);
     harness.sync();
+    harness.set_settings(Some(false));
     harness.set_mode_configs(vec![rhythm_core::ModeConfig {
         mode: rhythm_core::RhythmMode::Day,
         active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
@@ -279,6 +304,7 @@ fn soft_off_uses_explicit_idle_constant_override() {
     let (harness, spy) = TestHarness::with_spy_controller();
     let harness = harness.with_discovery(vec![room("kitchen", "Kitchen")], vec![]);
     harness.sync();
+    harness.set_settings(Some(false));
     harness.set_mode_configs(vec![rhythm_core::ModeConfig {
         mode: rhythm_core::RhythmMode::Day,
         active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),

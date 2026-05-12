@@ -91,6 +91,7 @@ fn soft_off_on_motion_room() {
         vec![motion_sensor("motion_01", "hallway")],
     );
     harness.sync();
+    harness.set_settings(Some(false));
 
     // Lights on + motion active
     harness.action("hallway", "on").unwrap();

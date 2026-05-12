@@ -15,6 +15,7 @@ fn off_press_overrides_motion_active_cache() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "on").unwrap();
     h.set_motion_active("kitchen");

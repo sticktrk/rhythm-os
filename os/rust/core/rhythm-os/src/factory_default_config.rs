@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn factory_default_profile_bundle_exposes_expected_defaults() {
         assert_eq!(factory_default_active_mode(), RhythmMode::Day);
-        assert!(!factory_default_power_save());
+        assert!(factory_default_power_save());
 
         let bundle = factory_default_profile_bundle();
         assert_eq!(bundle.name.as_deref(), Some("Factory Default"));

@@ -403,14 +403,27 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
 
     let runtime = Arc::new(runtime);
 
-    // Push runtime settings to engine
-    {
+    // Push runtime settings to engine. If restored rooms were idle and
+    // power_save is active, convert them to hard-off and refresh output.
+    let (power_save, power_save_refresh_rooms) = {
         let s = state
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
-        runtime.set_power_save(s.power_save);
+        let rooms = runtime.set_power_save(s.power_save);
         info!(target: "sys", "Active mode: {:?}", s.active_mode);
         info!(target: "sys", "Power save: {}", s.power_save);
+        (s.power_save, rooms)
+    };
+    if power_save {
+        for room_id in power_save_refresh_rooms {
+            if let Err(e) = runtime.lights_off_room(&room_id, None) {
+                warn!(
+                    target: "sys",
+                    "Failed to apply power-save hard-off output for '{}': {}",
+                    room_id, e
+                );
+            }
+        }
     }
 
     // Store runtime in ActiveHub and update runtime_config
@@ -783,10 +796,22 @@ pub fn ensure_composite_runtime(
 
     let runtime = std::sync::Arc::new(runtime);
 
-    // Push settings to engine
-    {
+    // Push settings to engine. If restored nodes were idle and power_save is
+    // active, convert them to hard-off and refresh output.
+    let (power_save, power_save_refresh_nodes) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        runtime.set_power_save(s.power_save);
+        (s.power_save, runtime.set_power_save(s.power_save))
+    };
+    if power_save {
+        for node_id in power_save_refresh_nodes {
+            if let Err(e) = runtime.lights_off_room(&node_id, None) {
+                warn!(
+                    target: "sys",
+                    "Failed to apply power-save hard-off output for '{}': {}",
+                    node_id, e
+                );
+            }
+        }
     }
 
     // Store runtime and composite controller

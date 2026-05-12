@@ -14,6 +14,7 @@ fn off_then_on_ends_active_with_adaptive_brightness() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "on").unwrap();
     h.action("kitchen", "off").unwrap();
@@ -33,6 +34,7 @@ fn on_then_off_ends_soft_off_at_one_percent() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "off").unwrap();
     h.action("kitchen", "on").unwrap();
@@ -55,6 +57,7 @@ fn morning_bundle_replay_off_off_on_off_ends_soft_off() {
     let (h, spy) = TestHarness::with_spy_controller_at(6.04, 118);
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("master", "on").unwrap();
     spy.reset();

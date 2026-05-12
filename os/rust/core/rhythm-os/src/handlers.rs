@@ -3046,7 +3046,7 @@ mod tests {
         assert_eq!(parsed["min_brightness"], 20);
         assert_eq!(parsed["max_brightness"], 20);
         assert_eq!(parsed["curve"]["type"], "constant");
-        assert_eq!(parsed["curve"]["direct_color"]["rgb"]["r"], 255);
+        assert!(parsed["curve"]["direct_color"].is_null());
         assert!(parsed.get("direct_color").is_none());
     }
 

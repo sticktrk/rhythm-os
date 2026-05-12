@@ -9,7 +9,7 @@ use rhythm_core::{
     ButtonAction, ModeChangeCause, NodeSnapshot, RhythmMode, RoomModeState, RoomProfileSettings,
 };
 
-use crate::api_types::ObservedPowerDto;
+use crate::api_types::{ObservedPowerDto, SettingsDto};
 use crate::pairing::{PairedDeviceInfo, PairingStage, PairingStatus};
 use crate::state::MotionSnapshot;
 
@@ -59,8 +59,8 @@ pub enum ServerEvent {
         address: Option<String>,
         connected: bool,
     },
-    /// Settings changed (client should refetch).
-    SettingsChanged,
+    /// Settings changed.
+    SettingsChanged { settings: SettingsDto },
     /// Active mode flipped — carries the new mode + last_change metadata so
     /// clients can update the displayed mode without an HTTP roundtrip and
     /// without waiting for the paced per-node `NodeState` events that follow.
@@ -305,11 +305,18 @@ mod tests {
 
     #[test]
     fn server_event_serializes_with_tagged_type_and_data() {
-        let event = ServerEvent::SettingsChanged;
+        let event = ServerEvent::SettingsChanged {
+            settings: SettingsDto { power_save: true },
+        };
         let json = serde_json::to_string(&event).unwrap();
         assert!(
             json.contains("\"type\":\"settings_changed\""),
             "expected snake_case tagged type, got {}",
+            json
+        );
+        assert!(
+            json.contains("\"power_save\":true"),
+            "expected settings payload, got {}",
             json
         );
     }
@@ -472,7 +479,9 @@ mod tests {
 
         // Push more events than the channel capacity.
         for _ in 0..32 {
-            let _ = tx.send(ServerEvent::SettingsChanged);
+            let _ = tx.send(ServerEvent::SettingsChanged {
+                settings: SettingsDto { power_save: false },
+            });
         }
 
         // Fast subscriber drains: it sees at least the latest 8 events
@@ -516,7 +525,9 @@ mod tests {
         // that callers like `emit_event` swallow with `let _ =`.
         let (tx, rx) = tokio::sync::broadcast::channel::<ServerEvent>(4);
         drop(rx);
-        let result = tx.send(ServerEvent::SettingsChanged);
+        let result = tx.send(ServerEvent::SettingsChanged {
+            settings: SettingsDto { power_save: false },
+        });
         assert!(
             result.is_err(),
             "send with no subscribers must error (and emit_event must ignore it)"

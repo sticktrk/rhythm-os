@@ -3,7 +3,8 @@
 //! Exercises the public mode API path end-to-end:
 //! 1. Hub discovery creates rooms and runtime state.
 //! 2. User configures room defaults on the sleep mode and activates it.
-//! 3. Rooms move to active / idle / hard-off before output recalculation.
+//! 3. Rooms move to active / off before output recalculation. In default
+//!    powersave mode, an idle default is applied as hard-off.
 //! 4. The API response echoes the stored room defaults.
 
 mod harness;
@@ -64,8 +65,14 @@ fn put_mode_applies_room_defaults_on_mode_activation() {
     assert_eq!(sleep_config["room_defaults"].as_array().unwrap().len(), 3);
 
     let kitchen = harness.snapshot("kitchen").unwrap();
-    assert!(kitchen.soft_off, "kitchen should move to idle");
-    assert!(!kitchen.hard_off, "idle room should not be hard-off");
+    assert!(
+        !kitchen.soft_off,
+        "powersave idle default should not leave soft_off set"
+    );
+    assert!(
+        kitchen.hard_off,
+        "powersave idle default should apply as hard-off"
+    );
 
     let office = harness.snapshot("office").unwrap();
     assert!(office.hard_off, "office should move to hard-off");
@@ -75,7 +82,10 @@ fn put_mode_applies_room_defaults_on_mode_activation() {
     assert!(!balcony.soft_off, "balcony should become active");
     assert!(!balcony.hard_off, "active default should clear hard-off");
 
-    assert!(harness.lights_on("kitchen"), "idle room remains visible");
+    assert!(
+        !harness.lights_on("kitchen"),
+        "powersave idle default should be tracked off"
+    );
     assert!(
         !harness.lights_on("office"),
         "hard-off room should be tracked off"
@@ -91,10 +101,8 @@ fn put_mode_applies_room_defaults_on_mode_activation() {
 
     let turn_on_calls = spy.turn_on_calls();
     assert!(
-        turn_on_calls
-            .iter()
-            .any(|(room_id, _)| room_id == &kitchen_id),
-        "idle default should re-render kitchen"
+        spy.turn_off_calls().contains(&kitchen_id),
+        "powersave idle default should send turn_off for kitchen"
     );
     assert!(
         turn_on_calls

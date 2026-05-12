@@ -1,5 +1,6 @@
 //! Mode transitions with `preserve_hard_off=true` must keep hard-off rooms
-//! hard-off, but a subsequent `OffPress` must still soft-off them to 1%.
+//! hard-off, but a subsequent non-powersave `OffPress` must still soft-off
+//! them to 1%.
 //!
 //! The factory-default Sleep↔Day transitions both have `preserve_hard_off=true`
 //! (see `factory_default_config.rs:267,277`), which is what the user runs in
@@ -23,6 +24,7 @@ fn preserve_hard_off_transition_keeps_hard_off_then_off_press_soft_offs() {
     let (h, spy) = TestHarness::with_spy_controller_at(6.04, 118);
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.set_mode_configs(default_mode_configs());
     {

@@ -137,6 +137,7 @@ fn actions_across_hub_types() {
 #[test]
 fn soft_off_on_cross_hub_room() {
     let (harness, _office_id) = setup_multi_hub();
+    harness.set_settings(Some(false));
 
     // Turn on Kitchen first
     harness.action("hue-kitchen", "on").unwrap();
@@ -189,6 +190,7 @@ fn brightness_on_cross_hub_room() {
 #[test]
 fn room_state_preserved_through_resync() {
     let (harness, _office_id) = setup_multi_hub();
+    harness.set_settings(Some(false));
 
     // Turn on Kitchen and set some state
     harness.action("hue-kitchen", "on").unwrap();

@@ -162,6 +162,7 @@ fn composite_fans_out_to_both_hubs() {
 #[test]
 fn composite_turn_off_fans_out() {
     let (runtime, hue_spy, ha_spy, _composite) = make_composite_pipeline();
+    runtime.set_power_save(false);
 
     // Turn on first
     let input = InputEvent::new("kitchen", rhythm_core::ButtonAction::OnPress);
@@ -309,6 +310,7 @@ fn composite_off_press_partial_failure_still_dims_working_hub() {
     // failure must not silently turn the request into a no-op on the working
     // hub.
     let (runtime, hue_spy, ha_spy, _composite) = make_composite_pipeline();
+    runtime.set_power_save(false);
 
     // Establish baseline-on across both hubs, then drop Hue.
     let on = InputEvent::new("kitchen", rhythm_core::ButtonAction::OnPress);

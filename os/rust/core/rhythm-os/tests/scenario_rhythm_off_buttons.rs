@@ -14,6 +14,7 @@ fn off_press_after_rhythm_off_still_dims_to_one_percent() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "on").unwrap();
     h.action("kitchen", "rhythm_off").unwrap();

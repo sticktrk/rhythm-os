@@ -124,7 +124,7 @@ fn sse_button_press_produces_correct_transport_call() {
 }
 
 #[test]
-fn sse_button_off_press_sends_soft_off() {
+fn sse_button_off_press_defaults_to_hard_off() {
     let (runtime, registry, spy) = make_hue_pipeline();
 
     // First turn on
@@ -164,10 +164,57 @@ fn sse_button_off_press_sends_soft_off() {
             brightness,
             ..
         } => {
-            assert!(
-                *on,
-                "Button 4 initial_press should soft-off (on at min brightness)"
-            );
+            assert!(!*on, "Button 4 short_release should hard-off by default");
+            assert_eq!(*brightness, None, "hard-off should not send brightness");
+            assert_eq!(grouped_light_id, "gl-room1");
+        }
+        other => panic!("Expected SetGroupedLight, got {:?}", other),
+    }
+}
+
+#[test]
+fn sse_button_off_press_sends_soft_off_when_power_save_disabled() {
+    let (runtime, registry, spy) = make_hue_pipeline();
+    runtime.set_power_save(false);
+
+    // First turn on
+    let input = InputEvent::new("room1", rhythm_core::ButtonAction::OnPress);
+    runtime.handle_event(&input).unwrap();
+    spy.reset();
+
+    // Add button 4 (control_id=4 -> OffPress on short_release)
+    registry.lock().unwrap().upsert_device(
+        "switch-1",
+        Some("room1"),
+        &[("btn-1".to_string(), 1), ("btn-4".to_string(), 4)],
+        DeviceType::Button,
+    );
+
+    let sse_event = HueSseEvent::ButtonEvent {
+        button_id: "btn-4".to_string(),
+        event_type: "short_release".to_string(),
+    };
+
+    let hub_events = translate_sse_event(&registry, sse_event, None, None, None);
+
+    if let Some(HubEvent::Button {
+        room_id, action, ..
+    }) = hub_events.first()
+    {
+        let input = InputEvent::new(room_id, *action);
+        runtime.handle_event(&input).unwrap();
+    }
+
+    let calls = spy.set_grouped_light_calls();
+    assert!(!calls.is_empty(), "Expected at least one transport call");
+    match &calls[0] {
+        HueTransportCall::SetGroupedLight {
+            on,
+            grouped_light_id,
+            brightness,
+            ..
+        } => {
+            assert!(*on, "non-powersave OffPress should soft-off");
             assert_eq!(*brightness, Some(1), "soft-off brightness should be 1%");
             assert_eq!(grouped_light_id, "gl-room1");
         }

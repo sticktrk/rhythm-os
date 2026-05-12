@@ -16,6 +16,7 @@ fn disabled_room_off_press_still_soft_offs() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "on").unwrap();
     h.set_room_preferences("kitchen", None, Some(true), None);

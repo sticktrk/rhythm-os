@@ -356,8 +356,8 @@ pub struct AppState {
     pub default_motion_timeout_secs: u64,
     /// Current curve-computed fade/transition time in milliseconds.
     pub default_fade_ms: u32,
-    /// Power save mode. When false, lights dim to soft-off brightness
-    /// instead of turning fully off.
+    /// Power save mode. When true, idle rooms turn fully off; when false,
+    /// idle rooms dim to standby brightness.
     pub power_save: bool,
     // ---- Storage ----
     /// Platform-specific storage backend.
@@ -997,7 +997,7 @@ mod tests {
             state.default_motion_timeout_secs,
             DEFAULT_MOTION_TIMEOUT_SECS as u64
         );
-        assert!(!state.power_save);
+        assert!(state.power_save);
         assert!(state.hubs.is_empty());
         assert!(state.latitude.is_none());
         assert!(state.longitude.is_none());

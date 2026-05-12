@@ -264,7 +264,7 @@ pub struct LocationDto {
 }
 
 /// App-level settings in state snapshot and `GET /api/settings`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SettingsDto {
     pub power_save: bool,
 }

@@ -1,7 +1,8 @@
 //! Bottom-button (off) flow tests for the Hue dimmer.
 //!
 //! Hue dimmer button 4 (bottom) maps:
-//! - short press → `OffPress` → soft-off (turn_on at 1% brightness, soft_off=true)
+//! - short press in non-powersave mode → `OffPress` → soft-off
+//!   (turn_on at 1% brightness, soft_off=true)
 //! - long press → `LightsOff` → hard turn_off (hard_off=true)
 //!
 //! These scenarios cover daily-use combinations the basic
@@ -19,6 +20,7 @@ fn bottom_short_press_from_on_dims_to_one_percent() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "on").unwrap();
     spy.reset();
@@ -37,6 +39,7 @@ fn bottom_short_press_twice_stays_at_one_percent() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "on").unwrap();
     spy.reset();
@@ -58,6 +61,7 @@ fn bottom_short_press_when_externally_off_still_soft_offs() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     // Cache says lights are off (e.g. someone flipped the switch externally),
     // but the user still presses the bottom button.
@@ -82,6 +86,7 @@ fn bottom_long_press_sends_hard_off() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "on").unwrap();
     spy.reset();
@@ -98,6 +103,7 @@ fn bottom_long_then_short_press_recovers_to_soft_off() {
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
     h.sync();
+    h.set_settings(Some(false));
 
     h.action("kitchen", "on").unwrap();
     h.action("kitchen", "lights_off").unwrap();

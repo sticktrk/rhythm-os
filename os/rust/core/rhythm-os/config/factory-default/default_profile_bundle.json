@@ -4,7 +4,7 @@
   "name": "Factory Default",
   "description": "Developer-owned factory-default Rhythm lighting profile bundle.",
   "profile": {
-    "power_save": false,
+    "power_save": true,
     "mode_transitions": [
       {
         "id": "sleep_to_day",
