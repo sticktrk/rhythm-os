@@ -14,6 +14,7 @@ import '../../providers/server_sync_provider.dart';
 import '../../providers/subscription_provider.dart';
 import '../../services/analytics_service.dart';
 import '../../utils/room_visibility.dart';
+import '../../widgets/info_tooltip.dart';
 import '../../widgets/plan_tier_modal.dart';
 
 /// Full-screen modal for configuring the light profile.
@@ -2546,6 +2547,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     required ValueChanged<double> onSliderChanged,
     required VoidCallback onAuto,
     required VoidCallback onManual,
+    String? tooltip,
   }) {
     final displayValue = isAuto ? effectiveValue : sliderValue;
     return Column(
@@ -2566,13 +2568,24 @@ class _LightProfileScreenState extends State<LightProfileScreen>
               ),
               const SizedBox(width: 12),
               Expanded(
-                child: Text(
-                  title,
-                  style: const TextStyle(
-                    color: _Palette.textSecondary,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
-                  ),
+                child: Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        title,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: _Palette.textSecondary,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                    if (tooltip != null) ...[
+                      const SizedBox(width: 2),
+                      InfoTooltip(message: tooltip, iconSize: 13),
+                    ],
+                  ],
                 ),
               ),
               _buildAutoToggle(
@@ -3057,6 +3070,9 @@ class _LightProfileScreenState extends State<LightProfileScreen>
             sliderMax: 1800,
             divisions: 59,
             format: (v) => _formatMotionTimeout(v.round()),
+            tooltip:
+                'How long the lights stay on after motion is last detected '
+                'before timing out to standby.',
             onSliderChanged: (v) => setState(() {
               _motionTimeoutSecs = v.round();
               _markDirty();
@@ -3083,6 +3099,10 @@ class _LightProfileScreenState extends State<LightProfileScreen>
             sliderMax: 1000,
             divisions: 20,
             format: _formatFade,
+            tooltip:
+                'How smoothly the lights fade between brightness and color '
+                'changes. Lower values feel snappier, higher values feel '
+                'gentler.',
             onSliderChanged: (v) => setState(() {
               _fadeMs = v;
               _markDirty();
@@ -3109,6 +3129,9 @@ class _LightProfileScreenState extends State<LightProfileScreen>
             sliderMax: 300,
             divisions: 27,
             format: _formatInterval,
+            tooltip:
+                'How often the lights update their color and brightness '
+                'throughout the day and night.',
             onSliderChanged: (v) => setState(() {
               _intervalSecs = v;
               _markDirty();
@@ -3345,15 +3368,31 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                       ),
                     ),
                     const SizedBox(width: 12),
-                    const Expanded(
-                      child: Text(
-                        'Room Defaults',
-                        style: TextStyle(
-                          color: _Palette.textPrimary,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: -0.1,
-                        ),
+                    Expanded(
+                      child: Row(
+                        children: [
+                          const Flexible(
+                            child: Text(
+                              'Room Defaults',
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: _Palette.textPrimary,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: -0.1,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          InfoTooltip(
+                            message:
+                                'Override the default state for each room '
+                                'while this profile is active. Useful for '
+                                'keeping certain rooms always on, off, or in '
+                                'standby regardless of the curve.',
+                            iconSize: 13,
+                          ),
+                        ],
                       ),
                     ),
                     if (!expanded && hasOverrides)
@@ -3827,7 +3866,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
 
   Widget _buildResetToDefaultsButton() {
     return GestureDetector(
-      onTap: _resetToDefaults,
+      onTap: _confirmResetToDefaults,
       child: Text(
         'Reset to Defaults',
         style: TextStyle(
@@ -3837,6 +3876,43 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         ),
       ),
     );
+  }
+
+  Future<void> _confirmResetToDefaults() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: _Palette.card,
+        title: Text(
+          'Reset $_profileTitle?',
+          style: const TextStyle(color: _Palette.textPrimary),
+        ),
+        content: Text(
+          'This restores every setting in the ${_profileTitle.toLowerCase()} '
+          'to its factory default. Any customizations you have made will be '
+          'lost.',
+          style: const TextStyle(color: _Palette.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text(
+              'Cancel',
+              style: TextStyle(color: _Palette.textSecondary),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text(
+              'Reset',
+              style: TextStyle(color: Colors.redAccent),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _resetToDefaults();
   }
 
 }

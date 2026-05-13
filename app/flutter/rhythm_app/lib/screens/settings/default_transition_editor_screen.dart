@@ -1228,6 +1228,10 @@ class _DefaultTransitionEditorScreenState
         accent: _chromeAccent,
         enabled: _timeEnabled,
         onChanged: _setTimeEnabled,
+        tooltip:
+            'Automatically switch between Day and Sleep at chosen times — '
+            'either anchored to solar events (sunrise, sunset) or fixed clock '
+            'times. Drag the orbs to adjust.',
       ),
       body: Padding(
         padding: const EdgeInsets.fromLTRB(8, 4, 8, 12),
@@ -1283,6 +1287,10 @@ class _DefaultTransitionEditorScreenState
                 context,
                 highlightFeature: Entitlement.transitionButton,
               ),
+      tooltip:
+          'Bind a physical button (e.g. a Hue Tap or Dimmer) so a single '
+          'press toggles between Day and Sleep mode. Great as a bedside '
+          'sleep + wake button.',
     );
 
     return _SourceSectionCard(
@@ -2326,6 +2334,9 @@ class _SourceSectionHeader extends StatelessWidget {
   /// right side renders an amber Pro pill instead of the enable switch.
   final VoidCallback? onLockTap;
 
+  /// Optional explanatory tooltip rendered as an (i) chip next to [label].
+  final String? tooltip;
+
   const _SourceSectionHeader({
     required this.icon,
     required this.label,
@@ -2334,6 +2345,7 @@ class _SourceSectionHeader extends StatelessWidget {
     required this.enabled,
     required this.onChanged,
     this.onLockTap,
+    this.tooltip,
   });
 
   bool get _locked => onLockTap != null;
@@ -2387,17 +2399,29 @@ class _SourceSectionHeader extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  AnimatedDefaultTextStyle(
-                    duration: const Duration(milliseconds: 200),
-                    style: TextStyle(
-                      color: enabled
-                          ? CelestialColors.textPrimary
-                          : CelestialColors.textPrimary.withValues(alpha: 0.6),
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 0.3,
-                    ),
-                    child: Text(label),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Flexible(
+                        child: AnimatedDefaultTextStyle(
+                          duration: const Duration(milliseconds: 200),
+                          style: TextStyle(
+                            color: enabled
+                                ? CelestialColors.textPrimary
+                                : CelestialColors.textPrimary
+                                    .withValues(alpha: 0.6),
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.3,
+                          ),
+                          child: Text(label, overflow: TextOverflow.ellipsis),
+                        ),
+                      ),
+                      if (tooltip != null) ...[
+                        const SizedBox(width: 4),
+                        InfoTooltip(message: tooltip!, iconSize: 13),
+                      ],
+                    ],
                   ),
                   const SizedBox(height: 2),
                   AnimatedDefaultTextStyle(
