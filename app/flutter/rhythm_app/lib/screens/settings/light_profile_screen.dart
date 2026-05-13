@@ -598,10 +598,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     });
   }
 
-  void _onIntervalChanged(double value) {
-    _onCurveChanged(() => _intervalSecs = value);
-  }
-
   String _formatInterval(double secs) {
     if (secs >= 60 && secs % 60 == 0) return '${(secs / 60).round()}m';
     return '${secs.round()}s';
@@ -614,11 +610,15 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     _maxBrightness = config.maxBrightness.toDouble();
     _maxDimSteps = config.maxDimSteps.toDouble();
     _fadeAuto = config.fadeMs == null;
-    _fadeMs = (config.fadeMs ?? 500).toDouble();
+    _fadeMs = (config.fadeMs ?? _serverSync.effectiveFadeMs ?? 500).toDouble();
     _motionTimeoutAuto = config.motionTimeoutSecs == null;
-    _motionTimeoutSecs = config.motionTimeoutSecs ?? 600;
+    _motionTimeoutSecs = config.motionTimeoutSecs ??
+        _serverSync.effectiveMotionTimeoutSecs ??
+        600;
     _intervalAuto = config.rhythmIntervalSecs == null;
-    _intervalSecs = (config.rhythmIntervalSecs ?? 60).toDouble();
+    _intervalSecs =
+        (config.rhythmIntervalSecs ?? _serverSync.rhythmIntervalSecs)
+            .toDouble();
 
     final curve = config.curve;
     if (curve is sdk.RhythmSuperGaussianCurve) {
@@ -729,9 +729,15 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         minBrightness: brightness,
         maxBrightness: brightness,
         maxDimSteps: base.maxDimSteps,
-        fadeMs: base.fadeMs,
-        motionTimeoutSecs: base.motionTimeoutSecs,
-        rhythmIntervalSecs: base.rhythmIntervalSecs,
+        fadeMs: canUseSleepPrimary
+            ? (_fadeAuto ? null : _fadeMs.round())
+            : base.fadeMs,
+        motionTimeoutSecs: canUseSleepPrimary
+            ? (_motionTimeoutAuto ? null : _motionTimeoutSecs)
+            : base.motionTimeoutSecs,
+        rhythmIntervalSecs: canUseSleepPrimary
+            ? (_intervalAuto ? null : _intervalSecs.round())
+            : base.rhythmIntervalSecs,
         curve: sdk.RhythmConstantCurve(
           brightness: 0,
           colorTemp: 0,
@@ -1256,6 +1262,57 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   String _formatFade(double ms) => '${ms.round()}ms';
+
+  /// Two-chip segmented toggle: `[Auto] [valueLabel]`.
+  ///
+  /// Both chips are always visible so the current mode is unambiguous and the
+  /// "reset to Auto" affordance is one tap away in any state.
+  Widget _buildAutoToggle({
+    required Color color,
+    required bool isAuto,
+    required String valueLabel,
+    required VoidCallback onAuto,
+    required VoidCallback onManual,
+  }) {
+    Widget chip(String label, bool active, VoidCallback onTap) {
+      return GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            color: active
+                ? color.withValues(alpha: 0.14)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(
+              color: active
+                  ? color.withValues(alpha: 0.30)
+                  : color.withValues(alpha: 0.14),
+            ),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: active ? color : color.withValues(alpha: 0.45),
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        chip('Auto', isAuto, isAuto ? () {} : onAuto),
+        const SizedBox(width: 6),
+        chip(valueLabel, !isAuto, !isAuto ? () {} : onManual),
+      ],
+    );
+  }
 
   String _formatMotionTimeout(int secs) {
     if (secs == 0) return 'Off';
@@ -2468,407 +2525,125 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   // Light Transition (fade) row
   // ---------------------------------------------------------------------------
 
-  Widget _buildFadeRow(Color color) {
+  /// Unified header + Auto-toggle + slider used by Light Transition,
+  /// Background Interval, and Motion Timeout.
+  ///
+  /// Tap behaviors:
+  /// - Tap anywhere on the header row (while in Auto) -> open the slider.
+  /// - Tap the Auto chip -> collapse the slider.
+  /// - Tap the value chip -> open the slider (same as row tap).
+  Widget _buildTimingRow({
+    required IconData icon,
+    required String title,
+    required Color color,
+    required bool isAuto,
+    required double sliderValue,
+    required double effectiveValue,
+    required double sliderMin,
+    required double sliderMax,
+    required int divisions,
+    required String Function(double) format,
+    required ValueChanged<double> onSliderChanged,
+    required VoidCallback onAuto,
+    required VoidCallback onManual,
+  }) {
+    final displayValue = isAuto ? effectiveValue : sliderValue;
     return Column(
       children: [
-        Row(
-          children: [
-            Container(
-              width: 30,
-              height: 30,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: color.withValues(alpha: 0.1),
-              ),
-              child: Icon(Icons.blur_on_rounded, color: color, size: 15),
-            ),
-            const SizedBox(width: 12),
-            const Expanded(
-              child: Text(
-                'Light Transition',
-                style: TextStyle(
-                  color: _Palette.textSecondary,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-            GestureDetector(
-              onTap: () {
-                setState(() {
-                  _fadeAuto = !_fadeAuto;
-                  _markDirty();
-                });
-              },
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: _fadeAuto
-                      ? color.withValues(alpha: 0.12)
-                      : color.withValues(alpha: 0.06),
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(
-                    color: _fadeAuto
-                        ? color.withValues(alpha: 0.25)
-                        : color.withValues(alpha: 0.12),
-                  ),
-                ),
-                child: Text(
-                  _fadeAuto ? 'Auto' : _formatFade(_fadeMs),
-                  style: TextStyle(
-                    color: _fadeAuto ? color : color.withValues(alpha: 0.7),
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ),
-            if (_fadeAuto) ...[
-              const SizedBox(width: 8),
-              Text(
-                _formatFade(_fadeMs),
-                style: TextStyle(
-                  color: _Palette.textSecondary.withValues(alpha: 0.5),
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  fontFeatures: const [FontFeature.tabularFigures()],
-                ),
-              ),
-            ],
-          ],
-        ),
-        AnimatedSize(
-          duration: const Duration(milliseconds: 250),
-          curve: Curves.easeOutCubic,
-          alignment: Alignment.topCenter,
-          child: _fadeAuto
-              ? const SizedBox.shrink()
-              : Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Column(
-                    children: [
-                      SliderTheme(
-                        data: SliderThemeData(
-                          activeTrackColor: color,
-                          inactiveTrackColor: color.withValues(alpha: 0.12),
-                          thumbColor: color,
-                          overlayColor: color.withValues(alpha: 0.12),
-                          trackHeight: 4,
-                          thumbShape: const RoundSliderThumbShape(
-                              enabledThumbRadius: 8),
-                          overlayShape:
-                              const RoundSliderOverlayShape(overlayRadius: 18),
-                        ),
-                        child: Slider(
-                          value: _fadeMs.clamp(0, 1000),
-                          min: 0,
-                          max: 1000,
-                          divisions: 20,
-                          onChanged: (v) {
-                            setState(() {
-                              _fadeMs = v;
-                              _markDirty();
-                            });
-                          },
-                        ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 6),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              _formatFade(0),
-                              style: TextStyle(
-                                color: _Palette.textSecondary
-                                    .withValues(alpha: 0.4),
-                                fontSize: 11,
-                              ),
-                            ),
-                            Text(
-                              _formatFade(1000),
-                              style: TextStyle(
-                                color: _Palette.textSecondary
-                                    .withValues(alpha: 0.4),
-                                fontSize: 11,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-        ),
-      ],
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // Background Light Interval card
-  // ---------------------------------------------------------------------------
-
-  Widget _buildIntervalRow() {
-    const color = _Palette.blue;
-    return Column(
-      children: [
-        Row(
-          children: [
-            Container(
-              width: 30,
-              height: 30,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: color.withValues(alpha: 0.1),
-              ),
-              child: Icon(Icons.update_rounded, color: color, size: 15),
-            ),
-            const SizedBox(width: 12),
-            const Expanded(
-              child: Text(
-                'Background Interval',
-                style: TextStyle(
-                  color: _Palette.textSecondary,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-            GestureDetector(
-              onTap: () {
-                setState(() {
-                  _intervalAuto = !_intervalAuto;
-                  _markDirty();
-                });
-              },
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: _intervalAuto
-                      ? color.withValues(alpha: 0.12)
-                      : color.withValues(alpha: 0.06),
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(
-                    color: _intervalAuto
-                        ? color.withValues(alpha: 0.25)
-                        : color.withValues(alpha: 0.12),
-                  ),
-                ),
-                child: Text(
-                  _intervalAuto ? 'Auto' : _formatInterval(_intervalSecs),
-                  style: TextStyle(
-                    color: _intervalAuto ? color : color.withValues(alpha: 0.7),
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ),
-            if (_intervalAuto) ...[
-              const SizedBox(width: 8),
-              Text(
-                _formatInterval(_intervalSecs),
-                style: TextStyle(
-                  color: _Palette.textSecondary.withValues(alpha: 0.5),
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  fontFeatures: const [FontFeature.tabularFigures()],
-                ),
-              ),
-            ],
-          ],
-        ),
-        AnimatedSize(
-          duration: const Duration(milliseconds: 250),
-          curve: Curves.easeOutCubic,
-          alignment: Alignment.topCenter,
-          child: _intervalAuto
-              ? const SizedBox.shrink()
-              : Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Column(
-                    children: [
-                      SliderTheme(
-                        data: SliderThemeData(
-                          activeTrackColor: color,
-                          inactiveTrackColor: color.withValues(alpha: 0.12),
-                          thumbColor: color,
-                          overlayColor: color.withValues(alpha: 0.12),
-                          trackHeight: 4,
-                          thumbShape: const RoundSliderThumbShape(
-                              enabledThumbRadius: 8),
-                          overlayShape:
-                              const RoundSliderOverlayShape(overlayRadius: 18),
-                        ),
-                        child: Slider(
-                          value: _intervalSecs.clamp(30, 300),
-                          min: 30,
-                          max: 300,
-                          divisions: 27,
-                          onChanged: _onIntervalChanged,
-                        ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 6),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              _formatInterval(30),
-                              style: TextStyle(
-                                color: _Palette.textSecondary
-                                    .withValues(alpha: 0.4),
-                                fontSize: 11,
-                              ),
-                            ),
-                            Text(
-                              _formatInterval(300),
-                              style: TextStyle(
-                                color: _Palette.textSecondary
-                                    .withValues(alpha: 0.4),
-                                fontSize: 11,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildMotionTimeoutHeader(Color color) {
-    return Row(
-      children: [
-        Container(
-          width: 30,
-          height: 30,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: color.withValues(alpha: 0.1),
-          ),
-          child: Icon(Icons.motion_photos_on_rounded, color: color, size: 15),
-        ),
-        const SizedBox(width: 12),
-        const Expanded(
-          child: Text(
-            'Motion Timeout',
-            style: TextStyle(
-              color: _Palette.textSecondary,
-              fontSize: 14,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ),
         GestureDetector(
-          onTap: () {
-            setState(() {
-              _motionTimeoutAuto = !_motionTimeoutAuto;
-              _markDirty();
-            });
-          },
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: BoxDecoration(
-              color: _motionTimeoutAuto
-                  ? color.withValues(alpha: 0.12)
-                  : color.withValues(alpha: 0.06),
-              borderRadius: BorderRadius.circular(6),
-              border: Border.all(
-                color: _motionTimeoutAuto
-                    ? color.withValues(alpha: 0.25)
-                    : color.withValues(alpha: 0.12),
+          behavior: HitTestBehavior.opaque,
+          onTap: isAuto ? onManual : null,
+          child: Row(
+            children: [
+              Container(
+                width: 30,
+                height: 30,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: color.withValues(alpha: 0.1),
+                ),
+                child: Icon(icon, color: color, size: 15),
               ),
-            ),
-            child: Text(
-              _motionTimeoutAuto
-                  ? 'Auto'
-                  : _formatMotionTimeout(_motionTimeoutSecs),
-              style: TextStyle(
-                color:
-                    _motionTimeoutAuto ? color : color.withValues(alpha: 0.7),
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    color: _Palette.textSecondary,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
               ),
-            ),
+              _buildAutoToggle(
+                color: color,
+                isAuto: isAuto,
+                valueLabel: format(displayValue),
+                onAuto: onAuto,
+                onManual: onManual,
+              ),
+            ],
           ),
         ),
-        if (_motionTimeoutAuto) ...[
-          const SizedBox(width: 8),
-          Text(
-            _formatMotionTimeout(_motionTimeoutSecs),
-            style: TextStyle(
-              color: _Palette.textSecondary.withValues(alpha: 0.5),
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              fontFeatures: const [FontFeature.tabularFigures()],
-            ),
-          ),
-        ],
+        AnimatedSize(
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOutCubic,
+          alignment: Alignment.topCenter,
+          child: isAuto
+              ? const SizedBox.shrink()
+              : Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Column(
+                    children: [
+                      SliderTheme(
+                        data: SliderThemeData(
+                          activeTrackColor: color,
+                          inactiveTrackColor: color.withValues(alpha: 0.12),
+                          thumbColor: color,
+                          overlayColor: color.withValues(alpha: 0.12),
+                          trackHeight: 4,
+                          thumbShape: const RoundSliderThumbShape(
+                              enabledThumbRadius: 8),
+                          overlayShape:
+                              const RoundSliderOverlayShape(overlayRadius: 18),
+                        ),
+                        child: Slider(
+                          value: sliderValue.clamp(sliderMin, sliderMax),
+                          min: sliderMin,
+                          max: sliderMax,
+                          divisions: divisions,
+                          onChanged: onSliderChanged,
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              format(sliderMin),
+                              style: TextStyle(
+                                color: _Palette.textSecondary
+                                    .withValues(alpha: 0.4),
+                                fontSize: 11,
+                              ),
+                            ),
+                            Text(
+                              format(sliderMax),
+                              style: TextStyle(
+                                color: _Palette.textSecondary
+                                    .withValues(alpha: 0.4),
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+        ),
       ],
-    );
-  }
-
-  Widget _buildMotionTimeoutSlider(Color color) {
-    return AnimatedSize(
-      duration: const Duration(milliseconds: 250),
-      curve: Curves.easeOutCubic,
-      alignment: Alignment.topCenter,
-      child: _motionTimeoutAuto
-          ? const SizedBox.shrink()
-          : Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Column(
-                children: [
-                  SliderTheme(
-                    data: SliderThemeData(
-                      activeTrackColor: color,
-                      inactiveTrackColor: color.withValues(alpha: 0.12),
-                      thumbColor: color,
-                      overlayColor: color.withValues(alpha: 0.12),
-                      trackHeight: 4,
-                      thumbShape:
-                          const RoundSliderThumbShape(enabledThumbRadius: 8),
-                      overlayShape:
-                          const RoundSliderOverlayShape(overlayRadius: 18),
-                    ),
-                    child: Slider(
-                      value: _motionTimeoutSecs.toDouble().clamp(30, 1800),
-                      min: 30,
-                      max: 1800,
-                      divisions: 59,
-                      onChanged: (v) {
-                        setState(() {
-                          _motionTimeoutSecs = v.round();
-                          _markDirty();
-                        });
-                      },
-                    ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 6),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text('30s',
-                            style: TextStyle(
-                                color: _Palette.textSecondary
-                                    .withValues(alpha: 0.4),
-                                fontSize: 11)),
-                        Text('30m',
-                            style: TextStyle(
-                                color: _Palette.textSecondary
-                                    .withValues(alpha: 0.4),
-                                fontSize: 11)),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
     );
   }
 
@@ -3242,32 +3017,26 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   // Timing Card — compact combined motion timeout + light transition
   // ---------------------------------------------------------------------------
 
-  Widget _buildMotionTimeoutCard() {
-    if (_isSleepProfile) return _buildMotionTimeoutOnly();
-    return _buildTimingCard();
-  }
-
-  Widget _buildMotionTimeoutOnly() {
-    const mtColor = _Palette.teal;
-    return Container(
-      padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
-      decoration: BoxDecoration(
-        color: _Palette.card,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: _Palette.border),
-      ),
-      child: Column(
-        children: [
-          _buildMotionTimeoutHeader(mtColor),
-          _buildMotionTimeoutSlider(mtColor),
-        ],
-      ),
-    );
-  }
-
   Widget _buildTimingCard() {
     const mtColor = _Palette.teal;
     const ltColor = _Palette.amber;
+    const intColor = _Palette.blue;
+
+    final effectiveMotionSecs =
+        (_serverSync.effectiveMotionTimeoutSecs ?? _motionTimeoutSecs)
+            .toDouble();
+    final effectiveFadeMs =
+        _serverSync.effectiveFadeMs?.toDouble() ?? _fadeMs;
+    final effectiveIntervalSecs = _serverSync.rhythmIntervalSecs.toDouble();
+
+    final divider = Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Divider(
+        height: 1,
+        color: _Palette.border.withValues(alpha: 0.5),
+      ),
+    );
+
     return Container(
       padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
       decoration: BoxDecoration(
@@ -3277,25 +3046,83 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       ),
       child: Column(
         children: [
-          _buildMotionTimeoutHeader(mtColor),
-          _buildMotionTimeoutSlider(mtColor),
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 10),
-            child: Divider(
-              height: 1,
-              color: _Palette.border.withValues(alpha: 0.5),
-            ),
+          _buildTimingRow(
+            icon: Icons.motion_photos_on_rounded,
+            title: 'Motion Timeout',
+            color: mtColor,
+            isAuto: _motionTimeoutAuto,
+            sliderValue: _motionTimeoutSecs.toDouble(),
+            effectiveValue: effectiveMotionSecs,
+            sliderMin: 30,
+            sliderMax: 1800,
+            divisions: 59,
+            format: (v) => _formatMotionTimeout(v.round()),
+            onSliderChanged: (v) => setState(() {
+              _motionTimeoutSecs = v.round();
+              _markDirty();
+            }),
+            onAuto: () => setState(() {
+              _motionTimeoutAuto = true;
+              _markDirty();
+            }),
+            onManual: () => setState(() {
+              _motionTimeoutSecs = effectiveMotionSecs.round();
+              _motionTimeoutAuto = false;
+              _markDirty();
+            }),
           ),
-          _buildFadeRow(ltColor),
-          // Background Light Interval
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 10),
-            child: Divider(
-              height: 1,
-              color: _Palette.border.withValues(alpha: 0.5),
-            ),
+          divider,
+          _buildTimingRow(
+            icon: Icons.blur_on_rounded,
+            title: 'Light Transition',
+            color: ltColor,
+            isAuto: _fadeAuto,
+            sliderValue: _fadeMs,
+            effectiveValue: effectiveFadeMs,
+            sliderMin: 0,
+            sliderMax: 1000,
+            divisions: 20,
+            format: _formatFade,
+            onSliderChanged: (v) => setState(() {
+              _fadeMs = v;
+              _markDirty();
+            }),
+            onAuto: () => setState(() {
+              _fadeAuto = true;
+              _markDirty();
+            }),
+            onManual: () => setState(() {
+              _fadeMs = effectiveFadeMs;
+              _fadeAuto = false;
+              _markDirty();
+            }),
           ),
-          _buildIntervalRow(),
+          divider,
+          _buildTimingRow(
+            icon: Icons.update_rounded,
+            title: 'Background Interval',
+            color: intColor,
+            isAuto: _intervalAuto,
+            sliderValue: _intervalSecs,
+            effectiveValue: effectiveIntervalSecs,
+            sliderMin: 30,
+            sliderMax: 300,
+            divisions: 27,
+            format: _formatInterval,
+            onSliderChanged: (v) => setState(() {
+              _intervalSecs = v;
+              _markDirty();
+            }),
+            onAuto: () => setState(() {
+              _intervalAuto = true;
+              _markDirty();
+            }),
+            onManual: () => setState(() {
+              _intervalSecs = effectiveIntervalSecs;
+              _intervalAuto = false;
+              _markDirty();
+            }),
+          ),
         ],
       ),
     );
@@ -3741,6 +3568,12 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                               ),
                               const SizedBox(height: 10),
                               _ProLockWrap(
+                                unlocked: canUseSleepPrimary,
+                                entitlement: Entitlement.sleepPrimarySettings,
+                                child: _buildTimingCard(),
+                              ),
+                              const SizedBox(height: 10),
+                              _ProLockWrap(
                                 unlocked: canUseStandby,
                                 entitlement: Entitlement.standby,
                                 child: _buildIdleSection(),
@@ -3752,7 +3585,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                               _ProLockWrap(
                                 unlocked: canUseAdvancedDay,
                                 entitlement: Entitlement.advancedDayControls,
-                                child: _buildMotionTimeoutCard(),
+                                child: _buildTimingCard(),
                               ),
                               const SizedBox(height: 10),
                               _ProLockWrap(
