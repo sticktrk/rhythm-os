@@ -5,12 +5,15 @@ import 'package:rhythm_sdk/rhythm_sdk.dart' as sdk;
 import '../api/hybrid_client.dart';
 import '../config/platform_context.dart';
 import '../providers/home_provider.dart';
+import '../providers/room_page_provider.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../providers/hub_connection_provider.dart';
+import 'cloud_backup_service.dart';
 import 'demo_server_api.dart';
 import 'hue/hue_service_locator.dart';
 import 'hue/demo_hue_bridge_service.dart';
+import 'settings_service.dart';
 
 /// Options for controlling what gets synced.
 class SyncOptions {
@@ -91,6 +94,9 @@ class AppStateRefresh {
       return const SyncResult.failure('Context not mounted after home init');
     }
 
+    await _restoreCloudAppSettingsIfAvailable(context, homeProvider);
+    _scheduleCloudBackupIfAvailable(homeProvider);
+
     // Step 2: Sync location into API client for accurate solar calculations
     final home = homeProvider.currentHome;
     final loc = home?.location;
@@ -134,6 +140,67 @@ class AppStateRefresh {
     }
 
     return SyncResult.success(roomsSynced: roomsSynced);
+  }
+
+  static Future<void> _restoreCloudAppSettingsIfAvailable(
+    BuildContext context,
+    HomeProvider homeProvider,
+  ) async {
+    final serverHub = homeProvider.getFirstHubOfType(HubType.server);
+    if (serverHub == null || !CloudBackupService.instance.canUseCloudBackups) {
+      return;
+    }
+
+    final scopeKey = RoomPageProvider.layoutScopeFor(
+      home: homeProvider.currentHome,
+      hubs: homeProvider.currentHomeHubs,
+    );
+    final hubKey = RoomPageProvider.hubLayoutKey(serverHub);
+
+    RoomPageProvider? roomPageProvider;
+    try {
+      roomPageProvider = Provider.of<RoomPageProvider>(
+        context,
+        listen: false,
+      );
+    } catch (_) {
+      roomPageProvider = null;
+    }
+
+    try {
+      final snapshot =
+          await CloudBackupService.instance.getSnapshotForCurrentUser();
+      if (snapshot == null) return;
+
+      final restored = await SettingsService.instance.applyCloudSettingsBundle(
+        snapshot.appSettingsBundle,
+        roomLayoutScopeKey: scopeKey,
+        roomLayoutHubKey: hubKey,
+        overwrite: false,
+      );
+      if (!restored) return;
+
+      roomPageProvider?.setLayoutScope(scopeKey);
+      roomPageProvider?.reloadLayout();
+      debugPrint(
+        'AppStateRefresh: Restored All Rooms layout from cloud for hub=$hubKey',
+      );
+    } catch (error) {
+      debugPrint('AppStateRefresh: Cloud app settings restore skipped: $error');
+    }
+  }
+
+  static void _scheduleCloudBackupIfAvailable(HomeProvider homeProvider) {
+    final serverHub = homeProvider.getFirstHubOfType(HubType.server);
+    if (serverHub == null || !CloudBackupService.instance.canUseCloudBackups) {
+      return;
+    }
+
+    CloudBackupService.instance.scheduleCapture(
+      serverHub: serverHub,
+      home: homeProvider.currentHome,
+      reason: 'app_state_sync',
+    );
   }
 
   /// Sync rooms from all configured hubs.

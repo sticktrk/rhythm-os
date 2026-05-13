@@ -116,10 +116,6 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
   double? _rate;
   late final TextEditingController _rateController;
 
-  bool _powerSave = true;
-  bool _powerSaveLoading = true;
-  bool _powerSaveSaving = false;
-
   @override
   void initState() {
     super.initState();
@@ -128,7 +124,6 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
       text: _rate != null ? _rate!.toStringAsFixed(2) : '',
     );
     _loadData();
-    _loadPowerSave();
   }
 
   @override
@@ -316,45 +311,6 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
     SettingsService.instance.setElectricityRate(parsed);
   }
 
-  Future<void> _loadPowerSave() async {
-    final syncProvider = context.read<ServerSyncProvider>();
-    _powerSave = syncProvider.powerSave;
-    if (!syncProvider.synced) {
-      if (mounted) setState(() => _powerSaveLoading = false);
-      return;
-    }
-    final settings = await syncProvider.api.getSettings();
-    if (settings != null && mounted) {
-      setState(() {
-        _powerSave = settings.powerSave;
-        _powerSaveLoading = false;
-      });
-    } else if (mounted) {
-      setState(() => _powerSaveLoading = false);
-    }
-  }
-
-  Future<void> _onPowerSaveChanged(bool value) async {
-    final previous = _powerSave;
-    setState(() {
-      _powerSave = value;
-      _powerSaveSaving = true;
-    });
-    final success =
-        await context.read<ServerSyncProvider>().setPowerSave(value);
-    if (!mounted) return;
-    setState(() {
-      if (!success) _powerSave = previous;
-      _powerSaveSaving = false;
-    });
-    if (success) {
-      AnalyticsService().logPowerSaveToggled(
-        enabled: value,
-        source: 'power_usage',
-      );
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -489,75 +445,6 @@ class _PowerUsageScreenState extends State<PowerUsageScreen> {
           ...data.rooms.map(_buildRoomCard),
           const SizedBox(height: 16),
           _buildDisclaimer(),
-          const SizedBox(height: 20),
-          _buildPowerSaveCard(),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPowerSaveCard() {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(18, 18, 18, 18),
-      decoration: BoxDecoration(
-        color: _P.card,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: _P.border),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: _P.green.withValues(alpha: 0.12),
-            ),
-            child: const Icon(Icons.eco_rounded, color: _P.green, size: 18),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Power Save',
-                  style: TextStyle(
-                    color: _P.textPrimary,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: -0.1,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  'Disables all standby lighting functionality',
-                  style: TextStyle(
-                    color: _P.textSecondary.withValues(alpha: 0.7),
-                    fontSize: 12,
-                    height: 1.3,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-          if (_powerSaveLoading || _powerSaveSaving)
-            const SizedBox(
-              width: 20,
-              height: 20,
-              child: CircularProgressIndicator(strokeWidth: 2, color: _P.green),
-            )
-          else
-            SizedBox(
-              height: 28,
-              child: Switch.adaptive(
-                value: _powerSave,
-                onChanged: _onPowerSaveChanged,
-                activeTrackColor: _P.green,
-                activeThumbColor: _P.textPrimary,
-              ),
-            ),
         ],
       ),
     );

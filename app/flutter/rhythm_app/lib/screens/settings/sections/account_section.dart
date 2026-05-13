@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../../../config/feature_flags.dart';
+import '../../../models/plan_tier.dart';
+import '../../../providers/subscription_provider.dart';
+import '../../../widgets/plan_tier_modal.dart';
 import '../../../widgets/solar_orbit.dart'; // For CelestialColors
 import '../../../widgets/settings_row.dart';
 import '../../../backend/auth/auth_user.dart';
@@ -15,105 +19,80 @@ class AccountSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Hide entire section when auxiliary sign-in is disabled
-    if (!FeatureFlags.auxSignIn) {
-      return const SizedBox.shrink();
-    }
-
+    final subscription = context.watch<SubscriptionProvider>();
     final isSignedIn = user != null && !user!.isAnonymous;
     final isAnonymous = user != null && user!.isAnonymous;
+    final rows = <Widget>[
+      if (FeatureFlags.auxSignIn)
+        if (isSignedIn)
+          SettingsRow(
+            icon: Icons.person_outline,
+            iconColor: CelestialColors.accentBlue,
+            label: 'Profile',
+            value: user?.email ?? 'Signed in',
+            showChevron: false,
+          )
+        else if (isAnonymous)
+          SettingsRow(
+            icon: Icons.person_add_outlined,
+            iconColor: const Color(0xFFFFC107),
+            label: 'Create Account',
+            value: 'Sync layout & backup',
+            onTap: () => SignInModal.show(context),
+          )
+        else
+          SettingsRow(
+            icon: Icons.cloud_outlined,
+            iconColor: CelestialColors.accentBlue,
+            label: 'Sign In',
+            value: 'Sync layout & backup',
+            onTap: () => SignInModal.show(context),
+          ),
+      SettingsRow(
+        icon: Icons.workspace_premium_outlined,
+        iconColor: subscription.isPro
+            ? const Color(0xFFFFC107)
+            : const Color(0xFF90A4AE),
+        label: 'Plan',
+        trailing: _PlanPill(tier: subscription.tier),
+        onTap: () => PlanTierModal.show(context),
+      ),
+    ];
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const SettingsSectionHeader(title: 'Account'),
-        if (isSignedIn)
-          const SizedBox.shrink()
-        else if (isAnonymous)
-          _buildUpgradeAccountCard(context)
-        else
-          _buildSignInCard(context),
+        const SettingsSectionHeader(title: 'Account & Plan'),
+        SettingsGroup(children: rows),
       ],
     );
   }
+}
 
-  Widget _buildSignInCard(BuildContext context) {
-    return SettingsGroup(
-      children: [
-        SettingsRow(
-          icon: Icons.cloud_outlined,
-          iconColor: CelestialColors.accentBlue,
-          label: 'Sign In',
-          value: 'Sync settings',
-          onTap: () => SignInModal.show(context),
-        ),
-      ],
-    );
-  }
+class _PlanPill extends StatelessWidget {
+  const _PlanPill({required this.tier});
 
-  Widget _buildUpgradeAccountCard(BuildContext context) {
-    return GestureDetector(
-      onTap: () => SignInModal.show(context),
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(14),
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              const Color(0xFFFFC107).withValues(alpha: 0.2),
-              CelestialColors.backgroundCard,
-            ],
-          ),
-        ),
-        child: Row(
-          children: [
-            // Solid amber icon
-            Container(
-              width: 44,
-              height: 44,
-              decoration: const BoxDecoration(
-                shape: BoxShape.circle,
-                color: Color(0xFFFFC107),
-              ),
-              child: const Icon(
-                Icons.person_add_outlined,
-                color: Color(0xFF1A1A1A),
-                size: 22,
-              ),
-            ),
-            const SizedBox(width: 14),
-            // Text content
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Create Account',
-                    style: TextStyle(
-                      color: CelestialColors.textPrimary,
-                      fontSize: 17,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Sync settings across devices',
-                    style: TextStyle(
-                      color: CelestialColors.textSecondary.withValues(alpha: 0.8),
-                      fontSize: 14,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Icon(
-              Icons.chevron_right,
-              color: CelestialColors.textSecondary.withValues(alpha: 0.5),
-              size: 22,
-            ),
-          ],
+  final PlanTier tier;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = tier.isPaid
+        ? const Color(0xFFFFC107)
+        : CelestialColors.textSecondary.withValues(alpha: 0.7);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: tier.isPaid ? 0.18 : 0.12),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Text(
+        tier.displayName,
+        style: TextStyle(
+          color: color,
+          fontSize: 13,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.1,
         ),
       ),
     );

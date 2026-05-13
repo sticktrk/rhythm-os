@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart' show HubType;
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnectionState;
+import '../../backend/auth/auth_user.dart';
 import '../../config/platform_capabilities.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../widgets/solar_orbit.dart'; // For CelestialColors
@@ -49,93 +50,15 @@ class SettingsScreen extends StatelessWidget {
                     builder: (context) {
                       final caps = context.read<PlatformCapabilities>();
                       if (!caps.hasAccounts) {
-                        return Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            const SettingsSectionHeader(title: 'DEVICES'),
-                            SettingsGroup(
-                              children: [
-                                SettingsRow(
-                                  icon: Icons.lightbulb_outline,
-                                  iconColor: const Color(0xFFFFB900),
-                                  label: 'Lights & Devices',
-                                  onTap: () =>
-                                      LightsDevicesDetailScreen.show(context),
-                                ),
-                              ],
-                            ),
-                            const SettingsSectionHeader(title: 'SETTINGS'),
-                            SettingsGroup(
-                              children: [
-                                _buildRhythmOsServerRow(),
-                                SettingsRow(
-                                  icon: Icons.apps_rounded,
-                                  iconColor: CelestialColors.accentBlue,
-                                  label: 'RhythmLighting App',
-                                  onTap: () =>
-                                      RhythmAppDetailScreen.show(context),
-                                ),
-                              ],
-                            ),
-                            const SettingsSectionHeader(title: 'STATS'),
-                            SettingsGroup(
-                              children: [
-                                _buildPowerUsageRow(context),
-                              ],
-                            ),
-                            const SizedBox(height: 40),
-                          ],
-                        );
+                        return _buildSettingsContent(context);
                       }
-                      return StreamBuilder(
+                      return StreamBuilder<AuthUser?>(
                         stream: AuthService().authStateChanges,
                         initialData: AuthService().currentUser,
                         builder: (context, snapshot) {
-                          final user = snapshot.data;
-                          final isAnonymous = user != null && user.isAnonymous;
-
-                          return Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              // Show Account CTA at top for anonymous users
-                              if (isAnonymous) AccountSection(user: user),
-                              // SleepSection(), // TODO: Re-enable when sleep schedule is implemented
-                              const SettingsSectionHeader(title: 'DEVICES'),
-                              SettingsGroup(
-                                children: [
-                                  SettingsRow(
-                                    icon: Icons.lightbulb_outline,
-                                    iconColor: const Color(0xFFFFB900),
-                                    label: 'Lights & Devices',
-                                    onTap: () => LightsDevicesDetailScreen.show(
-                                      context,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SettingsSectionHeader(title: 'SETTINGS'),
-                              SettingsGroup(
-                                children: [
-                                  _buildRhythmOsServerRow(),
-                                  SettingsRow(
-                                    icon: Icons.apps_rounded,
-                                    iconColor: CelestialColors.accentBlue,
-                                    label: 'RhythmLighting App',
-                                    onTap: () =>
-                                        RhythmAppDetailScreen.show(context),
-                                  ),
-                                ],
-                              ),
-                              const SettingsSectionHeader(title: 'STATS'),
-                              SettingsGroup(
-                                children: [
-                                  _buildPowerUsageRow(context),
-                                ],
-                              ),
-                              // Show Account at bottom for signed-in users
-                              if (!isAnonymous) AccountSection(user: user),
-                              const SizedBox(height: 40),
-                            ],
+                          return _buildSettingsContent(
+                            context,
+                            user: snapshot.data,
                           );
                         },
                       );
@@ -147,6 +70,47 @@ class SettingsScreen extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildSettingsContent(BuildContext context, {AuthUser? user}) {
+    final caps = context.read<PlatformCapabilities>();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (caps.hasAccounts) AccountSection(user: user),
+        // SleepSection(), // TODO: Re-enable when sleep schedule is implemented
+        const SettingsSectionHeader(title: 'Home'),
+        SettingsGroup(
+          children: [
+            SettingsRow(
+              icon: Icons.lightbulb_outline,
+              iconColor: const Color(0xFFFFB900),
+              label: 'Lights & Devices',
+              onTap: () => LightsDevicesDetailScreen.show(context),
+            ),
+            _buildRhythmOsServerRow(),
+          ],
+        ),
+        const SettingsSectionHeader(title: 'Energy'),
+        SettingsGroup(
+          children: [
+            _buildPowerUsageRow(context),
+          ],
+        ),
+        const SettingsSectionHeader(title: 'App'),
+        SettingsGroup(
+          children: [
+            SettingsRow(
+              icon: Icons.apps_rounded,
+              iconColor: CelestialColors.accentBlue,
+              label: 'RhythmLighting App',
+              onTap: () => RhythmAppDetailScreen.show(context),
+            ),
+          ],
+        ),
+        const SizedBox(height: 40),
+      ],
     );
   }
 

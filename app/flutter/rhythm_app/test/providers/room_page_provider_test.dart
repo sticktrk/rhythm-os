@@ -4,7 +4,7 @@ import 'package:rhythm_core/rhythm_core.dart';
 
 void main() {
   group('RoomPageProvider.layoutScopeFor', () {
-    test('keys server-backed layouts by home and server endpoint', () {
+    test('keys server-backed layouts by server endpoint', () {
       final home = Home.create(id: 'home-1', name: 'Home', ownerId: 'user-1');
       final server = Hub.server(
         id: 'server-1',
@@ -21,7 +21,43 @@ void main() {
 
       expect(
         scope,
-        'home:home-1:server:server:10.0.0.15:54448:plain',
+        'server:server:10.0.0.15:54448:plain',
+      );
+    });
+
+    test('uses the same server scope across homes for phone restore', () {
+      final firstHome =
+          Home.create(id: 'home-1', name: 'Home', ownerId: 'user-1');
+      final secondHome =
+          Home.create(id: 'home-2', name: 'Home', ownerId: 'user-1');
+      final firstServer = Hub.server(
+        id: 'server-1',
+        homeId: firstHome.id,
+        name: 'RhythmServer',
+        host: '10.0.0.15',
+        port: 54448,
+      );
+      final secondServer = Hub.server(
+        id: 'server-2',
+        homeId: secondHome.id,
+        name: 'RhythmServer',
+        host: '10.0.0.15',
+        port: 54448,
+      );
+
+      final first = RoomPageProvider.layoutScopeFor(
+        home: firstHome,
+        hubs: [firstServer],
+      );
+      final second = RoomPageProvider.layoutScopeFor(
+        home: secondHome,
+        hubs: [secondServer],
+      );
+
+      expect(first, second);
+      expect(
+        RoomPageProvider.hubLayoutKey(firstServer),
+        RoomPageProvider.hubLayoutKey(secondServer),
       );
     });
 

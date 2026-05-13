@@ -195,6 +195,15 @@ class LocalDataSource {
     return _settingsBox!.get(key);
   }
 
+  /// Get settings keys matching a prefix.
+  Iterable<String> getSettingsKeysWithPrefix(String prefix) {
+    _ensureInitialized();
+    return _settingsBox!.keys
+        .whereType<String>()
+        .where((key) => key.startsWith(prefix))
+        .toList(growable: false);
+  }
+
   /// Save an arbitrary value into the settings box.
   Future<void> saveSettingsValue(String key, dynamic value) async {
     _ensureInitialized();

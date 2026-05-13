@@ -46,16 +46,21 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   static const _tabs = [
     MainNavTab.home,
-    MainNavTab.dailyRhythm,
     MainNavTab.day,
+    MainNavTab.dailyRhythm,
     MainNavTab.sleep,
     MainNavTab.settings,
   ];
 
   int _tabIndex = 0;
-  final Set<int> _builtTabIndexes = {0};
-  late final List<GlobalKey<NavigatorState>> _navKeys =
-      List.generate(_tabs.length, (_) => GlobalKey<NavigatorState>());
+  // Keyed by tab identity (not index) so reordering [_tabs] doesn't strand
+  // a tab's Navigator state on the wrong screen — the initial route attached
+  // to a Navigator GlobalKey survives hot reload, so per-index keys would
+  // make a swap appear to "lose" screens until a full restart.
+  final Set<MainNavTab> _builtTabs = {MainNavTab.home};
+  final Map<MainNavTab, GlobalKey<NavigatorState>> _navKeys = {
+    for (final t in MainNavTab.values) t: GlobalKey<NavigatorState>(),
+  };
 
   CurveData? _curveData;
   final PageController _roomPageController = PageController();
@@ -145,13 +150,13 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
     if (newIndex == _tabIndex) {
       // Re-tap of the active tab pops its nested stack to root.
-      _navKeys[newIndex].currentState?.popUntil((route) => route.isFirst);
+      _navKeys[tab]?.currentState?.popUntil((route) => route.isFirst);
       return;
     }
 
     setState(() {
       _tabIndex = newIndex;
-      _builtTabIndexes.add(newIndex);
+      _builtTabs.add(tab);
     });
     AnalyticsService().logScreenView(_screenNameFor(tab));
   }
@@ -170,7 +175,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   ///   3. else allow the OS to exit the app.
   Future<void> _handlePopInvoked(bool didPop) async {
     if (didPop) return;
-    final nav = _navKeys[_tabIndex].currentState;
+    final nav = _navKeys[_currentTab]?.currentState;
     if (nav != null && nav.canPop()) {
       nav.pop();
       return;
@@ -193,7 +198,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       if (!mounted) return;
       // Clear any nested-tab navigation pushed on top of the home tab so the
       // user lands back on the room grid.
-      _navKeys[0].currentState?.popUntil((route) => route.isFirst);
+      _navKeys[MainNavTab.home]?.currentState?.popUntil((route) => route.isFirst);
       _serverRemovalCleanupPending = false;
     });
   }
@@ -318,18 +323,19 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       (s) => s.hasBeenSynced,
     );
     final visibleTabs = _computeVisibleTabs(serverSynced: serverSynced);
+    final disabledTabs = _computeDisabledTabs(serverSynced: serverSynced);
 
     // If the current tab depends on a synced server (e.g. Daily Rhythm) and
-    // the server hub was actually unpaired, bounce the user back to Home.
-    if (!visibleTabs.contains(_currentTab)) {
+    // the server hub was actually unpaired, bounce the user back to Home so
+    // they can't sit on a disabled tab's body.
+    if (disabledTabs.contains(_currentTab)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        if (!_computeVisibleTabs(
-                serverSynced: context.read<ServerSyncProvider>().hasBeenSynced)
-            .contains(_currentTab)) {
+        final synced = context.read<ServerSyncProvider>().hasBeenSynced;
+        if (_computeDisabledTabs(serverSynced: synced).contains(_currentTab)) {
           setState(() {
             _tabIndex = 0;
-            _builtTabIndexes.add(0);
+            _builtTabs.add(_tabs[0]);
           });
         }
       });
@@ -347,36 +353,49 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
             _buildTabSlot,
           ),
         ),
-        bottomNavigationBar: _buildBottomNav(visibleTabs: visibleTabs),
+        bottomNavigationBar: _buildBottomNav(
+          visibleTabs: visibleTabs,
+          disabledTabs: disabledTabs,
+        ),
       ),
     );
   }
 
-  /// Bottom-nav tab visibility — Daily Rhythm is hidden until the Rhythm
-  /// server has completed at least one hello (otherwise the orbital editor
-  /// renders without real profile data and looks wrong). Uses a sticky
-  /// `hasBeenSynced` signal so the tab does not flicker out during
-  /// transient reconnects (e.g. pull-to-refresh).
+  /// Bottom-nav tab visibility — all five tabs are always rendered so the
+  /// navbar shape stays stable. Tabs whose dependencies aren't met get
+  /// disabled via [_computeDisabledTabs] instead of being hidden.
   List<MainNavTab> _computeVisibleTabs({required bool serverSynced}) {
-    return [
+    return const [
       MainNavTab.home,
-      if (serverSynced) MainNavTab.dailyRhythm,
       MainNavTab.day,
+      MainNavTab.dailyRhythm,
       MainNavTab.sleep,
       MainNavTab.settings,
     ];
   }
 
+  /// Tabs to grey-out and reject taps on. Daily Rhythm is disabled until the
+  /// Rhythm server has completed at least one hello — the orbital editor
+  /// needs real profile data to render meaningfully. Uses the sticky
+  /// `hasBeenSynced` signal so the disabled state doesn't flicker on
+  /// transient reconnects.
+  Set<MainNavTab> _computeDisabledTabs({required bool serverSynced}) {
+    return {
+      if (!serverSynced) MainNavTab.dailyRhythm,
+    };
+  }
+
   Widget _buildTabSlot(int index) {
+    final tab = _tabs[index];
     final isActive = index == _tabIndex;
     return Offstage(
       offstage: !isActive,
       child: TickerMode(
         enabled: isActive,
-        child: _builtTabIndexes.contains(index)
+        child: _builtTabs.contains(tab)
             ? _TabNavigator(
-                navigatorKey: _navKeys[index],
-                builder: (_) => _buildTabRoot(_tabs[index]),
+                navigatorKey: _navKeys[tab]!,
+                builder: (_) => _buildTabRoot(tab),
               )
             : const SizedBox.shrink(),
       ),
@@ -393,11 +412,15 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     };
   }
 
-  Widget _buildBottomNav({required List<MainNavTab> visibleTabs}) {
+  Widget _buildBottomNav({
+    required List<MainNavTab> visibleTabs,
+    required Set<MainNavTab> disabledTabs,
+  }) {
     return MainBottomNav(
       currentBodyTab: _currentTab,
       onTabSelected: _handleTabSelected,
       tabs: visibleTabs,
+      disabledTabs: disabledTabs,
     );
   }
 

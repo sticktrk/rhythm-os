@@ -8,10 +8,13 @@ import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' as sdk;
 import '../../api/hybrid_client.dart';
 import '../../models/config_model.dart';
+import '../../models/plan_tier.dart';
 import '../../providers/room_provider.dart';
 import '../../providers/server_sync_provider.dart';
+import '../../providers/subscription_provider.dart';
 import '../../services/analytics_service.dart';
 import '../../utils/room_visibility.dart';
+import '../../widgets/plan_tier_modal.dart';
 
 /// Full-screen modal for configuring the light profile.
 ///
@@ -50,6 +53,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
 
   // Light transition duration (from selected profile config).
   double _fadeMs = 500;
+  bool _fadeAuto = true;
 
   // Background light interval.
   double _intervalSecs = 60;
@@ -78,9 +82,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   bool _colorTempExpanded = false;
   bool _idleExpanded = false;
   bool _roomDefaultsExpanded = false;
-
-  /// Notifier bumped on every setState so child screens can rebuild.
-  final _rebuildNotifier = ValueNotifier<int>(0);
+  bool _advancedExpanded = false;
 
   // Sleep profile state: optional fixed color + optional fixed brightness.
   // When neither toggle is on, sleep inherits CCT + brightness from the wake
@@ -148,18 +150,11 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   @override
-  void setState(VoidCallback fn) {
-    super.setState(fn);
-    _rebuildNotifier.value++;
-  }
-
-  @override
   void dispose() {
     _serverSync.removeListener(_handleServerSyncChanged);
     _roomDefaultsDebounce?.cancel();
     _curvePreviewRefreshTimer?.cancel();
     _glowController.dispose();
-    _rebuildNotifier.dispose();
     super.dispose();
   }
 
@@ -546,8 +541,30 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   void _onCurveChanged(void Function() update) {
     setState(() {
       update();
-      _curveConfigDirty = true;
+      _markDirty();
     });
+  }
+
+  /// Recomputes [_curveConfigDirty] by comparing the current draft against the
+  /// last loaded/saved baseline. Call after any state mutation that the user
+  /// might want to revert; toggling a value back to its baseline clears dirty.
+  void _markDirty() {
+    _curveConfigDirty = _computeDirty();
+  }
+
+  bool _computeDirty() {
+    final baseline = _profileConfigs[_selectedProfileId];
+    if (baseline == null) return false;
+    if (_buildDraftConfig() != baseline) return true;
+
+    final baselineIdleId = _customIdleProfileIdForProfile(_selectedProfileId);
+    final draftIdle = _buildIdleDraftConfig();
+    if ((draftIdle?.id) != baselineIdleId) return true;
+    if (draftIdle != null) {
+      final baselineIdle = _profileConfigs[draftIdle.id];
+      if (baselineIdle != draftIdle) return true;
+    }
+    return false;
   }
 
   void _onPreviewRangeChanged(void Function() update) {
@@ -596,6 +613,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     _minBrightness = config.minBrightness.toDouble();
     _maxBrightness = config.maxBrightness.toDouble();
     _maxDimSteps = config.maxDimSteps.toDouble();
+    _fadeAuto = config.fadeMs == null;
     _fadeMs = (config.fadeMs ?? 500).toDouble();
     _motionTimeoutAuto = config.motionTimeoutSecs == null;
     _motionTimeoutSecs = config.motionTimeoutSecs ?? 600;
@@ -693,11 +711,16 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     }
 
     if (_isSleepProfile) {
+      final canUseSleepPrimary = context
+          .read<SubscriptionProvider>()
+          .has(Entitlement.sleepPrimarySettings);
       final wakeMinBri = _wakeMinBrightness;
       final wakeMinCct = _wakeMinColorTemp;
-      final brightness =
-          _sleepCustomBri ? _sleepBrightness.round().clamp(1, 100) : wakeMinBri;
-      final directColor = _sleepCustomColor ? _sleepDirectColor : null;
+      final brightness = canUseSleepPrimary && _sleepCustomBri
+          ? _sleepBrightness.round().clamp(1, 100)
+          : wakeMinBri;
+      final directColor =
+          canUseSleepPrimary && _sleepCustomColor ? _sleepDirectColor : null;
       return sdk.RhythmCurveConfig(
         id: base.id,
         name: base.name,
@@ -707,8 +730,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         maxBrightness: brightness,
         maxDimSteps: base.maxDimSteps,
         fadeMs: base.fadeMs,
-        motionTimeoutSecs: _motionTimeoutAuto ? null : _motionTimeoutSecs,
-        rhythmIntervalSecs: _intervalAuto ? null : _intervalSecs.round(),
+        motionTimeoutSecs: base.motionTimeoutSecs,
+        rhythmIntervalSecs: base.rhythmIntervalSecs,
         curve: sdk.RhythmConstantCurve(
           brightness: 0,
           colorTemp: 0,
@@ -731,6 +754,9 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       nextCurve = curve;
     }
 
+    final canUseAdvancedDay = context
+        .read<SubscriptionProvider>()
+        .has(Entitlement.advancedDayControls);
     return sdk.RhythmCurveConfig(
       id: base.id,
       name: base.name,
@@ -739,9 +765,15 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       minBrightness: _minBrightness.round(),
       maxBrightness: _maxBrightness.round(),
       maxDimSteps: _maxDimSteps.round(),
-      fadeMs: base.fadeMs,
-      motionTimeoutSecs: _motionTimeoutAuto ? null : _motionTimeoutSecs,
-      rhythmIntervalSecs: _intervalAuto ? null : _intervalSecs.round(),
+      fadeMs: canUseAdvancedDay
+          ? (_fadeAuto ? null : _fadeMs.round())
+          : base.fadeMs,
+      motionTimeoutSecs: canUseAdvancedDay
+          ? (_motionTimeoutAuto ? null : _motionTimeoutSecs)
+          : base.motionTimeoutSecs,
+      rhythmIntervalSecs: canUseAdvancedDay
+          ? (_intervalAuto ? null : _intervalSecs.round())
+          : base.rhythmIntervalSecs,
       curve: nextCurve,
     );
   }
@@ -1110,26 +1142,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     AnalyticsService().logLightProfileReset(_selectedProfileId);
   }
 
-  void _resetCurveConfigToDefaults() {
-    if (_isSleepProfile) return;
-
-    final defaults = defaultCurveConfig;
-    _onCurveChanged(() {
-      _minColorTemp = defaults.minColorTemp.toDouble();
-      _maxColorTemp = defaults.maxColorTemp.toDouble();
-      _minBrightness = defaults.minBrightness.toDouble();
-      _maxBrightness = defaults.maxBrightness.toDouble();
-      _widthLeftBri = defaults.widthLeftBri;
-      _widthRightBri = defaults.widthRightBri;
-      _widthLeftCct = defaults.widthLeftCct;
-      _widthRightCct = defaults.widthRightCct;
-      _shapeP = defaults.shapeP;
-      _maxDimSteps = defaults.maxDimSteps.toDouble();
-    });
-    _queueDraftCurvePreviewRefresh();
-    AnalyticsService().logLightProfileReset(_selectedProfileId);
-  }
-
   void _showSaveFeedback(String message, {required bool error}) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -1243,10 +1255,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     );
   }
 
-  String _formatFade(double ms) {
-    if (ms == 0) return '0s';
-    return '${(ms / 1000).toStringAsFixed(1)}s';
-  }
+  String _formatFade(double ms) => '${ms.round()}ms';
 
   String _formatMotionTimeout(int secs) {
     if (secs == 0) return 'Off';
@@ -1255,26 +1264,40 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   Widget _buildContent() {
+    final subscription = context.watch<SubscriptionProvider>();
+    final canUseSleepPrimary =
+        subscription.has(Entitlement.sleepPrimarySettings);
+    final canUseAdvancedDay = subscription.has(Entitlement.advancedDayControls);
+    final canUseStandby = subscription.has(Entitlement.standby);
+    final canUseTimeSimulator = subscription.has(Entitlement.timeSimulator);
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 40),
       child: Column(
         children: [
           _buildHeroIcon(),
           const SizedBox(height: 24),
-          if (_isSleepProfile) ...[
-            _buildSleepPrimarySettingsCard(),
-          ] else ...[
-            _buildAdvancedColorEditorItem(),
+          if (!_isSleepProfile) ...[
+            _buildBrightnessRangeCard(),
+            const SizedBox(height: 14),
+            _buildColorTempRangeCard(),
+            const SizedBox(height: 24),
+            _ProLockWrap(
+              unlocked: canUseTimeSimulator,
+              entitlement: Entitlement.timeSimulator,
+              child: _buildTimeSimulator(),
+            ),
+            const SizedBox(height: 24),
           ],
-          const SizedBox(height: 24),
-          _buildMotionTimeoutCard(),
-          const SizedBox(height: 24),
-          _buildIdleSection(),
-          const SizedBox(height: 24),
-          _buildRoomDefaultsSection(),
+          _buildRoomDefaultsSection(canUseStandby: canUseStandby),
+          const SizedBox(height: 14),
+          _buildAdvancedSection(
+            canUseAdvancedDay: canUseAdvancedDay,
+            canUseStandby: canUseStandby,
+            canUseSleepPrimary: canUseSleepPrimary,
+          ),
           if (_curveConfigDirty || _isSaving) ...[
             const SizedBox(height: 24),
-            _buildSaveButton(),
+            _buildPendingChangesActions(),
           ],
           const SizedBox(height: 32),
           _buildResetToDefaultsButton(),
@@ -1295,8 +1318,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   Widget _buildSleepPrimarySettingsCard() {
     final isDefault = !_sleepCustomBri && !_sleepCustomColor;
     final briColor = _sleepCustomBri ? _Palette.amber : _Palette.idle;
-    final colorColor =
-        _sleepCustomColor ? _sleepSelectedColor : _Palette.idle;
+    final colorColor = _sleepCustomColor ? _sleepSelectedColor : _Palette.idle;
     final expanded = _sleepExpanded;
 
     return AnimatedContainer(
@@ -1472,7 +1494,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                                   if (v && _sleepBrightness < 1) {
                                     _sleepBrightness = 1;
                                   }
-                                  _curveConfigDirty = true;
+                                  _markDirty();
                                 });
                               },
                               activeTrackColor: briColor,
@@ -1511,7 +1533,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                                     onChanged: (v) {
                                       setState(() {
                                         _sleepBrightness = v;
-                                        _curveConfigDirty = true;
+                                        _markDirty();
                                       });
                                     },
                                   ),
@@ -1555,7 +1577,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                               onChanged: (v) {
                                 setState(() {
                                   _sleepCustomColor = v;
-                                  _curveConfigDirty = true;
+                                  _markDirty();
                                 });
                               },
                               activeTrackColor: colorColor,
@@ -1578,7 +1600,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                                   onHueChanged: (hue) {
                                     setState(() {
                                       _sleepHue = hue;
-                                      _curveConfigDirty = true;
+                                      _markDirty();
                                     });
                                   },
                                 ),
@@ -1779,7 +1801,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                                   if (v && _idleBrightness < 1) {
                                     _idleBrightness = 1;
                                   }
-                                  _curveConfigDirty = true;
+                                  _markDirty();
                                 });
                               },
                               activeTrackColor: briColor,
@@ -1818,7 +1840,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                                     onChanged: (v) {
                                       setState(() {
                                         _idleBrightness = v;
-                                        _curveConfigDirty = true;
+                                        _markDirty();
                                       });
                                     },
                                   ),
@@ -1863,7 +1885,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                               onChanged: (v) {
                                 setState(() {
                                   _idleCustomColor = v;
-                                  _curveConfigDirty = true;
+                                  _markDirty();
                                 });
                               },
                               activeTrackColor: colorColor,
@@ -1929,7 +1951,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       onHueChanged: (hue) {
         setState(() {
           _idleHue = hue;
-          _curveConfigDirty = true;
+          _markDirty();
         });
       },
     );
@@ -2443,6 +2465,146 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   // ---------------------------------------------------------------------------
+  // Light Transition (fade) row
+  // ---------------------------------------------------------------------------
+
+  Widget _buildFadeRow(Color color) {
+    return Column(
+      children: [
+        Row(
+          children: [
+            Container(
+              width: 30,
+              height: 30,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: color.withValues(alpha: 0.1),
+              ),
+              child: Icon(Icons.blur_on_rounded, color: color, size: 15),
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text(
+                'Light Transition',
+                style: TextStyle(
+                  color: _Palette.textSecondary,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+            GestureDetector(
+              onTap: () {
+                setState(() {
+                  _fadeAuto = !_fadeAuto;
+                  _markDirty();
+                });
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: _fadeAuto
+                      ? color.withValues(alpha: 0.12)
+                      : color.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(
+                    color: _fadeAuto
+                        ? color.withValues(alpha: 0.25)
+                        : color.withValues(alpha: 0.12),
+                  ),
+                ),
+                child: Text(
+                  _fadeAuto ? 'Auto' : _formatFade(_fadeMs),
+                  style: TextStyle(
+                    color: _fadeAuto ? color : color.withValues(alpha: 0.7),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+            if (_fadeAuto) ...[
+              const SizedBox(width: 8),
+              Text(
+                _formatFade(_fadeMs),
+                style: TextStyle(
+                  color: _Palette.textSecondary.withValues(alpha: 0.5),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            ],
+          ],
+        ),
+        AnimatedSize(
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOutCubic,
+          alignment: Alignment.topCenter,
+          child: _fadeAuto
+              ? const SizedBox.shrink()
+              : Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Column(
+                    children: [
+                      SliderTheme(
+                        data: SliderThemeData(
+                          activeTrackColor: color,
+                          inactiveTrackColor: color.withValues(alpha: 0.12),
+                          thumbColor: color,
+                          overlayColor: color.withValues(alpha: 0.12),
+                          trackHeight: 4,
+                          thumbShape: const RoundSliderThumbShape(
+                              enabledThumbRadius: 8),
+                          overlayShape:
+                              const RoundSliderOverlayShape(overlayRadius: 18),
+                        ),
+                        child: Slider(
+                          value: _fadeMs.clamp(0, 1000),
+                          min: 0,
+                          max: 1000,
+                          divisions: 20,
+                          onChanged: (v) {
+                            setState(() {
+                              _fadeMs = v;
+                              _markDirty();
+                            });
+                          },
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              _formatFade(0),
+                              style: TextStyle(
+                                color: _Palette.textSecondary
+                                    .withValues(alpha: 0.4),
+                                fontSize: 11,
+                              ),
+                            ),
+                            Text(
+                              _formatFade(1000),
+                              style: TextStyle(
+                                color: _Palette.textSecondary
+                                    .withValues(alpha: 0.4),
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+        ),
+      ],
+    );
+  }
+
+  // ---------------------------------------------------------------------------
   // Background Light Interval card
   // ---------------------------------------------------------------------------
 
@@ -2476,7 +2638,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
               onTap: () {
                 setState(() {
                   _intervalAuto = !_intervalAuto;
-                  _curveConfigDirty = true;
+                  _markDirty();
                 });
               },
               child: Container(
@@ -2605,7 +2767,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
           onTap: () {
             setState(() {
               _motionTimeoutAuto = !_motionTimeoutAuto;
-              _curveConfigDirty = true;
+              _markDirty();
             });
           },
           child: Container(
@@ -2681,7 +2843,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                       onChanged: (v) {
                         setState(() {
                           _motionTimeoutSecs = v.round();
-                          _curveConfigDirty = true;
+                          _markDirty();
                         });
                       },
                     ),
@@ -2711,137 +2873,128 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   // ---------------------------------------------------------------------------
-  // Light Tuning — nav item + screen
-  // ---------------------------------------------------------------------------
-
-  Widget _buildAdvancedColorEditorItem() {
-    const color = _Palette.amber;
-    return GestureDetector(
-      onTap: _openAdvancedColorEditor,
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(18, 16, 14, 16),
-        decoration: BoxDecoration(
-          color: _Palette.card,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: _Palette.border),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 36,
-              height: 36,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: color.withValues(alpha: 0.12),
-              ),
-              child: const Icon(Icons.tune_rounded, color: color, size: 18),
-            ),
-            const SizedBox(width: 12),
-            const Expanded(
-              child: Text(
-                'Light Tuning',
-                style: TextStyle(
-                  color: _Palette.textPrimary,
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: -0.1,
-                ),
-              ),
-            ),
-            Icon(
-              Icons.chevron_right_rounded,
-              color: _Palette.textSecondary.withValues(alpha: 0.4),
-              size: 22,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _openAdvancedColorEditor() {
-    AnalyticsService().logLightProfileAdvancedColorEditorOpened(
-      _selectedProfileId,
-    );
-    Navigator.of(context).push(
-      PageRouteBuilder(
-        opaque: false,
-        barrierColor: Colors.black54,
-        pageBuilder: (context, animation, secondaryAnimation) {
-          return _AdvancedColorEditorScreen(parent: this);
-        },
-        transitionsBuilder: (context, animation, secondaryAnimation, child) {
-          final curve = CurvedAnimation(
-            parent: animation,
-            curve: Curves.easeOutCubic,
-            reverseCurve: Curves.easeInCubic,
-          );
-          return SlideTransition(
-            position: Tween<Offset>(
-              begin: const Offset(1, 0),
-              end: Offset.zero,
-            ).animate(curve),
-            child: child,
-          );
-        },
-        transitionDuration: const Duration(milliseconds: 350),
-        reverseTransitionDuration: const Duration(milliseconds: 300),
-      ),
-    );
-  }
-
-  // ---------------------------------------------------------------------------
   // Time Simulator
   // ---------------------------------------------------------------------------
 
   Widget _buildTimeSimulator() {
     final selectedHour = _selectedHour();
     final previewColor = _previewColorAtHour(selectedHour);
+    final active = _hasTimeOffset;
 
-    return Column(
-      children: [
-        // Kelvin / brightness readout when active.
-        AnimatedSize(
-          duration: const Duration(milliseconds: 250),
-          curve: Curves.easeOutCubic,
-          child: _hasTimeOffset
-              ? Padding(
-                  padding: const EdgeInsets.only(bottom: 16),
-                  child: Text(
-                    _previewValueLabel(selectedHour),
-                    style: TextStyle(
-                      color: previewColor.withValues(alpha: 0.7),
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      fontFeatures: const [FontFeature.tabularFigures()],
-                    ),
-                  ),
-                )
-              : Padding(
-                  padding: const EdgeInsets.only(bottom: 16),
-                  child: Text(
-                    'Drag to simulate',
-                    style: TextStyle(
-                      color: _Palette.textSecondary.withValues(alpha: 0.3),
-                      fontSize: 12,
-                    ),
-                  ),
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(20),
+        gradient: const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            Color(0xFF06080C),
+            Color(0xFF0A0D13),
+          ],
+        ),
+        border: Border.all(
+          color: active
+              ? _Palette.amber.withValues(alpha: 0.30)
+              : Colors.white.withValues(alpha: 0.04),
+        ),
+        boxShadow: [
+          // Outer cast — sits on the surrounding card.
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.35),
+            blurRadius: 8,
+            spreadRadius: -2,
+            offset: const Offset(0, 2),
+          ),
+          // Warm amber bloom when the simulator is engaged.
+          if (active)
+            BoxShadow(
+              color: _Palette.amber.withValues(alpha: 0.12),
+              blurRadius: 24,
+              spreadRadius: -6,
+            ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Eyebrow: small "horizon" marker + label.
+          Row(
+            children: [
+              Container(
+                width: 6,
+                height: 6,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: active
+                      ? _Palette.amber
+                      : _Palette.amber.withValues(alpha: 0.35),
+                  boxShadow: active
+                      ? [
+                          BoxShadow(
+                            color: _Palette.amber.withValues(alpha: 0.6),
+                            blurRadius: 6,
+                          ),
+                        ]
+                      : null,
                 ),
-        ),
-        // The gradient slider.
-        _buildGradientSlider(),
-        // Apply / Reset + Absorb buttons.
-        AnimatedSize(
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOutCubic,
-          child: _showTimeOffsetActions
-              ? Padding(
-                  padding: const EdgeInsets.only(top: 16),
-                  child: _buildTimeOffsetActions(),
-                )
-              : const SizedBox.shrink(),
-        ),
-      ],
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'TIME SIMULATOR',
+                style: TextStyle(
+                  color: _Palette.amber.withValues(alpha: 0.75),
+                  fontSize: 10,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 2.0,
+                ),
+              ),
+              const Spacer(),
+              // Tiny right-side readout: live kelvin value when engaged,
+              // otherwise the drag-to-simulate prompt.
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 200),
+                child: active
+                    ? Text(
+                        _previewValueLabel(selectedHour),
+                        key: const ValueKey('readout'),
+                        style: TextStyle(
+                          color: previewColor.withValues(alpha: 0.85),
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.2,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                      )
+                    : Text(
+                        'Drag to simulate',
+                        key: const ValueKey('hint'),
+                        style: TextStyle(
+                          color: _Palette.textSecondary.withValues(alpha: 0.45),
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                          letterSpacing: 0.1,
+                        ),
+                      ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // The gradient slider — the magical part.
+          _buildGradientSlider(),
+          // Apply / Reset + Absorb buttons.
+          AnimatedSize(
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOutCubic,
+            child: _showTimeOffsetActions
+                ? Padding(
+                    padding: const EdgeInsets.only(top: 14),
+                    child: _buildTimeOffsetActions(),
+                  )
+                : const SizedBox.shrink(),
+          ),
+        ],
+      ),
     );
   }
 
@@ -3133,57 +3286,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
               color: _Palette.border.withValues(alpha: 0.5),
             ),
           ),
-          // Light Transition (read-only auto)
-          Row(
-            children: [
-              Container(
-                width: 30,
-                height: 30,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: ltColor.withValues(alpha: 0.06),
-                ),
-                child: Icon(Icons.blur_on_rounded,
-                    color: ltColor.withValues(alpha: 0.6), size: 15),
-              ),
-              const SizedBox(width: 12),
-              const Expanded(
-                child: Text(
-                  'Light Transition',
-                  style: TextStyle(
-                    color: _Palette.textSecondary,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: ltColor.withValues(alpha: 0.06),
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: Text(
-                  'Auto',
-                  style: TextStyle(
-                    color: ltColor.withValues(alpha: 0.5),
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                _formatFade(_fadeMs),
-                style: TextStyle(
-                  color: _Palette.textSecondary.withValues(alpha: 0.5),
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  fontFeatures: const [FontFeature.tabularFigures()],
-                ),
-              ),
-            ],
-          ),
+          _buildFadeRow(ltColor),
           // Background Light Interval
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 10),
@@ -3365,7 +3468,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     );
   }
 
-  Widget _buildRoomDefaultsSection() {
+  Widget _buildRoomDefaultsSection({required bool canUseStandby}) {
     return Selector<RoomProvider, List<RoomDto>>(
       selector: (_, provider) =>
           provider.rooms.where(showsInAllRooms).toList(growable: false),
@@ -3483,24 +3586,22 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                 alignment: Alignment.topCenter,
                 child: expanded
                     ? Padding(
-                        padding: const EdgeInsets.only(top: 16),
-                        child: GridView.count(
-                          crossAxisCount: 2,
-                          crossAxisSpacing: 10,
-                          mainAxisSpacing: 10,
-                          childAspectRatio: 1.55,
-                          shrinkWrap: true,
-                          physics: const NeverScrollableScrollPhysics(),
+                        padding: const EdgeInsets.only(top: 14),
+                        child: Column(
                           children: [
-                            for (final room in rooms)
+                            for (int i = 0; i < rooms.length; i++) ...[
+                              if (i > 0) const SizedBox(height: 6),
                               _RoomDefaultCard(
-                                key: ValueKey(room.id),
-                                roomId: room.id,
-                                roomName: room.name,
-                                state: defaults[room.id],
+                                key: ValueKey(rooms[i].id),
+                                roomId: rooms[i].id,
+                                roomName: rooms[i].name,
+                                state: defaults[rooms[i].id],
+                                canUseStandby: canUseStandby,
                                 onStateChanged: (newState) =>
-                                    _onRoomDefaultChanged(room.id, newState),
+                                    _onRoomDefaultChanged(
+                                        rooms[i].id, newState),
                               ),
+                            ],
                           ],
                         ),
                       )
@@ -3514,8 +3615,211 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   // ---------------------------------------------------------------------------
-  // Save
+  // Advanced — Pro-gated features collected under one expandable section.
+  // Cards are always rendered; when the user lacks the relevant entitlement
+  // the body is dimmed, pointer events are absorbed by an upsell tap target
+  // that opens the PlanTierModal.
   // ---------------------------------------------------------------------------
+
+  Widget _buildAdvancedSection({
+    required bool canUseAdvancedDay,
+    required bool canUseStandby,
+    required bool canUseSleepPrimary,
+  }) {
+    final expanded = _advancedExpanded;
+    final lockedCount = _isSleepProfile
+        ? (canUseSleepPrimary ? 0 : 1) + (canUseStandby ? 0 : 1)
+        : (canUseAdvancedDay ? 0 : 1) + (canUseStandby ? 0 : 1);
+    final allUnlocked = lockedCount == 0;
+    const accent = _Palette.amber;
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
+      padding: EdgeInsets.fromLTRB(18, 18, 18, expanded ? 14 : 18),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            _Palette.card,
+            allUnlocked
+                ? _Palette.card
+                : Color.alphaBlend(
+                    accent.withValues(alpha: 0.04), _Palette.card),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: expanded
+              ? accent.withValues(alpha: 0.30)
+              : accent.withValues(alpha: 0.14),
+        ),
+        boxShadow: expanded
+            ? [
+                BoxShadow(
+                  color: accent.withValues(alpha: 0.10),
+                  blurRadius: 24,
+                  spreadRadius: -4,
+                ),
+              ]
+            : const [],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {
+              HapticFeedback.selectionClick();
+              setState(() => _advancedExpanded = !_advancedExpanded);
+            },
+            child: Row(
+              children: [
+                _AdvancedHeaderIcon(locked: !allUnlocked),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Advanced',
+                        style: TextStyle(
+                          color: _Palette.textPrimary,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: -0.1,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        _isSleepProfile
+                            ? 'Custom sleep colors & standby'
+                            : 'Fine-tune timing & standby',
+                        style: const TextStyle(
+                          color: _Palette.textSecondary,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                          letterSpacing: 0.1,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (!expanded && !allUnlocked)
+                  _ProBadge(label: '$lockedCount locked'),
+                if (!expanded && allUnlocked)
+                  _ProBadge(label: 'Pro', solid: true),
+                const SizedBox(width: 6),
+                AnimatedRotation(
+                  turns: expanded ? 0.5 : 0,
+                  duration: const Duration(milliseconds: 250),
+                  curve: Curves.easeOutCubic,
+                  child: Icon(
+                    Icons.keyboard_arrow_down_rounded,
+                    color: _Palette.textSecondary.withValues(alpha: 0.4),
+                    size: 20,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          AnimatedSize(
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.topCenter,
+            child: expanded
+                ? Padding(
+                    padding: const EdgeInsets.only(top: 14),
+                    child: _isSleepProfile
+                        ? Column(
+                            children: [
+                              _ProLockWrap(
+                                unlocked: canUseSleepPrimary,
+                                entitlement: Entitlement.sleepPrimarySettings,
+                                child: _buildSleepPrimarySettingsCard(),
+                              ),
+                              const SizedBox(height: 10),
+                              _ProLockWrap(
+                                unlocked: canUseStandby,
+                                entitlement: Entitlement.standby,
+                                child: _buildIdleSection(),
+                              ),
+                            ],
+                          )
+                        : Column(
+                            children: [
+                              _ProLockWrap(
+                                unlocked: canUseAdvancedDay,
+                                entitlement: Entitlement.advancedDayControls,
+                                child: _buildMotionTimeoutCard(),
+                              ),
+                              const SizedBox(height: 10),
+                              _ProLockWrap(
+                                unlocked: canUseStandby,
+                                entitlement: Entitlement.standby,
+                                child: _buildIdleSection(),
+                              ),
+                            ],
+                          ),
+                  )
+                : const SizedBox.shrink(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pending changes — Revert | Save
+  // ---------------------------------------------------------------------------
+
+  Widget _buildPendingChangesActions() {
+    final canRevert = !_isSaving && _curveConfigDirty;
+    return Row(
+      children: [
+        Expanded(child: _buildRevertButton(enabled: canRevert)),
+        const SizedBox(width: 10),
+        Expanded(child: _buildSaveButton()),
+      ],
+    );
+  }
+
+  Widget _buildRevertButton({required bool enabled}) {
+    final color = _Palette.textSecondary;
+    return GestureDetector(
+      onTap: enabled ? _revertChanges : null,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: enabled ? 0.08 : 0.04),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: color.withValues(alpha: enabled ? 0.20 : 0.10),
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.undo_rounded,
+              color: color.withValues(alpha: enabled ? 0.85 : 0.35),
+              size: 18,
+            ),
+            const SizedBox(width: 8),
+            Text(
+              'Revert',
+              style: TextStyle(
+                color: color.withValues(alpha: enabled ? 0.95 : 0.4),
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   Widget _buildSaveButton() {
     return GestureDetector(
@@ -3545,7 +3849,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
               const Icon(Icons.save_rounded, color: _Palette.amber, size: 18),
             const SizedBox(width: 8),
             Text(
-              _isSaving ? 'Applying…' : 'Save Changes',
+              _isSaving ? 'Applying…' : 'Save',
               style: const TextStyle(
                 color: _Palette.amber,
                 fontSize: 14,
@@ -3558,10 +3862,30 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     );
   }
 
+  void _revertChanges() {
+    final baseline = _profileConfigs[_selectedProfileId];
+    if (baseline == null) return;
+    setState(() {
+      _applyProfileConfig(baseline);
+      final idleProfileId = _customIdleProfileIdForProfile(_selectedProfileId);
+      final idleConfig =
+          idleProfileId != null ? _profileConfigs[idleProfileId] : null;
+      if (idleConfig != null) {
+        _applyIdleConfig(idleConfig);
+      } else {
+        _applyIdleFallback();
+      }
+      _curveConfigDirty = false;
+    });
+    unawaited(_loadCurveData(profileId: _selectedProfileId));
+  }
+
   Future<void> _saveCurveConfig() async {
     if (_isSaving) return;
     final config = _buildDraftConfig();
     final serverSync = context.read<ServerSyncProvider>();
+    final canUseStandby =
+        context.read<SubscriptionProvider>().has(Entitlement.standby);
     final api = serverSync.api;
     final activeProfileId = serverSync.activeProfileId;
     setState(() {
@@ -3588,8 +3912,9 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         return;
       }
 
-      // Also save idle config.
-      final idleConfig = _buildIdleDraftConfig();
+      // Also save idle config when standby is entitled. Free users keep
+      // Power Save on and detach any custom standby profile on the next save.
+      final idleConfig = canUseStandby ? _buildIdleDraftConfig() : null;
       bool idleSaved = true;
       if (idleConfig != null) {
         idleSaved = await api.configSet(
@@ -3681,19 +4006,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     );
   }
 
-  Widget _buildResetCurveConfigButton() {
-    return GestureDetector(
-      onTap: _resetCurveConfigToDefaults,
-      child: Text(
-        'Reset Curve Defaults',
-        style: TextStyle(
-          color: _Palette.textSecondary.withValues(alpha: 0.3),
-          fontSize: 12,
-          fontWeight: FontWeight.w500,
-        ),
-      ),
-    );
-  }
 }
 
 // -----------------------------------------------------------------------------
@@ -4062,6 +4374,7 @@ class _RoomDefaultCard extends StatelessWidget {
   final String roomId;
   final String roomName;
   final String? state; // null = no override, "active", "idle", "hard_off"
+  final bool canUseStandby;
   final ValueChanged<String?> onStateChanged;
 
   const _RoomDefaultCard({
@@ -4069,6 +4382,7 @@ class _RoomDefaultCard extends StatelessWidget {
     required this.roomId,
     required this.roomName,
     required this.state,
+    required this.canUseStandby,
     required this.onStateChanged,
   });
 
@@ -4130,82 +4444,76 @@ class _RoomDefaultCard extends StatelessWidget {
         final hasSensor = motionState.hasSensor;
 
         return GestureDetector(
-          onLongPress: hasOverride
-              ? () {
-                  HapticFeedback.lightImpact();
-                  onStateChanged(null);
-                }
-              : null,
+          onLongPress: () {
+            HapticFeedback.lightImpact();
+            onStateChanged('hard_off');
+          },
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 300),
             curve: Curves.easeInOut,
             decoration: BoxDecoration(
               color: bgColor,
-              borderRadius: BorderRadius.circular(14),
+              borderRadius: BorderRadius.circular(12),
               border: Border.all(
                 color: hasOverride
                     ? _Palette.border
                     : _Palette.border.withValues(alpha: 0.4),
               ),
             ),
-            padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
+            child: Row(
               children: [
+                if (motionTimer != null)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 10),
+                    child: _RoomDefaultMotionIndicator(
+                      info: motionTimer,
+                      color: indicatorColor,
+                      onExpired: () => context
+                          .read<RoomProvider>()
+                          .clearMotionTimer(roomId),
+                    ),
+                  )
+                else if (hasSensor)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 10),
+                    child: Icon(
+                      Icons.sensors_rounded,
+                      size: 16,
+                      color: indicatorColor.withValues(alpha: 0.45),
+                    ),
+                  ),
                 Expanded(
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if (motionTimer != null)
-                        Padding(
-                          padding: const EdgeInsets.only(right: 8, top: 1),
-                          child: _RoomDefaultMotionIndicator(
-                            info: motionTimer,
-                            color: indicatorColor,
-                            onExpired: () => context
-                                .read<RoomProvider>()
-                                .clearMotionTimer(roomId),
-                          ),
-                        )
-                      else if (hasSensor)
-                        Padding(
-                          padding: const EdgeInsets.only(right: 8, top: 2),
-                          child: Icon(
-                            Icons.sensors_rounded,
-                            size: 18,
-                            color: indicatorColor.withValues(alpha: 0.45),
-                          ),
-                        ),
-                      Expanded(
-                        child: AnimatedOpacity(
-                          opacity: hasOverride ? 1.0 : 0.45,
-                          duration: const Duration(milliseconds: 300),
-                          child: Text(
-                            roomName,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: _Palette.textPrimary,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
+                  child: AnimatedOpacity(
+                    opacity: hasOverride ? 1.0 : 0.55,
+                    duration: const Duration(milliseconds: 300),
+                    child: Text(
+                      roomName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: _Palette.textPrimary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
                       ),
-                    ],
+                    ),
                   ),
                 ),
-                Text(
-                  stateLabel,
-                  style: TextStyle(
-                    color: stateLabelColor,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w500,
+                if (hasOverride) ...[
+                  const SizedBox(width: 8),
+                  Text(
+                    stateLabel,
+                    style: TextStyle(
+                      color: stateLabelColor,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w500,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 6),
+                ],
+                const SizedBox(width: 10),
                 _DefaultStateToggle(
                   mode: mode,
+                  canUseStandby: canUseStandby,
                   onModeChanged: (newMode) {
                     HapticFeedback.lightImpact();
                     onStateChanged(_stateFromMode(newMode));
@@ -4410,24 +4718,33 @@ class _RoomDefaultMiniCountdownPainter extends CustomPainter {
 
 class _DefaultStateToggle extends StatelessWidget {
   final _RoomDefaultMode mode;
+  final bool canUseStandby;
   final ValueChanged<_RoomDefaultMode> onModeChanged;
 
   const _DefaultStateToggle({
     required this.mode,
+    required this.canUseStandby,
     required this.onModeChanged,
   });
 
   void _onTap() {
-    switch (mode) {
-      case _RoomDefaultMode.none:
-        onModeChanged(_RoomDefaultMode.active);
-      case _RoomDefaultMode.active:
-        onModeChanged(_RoomDefaultMode.idle);
-      case _RoomDefaultMode.idle:
-        onModeChanged(_RoomDefaultMode.active);
-      case _RoomDefaultMode.off:
-        onModeChanged(_RoomDefaultMode.none);
+    // Mirrors _CelestialToggle in room_card.dart. `none` (no stored override)
+    // is treated as `active` for cycling, since active is the default behavior
+    // in absence of an override.
+    if (!canUseStandby) {
+      // Free tier: 2-state cycle, active ↔ off.
+      onModeChanged(switch (mode) {
+        _RoomDefaultMode.off => _RoomDefaultMode.active,
+        _ => _RoomDefaultMode.off,
+      });
+      return;
     }
+    // Pro tier: 3-state cycle. active ↔ idle, off → active.
+    onModeChanged(switch (mode) {
+      _RoomDefaultMode.idle => _RoomDefaultMode.active,
+      _RoomDefaultMode.off => _RoomDefaultMode.active,
+      _ => _RoomDefaultMode.idle,
+    });
   }
 
   void _onLongPress() {
@@ -4440,15 +4757,24 @@ class _DefaultStateToggle extends StatelessWidget {
   Widget build(BuildContext context) {
     final hasOverride = mode != _RoomDefaultMode.none;
 
-    final alignment = switch (mode) {
-      _RoomDefaultMode.off => Alignment.centerLeft,
-      _RoomDefaultMode.idle => Alignment.center,
-      _RoomDefaultMode.active => Alignment.centerRight,
-      _RoomDefaultMode.none => Alignment.center,
+    // Mirrors room_card.dart's _CelestialToggle. `none` (no override) renders
+    // as `active` since active is the default behavior in absence of one;
+    // for free tier, legacy `idle` collapses to `off` since standby isn't
+    // available — the thumb only ever sits at left or right.
+    final visualMode = switch (mode) {
+      _RoomDefaultMode.none => _RoomDefaultMode.active,
+      _RoomDefaultMode.idle when !canUseStandby => _RoomDefaultMode.off,
+      _ => mode,
     };
 
-    final trackGradient = switch (mode) {
-      _RoomDefaultMode.off => const LinearGradient(
+    final alignment = switch (visualMode) {
+      _RoomDefaultMode.off => Alignment.centerLeft,
+      _RoomDefaultMode.idle => Alignment.center,
+      _RoomDefaultMode.active || _RoomDefaultMode.none => Alignment.centerRight,
+    };
+
+    final trackGradient = switch (visualMode) {
+      _RoomDefaultMode.off || _RoomDefaultMode.none => const LinearGradient(
           colors: [Color(0xFF2A2F38), Color(0xFF30363D)],
         ),
       _RoomDefaultMode.idle => const LinearGradient(
@@ -4457,19 +4783,15 @@ class _DefaultStateToggle extends StatelessWidget {
       _RoomDefaultMode.active => const LinearGradient(
           colors: [Color(0xFF8B6B20), Color(0xFFD4A020)],
         ),
-      _RoomDefaultMode.none => const LinearGradient(
-          colors: [Color(0xFF1E2228), Color(0xFF1E2228)],
-        ),
     };
 
-    final thumbColor = switch (mode) {
-      _RoomDefaultMode.off => _Palette.textSecondary,
+    final thumbColor = switch (visualMode) {
+      _RoomDefaultMode.off || _RoomDefaultMode.none => _Palette.textSecondary,
       _RoomDefaultMode.idle => const Color(0xFFCDBFAA),
       _RoomDefaultMode.active => Colors.white,
-      _RoomDefaultMode.none => _Palette.textSecondary.withValues(alpha: 0.3),
     };
 
-    final thumbShadow = switch (mode) {
+    final thumbShadow = switch (visualMode) {
       _RoomDefaultMode.active => [
           BoxShadow(
             color: _Palette.amber.withValues(alpha: 0.4),
@@ -4524,62 +4846,279 @@ class _DefaultStateToggle extends StatelessWidget {
   }
 }
 
-// Palette
-// -----------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Light Tuning — full-screen overlay
-// ---------------------------------------------------------------------------
-
-class _AdvancedColorEditorScreen extends StatefulWidget {
-  final _LightProfileScreenState parent;
-
-  const _AdvancedColorEditorScreen({required this.parent});
-
-  @override
-  State<_AdvancedColorEditorScreen> createState() =>
-      _AdvancedColorEditorScreenState();
+class _Palette {
+  static const bg = Color(0xFF0B0E13);
+  static const card = Color(0xFF13171E);
+  static const border = Color(0xFF232A35);
+  static const textPrimary = Color(0xFFE8EDF4);
+  static const textSecondary = Color(0xFF8A919C);
+  static const amber = Color(0xFFF9A825);
+  static const amberWarm = Color(0xFFFFB900);
+  static const amberDeep = Color(0xFFFF8C00);
+  static const blue = Color(0xFF58A6FF);
+  static const teal = Color(0xFF4ADE80);
+  static const idle = Color(0xFFB8A890);
 }
 
-class _AdvancedColorEditorScreenState
-    extends State<_AdvancedColorEditorScreen> {
-  _LightProfileScreenState get _parent => widget.parent;
+// ---------------------------------------------------------------------------
+// Advanced section — header icon, Pro badge, and per-card lock wrap.
+// ---------------------------------------------------------------------------
+
+class _AdvancedHeaderIcon extends StatelessWidget {
+  const _AdvancedHeaderIcon({required this.locked});
+  final bool locked;
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: _Palette.bg,
-      body: SafeArea(
-        child: Column(
+    return Container(
+      width: 36,
+      height: 36,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [_Palette.amberWarm, _Palette.amberDeep],
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: _Palette.amber.withValues(alpha: locked ? 0.18 : 0.35),
+            blurRadius: 14,
+            spreadRadius: -2,
+          ),
+        ],
+      ),
+      child: Icon(
+        locked ? Icons.workspace_premium_rounded : Icons.auto_awesome_rounded,
+        color: Colors.white,
+        size: 18,
+      ),
+    );
+  }
+}
+
+class _ProBadge extends StatelessWidget {
+  const _ProBadge({required this.label, this.solid = false});
+  final String label;
+  final bool solid;
+
+  @override
+  Widget build(BuildContext context) {
+    if (solid) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [_Palette.amberWarm, _Palette.amberDeep],
+          ),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Text(
+          label.toUpperCase(),
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 10,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 1.0,
+          ),
+        ),
+      );
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: _Palette.amber.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: _Palette.amber.withValues(alpha: 0.30)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: _Palette.amber.withValues(alpha: 0.92),
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.1,
+        ),
+      ),
+    );
+  }
+}
+
+/// Wraps a Pro-only card so it always renders, but blocks interaction and
+/// reveals an upsell tap target when [unlocked] is false. The visual
+/// treatment — dimmed body, amber gloss, a floating PRO chip — is meant to
+/// read as "you can see what you're missing" rather than "this is disabled".
+class _ProLockWrap extends StatelessWidget {
+  const _ProLockWrap({
+    required this.child,
+    required this.unlocked,
+    required this.entitlement,
+  });
+
+  final Widget child;
+  final bool unlocked;
+  final Entitlement entitlement;
+
+  @override
+  Widget build(BuildContext context) {
+    if (unlocked) return child;
+    return _LockedCard(entitlement: entitlement, child: child);
+  }
+}
+
+class _LockedCard extends StatefulWidget {
+  const _LockedCard({required this.child, required this.entitlement});
+
+  final Widget child;
+  final Entitlement entitlement;
+
+  @override
+  State<_LockedCard> createState() => _LockedCardState();
+}
+
+class _LockedCardState extends State<_LockedCard>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _shimmer;
+
+  @override
+  void initState() {
+    super.initState();
+    _shimmer = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 3400),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _shimmer.dispose();
+    super.dispose();
+  }
+
+  void _openUpsell() {
+    HapticFeedback.lightImpact();
+    PlanTierModal.show(context, highlightFeature: widget.entitlement);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: _openUpsell,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(18),
+        child: Stack(
           children: [
-            _buildHeader(),
-            Expanded(
-              child: ValueListenableBuilder<int>(
-                valueListenable: _parent._rebuildNotifier,
-                builder: (context, _, __) {
-                  return SingleChildScrollView(
-                    padding: const EdgeInsets.fromLTRB(20, 8, 20, 40),
-                    child: Column(
-                      children: [
-                        _parent._buildHeroIcon(),
-                        const SizedBox(height: 24),
-                        if (!_parent._isSleepProfile) ...[
-                          _parent._buildBrightnessRangeCard(),
-                          const SizedBox(height: 14),
-                          _parent._buildColorTempRangeCard(),
-                          const SizedBox(height: 24),
-                        ],
-                        _parent._buildTimeSimulator(),
-                        if (_parent._curveConfigDirty || _parent._isSaving) ...[
-                          const SizedBox(height: 24),
-                          _parent._buildSaveButton(),
-                        ],
-                        const SizedBox(height: 32),
-                        _parent._buildResetCurveConfigButton(),
+            // 1. The real card, painted but inert.
+            IgnorePointer(
+              ignoring: true,
+              child: ColorFiltered(
+                colorFilter: const ColorFilter.matrix(<double>[
+                  // De-saturate ~55% so cool greens/teals don't fight the
+                  // warm amber lock veil.
+                  0.55, 0.35, 0.10, 0, 0,
+                  0.20, 0.65, 0.15, 0, 0,
+                  0.20, 0.35, 0.45, 0, 0,
+                  0, 0, 0, 0.55, 0,
+                ]),
+                child: child(),
+              ),
+            ),
+
+            // 2. Diagonal amber veil — top-right glow.
+            Positioned.fill(
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.bottomLeft,
+                      end: Alignment.topRight,
+                      colors: [
+                        _Palette.amberWarm.withValues(alpha: 0.02),
+                        _Palette.amberWarm.withValues(alpha: 0.08),
                       ],
                     ),
-                  );
-                },
+                  ),
+                ),
+              ),
+            ),
+
+            // 3. Slow shimmer sweep that signals "tap me".
+            Positioned.fill(
+              child: IgnorePointer(
+                child: AnimatedBuilder(
+                  animation: _shimmer,
+                  builder: (context, _) {
+                    final t = _shimmer.value;
+                    return ShaderMask(
+                      shaderCallback: (rect) => LinearGradient(
+                        begin: const Alignment(-1.4, -1),
+                        end: const Alignment(1.4, 1),
+                        stops: [
+                          (t - 0.20).clamp(0.0, 1.0),
+                          t.clamp(0.0, 1.0),
+                          (t + 0.20).clamp(0.0, 1.0),
+                        ],
+                        colors: [
+                          Colors.white.withValues(alpha: 0.00),
+                          Colors.white.withValues(alpha: 0.04),
+                          Colors.white.withValues(alpha: 0.00),
+                        ],
+                      ).createShader(rect),
+                      blendMode: BlendMode.plus,
+                      child: const ColoredBox(color: Colors.transparent),
+                    );
+                  },
+                ),
+              ),
+            ),
+
+            // 4. Floating PRO chip in the top-right.
+            const Positioned(
+              top: 10,
+              right: 12,
+              child: _ProBadge(label: 'Pro', solid: true),
+            ),
+
+            // 5. Bottom-center upsell hint.
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 10,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.38),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(
+                      color: _Palette.amber.withValues(alpha: 0.35),
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.lock_open_rounded,
+                        size: 12,
+                        color: _Palette.amberWarm,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Tap to unlock',
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.95),
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.2,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ),
           ],
@@ -4588,54 +5127,5 @@ class _AdvancedColorEditorScreenState
     );
   }
 
-  Widget _buildHeader() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        children: [
-          GestureDetector(
-            onTap: () => Navigator.of(context).pop(),
-            child: Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _Palette.amber.withValues(alpha: 0.12),
-                border: Border.all(
-                  color: _Palette.amber.withValues(alpha: 0.25),
-                ),
-              ),
-              child: const Icon(Icons.arrow_back_rounded,
-                  color: _Palette.amber, size: 20),
-            ),
-          ),
-          const Expanded(
-            child: Text(
-              'Light Tuning',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: _Palette.textPrimary,
-                fontSize: 18,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.3,
-              ),
-            ),
-          ),
-          const SizedBox(width: 40),
-        ],
-      ),
-    );
-  }
-}
-
-class _Palette {
-  static const bg = Color(0xFF0B0E13);
-  static const card = Color(0xFF13171E);
-  static const border = Color(0xFF232A35);
-  static const textPrimary = Color(0xFFE8EDF4);
-  static const textSecondary = Color(0xFF8A919C);
-  static const amber = Color(0xFFF9A825);
-  static const blue = Color(0xFF58A6FF);
-  static const teal = Color(0xFF4ADE80);
-  static const idle = Color(0xFFB8A890);
+  Widget child() => widget.child;
 }

@@ -5,9 +5,11 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
     show RhythmBundleApi, RhythmConnectionState;
 
 import '../../../providers/home_provider.dart';
+import '../../../providers/room_page_provider.dart';
 import '../../../providers/server_sync_provider.dart';
 import '../../../services/analytics_service.dart';
 import '../../../services/cloud_backup_service.dart';
+import '../../../services/settings_service.dart';
 import '../../triage_screen.dart';
 import '../../../widgets/settings_row.dart';
 import '../../../widgets/solar_orbit.dart';
@@ -106,7 +108,7 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
                         borderRadius: BorderRadius.circular(14),
                       ),
                       child: const Text(
-                        'Save the current Rhythm Server state to your cloud backup, or restore the latest cloud backup back onto the connected server.',
+                        'Save the current Rhythm Server state and All Rooms layout to your cloud backup, or restore the latest cloud backup back onto the connected server.',
                         style: TextStyle(
                           color: CelestialColors.textSecondary,
                           fontSize: 14,
@@ -526,6 +528,21 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
       );
       final api = RhythmBundleApi(baseUrl: serverHub.endpoint.baseUrl);
       await api.putBackupBundle(snapshot.backupBundle);
+      final scopeKey = RoomPageProvider.layoutScopeFor(
+        home: homeProvider.currentHome,
+        hubs: homeProvider.currentHomeHubs,
+      );
+      final restoredLayout =
+          await SettingsService.instance.applyCloudSettingsBundle(
+        snapshot.appSettingsBundle,
+        roomLayoutScopeKey: scopeKey,
+        roomLayoutHubKey: RoomPageProvider.hubLayoutKey(serverHub),
+      );
+      if (restoredLayout && context.mounted) {
+        final roomPages = context.read<RoomPageProvider>();
+        roomPages.setLayoutScope(scopeKey);
+        roomPages.reloadLayout();
+      }
       await serverSync.fullRefresh();
 
       if (context.mounted) {

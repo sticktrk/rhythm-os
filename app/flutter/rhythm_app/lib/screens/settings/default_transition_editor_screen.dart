@@ -9,9 +9,12 @@ import 'package:rhythm_core/rhythm_core.dart' hide Home, Hub, HubType;
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../../api/hybrid_client.dart' show sdkCurveConfigToDto;
+import '../../models/plan_tier.dart';
 import '../../providers/home_provider.dart';
 import '../../providers/server_sync_provider.dart';
+import '../../providers/subscription_provider.dart';
 import '../../widgets/info_tooltip.dart';
+import '../../widgets/plan_tier_modal.dart';
 import '../../widgets/solar_clock/solar_clock_exports.dart';
 import '../../widgets/solar_orbit.dart';
 
@@ -1022,6 +1025,12 @@ class _DefaultTransitionEditorScreenState
 
   @override
   Widget build(BuildContext context) {
+    // Read entitlements up here — `context.select` is not safe to call from
+    // inside a LayoutBuilder's builder (it runs during layout, not build),
+    // and `_buildButtonSection` is reached through one.
+    final canUseTransitionButton = context.select<SubscriptionProvider, bool>(
+      (s) => s.has(Entitlement.transitionButton),
+    );
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,
       body: SafeArea(
@@ -1044,7 +1053,10 @@ class _DefaultTransitionEditorScreenState
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         SizedBox(height: topSpacing),
-                        _buildHero(compactLayout: compactLayout),
+                        _buildHero(
+                          compactLayout: compactLayout,
+                          canUseTransitionButton: canUseTransitionButton,
+                        ),
                         SizedBox(height: sectionSpacing),
                         _buildDurationRow(compactLayout: compactLayout),
                         SizedBox(height: bottomSpacing),
@@ -1067,7 +1079,7 @@ class _DefaultTransitionEditorScreenState
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           const Text(
-            'Transitions',
+            'Transition',
             style: TextStyle(
               color: CelestialColors.textPrimary,
               fontSize: 19,
@@ -1148,7 +1160,10 @@ class _DefaultTransitionEditorScreenState
     );
   }
 
-  Widget _buildHero({required bool compactLayout}) {
+  Widget _buildHero({
+    required bool compactLayout,
+    required bool canUseTransitionButton,
+  }) {
     final dayColor = widget.profileColors[RhythmMode.day] ??
         _fallbackModeColor(RhythmMode.day);
     final sleepColor = widget.profileColors[RhythmMode.sleep] ??
@@ -1183,6 +1198,7 @@ class _DefaultTransitionEditorScreenState
           _buildButtonSection(
             accentColor: _chromeAccent,
             compactLayout: compactLayout,
+            unlocked: canUseTransitionButton,
           ),
           // Save/Reset cluster lives at hero scope (not inside the Time
           // section's collapsible body) so toggling Time off can still be
@@ -1241,23 +1257,39 @@ class _DefaultTransitionEditorScreenState
   }
 
   /// Physical-button trigger section. Header with an enable switch; when on,
-  /// the device picker + pair CTA expand below.
+  /// the device picker + pair CTA expand below. Gated by the
+  /// [Entitlement.transitionButton] entitlement — for users without it the
+  /// header renders a Pro pill in place of the switch and tapping the header
+  /// opens the upsell modal.
   Widget _buildButtonSection({
     required Color accentColor,
     required bool compactLayout,
+    required bool unlocked,
   }) {
-    return _SourceSectionCard(
-      enabled: _buttonEnabled,
+    final header = _SourceSectionHeader(
+      icon: Icons.radio_button_checked_rounded,
+      label: 'Button',
+      sublabel: !unlocked
+          ? 'Pro · Bind a physical button'
+          : _buttonEnabled
+              ? 'One button toggles Day ⇄ Sleep'
+              : 'Off',
       accent: _chromeAccent,
-      header: _SourceSectionHeader(
-        icon: Icons.radio_button_checked_rounded,
-        label: 'Button',
-        sublabel: _buttonEnabled ? 'One button toggles Day ⇄ Sleep' : 'Off',
-        accent: _chromeAccent,
-        enabled: _buttonEnabled,
-        onChanged: _setButtonEnabled,
-      ),
-      body: _buildButtonSectionBody(),
+      enabled: unlocked && _buttonEnabled,
+      onChanged: _setButtonEnabled,
+      onLockTap: unlocked
+          ? null
+          : () => PlanTierModal.show(
+                context,
+                highlightFeature: Entitlement.transitionButton,
+              ),
+    );
+
+    return _SourceSectionCard(
+      enabled: unlocked && _buttonEnabled,
+      accent: _chromeAccent,
+      header: header,
+      body: unlocked ? _buildButtonSectionBody() : const SizedBox.shrink(),
     );
   }
 
@@ -2289,6 +2321,11 @@ class _SourceSectionHeader extends StatelessWidget {
   final bool enabled;
   final ValueChanged<bool> onChanged;
 
+  /// When set, the section is rendered as a Pro-locked teaser: tapping
+  /// anywhere on the header fires [onLockTap] instead of toggling, and the
+  /// right side renders an amber Pro pill instead of the enable switch.
+  final VoidCallback? onLockTap;
+
   const _SourceSectionHeader({
     required this.icon,
     required this.label,
@@ -2296,16 +2333,27 @@ class _SourceSectionHeader extends StatelessWidget {
     required this.accent,
     required this.enabled,
     required this.onChanged,
+    this.onLockTap,
   });
+
+  bool get _locked => onLockTap != null;
 
   @override
   Widget build(BuildContext context) {
-    final activeColor = enabled
-        ? accent.withValues(alpha: 0.92)
-        : CelestialColors.textSecondary.withValues(alpha: 0.6);
+    final activeColor = _locked
+        ? const Color(0xFFFFB900).withValues(alpha: 0.85)
+        : enabled
+            ? accent.withValues(alpha: 0.92)
+            : CelestialColors.textSecondary.withValues(alpha: 0.6);
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: () => onChanged(!enabled),
+      onTap: () {
+        if (_locked) {
+          onLockTap!();
+        } else {
+          onChanged(!enabled);
+        }
+      },
       child: Padding(
         padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
         child: Row(
@@ -2318,10 +2366,17 @@ class _SourceSectionHeader extends StatelessWidget {
               alignment: Alignment.center,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color:
-                    enabled ? CelestialColors.backgroundCard : _surfaceRecessed,
+                color: _locked
+                    ? const Color(0xFFFFB900).withValues(alpha: 0.10)
+                    : enabled
+                        ? CelestialColors.backgroundCard
+                        : _surfaceRecessed,
                 border: Border.all(
-                  color: enabled ? _hairlineStrong : _hairlineSoft,
+                  color: _locked
+                      ? const Color(0xFFFFB900).withValues(alpha: 0.35)
+                      : enabled
+                          ? _hairlineStrong
+                          : _hairlineSoft,
                 ),
               ),
               child: Icon(icon, size: 15, color: activeColor),
@@ -2362,13 +2417,61 @@ class _SourceSectionHeader extends StatelessWidget {
                 ],
               ),
             ),
-            _CelestialSwitch(
-              value: enabled,
-              accent: accent,
-              onChanged: onChanged,
-            ),
+            if (_locked)
+              const _HeaderProPill()
+            else
+              _CelestialSwitch(
+                value: enabled,
+                accent: accent,
+                onChanged: onChanged,
+              ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Solid amber pill that replaces the section switch when a section is
+/// Pro-locked. Tap is handled by the parent header's gesture detector — this
+/// is purely decorative.
+class _HeaderProPill extends StatelessWidget {
+  const _HeaderProPill();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFFFFB900), Color(0xFFFF8C00)],
+        ),
+        borderRadius: BorderRadius.circular(999),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFFFFB900).withValues(alpha: 0.32),
+            blurRadius: 10,
+            spreadRadius: -2,
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: const [
+          Icon(Icons.lock_open_rounded, size: 11, color: Colors.white),
+          SizedBox(width: 4),
+          Text(
+            'PRO',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 10,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 1.0,
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -342,6 +342,83 @@ class SettingsService {
     return '$roomPageLayoutScopePrefix$scopeKey';
   }
 
+  /// Export app settings that should roam with a signed-in account.
+  ///
+  /// Keep this deliberately narrow for now. Device-local preferences stay
+  /// local; the user-facing setting we sync is the All Rooms page layout.
+  Map<String, dynamic> buildCloudSettingsBundle({
+    String? roomLayoutScopeKey,
+    String? roomLayoutHubKey,
+  }) {
+    final bundle = <String, dynamic>{
+      'schema_version': 1,
+    };
+
+    final scopedPages = getRoomPageLayout(scopeKey: roomLayoutScopeKey);
+    final legacyPages = getLegacyRoomPageLayout();
+    final pages = scopedPages ?? legacyPages;
+    if (pages != null) {
+      bundle['all_rooms_layouts'] = <Map<String, dynamic>>[
+        <String, dynamic>{
+          if (roomLayoutHubKey != null) 'hub_key': roomLayoutHubKey,
+          if (roomLayoutScopeKey != null)
+            'source_scope_key': roomLayoutScopeKey,
+          'pages': pages,
+        },
+      ];
+    }
+
+    return bundle;
+  }
+
+  /// Apply cloud-backed app settings to the current device.
+  ///
+  /// Restores the saved All Rooms page layout into the caller-provided current
+  /// layout scope, so a backup captured on one local home/server ID can still
+  /// apply to the equivalent server on this device.
+  Future<bool> applyCloudSettingsBundle(
+    Map<String, dynamic> bundle, {
+    String? roomLayoutScopeKey,
+    String? roomLayoutHubKey,
+    bool overwrite = true,
+  }) async {
+    if (!overwrite && getRoomPageLayout(scopeKey: roomLayoutScopeKey) != null) {
+      return false;
+    }
+
+    final layout = _findAllRoomsLayoutForHub(
+      bundle,
+      roomLayoutHubKey: roomLayoutHubKey,
+    );
+    if (layout == null) return false;
+
+    final pages = _decodeRoomPageLayoutFromValue(layout['pages']);
+    if (pages == null) return false;
+
+    await saveRoomPageLayout(pages, scopeKey: roomLayoutScopeKey);
+    return true;
+  }
+
+  Map<dynamic, dynamic>? _findAllRoomsLayoutForHub(
+    Map<String, dynamic> bundle, {
+    String? roomLayoutHubKey,
+  }) {
+    final layouts = bundle['all_rooms_layouts'];
+    if (layouts is List) {
+      for (final layout in layouts) {
+        if (layout is! Map) continue;
+        if (roomLayoutHubKey == null || layout['hub_key'] == roomLayoutHubKey) {
+          return layout;
+        }
+      }
+    }
+
+    // Backward compatibility with early local snapshots before layouts were
+    // keyed by hub.
+    final legacyLayout = bundle['all_rooms_layout'];
+    return legacyLayout is Map ? legacyLayout : null;
+  }
+
   String? _roomPageLayoutJson({String? scopeKey}) {
     if (scopeKey == null) {
       return _settings.roomPageAssignmentsJson;
@@ -349,14 +426,36 @@ class SettingsService {
     final value = _localDataSource!.getSettingsValue(
       _roomPageLayoutStorageKey(scopeKey),
     );
-    return value as String?;
+    if (value is String) return value;
+    return _findHomeScopedRoomPageLayoutJson(scopeKey);
+  }
+
+  String? _findHomeScopedRoomPageLayoutJson(String scopeKey) {
+    for (final key in _localDataSource!.getSettingsKeysWithPrefix(
+      roomPageLayoutScopePrefix,
+    )) {
+      if (!key.endsWith(':$scopeKey')) continue;
+      final value = _localDataSource!.getSettingsValue(key);
+      if (value is String && value.isNotEmpty) {
+        return value;
+      }
+    }
+    return null;
   }
 
   List<List<String>>? _decodeRoomPageLayout(String? json) {
     if (json == null) return null;
     try {
-      final decoded = jsonDecode(json) as List<dynamic>;
-      return decoded
+      return _decodeRoomPageLayoutFromValue(jsonDecode(json));
+    } catch (e) {
+      return null;
+    }
+  }
+
+  List<List<String>>? _decodeRoomPageLayoutFromValue(Object? value) {
+    if (value is! List) return null;
+    try {
+      return value
           .map((page) => (page as List<dynamic>).cast<String>().toList())
           .toList();
     } catch (e) {

@@ -7,7 +7,9 @@ import 'package:rhythm_sdk/rhythm_sdk.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../backend/backend.dart';
+import '../providers/room_page_provider.dart';
 import 'auth_service.dart';
+import 'settings_service.dart';
 
 /// Single cloud snapshot for the signed-in user.
 ///
@@ -24,6 +26,7 @@ class CloudBackupSnapshot {
     required this.sourceHubPort,
     required this.configurationBundle,
     required this.backupBundle,
+    required this.appSettingsBundle,
     this.homeId,
     this.homeName,
     this.capturedAt,
@@ -40,6 +43,7 @@ class CloudBackupSnapshot {
   final String? homeName;
   final Map<String, dynamic> configurationBundle;
   final Map<String, dynamic> backupBundle;
+  final Map<String, dynamic> appSettingsBundle;
   final DateTime? capturedAt;
   final DateTime? updatedAt;
 
@@ -59,6 +63,9 @@ class CloudBackupSnapshot {
       backupBundle: Map<String, dynamic>.from(
         (row['backup_bundle'] as Map?) ?? const <String, dynamic>{},
       ),
+      appSettingsBundle: Map<String, dynamic>.from(
+        (row['app_settings_bundle'] as Map?) ?? const <String, dynamic>{},
+      ),
       capturedAt: _parseDateTime(row['captured_at']),
       updatedAt: _parseDateTime(row['updated_at']),
     );
@@ -76,6 +83,7 @@ class CloudBackupSnapshot {
       if (homeName != null) 'home_name': homeName,
       'configuration_bundle': configurationBundle,
       'backup_bundle': backupBundle,
+      'app_settings_bundle': appSettingsBundle,
       'captured_at': (capturedAt ?? DateTime.now()).toUtc().toIso8601String(),
     };
   }
@@ -227,6 +235,7 @@ class CloudBackupService {
     Home? home,
     required Map<String, dynamic> configurationBundle,
     required Map<String, dynamic> backupBundle,
+    Map<String, dynamic> appSettingsBundle = const <String, dynamic>{},
     DateTime? capturedAt,
   }) {
     return CloudBackupSnapshot(
@@ -240,6 +249,7 @@ class CloudBackupService {
       homeName: home?.name,
       configurationBundle: configurationBundle,
       backupBundle: backupBundle,
+      appSettingsBundle: appSettingsBundle,
       capturedAt: capturedAt ?? DateTime.now(),
     );
   }
@@ -301,6 +311,16 @@ class CloudBackupService {
       serverHub: serverHub,
       reason: reason,
     );
+    final roomLayoutScopeKey = RoomPageProvider.layoutScopeFor(
+      home: home,
+      hubs: <Hub>[serverHub],
+    );
+    final appSettingsBundle = await _buildAppSettingsBundleForCapture(
+      client: client,
+      userId: userId,
+      serverHub: serverHub,
+      roomLayoutScopeKey: roomLayoutScopeKey,
+    );
 
     final snapshot = buildSnapshot(
       userId: userId,
@@ -308,6 +328,7 @@ class CloudBackupService {
       home: home,
       configurationBundle: configurationBundle,
       backupBundle: backupBundle,
+      appSettingsBundle: appSettingsBundle,
     );
 
     await _runCaptureStep(
@@ -325,6 +346,39 @@ class CloudBackupService {
       'hub=${serverHub.id} reason=$reason',
     );
     return snapshot;
+  }
+
+  Future<Map<String, dynamic>> _buildAppSettingsBundleForCapture({
+    required SupabaseClient client,
+    required String userId,
+    required Hub serverHub,
+    required String? roomLayoutScopeKey,
+  }) async {
+    final bundle = SettingsService.instance.buildCloudSettingsBundle(
+      roomLayoutScopeKey: roomLayoutScopeKey,
+      roomLayoutHubKey: RoomPageProvider.hubLayoutKey(serverHub),
+    );
+    if (bundle['all_rooms_layouts'] != null) {
+      return bundle;
+    }
+
+    try {
+      final row = await client
+          .from(tableName)
+          .select('app_settings_bundle')
+          .eq('user_id', userId)
+          .maybeSingle();
+      final existingBundle = row?['app_settings_bundle'];
+      if (existingBundle is Map) {
+        return Map<String, dynamic>.from(existingBundle);
+      }
+    } catch (error) {
+      debugPrint(
+        'CloudBackupService: existing app settings lookup failed: $error',
+      );
+    }
+
+    return bundle;
   }
 
   Future<Map<String, dynamic>> _getConfigurationBundleBestEffort({
@@ -381,9 +435,11 @@ class CloudBackupService {
     if (error is RhythmApiException) {
       final parts = <String>[
         if (error.statusCode != null) 'HTTP ${error.statusCode}',
-        if (error.serverMessage != null && error.serverMessage!.trim().isNotEmpty)
+        if (error.serverMessage != null &&
+            error.serverMessage!.trim().isNotEmpty)
           error.serverMessage!.trim(),
-        if ((error.serverMessage == null || error.serverMessage!.trim().isEmpty) &&
+        if ((error.serverMessage == null ||
+                error.serverMessage!.trim().isEmpty) &&
             error.message.trim().isNotEmpty)
           error.message.trim(),
       ];

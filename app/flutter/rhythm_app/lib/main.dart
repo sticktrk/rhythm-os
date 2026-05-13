@@ -15,6 +15,7 @@ import 'api/hybrid_client.dart';
 import 'onboarding/onboarding_flow.dart';
 import 'services/auth_service.dart';
 import 'services/analytics_service.dart';
+import 'services/entitlements_service.dart';
 import 'services/settings_service.dart';
 import 'services/app_state_refresh.dart';
 import 'data/local_data_source.dart';
@@ -23,6 +24,7 @@ import 'providers/room_provider.dart';
 import 'providers/room_page_provider.dart';
 import 'providers/home_provider.dart';
 import 'providers/server_sync_provider.dart';
+import 'providers/subscription_provider.dart';
 import 'config/platform_capabilities.dart';
 import 'config/supabase_config.dart';
 
@@ -77,6 +79,10 @@ void main() async {
       debugPrint('Backend initialization failed: $e');
     }
   }
+
+  // Entitlements: resolves the user's plan tier (Basic vs Pro). Always
+  // bootstraps — for HA add-on (no cloud) this short-circuits to Pro.
+  await EntitlementsService.bootstrap(caps);
 
   HybridApiClient? client;
   String? initError;
@@ -158,6 +164,9 @@ class RhythmApp extends StatelessWidget {
     return MultiProvider(
       providers: [
         Provider<PlatformCapabilities>.value(value: capabilities),
+        ChangeNotifierProvider(
+          create: (_) => SubscriptionProvider(EntitlementsService.instance),
+        ),
         ChangeNotifierProvider(create: (_) => ConfigModel()),
         Provider<RhythmApi>.value(value: client!),
         // Also expose the hybrid client directly for local brain access

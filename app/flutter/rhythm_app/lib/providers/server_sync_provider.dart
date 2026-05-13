@@ -15,8 +15,10 @@ import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
+import '../models/plan_tier.dart';
 import '../services/cloud_backed_server_api.dart';
 import '../services/demo_server_api.dart';
+import '../services/entitlements_service.dart';
 import '../services/hue/demo_hue_bridge_service.dart';
 import '../services/hue/hue_service_locator.dart';
 import 'home_provider.dart';
@@ -56,6 +58,7 @@ class ServerSyncProvider extends ChangeNotifier {
   StreamSubscription<Map<String, dynamic>>? _triageChangedSub;
   StreamSubscription<RhythmConnectionState>? _connectionStateSub;
   StreamSubscription<void>? _demoChangeSub;
+  StreamSubscription<PlanTier>? _entitlementsSub;
 
   /// Suppresses push-back when receiving rhythm_state from server.
   bool _receivingFromServer = false;
@@ -585,6 +588,33 @@ class ServerSyncProvider extends ChangeNotifier {
       if (!HueServiceLocator.isDemoMode) return;
       unawaited(_refreshDemoState());
     });
+
+    // Entitlement enforcement: Power Save is derived from tier, not user UI.
+    // Free => powerSave=true (no standby). Pro => powerSave=false.
+    try {
+      _entitlementsSub = EntitlementsService.instance.tierChanges.listen(
+        (_) => _enforcePowerSaveEntitlement(),
+      );
+    } catch (_) {
+      // EntitlementsService not bootstrapped (test / non-app entry).
+    }
+  }
+
+  /// Keep server Power Save aligned with the current tier.
+  void _enforcePowerSaveEntitlement() {
+    EntitlementsService service;
+    try {
+      service = EntitlementsService.instance;
+    } catch (_) {
+      return;
+    }
+    final desiredPowerSave = !service.has(Entitlement.standby);
+    if (_powerSave == desiredPowerSave) return;
+    if (!synced) return; // Wait for a server connection.
+    debugPrint(
+      'ServerSync: enforcing powerSave=$desiredPowerSave from entitlements',
+    );
+    unawaited(setPowerSave(desiredPowerSave));
   }
 
   /// Connect to server if a hub is available.
@@ -786,6 +816,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _refreshTopologyNodes();
 
     notifyListeners();
+    _enforcePowerSaveEntitlement();
   }
 
   /// Accept light-addressable nodes from the server as the authoritative source.
@@ -965,6 +996,7 @@ class ServerSyncProvider extends ChangeNotifier {
     if (_powerSave == settings.powerSave) return;
     _powerSave = settings.powerSave;
     notifyListeners();
+    _enforcePowerSaveEntitlement();
   }
 
   /// Handle new nodes detected in poll — trigger a full re-hello.
@@ -1838,6 +1870,7 @@ class ServerSyncProvider extends ChangeNotifier {
     if (hasListeners) {
       notifyListeners();
     }
+    _enforcePowerSaveEntitlement();
   }
 
   void _syncHelloMotionState(Iterable<RhythmRoom> nodes) {
@@ -2202,6 +2235,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _triageChangedSub?.cancel();
     _connectionStateSub?.cancel();
     _demoChangeSub?.cancel();
+    _entitlementsSub?.cancel();
     super.dispose();
   }
 }

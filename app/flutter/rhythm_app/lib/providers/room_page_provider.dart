@@ -88,21 +88,24 @@ class RoomPageProvider extends ChangeNotifier {
     required List<Hub> hubs,
   }) {
     final enabledHubs = hubs.where((hub) => hub.enabled).toList();
-    final homePrefix = home == null ? '' : 'home:${home.id}:';
 
     final serverHub =
         enabledHubs.where((hub) => hub.type == HubType.server).firstOrNull;
     if (serverHub != null) {
-      return '${homePrefix}server:${_hubFingerprint(serverHub)}';
+      return 'server:${hubLayoutKey(serverHub)}';
     }
 
     if (enabledHubs.isNotEmpty) {
-      final fingerprints = enabledHubs.map(_hubFingerprint).toList()..sort();
-      return '${homePrefix}hubs:${fingerprints.join('|')}';
+      final fingerprints = enabledHubs.map(hubLayoutKey).toList()..sort();
+      return 'hubs:${fingerprints.join('|')}';
     }
 
-    return home == null ? null : '${homePrefix}default';
+    return home == null ? null : 'home:${home.id}:default';
   }
+
+  /// Stable key used by cloud layout sync to match an All Rooms layout to the
+  /// same physical/logical hub on another phone.
+  static String hubLayoutKey(Hub hub) => _hubFingerprint(hub);
 
   /// Reload the persisted layout for a new room source scope.
   void setLayoutScope(String? scopeKey, {bool notify = true}) {
@@ -122,6 +125,19 @@ class RoomPageProvider extends ChangeNotifier {
     _pausePersistenceUntilRoomSetChanges = normalizedScopeKey != null;
     _roomSignatureAtScopeChange = null;
 
+    if (notify) {
+      notifyListeners();
+    }
+  }
+
+  /// Reload the current scope from storage.
+  ///
+  /// Used after cloud settings restore writes the layout outside this provider.
+  void reloadLayout({bool notify = true}) {
+    _pages = _loadPagesForScope(_scopeKey);
+    if (!_editMode) {
+      _compactPages();
+    }
     if (notify) {
       notifyListeners();
     }

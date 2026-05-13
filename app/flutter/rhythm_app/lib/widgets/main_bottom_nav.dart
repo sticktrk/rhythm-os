@@ -23,17 +23,23 @@ class MainBottomNav extends StatelessWidget {
   /// whose dependencies aren't met (e.g. Daily Rhythm with no synced server).
   final List<MainNavTab> tabs;
 
+  /// Tabs that should render but reject taps — used to keep slots like
+  /// Transition visible (so the navbar shape is stable) while their underlying
+  /// data isn't ready yet.
+  final Set<MainNavTab> disabledTabs;
+
   const MainBottomNav({
     super.key,
     required this.currentBodyTab,
     required this.onTabSelected,
     this.tabs = const [
       MainNavTab.home,
-      MainNavTab.dailyRhythm,
       MainNavTab.day,
+      MainNavTab.dailyRhythm,
       MainNavTab.sleep,
       MainNavTab.settings,
     ],
+    this.disabledTabs = const {},
   });
 
   int get _selectedIndex {
@@ -41,33 +47,41 @@ class MainBottomNav extends StatelessWidget {
     return i >= 0 ? i : 0;
   }
 
-  NavigationDestination _destinationFor(MainNavTab tab) => switch (tab) {
-        MainNavTab.home => const NavigationDestination(
-            icon: Icon(Icons.home_outlined),
-            selectedIcon: Icon(Icons.home_rounded),
-            label: 'Home',
-          ),
-        MainNavTab.dailyRhythm => const NavigationDestination(
-            icon: Icon(Icons.brightness_6_outlined),
-            selectedIcon: Icon(Icons.brightness_6_rounded),
-            label: 'Transitions',
-          ),
-        MainNavTab.day => const NavigationDestination(
-            icon: Icon(Icons.wb_sunny_outlined),
-            selectedIcon: Icon(Icons.wb_sunny_rounded),
-            label: 'Day',
-          ),
-        MainNavTab.sleep => const NavigationDestination(
-            icon: Icon(Icons.bedtime_outlined),
-            selectedIcon: Icon(Icons.bedtime_rounded),
-            label: 'Sleep',
-          ),
-        MainNavTab.settings => const NavigationDestination(
-            icon: Icon(Icons.settings_outlined),
-            selectedIcon: Icon(Icons.settings_rounded),
-            label: 'Settings',
-          ),
-      };
+  NavigationDestination _destinationFor(MainNavTab tab) {
+    final enabled = !disabledTabs.contains(tab);
+    return switch (tab) {
+      MainNavTab.home => NavigationDestination(
+          icon: const Icon(Icons.home_outlined),
+          selectedIcon: const Icon(Icons.home_rounded),
+          label: 'Home',
+          enabled: enabled,
+        ),
+      MainNavTab.dailyRhythm => NavigationDestination(
+          icon: const Icon(Icons.brightness_6_outlined),
+          selectedIcon: const Icon(Icons.brightness_6_rounded),
+          label: 'Transition',
+          enabled: enabled,
+        ),
+      MainNavTab.day => NavigationDestination(
+          icon: const Icon(Icons.wb_sunny_outlined),
+          selectedIcon: const Icon(Icons.wb_sunny_rounded),
+          label: 'Day',
+          enabled: enabled,
+        ),
+      MainNavTab.sleep => NavigationDestination(
+          icon: const Icon(Icons.bedtime_outlined),
+          selectedIcon: const Icon(Icons.bedtime_rounded),
+          label: 'Sleep',
+          enabled: enabled,
+        ),
+      MainNavTab.settings => NavigationDestination(
+          icon: const Icon(Icons.settings_outlined),
+          selectedIcon: const Icon(Icons.settings_rounded),
+          label: 'Settings',
+          enabled: enabled,
+        ),
+    };
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -90,22 +104,26 @@ class MainBottomNav extends StatelessWidget {
           labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
           labelTextStyle: WidgetStateProperty.resolveWith((states) {
             final selected = states.contains(WidgetState.selected);
+            final disabled = states.contains(WidgetState.disabled);
+            final base = selected
+                ? CelestialColors.textPrimary
+                : CelestialColors.textSecondary;
             return TextStyle(
               fontSize: 11,
               fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
               letterSpacing: 0.2,
-              color: selected
-                  ? CelestialColors.textPrimary
-                  : CelestialColors.textSecondary,
+              color: disabled ? base.withValues(alpha: 0.38) : base,
             );
           }),
           iconTheme: WidgetStateProperty.resolveWith((states) {
             final selected = states.contains(WidgetState.selected);
+            final disabled = states.contains(WidgetState.disabled);
+            final base = selected
+                ? CelestialColors.textPrimary
+                : CelestialColors.textSecondary;
             return IconThemeData(
               size: 22,
-              color: selected
-                  ? CelestialColors.textPrimary
-                  : CelestialColors.textSecondary,
+              color: disabled ? base.withValues(alpha: 0.38) : base,
             );
           }),
         ),

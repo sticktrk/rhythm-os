@@ -58,6 +58,17 @@ void main() {
         backupBundle: const <String, dynamic>{
           'kind': 'backup_bundle',
         },
+        appSettingsBundle: const <String, dynamic>{
+          'schema_version': 1,
+          'all_rooms_layouts': [
+            {
+              'hub_key': 'server:192.168.1.50',
+              'pages': [
+                ['room-1', 'room-2'],
+              ],
+            },
+          ],
+        },
         capturedAt: DateTime.utc(2026, 4, 16),
       );
 
@@ -76,6 +87,20 @@ void main() {
       expect(
         payload['backup_bundle'],
         const <String, dynamic>{'kind': 'backup_bundle'},
+      );
+      expect(
+        payload['app_settings_bundle'],
+        const <String, dynamic>{
+          'schema_version': 1,
+          'all_rooms_layouts': [
+            {
+              'hub_key': 'server:192.168.1.50',
+              'pages': [
+                ['room-1', 'room-2'],
+              ],
+            },
+          ],
+        },
       );
     });
   });
