@@ -617,7 +617,16 @@ fn spawn_input_binding_action(
 
 fn run_motion_turn_on_action(state: &SharedState, node_id: &str) {
     // Motion ingress is fast lane for occupancy responsiveness.
-    turn_on_node_inline(state, node_id);
+    if !turn_on_node_inline(state, node_id) {
+        return;
+    }
+    let runtime = {
+        let Ok(s) = state.lock() else { return };
+        s.hub_runtime()
+    };
+    if let Some(runtime) = runtime {
+        crate::commands::emit_node_state_event_after_apply(state, &runtime, node_id);
+    }
 }
 
 fn spawn_motion_turn_on_action(state: &SharedState, node_id: String) {
@@ -3842,6 +3851,50 @@ mod tests {
             }
             other => panic!("unexpected event: {:?}", other),
         }
+    }
+
+    #[test]
+    fn motion_turn_on_emits_node_state_event() {
+        // Regression test for issue #72. Motion-triggered turn-on must
+        // broadcast a NodeState SSE event so the app updates without
+        // requiring a hard refresh.
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(MotionTestRuntime {
+            snapshots: vec![RoomSnapshot {
+                id: "room_a".into(),
+                name: "Room A".into(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                hard_off: false,
+                profile_settings: RoomProfileSettings::default(),
+            }],
+            any_lights_on_calls: None,
+        });
+        let state = make_state_with_runtime(runtime);
+        let mut event_rx = subscribe_events(&state);
+
+        run_motion_turn_on_action(&state, "room_a");
+
+        let mut saw_node_state = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if let crate::server_event::ServerEvent::NodeState { nodes } = event {
+                assert!(
+                    nodes.iter().any(|n| n.id == "room_a"),
+                    "NodeState should include room_a, got {:?}",
+                    nodes.iter().map(|n| &n.id).collect::<Vec<_>>()
+                );
+                saw_node_state = true;
+                break;
+            }
+        }
+        assert!(
+            saw_node_state,
+            "expected NodeState SSE event after motion-triggered turn-on"
+        );
     }
 
     #[test]
