@@ -3506,6 +3506,11 @@ fn restore_backup_runtime_state(
     s.last_active_mode_cause = runtime_state.last_change_cause;
     s.last_active_mode_transition_id = runtime_state.last_change_transition_id.clone();
     s.last_active_mode_change_utc_ms = runtime_state.last_change_epoch_ms;
+    // Backup restore is authoritative for room state, so discard any deferred
+    // mode-output apply that `apply_backup_configuration` may have flagged
+    // while restoring with no runtime attached. Otherwise a late hub
+    // reconnect would re-apply mode defaults over the restored room state.
+    s.pending_mode_output_apply = false;
     s.sync_active_mode_runtime_overrides();
     s.invalidate_queued_light_dispatches();
     persist_settings_locked(&s);
@@ -4323,10 +4328,12 @@ fn apply_active_mode_outputs(
     let Some(runtime) = runtime else {
         if let Ok(mut s) = state.lock() {
             s.room_mode_transitions.clear();
+            s.pending_mode_output_apply = true;
         }
         debug!(
             target: "cmd",
-            "active_mode_apply: no runtime available, cleared pending room transitions"
+            "active_mode_apply: no runtime available, deferring {:?} room-default apply until runtime ready",
+            target_mode
         );
         return;
     };
@@ -4526,27 +4533,28 @@ fn apply_active_mode_outputs(
             dispatch_generation,
         );
     }
+    if let Ok(mut s) = state.lock() {
+        s.pending_mode_output_apply = false;
+    }
 }
 
-pub(crate) fn reconcile_scheduled_active_mode_outputs_after_runtime_ready(state: &SharedState) {
+/// Apply the active mode's room defaults if a prior mode change deferred them
+/// because no runtime was available. The deferral is set by
+/// `apply_active_mode_outputs` when it sees no runtime (typically when the
+/// periodic loop replayed a missed scheduled transition before hub bootstrap).
+///
+/// Callers must invoke this after a runtime becomes available and any
+/// persisted room state has been restored. This is the only catch-up path
+/// — routine restarts without a deferred apply leave restored room state
+/// untouched.
+fn apply_pending_mode_outputs_if_ready(state: &SharedState) {
     let (active_mode, transition, dispatch_generation) = {
         let Ok(mut s) = state.lock() else {
             return;
         };
-        if s.startup_active_mode_reconcile_done || s.hub_runtime().is_none() {
+        if !s.pending_mode_output_apply || s.hub_runtime().is_none() {
             return;
         }
-
-        s.startup_active_mode_reconcile_done = true;
-        if s.last_active_mode_cause != ModeChangeCause::Schedule {
-            debug!(
-                target: "cmd",
-                "startup_active_mode_reconcile: skipped for last_change_cause={:?}",
-                s.last_active_mode_cause
-            );
-            return;
-        }
-
         let active_mode = s.active_mode;
         let transition = s.last_active_mode_transition_id.as_ref().and_then(|id| {
             s.mode_transition_configs()
@@ -4559,7 +4567,7 @@ pub(crate) fn reconcile_scheduled_active_mode_outputs_after_runtime_ready(state:
 
     info!(
         target: "cmd",
-        "startup_active_mode_reconcile: reapplying {:?} defaults transition_id={:?}",
+        "active_mode_apply_deferred: applying {:?} defaults transition_id={:?}",
         active_mode,
         transition.as_ref().map(|config| config.id.as_str())
     );
@@ -7597,7 +7605,7 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
 
     rebuild_composite_routing(state);
     schedule_topology_group_sync_for_integrations(state);
-    reconcile_scheduled_active_mode_outputs_after_runtime_ready(state);
+    apply_pending_mode_outputs_if_ready(state);
 
     Ok(())
 }
@@ -11378,6 +11386,142 @@ mod tests {
     }
 
     #[test]
+    fn redacted_backup_restore_does_not_reapply_mode_defaults_on_late_hub_reconnect() {
+        // Companion to issue #69: backup restore runs apply_backup_configuration
+        // with force_reapply_outputs=true while no hub runtime is attached
+        // (do_hub_disconnect emptied them), so apply_active_mode_outputs hits the
+        // no-runtime branch and sets pending_mode_output_apply. The restored room
+        // state is authoritative, so leaking that flag past restore would let a
+        // late hub reconnect re-apply mode defaults and clobber the user's
+        // restored state. restore_backup_runtime_state must clear the flag.
+        let storage = TestStorage::default();
+        let app = AppState {
+            storage: Some(Box::new(storage.clone())),
+            ..Default::default()
+        };
+        let state = Arc::new(Mutex::new(app));
+        install_mock_hub_provider(&state);
+
+        // Restored room state: living is rhythm-on with soft_off=true but
+        // hard_off=false.
+        let mut rooms = rhythm_core::RoomManager::new();
+        let room = rooms.get_or_create("living", "Living Room");
+        room.rhythm_enabled = true;
+        room.soft_off = true;
+        room.hard_off = false;
+
+        let hub_key = HubKey::new(HubType::new("mock"), "bridge.local");
+        let bundle = BackupBundle {
+            schema_version: BUNDLE_SCHEMA_VERSION,
+            kind: BundleKind::BackupBundle,
+            created_at: "2026-04-16T00:00:00Z".into(),
+            secrets_included: false,
+            configuration: BackupConfiguration {
+                power_save: false,
+                active_mode: RhythmMode::Day,
+                profiles: Vec::new(),
+                // Conflict: Day mode's room_default for "living" is HardOff. If
+                // the pending flag leaks past restore, reconcile_runtime_from_state
+                // will dispatch lights_off and force hard_off=true on the room.
+                mode_configs: vec![
+                    ModeConfig {
+                        mode: RhythmMode::Day,
+                        active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                        idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                        wake_profile_id: None,
+                        warning_profile_id: None,
+                        room_defaults: vec![rhythm_core::RoomModeDefault {
+                            room_id: "living".into(),
+                            state: RoomModeState::HardOff,
+                        }],
+                    },
+                    ModeConfig::default_for_mode(RhythmMode::Sleep),
+                ],
+                mode_transitions: Vec::new(),
+                rooms: Vec::new(),
+            },
+            installation: BackupInstallation {
+                location: None,
+                rooms: rooms.clone(),
+                topology: crate::topology::RoomTopologyStore::new(),
+                canonical_registry: crate::canonical::registry::CanonicalRegistry::new(),
+                hub_credentials: vec![BackupHubCredentials {
+                    hub_type: Some(HubType::new("mock")),
+                    address: "bridge.local".into(),
+                    data: None,
+                }],
+                hub_registries: vec![crate::bundle::BackupHubRegistry {
+                    hub_key: hub_key.clone(),
+                    snapshot: serde_json::json!({ "rooms": [] }),
+                }],
+            },
+            runtime_state: BackupRuntimeState {
+                active_mode: RhythmMode::Day,
+                last_change_cause: ModeChangeCause::Schedule,
+                last_change_transition_id: None,
+                last_change_epoch_ms: Some(1_700_000_000_000),
+            },
+        };
+
+        do_backup_restore(&state, bundle).unwrap();
+
+        assert!(
+            !state.lock().unwrap().pending_mode_output_apply,
+            "do_backup_restore must clear pending_mode_output_apply so a \
+             late hub reconnect doesn't clobber restored room state"
+        );
+
+        // Simulate the late hub reconnect: attach a runtime carrying the
+        // restored snapshot, add a matching topology room, then reconcile.
+        let mut restored_snapshot = make_snapshot("living", false, true);
+        restored_snapshot.name = "Living Room".into();
+        restored_snapshot.rhythm_enabled = true;
+        restored_snapshot.hard_off = false;
+        let runtime = Arc::new(MockRuntime::new(vec![restored_snapshot], 12.0));
+        {
+            let mut s = state.lock().unwrap();
+            let hub_type = HubType::new("mock");
+            s.hubs.insert(
+                hub_key.clone(),
+                ActiveHub {
+                    hub_type,
+                    hub_key: hub_key.clone(),
+                    runtime: Some(runtime.clone() as Arc<dyn RuntimeHandle>),
+                    hub_data: Box::new(()),
+                    registry: None,
+                    discovery: None,
+                    shutdown: Default::default(),
+                },
+            );
+        }
+        add_topology_room(&state, "living", &[]);
+
+        reconcile_runtime_from_state(&state).unwrap();
+
+        assert!(
+            runtime.applied_states().is_empty(),
+            "late reconnect must not re-apply mode defaults over restored state (got {:?})",
+            runtime.applied_states()
+        );
+        assert!(
+            runtime.lights_off_calls().is_empty(),
+            "late reconnect must not dispatch lights-off over restored state (got {:?})",
+            runtime.lights_off_calls()
+        );
+        let snap = runtime
+            .engine_room_snapshot("living")
+            .expect("living should be present after reconcile");
+        assert!(
+            !snap.hard_off,
+            "restored hard_off=false must survive a late hub reconnect"
+        );
+        assert!(
+            snap.soft_off,
+            "restored soft_off=true must survive a late hub reconnect"
+        );
+    }
+
+    #[test]
     fn restore_backup_room_manager_prunes_stale_runtime_nodes_and_periodic_state() {
         let (state, runtime) = setup_state(vec![
             make_snapshot("stale-room", false, false),
@@ -14201,7 +14345,89 @@ mod tests {
     }
 
     #[test]
-    fn startup_scheduled_active_mode_reconcile_applies_current_room_defaults_once() {
+    fn reconcile_runtime_from_state_does_not_reapply_scheduled_active_mode_on_restart() {
+        // Regression for issue #69: on restart the server must not re-apply the
+        // active mode's room defaults. Persisted room state is authoritative.
+        for cause in [ModeChangeCause::Schedule, ModeChangeCause::Manual] {
+            let mut active_room = make_snapshot("active-room", false, true);
+            active_room.rhythm_enabled = true;
+            let hard_off_room = make_snapshot("hard-off-room", false, false);
+            let (state, runtime) = setup_state(vec![active_room, hard_off_room]);
+            let storage = TestStorage::default();
+            let transition =
+                rhythm_core::ModeTransitionConfig::new(RhythmMode::Sleep, RhythmMode::Day, 4_321)
+                    .with_trigger(ModeTransitionTrigger::Sunrise);
+
+            add_topology_room(&state, "active-room", &[]);
+            add_topology_room(&state, "hard-off-room", &[]);
+
+            {
+                let mut s = state.lock().unwrap();
+                s.storage = Some(Box::new(storage.clone()));
+                s.active_mode = RhythmMode::Day;
+                s.last_active_mode_cause = cause;
+                s.set_mode_transition_configs(vec![transition]);
+                s.last_active_mode_transition_id = s
+                    .mode_transition_configs()
+                    .first()
+                    .map(|config| config.id.clone());
+                s.set_mode_configs(vec![ModeConfig {
+                    mode: RhythmMode::Day,
+                    active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                    idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                    wake_profile_id: None,
+                    warning_profile_id: None,
+                    room_defaults: vec![
+                        rhythm_core::RoomModeDefault {
+                            room_id: "active-room".into(),
+                            state: RoomModeState::Active,
+                        },
+                        rhythm_core::RoomModeDefault {
+                            room_id: "hard-off-room".into(),
+                            state: RoomModeState::HardOff,
+                        },
+                    ]
+                }]);
+            }
+
+            reconcile_runtime_from_state(&state).unwrap();
+
+            assert!(
+                runtime.applied_states().is_empty(),
+                "{:?}: mode defaults must not be applied on restart (got {:?})",
+                cause,
+                runtime.applied_states()
+            );
+            assert!(
+                runtime.lights_off_calls().is_empty(),
+                "{:?}: hard-off defaults must not dispatch lights-off on restart (got {:?})",
+                cause,
+                runtime.lights_off_calls()
+            );
+            assert!(
+                runtime.engine_room_snapshot("active-room").unwrap().soft_off,
+                "{:?}: persisted soft_off should survive restart",
+                cause
+            );
+            assert!(
+                !runtime
+                    .engine_room_snapshot("hard-off-room")
+                    .unwrap()
+                    .hard_off,
+                "{:?}: hard_off must not be forced on by a scheduled mode reapply",
+                cause
+            );
+        }
+    }
+
+    #[test]
+    fn reconcile_runtime_from_state_drains_pending_mode_output_apply() {
+        // Companion to issue #69: when the periodic loop replays a missed
+        // scheduled transition before runtime bootstrap, `apply_active_mode_outputs`
+        // defers the room-default apply via `pending_mode_output_apply`. Once
+        // the runtime is ready, `reconcile_runtime_from_state` must drain that
+        // flag and apply the defaults — otherwise an offline overnight
+        // Sleep→Day transition would leave rooms stuck in Sleep-era state.
         let mut active_room = make_snapshot("active-room", false, true);
         active_room.rhythm_enabled = true;
         let hard_off_room = make_snapshot("hard-off-room", false, false);
@@ -14210,6 +14436,9 @@ mod tests {
         let transition =
             rhythm_core::ModeTransitionConfig::new(RhythmMode::Sleep, RhythmMode::Day, 4_321)
                 .with_trigger(ModeTransitionTrigger::Sunrise);
+
+        add_topology_room(&state, "active-room", &[]);
+        add_topology_room(&state, "hard-off-room", &[]);
 
         {
             let mut s = state.lock().unwrap();
@@ -14238,64 +14467,27 @@ mod tests {
                     },
                 ],
             }]);
+            // Simulate the periodic loop having replayed a missed Sleep→Day
+            // transition while the runtime was still bootstrapping.
+            s.pending_mode_output_apply = true;
         }
 
-        reconcile_scheduled_active_mode_outputs_after_runtime_ready(&state);
-        reconcile_scheduled_active_mode_outputs_after_runtime_ready(&state);
+        reconcile_runtime_from_state(&state).unwrap();
 
         assert_eq!(
-            runtime.restore_calls(),
-            vec![
-                ("active-room".into(), false, false),
-                ("hard-off-room".into(), false, true),
-            ]
-        );
-        assert_eq!(
             runtime.applied_states(),
-            vec![("active-room".into(), RoomModeState::Active)]
+            vec![("active-room".into(), RoomModeState::Active)],
+            "deferred apply must reach Active rooms once runtime is ready"
         );
         assert_eq!(
             runtime.lights_off_calls(),
-            vec![("hard-off-room".into(), Some(4_321))]
+            vec![("hard-off-room".into(), Some(4_321))],
+            "deferred apply must dispatch lights-off for HardOff defaults"
         );
-        assert!(state.lock().unwrap().startup_active_mode_reconcile_done);
-
-        let saved = storage.inner.lock().unwrap();
-        let saved_active = saved.rooms.get("active-room").unwrap();
-        assert!(!saved_active.soft_off);
-        assert!(!saved_active.hard_off);
-        let saved_hard_off = saved.rooms.get("hard-off-room").unwrap();
-        assert!(saved_hard_off.hard_off);
-    }
-
-    #[test]
-    fn startup_active_mode_reconcile_preserves_manual_restore() {
-        let mut room = make_snapshot("r1", false, true);
-        room.rhythm_enabled = true;
-        let (state, runtime) = setup_state(vec![room]);
-        {
-            let mut s = state.lock().unwrap();
-            s.active_mode = RhythmMode::Day;
-            s.last_active_mode_cause = ModeChangeCause::Manual;
-            s.set_mode_configs(vec![ModeConfig {
-                mode: RhythmMode::Day,
-                active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
-                idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
-                wake_profile_id: None,
-                warning_profile_id: None,
-                room_defaults: vec![rhythm_core::RoomModeDefault {
-                    room_id: "r1".into(),
-                    state: RoomModeState::Active,
-                }],
-            }]);
-        }
-
-        reconcile_scheduled_active_mode_outputs_after_runtime_ready(&state);
-
-        assert!(runtime.restore_calls().is_empty());
-        assert!(runtime.applied_commands().is_empty());
-        assert!(runtime.engine_room_snapshot("r1").unwrap().soft_off);
-        assert!(state.lock().unwrap().startup_active_mode_reconcile_done);
+        assert!(
+            !state.lock().unwrap().pending_mode_output_apply,
+            "pending flag must be cleared after the deferred apply runs"
+        );
     }
 
     #[test]
