@@ -844,6 +844,7 @@ pub struct EffectiveRoomState {
     pub brightness_offset: f32,
     pub soft_off: bool,
     pub hard_off: bool,
+    pub warning_active: bool,
     pub profile_settings: RoomProfileSettings,
 }
 
@@ -900,6 +901,13 @@ pub struct Room {
     #[cfg_attr(feature = "serde", serde(default))]
     pub hard_off: bool,
 
+    /// Whether a pre-timeout warning dim is currently applied to this room.
+    /// Transient — set when the motion timer enters the warning window and
+    /// cleared when motion returns, the timeout fires, or the user takes
+    /// any explicit action. Not persisted across restarts.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub warning_active: bool,
+
     /// Optional per-room base profile selection and timer overrides.
     #[cfg_attr(
         feature = "serde",
@@ -926,6 +934,7 @@ impl Room {
             brightness_offset: 0.0,
             soft_off: false,
             hard_off: false,
+            warning_active: false,
             profile_settings: RoomProfileSettings::default(),
         }
     }
@@ -967,6 +976,30 @@ impl Room {
     pub fn reset_offsets(&mut self) {
         self.time_offset_minutes = 0.0;
         self.brightness_offset = 0.0;
+    }
+
+    /// Clear transient and persisted off-state flags, returning the room to active.
+    pub fn clear_off_states(&mut self) {
+        self.soft_off = false;
+        self.hard_off = false;
+        self.warning_active = false;
+    }
+
+    /// Mark the room as idle/soft-off and clear mutually exclusive off states.
+    pub fn set_soft_off(&mut self) {
+        self.clear_off_states();
+        self.soft_off = true;
+    }
+
+    /// Mark the room as hard-off and clear mutually exclusive off states.
+    pub fn set_hard_off(&mut self) {
+        self.clear_off_states();
+        self.hard_off = true;
+    }
+
+    /// Clear the transient motion warning-dim flag.
+    pub fn clear_warning_state(&mut self) {
+        self.warning_active = false;
     }
 
     /// Apply a time offset (from step_up/step_down).
@@ -1018,6 +1051,7 @@ impl Default for Room {
             brightness_offset: 0.0,
             soft_off: false,
             hard_off: false,
+            warning_active: false,
             profile_settings: RoomProfileSettings::default(),
         }
     }
@@ -1220,6 +1254,7 @@ impl RoomManager {
             brightness_offset: room.brightness_offset,
             soft_off: room.soft_off,
             hard_off: room.hard_off,
+            warning_active: room.warning_active,
             profile_settings: room.profile_settings.clone(),
         };
 
@@ -1238,6 +1273,7 @@ impl RoomManager {
             state.brightness_offset += parent.brightness_offset;
             state.soft_off |= parent.soft_off;
             state.hard_off |= parent.hard_off;
+            state.warning_active |= parent.warning_active;
             state.profile_settings = state
                 .profile_settings
                 .merged_with_parent(&parent.profile_settings);
@@ -1267,7 +1303,31 @@ mod tests {
         assert_eq!(room.brightness_offset, 0.0);
         assert!(!room.soft_off);
         assert!(!room.hard_off);
+        assert!(!room.warning_active);
         assert!(room.profile_settings.is_empty());
+    }
+
+    #[test]
+    fn test_room_off_state_helpers_clear_mutually_exclusive_flags() {
+        let mut room = Room::new("living_room", "Living Room");
+
+        room.warning_active = true;
+        room.set_soft_off();
+        assert!(room.soft_off);
+        assert!(!room.hard_off);
+        assert!(!room.warning_active);
+
+        room.warning_active = true;
+        room.set_hard_off();
+        assert!(!room.soft_off);
+        assert!(room.hard_off);
+        assert!(!room.warning_active);
+
+        room.warning_active = true;
+        room.clear_off_states();
+        assert!(!room.soft_off);
+        assert!(!room.hard_off);
+        assert!(!room.warning_active);
     }
 
     #[test]

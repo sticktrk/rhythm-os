@@ -753,6 +753,7 @@ where
                 .engine()
                 .write()
                 .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
+            engine.clear_motion_warning_state(room_id);
             engine.invalidate_periodic_cache_for_room(room_id);
         }
 
@@ -1027,6 +1028,86 @@ mod tests {
             hard_off: false,
             profile_settings: crate::RoomProfileSettings::default(),
         }
+    }
+
+    fn restored_active_node_state() -> RestoredNodeState {
+        RestoredNodeState {
+            rhythm_enabled: true,
+            disabled: false,
+            time_offset_minutes: 0.0,
+            brightness_offset: 0.0,
+            soft_off: false,
+            hard_off: false,
+            profile_settings: crate::RoomProfileSettings::default(),
+        }
+    }
+
+    fn room_warning_active(runtime: &SpyTestRuntime, room_id: &str) -> bool {
+        runtime
+            .engine()
+            .read()
+            .unwrap()
+            .rooms()
+            .get(room_id)
+            .unwrap()
+            .warning_active
+    }
+
+    #[test]
+    fn restore_node_state_clears_motion_warning_dim() {
+        let (runtime, spy) = spy_runtime();
+        let handle = runtime.as_ref() as &dyn RuntimeHandle;
+
+        handle.add_room("room-a", "Room A");
+        handle.restore_node_state("room-a", restored_active_node_state());
+        handle.dim_room("room-a", 0.5).unwrap();
+        assert!(room_warning_active(runtime.as_ref(), "room-a"));
+
+        handle.restore_node_state("room-a", restored_active_node_state());
+        assert!(!room_warning_active(runtime.as_ref(), "room-a"));
+
+        spy.set_any_lights_on(true);
+        spy.reset();
+        handle.periodic_tick_node("room-a", "room-a", 18.0).unwrap();
+        assert_eq!(spy.turn_on_count(), 1);
+    }
+
+    #[test]
+    fn set_room_time_offset_clears_motion_warning_dim() {
+        let (runtime, spy) = spy_runtime();
+        let handle = runtime.as_ref() as &dyn RuntimeHandle;
+
+        handle.add_room("room-a", "Room A");
+        handle.restore_room_state("room-a", restored_active_room_state());
+        handle.dim_room("room-a", 0.5).unwrap();
+        assert!(room_warning_active(runtime.as_ref(), "room-a"));
+
+        spy.reset();
+        handle.set_room_time_offset("room-a", 30.0).unwrap();
+        assert!(!room_warning_active(runtime.as_ref(), "room-a"));
+        assert_eq!(spy.turn_on_count(), 1);
+    }
+
+    #[test]
+    fn apply_room_command_clears_motion_warning_dim() {
+        let (runtime, spy) = spy_runtime();
+        let handle = runtime.as_ref() as &dyn RuntimeHandle;
+
+        handle.add_room("room-a", "Room A");
+        handle.restore_room_state("room-a", restored_active_room_state());
+        handle.dim_room("room-a", 0.5).unwrap();
+        assert!(room_warning_active(runtime.as_ref(), "room-a"));
+
+        spy.reset();
+        handle
+            .apply_room_command("room-a", LightingCommand::new(42, 2700))
+            .unwrap();
+        assert!(!room_warning_active(runtime.as_ref(), "room-a"));
+        assert_eq!(
+            spy.last_command_for("room-a")
+                .map(|command| command.brightness),
+            Some(42)
+        );
     }
 
     fn wait_for_any_lights_on_call(spy: &SpyLightController, room_id: &str) {

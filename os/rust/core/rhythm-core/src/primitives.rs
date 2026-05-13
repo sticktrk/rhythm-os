@@ -294,6 +294,9 @@ impl<C: LightController> RhythmEngine<C> {
     pub fn set_power_save(&mut self, enabled: bool) -> Vec<String> {
         self.power_save = enabled;
         self.periodic_command_cache.clear();
+        for room in self.rooms.iter_mut() {
+            room.clear_warning_state();
+        }
 
         if enabled {
             let room_ids: Vec<String> = self
@@ -304,8 +307,7 @@ impl<C: LightController> RhythmEngine<C> {
                 .collect();
             for room_id in &room_ids {
                 if let Some(room) = self.rooms.get_mut(room_id) {
-                    room.soft_off = false;
-                    room.hard_off = true;
+                    room.set_hard_off();
                 }
             }
             room_ids
@@ -329,6 +331,7 @@ impl<C: LightController> RhythmEngine<C> {
                 brightness_offset: 0.0,
                 soft_off: false,
                 hard_off: false,
+                warning_active: false,
                 profile_settings: RoomProfileSettings::default(),
             })
     }
@@ -422,8 +425,7 @@ impl<C: LightController> RhythmEngine<C> {
         {
             let room = self.rooms.get_or_create(room_id, room_id);
             room.enable_rhythm();
-            room.soft_off = false;
-            room.hard_off = false;
+            room.clear_off_states();
         };
         let effective = self.effective_room_state(room_id);
         let offset_minutes = effective.time_offset_minutes;
@@ -446,8 +448,12 @@ impl<C: LightController> RhythmEngine<C> {
     ) -> Option<ManualDispatchPlan> {
         {
             let room = self.rooms.get_mut(room_id)?;
-            room.soft_off = false;
-            room.hard_off = false;
+            room.clear_off_states();
+            // A factor below 1.0 is the motion-timeout warning dim. Mark the
+            // room so the periodic worker doesn't immediately overwrite it
+            // with the active curve. Restoring to 1.0 (motion returned)
+            // clears the flag.
+            room.warning_active = factor < 0.999;
         };
         let effective = self.effective_room_state(room_id);
         let offset_minutes = effective.time_offset_minutes;
@@ -467,15 +473,13 @@ impl<C: LightController> RhythmEngine<C> {
         if self.power_save {
             {
                 let room = self.rooms.get_or_create(room_id, room_id);
-                room.soft_off = false;
-                room.hard_off = true;
+                room.set_hard_off();
             };
             self.plan_non_periodic_turn_off(room_id, None)
         } else {
             {
                 let room = self.rooms.get_or_create(room_id, room_id);
-                room.soft_off = true;
-                room.hard_off = false;
+                room.set_soft_off();
             };
             let effective = self.effective_room_state(room_id);
             let offset = effective.time_offset_minutes;
@@ -494,8 +498,7 @@ impl<C: LightController> RhythmEngine<C> {
         transition_ms: Option<u32>,
     ) -> ManualDispatchPlan {
         let room = self.rooms.get_or_create(room_id, room_id);
-        room.soft_off = false;
-        room.hard_off = true;
+        room.set_hard_off();
         self.plan_non_periodic_turn_off(room_id, transition_ms)
     }
 
@@ -509,11 +512,13 @@ impl<C: LightController> RhythmEngine<C> {
             .effective_state(room_id)
             .map(|state| (state.time_offset_minutes, state.profile_settings))
             .unwrap_or((0.0, RoomProfileSettings::default()));
+        if let Some(room) = self.rooms.get_mut(room_id) {
+            room.clear_warning_state();
+        }
         if self.power_save {
             {
                 let room = self.rooms.get_or_create(room_id, room_id);
-                room.soft_off = false;
-                room.hard_off = true;
+                room.set_hard_off();
             };
             return self.plan_non_periodic_turn_off(room_id, None);
         }
@@ -530,8 +535,7 @@ impl<C: LightController> RhythmEngine<C> {
         action: StepAction,
     ) -> ManualDispatchPlan {
         if let Some(room) = self.rooms.get_mut(room_id) {
-            room.soft_off = false;
-            room.hard_off = false;
+            room.clear_off_states();
         }
 
         let (current_offset, profile_settings) = self
@@ -560,8 +564,7 @@ impl<C: LightController> RhythmEngine<C> {
     ) -> ManualDispatchPlan {
         {
             let room = self.rooms.get_or_create(room_id, room_id);
-            room.soft_off = false;
-            room.hard_off = false;
+            room.clear_off_states();
             room.apply_brightness_offset(amount);
         };
         let effective = self.effective_room_state(room_id);
@@ -585,8 +588,7 @@ impl<C: LightController> RhythmEngine<C> {
     ) -> ManualDispatchPlan {
         {
             let room = self.rooms.get_or_create(room_id, room_id);
-            room.soft_off = false;
-            room.hard_off = false;
+            room.clear_off_states();
         };
         let effective = self.effective_room_state(room_id);
         let offset_minutes = effective.time_offset_minutes;
@@ -612,6 +614,7 @@ impl<C: LightController> RhythmEngine<C> {
         {
             let room = self.rooms.get_or_create(room_id, room_id);
             room.time_offset_minutes = offset_minutes;
+            room.clear_warning_state();
         }
 
         let effective = self.effective_room_state(room_id);
@@ -649,8 +652,7 @@ impl<C: LightController> RhythmEngine<C> {
         {
             let room = self.rooms.get_or_create(room_id, room_id);
             room.reset_offsets();
-            room.soft_off = false;
-            room.hard_off = false;
+            room.clear_off_states();
             room.enable_rhythm();
         };
         let profile_settings = self.effective_room_state(room_id).profile_settings;
@@ -786,8 +788,19 @@ impl<C: LightController> RhythmEngine<C> {
         let rhythm_enabled = effective.rhythm_enabled;
         let soft_off = effective.soft_off;
         let hard_off = effective.hard_off;
+        let warning_active = effective.warning_active;
 
         if !rhythm_enabled || hard_off {
+            return PeriodicTickPlan::Skipped;
+        }
+
+        // The motion-timeout warning dim is a transient "lights will turn off
+        // soon" signal. Re-applying the active curve here would visibly undo
+        // the dim within the 60-second warning window — the user sees the
+        // lights dim, brighten, then drop to soft-off, which reads as a
+        // "double on/off". Let the dim stand until motion returns or the
+        // timeout fires.
+        if warning_active && !soft_off {
             return PeriodicTickPlan::Skipped;
         }
 
@@ -862,7 +875,14 @@ impl<C: LightController> RhythmEngine<C> {
         self.clear_periodic_dedupe_room(room_id);
     }
 
+    pub(crate) fn clear_motion_warning_state(&mut self, room_id: &str) {
+        if let Some(room) = self.rooms.get_mut(room_id) {
+            room.clear_warning_state();
+        }
+    }
+
     pub(crate) fn reset_restored_room_state(&mut self, room_id: &str) {
+        self.clear_motion_warning_state(room_id);
         self.clear_periodic_dedupe_room(room_id);
     }
 
@@ -948,6 +968,9 @@ impl<C: LightController> RhythmEngine<C> {
         room_id: &str,
         command: LightingCommand,
     ) -> LightControlResult<()> {
+        if let Some(room) = self.rooms.get_mut(room_id) {
+            room.clear_warning_state();
+        }
         self.send_non_periodic_turn_on(room_id, command).await
     }
 
@@ -1004,6 +1027,7 @@ impl<C: LightController> RhythmEngine<C> {
     pub async fn rhythm_on(&mut self, room_id: &str) -> LightControlResult<()> {
         let room = self.rooms.get_or_create(room_id, room_id);
         room.enable_rhythm();
+        room.clear_warning_state();
         Ok(())
     }
 
@@ -1021,8 +1045,7 @@ impl<C: LightController> RhythmEngine<C> {
         {
             let room = self.rooms.get_or_create(room_id, room_id);
             room.enable_rhythm();
-            room.soft_off = false;
-            room.hard_off = false;
+            room.clear_off_states();
         };
         let effective = self.effective_room_state(room_id);
         let offset_minutes = effective.time_offset_minutes;
@@ -1064,8 +1087,8 @@ impl<C: LightController> RhythmEngine<C> {
             let Some(room) = self.rooms.get_mut(room_id) else {
                 return Ok(());
             };
-            room.soft_off = false;
-            room.hard_off = false;
+            room.clear_off_states();
+            room.warning_active = factor < 0.999;
         };
         let effective = self.effective_room_state(room_id);
         let offset_minutes = effective.time_offset_minutes;
@@ -1095,6 +1118,7 @@ impl<C: LightController> RhythmEngine<C> {
     pub async fn rhythm_off(&mut self, room_id: &str) -> LightControlResult<()> {
         if let Some(room) = self.rooms.get_mut(room_id) {
             room.disable_rhythm();
+            room.clear_warning_state();
         }
         self.clear_periodic_dedupe_room(room_id);
         // Note: We don't turn off the lights, just disable rhythm mode
@@ -1175,8 +1199,7 @@ impl<C: LightController> RhythmEngine<C> {
     ) -> LightControlResult<()> {
         // User is interacting — clear soft_off
         if let Some(room) = self.rooms.get_mut(room_id) {
-            room.soft_off = false;
-            room.hard_off = false;
+            room.clear_off_states();
         }
 
         // Get the room's current time offset
@@ -1253,8 +1276,7 @@ impl<C: LightController> RhythmEngine<C> {
         // User is interacting — clear soft_off
         {
             let room = self.rooms.get_or_create(room_id, room_id);
-            room.soft_off = false;
-            room.hard_off = false;
+            room.clear_off_states();
             room.apply_brightness_offset(amount);
         };
         let effective = self.effective_room_state(room_id);
@@ -1294,8 +1316,7 @@ impl<C: LightController> RhythmEngine<C> {
         // First borrow: clear soft_off and extract time offset + profile settings
         {
             let room = self.rooms.get_or_create(room_id, room_id);
-            room.soft_off = false;
-            room.hard_off = false;
+            room.clear_off_states();
         };
         let effective = self.effective_room_state(room_id);
         let offset_minutes = effective.time_offset_minutes;
@@ -1336,6 +1357,7 @@ impl<C: LightController> RhythmEngine<C> {
         {
             let room = self.rooms.get_or_create(room_id, room_id);
             room.time_offset_minutes = offset_minutes;
+            room.clear_warning_state();
         }
 
         let effective = self.effective_room_state(room_id);
@@ -1386,8 +1408,7 @@ impl<C: LightController> RhythmEngine<C> {
         {
             let room = self.rooms.get_or_create(room_id, room_id);
             room.reset_offsets();
-            room.soft_off = false;
-            room.hard_off = false;
+            room.clear_off_states();
             room.enable_rhythm();
         };
         let profile_settings = self.effective_room_state(room_id).profile_settings;
@@ -1415,16 +1436,14 @@ impl<C: LightController> RhythmEngine<C> {
         if self.power_save {
             {
                 let room = self.rooms.get_or_create(room_id, room_id);
-                room.soft_off = false;
-                room.hard_off = true;
+                room.set_hard_off();
             };
             self.send_non_periodic_turn_off(room_id, None).await
         } else {
             // Dim to soft-off brightness with idle profile color instead of turning off
             {
                 let room = self.rooms.get_or_create(room_id, room_id);
-                room.soft_off = true;
-                room.hard_off = false;
+                room.set_soft_off();
             };
             let effective = self.effective_room_state(room_id);
             let offset = effective.time_offset_minutes;
@@ -1447,8 +1466,7 @@ impl<C: LightController> RhythmEngine<C> {
         transition_ms: Option<u32>,
     ) -> LightControlResult<()> {
         let room = self.rooms.get_or_create(room_id, room_id);
-        room.soft_off = false;
-        room.hard_off = true;
+        room.set_hard_off();
         self.send_non_periodic_turn_off(room_id, transition_ms)
             .await
     }
@@ -1483,8 +1501,15 @@ impl<C: LightController> RhythmEngine<C> {
         let rhythm_enabled = effective.rhythm_enabled;
         let soft_off = effective.soft_off;
         let hard_off = effective.hard_off;
+        let warning_active = effective.warning_active;
 
         if !rhythm_enabled || hard_off {
+            return PeriodicTickResult::Skipped;
+        }
+
+        // Honor the motion-timeout warning dim — see `plan_periodic_tick_node`
+        // for the rationale.
+        if warning_active && !soft_off {
             return PeriodicTickResult::Skipped;
         }
 
@@ -1617,11 +1642,13 @@ impl<C: LightController> RhythmEngine<C> {
             .effective_state(room_id)
             .map(|state| (state.time_offset_minutes, state.profile_settings))
             .unwrap_or((0.0, RoomProfileSettings::default()));
+        if let Some(room) = self.rooms.get_mut(room_id) {
+            room.clear_warning_state();
+        }
         if self.power_save {
             {
                 let room = self.rooms.get_or_create(room_id, room_id);
-                room.soft_off = false;
-                room.hard_off = true;
+                room.set_hard_off();
             };
             return self.send_non_periodic_turn_off(room_id, None).await;
         }
@@ -1736,6 +1763,12 @@ mod tests {
         let spy = Arc::new(SpyLightController::new());
         let engine = RhythmEngine::new(spy.clone());
         (engine, spy)
+    }
+
+    async fn enter_warning_dim(engine: &mut RhythmEngine<Arc<SpyLightController>>) {
+        engine.rhythm_on("room1").await.unwrap();
+        engine.dim_to_factor("room1", 12.0, 0.5).await.unwrap();
+        assert!(engine.rooms.get("room1").unwrap().warning_active);
     }
 
     #[tokio::test]
@@ -2238,6 +2271,88 @@ mod tests {
             PeriodicTickResult::Skipped
         ));
         assert_eq!(spy.turn_on_count(), 0);
+    }
+
+    // Regression for #70: the periodic worker used to keep dispatching the
+    // Active brightness curve during the motion-timeout warning-dim window,
+    // visibly overwriting the dim a few seconds after it was applied. The
+    // user saw "on → dim → on → off" — a "weird double on/off".
+    #[tokio::test]
+    async fn test_periodic_tick_skipped_during_motion_warning_dim() {
+        let (mut engine, spy) = spy_engine();
+
+        // Enable rhythm and apply the warning dim at hour=12. A factor < 1.0
+        // marks the room as warning_active.
+        spy.set_any_lights_on(true);
+        enter_warning_dim(&mut engine).await;
+        let dim_brightness = spy
+            .last_command_for("room1")
+            .expect("dim should dispatch")
+            .brightness;
+        spy.reset();
+
+        // Periodic tick at a different hour produces a different brightness
+        // command than what's cached, so dedupe would normally let it
+        // through. The warning_active flag must short-circuit the tick or
+        // the dim is undone within ~60s — the user-visible "double on/off".
+        assert!(matches!(
+            engine.periodic_tick_single_room("room1", 18.0).await,
+            PeriodicTickResult::Skipped
+        ));
+        assert_eq!(
+            spy.turn_on_count(),
+            0,
+            "periodic tick must not dispatch while warning dim is active"
+        );
+
+        // Motion returns: factor=1.0 clears the warning and restores
+        // brightness. Periodic ticks resume on the next cycle.
+        engine.dim_to_factor("room1", 12.0, 1.0).await.unwrap();
+        assert!(!engine.rooms.get("room1").unwrap().warning_active);
+        let restored_brightness = spy
+            .last_command_for("room1")
+            .expect("restore should dispatch")
+            .brightness;
+        assert!(
+            restored_brightness > dim_brightness,
+            "restoring (factor=1.0) should brighten past the dim level"
+        );
+        spy.reset();
+
+        assert!(matches!(
+            engine.periodic_tick_single_room("room1", 18.0).await,
+            PeriodicTickResult::Updated
+        ));
+        assert_eq!(spy.turn_on_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_explicit_async_actions_clear_motion_warning_dim() {
+        let (mut engine, _spy) = spy_engine();
+
+        enter_warning_dim(&mut engine).await;
+        engine.reset("room1", 12.0).await.unwrap();
+        assert!(!engine.rooms.get("room1").unwrap().warning_active);
+
+        enter_warning_dim(&mut engine).await;
+        engine.turn_off("room1", 12.0).await.unwrap();
+        assert!(!engine.rooms.get("room1").unwrap().warning_active);
+
+        enter_warning_dim(&mut engine).await;
+        engine.lights_off("room1", None).await.unwrap();
+        assert!(!engine.rooms.get("room1").unwrap().warning_active);
+
+        enter_warning_dim(&mut engine).await;
+        engine.set_time_offset("room1", 12.0, 30.0).await.unwrap();
+        assert!(!engine.rooms.get("room1").unwrap().warning_active);
+
+        enter_warning_dim(&mut engine).await;
+        engine.soft_off_tick("room1", 12.0).await.unwrap();
+        assert!(!engine.rooms.get("room1").unwrap().warning_active);
+
+        enter_warning_dim(&mut engine).await;
+        engine.set_power_save(true);
+        assert!(!engine.rooms.get("room1").unwrap().warning_active);
     }
 
     #[tokio::test]
