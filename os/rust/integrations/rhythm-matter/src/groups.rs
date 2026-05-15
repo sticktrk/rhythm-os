@@ -216,8 +216,8 @@ impl MatterGroupController {
             .collect();
         let stale_groups: Vec<ExistingMatterGroup> = existing
             .iter()
-            .cloned()
             .filter(|group| !desired_area_ids.contains(group.area_id.as_str()))
+            .cloned()
             .collect();
 
         for (matter_group, light_group) in &planned {

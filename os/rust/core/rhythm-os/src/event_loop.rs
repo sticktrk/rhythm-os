@@ -121,16 +121,26 @@ fn emit_button_input_event(
     );
 }
 
-fn emit_motion_input_event(
-    state: &SharedState,
-    hub_key: Option<&HubKey>,
-    source_node_id: Option<&str>,
-    target_node_id: Option<&str>,
-    source_room_id: Option<&str>,
-    native_sensor_id: &str,
+struct MotionInputEventFields<'a> {
+    hub_key: Option<&'a HubKey>,
+    source_node_id: Option<&'a str>,
+    target_node_id: Option<&'a str>,
+    source_room_id: Option<&'a str>,
+    native_sensor_id: &'a str,
     detected: bool,
     route: InputEventRoute,
-) {
+}
+
+fn emit_motion_input_event(state: &SharedState, fields: MotionInputEventFields<'_>) {
+    let MotionInputEventFields {
+        hub_key,
+        source_node_id,
+        target_node_id,
+        source_room_id,
+        native_sensor_id,
+        detected,
+        route,
+    } = fields;
     let (hub_type, address) = hub_event_fields(hub_key);
     crate::state::emit_server_event(
         state,
@@ -1093,13 +1103,15 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             let Some(hub_key) = hub_key.as_ref() else {
                 emit_motion_input_event(
                     state,
-                    None,
-                    None,
-                    None,
-                    Some(room_id.as_str()),
-                    sensor_id,
-                    detected,
-                    InputEventRoute::Unresolved,
+                    MotionInputEventFields {
+                        hub_key: None,
+                        source_node_id: None,
+                        target_node_id: None,
+                        source_room_id: Some(room_id.as_str()),
+                        native_sensor_id: sensor_id,
+                        detected,
+                        route: InputEventRoute::Unresolved,
+                    },
                 );
                 info!(
                     target: "evt",
@@ -1113,13 +1125,15 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             else {
                 emit_motion_input_event(
                     state,
-                    Some(hub_key),
-                    None,
-                    None,
-                    Some(room_id.as_str()),
-                    sensor_id,
-                    detected,
-                    InputEventRoute::Unresolved,
+                    MotionInputEventFields {
+                        hub_key: Some(hub_key),
+                        source_node_id: None,
+                        target_node_id: None,
+                        source_room_id: Some(room_id.as_str()),
+                        native_sensor_id: sensor_id,
+                        detected,
+                        route: InputEventRoute::Unresolved,
+                    },
                 );
                 info!(
                     target: "evt",
@@ -1135,13 +1149,15 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             ) else {
                 emit_motion_input_event(
                     state,
-                    Some(hub_key),
-                    Some(source_node_id.as_str()),
-                    None,
-                    Some(room_id.as_str()),
-                    sensor_id,
-                    detected,
-                    InputEventRoute::Unroutable,
+                    MotionInputEventFields {
+                        hub_key: Some(hub_key),
+                        source_node_id: Some(source_node_id.as_str()),
+                        target_node_id: None,
+                        source_room_id: Some(room_id.as_str()),
+                        native_sensor_id: sensor_id,
+                        detected,
+                        route: InputEventRoute::Unroutable,
+                    },
                 );
                 info!(
                     target: "evt",
@@ -1152,13 +1168,15 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             };
             emit_motion_input_event(
                 state,
-                Some(hub_key),
-                Some(source_node_id.as_str()),
-                Some(target_node_id.as_str()),
-                Some(room_id.as_str()),
-                sensor_id,
-                detected,
-                InputEventRoute::NodeControl,
+                MotionInputEventFields {
+                    hub_key: Some(hub_key),
+                    source_node_id: Some(source_node_id.as_str()),
+                    target_node_id: Some(target_node_id.as_str()),
+                    source_room_id: Some(room_id.as_str()),
+                    native_sensor_id: sensor_id,
+                    detected,
+                    route: InputEventRoute::NodeControl,
+                },
             );
             if detected {
                 if motion.warning_active.remove(&target_node_id) {

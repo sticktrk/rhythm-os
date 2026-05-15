@@ -873,9 +873,7 @@ fn light_node_uses_parent_dispatch(s: &AppState, node_id: &str, kind: LightNodeK
 }
 
 fn semantic_lights_on_override(power_save: bool, hard_off: bool, soft_off: bool) -> Option<bool> {
-    if hard_off {
-        Some(false)
-    } else if soft_off && power_save {
+    if hard_off || (soft_off && power_save) {
         Some(false)
     } else if soft_off {
         Some(true)
@@ -10383,7 +10381,7 @@ mod tests {
 
         let app = state.lock().unwrap();
         let observed = app.room_observed_power.get("room1").unwrap();
-        assert_eq!(observed.lights_on, true);
+        assert!(observed.lights_on);
         assert_eq!(observed.source, ObservedPowerSource::LiveSubscription);
     }
 
@@ -10409,7 +10407,7 @@ mod tests {
 
         let app = state.lock().unwrap();
         let observed = app.room_observed_power.get("room1").unwrap();
-        assert_eq!(observed.lights_on, false);
+        assert!(!observed.lights_on);
         assert_eq!(observed.source, ObservedPowerSource::Command);
     }
 
@@ -14386,7 +14384,7 @@ mod tests {
                             room_id: "hard-off-room".into(),
                             state: RoomModeState::HardOff,
                         },
-                    ]
+                    ],
                 }]);
             }
 
@@ -14405,7 +14403,10 @@ mod tests {
                 runtime.lights_off_calls()
             );
             assert!(
-                runtime.engine_room_snapshot("active-room").unwrap().soft_off,
+                runtime
+                    .engine_room_snapshot("active-room")
+                    .unwrap()
+                    .soft_off,
                 "{:?}: persisted soft_off should survive restart",
                 cause
             );
