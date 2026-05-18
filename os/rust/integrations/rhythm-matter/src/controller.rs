@@ -1,8 +1,10 @@
 //! Matter light controller using the typed Matter transport.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use anyhow::Result;
 use async_trait::async_trait;
 use log::{debug, info, warn};
 use rhythm_core::controller::{
@@ -24,6 +26,19 @@ const DISPATCH_WARN_MS: u128 = 1000;
 const MATTER_IDENTIFY_DURATION_SECS: u16 = 1;
 const MATTER_GROUP_CONTROL_PREFIX: &str = "matter-group-";
 const MATTER_GROUP_SAFETY_FANOUT_ENV: &str = "RHYTHM_MATTER_GROUP_SAFETY_FANOUT";
+const MATTER_ON_OFF_READ_BACKOFF: Duration = Duration::from_secs(120);
+
+#[derive(Clone, Copy, Debug)]
+struct MatterOnOffReadBackoff {
+    suppress_until: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MatterOnOffRead {
+    On,
+    Off,
+    Suppressed,
+}
 
 /// Format the hub-native control ID used for a Matter group.
 pub fn format_group_control_id(group_id: u16) -> String {
@@ -42,6 +57,7 @@ pub fn parse_group_control_id(control_id: &str) -> Option<u16> {
 pub struct MatterLightController {
     transport: Arc<dyn MatterTransport>,
     hub_data: Arc<MatterHubData>,
+    on_off_read_backoff: Mutex<HashMap<(u64, u16), MatterOnOffReadBackoff>>,
 }
 
 impl MatterLightController {
@@ -50,6 +66,7 @@ impl MatterLightController {
         Self {
             transport,
             hub_data,
+            on_off_read_backoff: Mutex::new(HashMap::new()),
         }
     }
 
@@ -280,6 +297,61 @@ impl MatterLightController {
         }
     }
 
+    fn clear_on_off_read_backoff(&self, node_id: u64, endpoint: u16) {
+        if let Ok(mut backoff) = self.on_off_read_backoff.lock() {
+            backoff.remove(&(node_id, endpoint));
+        }
+    }
+
+    fn mark_on_off_read_failed(&self, node_id: u64, endpoint: u16) {
+        if let Ok(mut backoff) = self.on_off_read_backoff.lock() {
+            backoff.insert(
+                (node_id, endpoint),
+                MatterOnOffReadBackoff {
+                    suppress_until: Instant::now() + MATTER_ON_OFF_READ_BACKOFF,
+                },
+            );
+        }
+    }
+
+    fn read_on_off_with_backoff(&self, node_id: u64, endpoint: u16) -> Result<MatterOnOffRead> {
+        let now = Instant::now();
+        if let Ok(mut backoff) = self.on_off_read_backoff.lock() {
+            match backoff.get(&(node_id, endpoint)).copied() {
+                Some(entry) if entry.suppress_until > now => {
+                    return Ok(MatterOnOffRead::Suppressed);
+                }
+                Some(_) => {
+                    backoff.remove(&(node_id, endpoint));
+                }
+                None => {}
+            }
+        }
+
+        match self.transport.read_on_off(node_id, endpoint) {
+            Ok(true) => {
+                self.clear_on_off_read_backoff(node_id, endpoint);
+                Ok(MatterOnOffRead::On)
+            }
+            Ok(false) => {
+                self.clear_on_off_read_backoff(node_id, endpoint);
+                Ok(MatterOnOffRead::Off)
+            }
+            Err(e) => {
+                self.mark_on_off_read_failed(node_id, endpoint);
+                Err(e)
+            }
+        }
+    }
+
+    fn looks_like_connectivity_timeout(error: &anyhow::Error) -> bool {
+        let lower = error.to_string().to_ascii_lowercase();
+        lower.contains("timeout")
+            || lower.contains("timed out")
+            || lower.contains("chip error 0x32")
+            || lower.contains("failed to connect")
+    }
+
     fn turn_on_devices(
         &self,
         target_label: &str,
@@ -419,6 +491,10 @@ impl MatterLightController {
                     command_successes += 1;
                 }
                 Self::maybe_throttle(throttle_ms);
+            }
+
+            if command_successes > 0 {
+                self.clear_on_off_read_backoff(node_id, endpoint);
             }
 
             match (command_successes, command_failures) {
@@ -758,6 +834,7 @@ impl MatterLightController {
                 failed_devices += 1;
             } else {
                 successful_devices += 1;
+                self.clear_on_off_read_backoff(node_id, endpoint);
             }
         }
 
@@ -1112,9 +1189,9 @@ impl HubLightController for MatterLightController {
             let Some((node_id, endpoint)) = Self::parse_device_id(device_id) else {
                 continue;
             };
-            match self.transport.read_on_off(node_id, endpoint) {
-                Ok(true) => return Ok(true),
-                Ok(false) => {}
+            match self.read_on_off_with_backoff(node_id, endpoint) {
+                Ok(MatterOnOffRead::On) => return Ok(true),
+                Ok(MatterOnOffRead::Off) | Ok(MatterOnOffRead::Suppressed) => {}
                 Err(e) => {
                     warn!(
                         target: "cmd",
@@ -1122,6 +1199,17 @@ impl HubLightController for MatterLightController {
                         node_id,
                         e
                     );
+                    if Self::looks_like_connectivity_timeout(&e) {
+                        tracing::debug!(
+                            target: "cmd",
+                            event = "matter_on_off_read_backoff",
+                            node_id,
+                            endpoint,
+                            backoff_secs = MATTER_ON_OFF_READ_BACKOFF.as_secs(),
+                            "Matter on/off read failed with connectivity error; suppressing remaining reads for this target"
+                        );
+                        break;
+                    }
                 }
             }
         }
@@ -1774,6 +1862,54 @@ mod tests {
         )
         .unwrap();
         assert!(result);
+    }
+
+    #[test]
+    fn any_lights_on_backs_off_after_on_off_read_timeout() {
+        let (controller, spy, _) = make_controller();
+        spy.fail_read_node(42);
+
+        let target = HubDispatchTarget::Devices {
+            native_ids: vec!["matter-42".to_string()],
+        };
+
+        assert!(!block_on(controller.any_lights_on_target(&target)).unwrap());
+        assert!(!block_on(controller.any_lights_on_target(&target)).unwrap());
+
+        let read_count = spy
+            .operations()
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation,
+                    RecordedOperation::ReadOnOff {
+                        node_id: 42,
+                        endpoint: 1
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            read_count, 1,
+            "second read should be suppressed while the failed endpoint is in backoff"
+        );
+    }
+
+    #[test]
+    fn any_lights_on_stops_room_scan_after_connectivity_timeout() {
+        let (controller, spy, _) = make_controller();
+        spy.fail_read_node(42);
+
+        assert!(!block_on(controller.any_lights_on("kitchen")).unwrap());
+
+        assert_eq!(
+            spy.operations(),
+            vec![RecordedOperation::ReadOnOff {
+                node_id: 42,
+                endpoint: 1,
+            }],
+            "a timeout on one physically unavailable bulb should not serially block on every other Matter bulb in the room"
+        );
     }
 
     #[test]

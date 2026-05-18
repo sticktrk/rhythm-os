@@ -2125,7 +2125,7 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             dispatch_generation,
         } => {
             let current_hour = {
-                let Ok(mut s) = state.lock() else { return };
+                let Ok(s) = state.lock() else { return };
                 if s.light_dispatch_generation != dispatch_generation {
                     tracing::debug!(
                         target: "sys",
@@ -2141,7 +2141,9 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                     return;
                 }
                 s.pending_periodic_ticks
-                    .remove(&node_id)
+                    .get(&node_id)
+                    .filter(|pending| pending.dispatch_generation == dispatch_generation)
+                    .map(|pending| pending.current_hour)
                     .unwrap_or(current_hour)
             };
 
@@ -2149,7 +2151,14 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                 let Ok(s) = state.lock() else { return };
                 s.hub_runtime()
             };
-            let Some(runtime) = runtime else { return };
+            let Some(runtime) = runtime else {
+                crate::periodic::clear_pending_periodic_tick_generation(
+                    state,
+                    &node_id,
+                    dispatch_generation,
+                );
+                return;
+            };
 
             if runtime.engine_node_snapshot(&settings_node_id).is_none() {
                 tracing::debug!(
@@ -2160,6 +2169,11 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                     settings_node_id = %settings_node_id,
                     reason = "stale_settings_node",
                     "Skipping stale periodic tick"
+                );
+                crate::periodic::clear_pending_periodic_tick_generation(
+                    state,
+                    &node_id,
+                    dispatch_generation,
                 );
                 return;
             }
@@ -2180,6 +2194,11 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                     dispatch_generation,
                     reason = "stale_dispatch_generation_after_pace",
                     "Skipping stale periodic tick"
+                );
+                crate::periodic::clear_pending_periodic_tick_generation(
+                    state,
+                    &node_id,
+                    dispatch_generation,
                 );
                 return;
             }
@@ -2221,6 +2240,11 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                     crate::periodic::post_tick_node(state, &runtime, &parent_node_id);
                 }
             }
+            crate::periodic::clear_pending_periodic_tick_generation(
+                state,
+                &node_id,
+                dispatch_generation,
+            );
         }
         WorkItem::DeferredPersist { node_id: _ } => {
             commands::persist_rooms(state);
@@ -2787,6 +2811,8 @@ mod tests {
         handle_event_calls: Arc<AtomicUsize>,
         turn_on_room_calls: Arc<AtomicUsize>,
         set_room_brightness_calls: Arc<AtomicUsize>,
+        periodic_entered_tx: Option<std::sync::mpsc::Sender<()>>,
+        periodic_release_rx: Option<Arc<Mutex<std::sync::mpsc::Receiver<()>>>>,
     }
 
     impl RuntimeHandle for PeriodicWorkerTestRuntime {
@@ -2820,6 +2846,12 @@ mod tests {
                 source_room_id.to_string(),
                 current_hour,
             ));
+            if let Some(tx) = &self.periodic_entered_tx {
+                let _ = tx.send(());
+            }
+            if let Some(rx) = &self.periodic_release_rx {
+                let _ = rx.lock().unwrap().recv_timeout(Duration::from_secs(2));
+            }
             Ok(())
         }
         fn engine_room_snapshot(&self, room_id: &str) -> Option<RoomSnapshot> {
@@ -3519,6 +3551,8 @@ mod tests {
             handle_event_calls: Arc::new(AtomicUsize::new(0)),
             turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
             set_room_brightness_calls: Arc::new(AtomicUsize::new(0)),
+            periodic_entered_tx: None,
+            periodic_release_rx: None,
         });
         let state = make_state_with_runtime(runtime);
         let internal_node_id =
@@ -3566,6 +3600,8 @@ mod tests {
             handle_event_calls: Arc::new(AtomicUsize::new(0)),
             turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
             set_room_brightness_calls: Arc::new(AtomicUsize::new(0)),
+            periodic_entered_tx: None,
+            periodic_release_rx: None,
         });
         let state = make_state_with_runtime(runtime);
         let stale_generation = state.lock().unwrap().light_dispatch_generation;
@@ -3574,8 +3610,11 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             s.invalidate_queued_light_dispatches();
-            s.pending_periodic_ticks
-                .insert(internal_node_id.to_string(), 21.0);
+            let current_generation = s.light_dispatch_generation;
+            s.pending_periodic_ticks.insert(
+                internal_node_id.to_string(),
+                crate::state::PendingPeriodicTick::new(21.0, current_generation),
+            );
         }
 
         process_work_item(
@@ -3597,6 +3636,113 @@ mod tests {
             .unwrap()
             .pending_periodic_ticks
             .contains_key(internal_node_id));
+    }
+
+    #[test]
+    fn periodic_worker_keeps_pending_marker_while_tick_is_running() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(PeriodicWorkerTestRuntime {
+            snapshots: vec![RoomSnapshot {
+                id: "room_a".into(),
+                name: "Room A".into(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                hard_off: false,
+                profile_settings: RoomProfileSettings::default(),
+            }],
+            periodic_tick_node_calls: calls.clone(),
+            apply_room_command_calls: Arc::new(AtomicUsize::new(0)),
+            handle_event_calls: Arc::new(AtomicUsize::new(0)),
+            turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
+            set_room_brightness_calls: Arc::new(AtomicUsize::new(0)),
+            periodic_entered_tx: Some(entered_tx),
+            periodic_release_rx: Some(Arc::new(Mutex::new(release_rx))),
+        });
+        let state = make_state_with_runtime(runtime);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<WorkItem>(4);
+        let dispatch_generation = state.lock().unwrap().light_dispatch_generation;
+
+        assert!(crate::periodic::enqueue_periodic_tick(
+            &state,
+            &tx,
+            crate::periodic::PeriodicTickEnqueue {
+                command_id: "periodic-running-1",
+                node_id: "room_a",
+                settings_node_id: "room_a",
+                dispatch_generation,
+                current_hour: 20.0,
+                emit_parent_node_id: None,
+                dispatch_spacing: Duration::ZERO,
+            },
+        ));
+        let item = rx.try_recv().expect("first tick should enqueue");
+
+        let state_for_worker = state.clone();
+        let worker = std::thread::spawn(move || {
+            process_work_item(&state_for_worker, item);
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("periodic tick should enter runtime");
+
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .pending_periodic_ticks
+                .contains_key("room_a"),
+            "pending marker must remain while the controller call is in flight"
+        );
+
+        assert!(crate::periodic::enqueue_periodic_tick(
+            &state,
+            &tx,
+            crate::periodic::PeriodicTickEnqueue {
+                command_id: "periodic-running-2",
+                node_id: "room_a",
+                settings_node_id: "room_a",
+                dispatch_generation,
+                current_hour: 21.0,
+                emit_parent_node_id: None,
+                dispatch_spacing: Duration::ZERO,
+            },
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "a tick that arrives while the previous one runs must coalesce, not queue behind it"
+        );
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .pending_periodic_ticks
+                .get("room_a")
+                .map(|pending| pending.current_hour),
+            Some(21.0)
+        );
+
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+
+        assert!(
+            !state
+                .lock()
+                .unwrap()
+                .pending_periodic_ticks
+                .contains_key("room_a"),
+            "finished tick should release the coalescing marker"
+        );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[("room_a".to_string(), "room_a".to_string(), 20.0)]
+        );
     }
 
     #[test]
@@ -3626,6 +3772,8 @@ mod tests {
             handle_event_calls: Arc::new(AtomicUsize::new(0)),
             turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
             set_room_brightness_calls: Arc::new(AtomicUsize::new(0)),
+            periodic_entered_tx: None,
+            periodic_release_rx: None,
         });
         let state = make_state_with_runtime(runtime);
         let dispatch_generation = state.lock().unwrap().light_dispatch_generation;
@@ -3685,6 +3833,8 @@ mod tests {
             handle_event_calls: handle_event_calls.clone(),
             turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
             set_room_brightness_calls: Arc::new(AtomicUsize::new(0)),
+            periodic_entered_tx: None,
+            periodic_release_rx: None,
         });
         let state = make_state_with_runtime(runtime);
         {
@@ -3737,6 +3887,8 @@ mod tests {
             handle_event_calls: Arc::new(AtomicUsize::new(0)),
             turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
             set_room_brightness_calls: brightness_calls.clone(),
+            periodic_entered_tx: None,
+            periodic_release_rx: None,
         });
         let state = make_state_with_runtime(runtime);
         {
@@ -3788,6 +3940,8 @@ mod tests {
             handle_event_calls: Arc::new(AtomicUsize::new(0)),
             turn_on_room_calls: turn_on_room_calls.clone(),
             set_room_brightness_calls: Arc::new(AtomicUsize::new(0)),
+            periodic_entered_tx: None,
+            periodic_release_rx: None,
         });
         let state = make_state_with_runtime(runtime);
         {

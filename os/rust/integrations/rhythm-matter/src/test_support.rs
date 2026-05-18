@@ -251,6 +251,7 @@ pub struct SpyTransport {
     on_off_state: Mutex<HashMap<u64, bool>>,
     groups: Mutex<HashMap<u16, MatterGroup>>,
     failing_nodes: Mutex<HashSet<u64>>,
+    failing_read_nodes: Mutex<HashSet<u64>>,
     failing_groups: Mutex<HashSet<u16>>,
     commission_result: Mutex<Result<CommissionedDevice>>,
     commission_requests: Mutex<Vec<MatterCommissionRequest>>,
@@ -266,6 +267,7 @@ impl SpyTransport {
             on_off_state: Mutex::new(HashMap::new()),
             groups: Mutex::new(HashMap::new()),
             failing_nodes: Mutex::new(HashSet::new()),
+            failing_read_nodes: Mutex::new(HashSet::new()),
             failing_groups: Mutex::new(HashSet::new()),
             commission_result: Mutex::new(Ok(default_device(99))),
             commission_requests: Mutex::new(Vec::new()),
@@ -314,6 +316,10 @@ impl SpyTransport {
         self.failing_nodes.lock().unwrap().insert(node_id);
     }
 
+    pub fn fail_read_node(&self, node_id: u64) {
+        self.failing_read_nodes.lock().unwrap().insert(node_id);
+    }
+
     pub fn fail_group_commands(&self, group_id: u16) {
         self.failing_groups.lock().unwrap().insert(group_id);
     }
@@ -332,6 +338,10 @@ impl SpyTransport {
 
     fn should_fail(&self, node_id: u64) -> bool {
         self.failing_nodes.lock().unwrap().contains(&node_id)
+    }
+
+    fn should_fail_read(&self, node_id: u64) -> bool {
+        self.failing_read_nodes.lock().unwrap().contains(&node_id)
     }
 
     fn should_fail_group(&self, group_id: u16) -> bool {
@@ -635,10 +645,13 @@ impl MatterTransport for SpyTransport {
     }
 
     fn read_on_off(&self, node_id: u64, endpoint: u16) -> Result<bool> {
-        if self.should_fail(node_id) {
-            anyhow::bail!("device {} not found in registry", node_id);
-        }
         self.record(RecordedOperation::ReadOnOff { node_id, endpoint });
+        if self.should_fail(node_id) || self.should_fail_read(node_id) {
+            anyhow::bail!(
+                "CHIP Error 0x32: Timeout reading on/off for node {}",
+                node_id
+            );
+        }
         Ok(self
             .on_off_state
             .lock()

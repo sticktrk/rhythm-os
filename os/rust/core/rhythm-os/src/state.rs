@@ -124,6 +124,26 @@ pub enum WorkItem {
     DeferredPersistState,
 }
 
+/// Latest-only periodic tick state for one schedulable light node.
+///
+/// This stays present while a queued tick is running, not just while it is
+/// waiting in the channel. That lets producer cycles coalesce into the single
+/// in-flight tick instead of building a stale backlog behind slow controllers.
+#[derive(Clone, Copy, Debug)]
+pub struct PendingPeriodicTick {
+    pub current_hour: f32,
+    pub dispatch_generation: u64,
+}
+
+impl PendingPeriodicTick {
+    pub fn new(current_hour: f32, dispatch_generation: u64) -> Self {
+        Self {
+            current_hour,
+            dispatch_generation,
+        }
+    }
+}
+
 /// One motion sensor handed off from startup prefetch to the event loop.
 ///
 /// Carries the sensor's current state so the event loop can seed both
@@ -374,11 +394,11 @@ pub struct AppState {
     /// When present, periodic updates no longer compete with button actions
     /// and deferred persists on the main worker queue.
     pub periodic_work_tx: Option<std::sync::mpsc::SyncSender<WorkItem>>,
-    /// Latest pending periodic tick hour per schedulable light node.
+    /// Latest pending/running periodic tick per schedulable light node.
     ///
     /// Used for latest-only coalescing so repeated scheduler passes update the
     /// most recent hour for a node without queueing duplicate work items.
-    pub pending_periodic_ticks: HashMap<String, f32>,
+    pub pending_periodic_ticks: HashMap<String, PendingPeriodicTick>,
     /// Generation token for queued light-output dispatches.
     ///
     /// Incrementing this invalidates already queued periodic and mode-apply

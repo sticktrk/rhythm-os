@@ -23,8 +23,8 @@ use std::sync::Arc;
 use rhythm_core::{runtime::RuntimeHandle, RestoredNodeState};
 
 use crate::logging;
-use crate::state::WorkItem;
 use crate::state::{AppState, SharedState};
+use crate::state::{PendingPeriodicTick, WorkItem};
 use crate::storage::StoredLocation;
 
 pub(crate) fn stable_room_phase_key(room_id: &str) -> u64 {
@@ -509,22 +509,33 @@ pub(crate) fn enqueue_periodic_tick(
         }
         match s.pending_periodic_ticks.entry(tick.node_id.to_string()) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
-                let previous_hour = *entry.get();
-                entry.insert(tick.current_hour);
-                tracing::debug!(
-                    target: "sys",
-                    event = "periodic_tick_coalesced",
-                    command_id = %tick.command_id,
-                    node_id = %tick.node_id,
-                    settings_node_id = %tick.settings_node_id,
-                    previous_hour,
-                    current_hour = tick.current_hour,
-                    "Periodic tick already pending"
-                );
-                false
+                let previous = *entry.get();
+                if previous.dispatch_generation != tick.dispatch_generation {
+                    entry.insert(PendingPeriodicTick::new(
+                        tick.current_hour,
+                        tick.dispatch_generation,
+                    ));
+                    true
+                } else {
+                    entry.get_mut().current_hour = tick.current_hour;
+                    tracing::debug!(
+                        target: "sys",
+                        event = "periodic_tick_coalesced",
+                        command_id = %tick.command_id,
+                        node_id = %tick.node_id,
+                        settings_node_id = %tick.settings_node_id,
+                        previous_hour = previous.current_hour,
+                        current_hour = tick.current_hour,
+                        "Periodic tick already pending"
+                    );
+                    false
+                }
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(tick.current_hour);
+                entry.insert(PendingPeriodicTick::new(
+                    tick.current_hour,
+                    tick.dispatch_generation,
+                ));
                 true
             }
         }
@@ -550,6 +561,20 @@ pub(crate) fn enqueue_periodic_tick(
             }
             false
         }
+    }
+}
+
+pub(crate) fn clear_pending_periodic_tick_generation(
+    state: &SharedState,
+    node_id: &str,
+    dispatch_generation: u64,
+) {
+    let Ok(mut s) = state.lock() else { return };
+    if s.pending_periodic_ticks
+        .get(node_id)
+        .is_some_and(|pending| pending.dispatch_generation == dispatch_generation)
+    {
+        s.pending_periodic_ticks.remove(node_id);
     }
 }
 
@@ -2005,9 +2030,9 @@ mod tests {
         let latest = pending
             .pending_periodic_ticks
             .get("node-1")
-            .copied()
             .expect("latest hour should be retained");
-        assert!((latest - 10.5).abs() < f32::EPSILON);
+        assert!((latest.current_hour - 10.5).abs() < f32::EPSILON);
+        assert_eq!(latest.dispatch_generation, dispatch_generation);
     }
 
     #[test]

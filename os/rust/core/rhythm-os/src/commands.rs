@@ -12245,7 +12245,11 @@ mod tests {
             s.utc_offset_hours = -5.0;
             s.timezone_name = Some("America/New_York".into());
             set_observed_lights_on_in_app(&mut s, "r1", true);
-            s.pending_periodic_ticks.insert("r1".into(), 12.0);
+            let dispatch_generation = s.light_dispatch_generation;
+            s.pending_periodic_ticks.insert(
+                "r1".into(),
+                crate::state::PendingPeriodicTick::new(12.0, dispatch_generation),
+            );
             s.pending_motion_clear.push("r1".into());
             s.pending_motion_seed.push(crate::state::MotionSeedEntry {
                 source_node_id: "sensor-1".into(),
@@ -13673,7 +13677,11 @@ mod tests {
         let (state, _rt) = setup_state(vec![]);
         let previous_generation = {
             let mut s = state.lock().unwrap();
-            s.pending_periodic_ticks.insert("room1".into(), 12.0);
+            let dispatch_generation = s.light_dispatch_generation;
+            s.pending_periodic_ticks.insert(
+                "room1".into(),
+                crate::state::PendingPeriodicTick::new(12.0, dispatch_generation),
+            );
             s.next_node_dispatch_at =
                 Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
             s.light_dispatch_generation
@@ -15941,7 +15949,11 @@ mod tests {
                     periodic_resume_at: std::time::Instant::now(),
                 },
             );
-            s.pending_periodic_ticks.insert(device_id.clone(), 12.0);
+            let dispatch_generation = s.light_dispatch_generation;
+            s.pending_periodic_ticks.insert(
+                device_id.clone(),
+                crate::state::PendingPeriodicTick::new(12.0, dispatch_generation),
+            );
             s.pending_motion_clear.push(device_id.clone());
             s.pending_motion_seed.push(crate::state::MotionSeedEntry {
                 source_node_id: device_id.clone(),
