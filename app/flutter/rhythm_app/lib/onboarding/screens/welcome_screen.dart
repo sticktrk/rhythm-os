@@ -8,6 +8,7 @@ import '../providers/onboarding_provider.dart';
 import '../widgets/onboarding_orbit.dart';
 import '../widgets/sun_glow_button.dart';
 import '../../services/analytics_service.dart';
+import '../../services/virtual_experience_service.dart';
 
 /// Welcome screen — celestial introduction matching the rest of the app.
 ///
@@ -141,7 +142,19 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                               context.read<OnboardingProvider>().nextPage(),
                         ),
                       ),
-                      const SizedBox(height: 48),
+                      const SizedBox(height: 18),
+
+                      // Secondary CTA — drop into the demo without setup.
+                      _Reveal(
+                        controller: _reveal,
+                        start: 0.72,
+                        child: _VirtualExperienceLink(
+                          onPressed: () {
+                            VirtualExperienceService.instance.enter();
+                          },
+                        ),
+                      ),
+                      const SizedBox(height: 30),
                     ],
                   ),
                 );
@@ -149,6 +162,68 @@ class _WelcomeScreenState extends State<WelcomeScreen>
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Virtual Experience link — secondary entry point that drops a curious user
+// into a fully populated demo without sign-in or hardware. Styled as a quiet
+// text link with a small "live" dot so it reads as "explore" rather than
+// "alternative sign-in path".
+// ---------------------------------------------------------------------------
+
+class _VirtualExperienceLink extends StatelessWidget {
+  final VoidCallback onPressed;
+  const _VirtualExperienceLink({required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onPressed,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 6,
+                height: 6,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: OnboardingColors.sunWarm,
+                  boxShadow: [
+                    BoxShadow(
+                      color: OnboardingColors.sunWarm.withValues(alpha: 0.5),
+                      blurRadius: 6,
+                      spreadRadius: 0.5,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                'Try a Virtual Experience',
+                style: TextStyle(
+                  color: OnboardingColors.textPrimary.withValues(alpha: 0.85),
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                  letterSpacing: 0.4,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Icon(
+                Icons.arrow_forward_rounded,
+                size: 16,
+                color: OnboardingColors.textPrimary.withValues(alpha: 0.7),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' as sdk;
 import '../../api/hybrid_client.dart';
+import '../../config/feature_flags.dart';
 import '../../models/config_model.dart';
 import '../../models/plan_tier.dart';
 import '../../providers/room_provider.dart';
@@ -4322,7 +4323,7 @@ class _RoomDefaultCard extends StatelessWidget {
     };
 
     final stateLabel = switch (mode) {
-      _RoomDefaultMode.active => 'Active',
+      _RoomDefaultMode.active => 'On',
       _RoomDefaultMode.idle => 'Standby',
       _RoomDefaultMode.off => 'Off',
       _RoomDefaultMode.none => 'No override',
@@ -4637,22 +4638,21 @@ class _DefaultStateToggle extends StatelessWidget {
   });
 
   void _onTap() {
-    // Mirrors _CelestialToggle in room_card.dart. `none` (no stored override)
-    // is treated as `active` for cycling, since active is the default behavior
-    // in absence of an override.
     if (!canUseStandby) {
-      // Free tier: 2-state cycle, active ↔ off.
+      // Free tier: active → off → none (no override) → active.
       onModeChanged(switch (mode) {
-        _RoomDefaultMode.off => _RoomDefaultMode.active,
-        _ => _RoomDefaultMode.off,
+        _RoomDefaultMode.active => _RoomDefaultMode.off,
+        _RoomDefaultMode.off => _RoomDefaultMode.none,
+        _ => _RoomDefaultMode.active,
       });
       return;
     }
-    // Pro tier: 3-state cycle. active ↔ idle, off → active.
+    // Pro tier: active → idle → off → none (no override) → active.
     onModeChanged(switch (mode) {
-      _RoomDefaultMode.idle => _RoomDefaultMode.active,
-      _RoomDefaultMode.off => _RoomDefaultMode.active,
-      _ => _RoomDefaultMode.idle,
+      _RoomDefaultMode.active => _RoomDefaultMode.idle,
+      _RoomDefaultMode.idle => _RoomDefaultMode.off,
+      _RoomDefaultMode.off => _RoomDefaultMode.none,
+      _RoomDefaultMode.none => _RoomDefaultMode.active,
     });
   }
 
@@ -4664,14 +4664,59 @@ class _DefaultStateToggle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hasOverride = mode != _RoomDefaultMode.none;
+    return GestureDetector(
+      onTap: _onTap,
+      onLongPress: _onLongPress,
+      behavior: HitTestBehavior.opaque,
+      child: SizedBox(
+        width: 64,
+        height: 28,
+        child: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 220),
+          switchInCurve: Curves.easeOut,
+          switchOutCurve: Curves.easeIn,
+          transitionBuilder: (child, animation) => FadeTransition(
+            opacity: animation,
+            child: ScaleTransition(
+              scale: Tween<double>(begin: 0.92, end: 1).animate(animation),
+              child: child,
+            ),
+          ),
+          child: mode == _RoomDefaultMode.none
+              ? _buildNoOverrideChip()
+              : _buildToggle(),
+        ),
+      ),
+    );
+  }
 
-    // Mirrors room_card.dart's _CelestialToggle. `none` (no override) renders
-    // as `active` since active is the default behavior in absence of one;
-    // for free tier, legacy `idle` collapses to `off` since standby isn't
+  Widget _buildNoOverrideChip() {
+    return Container(
+      key: const ValueKey('none'),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: _Palette.textSecondary.withValues(alpha: 0.22),
+          width: 1,
+        ),
+      ),
+      alignment: Alignment.center,
+      child: Text(
+        'Auto',
+        style: TextStyle(
+          color: _Palette.textSecondary.withValues(alpha: 0.7),
+          fontSize: 10,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 0.4,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildToggle() {
+    // For free tier, legacy `idle` collapses to `off` since standby isn't
     // available — the thumb only ever sits at left or right.
     final visualMode = switch (mode) {
-      _RoomDefaultMode.none => _RoomDefaultMode.active,
       _RoomDefaultMode.idle when !canUseStandby => _RoomDefaultMode.off,
       _ => mode,
     };
@@ -4679,7 +4724,8 @@ class _DefaultStateToggle extends StatelessWidget {
     final alignment = switch (visualMode) {
       _RoomDefaultMode.off => Alignment.centerLeft,
       _RoomDefaultMode.idle => Alignment.center,
-      _RoomDefaultMode.active || _RoomDefaultMode.none => Alignment.centerRight,
+      _RoomDefaultMode.active => Alignment.centerRight,
+      _RoomDefaultMode.none => Alignment.centerRight, // unreachable
     };
 
     final trackGradient = switch (visualMode) {
@@ -4717,37 +4763,27 @@ class _DefaultStateToggle extends StatelessWidget {
       _RoomDefaultMode.off || _RoomDefaultMode.none => <BoxShadow>[],
     };
 
-    return GestureDetector(
-      onTap: _onTap,
-      onLongPress: _onLongPress,
-      behavior: HitTestBehavior.opaque,
-      child: AnimatedOpacity(
-        opacity: hasOverride ? 1.0 : 0.4,
+    return AnimatedContainer(
+      key: const ValueKey('toggle'),
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeInOut,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        gradient: trackGradient,
+      ),
+      padding: const EdgeInsets.all(3),
+      child: AnimatedAlign(
         duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInOut,
+        alignment: alignment,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 300),
-          curve: Curves.easeInOut,
-          width: 64,
-          height: 28,
+          width: 22,
+          height: 22,
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            gradient: trackGradient,
-          ),
-          padding: const EdgeInsets.all(3),
-          child: AnimatedAlign(
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeInOut,
-            alignment: alignment,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 300),
-              width: 22,
-              height: 22,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: thumbColor,
-                boxShadow: thumbShadow,
-              ),
-            ),
+            shape: BoxShape.circle,
+            color: thumbColor,
+            boxShadow: thumbShadow,
           ),
         ),
       ),
@@ -4813,6 +4849,7 @@ class _ProBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (!FeatureFlags.entitlementsEnabled) return const SizedBox.shrink();
     if (solid) {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),

@@ -146,6 +146,9 @@ class AppStateRefresh {
     BuildContext context,
     HomeProvider homeProvider,
   ) async {
+    // The demo / Virtual Experience hub is a fake host (`demo.rhythm.local`);
+    // hitting the cloud backup service for it would just throw a DNS error.
+    if (HueServiceLocator.isDemoMode) return;
     final serverHub = homeProvider.getFirstHubOfType(HubType.server);
     if (serverHub == null || !CloudBackupService.instance.canUseCloudBackups) {
       return;
@@ -191,6 +194,9 @@ class AppStateRefresh {
   }
 
   static void _scheduleCloudBackupIfAvailable(HomeProvider homeProvider) {
+    // Demo hub host (`demo.rhythm.local`) isn't reachable — skip cloud
+    // backup capture entirely while in Virtual Experience / demo mode.
+    if (HueServiceLocator.isDemoMode) return;
     final serverHub = homeProvider.getFirstHubOfType(HubType.server);
     if (serverHub == null || !CloudBackupService.instance.canUseCloudBackups) {
       return;

@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../services/analytics_service.dart';
+import '../services/virtual_experience_service.dart';
 import 'connect_hub_screen.dart';
 import 'solar_orbit.dart';
 
@@ -269,10 +270,25 @@ class _HardwareGateScreenState extends State<_HardwareGateScreen>
                               start: 0.62,
                               child: _NoAnswerCard(onTap: widget.onNo),
                             ),
+                            const SizedBox(height: 16),
+                            _Reveal(
+                              controller: _reveal,
+                              start: 0.70,
+                              child: _VirtualExperienceLink(
+                                onTap: () {
+                                  HapticFeedback.selectionClick();
+                                  AnalyticsService().logEvent(
+                                    'onboarding_hardware_choice',
+                                    {'choice': 'virtual_experience'},
+                                  );
+                                  VirtualExperienceService.instance.enter();
+                                },
+                              ),
+                            ),
                             const Spacer(flex: 1),
                             _Reveal(
                               controller: _reveal,
-                              start: 0.78,
+                              start: 0.82,
                               child: _Footnote(),
                             ),
                             const SizedBox(height: 8),
@@ -552,6 +568,66 @@ class _NoAnswerCardState extends State<_NoAnswerCard> {
                 size: 22,
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Subtle third option on the gate — drops the user into a fully populated
+/// demo with no sign-in or hardware. Sits between the two answer cards and
+/// the footnote so it reads as "explore" rather than another primary path.
+class _VirtualExperienceLink extends StatelessWidget {
+  final VoidCallback onTap;
+  const _VirtualExperienceLink({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(12),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: CelestialColors.sunWarm,
+                    boxShadow: [
+                      BoxShadow(
+                        color: CelestialColors.sunWarm.withValues(alpha: 0.55),
+                        blurRadius: 6,
+                        spreadRadius: 0.5,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  'Try a Virtual Experience',
+                  style: TextStyle(
+                    color: CelestialColors.textPrimary.withValues(alpha: 0.88),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    letterSpacing: 0.4,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Icon(
+                  Icons.arrow_forward_rounded,
+                  size: 16,
+                  color: CelestialColors.textPrimary.withValues(alpha: 0.7),
+                ),
+              ],
+            ),
           ),
         ),
       ),

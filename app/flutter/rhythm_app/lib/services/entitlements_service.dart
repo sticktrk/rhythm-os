@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' hide AuthUser;
 
 import '../backend/backend.dart';
+import '../config/feature_flags.dart';
 import '../config/platform_capabilities.dart';
 import '../models/plan_tier.dart';
 import 'auth_service.dart';
@@ -67,8 +68,15 @@ class EntitlementsService {
   /// [isDemoOverrideActive] is true.
   PlanTier? get demoOverride => _demoOverride;
 
-  bool has(Entitlement e) => _currentTier.grants(e) && !e.isComingSoon;
-  bool isEligibleFor(Entitlement e) => _currentTier.grants(e);
+  bool has(Entitlement e) {
+    if (!FeatureFlags.entitlementsEnabled) return !e.isComingSoon;
+    return _currentTier.grants(e) && !e.isComingSoon;
+  }
+
+  bool isEligibleFor(Entitlement e) {
+    if (!FeatureFlags.entitlementsEnabled) return true;
+    return _currentTier.grants(e);
+  }
   Stream<PlanTier> get tierChanges => _controller.stream;
 
   Future<void> _initialize() async {

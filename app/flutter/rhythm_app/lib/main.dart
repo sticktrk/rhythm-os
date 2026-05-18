@@ -18,6 +18,7 @@ import 'services/analytics_service.dart';
 import 'services/entitlements_service.dart';
 import 'services/settings_service.dart';
 import 'services/app_state_refresh.dart';
+import 'services/virtual_experience_service.dart';
 import 'data/local_data_source.dart';
 import 'providers/hub_connection_provider.dart';
 import 'providers/room_provider.dart';
@@ -265,12 +266,35 @@ class _AuthGateState extends State<AuthGate> {
     _checkAuthState();
     // Listen to reset events from static method
     AuthGate._resetController.addListener(_onResetRequested);
+    // Listen for Virtual Experience entry/exit so we can route directly
+    // into AppShell (no sign-in, no onboarding persistence) and bounce
+    // back to the welcome page on exit.
+    VirtualExperienceService.instance.addListener(_onVirtualExperienceChanged);
   }
 
   @override
   void dispose() {
     AuthGate._resetController.removeListener(_onResetRequested);
+    VirtualExperienceService.instance
+        .removeListener(_onVirtualExperienceChanged);
     super.dispose();
+  }
+
+  void _onVirtualExperienceChanged() {
+    final active = VirtualExperienceService.instance.isActive;
+    if (active) {
+      // Entry can happen from either the welcome screen (onboarding) or
+      // the hardware-gate "LightBox" screen (already inside AppShell).
+      // Always run the sync so demo rooms populate; flip to AppShell only
+      // if we were still showing onboarding.
+      unawaited(_enterVirtualExperience());
+    } else if (!_showOnboarding &&
+        !SettingsService.instance.onboardingComplete) {
+      // VE-only sessions never persisted onboarding — exit drops the user
+      // back to the welcome screen. A real user who completed onboarding
+      // before stays in AppShell.
+      _resetToOnboarding();
+    }
   }
 
   void _onResetRequested() {
@@ -379,6 +403,27 @@ class _AuthGateState extends State<AuthGate> {
       _showOnboarding = true;
       _isLoading = false;
     });
+  }
+
+  /// Drop the user into [AppShell] in Virtual Experience mode.
+  ///
+  /// Differs from [_completeOnboarding] in two important ways: it does NOT
+  /// persist `onboardingComplete` (so quitting back to the welcome screen
+  /// truly resets), and it does NOT create an anonymous auth user (Virtual
+  /// Experience is a throwaway preview that shouldn't pollute analytics or
+  /// the backend with one-off accounts).
+  Future<void> _enterVirtualExperience() async {
+    AnalyticsService().logEvent('virtual_experience_entered');
+    if (!mounted) return;
+    // Seed the demo rooms. Safe whether we were on the welcome screen or
+    // already inside AppShell (e.g. on the hardware gate).
+    await AppStateRefresh.sync(context);
+    if (!mounted) return;
+    if (_showOnboarding) {
+      setState(() {
+        _showOnboarding = false;
+      });
+    }
   }
 
   Future<void> _completeOnboarding() async {

@@ -24,12 +24,14 @@ import 'screens/settings/settings_screen.dart';
 import 'services/analytics_service.dart';
 import 'services/app_state_refresh.dart';
 import 'services/hue/hue_service_locator.dart';
+import 'services/virtual_experience_service.dart';
 import 'utils/room_visibility.dart';
 import 'widgets/connect_hub_screen.dart';
 import 'widgets/hardware_gate_screen.dart';
 import 'widgets/hub_picker_screen.dart';
 import 'widgets/main_bottom_nav.dart';
 import 'widgets/solar_orbit.dart';
+import 'widgets/virtual_experience_banner.dart';
 
 /// Main app shell.
 ///
@@ -312,6 +314,16 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     );
     _handleServerHubLifecycle(hasServerHub: hasServerHub);
 
+    // The "Do you have a LightBox?" gate occupies the full Home-tab body and
+    // shouldn't show the bottom nav — it's effectively the first onboarding
+    // step a fresh user lands on. Mirror the same conditions used inside
+    // `_buildHomeTab` so the two stay aligned.
+    final hasRooms = context.select<RoomProvider, bool>((r) => r.hasRooms);
+    final showingHardwareGate = _currentTab == MainNavTab.home &&
+        !hasServerHub &&
+        !hasRooms &&
+        !HueServiceLocator.isDemoMode;
+
     // `hasBeenSynced` is the sticky flag (true once a hello has completed,
     // false only on full hub unpair). Reading the non-sticky `synced` here
     // would dip false during transient SSE/poll reconnects — including the
@@ -344,22 +356,48 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) => _handlePopInvoked(didPop),
-      child: Scaffold(
-        backgroundColor: CelestialColors.backgroundDark,
-        body: Stack(
-          fit: StackFit.expand,
-          children: List.generate(
-            _tabs.length,
-            _buildTabSlot,
-          ),
-        ),
-        bottomNavigationBar: _buildBottomNav(
-          visibleTabs: visibleTabs,
-          disabledTabs: disabledTabs,
-        ),
+      child: ListenableBuilder(
+        listenable: VirtualExperienceService.instance,
+        builder: (context, _) {
+          final isVirtual = VirtualExperienceService.instance.isActive;
+          return Scaffold(
+            backgroundColor: CelestialColors.backgroundDark,
+            body: Column(
+              children: [
+                if (isVirtual)
+                  VirtualExperienceBanner(
+                    onExit: VirtualExperienceService.instance.exit,
+                  ),
+                Expanded(
+                  // Banner already consumed the status-bar inset; the tab
+                  // screens below use SafeArea(top:true) and would otherwise
+                  // double-pad.
+                  child: MediaQuery.removePadding(
+                    context: context,
+                    removeTop: isVirtual,
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: List.generate(
+                        _tabs.length,
+                        _buildTabSlot,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            bottomNavigationBar: showingHardwareGate
+                ? null
+                : _buildBottomNav(
+                    visibleTabs: visibleTabs,
+                    disabledTabs: disabledTabs,
+                  ),
+          );
+        },
       ),
     );
   }
+
 
   /// Bottom-nav tab visibility — all five tabs are always rendered so the
   /// navbar shape stays stable. Tabs whose dependencies aren't met get

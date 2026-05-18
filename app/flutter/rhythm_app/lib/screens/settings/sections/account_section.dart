@@ -48,21 +48,26 @@ class AccountSection extends StatelessWidget {
             value: 'Sync layout & backup',
             onTap: () => SignInModal.show(context),
           ),
-      SettingsRow(
-        icon: Icons.workspace_premium_outlined,
-        iconColor: subscription.isPro
-            ? const Color(0xFFFFC107)
-            : const Color(0xFF90A4AE),
-        label: 'Plan',
-        trailing: _PlanPill(tier: subscription.tier),
-        onTap: () => PlanTierModal.show(context),
-      ),
+      if (FeatureFlags.entitlementsEnabled)
+        SettingsRow(
+          icon: Icons.workspace_premium_outlined,
+          iconColor: subscription.isPro
+              ? const Color(0xFFFFC107)
+              : const Color(0xFF90A4AE),
+          label: 'Plan',
+          trailing: _PlanPill(tier: subscription.tier),
+          onTap: () => PlanTierModal.show(context),
+        ),
     ];
+
+    if (rows.isEmpty) return const SizedBox.shrink();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const SettingsSectionHeader(title: 'Account & Plan'),
+        SettingsSectionHeader(
+          title: FeatureFlags.entitlementsEnabled ? 'Account & Plan' : 'Account',
+        ),
         SettingsGroup(children: rows),
       ],
     );

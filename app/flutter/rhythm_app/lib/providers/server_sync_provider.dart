@@ -633,8 +633,12 @@ class ServerSyncProvider extends ChangeNotifier {
         _serverHub = serverHub;
         if (hubChanged) {
           notifyListeners();
+          // Refresh demo state once per hub change. Don't do this on every
+          // call — ProxyProvider re-fires on every RoomProvider notify, and
+          // `_refreshDemoState` itself notifies RoomProvider, which would
+          // loop forever.
+          unawaited(_refreshDemoState());
         }
-        unawaited(_refreshDemoState());
       }
       return;
     }

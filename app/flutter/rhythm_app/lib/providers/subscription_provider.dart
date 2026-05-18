@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../config/feature_flags.dart';
 import '../models/plan_tier.dart';
 import '../services/entitlements_service.dart';
 
@@ -21,8 +22,15 @@ class SubscriptionProvider extends ChangeNotifier {
 
   PlanTier get tier => _tier;
   bool get isPro => _tier == PlanTier.pro;
-  bool has(Entitlement e) => _tier.grants(e) && !e.isComingSoon;
-  bool isEligibleFor(Entitlement e) => _tier.grants(e);
+  bool has(Entitlement e) {
+    if (!FeatureFlags.entitlementsEnabled) return !e.isComingSoon;
+    return _tier.grants(e) && !e.isComingSoon;
+  }
+
+  bool isEligibleFor(Entitlement e) {
+    if (!FeatureFlags.entitlementsEnabled) return true;
+    return _tier.grants(e);
+  }
 
   /// True when the plan-tier modal should let the user flip between Basic
   /// and Pro locally (demo-mode reviewer flow / pre-IAP testing).
