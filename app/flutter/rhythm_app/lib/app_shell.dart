@@ -21,6 +21,7 @@ import 'screens/server_disconnected_screen.dart';
 import 'screens/settings/default_transition_editor_screen.dart';
 import 'screens/settings/light_profile_screen.dart';
 import 'screens/settings/settings_screen.dart';
+import 'screens/sun_position_screen.dart';
 import 'services/analytics_service.dart';
 import 'services/app_state_refresh.dart';
 import 'services/hue/hue_service_locator.dart';
@@ -362,28 +363,40 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           final isVirtual = VirtualExperienceService.instance.isActive;
           return Scaffold(
             backgroundColor: CelestialColors.backgroundDark,
-            body: Column(
+            body: Stack(
               children: [
-                if (isVirtual)
-                  VirtualExperienceBanner(
-                    onExit: VirtualExperienceService.instance.exit,
-                  ),
-                Expanded(
-                  // Banner already consumed the status-bar inset; the tab
-                  // screens below use SafeArea(top:true) and would otherwise
-                  // double-pad.
-                  child: MediaQuery.removePadding(
-                    context: context,
-                    removeTop: isVirtual,
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: List.generate(
-                        _tabs.length,
-                        _buildTabSlot,
+                Column(
+                  children: [
+                    if (isVirtual)
+                      VirtualExperienceBanner(
+                        onExit: VirtualExperienceService.instance.exit,
+                      ),
+                    Expanded(
+                      // Banner already consumed the status-bar inset; the tab
+                      // screens below use SafeArea(top:true) and would otherwise
+                      // double-pad.
+                      child: MediaQuery.removePadding(
+                        context: context,
+                        removeTop: isVirtual,
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: List.generate(
+                            _tabs.length,
+                            _buildTabSlot,
+                          ),
+                        ),
                       ),
                     ),
-                  ),
+                  ],
                 ),
+                if (!showingHardwareGate)
+                  Positioned(
+                    right: 14,
+                    bottom: 14,
+                    child: _FloatingSunButton(
+                      onTap: () => SunPositionScreen.show(context),
+                    ),
+                  ),
               ],
             ),
             bottomNavigationBar: showingHardwareGate
@@ -710,6 +723,68 @@ class _PulsingIconState extends State<_PulsingIcon>
           color: widget.color.withValues(alpha: opacity),
         );
       },
+    );
+  }
+}
+
+/// Small floating amber sun chip pinned bottom-right above the nav bar.
+/// Entry point for [SunPositionScreen] — the celestial visualization no
+/// longer has its own tab, so it lives here as a discoverable hover.
+class _FloatingSunButton extends StatelessWidget {
+  const _FloatingSunButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    const warm = Color(0xFFFFB74D);
+    const deep = Color(0xFFE6892E);
+    return Semantics(
+      button: true,
+      label: 'Open sun position',
+      child: Material(
+        color: Colors.transparent,
+        shape: const CircleBorder(),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () {
+            HapticFeedback.selectionClick();
+            onTap();
+          },
+          child: Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: const LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [warm, deep],
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: warm.withValues(alpha: 0.45),
+                  blurRadius: 16,
+                  spreadRadius: -2,
+                ),
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.30),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+              border: Border.all(
+                color: Colors.white.withValues(alpha: 0.18),
+              ),
+            ),
+            child: const Icon(
+              Icons.wb_sunny_rounded,
+              color: Colors.white,
+              size: 22,
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

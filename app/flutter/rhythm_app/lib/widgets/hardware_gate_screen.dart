@@ -550,7 +550,7 @@ class _NoAnswerCardState extends State<_NoAnswerCard> {
                     ),
                     const SizedBox(height: 3),
                     Text(
-                      'Show me what RhythmOS does',
+                      "Let's get started",
                       style: TextStyle(
                         color: CelestialColors.textSecondary
                             .withValues(alpha: 0.72),
@@ -765,7 +765,7 @@ class _GetLightBoxScreenState extends State<_GetLightBoxScreen>
   Future<void> _openShop() async {
     HapticFeedback.mediumImpact();
     AnalyticsService().logEvent('onboarding_lightbox_shop_opened');
-    final uri = Uri.parse('https://rhythm.lighting/lightbox');
+    final uri = Uri.parse('https://rhythm.lighting');
     await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
@@ -864,7 +864,7 @@ class _GetLightBoxScreenState extends State<_GetLightBoxScreen>
                             glyph: _FeatureGlyph.local,
                             title: '100% local',
                             body:
-                                'Runs on your network. Your sleep schedule never leaves the house.',
+                                'Runs on your network.',
                           ),
                         ),
                         const SizedBox(height: 28),
