@@ -17,6 +17,7 @@ use crate::chip_rpc::{
     ChipRpcCommissionLightResponse, ChipRpcListDevicesResponse, ChipRpcProbeLightResponse,
     ChipRpcReadOnOffResponse, ChipRpcRequest, ChipRpcRequestEnvelope, ChipRpcResponseEnvelope,
 };
+use crate::fabric::MatterFabricIdentity;
 use crate::transport::{
     CommissionedDevice, MatterAttributeReport, MatterCommissionRequest, MatterDeviceInfo,
     MatterGroup, MatterGroupMember, MatterSubscriptionTarget, MatterTransport,
@@ -47,6 +48,7 @@ pub struct ChipTransport {
 impl ChipTransport {
     /// Load or create the local CHIP controller sidecar state.
     pub fn load_or_create(data_path: &str, fabric_id: &str) -> Result<Self> {
+        let fabric_identity = MatterFabricIdentity::load_or_create(data_path, fabric_id)?;
         let chip_dir = Path::new(data_path).join("chip");
         fs::create_dir_all(&chip_dir)
             .with_context(|| format!("creating CHIP data dir {}", chip_dir.display()))?;
@@ -60,6 +62,8 @@ impl ChipTransport {
             socket_path: chip_dir.join(SOCKET_NAME),
             init_request: ChipInitControllerRequest {
                 fabric_id: fabric_id.to_string(),
+                operational_fabric_id: fabric_identity.operational_fabric_id,
+                ipk_hex: fabric_identity.ipk_hex.clone(),
                 storage_path: chip_dir.join(STORAGE_NAME).display().to_string(),
                 ble_controller,
             },
@@ -83,6 +87,8 @@ impl ChipTransport {
             socket_path,
             init_request: ChipInitControllerRequest {
                 fabric_id: "test".to_string(),
+                operational_fabric_id: 1,
+                ipk_hex: "00112233445566778899aabbccddeeff".to_string(),
                 storage_path: "/tmp/test-controller-storage.json".to_string(),
                 ble_controller: None,
             },
@@ -133,6 +139,12 @@ impl ChipTransport {
             anyhow::bail!(
                 "CHIP sidecar initialized unexpected fabric '{}'",
                 response.fabric_id
+            );
+        }
+        if response.operational_fabric_id != self.init_request.operational_fabric_id {
+            anyhow::bail!(
+                "CHIP sidecar initialized unexpected operational fabric id {}",
+                response.operational_fabric_id
             );
         }
 
@@ -1063,6 +1075,7 @@ mod tests {
                     request.id,
                     ChipInitControllerResponse {
                         fabric_id: "test".to_string(),
+                        operational_fabric_id: 1,
                     },
                 ),
                 other => panic!("unexpected RPC during recovery test: {:?}", other),

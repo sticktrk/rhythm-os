@@ -236,6 +236,9 @@ run_in_docker() {
         )
     fi
     docker_args+=(-e "RHYTHM_DEV_MODE=$DEV_MODE")
+    if [ -n "${RHYTHM_PROD_PAA_TRUST_STORE_PATH:-}" ]; then
+        docker_args+=(-e "RHYTHM_PROD_PAA_TRUST_STORE_PATH=$RHYTHM_PROD_PAA_TRUST_STORE_PATH")
+    fi
 
     # Forward the baked output prefix so the inner seed step can rewrite
     # Buildroot's hardcoded paths (fakeroot wrapper, *.pc, *.la, libtool) to
@@ -347,9 +350,11 @@ if [ -n "$WIFI_SSID" ]; then
 fi
 if is_truthy "$DEV_MODE"; then
     echo "Building rpiz image in dev mode (Dropbear, known root password, Matter attestation bypass)"
+    IMAGE_MODE=dev
     export RHYTHM_DEV_MODE=1
 else
     echo "Building rpiz image in production mode (no Dropbear, no known root password, Matter attestation enforced)"
+    IMAGE_MODE=prod
     unset RHYTHM_DEV_MODE
 fi
 
@@ -384,6 +389,7 @@ fi
 # copy when the host-side binary changes between image builds.
 buildroot_make rhythm-prebuilt-dirclean
 buildroot_make
+"$SCRIPT_DIR/check-rpiz-image-mode.sh" "$OUTPUT_DIR" "$IMAGE_MODE"
 
 rm -f "$OUTPUT_DIR/images/rootfs.ext2.gz" "$OUTPUT_DIR/images/sdcard.img.gz"
 if command -v gzip >/dev/null 2>&1; then

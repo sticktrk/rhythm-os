@@ -27,3 +27,4 @@ pub mod test_support;
 pub mod transport;
 
 pub mod desktop_lifecycle;
+pub mod fabric;

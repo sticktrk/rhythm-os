@@ -60,7 +60,18 @@ If `./buildroot` does not exist, the helper script now clones Buildroot there au
 
 Use `--prod` or `RHYTHM_DEV_MODE=0` when you want a production-style image
 without Dropbear, without the known root password, and with Matter device
-attestation enforced.
+attestation enforced. Production images write `/etc/default/rhythm` with:
+
+```sh
+RHYTHM_DEV_MODE=0
+RHYTHM_MATTER_PAA_TRUST_STORE_PATH=/data/matter/paa-root-certs
+RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION=0
+RHYTHM_MATTER_ALLOW_TEST_PAA=0
+```
+
+Provision CSA production PAA roots under that trust-store directory before
+commissioning production devices. You can override the baked path during the
+image build with `RHYTHM_PROD_PAA_TRUST_STORE_PATH`.
 
 The image lands at:
 
@@ -128,7 +139,13 @@ gh workflow run rpiz-sd-image.yml                 # artifact-only rebuild from c
 
 `rpiz-sd-image.yml` now matches the tag flavor when it builds the rootfs: `*-beta`
 tags keep the bring-up image defaults (`RHYTHM_DEV_MODE=1`, Matter device
-attestation bypass enabled), while stable tags build the production image.
+attestation bypass enabled), while stable tags build the production image. To
+force a production-style image from a beta tag for field testing, dispatch with
+`image_mode=prod`:
+
+```bash
+gh workflow run rpiz-sd-image.yml -f tag=v0.5.0-beta -f image_mode=prod
+```
 
 ### Refreshing the builder image
 

@@ -16,6 +16,8 @@ use crate::backend::ChipControllerBackend;
 #[derive(Debug, Clone)]
 pub struct CommissioningState {
     pub fabric_id: String,
+    pub operational_fabric_id: u64,
+    pub ipk_hex: String,
     pub storage_path: PathBuf,
 }
 
@@ -237,11 +239,15 @@ impl ChipControllerService {
     ) -> Result<ChipInitControllerResponse> {
         let ChipInitControllerRequest {
             fabric_id,
+            operational_fabric_id,
+            ipk_hex,
             storage_path,
             ble_controller,
         } = request;
         let state = CommissioningState {
             fabric_id,
+            operational_fabric_id,
+            ipk_hex,
             storage_path: PathBuf::from(storage_path),
         };
 

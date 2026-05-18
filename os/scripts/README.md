@@ -138,6 +138,11 @@ Build a Raspberry Pi Zero SD-card image using the Buildroot external tree in `in
 **Output:** `out/rpiz/images/sdcard.img`
 With `--docker` and no explicit `--output-dir`, the default becomes `out/rpiz-docker/images/sdcard.img`.
 By default, rpiz image builds include the bring-up extras: Dropbear SSH, root password `rhythm`, and Matter device attestation bypass. Use `--prod` or `RHYTHM_DEV_MODE=0` to turn those off.
+Production images also bake `/etc/default/rhythm` with Matter attestation
+enforced, test PAA roots disabled, and
+`RHYTHM_MATTER_PAA_TRUST_STORE_PATH=/data/matter/paa-root-certs`. Override that
+path at build time with `RHYTHM_PROD_PAA_TRUST_STORE_PATH` if your provisioning
+flow uses a different trust-store location.
 
 `--docker` pulls `dtconcepts/rhythm-rpiz-builder:latest` from Docker Hub and
 runs the full cross-compile + image packaging inside it. Override the image

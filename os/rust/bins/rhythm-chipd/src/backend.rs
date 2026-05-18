@@ -129,6 +129,7 @@ impl ChipControllerBackend for NativeChipBackend {
         self.controller = Some(controller);
         Ok(ChipInitControllerResponse {
             fabric_id: state.fabric_id.clone(),
+            operational_fabric_id: state.operational_fabric_id,
         })
     }
 
@@ -324,6 +325,12 @@ impl ChipControllerBackend for FakeChipBackend {
         _ble_controller: Option<u16>,
         existing_devices: &[CommissionedDevice],
     ) -> Result<ChipInitControllerResponse> {
+        if state.operational_fabric_id == 0 {
+            anyhow::bail!("Fake CHIP operational fabric id must be non-zero");
+        }
+        if state.ipk_hex.len() != 32 || !state.ipk_hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            anyhow::bail!("Fake CHIP IPK must be a 16-byte hex string");
+        }
         self.state = Some(state.clone());
         self.devices = existing_devices
             .iter()
@@ -337,6 +344,7 @@ impl ChipControllerBackend for FakeChipBackend {
         self.groups.clear();
         Ok(ChipInitControllerResponse {
             fabric_id: state.fabric_id.clone(),
+            operational_fabric_id: state.operational_fabric_id,
         })
     }
 

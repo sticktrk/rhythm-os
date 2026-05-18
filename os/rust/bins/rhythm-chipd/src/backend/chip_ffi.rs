@@ -21,7 +21,13 @@ impl ChipFfiController {
         #[cfg(not(rhythm_chipd_chip_ffi))]
         let _ = (state, ble_controller);
         #[cfg(rhythm_chipd_chip_ffi)]
-        ffi_probe::initialize_bridge(&state.storage_path, &state.fabric_id, ble_controller)?;
+        ffi_probe::initialize_bridge(
+            &state.storage_path,
+            &state.fabric_id,
+            state.operational_fabric_id,
+            &state.ipk_hex,
+            ble_controller,
+        )?;
 
         Ok(Self {
             #[cfg(not(rhythm_chipd_chip_ffi))]
@@ -474,6 +480,8 @@ mod ffi_probe {
         fn rhythm_chip_bridge_init(
             storage_path: *const c_char,
             fabric_id: *const c_char,
+            operational_fabric_id: u64,
+            ipk_hex: *const c_char,
             has_ble_controller: bool,
             ble_controller: c_ushort,
             controller_vendor_id: c_ushort,
@@ -636,11 +644,14 @@ mod ffi_probe {
     pub fn initialize_bridge(
         storage_path: &Path,
         fabric_id: &str,
+        operational_fabric_id: u64,
+        ipk_hex: &str,
         ble_controller: Option<u16>,
     ) -> Result<()> {
         let storage_path = CString::new(storage_path.display().to_string())
             .context("encoding CHIP storage path")?;
         let fabric_id = CString::new(fabric_id).context("encoding CHIP fabric id")?;
+        let ipk_hex = CString::new(ipk_hex).context("encoding CHIP IPK")?;
         let controller_vendor_id = controller_vendor_id()?;
         let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
 
@@ -648,6 +659,8 @@ mod ffi_probe {
             rhythm_chip_bridge_init(
                 storage_path.as_ptr(),
                 fabric_id.as_ptr(),
+                operational_fabric_id,
+                ipk_hex.as_ptr(),
                 ble_controller.is_some(),
                 ble_controller.unwrap_or_default(),
                 controller_vendor_id,

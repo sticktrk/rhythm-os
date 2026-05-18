@@ -12,6 +12,7 @@
 #include <credentials/PersistentStorageOpCertStore.h>
 #include <credentials/attestation_verifier/DefaultDeviceAttestationVerifier.h>
 #include <credentials/attestation_verifier/DeviceAttestationVerifier.h>
+#include <credentials/attestation_verifier/FileAttestationTrustStore.h>
 #include <crypto/CHIPCryptoPAL.h>
 #include <crypto/RawKeySessionKeystore.h>
 #include <data-model-providers/codegen/Instance.h>
@@ -19,7 +20,6 @@
 #include <lib/core/ErrorStr.h>
 #include <lib/support/CodeUtils.h>
 #include <lib/support/ScopedMemoryBuffer.h>
-#include <lib/support/TestGroupData.h>
 #include <platform/CHIPDeviceLayer.h>
 #include <platform/TestOnlyCommissionableDataProvider.h>
 #include <protocols/secure_channel/RendezvousParameters.h>
@@ -64,10 +64,49 @@ constexpr std::chrono::seconds kCommissioningTimeout(180);
 constexpr EndpointId kRootEndpoint = kRootEndpointId;
 constexpr VendorId kDefaultControllerVendorId = VendorId::TestVendor1;
 constexpr const char * kBypassAttestationEnv = "RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION";
+constexpr const char * kPaaTrustStorePathEnv = "RHYTHM_MATTER_PAA_TRUST_STORE_PATH";
+constexpr const char * kAllowTestPaaEnv = "RHYTHM_MATTER_ALLOW_TEST_PAA";
 constexpr KeysetId kRhythmGroupKeySetId = 0x5201;
 constexpr uint64_t kRhythmGroupEpochStartTime = 1;
 constexpr const char * kRhythmGroupEpochKeyStorageKey = "rhythm:matter-group-epoch-key:v1";
-using RhythmGroupEpochKey = std::array<uint8_t, chip::Credentials::GroupDataProvider::EpochKey::kLengthBytes>;
+using RhythmIpk =
+    std::array<uint8_t, chip::Credentials::GroupDataProvider::EpochKey::kLengthBytes>;
+using RhythmGroupEpochKey = RhythmIpk;
+
+std::optional<uint8_t> DecodeHexNibble(char value)
+{
+    if (value >= '0' && value <= '9')
+    {
+        return static_cast<uint8_t>(value - '0');
+    }
+    if (value >= 'a' && value <= 'f')
+    {
+        return static_cast<uint8_t>(value - 'a' + 10);
+    }
+    if (value >= 'A' && value <= 'F')
+    {
+        return static_cast<uint8_t>(value - 'A' + 10);
+    }
+    return std::nullopt;
+}
+
+CHIP_ERROR DecodeRhythmIpk(const char * ipkHex, RhythmIpk & out)
+{
+    VerifyOrReturnError(ipkHex != nullptr, CHIP_ERROR_INVALID_ARGUMENT);
+
+    std::string_view hex(ipkHex);
+    VerifyOrReturnError(hex.size() == out.size() * 2, CHIP_ERROR_INVALID_ARGUMENT);
+
+    for (size_t i = 0; i < out.size(); ++i)
+    {
+        const auto high = DecodeHexNibble(hex[i * 2]);
+        const auto low  = DecodeHexNibble(hex[i * 2 + 1]);
+        VerifyOrReturnError(high.has_value() && low.has_value(), CHIP_ERROR_INVALID_ARGUMENT);
+        out[i] = static_cast<uint8_t>((*high << 4) | *low);
+    }
+
+    return CHIP_NO_ERROR;
+}
 
 // DEV-ONLY attestation verifier that waves every device through.
 // Use only on a trusted LAN during rpiz bring-up; production must use
@@ -137,6 +176,16 @@ bool EnvFlagEnabled(const char * name)
     std::transform(normalized.begin(), normalized.end(), normalized.begin(),
                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
     return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
+}
+
+std::optional<std::string> EnvValue(const char * name)
+{
+    const char * value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0')
+    {
+        return std::nullopt;
+    }
+    return std::string(value);
 }
 
 void WriteErrorMessage(char * buffer, size_t bufferSize, const std::string & message)
@@ -639,8 +688,8 @@ private:
 class ChipBridgeContext
 {
 public:
-    CHIP_ERROR Init(const char * storagePath, const char * fabricId, bool hasBleController, uint16_t bleController,
-                    uint16_t controllerVendorId)
+    CHIP_ERROR Init(const char * storagePath, const char * fabricId, uint64_t operationalFabricId, const char * ipkHex,
+                    bool hasBleController, uint16_t bleController, uint16_t controllerVendorId)
     {
         std::lock_guard<std::mutex> lock(mMutex);
 
@@ -649,20 +698,30 @@ public:
         {
             return CHIP_ERROR_INVALID_ARGUMENT;
         }
+        VerifyOrReturnError(operationalFabricId != 0, CHIP_ERROR_INVALID_ARGUMENT);
+
+        RhythmIpk requestedIpk;
+        ReturnErrorOnFailure(DecodeRhythmIpk(ipkHex, requestedIpk));
+        const std::string requestedFabricId = fabricId != nullptr ? fabricId : "";
 
         if (mCommissioner != nullptr)
         {
             if (requestedStorage == mStoragePath)
             {
                 VerifyOrReturnError(mControllerVendorId == controllerVendorId, CHIP_ERROR_INCORRECT_STATE);
+                VerifyOrReturnError(mFabricId == requestedFabricId, CHIP_ERROR_INCORRECT_STATE);
+                VerifyOrReturnError(mOperationalFabricId == operationalFabricId, CHIP_ERROR_INCORRECT_STATE);
+                VerifyOrReturnError(mIpk == requestedIpk, CHIP_ERROR_INCORRECT_STATE);
                 return CHIP_NO_ERROR;
             }
             return CHIP_ERROR_INCORRECT_STATE;
         }
 
-        mStoragePath = requestedStorage;
-        mFabricId    = fabricId != nullptr ? fabricId : "";
-        mControllerVendorId = controllerVendorId;
+        mStoragePath           = requestedStorage;
+        mFabricId              = requestedFabricId;
+        mOperationalFabricId   = operationalFabricId;
+        mIpk                   = requestedIpk;
+        mControllerVendorId    = controllerVendorId;
 
         if (!mFactoryInitialized)
         {
@@ -1250,8 +1309,11 @@ public:
 
         mFactoryInitialized = false;
         mStorage.reset();
+        mPaaTrustStore.reset();
         mStoragePath.clear();
         mFabricId.clear();
+        mOperationalFabricId = 0;
+        mIpk                 = {};
         mControllerVendorId = static_cast<uint16_t>(kDefaultControllerVendorId);
     }
 
@@ -1334,12 +1396,32 @@ private:
             // the configured trust store.
             dacVerifier = &sBypassVerifier;
         }
-        else
+        else if (auto paaTrustStorePath = EnvValue(kPaaTrustStorePathEnv))
         {
+            mPaaTrustStore = std::make_unique<chip::Credentials::FileAttestationTrustStore>(
+                paaTrustStorePath->c_str());
+            VerifyOrReturnError(mPaaTrustStore->IsInitialized() && mPaaTrustStore->paaCount() > 0,
+                                CHIP_ERROR_INVALID_ARGUMENT);
+            dacVerifier = chip::Credentials::GetDefaultDACVerifier(mPaaTrustStore.get(),
+                                                                    /* revocationDelegate = */ nullptr);
+            VerifyOrReturnError(dacVerifier != nullptr, CHIP_ERROR_INCORRECT_STATE);
+        }
+        else if (EnvFlagEnabled(kAllowTestPaaEnv))
+        {
+            // DEV-ONLY: the SDK test PAA store accepts development devices.
+            // Production must provide RHYTHM_MATTER_PAA_TRUST_STORE_PATH.
             dacVerifier = chip::Credentials::GetDefaultDACVerifier(
                 chip::Credentials::GetTestAttestationTrustStore(),
                 /* revocationDelegate = */ nullptr);
             VerifyOrReturnError(dacVerifier != nullptr, CHIP_ERROR_INCORRECT_STATE);
+        }
+        else
+        {
+            ChipLogError(Controller,
+                         "Matter PAA trust store is required. Set %s to a directory of PAA DER certificates, or set %s=1 for "
+                         "development devices.",
+                         kPaaTrustStorePathEnv, kAllowTestPaaEnv);
+            return CHIP_ERROR_INVALID_ARGUMENT;
         }
         chip::Credentials::SetDeviceAttestationVerifier(dacVerifier);
 
@@ -1369,8 +1451,8 @@ private:
         chip::MutableByteSpan rcacSpan(rcac.Get(), chip::Controller::kMaxCHIPDERCertLength);
 
         ReturnErrorOnFailure(mOperationalCredentialsIssuer.GenerateNOCChainAfterValidation(
-            mStorage->GetLocalNodeId(), /* fabricId = */ 1, mStorage->GetCommissionerCATs(), mOperationalKeypair.Pubkey(), rcacSpan,
-            icacSpan, nocSpan));
+            mStorage->GetLocalNodeId(), mOperationalFabricId, mStorage->GetCommissionerCATs(),
+            mOperationalKeypair.Pubkey(), rcacSpan, icacSpan, nocSpan));
 
         commissionerParams.controllerNOC  = nocSpan;
         commissionerParams.controllerICAC = icacSpan;
@@ -1382,9 +1464,9 @@ private:
         chip::MutableByteSpan compressedFabricIdSpan(compressedFabricId);
         ReturnErrorOnFailure(commissioner->GetCompressedFabricIdBytes(compressedFabricIdSpan));
 
-        const chip::ByteSpan defaultIpk = chip::GroupTesting::DefaultIpkValue::GetDefaultIpk();
+        const chip::ByteSpan rhythmIpk(mIpk.data(), mIpk.size());
         ReturnErrorOnFailure(chip::Credentials::SetSingleIpkEpochKey(
-            &mGroupDataProvider, commissioner->GetFabricIndex(), defaultIpk, compressedFabricIdSpan));
+            &mGroupDataProvider, commissioner->GetFabricIndex(), rhythmIpk, compressedFabricIdSpan));
 
         mCommissioner = std::move(commissioner);
         return CHIP_NO_ERROR;
@@ -1707,6 +1789,7 @@ private:
 
     std::mutex mMutex;
     std::unique_ptr<PersistentStorage> mStorage;
+    std::unique_ptr<chip::Credentials::FileAttestationTrustStore> mPaaTrustStore;
     chip::Credentials::GroupDataProviderImpl mGroupDataProvider;
     chip::Credentials::PersistentStorageOpCertStore mOpCertStore;
     ExampleOperationalCredentialsIssuer mOperationalCredentialsIssuer;
@@ -1720,6 +1803,8 @@ private:
     std::vector<rhythm_chip_bridge_attribute_report> mAttributeReports;
     std::string mStoragePath;
     std::string mFabricId;
+    uint64_t mOperationalFabricId = 0;
+    RhythmIpk mIpk                = {};
     uint16_t mControllerVendorId = static_cast<uint16_t>(kDefaultControllerVendorId);
     bool mFactoryInitialized = false;
     bool mEventLoopStarted   = false;
@@ -1754,13 +1839,14 @@ const char * rhythm_chip_bridge_link_mode(void)
 #endif
 }
 
-bool rhythm_chip_bridge_init(const char * storage_path, const char * fabric_id, bool has_ble_controller,
-                             uint16_t ble_controller, uint16_t controller_vendor_id, char * error_message,
-                             size_t error_message_size)
+bool rhythm_chip_bridge_init(const char * storage_path, const char * fabric_id, uint64_t operational_fabric_id,
+                             const char * ipk_hex, bool has_ble_controller, uint16_t ble_controller,
+                             uint16_t controller_vendor_id, char * error_message, size_t error_message_size)
 {
     return HandleBridgeResult(
-        gContext.Init(storage_path, fabric_id, has_ble_controller, ble_controller, controller_vendor_id), error_message,
-        error_message_size, "initializing CHIP controller bridge");
+        gContext.Init(storage_path, fabric_id, operational_fabric_id, ipk_hex, has_ble_controller, ble_controller,
+                      controller_vendor_id),
+        error_message, error_message_size, "initializing CHIP controller bridge");
 }
 
 bool rhythm_chip_bridge_commission_light(const struct rhythm_chip_bridge_commission_request * request,

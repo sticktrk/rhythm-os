@@ -44,6 +44,28 @@ pub trait Storage: Send + Sync {
         Ok(())
     }
 
+    /// Load integration-owned durable files for a backup bundle.
+    ///
+    /// Implementations should only include secret-bearing files when
+    /// `include_secrets` is true. Default: no integration files.
+    fn load_integration_backup_files(
+        &self,
+        _include_secrets: bool,
+    ) -> Result<Vec<crate::bundle::BackupIntegrationFile>> {
+        Ok(Vec::new())
+    }
+
+    /// Replace integration-owned durable files during backup restore.
+    ///
+    /// A restore with an empty file list should clear known integration state,
+    /// matching the restored backup's authoritative contents. Default: no-op.
+    fn restore_integration_backup_files(
+        &self,
+        _files: &[crate::bundle::BackupIntegrationFile],
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Load the canonical device registry. Default: returns None (not persisted).
     fn load_canonical_registry(&self) -> Result<Option<Value>> {
         Ok(None)
@@ -272,6 +294,8 @@ pub struct FileStorage {
     dir: std::path::PathBuf,
 }
 
+const INTEGRATION_SUBDIRS: &[&str] = &["matter"];
+
 impl FileStorage {
     /// Create a new `FileStorage` rooted at `dir`.
     ///
@@ -369,6 +393,151 @@ impl FileStorage {
 
         Ok(())
     }
+
+    fn clear_integration_state_dirs(&self) -> Result<()> {
+        for dir in INTEGRATION_SUBDIRS {
+            let path = self.dir.join(dir);
+            match std::fs::remove_dir_all(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(anyhow::anyhow!(e))
+                        .with_context(|| format!("removing {}", path.display()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_integration_backup_files(
+        &self,
+        relative_dir: &std::path::Path,
+        files: &mut Vec<crate::bundle::BackupIntegrationFile>,
+    ) -> Result<()> {
+        let absolute_dir = self.dir.join(relative_dir);
+        let entries = match std::fs::read_dir(&absolute_dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(anyhow::anyhow!(e))
+                    .with_context(|| format!("reading {}", absolute_dir.display()));
+            }
+        };
+
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            let relative_path = relative_dir.join(entry.file_name());
+            if file_type.is_dir() {
+                if should_skip_integration_backup_dir(&relative_path) {
+                    continue;
+                }
+                self.collect_integration_backup_files(&relative_path, files)?;
+            } else if file_type.is_file() {
+                if should_skip_integration_backup_file(&relative_path) {
+                    continue;
+                }
+                let path_string = normalized_relative_path(&relative_path)?;
+                let content = std::fs::read_to_string(&path)
+                    .with_context(|| format!("reading {}", path.display()))?;
+                files.push(crate::bundle::BackupIntegrationFile {
+                    path: path_string,
+                    content,
+                    secret: true,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn write_file_atomic_path(path: &std::path::Path, data: &[u8]) -> Result<()> {
+        use std::io::Write;
+
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("integration backup path has no parent"))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow::anyhow!("invalid integration backup file name"))?;
+        let tmp = path.with_file_name(format!("{filename}.tmp"));
+
+        {
+            let mut file = std::fs::File::create(&tmp)
+                .with_context(|| format!("creating {}", tmp.display()))?;
+            file.write_all(data)
+                .with_context(|| format!("writing {}", tmp.display()))?;
+            file.sync_all()
+                .with_context(|| format!("fsync {}", tmp.display()))?;
+        }
+
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(anyhow::anyhow!(e))
+                .with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()));
+        }
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+        Ok(())
+    }
+}
+
+fn should_skip_integration_backup_dir(relative_path: &std::path::Path) -> bool {
+    relative_path.components().any(
+        |component| matches!(component, std::path::Component::Normal(name) if name == "captures"),
+    )
+}
+
+fn should_skip_integration_backup_file(relative_path: &std::path::Path) -> bool {
+    let Some(name) = relative_path.file_name().and_then(|name| name.to_str()) else {
+        return true;
+    };
+    name == "chip-controller.sock"
+        || name.ends_with(".sock")
+        || name.ends_with(".tmp")
+        || name.ends_with(".log")
+}
+
+fn normalized_relative_path(path: &std::path::Path) -> Result<String> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                let part = part
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("integration backup path is not UTF-8"))?;
+                parts.push(part.to_string());
+            }
+            _ => anyhow::bail!("invalid integration backup path {}", path.display()),
+        }
+    }
+    if parts.is_empty() {
+        anyhow::bail!("integration backup path must not be empty");
+    }
+    Ok(parts.join("/"))
+}
+
+fn validate_integration_backup_path(path: &str) -> Result<std::path::PathBuf> {
+    if path.trim().is_empty() {
+        anyhow::bail!("integration backup path must not be empty");
+    }
+    let relative = std::path::Path::new(path);
+    if relative.is_absolute() {
+        anyhow::bail!("integration backup path must be relative: {}", path);
+    }
+
+    let normalized = normalized_relative_path(relative)?;
+    let mut components = std::path::Path::new(&normalized).components();
+    match components.next() {
+        Some(std::path::Component::Normal(first)) if first == "matter" => {}
+        _ => anyhow::bail!("unsupported integration backup path: {}", path),
+    }
+    Ok(std::path::PathBuf::from(normalized))
 }
 
 impl Storage for FileStorage {
@@ -486,6 +655,41 @@ impl Storage for FileStorage {
         self.clear_hub_registry_files()
     }
 
+    fn load_integration_backup_files(
+        &self,
+        include_secrets: bool,
+    ) -> Result<Vec<crate::bundle::BackupIntegrationFile>> {
+        if !include_secrets {
+            return Ok(Vec::new());
+        }
+
+        let mut files = Vec::new();
+        for dir in INTEGRATION_SUBDIRS {
+            self.collect_integration_backup_files(std::path::Path::new(dir), &mut files)?;
+        }
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(files)
+    }
+
+    fn restore_integration_backup_files(
+        &self,
+        files: &[crate::bundle::BackupIntegrationFile],
+    ) -> Result<()> {
+        let files = files
+            .iter()
+            .map(|file| validate_integration_backup_path(&file.path).map(|path| (path, file)))
+            .collect::<Result<Vec<_>>>()?;
+
+        self.clear_integration_state_dirs()?;
+
+        for (relative_path, file) in files {
+            let absolute_path = self.dir.join(relative_path);
+            Self::write_file_atomic_path(&absolute_path, file.content.as_bytes())?;
+        }
+
+        Ok(())
+    }
+
     fn load_canonical_registry(&self) -> Result<Option<serde_json::Value>> {
         let path = self.file_path("canonical_registry.json");
         match self.read_json::<serde_json::Value>("canonical_registry.json") {
@@ -601,21 +805,7 @@ impl Storage for FileStorage {
         }
         self.clear_hub_registry_files()?;
 
-        // Per-integration subdirectories that hold hub-local caches. Stored
-        // as a slice so adding future integrations keeps this block
-        // structured identically.
-        const INTEGRATION_SUBDIRS: &[&str] = &["matter"];
-        for dir in INTEGRATION_SUBDIRS {
-            let path = self.dir.join(dir);
-            match std::fs::remove_dir_all(&path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    return Err(anyhow::anyhow!(e))
-                        .with_context(|| format!("removing {}", path.display()));
-                }
-            }
-        }
+        self.clear_integration_state_dirs()?;
 
         Ok(())
     }
@@ -1676,6 +1866,115 @@ mod tests {
                 "integration runtime state should be removed"
             );
 
+            cleanup(&path);
+        }
+
+        #[test]
+        fn integration_backup_files_require_secrets_and_skip_runtime_noise() {
+            let (storage, path) = temp_storage();
+            std::fs::create_dir_all(path.join("matter").join("chip")).unwrap();
+            std::fs::create_dir_all(path.join("matter").join("captures")).unwrap();
+            std::fs::write(path.join("matter").join("fabric-identity.json"), "fabric").unwrap();
+            std::fs::write(
+                path.join("matter")
+                    .join("chip")
+                    .join("controller-storage.json"),
+                "controller",
+            )
+            .unwrap();
+            std::fs::write(
+                path.join("matter").join("chip").join("devices.json"),
+                "devices",
+            )
+            .unwrap();
+            std::fs::write(path.join("matter").join("chip").join("write.tmp"), "tmp").unwrap();
+            std::fs::write(path.join("matter").join("chip").join("sidecar.log"), "log").unwrap();
+            std::fs::write(
+                path.join("matter").join("captures").join("pairing.json"),
+                "capture",
+            )
+            .unwrap();
+
+            assert!(storage
+                .load_integration_backup_files(false)
+                .unwrap()
+                .is_empty());
+
+            let files = storage.load_integration_backup_files(true).unwrap();
+            assert_eq!(
+                files
+                    .iter()
+                    .map(|file| (file.path.as_str(), file.content.as_str(), file.secret))
+                    .collect::<Vec<_>>(),
+                vec![
+                    ("matter/chip/controller-storage.json", "controller", true),
+                    ("matter/chip/devices.json", "devices", true),
+                    ("matter/fabric-identity.json", "fabric", true),
+                ]
+            );
+
+            cleanup(&path);
+        }
+
+        #[test]
+        fn restore_integration_backup_files_replaces_matter_state() {
+            let (storage, path) = temp_storage();
+            std::fs::create_dir_all(path.join("matter").join("chip")).unwrap();
+            std::fs::write(path.join("matter").join("stale.json"), "stale").unwrap();
+
+            storage
+                .restore_integration_backup_files(&[
+                    crate::bundle::BackupIntegrationFile {
+                        path: "matter/fabric-identity.json".to_string(),
+                        content: "fabric".to_string(),
+                        secret: true,
+                    },
+                    crate::bundle::BackupIntegrationFile {
+                        path: "matter/chip/controller-storage.json".to_string(),
+                        content: "controller".to_string(),
+                        secret: true,
+                    },
+                ])
+                .unwrap();
+
+            assert!(!path.join("matter").join("stale.json").exists());
+            assert_eq!(
+                std::fs::read_to_string(path.join("matter").join("fabric-identity.json")).unwrap(),
+                "fabric"
+            );
+            assert_eq!(
+                std::fs::read_to_string(
+                    path.join("matter")
+                        .join("chip")
+                        .join("controller-storage.json")
+                )
+                .unwrap(),
+                "controller"
+            );
+
+            storage.restore_integration_backup_files(&[]).unwrap();
+            assert!(!path.join("matter").exists());
+
+            cleanup(&path);
+        }
+
+        #[test]
+        fn restore_integration_backup_files_rejects_path_escape() {
+            let (storage, path) = temp_storage();
+            std::fs::create_dir_all(path.join("matter")).unwrap();
+            std::fs::write(path.join("matter").join("existing.json"), "existing").unwrap();
+            let err = storage
+                .restore_integration_backup_files(&[crate::bundle::BackupIntegrationFile {
+                    path: "../matter/fabric-identity.json".to_string(),
+                    content: "fabric".to_string(),
+                    secret: true,
+                }])
+                .unwrap_err();
+            assert!(err.to_string().contains("invalid integration backup path"));
+            assert_eq!(
+                std::fs::read_to_string(path.join("matter").join("existing.json")).unwrap(),
+                "existing"
+            );
             cleanup(&path);
         }
 

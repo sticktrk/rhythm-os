@@ -11,7 +11,12 @@ use crate::transport::{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChipInitControllerRequest {
+    /// Rhythm-level fabric label from hub credentials.
     pub fabric_id: String,
+    /// Matter operational fabric id used when minting the controller NOC.
+    pub operational_fabric_id: u64,
+    /// 16-byte Matter Identity Protection Key, hex encoded.
+    pub ipk_hex: String,
     pub storage_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ble_controller: Option<u16>,
@@ -20,6 +25,7 @@ pub struct ChipInitControllerRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChipInitControllerResponse {
     pub fabric_id: String,
+    pub operational_fabric_id: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -31,8 +31,8 @@ use crate::api_types::{
 };
 use crate::bundle::{
     BackupBundle, BackupConfiguration, BackupConfigurationRoom, BackupHubCredentials,
-    BackupHubRegistry, BackupInstallation, BackupRuntimeState, ProfileBundle, ProfileBundleData,
-    ProfileBundleImportPayload, BUNDLE_SCHEMA_VERSION,
+    BackupHubRegistry, BackupInstallation, BackupIntegrationFile, BackupRuntimeState,
+    ProfileBundle, ProfileBundleData, ProfileBundleImportPayload, BUNDLE_SCHEMA_VERSION,
 };
 use crate::canonical::identity::HubKey;
 use crate::factory_default_config::{
@@ -3205,6 +3205,7 @@ pub fn do_factory_reset(state: &SharedState) -> Result<String> {
         canonical_registry: crate::canonical::registry::CanonicalRegistry::new(),
         hub_credentials: Vec::new(),
         hub_registries: Vec::new(),
+        integration_files: Vec::new(),
     };
     restore_backup_installation_metadata(state, &installation)?;
     restore_backup_room_manager(state, &installation.rooms)?;
@@ -3233,6 +3234,7 @@ pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Re
         runtime_state,
         hub_credentials,
         hub_registries,
+        integration_files,
     ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let configuration = backup_configuration_from_parts(&s, &room_manager);
@@ -3272,6 +3274,10 @@ pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Re
             },
             hub_credentials,
             hub_registries,
+            match s.storage.as_ref() {
+                Some(storage) => storage.load_integration_backup_files(include_secrets)?,
+                None => Vec::new(),
+            },
         )
     };
 
@@ -3300,6 +3306,7 @@ pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Re
             canonical_registry,
             hub_credentials,
             hub_registries: hub_registry_snapshots,
+            integration_files,
         },
         runtime_state,
     })
@@ -3539,6 +3546,19 @@ fn save_backup_hub_registries_to_storage(
     }
 
     Ok(())
+}
+
+fn restore_backup_integration_files(
+    state: &SharedState,
+    files: &[BackupIntegrationFile],
+) -> Result<()> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let Some(storage) = s.storage.as_ref() else {
+        return Ok(());
+    };
+    storage
+        .restore_integration_backup_files(files)
+        .map_err(|e| anyhow::anyhow!("Failed to restore integration files: {}", e))
 }
 
 fn restore_backup_hub_credentials(
@@ -5215,6 +5235,7 @@ pub fn do_backup_restore(state: &SharedState, bundle: BackupBundle) -> Result<St
     }
 
     do_hub_disconnect(state)?;
+    restore_backup_integration_files(state, &bundle.installation.integration_files)?;
     save_backup_hub_registries_to_storage(state, &bundle.installation.hub_registries)?;
 
     let mut configuration = bundle.configuration.clone();
@@ -9306,7 +9327,7 @@ mod tests {
     use super::*;
     use crate::bundle::{
         BackupBundle, BackupConfiguration, BackupHubCredentials, BackupInstallation,
-        BackupRuntimeState, BundleKind, ProfileBundle, ProfileBundleData,
+        BackupIntegrationFile, BackupRuntimeState, BundleKind, ProfileBundle, ProfileBundleData,
         ProfileBundleImportPayload,
     };
     use crate::factory_default_config::{
@@ -10129,6 +10150,7 @@ mod tests {
         canonical_registry: Option<Value>,
         topology: Option<Value>,
         commissioning_wifi: Option<crate::provisioning::WifiCredentials>,
+        integration_files: Vec<BackupIntegrationFile>,
     }
 
     impl Storage for TestStorage {
@@ -10216,6 +10238,22 @@ mod tests {
             Ok(())
         }
 
+        fn load_integration_backup_files(
+            &self,
+            include_secrets: bool,
+        ) -> Result<Vec<BackupIntegrationFile>> {
+            if include_secrets {
+                Ok(self.inner.lock().unwrap().integration_files.clone())
+            } else {
+                Ok(Vec::new())
+            }
+        }
+
+        fn restore_integration_backup_files(&self, files: &[BackupIntegrationFile]) -> Result<()> {
+            self.inner.lock().unwrap().integration_files = files.to_vec();
+            Ok(())
+        }
+
         fn load_canonical_registry(&self) -> Result<Option<Value>> {
             Ok(self.inner.lock().unwrap().canonical_registry.clone())
         }
@@ -10264,6 +10302,7 @@ mod tests {
             inner.canonical_registry = None;
             inner.topology = None;
             inner.commissioning_wifi = None;
+            inner.integration_files.clear();
             Ok(())
         }
     }
@@ -11149,6 +11188,31 @@ mod tests {
     }
 
     #[test]
+    fn build_backup_bundle_dto_redacts_or_includes_integration_files() {
+        let storage = TestStorage::default();
+        storage.inner.lock().unwrap().integration_files = vec![BackupIntegrationFile {
+            path: "matter/fabric-identity.json".to_string(),
+            content: "{\"ipk_hex\":\"secret\"}".to_string(),
+            secret: true,
+        }];
+        let state = Arc::new(Mutex::new(AppState {
+            storage: Some(Box::new(storage)),
+            ..Default::default()
+        }));
+
+        let redacted = build_backup_bundle_dto(&state, false).unwrap();
+        assert!(redacted.installation.integration_files.is_empty());
+
+        let included = build_backup_bundle_dto(&state, true).unwrap();
+        assert_eq!(included.installation.integration_files.len(), 1);
+        assert_eq!(
+            included.installation.integration_files[0].path,
+            "matter/fabric-identity.json"
+        );
+        assert!(included.installation.integration_files[0].secret);
+    }
+
+    #[test]
     fn build_backup_bundle_dto_keeps_redacted_placeholders_redacted_even_with_secrets() {
         let (state, _rt) = setup_state(vec![]);
         state.lock().unwrap().hub_credentials.insert(
@@ -11310,6 +11374,11 @@ mod tests {
                     hub_key: hub_key.clone(),
                     snapshot: serde_json::json!({ "rooms": [] }),
                 }],
+                integration_files: vec![BackupIntegrationFile {
+                    path: "matter/fabric-identity.json".to_string(),
+                    content: "{\"label\":\"default\"}".to_string(),
+                    secret: true,
+                }],
             },
             runtime_state: BackupRuntimeState {
                 active_mode: RhythmMode::Day,
@@ -11372,6 +11441,14 @@ mod tests {
         );
         assert_eq!(saved.location.as_ref().unwrap().latitude, Some(40.7128));
         assert!(saved.hub_registries.contains_key(&hub_key.to_string()));
+        assert_eq!(
+            saved.integration_files,
+            vec![BackupIntegrationFile {
+                path: "matter/fabric-identity.json".to_string(),
+                content: "{\"label\":\"default\"}".to_string(),
+                secret: true,
+            }]
+        );
         drop(saved);
 
         let s = state.lock().unwrap();
@@ -11452,6 +11529,7 @@ mod tests {
                     hub_key: hub_key.clone(),
                     snapshot: serde_json::json!({ "rooms": [] }),
                 }],
+                integration_files: vec![],
             },
             runtime_state: BackupRuntimeState {
                 active_mode: RhythmMode::Day,
@@ -11958,6 +12036,7 @@ mod tests {
                     data: None,
                 }],
                 hub_registries: vec![],
+                integration_files: vec![],
             },
             runtime_state: BackupRuntimeState {
                 active_mode: RhythmMode::Sleep,
@@ -12054,6 +12133,7 @@ mod tests {
                     canonical_registry: crate::canonical::registry::CanonicalRegistry::new(),
                     hub_credentials: vec![],
                     hub_registries: vec![],
+                    integration_files: vec![],
                 },
                 runtime_state: BackupRuntimeState {
                     active_mode: RhythmMode::Day,
@@ -12102,6 +12182,7 @@ mod tests {
                     hub_key: restored_key.clone(),
                     snapshot: serde_json::json!({ "rooms": [{"id": "restored-room"}] }),
                 }],
+                integration_files: vec![],
             },
             runtime_state: BackupRuntimeState {
                 active_mode: RhythmMode::Day,
@@ -12151,6 +12232,7 @@ mod tests {
                 canonical_registry,
                 hub_credentials: vec![],
                 hub_registries: vec![],
+                integration_files: vec![],
             },
             runtime_state: BackupRuntimeState {
                 active_mode: RhythmMode::Day,

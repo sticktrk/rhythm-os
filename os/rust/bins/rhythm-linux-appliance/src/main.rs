@@ -27,6 +27,7 @@ const VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 const RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV: &str = "RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION";
+const RHYTHM_DEV_MODE_ENV: &str = "RHYTHM_DEV_MODE";
 const STARTUP_WIFI_RESTORE_TIMEOUT: Duration = Duration::from_secs(30);
 const PERIODIC_WIFI_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const CLOCK_SYNC_RETRY_INTERVAL: Duration = Duration::from_secs(15);
@@ -52,6 +53,22 @@ fn beta_build_enables_matter_attestation_bypass(version: &str) -> bool {
     version.contains("-beta")
 }
 
+fn env_value_is_falsey(value: &str) -> bool {
+    let value = value.trim();
+    value == "0"
+        || value.eq_ignore_ascii_case("false")
+        || value.eq_ignore_ascii_case("no")
+        || value.eq_ignore_ascii_case("off")
+}
+
+fn dev_mode_explicitly_disabled_value(value: Option<&str>) -> bool {
+    value.is_some_and(env_value_is_falsey)
+}
+
+fn dev_mode_explicitly_disabled() -> bool {
+    dev_mode_explicitly_disabled_value(std::env::var(RHYTHM_DEV_MODE_ENV).ok().as_deref())
+}
+
 fn set_env_default(name: &str, value: &str) -> bool {
     match std::env::var_os(name) {
         Some(existing) if !existing.is_empty() => false,
@@ -64,6 +81,9 @@ fn set_env_default(name: &str, value: &str) -> bool {
 
 fn apply_beta_build_defaults() -> bool {
     if !beta_build_enables_matter_attestation_bypass(VERSION) {
+        return false;
+    }
+    if dev_mode_explicitly_disabled() {
         return false;
     }
 
@@ -553,9 +573,9 @@ fn extract_serial_suffix(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        beta_build_enables_matter_attestation_bypass, extract_serial_suffix,
-        periodic_startup_action, startup_wifi_restore_action, PeriodicStartupAction,
-        StartupWifiRestoreAction, STARTUP_WIFI_RESTORE_TIMEOUT,
+        beta_build_enables_matter_attestation_bypass, dev_mode_explicitly_disabled_value,
+        extract_serial_suffix, periodic_startup_action, startup_wifi_restore_action,
+        PeriodicStartupAction, StartupWifiRestoreAction, STARTUP_WIFI_RESTORE_TIMEOUT,
     };
     use crate::time_sync::clock_is_sane_at;
     use chrono::{TimeZone, Utc};
@@ -671,5 +691,14 @@ mod tests {
     #[test]
     fn stable_builds_do_not_enable_matter_attestation_bypass_defaults() {
         assert!(!beta_build_enables_matter_attestation_bypass("0.4.160"));
+    }
+
+    #[test]
+    fn explicit_prod_mode_disables_beta_matter_attestation_bypass_defaults() {
+        assert!(dev_mode_explicitly_disabled_value(Some("0")));
+        assert!(dev_mode_explicitly_disabled_value(Some("false")));
+        assert!(dev_mode_explicitly_disabled_value(Some("OFF")));
+        assert!(!dev_mode_explicitly_disabled_value(None));
+        assert!(!dev_mode_explicitly_disabled_value(Some("1")));
     }
 }

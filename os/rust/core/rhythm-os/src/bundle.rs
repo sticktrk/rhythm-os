@@ -154,6 +154,17 @@ pub struct BackupHubRegistry {
     pub snapshot: Value,
 }
 
+/// Integration-owned durable file included in full-secret backups.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupIntegrationFile {
+    /// Normalized path relative to the storage root, e.g.
+    /// `matter/fabric-identity.json`.
+    pub path: String,
+    pub content: String,
+    #[serde(default)]
+    pub secret: bool,
+}
+
 /// Installation-specific data for restore workflows.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BackupInstallation {
@@ -169,6 +180,8 @@ pub struct BackupInstallation {
     pub hub_credentials: Vec<BackupHubCredentials>,
     #[serde(default)]
     pub hub_registries: Vec<BackupHubRegistry>,
+    #[serde(default)]
+    pub integration_files: Vec<BackupIntegrationFile>,
 }
 
 /// Restorable runtime mode state captured at backup time.
