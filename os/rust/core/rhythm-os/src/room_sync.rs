@@ -702,6 +702,12 @@ fn sync_with_discovery(
             // already on at boot. Resolve to public source/target node IDs
             // up front so startup motion state follows the same node-control
             // graph as live events.
+            let motion_timer_restores = state
+                .lock()
+                .ok()
+                .map(|s| s.motion_timer_restores.clone())
+                .unwrap_or_default();
+            let mut used_restore_source_ids = Vec::new();
             let seeds: Vec<crate::state::MotionSeedEntry> = motion_states
                 .iter()
                 .filter_map(|ms| {
@@ -712,10 +718,24 @@ fn sync_with_discovery(
                         &crate::topology::NodeControlKind::Motion,
                     )
                     .map(|(source_node_id, target_node_id)| {
+                        let restore = motion_timer_restores
+                            .get(&source_node_id)
+                            .filter(|entry| entry.target_node_id == target_node_id);
+                        if restore.is_some() {
+                            used_restore_source_ids.push(source_node_id.clone());
+                        }
                         crate::state::MotionSeedEntry {
                             source_node_id,
                             target_node_id,
                             is_active: ms.is_active,
+                            stopped_at_epoch_ms: restore
+                                .and_then(|entry| {
+                                    (!ms.is_active).then_some(entry.stopped_at_epoch_ms)
+                                })
+                                .flatten(),
+                            motion_owned: restore.map(|entry| entry.motion_owned),
+                            warning_active: restore
+                                .is_some_and(|entry| !ms.is_active && entry.warning_active),
                         }
                     })
                 })
@@ -723,6 +743,9 @@ fn sync_with_discovery(
             if !seeds.is_empty() {
                 if let Ok(mut s) = state.lock() {
                     s.pending_motion_seed.extend(seeds);
+                    for source_id in used_restore_source_ids {
+                        s.motion_timer_restores.remove(&source_id);
+                    }
                 }
             }
             info!(target: "room_sync", "Motion prefetch: {} sensors, {} active",

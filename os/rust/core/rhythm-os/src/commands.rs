@@ -12255,6 +12255,9 @@ mod tests {
                 source_node_id: "sensor-1".into(),
                 target_node_id: "r1".into(),
                 is_active: true,
+                stopped_at_epoch_ms: None,
+                motion_owned: None,
+                warning_active: false,
             });
             s.canonical_registry.queue_unassigned(&canonical_id, 1000);
         }
@@ -15959,6 +15962,9 @@ mod tests {
                 source_node_id: device_id.clone(),
                 target_node_id: "room1".to_string(),
                 is_active: true,
+                stopped_at_epoch_ms: None,
+                motion_owned: None,
+                warning_active: false,
             });
         }
 

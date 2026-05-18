@@ -30,6 +30,12 @@ pub trait Storage: Send + Sync {
     fn save_location(&self, loc: &StoredLocation) -> Result<()>;
     fn load_settings(&self) -> Result<StoredSettings>;
     fn save_settings(&self, settings: &StoredSettings) -> Result<()>;
+    fn load_motion_timers(&self) -> Result<Option<StoredMotionTimers>> {
+        Ok(None)
+    }
+    fn save_motion_timers(&self, _timers: &StoredMotionTimers) -> Result<()> {
+        Ok(())
+    }
     fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>>;
     fn save_all_hub_credentials(&self, creds: &[HubCredentials]) -> Result<()>;
     fn load_hub_registry_for(&self, key: &HubKey) -> Result<Option<Value>>;
@@ -218,6 +224,42 @@ pub struct StoredSettings {
     pub mode_transitions: Vec<ModeTransitionConfig>,
 }
 
+/// Runtime motion timer state persisted across process restarts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredMotionTimers {
+    #[serde(default = "stored_motion_timers_schema_version")]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub entries: Vec<StoredMotionTimerEntry>,
+}
+
+fn stored_motion_timers_schema_version() -> u32 {
+    1
+}
+
+impl Default for StoredMotionTimers {
+    fn default() -> Self {
+        Self {
+            schema_version: stored_motion_timers_schema_version(),
+            entries: Vec::new(),
+        }
+    }
+}
+
+/// One persisted motion source timer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredMotionTimerEntry {
+    pub source_node_id: String,
+    pub target_node_id: String,
+    /// `None` means the source was still active when persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_at_epoch_ms: Option<u64>,
+    #[serde(default)]
+    pub motion_owned: bool,
+    #[serde(default)]
+    pub warning_active: bool,
+}
+
 // ---------------------------------------------------------------------------
 // FileStorage — filesystem backend (desktop targets only)
 // ---------------------------------------------------------------------------
@@ -364,6 +406,35 @@ impl Storage for FileStorage {
     fn save_settings(&self, settings: &StoredSettings) -> Result<()> {
         let data = serde_json::to_string_pretty(settings)?;
         self.write_atomic("settings.json", data.as_bytes())
+    }
+
+    fn load_motion_timers(&self) -> Result<Option<StoredMotionTimers>> {
+        let path = self.file_path("motion_timers.json");
+        match self.read_json::<StoredMotionTimers>("motion_timers.json") {
+            Ok(v) => Ok(Some(v)),
+            Err(e) => {
+                if path.exists() {
+                    warn!(
+                        target: "sys",
+                        "Failed to load motion timers {}: {}",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    debug!(
+                        target: "sys",
+                        "No persisted motion timers at {}",
+                        path.display()
+                    );
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    fn save_motion_timers(&self, timers: &StoredMotionTimers) -> Result<()> {
+        let data = serde_json::to_string_pretty(timers)?;
+        self.write_atomic("motion_timers.json", data.as_bytes())
     }
 
     fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>> {
@@ -520,6 +591,7 @@ impl Storage for FileStorage {
             "light_profiles.json",
             "location.json",
             "settings.json",
+            "motion_timers.json",
             "hub_credentials.json",
             "canonical_registry.json",
             "topology.json",
@@ -671,6 +743,24 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
             }
             Err(e) => {
                 debug!(target: "sys", "No persisted settings loaded: {}", e);
+            }
+        }
+    }
+
+    if let Some(storage) = s.storage.as_ref() {
+        match storage.load_motion_timers() {
+            Ok(Some(timers)) => {
+                let count = timers.entries.len();
+                s.motion_timer_restores = timers
+                    .entries
+                    .into_iter()
+                    .map(|entry| (entry.source_node_id.clone(), entry))
+                    .collect();
+                info!(target: "sys", "Loaded motion timers: {} sources", count);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                debug!(target: "sys", "No persisted motion timers loaded: {}", e);
             }
         }
     }
@@ -1440,6 +1530,26 @@ mod tests {
         }
 
         #[test]
+        fn motion_timers_save_load_roundtrip() {
+            let (storage, path) = temp_storage();
+            let timers = StoredMotionTimers {
+                schema_version: 1,
+                entries: vec![StoredMotionTimerEntry {
+                    source_node_id: "sensor-1".into(),
+                    target_node_id: "room-1".into(),
+                    stopped_at_epoch_ms: Some(1_700_000_000_000),
+                    motion_owned: true,
+                    warning_active: false,
+                }],
+            };
+
+            storage.save_motion_timers(&timers).unwrap();
+            let loaded = storage.load_motion_timers().unwrap();
+            assert_eq!(loaded, Some(timers));
+            cleanup(&path);
+        }
+
+        #[test]
         fn commissioning_wifi_save_load_and_clear_roundtrip() {
             let (storage, path) = temp_storage();
             let creds = crate::provisioning::WifiCredentials {
@@ -1486,6 +1596,18 @@ mod tests {
                     last_active_mode_change_utc_ms: Some(123),
                     modes: rhythm_core::default_mode_configs(),
                     mode_transitions: rhythm_core::default_mode_transition_configs(),
+                })
+                .unwrap();
+            storage
+                .save_motion_timers(&StoredMotionTimers {
+                    schema_version: 1,
+                    entries: vec![StoredMotionTimerEntry {
+                        source_node_id: "sensor-1".into(),
+                        target_node_id: "room-1".into(),
+                        stopped_at_epoch_ms: Some(123),
+                        motion_owned: true,
+                        warning_active: false,
+                    }],
                 })
                 .unwrap();
             storage
@@ -1540,6 +1662,7 @@ mod tests {
                 "light_profiles.json",
                 "location.json",
                 "settings.json",
+                "motion_timers.json",
                 "hub_credentials.json",
                 "canonical_registry.json",
                 "topology.json",

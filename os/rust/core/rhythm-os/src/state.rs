@@ -20,7 +20,7 @@ use crate::factory_default_config::{
     factory_default_power_save,
 };
 use crate::hub::{ActiveHub, HubCredentials, HubEvent};
-use crate::storage::Storage;
+use crate::storage::{Storage, StoredMotionTimerEntry};
 use crate::topology::{NodeControlKind, RoomTopologyStore};
 
 /// Ephemeral startup-bootstrap retry state for one configured hub.
@@ -155,6 +155,11 @@ pub struct MotionSeedEntry {
     pub source_node_id: String,
     pub target_node_id: String,
     pub is_active: bool,
+    /// Wall-clock time when the sensor cleared before restart.
+    pub stopped_at_epoch_ms: Option<u64>,
+    /// Persisted ownership override. `None` falls back to startup inference.
+    pub motion_owned: Option<bool>,
+    pub warning_active: bool,
 }
 
 /// Snapshot of motion timer state for a single controlled target node, exposed via API.
@@ -354,6 +359,10 @@ pub struct AppState {
     /// Per-target motion timer snapshots, updated by the main loop.
     /// Keyed by **topology node IDs** (not hub-native IDs).
     pub motion_snapshots: HashMap<String, MotionSnapshot>,
+    /// Temporary restored motion timers waiting for startup prefetch to
+    /// reconcile source/target IDs. Matched entries are removed by room sync;
+    /// unmatched stale entries disappear on the next motion timer persist.
+    pub motion_timer_restores: HashMap<String, StoredMotionTimerEntry>,
     /// Rooms currently transitioning between global modes.
     pub room_mode_transitions: HashMap<String, RoomModeTransition>,
     /// Set when a mode change wanted to apply room defaults but no runtime
@@ -584,6 +593,7 @@ impl Default for AppState {
             topology_group_sync_pending: false,
             room_observed_power: HashMap::new(),
             motion_snapshots: HashMap::new(),
+            motion_timer_restores: HashMap::new(),
             room_mode_transitions: HashMap::new(),
             pending_mode_output_apply: false,
             last_check_hour: None,

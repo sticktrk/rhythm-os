@@ -38,6 +38,7 @@ fn motion_timers_survive_hub_disconnect() {
             source_node_id: "sensor_01".to_string(),
             target_node_id: resolved.clone(),
             stopped_at: None,
+            stopped_at_epoch_ms: None,
         },
     ); // active
     motion.motion_owned.insert(resolved.clone());
@@ -88,6 +89,7 @@ fn warning_active_survives_hub_disconnect() {
             source_node_id: "sensor_01".to_string(),
             target_node_id: resolved.clone(),
             stopped_at: Some(Instant::now()),
+            stopped_at_epoch_ms: Some(1_700_000_000_000),
         },
     );
     motion.motion_owned.insert(resolved.clone());

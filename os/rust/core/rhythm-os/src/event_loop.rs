@@ -17,7 +17,8 @@ use crate::commands;
 use crate::hub::HubEvent;
 use crate::logging;
 use crate::server_event::{InputEventResource, InputEventRoute, ServerEvent};
-use crate::state::{MotionSeedEntry, MotionSnapshot, SharedState, WorkItem};
+use crate::state::{current_epoch_ms, MotionSeedEntry, MotionSnapshot, SharedState, WorkItem};
+use crate::storage::{StoredMotionTimerEntry, StoredMotionTimers};
 use crate::topology::NodeControlKind;
 
 /// How many seconds before timeout to start the warning dim.
@@ -45,6 +46,8 @@ pub struct MotionSourceState {
     pub target_node_id: String,
     /// `None` while motion is active, `Some(stopped_at)` once the source clears.
     pub stopped_at: Option<Instant>,
+    /// Wall-clock timestamp matching `stopped_at`, persisted across restarts.
+    pub stopped_at_epoch_ms: Option<u64>,
 }
 
 /// Per-target motion timer state managed by the main loop.
@@ -1195,6 +1198,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                         source_node_id: source_node_id.clone(),
                         target_node_id: target_node_id.clone(),
                         stopped_at: None,
+                        stopped_at_epoch_ms: None,
                     },
                 );
 
@@ -1220,6 +1224,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             } else if let Some(source) = motion.sensors.get_mut(&source_node_id) {
                 source.target_node_id = target_node_id.clone();
                 source.stopped_at = Some(Instant::now());
+                source.stopped_at_epoch_ms = Some(current_epoch_ms());
 
                 let all_cleared = motion
                     .sensors
@@ -1557,11 +1562,13 @@ pub fn run_event_loop(
 ) {
     let mut hub_event_rxs: Vec<std::sync::mpsc::Receiver<HubEvent>> = initial_event_rxs;
     let mut motion_state = MotionTimerState::new();
+    let mut motion_persistence = MotionTimerPersistence::new();
     let mut last_motion_check = Instant::now();
     let mut motion_dirty = false;
 
     loop {
         let mut processed_hub_event = false;
+        let mut force_motion_persist = false;
 
         // Pick up new hub event receivers from reconfiguration
         if let Ok(mut s) = state.lock() {
@@ -1570,6 +1577,9 @@ pub fn run_event_loop(
                 hub_event_rxs.extend(new_rxs);
                 motion_state = MotionTimerState::new();
                 last_motion_check = Instant::now();
+                motion_dirty = true;
+                motion_persistence.mark_dirty();
+                force_motion_persist = true;
             }
 
             if !s.pending_motion_clear.is_empty() {
@@ -1589,6 +1599,8 @@ pub fn run_event_loop(
                         target_node_ids.len()
                     );
                     motion_dirty = true;
+                    motion_persistence.mark_dirty();
+                    force_motion_persist = true;
                 }
             }
         }
@@ -1598,6 +1610,8 @@ pub fn run_event_loop(
         // loop — checking once before the loop drops every seed.
         if apply_pending_motion_seeds(&state, &mut motion_state, Instant::now()) {
             motion_dirty = true;
+            motion_persistence.mark_dirty();
+            force_motion_persist = true;
         }
 
         // Process hub events from all receivers, removing disconnected ones
@@ -1607,6 +1621,7 @@ pub fn run_event_loop(
                     processed_hub_event = true;
                     handle_hub_event(&state, event, &mut motion_state);
                     motion_dirty = true;
+                    motion_persistence.mark_dirty();
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => return true,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -1626,6 +1641,8 @@ pub fn run_event_loop(
             if !motion_state.sensors.is_empty() {
                 check_motion_timers(&state, &mut motion_state);
                 motion_dirty = true;
+                motion_persistence.mark_dirty();
+                force_motion_persist = true;
             }
         }
 
@@ -1633,6 +1650,11 @@ pub fn run_event_loop(
         if motion_dirty {
             motion_dirty = false;
             sync_motion_snapshots(&state, &motion_state);
+        }
+        if force_motion_persist {
+            motion_persistence.persist_now(&state, &motion_state);
+        } else {
+            motion_persistence.persist_if_due(&state, &motion_state);
         }
 
         if processed_hub_event {
@@ -1697,7 +1719,24 @@ pub fn apply_pending_motion_seeds(
             source_node_id,
             target_node_id,
             is_active,
+            stopped_at_epoch_ms,
+            motion_owned,
+            warning_active,
         } = seed;
+        let restore_too_stale = stopped_at_epoch_ms.is_some_and(|epoch_ms| {
+            restored_motion_timer_too_stale(state, &target_node_id, epoch_ms)
+        });
+        let stopped_at_epoch_ms = if restore_too_stale {
+            None
+        } else {
+            stopped_at_epoch_ms
+        };
+        let motion_owned = if restore_too_stale {
+            None
+        } else {
+            motion_owned
+        };
+        let warning_active = warning_active && !restore_too_stale && !is_active;
 
         if motion.sensors.contains_key(&source_node_id) {
             live_count += 1;
@@ -1722,7 +1761,7 @@ pub fn apply_pending_motion_seeds(
             }
         }
 
-        let observed_lights_on = if is_active {
+        let observed_lights_on = if is_active || motion_owned.is_some() {
             None
         } else {
             match observed_room_lights_on(state, &target_node_id) {
@@ -1732,26 +1771,45 @@ pub fn apply_pending_motion_seeds(
                         source_node_id,
                         target_node_id,
                         is_active,
+                        stopped_at_epoch_ms,
+                        motion_owned,
+                        warning_active,
                     });
                     continue;
                 }
             }
         };
 
-        let stopped_at = if is_active { None } else { Some(now) };
+        let (stopped_at, stopped_at_epoch_ms) = if is_active {
+            (None, None)
+        } else if let Some(epoch_ms) = stopped_at_epoch_ms {
+            (Some(instant_from_epoch_ms(now, epoch_ms)), Some(epoch_ms))
+        } else {
+            (Some(now), Some(current_epoch_ms()))
+        };
+        let should_own = if is_active {
+            true
+        } else {
+            motion_owned.unwrap_or_else(|| observed_lights_on.unwrap_or(false))
+        };
         motion.sensors.insert(
             source_node_id.clone(),
             MotionSourceState {
                 source_node_id,
                 target_node_id: target_node_id.clone(),
                 stopped_at,
+                stopped_at_epoch_ms,
             },
         );
+        if should_own {
+            motion.motion_owned.insert(target_node_id.clone());
+        }
+        if warning_active && should_own {
+            motion.warning_active.insert(target_node_id.clone());
+        }
         if is_active {
-            motion.motion_owned.insert(target_node_id);
             active_count += 1;
-        } else if observed_lights_on.unwrap_or(false) {
-            motion.motion_owned.insert(target_node_id);
+        } else if should_own {
             owned_inactive_count += 1;
         } else {
             idle_count += 1;
@@ -1775,6 +1833,37 @@ pub fn apply_pending_motion_seeds(
     applied_count > 0
 }
 
+fn instant_from_epoch_ms(now: Instant, epoch_ms: u64) -> Instant {
+    let age_ms = current_epoch_ms().saturating_sub(epoch_ms);
+    now.checked_sub(Duration::from_millis(age_ms))
+        .unwrap_or(now)
+}
+
+fn restored_motion_timer_too_stale(
+    state: &SharedState,
+    target_node_id: &str,
+    stopped_at_epoch_ms: u64,
+) -> bool {
+    let timeout_secs = motion_timeout_secs_for_target(state, target_node_id);
+    if timeout_secs == 0 {
+        return false;
+    }
+
+    let age_ms = current_epoch_ms().saturating_sub(stopped_at_epoch_ms);
+    age_ms > timeout_secs.saturating_mul(2).saturating_mul(1_000)
+}
+
+fn motion_timeout_secs_for_target(state: &SharedState, target_node_id: &str) -> u64 {
+    let (timeouts, _) = commands::resolved_motion_timeout_map(state);
+    timeouts.get(target_node_id).copied().unwrap_or_else(|| {
+        state
+            .lock()
+            .ok()
+            .map(|s| s.default_motion_timeout_secs)
+            .unwrap_or(0)
+    })
+}
+
 fn observed_room_lights_on(state: &SharedState, target_node_id: &str) -> Option<bool> {
     state.lock().ok().and_then(|s| {
         s.room_observed_power
@@ -1788,6 +1877,100 @@ fn target_room_flags(state: &SharedState, target_node_id: &str) -> Option<(bool,
     runtime
         .engine_effective_node_snapshot(target_node_id)
         .map(|snap| (snap.hard_off, snap.soft_off))
+}
+
+fn motion_timers_for_storage(motion: &MotionTimerState) -> StoredMotionTimers {
+    let mut entries: Vec<_> = motion
+        .sensors
+        .values()
+        .map(|source| StoredMotionTimerEntry {
+            source_node_id: source.source_node_id.clone(),
+            target_node_id: source.target_node_id.clone(),
+            stopped_at_epoch_ms: stopped_at_epoch_ms_for_storage(source),
+            motion_owned: motion.motion_owned.contains(&source.target_node_id),
+            warning_active: motion.warning_active.contains(&source.target_node_id),
+        })
+        .collect();
+    entries.sort_by(|a, b| a.source_node_id.cmp(&b.source_node_id));
+    StoredMotionTimers {
+        schema_version: 1,
+        entries,
+    }
+}
+
+fn stopped_at_epoch_ms_for_storage(source: &MotionSourceState) -> Option<u64> {
+    source.stopped_at.map(|stopped_at| {
+        source.stopped_at_epoch_ms.unwrap_or_else(|| {
+            let elapsed_ms: u64 = Instant::now()
+                .checked_duration_since(stopped_at)
+                .unwrap_or(Duration::ZERO)
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX);
+            current_epoch_ms().saturating_sub(elapsed_ms)
+        })
+    })
+}
+
+#[derive(Default)]
+struct MotionTimerPersistence {
+    dirty: bool,
+    last_attempt_at: Option<Instant>,
+    last_saved: Option<StoredMotionTimers>,
+}
+
+impl MotionTimerPersistence {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    fn persist_if_due(&mut self, state: &SharedState, motion: &MotionTimerState) {
+        if !self.dirty {
+            return;
+        }
+        if self
+            .last_attempt_at
+            .is_some_and(|last| last.elapsed() < MOTION_TIMER_CHECK_INTERVAL)
+        {
+            return;
+        }
+        self.persist_now(state, motion);
+    }
+
+    fn persist_now(&mut self, state: &SharedState, motion: &MotionTimerState) {
+        if !self.dirty {
+            return;
+        }
+
+        self.last_attempt_at = Some(Instant::now());
+        let timers = motion_timers_for_storage(motion);
+        if self.last_saved.as_ref() == Some(&timers) {
+            self.dirty = false;
+            return;
+        }
+
+        let s = match state.lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let Some(ref storage) = s.storage else {
+            self.dirty = false;
+            return;
+        };
+        match storage.save_motion_timers(&timers) {
+            Ok(()) => {
+                self.last_saved = Some(timers);
+                self.dirty = false;
+            }
+            Err(e) => {
+                warn!(target: "evt", "Failed to save motion timers: {}", e);
+            }
+        }
+    }
 }
 
 /// Sync motion timer snapshots into AppState for API visibility.
@@ -2282,6 +2465,7 @@ mod tests {
             source_node_id: source_node_id.to_string(),
             target_node_id: target_node_id.to_string(),
             stopped_at,
+            stopped_at_epoch_ms: stopped_at.map(|_| current_epoch_ms()),
         }
     }
 
@@ -2521,6 +2705,82 @@ mod tests {
 
     fn make_state() -> SharedState {
         std::sync::Arc::new(std::sync::Mutex::new(crate::state::AppState::default()))
+    }
+
+    #[derive(Clone, Default)]
+    struct MotionTimerTestStorage {
+        saved_motion_timers: Arc<Mutex<Vec<StoredMotionTimers>>>,
+    }
+
+    impl crate::storage::Storage for MotionTimerTestStorage {
+        fn load_rooms(&self) -> anyhow::Result<rhythm_core::room::RoomManager> {
+            Ok(rhythm_core::room::RoomManager::new())
+        }
+
+        fn save_rooms(&self, _rooms: &rhythm_core::room::RoomManager) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn load_light_profiles(&self) -> anyhow::Result<crate::storage::StoredLightProfiles> {
+            Err(anyhow::anyhow!("missing light profiles"))
+        }
+
+        fn save_light_profiles(
+            &self,
+            _config: &crate::storage::StoredLightProfiles,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn load_location(&self) -> anyhow::Result<crate::storage::StoredLocation> {
+            Err(anyhow::anyhow!("missing location"))
+        }
+
+        fn save_location(&self, _loc: &crate::storage::StoredLocation) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn load_settings(&self) -> anyhow::Result<crate::storage::StoredSettings> {
+            Err(anyhow::anyhow!("missing settings"))
+        }
+
+        fn save_settings(&self, _settings: &crate::storage::StoredSettings) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn save_motion_timers(&self, timers: &StoredMotionTimers) -> anyhow::Result<()> {
+            self.saved_motion_timers
+                .lock()
+                .unwrap()
+                .push(timers.clone());
+            Ok(())
+        }
+
+        fn load_all_hub_credentials(&self) -> anyhow::Result<Vec<crate::hub::HubCredentials>> {
+            Ok(Vec::new())
+        }
+
+        fn save_all_hub_credentials(
+            &self,
+            _creds: &[crate::hub::HubCredentials],
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn load_hub_registry_for(
+            &self,
+            _key: &HubKey,
+        ) -> anyhow::Result<Option<serde_json::Value>> {
+            Ok(None)
+        }
+
+        fn save_hub_registry_for(
+            &self,
+            _key: &HubKey,
+            _data: &serde_json::Value,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     fn make_state_with_runtime(runtime: Arc<dyn RuntimeHandle>) -> SharedState {
@@ -4814,7 +5074,118 @@ mod tests {
                 source_node_id: source.into(),
                 target_node_id: target.into(),
                 is_active,
+                stopped_at_epoch_ms: None,
+                motion_owned: None,
+                warning_active: false,
             });
+    }
+
+    #[test]
+    fn motion_timers_for_storage_sorts_and_preserves_source_fields() {
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            "sensor_b".into(),
+            MotionSourceState {
+                source_node_id: "sensor_b".into(),
+                target_node_id: "room_b".into(),
+                stopped_at: None,
+                stopped_at_epoch_ms: None,
+            },
+        );
+        motion.sensors.insert(
+            "sensor_a".into(),
+            MotionSourceState {
+                source_node_id: "sensor_a".into(),
+                target_node_id: "room_a".into(),
+                stopped_at: Some(Instant::now()),
+                stopped_at_epoch_ms: Some(1_700_000_010_000),
+            },
+        );
+        motion.motion_owned.insert("room_a".into());
+        motion.warning_active.insert("room_a".into());
+
+        let timers = motion_timers_for_storage(&motion);
+
+        assert_eq!(timers.schema_version, 1);
+        assert_eq!(
+            timers
+                .entries
+                .iter()
+                .map(|entry| entry.source_node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sensor_a", "sensor_b"]
+        );
+        assert_eq!(
+            timers.entries[0],
+            StoredMotionTimerEntry {
+                source_node_id: "sensor_a".into(),
+                target_node_id: "room_a".into(),
+                stopped_at_epoch_ms: Some(1_700_000_010_000),
+                motion_owned: true,
+                warning_active: true,
+            }
+        );
+        assert_eq!(timers.entries[1].stopped_at_epoch_ms, None);
+        assert!(!timers.entries[1].motion_owned);
+        assert!(!timers.entries[1].warning_active);
+    }
+
+    #[test]
+    fn motion_persistence_skips_unchanged_payloads() {
+        let saved = Arc::new(Mutex::new(Vec::new()));
+        let mut app = crate::state::AppState::default();
+        app.storage = Some(Box::new(MotionTimerTestStorage {
+            saved_motion_timers: saved.clone(),
+        }));
+        let state = Arc::new(Mutex::new(app));
+
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            "sensor_a".into(),
+            MotionSourceState {
+                source_node_id: "sensor_a".into(),
+                target_node_id: "room_a".into(),
+                stopped_at: None,
+                stopped_at_epoch_ms: None,
+            },
+        );
+
+        let mut persistence = MotionTimerPersistence::new();
+        persistence.mark_dirty();
+        persistence.persist_now(&state, &motion);
+        persistence.mark_dirty();
+        persistence.persist_now(&state, &motion);
+
+        assert_eq!(saved.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn motion_persistence_waits_for_coalesce_interval() {
+        let saved = Arc::new(Mutex::new(Vec::new()));
+        let mut app = crate::state::AppState::default();
+        app.storage = Some(Box::new(MotionTimerTestStorage {
+            saved_motion_timers: saved.clone(),
+        }));
+        let state = Arc::new(Mutex::new(app));
+
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            "sensor_a".into(),
+            MotionSourceState {
+                source_node_id: "sensor_a".into(),
+                target_node_id: "room_a".into(),
+                stopped_at: None,
+                stopped_at_epoch_ms: None,
+            },
+        );
+
+        let mut persistence = MotionTimerPersistence::new();
+        persistence.last_attempt_at = Some(Instant::now());
+        persistence.mark_dirty();
+        persistence.persist_if_due(&state, &motion);
+
+        assert!(saved.lock().unwrap().is_empty());
+        assert!(persistence.dirty);
     }
 
     fn set_observed_lights_on_with_source(
@@ -4870,6 +5241,101 @@ mod tests {
         assert!(
             state.lock().unwrap().pending_motion_seed.is_empty(),
             "applying seeds must drain the queue"
+        );
+    }
+
+    #[test]
+    fn apply_seeds_preserves_persisted_inactive_countdown() {
+        let state = make_state();
+        let stopped_at_epoch_ms = crate::state::current_epoch_ms().saturating_sub(85_000);
+        state
+            .lock()
+            .unwrap()
+            .pending_motion_seed
+            .push(MotionSeedEntry {
+                source_node_id: "sensor_1".into(),
+                target_node_id: "room_a".into(),
+                is_active: false,
+                stopped_at_epoch_ms: Some(stopped_at_epoch_ms),
+                motion_owned: Some(true),
+                warning_active: false,
+            });
+
+        let mut motion = MotionTimerState::new();
+        let dirty = apply_pending_motion_seeds(&state, &mut motion, Instant::now());
+
+        assert!(dirty);
+        assert!(motion.motion_owned.contains("room_a"));
+        let snapshots = motion.snapshots(&HashMap::from([("room_a".to_string(), 120)]), 300);
+        let remaining = snapshots["room_a"]
+            .remaining_secs
+            .expect("inactive seed should be counting down");
+        assert!(
+            (28..=38).contains(&remaining),
+            "remaining_secs should preserve elapsed time, got {}",
+            remaining
+        );
+    }
+
+    #[test]
+    fn apply_active_seed_keeps_motion_owned_invariant() {
+        let state = make_state();
+        state
+            .lock()
+            .unwrap()
+            .pending_motion_seed
+            .push(MotionSeedEntry {
+                source_node_id: "sensor_1".into(),
+                target_node_id: "room_a".into(),
+                is_active: true,
+                stopped_at_epoch_ms: None,
+                motion_owned: Some(false),
+                warning_active: true,
+            });
+
+        let mut motion = MotionTimerState::new();
+        let dirty = apply_pending_motion_seeds(&state, &mut motion, Instant::now());
+
+        assert!(dirty);
+        assert!(motion.motion_owned.contains("room_a"));
+        assert!(!motion.warning_active.contains("room_a"));
+        assert_eq!(motion.sensors["sensor_1"].stopped_at, None);
+        assert_eq!(motion.sensors["sensor_1"].stopped_at_epoch_ms, None);
+    }
+
+    #[test]
+    fn apply_seed_drops_stale_persisted_countdown() {
+        let state = make_state();
+        {
+            let mut s = state.lock().unwrap();
+            s.default_motion_timeout_secs = 120;
+            s.pending_motion_seed.push(MotionSeedEntry {
+                source_node_id: "sensor_1".into(),
+                target_node_id: "room_a".into(),
+                is_active: false,
+                stopped_at_epoch_ms: Some(
+                    crate::state::current_epoch_ms().saturating_sub(10 * 60 * 1_000),
+                ),
+                motion_owned: Some(true),
+                warning_active: true,
+            });
+        }
+        set_observed_lights_on(&state, "room_a", true);
+
+        let mut motion = MotionTimerState::new();
+        let dirty = apply_pending_motion_seeds(&state, &mut motion, Instant::now());
+
+        assert!(dirty);
+        assert!(motion.motion_owned.contains("room_a"));
+        assert!(!motion.warning_active.contains("room_a"));
+        let snapshots = motion.snapshots(&HashMap::from([("room_a".to_string(), 120)]), 300);
+        let remaining = snapshots["room_a"]
+            .remaining_secs
+            .expect("inactive seed should be counting down");
+        assert!(
+            remaining >= 115,
+            "stale restored countdown should restart near full timeout, got {}",
+            remaining
         );
     }
 
