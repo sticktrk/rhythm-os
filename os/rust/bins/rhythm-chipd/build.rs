@@ -5,6 +5,11 @@ use std::process::Command;
 
 const BRIDGE_HEADER: &str = "native/chip_bridge.h";
 const BRIDGE_SOURCE: &str = "native/chip_bridge.cc";
+const CHIP_EXAMPLE_STORAGE_SOURCE: &str = "src/controller/ExamplePersistentStorage.cpp";
+const CHIP_FILE_ATTESTATION_TRUST_STORE_HEADER: &str =
+    "src/credentials/attestation_verifier/FileAttestationTrustStore.h";
+const CHIP_FILE_ATTESTATION_TRUST_STORE_SOURCE: &str =
+    "src/credentials/attestation_verifier/FileAttestationTrustStore.cpp";
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(rhythm_chipd_chip_ffi)");
@@ -35,10 +40,11 @@ fn main() {
                 // static-link libstdc++ to avoid shipping a C++ runtime .so.
                 .cpp_link_stdlib(None::<&str>)
                 .file(BRIDGE_SOURCE)
+                .file(artifacts.chip_root.join(CHIP_EXAMPLE_STORAGE_SOURCE))
                 .file(
                     artifacts
                         .chip_root
-                        .join("src/controller/ExamplePersistentStorage.cpp"),
+                        .join(CHIP_FILE_ATTESTATION_TRUST_STORE_SOURCE),
                 )
                 .flag_if_supported("-std=c++17")
                 .warnings(false)
@@ -76,6 +82,16 @@ fn main() {
                 for path in inputs {
                     println!("cargo:rerun-if-changed={}", path.display());
                 }
+            }
+            for relative in [
+                CHIP_EXAMPLE_STORAGE_SOURCE,
+                CHIP_FILE_ATTESTATION_TRUST_STORE_HEADER,
+                CHIP_FILE_ATTESTATION_TRUST_STORE_SOURCE,
+            ] {
+                println!(
+                    "cargo:rerun-if-changed={}",
+                    artifacts.chip_root.join(relative).display()
+                );
             }
             emit_platform_link_args(&artifacts.target);
             println!("cargo:rustc-cfg=rhythm_chipd_chip_ffi");
