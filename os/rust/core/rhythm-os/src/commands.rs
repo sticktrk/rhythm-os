@@ -7661,6 +7661,12 @@ fn run_topology_group_sync_for_integrations(state: &SharedState) {
             if let Ok(state) = state.lock() {
                 persist_topology(&state);
             }
+            // The sync may have upserted new hub-native group bindings into
+            // topology (e.g. a Matter group). The composite routing table was
+            // built from the pre-sync topology, so without this rebuild
+            // dispatch keeps fanning out per-device until some unrelated
+            // topology mutation triggers a rebuild.
+            rebuild_composite_routing(state);
         }
         Err(error) => {
             warn!(target: "cmd", "Topology group sync failed: {}", error);
@@ -9358,8 +9364,8 @@ mod tests {
     use crate::topology::InputBindingPreset;
     use chrono::{Datelike, Timelike};
     use rhythm_core::{
-        HubDispatchTarget, HubLightController, HubRegistry, LightControlResult, LightProfileConfig,
-        Room, RoomSnapshot, RuntimeHandle,
+        HubDispatchTarget, HubLightController, HubRegistry, LightController, LightControlResult,
+        LightProfileConfig, Room, RoomSnapshot, RuntimeHandle,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -9766,6 +9772,61 @@ mod tests {
 
         fn name(&self) -> &str {
             "RecordingFlash"
+        }
+    }
+
+    struct RecordingDispatchController {
+        turn_on_calls: Mutex<Vec<String>>,
+    }
+
+    impl RecordingDispatchController {
+        fn new() -> Self {
+            Self {
+                turn_on_calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn turn_on_calls(&self) -> Vec<String> {
+            self.turn_on_calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HubLightController for RecordingDispatchController {
+        async fn turn_on_target(
+            &self,
+            target: &HubDispatchTarget,
+            _command: rhythm_core::LightingCommand,
+        ) -> LightControlResult<()> {
+            self.turn_on_calls.lock().unwrap().push(target.label());
+            Ok(())
+        }
+
+        async fn turn_off_target(
+            &self,
+            _target: &HubDispatchTarget,
+            _transition_ms: Option<u32>,
+        ) -> LightControlResult<()> {
+            Ok(())
+        }
+
+        async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
+            Ok(Vec::new())
+        }
+
+        async fn is_connected(&self) -> bool {
+            true
+        }
+
+        async fn any_lights_on_target(
+            &self,
+            _target: &HubDispatchTarget,
+        ) -> LightControlResult<bool> {
+            Ok(false)
+        }
+
+        fn name(&self) -> &str {
+            "RecordingDispatch"
         }
     }
 
@@ -15963,6 +16024,93 @@ mod tests {
         );
         wait_for_sync_count(&sync_started, 1);
         wait_for_sync_count(&sync_finished, 1);
+    }
+
+    #[test]
+    fn topology_group_sync_rebuilds_composite_routing_for_new_group_binding() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+
+        let created: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Office").unwrap()).unwrap();
+        let room_id = created["id"].as_str().unwrap().to_string();
+        let device_one =
+            insert_canonical_device(&state, hub_key.clone(), "matter-100", "Desk Lamp", "", "");
+        let device_two =
+            insert_canonical_device(&state, hub_key.clone(), "matter-101", "Table Lamp", "", "");
+
+        let recording = Arc::new(RecordingDispatchController::new());
+        let composite = Arc::new(rhythm_core::CompositeController::new());
+        composite.register_controller(&hub_key.to_string(), recording.clone());
+        state.lock().unwrap().composite_controller = Some(composite.clone());
+
+        let control_id = "matter-group-40657".to_string();
+        let sync_count = Arc::new(AtomicUsize::new(0));
+        {
+            let sync_count = sync_count.clone();
+            let hub_key_for_callback = hub_key.clone();
+            let room_id_for_callback = room_id.clone();
+            let control_id_for_callback = control_id.clone();
+            state.lock().unwrap().sync_topology_groups_fn =
+                Some(Arc::new(move |state: &SharedState| {
+                    {
+                        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+                        let member_device_ids: Vec<String> = s
+                            .topology
+                            .get(&room_id_for_callback)
+                            .map(|room| {
+                                room.devices
+                                    .iter()
+                                    .filter_map(|room_device| {
+                                        s.canonical_registry.get(&room_device.device_id)
+                                    })
+                                    .filter_map(|device| device.preferred_endpoint())
+                                    .map(|endpoint| endpoint.native_id.clone())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if member_device_ids.len() >= 2 {
+                            s.topology.upsert_room_binding(
+                                &room_id_for_callback,
+                                crate::topology::HubRoomBinding {
+                                    hub_key: hub_key_for_callback.clone(),
+                                    hub_room_id: room_id_for_callback.clone(),
+                                    control_id: control_id_for_callback.clone(),
+                                    light_device_ids: member_device_ids,
+                                },
+                            );
+                        }
+                    }
+                    sync_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }));
+        }
+
+        do_canonical_assign_room(&state, &device_one, Some(&room_id)).unwrap();
+        wait_for_sync_count(&sync_count, 1);
+        do_canonical_assign_room(&state, &device_two, Some(&room_id)).unwrap();
+        wait_for_sync_count(&sync_count, 2);
+
+        futures::executor::block_on(
+            composite.turn_on(&room_id, rhythm_core::LightingCommand::new(80, 4000)),
+        )
+        .expect("turn_on should succeed");
+
+        let calls = recording.turn_on_calls();
+        assert_eq!(
+            calls.len(),
+            1,
+            "expected exactly one turn_on_target dispatch, got {calls:?}"
+        );
+        let label = &calls[0];
+        assert!(
+            label.contains(control_id.as_str()),
+            "composite routing did not refresh after topology group sync: \
+             got target={label:?}, expected groupcast via {control_id}"
+        );
+        assert!(
+            !label.contains("matter-100,matter-101"),
+            "composite routing still dispatching per-device after sync: target={label:?}"
+        );
     }
 
     #[test]
