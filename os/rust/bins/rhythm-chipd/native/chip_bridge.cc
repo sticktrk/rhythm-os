@@ -58,6 +58,7 @@ using chip::Controller::ClusterBase;
 using chip::Controller::CommissioningParameters;
 using chip::Controller::DevicePairingDelegate;
 using chip::Controller::DiscoveryType;
+using chip::Controller::OnNOCChainGeneration;
 using chip::Controller::WiFiCredentials;
 
 constexpr std::chrono::seconds kOperationTimeout(30);
@@ -108,6 +109,49 @@ CHIP_ERROR DecodeRhythmIpk(const char * ipkHex, RhythmIpk & out)
 
     return CHIP_NO_ERROR;
 }
+
+class RhythmOperationalCredentialsIssuer final : public ExampleOperationalCredentialsIssuer
+{
+public:
+    void SetCommissioningIpk(const RhythmIpk & ipk) { mCommissioningIpk = ipk; }
+
+    CHIP_ERROR GenerateNOCChain(const ByteSpan & csrElements, const ByteSpan & csrNonce,
+                                const ByteSpan & attestationSignature, const ByteSpan & attestationChallenge,
+                                const ByteSpan & DAC, const ByteSpan & PAI,
+                                Callback::Callback<OnNOCChainGeneration> * onCompletion) override
+    {
+        VerifyOrReturnError(onCompletion != nullptr && onCompletion->mCall != nullptr, CHIP_ERROR_INVALID_ARGUMENT);
+
+        IpkOverrideContext context{ onCompletion, &mCommissioningIpk };
+        Callback::Callback<OnNOCChainGeneration> callback(&OnNOCChainGenerated, &context);
+        return ExampleOperationalCredentialsIssuer::GenerateNOCChain(csrElements, csrNonce, attestationSignature,
+                                                                     attestationChallenge, DAC, PAI, &callback);
+    }
+
+private:
+    struct IpkOverrideContext
+    {
+        Callback::Callback<OnNOCChainGeneration> * original;
+        const RhythmIpk * ipk;
+    };
+
+    static void OnNOCChainGenerated(void * rawContext, CHIP_ERROR status, const ByteSpan & noc, const ByteSpan & icac,
+                                    const ByteSpan & rcac, Optional<Crypto::IdentityProtectionKeySpan> ignoredIpk,
+                                    Optional<NodeId> adminSubject)
+    {
+        (void) ignoredIpk;
+
+        auto * context = static_cast<IpkOverrideContext *>(rawContext);
+        VerifyOrReturn(context != nullptr && context->original != nullptr && context->original->mCall != nullptr &&
+                       context->ipk != nullptr);
+
+        Crypto::IdentityProtectionKeySpan ipkSpan(*context->ipk);
+        ChipLogProgress(Controller, "Rhythm Matter generated device NOC chain with configured fabric IPK");
+        context->original->mCall(context->original->mContext, status, noc, icac, rcac, MakeOptional(ipkSpan), adminSubject);
+    }
+
+    RhythmIpk mCommissioningIpk = {};
+};
 
 // DEV-ONLY attestation verifier that waves every device through.
 // Use only on a trusted LAN during rpiz bring-up; production must use
@@ -1437,6 +1481,7 @@ private:
         ReturnErrorOnFailure(mOperationalKeypair.Initialize(chip::Crypto::ECPKeyTarget::ECDSA));
         commissionerParams.operationalKeypair = &mOperationalKeypair;
 
+        mOperationalCredentialsIssuer.SetCommissioningIpk(mIpk);
         ReturnErrorOnFailure(mOperationalCredentialsIssuer.Initialize(*mStorage));
 
         chip::Platform::ScopedMemoryBuffer<uint8_t> noc;
@@ -1851,7 +1896,7 @@ private:
     std::unique_ptr<chip::Credentials::FileAttestationTrustStore> mPaaTrustStore;
     chip::Credentials::GroupDataProviderImpl mGroupDataProvider;
     chip::Credentials::PersistentStorageOpCertStore mOpCertStore;
-    ExampleOperationalCredentialsIssuer mOperationalCredentialsIssuer;
+    RhythmOperationalCredentialsIssuer mOperationalCredentialsIssuer;
     chip::Crypto::RawKeySessionKeystore mSessionKeystore;
     chip::Crypto::P256Keypair mOperationalKeypair;
     BlockingPairingDelegate mPairingDelegate;
