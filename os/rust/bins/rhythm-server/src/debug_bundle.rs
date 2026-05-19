@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{BufRead, Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::sync::MutexGuard;
+use std::time::SystemTime;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
@@ -800,7 +801,7 @@ fn discover_log_artifacts(
     log_dirs: &[PathBuf],
     diagnostics: &mut BundleDiagnostics,
 ) -> Vec<FileArtifact> {
-    let mut discovered = Vec::<FileArtifact>::new();
+    let mut discovered = Vec::<(FileArtifact, Option<SystemTime>)>::new();
     let mut seen_archive_paths = BTreeSet::<String>::new();
 
     for dir in log_dirs {
@@ -843,15 +844,28 @@ fn discover_log_artifacts(
                 continue;
             }
 
-            discovered.push(FileArtifact {
-                source_path: path,
-                archive_path,
-            });
+            let modified = fs::metadata(&path).and_then(|m| m.modified()).ok();
+
+            discovered.push((
+                FileArtifact {
+                    source_path: path,
+                    archive_path,
+                },
+                modified,
+            ));
         }
     }
 
-    discovered.sort_by(|left, right| left.archive_path.cmp(&right.archive_path));
-    discovered
+    // Iterate oldest -> newest so the sliding `recent_*` deques in
+    // build_log_summary_json end up holding the most recent entries
+    // (push_limited evicts from the front). Files without mtime sort first
+    // so any readable file still surfaces its newest content at the end.
+    discovered.sort_by(|left, right| {
+        left.1
+            .cmp(&right.1)
+            .then_with(|| left.0.archive_path.cmp(&right.0.archive_path))
+    });
+    discovered.into_iter().map(|(artifact, _)| artifact).collect()
 }
 
 fn discover_persisted_artifacts(
@@ -2315,6 +2329,86 @@ mod tests {
                 "/proc/partitions capture missing on linux"
             );
         }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn log_summary_recent_windows_capture_newest_log_entries() {
+        let root = unique_test_dir("log-recency");
+        let data_dir = root.join("data");
+        let log_dir = data_dir.join("log");
+        fs::create_dir_all(&log_dir).unwrap();
+
+        // Older rotated log: more than RECENT_PERIODIC_LIMIT (50) periodic
+        // cycle lines, so if iteration order were wrong the rotated file's
+        // entries would entirely crowd out the newest log's marker.
+        let mut old_lines = String::new();
+        for i in 0..60 {
+            old_lines.push_str(&format!(
+                "2026-04-27T19:00:{:02}-04:00  INFO periodic sys: Periodic cycle event=\"periodic_cycle\" marker=OLD-{}\n",
+                i % 60,
+                i
+            ));
+        }
+        let old_path = log_dir.join("rhythm-server.log.1");
+        fs::write(&old_path, &old_lines).unwrap();
+
+        let new_line = "2026-05-19T07:49:39-04:00  INFO periodic sys: Periodic cycle event=\"periodic_cycle\" marker=NEW-LINE\n";
+        let new_path = log_dir.join("rhythm-server.log");
+        fs::write(&new_path, new_line).unwrap();
+
+        // Force mtimes so the rotated log is unambiguously older than the
+        // active log, regardless of filesystem mtime granularity.
+        let now = SystemTime::now();
+        let old_time = now - std::time::Duration::from_secs(86_400);
+        fs::File::options()
+            .write(true)
+            .open(&old_path)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&new_path)
+            .unwrap()
+            .set_modified(now)
+            .unwrap();
+
+        let state: SharedState =
+            std::sync::Arc::new(std::sync::Mutex::new(rhythm_os::state::AppState::default()));
+        {
+            let mut guard = state.lock().unwrap();
+            guard.firmware_version = "1.2.3";
+            guard.platform_type = "appliance";
+            guard.platform_context = "rpiz";
+            guard.data_dir = data_dir.display().to_string();
+        }
+
+        let bundle = build_debug_bundle(&state).unwrap();
+        let files = unpack_bundle(&bundle.bytes);
+        let log_summary: Value =
+            serde_json::from_slice(files.get("log_summary.json").unwrap()).unwrap();
+
+        let recent = log_summary["recent_periodic_cycles"].as_array().unwrap();
+        assert_eq!(recent.len(), 50, "sliding window should be at capacity");
+        assert!(
+            recent.iter().any(|entry| entry["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("marker=NEW-LINE"))),
+            "recent_periodic_cycles should retain the newest log's entry, got: {recent:#?}"
+        );
+        let last = recent.last().unwrap();
+        assert_eq!(
+            last["archive_path"], "logs/rhythm-server.log",
+            "newest entry should sit at the back of the sliding window"
+        );
+
+        let tail = log_summary["tail"].as_array().unwrap();
+        assert!(
+            tail.iter().any(|entry| entry["archive_path"] == "logs/rhythm-server.log"),
+            "tail should include lines from the active log"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
