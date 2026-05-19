@@ -32,6 +32,7 @@ const APPLIANCE_CMDLINE_PATH: &str = "/boot/cmdline.txt";
 const APPLIANCE_CMDLINE_BACKUP_PATH: &str = "/boot/cmdline.txt.bak";
 const APPLIANCE_BOOT_STATE_PATH: &str = "/boot/rhythm-bootstate.env";
 const APPLIANCE_BOOT_STATE_BACKUP_PATH: &str = "/boot/rhythm-bootstate.env.bak";
+const APPLIANCE_BOOT_STATE_MIRROR_PATH: &str = "/data/ota/bootstate.env";
 const APPLIANCE_REBOOT_FALLBACK_SECS: u64 = 30;
 
 static APPLY_LOCK: Mutex<()> = Mutex::new(());
@@ -69,11 +70,15 @@ impl UpdateChannel {
 /// CI feed and manual control over when updates apply. Non-appliance runtimes
 /// stay on beta because stable promotion is only defined for the rpiz feed.
 pub fn channel_from_state(state: &rhythm_os::state::SharedState) -> UpdateChannel {
-    if !is_appliance_runtime_default() {
+    let (platform_type, auto_update) = state
+        .lock()
+        .map(|s| (s.platform_type, s.auto_update))
+        .unwrap_or(("desktop", true));
+
+    if !is_appliance_runtime_default() && platform_type != "appliance" {
         return UpdateChannel::Beta;
     }
 
-    let auto_update = state.lock().map(|s| s.auto_update).unwrap_or(true);
     if auto_update {
         UpdateChannel::Stable
     } else {
@@ -971,13 +976,13 @@ fn ensure_mount(path: &str, device: &str, fs_type: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn write_appliance_boot_state(
+fn appliance_pending_boot_state_body(
     current_slot: ApplianceSlot,
     target_slot: ApplianceSlot,
     current_version: &str,
     pending_version: &str,
-) -> Result<(), String> {
-    let body = format!(
+) -> String {
+    format!(
         "RHYTHM_ACTIVE_SLOT={}\nRHYTHM_LAST_GOOD_SLOT={}\nRHYTHM_PENDING_SLOT={}\nRHYTHM_PENDING_VERSION={}\nRHYTHM_ACTIVE_VERSION={}\nRHYTHM_BOOT_STATUS=pending\nRHYTHM_LAST_UPDATE_EPOCH_MS={}\nRHYTHM_LAST_ROLLBACK_SLOT=\nRHYTHM_LAST_ROLLBACK_VERSION=\nRHYTHM_LAST_ROLLBACK_EPOCH_MS=\n",
         current_slot.as_str(),
         current_slot.as_str(),
@@ -985,12 +990,86 @@ fn write_appliance_boot_state(
         pending_version,
         current_version,
         now_ms()
+    )
+}
+
+fn appliance_idle_boot_state_body(active_slot: ApplianceSlot, active_version: &str) -> String {
+    format!(
+        "RHYTHM_ACTIVE_SLOT={}\nRHYTHM_LAST_GOOD_SLOT={}\nRHYTHM_PENDING_SLOT=\nRHYTHM_PENDING_VERSION=\nRHYTHM_ACTIVE_VERSION={}\nRHYTHM_BOOT_STATUS=idle\nRHYTHM_LAST_UPDATE_EPOCH_MS={}\nRHYTHM_LAST_ROLLBACK_SLOT=\nRHYTHM_LAST_ROLLBACK_VERSION=\nRHYTHM_LAST_ROLLBACK_EPOCH_MS=\n",
+        active_slot.as_str(),
+        active_slot.as_str(),
+        active_version,
+        now_ms()
+    )
+}
+
+fn write_appliance_boot_state(
+    current_slot: ApplianceSlot,
+    target_slot: ApplianceSlot,
+    current_version: &str,
+    pending_version: &str,
+) -> Result<(), String> {
+    let body = appliance_pending_boot_state_body(
+        current_slot,
+        target_slot,
+        current_version,
+        pending_version,
     );
     bootstate::write_with_backup(
         Path::new(APPLIANCE_BOOT_STATE_PATH),
         Path::new(APPLIANCE_BOOT_STATE_BACKUP_PATH),
         &body,
     )
+}
+
+fn write_appliance_idle_boot_state(
+    active_slot: ApplianceSlot,
+    active_version: &str,
+) -> Result<(), String> {
+    let body = appliance_idle_boot_state_body(active_slot, active_version);
+    bootstate::write_with_backup(
+        Path::new(APPLIANCE_BOOT_STATE_PATH),
+        Path::new(APPLIANCE_BOOT_STATE_BACKUP_PATH),
+        &body,
+    )
+}
+
+fn finalize_appliance_boot_switch<W, C, R>(
+    current_slot: ApplianceSlot,
+    target_slot: ApplianceSlot,
+    current_version: &str,
+    latest_version: &str,
+    mut write_pending_boot_state: W,
+    mut rewrite_cmdline: C,
+    mut write_idle_boot_state: R,
+) -> Result<(), String>
+where
+    W: FnMut(ApplianceSlot, ApplianceSlot, &str, &str) -> Result<(), String>,
+    C: FnMut(ApplianceSlot) -> Result<(), String>,
+    R: FnMut(ApplianceSlot, &str) -> Result<(), String>,
+{
+    // The boot marker must be durable before cmdline points at the new slot.
+    // If power dies after cmdline is rewritten, S41bootstate can still treat
+    // the next boot as pending and roll back if the process fails early.
+    write_pending_boot_state(current_slot, target_slot, current_version, latest_version)?;
+
+    if let Err(error) = rewrite_cmdline(target_slot) {
+        // Cmdline still points at the current slot, so return bootstate to an
+        // idle state. This avoids a stale pending marker confusing the next
+        // ordinary boot if /boot was writable enough for the marker but not
+        // for cmdline.txt.
+        if let Err(reset_error) = write_idle_boot_state(current_slot, current_version) {
+            return Err(format!(
+                "{}; additionally failed to restore bootstate for slot {}: {}",
+                error,
+                current_slot.as_str(),
+                reset_error
+            ));
+        }
+        return Err(error);
+    }
+
+    Ok(())
 }
 
 fn update_appliance_cmdline_for_slot(slot: ApplianceSlot) -> Result<(), String> {
@@ -1159,8 +1238,15 @@ fn apply_appliance_image_blocking(
             OtaUpdateStage::Finalizing,
             "Preparing updated boot slot",
         ));
-        update_appliance_cmdline_for_slot(target_slot)?;
-        write_appliance_boot_state(current_slot, target_slot, current_version, latest_version)?;
+        finalize_appliance_boot_switch(
+            current_slot,
+            target_slot,
+            current_version,
+            latest_version,
+            write_appliance_boot_state,
+            update_appliance_cmdline_for_slot,
+            write_appliance_idle_boot_state,
+        )?;
         Ok::<(), String>(())
     })() {
         remove_if_exists(&download_path);
@@ -1516,6 +1602,60 @@ fn is_appliance_runtime(platform_type: Option<&str>) -> bool {
 pub fn is_appliance_runtime_default() -> bool {
     let platform_type = std::env::var("RHYTHM_PLATFORM_TYPE").ok();
     is_appliance_runtime(platform_type.as_deref())
+}
+
+/// Best-effort persistence before a planned restart/reboot.
+///
+/// This asks the event loop to flush its owned motion timers, then captures
+/// canonical registry and room runtime state before an OTA or explicit restart.
+pub fn persist_before_restart(state: &rhythm_os::state::SharedState) {
+    log::info!(target: "sys", "Persisting runtime state before restart");
+    if !rhythm_os::event_loop::request_motion_timer_persist(
+        state,
+        std::time::Duration::from_millis(750),
+    ) {
+        log::warn!(
+            target: "sys",
+            "Timed out waiting for motion timer persistence before restart"
+        );
+    }
+    rhythm_os::commands::persist_state(state);
+}
+
+pub fn appliance_rollback_version_matches(version: &str) -> bool {
+    if version.trim().is_empty() {
+        return false;
+    }
+
+    let Some(rolled_back) = fs::read_to_string(APPLIANCE_BOOT_STATE_MIRROR_PATH)
+        .ok()
+        .and_then(|raw| bootstate_body_from_text(&raw))
+        .and_then(|body| last_appliance_rollback_version_from_body(&body))
+    else {
+        return false;
+    };
+
+    rolled_back == version
+}
+
+fn bootstate_body_from_text(raw: &str) -> Option<String> {
+    if raw.starts_with(bootstate::HASH_HEADER_PREFIX) {
+        bootstate::verify_and_extract(raw)
+    } else {
+        Some(raw.to_string())
+    }
+}
+
+fn last_appliance_rollback_version_from_body(body: &str) -> Option<String> {
+    bootstate_value(body, "RHYTHM_LAST_ROLLBACK_VERSION")
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn bootstate_value<'a>(body: &'a str, key: &str) -> Option<&'a str> {
+    body.lines()
+        .filter_map(|line| line.split_once('='))
+        .find_map(|(k, v)| (k == key).then_some(v.trim()))
 }
 
 pub fn schedule_post_update_restart() {
@@ -2172,6 +2312,121 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&cmdline).unwrap(), initial);
         assert_eq!(fs::read_to_string(&backup).unwrap(), initial);
+    }
+
+    #[test]
+    fn appliance_pending_boot_state_body_marks_target_slot_pending() {
+        let body =
+            appliance_pending_boot_state_body(ApplianceSlot::A, ApplianceSlot::B, "0.4.1", "0.4.2");
+
+        assert!(body.contains("RHYTHM_ACTIVE_SLOT=a\n"));
+        assert!(body.contains("RHYTHM_LAST_GOOD_SLOT=a\n"));
+        assert!(body.contains("RHYTHM_PENDING_SLOT=b\n"));
+        assert!(body.contains("RHYTHM_PENDING_VERSION=0.4.2\n"));
+        assert!(body.contains("RHYTHM_ACTIVE_VERSION=0.4.1\n"));
+        assert!(body.contains("RHYTHM_BOOT_STATUS=pending\n"));
+        assert!(body.contains("RHYTHM_LAST_ROLLBACK_VERSION=\n"));
+    }
+
+    #[test]
+    fn appliance_idle_boot_state_body_clears_pending_marker() {
+        let body = appliance_idle_boot_state_body(ApplianceSlot::A, "0.4.1");
+
+        assert!(body.contains("RHYTHM_ACTIVE_SLOT=a\n"));
+        assert!(body.contains("RHYTHM_LAST_GOOD_SLOT=a\n"));
+        assert!(body.contains("RHYTHM_PENDING_SLOT=\n"));
+        assert!(body.contains("RHYTHM_PENDING_VERSION=\n"));
+        assert!(body.contains("RHYTHM_ACTIVE_VERSION=0.4.1\n"));
+        assert!(body.contains("RHYTHM_BOOT_STATUS=idle\n"));
+    }
+
+    #[test]
+    fn finalize_appliance_boot_switch_writes_pending_marker_before_cmdline() {
+        let steps = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let pending_steps = steps.clone();
+        let cmdline_steps = steps.clone();
+        let reset_steps = steps.clone();
+
+        finalize_appliance_boot_switch(
+            ApplianceSlot::A,
+            ApplianceSlot::B,
+            "0.4.1",
+            "0.4.2",
+            move |current, target, current_version, latest_version| {
+                assert_eq!(current, ApplianceSlot::A);
+                assert_eq!(target, ApplianceSlot::B);
+                assert_eq!(current_version, "0.4.1");
+                assert_eq!(latest_version, "0.4.2");
+                pending_steps.lock().unwrap().push("bootstate");
+                Ok(())
+            },
+            move |target| {
+                assert_eq!(target, ApplianceSlot::B);
+                cmdline_steps.lock().unwrap().push("cmdline");
+                Ok(())
+            },
+            move |_, _| {
+                reset_steps.lock().unwrap().push("reset");
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(*steps.lock().unwrap(), vec!["bootstate", "cmdline"]);
+    }
+
+    #[test]
+    fn finalize_appliance_boot_switch_resets_pending_marker_when_cmdline_fails() {
+        let steps = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let pending_steps = steps.clone();
+        let cmdline_steps = steps.clone();
+        let reset_steps = steps.clone();
+
+        let result = finalize_appliance_boot_switch(
+            ApplianceSlot::A,
+            ApplianceSlot::B,
+            "0.4.1",
+            "0.4.2",
+            move |_, _, _, _| {
+                pending_steps.lock().unwrap().push("bootstate");
+                Ok(())
+            },
+            move |_| {
+                cmdline_steps.lock().unwrap().push("cmdline");
+                Err("cmdline rewrite failed".to_string())
+            },
+            move |slot, version| {
+                assert_eq!(slot, ApplianceSlot::A);
+                assert_eq!(version, "0.4.1");
+                reset_steps.lock().unwrap().push("reset");
+                Ok(())
+            },
+        );
+
+        assert_eq!(result.unwrap_err(), "cmdline rewrite failed");
+        assert_eq!(
+            *steps.lock().unwrap(),
+            vec!["bootstate", "cmdline", "reset"]
+        );
+    }
+
+    #[test]
+    fn rollback_version_parser_reads_plain_and_hashed_bootstate() {
+        let body = "RHYTHM_ACTIVE_SLOT=b\nRHYTHM_LAST_ROLLBACK_VERSION=0.4.2\n";
+        assert_eq!(
+            last_appliance_rollback_version_from_body(body).as_deref(),
+            Some("0.4.2")
+        );
+
+        let composed = String::from_utf8(bootstate::compose(body)).unwrap();
+        let extracted = bootstate_body_from_text(&composed).unwrap();
+        assert_eq!(
+            last_appliance_rollback_version_from_body(&extracted).as_deref(),
+            Some("0.4.2")
+        );
+
+        let tampered = composed.replace("0.4.2", "0.4.3");
+        assert_eq!(bootstate_body_from_text(&tampered), None);
     }
 
     #[test]
@@ -2832,6 +3087,18 @@ mod tests {
         assert_eq!(channel_from_state(&state), UpdateChannel::Beta);
 
         std::env::remove_var("RHYTHM_PLATFORM_TYPE");
+    }
+
+    #[test]
+    fn channel_from_state_treats_appliance_state_as_stable_even_without_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("RHYTHM_PLATFORM_TYPE");
+
+        let state: rhythm_os::state::SharedState =
+            Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
+        state.lock().unwrap().platform_type = "appliance";
+
+        assert_eq!(channel_from_state(&state), UpdateChannel::Stable);
     }
 
     #[test]

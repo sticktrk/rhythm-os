@@ -2,12 +2,15 @@
 
 set -eu
 
-BOOT_MOUNT=/boot
-STATE_FILE="${BOOT_MOUNT}/rhythm-bootstate.env"
-DATA_STATE_DIR=/data/ota
-DATA_STATE_FILE="${DATA_STATE_DIR}/bootstate.env"
-SERVER_BIN=/usr/bin/rhythm-server
-CMDLINE_FILE="${BOOT_MOUNT}/cmdline.txt"
+BOOT_MOUNT="${RHYTHM_BOOT_MOUNT:-/boot}"
+STATE_FILE="${RHYTHM_BOOTSTATE_FILE:-${BOOT_MOUNT}/rhythm-bootstate.env}"
+STATE_BACKUP_FILE="${RHYTHM_BOOTSTATE_BACKUP_FILE:-${STATE_FILE}.bak}"
+DATA_STATE_DIR="${RHYTHM_BOOTSTATE_DATA_DIR:-/data/ota}"
+DATA_STATE_FILE="${RHYTHM_BOOTSTATE_DATA_FILE:-${DATA_STATE_DIR}/bootstate.env}"
+SERVER_BIN="${RHYTHM_SERVER_BIN:-/usr/bin/rhythm-server}"
+CMDLINE_FILE="${RHYTHM_CMDLINE_FILE:-${BOOT_MOUNT}/cmdline.txt}"
+PROC_CMDLINE="${RHYTHM_PROC_CMDLINE:-/proc/cmdline}"
+HASH_HEADER_PREFIX="# RHYTHM_BOOTSTATE_HASH="
 
 now_ms() {
     date +%s 2>/dev/null | awk '{ printf "%s000\n", $1 }'
@@ -21,10 +24,91 @@ slot_device() {
     esac
 }
 
+hash_file() {
+    local path="$1"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$path" | awk '{ print $1 }'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$path" | awk '{ print $1 }'
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 "$path" | awk '{ print $NF }'
+    else
+        return 1
+    fi
+}
+
+sync_path() {
+    sync "$1" 2>/dev/null || sync
+}
+
+sync_parent() {
+    local parent
+
+    parent="$(dirname "$1")"
+    sync "$parent" 2>/dev/null || sync
+}
+
+atomic_write_text() {
+    local target="$1"
+    local text="$2"
+    local tmp="${target}.tmp.$$"
+
+    mkdir -p "$(dirname "$target")"
+    printf '%s\n' "$text" > "$tmp"
+    sync_path "$tmp"
+    mv -f "$tmp" "$target"
+    sync_parent "$target"
+}
+
+bootstate_hash_valid() {
+    local path="$1"
+    local header expected actual body_tmp
+
+    [ -r "$path" ] || return 1
+    header="$(sed -n '1p' "$path" 2>/dev/null || true)"
+    case "$header" in
+        "$HASH_HEADER_PREFIX"*) ;;
+        *) return 1 ;;
+    esac
+
+    expected="$(printf '%s\n' "$header" | sed 's/^# RHYTHM_BOOTSTATE_HASH=//')"
+    body_tmp="/tmp/rhythm-bootstate-body.$$"
+    tail -n +2 "$path" > "$body_tmp"
+    actual="$(hash_file "$body_tmp" || true)"
+    rm -f "$body_tmp"
+
+    [ -n "$actual" ] && [ "$actual" = "$expected" ]
+}
+
+source_bootstate_file() {
+    local path="$1"
+    local header body_tmp
+
+    [ -r "$path" ] || return 1
+    header="$(sed -n '1p' "$path" 2>/dev/null || true)"
+    case "$header" in
+        "$HASH_HEADER_PREFIX"*)
+            bootstate_hash_valid "$path" || return 1
+            body_tmp="/tmp/rhythm-bootstate-source.$$"
+            tail -n +2 "$path" > "$body_tmp"
+            # shellcheck disable=SC1090
+            . "$body_tmp"
+            rm -f "$body_tmp"
+            ;;
+        *)
+            # Legacy pre-hash bootstate; accepted so older appliances can
+            # upgrade and immediately rewrite a hashed primary+backup.
+            # shellcheck disable=SC1090
+            . "$path"
+            ;;
+    esac
+}
+
 current_slot() {
     local token
 
-    for token in $(cat /proc/cmdline 2>/dev/null); do
+    for token in $(cat "$PROC_CMDLINE" 2>/dev/null); do
         case "$token" in
             root=/dev/mmcblk0p2)
                 printf 'a\n'
@@ -60,14 +144,11 @@ load_state() {
     RHYTHM_LAST_ROLLBACK_VERSION=""
     RHYTHM_LAST_ROLLBACK_EPOCH_MS=""
 
-    if [ -r "$STATE_FILE" ]; then
-        # shellcheck disable=SC1090
-        . "$STATE_FILE"
-    fi
+    source_bootstate_file "$STATE_FILE" || source_bootstate_file "$STATE_BACKUP_FILE" || true
 }
 
-write_state() {
-    cat > "$STATE_FILE" <<EOF
+compose_state_body() {
+    cat <<EOF
 RHYTHM_ACTIVE_SLOT=${RHYTHM_ACTIVE_SLOT:-}
 RHYTHM_LAST_GOOD_SLOT=${RHYTHM_LAST_GOOD_SLOT:-}
 RHYTHM_PENDING_SLOT=${RHYTHM_PENDING_SLOT:-}
@@ -81,9 +162,47 @@ RHYTHM_LAST_ROLLBACK_EPOCH_MS=${RHYTHM_LAST_ROLLBACK_EPOCH_MS:-}
 EOF
 }
 
+write_state_file() {
+    local target="$1"
+    local body_tmp tmp hash
+
+    mkdir -p "$(dirname "$target")"
+    body_tmp="/tmp/rhythm-bootstate-body.$$"
+    tmp="${target}.tmp.$$"
+
+    compose_state_body > "$body_tmp"
+    hash="$(hash_file "$body_tmp")" || {
+        rm -f "$body_tmp" "$tmp"
+        return 1
+    }
+
+    {
+        printf '%s%s\n' "$HASH_HEADER_PREFIX" "$hash"
+        cat "$body_tmp"
+    } > "$tmp"
+
+    rm -f "$body_tmp"
+    sync_path "$tmp"
+    mv -f "$tmp" "$target"
+    sync_parent "$target"
+}
+
+write_state() {
+    write_state_file "$STATE_BACKUP_FILE"
+    write_state_file "$STATE_FILE"
+}
+
 mirror_state() {
     mkdir -p "$DATA_STATE_DIR"
-    cp -f "$STATE_FILE" "$DATA_STATE_FILE"
+    if [ -r "$STATE_FILE" ]; then
+        cp -f "$STATE_FILE" "$DATA_STATE_FILE"
+    elif [ -r "$STATE_BACKUP_FILE" ]; then
+        cp -f "$STATE_BACKUP_FILE" "$DATA_STATE_FILE"
+    else
+        return 0
+    fi
+    sync_path "$DATA_STATE_FILE"
+    sync_parent "$DATA_STATE_FILE"
 }
 
 rewrite_cmdline_slot() {
@@ -112,12 +231,15 @@ rewrite_cmdline_slot() {
 
     [ "$found_root" -eq 1 ] || return 1
 
-    cp -f "$CMDLINE_FILE" "${CMDLINE_FILE}.bak" 2>/dev/null || true
-    printf '%s\n' "$rewritten" > "$CMDLINE_FILE"
+    atomic_write_text "${CMDLINE_FILE}.bak" "$current_cmdline"
+    atomic_write_text "$CMDLINE_FILE" "$rewritten"
 }
 
 reboot_now() {
     sync
+    if [ -n "${RHYTHM_BOOTSTATE_REBOOT_DRY_RUN:-}" ]; then
+        return 0
+    fi
     /sbin/reboot 2>/dev/null || reboot
 }
 

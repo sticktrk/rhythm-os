@@ -407,8 +407,9 @@ fn scan_mdns() -> Vec<serde_json::Value> {
     devices
 }
 
-async fn restart_device() -> Response {
+async fn restart_device(State(state): State<SharedState>) -> Response {
     log::info!(target: "http", "Restart requested via /api/restart");
+    crate::self_update::persist_before_restart(&state);
     crate::self_update::schedule_user_initiated_restart();
     json_ok(r#"{"status":"ok","message":"Restart scheduled"}"#.to_string())
 }
@@ -586,6 +587,7 @@ async fn do_update(
         None,
     );
 
+    crate::self_update::persist_before_restart(&state);
     crate::self_update::schedule_post_update_restart();
 
     json_ok(format!(

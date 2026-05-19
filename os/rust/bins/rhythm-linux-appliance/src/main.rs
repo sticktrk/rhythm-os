@@ -97,6 +97,8 @@ fn main() -> Result<()> {
         std::env::var("RHYTHM_PLATFORM_TYPE").unwrap_or_else(|_| "appliance".to_string());
     let platform_context =
         std::env::var("RHYTHM_PLATFORM_CONTEXT").unwrap_or_else(|_| "rpiz".to_string());
+    std::env::set_var("RHYTHM_PLATFORM_TYPE", &platform_type);
+    std::env::set_var("RHYTHM_PLATFORM_CONTEXT", &platform_context);
 
     logging::init_native_logging(&args.log_level)?;
 
@@ -224,6 +226,7 @@ fn main() -> Result<()> {
             .expect("Failed to spawn periodic thread");
     }
     rhythm_server::liveness::spawn_periodic_watchdog(state.clone());
+    rhythm_server::auto_update::spawn(state.clone());
 
     let provisioning = ble_provision::ProvisioningManager::new(VERSION.to_string(), state.clone());
     if let Err(e) = provisioning.ensure_running_if_needed("startup") {
@@ -499,16 +502,54 @@ async fn run_server(
     );
 
     rhythm_os::hub::spawn_stored_hub_bootstrap(state.clone(), hub::INTEGRATIONS);
-    spawn_boot_success_marker();
+    spawn_boot_success_marker(state.clone());
 
     axum::serve(listener, server).await?;
 
     Ok(())
 }
 
-fn spawn_boot_success_marker() {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BootSuccessHealth {
+    Ready,
+    Waiting(&'static str),
+}
+
+fn boot_success_health(state: &SharedState) -> BootSuccessHealth {
+    let Ok(s) = state.lock() else {
+        return BootSuccessHealth::Waiting("state_lock_poisoned");
+    };
+
+    if s.last_check_instant.is_none() {
+        return BootSuccessHealth::Waiting("periodic_not_ready");
+    }
+    if s.hub_bootstrap_worker_running {
+        return BootSuccessHealth::Waiting("hub_bootstrap_running");
+    }
+    if !s.hub_sync_in_progress.is_empty() {
+        return BootSuccessHealth::Waiting("hub_sync_in_progress");
+    }
+
+    for (key, credentials) in &s.hub_credentials {
+        if !credentials.can_connect() {
+            continue;
+        }
+        if !s.hubs.contains_key(key) {
+            return BootSuccessHealth::Waiting("hub_not_active");
+        }
+        if !s.hub_is_connected(key) {
+            return BootSuccessHealth::Waiting("hub_not_connected");
+        }
+    }
+
+    BootSuccessHealth::Ready
+}
+
+fn spawn_boot_success_marker(state: SharedState) {
     const BOOTSTATE_SCRIPT: &str = "/etc/init.d/S41bootstate";
     const GRACE_SECS: u64 = 30;
+    const POLL_SECS: u64 = 5;
+    const TIMEOUT_SECS: u64 = 10 * 60;
 
     if !std::path::Path::new(BOOTSTATE_SCRIPT).exists() {
         return;
@@ -516,37 +557,71 @@ fn spawn_boot_success_marker() {
 
     info!(
         target: "sys",
-        "Will mark OTA slot as last-good via {} success in {}s",
+        "Will mark OTA slot as last-good via {} success after startup health is ready (grace={}s, timeout={}s)",
         BOOTSTATE_SCRIPT,
-        GRACE_SECS
+        GRACE_SECS,
+        TIMEOUT_SECS
     );
 
     std::thread::Builder::new()
         .name("boot-success-marker".to_string())
-        .spawn(|| {
+        .spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(GRACE_SECS));
-            match std::process::Command::new(BOOTSTATE_SCRIPT)
-                .arg("success")
-                .status()
-            {
-                Ok(status) if status.success() => {
-                    info!(target: "sys", "OTA bootstate marked success");
+            let started = Instant::now();
+            let mut last_reason: Option<&'static str> = None;
+            loop {
+                match boot_success_health(&state) {
+                    BootSuccessHealth::Ready => {
+                        run_bootstate_script_action(BOOTSTATE_SCRIPT, "success");
+                        return;
+                    }
+                    BootSuccessHealth::Waiting(reason) => {
+                        if last_reason != Some(reason) {
+                            info!(
+                                target: "sys",
+                                "Waiting to mark OTA boot success: {}",
+                                reason
+                            );
+                            last_reason = Some(reason);
+                        }
+                        if started.elapsed() >= std::time::Duration::from_secs(TIMEOUT_SECS) {
+                            warn!(
+                                target: "sys",
+                                "OTA boot health did not become ready within {}s; requesting bootstate rollback (last reason: {})",
+                                TIMEOUT_SECS,
+                                reason
+                            );
+                            run_bootstate_script_action(BOOTSTATE_SCRIPT, "fail");
+                            return;
+                        }
+                    }
                 }
-                Ok(status) => warn!(
-                    target: "sys",
-                    "{} success exited with {}",
-                    BOOTSTATE_SCRIPT,
-                    status
-                ),
-                Err(e) => warn!(
-                    target: "sys",
-                    "Failed to exec {} success: {}",
-                    BOOTSTATE_SCRIPT,
-                    e
-                ),
+                std::thread::sleep(std::time::Duration::from_secs(POLL_SECS));
             }
         })
         .expect("Failed to spawn boot-success marker thread");
+}
+
+fn run_bootstate_script_action(script: &str, action: &str) {
+    match std::process::Command::new(script).arg(action).status() {
+        Ok(status) if status.success() => {
+            info!(target: "sys", "OTA bootstate action '{}' succeeded", action);
+        }
+        Ok(status) => warn!(
+            target: "sys",
+            "{} {} exited with {}",
+            script,
+            action,
+            status
+        ),
+        Err(e) => warn!(
+            target: "sys",
+            "Failed to exec {} {}: {}",
+            script,
+            action,
+            e
+        ),
+    }
 }
 
 /// Read the rpiz board serial number and extract a short alphanumeric suffix
@@ -573,12 +648,19 @@ fn extract_serial_suffix(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        beta_build_enables_matter_attestation_bypass, dev_mode_explicitly_disabled_value,
-        extract_serial_suffix, periodic_startup_action, startup_wifi_restore_action,
-        PeriodicStartupAction, StartupWifiRestoreAction, STARTUP_WIFI_RESTORE_TIMEOUT,
+        beta_build_enables_matter_attestation_bypass, boot_success_health,
+        dev_mode_explicitly_disabled_value, extract_serial_suffix, periodic_startup_action,
+        startup_wifi_restore_action, BootSuccessHealth, PeriodicStartupAction,
+        StartupWifiRestoreAction, STARTUP_WIFI_RESTORE_TIMEOUT,
     };
     use crate::time_sync::clock_is_sane_at;
     use chrono::{TimeZone, Utc};
+    use rhythm_os::canonical::identity::HubKey;
+    use rhythm_os::hub::{ActiveHub, HubCredentials, HubType};
+    use rhythm_os::state::{AppState, SharedState};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
     #[test]
     fn extract_serial_suffix_takes_last_eight_hex_chars() {
@@ -678,6 +760,93 @@ mod tests {
             .unwrap();
         assert!(!clock_is_sane_at(boot_epoch));
         assert!(clock_is_sane_at(synced_time));
+    }
+
+    fn test_state() -> SharedState {
+        Arc::new(Mutex::new(AppState::default()))
+    }
+
+    fn mark_periodic_ready(state: &SharedState) {
+        state.lock().unwrap().last_check_instant = Some(Instant::now());
+    }
+
+    #[test]
+    fn boot_success_health_waits_for_periodic_loop() {
+        let state = test_state();
+
+        assert_eq!(
+            boot_success_health(&state),
+            BootSuccessHealth::Waiting("periodic_not_ready")
+        );
+    }
+
+    #[test]
+    fn boot_success_health_ready_without_connectable_hubs_after_periodic() {
+        let state = test_state();
+        mark_periodic_ready(&state);
+
+        assert_eq!(boot_success_health(&state), BootSuccessHealth::Ready);
+    }
+
+    #[test]
+    fn boot_success_health_waits_for_hub_bootstrap_worker() {
+        let state = test_state();
+        mark_periodic_ready(&state);
+        state.lock().unwrap().begin_hub_bootstrap_worker();
+
+        assert_eq!(
+            boot_success_health(&state),
+            BootSuccessHealth::Waiting("hub_bootstrap_running")
+        );
+    }
+
+    #[test]
+    fn boot_success_health_waits_for_configured_hub_to_activate() {
+        let state = test_state();
+        mark_periodic_ready(&state);
+        let credentials = HubCredentials::new("hue", "192.0.2.10", serde_json::json!({}));
+        let key = credentials.hub_key().unwrap();
+        state
+            .lock()
+            .unwrap()
+            .hub_credentials
+            .insert(key, credentials);
+
+        assert_eq!(
+            boot_success_health(&state),
+            BootSuccessHealth::Waiting("hub_not_active")
+        );
+    }
+
+    #[test]
+    fn boot_success_health_waits_for_active_hub_connection() {
+        let state = test_state();
+        mark_periodic_ready(&state);
+        let hub_type = HubType::new("hue");
+        let key = HubKey::new(hub_type.clone(), "192.0.2.10");
+        let credentials = HubCredentials::new("hue", "192.0.2.10", serde_json::json!({}));
+        let hub = ActiveHub {
+            hub_type,
+            hub_key: key.clone(),
+            runtime: None,
+            hub_data: Box::new(()),
+            registry: None,
+            discovery: None,
+            shutdown: Arc::new(AtomicBool::new(false)),
+        };
+        {
+            let mut s = state.lock().unwrap();
+            s.hub_credentials.insert(key.clone(), credentials);
+            s.hubs.insert(key.clone(), hub);
+        }
+
+        assert_eq!(
+            boot_success_health(&state),
+            BootSuccessHealth::Waiting("hub_not_connected")
+        );
+
+        state.lock().unwrap().set_hub_connected(&key, true);
+        assert_eq!(boot_success_health(&state), BootSuccessHealth::Ready);
     }
 
     #[test]

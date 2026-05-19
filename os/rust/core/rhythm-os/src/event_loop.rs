@@ -1569,6 +1569,8 @@ pub fn run_event_loop(
     loop {
         let mut processed_hub_event = false;
         let mut force_motion_persist = false;
+        let mut motion_persist_acks = Vec::new();
+        let mut pending_motion_clear = Vec::new();
 
         // Pick up new hub event receivers from reconfiguration
         if let Ok(mut s) = state.lock() {
@@ -1583,26 +1585,30 @@ pub fn run_event_loop(
             }
 
             if !s.pending_motion_clear.is_empty() {
-                let target_node_ids = std::mem::take(&mut s.pending_motion_clear);
-                drop(s);
-                for target_node_id in &target_node_ids {
-                    motion_state
-                        .sensors
-                        .retain(|_, source| &source.target_node_id != target_node_id);
-                    motion_state.motion_owned.remove(target_node_id);
-                    motion_state.warning_active.remove(target_node_id);
-                }
-                if !target_node_ids.is_empty() {
-                    info!(
-                        target: "evt",
-                        "Motion: cleared timers for {} targets",
-                        target_node_ids.len()
-                    );
-                    motion_dirty = true;
-                    motion_persistence.mark_dirty();
-                    force_motion_persist = true;
-                }
+                pending_motion_clear = std::mem::take(&mut s.pending_motion_clear);
             }
+
+            if !s.pending_motion_timer_persist_acks.is_empty() {
+                motion_persist_acks = std::mem::take(&mut s.pending_motion_timer_persist_acks);
+            }
+        }
+
+        for target_node_id in &pending_motion_clear {
+            motion_state
+                .sensors
+                .retain(|_, source| &source.target_node_id != target_node_id);
+            motion_state.motion_owned.remove(target_node_id);
+            motion_state.warning_active.remove(target_node_id);
+        }
+        if !pending_motion_clear.is_empty() {
+            info!(
+                target: "evt",
+                "Motion: cleared timers for {} targets",
+                pending_motion_clear.len()
+            );
+            motion_dirty = true;
+            motion_persistence.mark_dirty();
+            force_motion_persist = true;
         }
 
         // Apply any motion seeds queued by startup prefetch. Hub bootstrap
@@ -1651,7 +1657,13 @@ pub fn run_event_loop(
             motion_dirty = false;
             sync_motion_snapshots(&state, &motion_state);
         }
-        if force_motion_persist {
+        if !motion_persist_acks.is_empty() {
+            motion_persistence.mark_dirty();
+            motion_persistence.persist_now(&state, &motion_state);
+            for ack in motion_persist_acks {
+                let _ = ack.send(());
+            }
+        } else if force_motion_persist {
             motion_persistence.persist_now(&state, &motion_state);
         } else {
             motion_persistence.persist_if_due(&state, &motion_state);
@@ -1663,6 +1675,24 @@ pub fn run_event_loop(
             std::thread::sleep(EVENT_LOOP_IDLE_SLEEP);
         }
     }
+}
+
+/// Ask the event loop to persist its owned motion timer map before a planned
+/// restart. Returns `true` if there was nothing to flush or the event loop
+/// acknowledged the request before `timeout`.
+pub fn request_motion_timer_persist(state: &SharedState, timeout: Duration) -> bool {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    {
+        let Ok(mut s) = state.lock() else {
+            return false;
+        };
+        if s.motion_snapshots.is_empty() && s.motion_timer_restores.is_empty() {
+            return true;
+        }
+        s.pending_motion_timer_persist_acks.push(tx);
+    }
+
+    rx.recv_timeout(timeout).is_ok()
 }
 
 /// Persist registry to disk if on-demand discovery marked it dirty.
@@ -5186,6 +5216,58 @@ mod tests {
 
         assert!(saved.lock().unwrap().is_empty());
         assert!(persistence.dirty);
+    }
+
+    #[test]
+    fn request_motion_timer_persist_returns_immediately_when_no_motion_state_exists() {
+        let state = Arc::new(Mutex::new(crate::state::AppState::default()));
+
+        assert!(request_motion_timer_persist(
+            &state,
+            Duration::from_millis(1)
+        ));
+        assert!(state
+            .lock()
+            .unwrap()
+            .pending_motion_timer_persist_acks
+            .is_empty());
+    }
+
+    #[test]
+    fn request_motion_timer_persist_waits_for_event_loop_ack_when_snapshots_exist() {
+        let mut app = crate::state::AppState::default();
+        app.motion_snapshots.insert(
+            "room_a".to_string(),
+            MotionSnapshot {
+                motion_active: false,
+                motion_owned: true,
+                remaining_secs: Some(30),
+                timeout_secs: 60,
+                warning_active: false,
+            },
+        );
+        let state = Arc::new(Mutex::new(app));
+        let request_state = state.clone();
+
+        let handle = std::thread::spawn(move || {
+            request_motion_timer_persist(&request_state, Duration::from_secs(1))
+        });
+
+        let mut ack = None;
+        for _ in 0..100 {
+            ack = state
+                .lock()
+                .unwrap()
+                .pending_motion_timer_persist_acks
+                .pop();
+            if ack.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        ack.expect("queued motion persist ack").send(()).unwrap();
+
+        assert!(handle.join().unwrap());
     }
 
     fn set_observed_lights_on_with_source(

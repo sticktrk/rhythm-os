@@ -1,9 +1,10 @@
 //! Background loop that auto-applies stable OTA updates overnight.
 //!
 //! Runs on the rpiz appliance only. Wakes every 30 minutes, checks whether the
-//! local clock is inside the configured overnight window (default 02:00–04:00
+//! local clock is inside the configured overnight window (default 00:00–02:00
 //! local), and — at most once per 20 hours — pulls the stable manifest,
-//! downloads any newer release, and triggers the rpiz A/B reboot path. The
+//! downloads any newer release, persists runtime state, and triggers the rpiz
+//! A/B reboot path. The
 //! 30-min wake / 20h dedupe combination means at most one update attempt per
 //! night even if the device clock skews mid-window.
 //!
@@ -13,7 +14,7 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
-use chrono::{FixedOffset, Timelike, Utc};
+use chrono::{Datelike, FixedOffset, Timelike, Utc};
 use log::{info, warn};
 use rhythm_os::state::SharedState;
 
@@ -21,11 +22,12 @@ use crate::self_update::{self, UpdateChannel};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const MIN_BETWEEN_CHECKS: Duration = Duration::from_secs(20 * 60 * 60);
-const WINDOW_START_HOUR: u32 = 2;
-const WINDOW_END_HOUR: u32 = 4;
+const WINDOW_START_HOUR: u32 = 0;
+const WINDOW_END_HOUR: u32 = 2;
+const MIN_SANE_YEAR: i32 = 2024;
 
 pub fn spawn(state: SharedState) {
-    if !self_update::is_appliance_runtime_default() {
+    if !should_spawn_for_state(&state) {
         info!(target: "sys", "auto-update: skipping loop (not appliance)");
         return;
     }
@@ -60,7 +62,17 @@ fn run(state: SharedState) {
             continue;
         }
 
-        if !in_overnight_window(Utc::now(), snapshot.utc_offset_hours) {
+        let now = Utc::now();
+        if !clock_is_sane(now) {
+            warn!(
+                target: "sys",
+                "auto-update: skipping check until wall clock is sane (utc={})",
+                now
+            );
+            continue;
+        }
+
+        if !in_overnight_window(now, snapshot.utc_offset_hours) {
             continue;
         }
 
@@ -71,7 +83,7 @@ fn run(state: SharedState) {
         }
         last_attempt = Some(Instant::now());
 
-        attempt_update();
+        attempt_update(&state);
     }
 }
 
@@ -94,6 +106,18 @@ fn snapshot_settings(state: &SharedState) -> Option<LoopSettings> {
     }
 }
 
+fn should_spawn_for_state(state: &SharedState) -> bool {
+    self_update::is_appliance_runtime_default()
+        || state
+            .lock()
+            .map(|s| s.platform_type == "appliance")
+            .unwrap_or(false)
+}
+
+fn clock_is_sane(now_utc: chrono::DateTime<Utc>) -> bool {
+    now_utc.year() >= MIN_SANE_YEAR
+}
+
 fn in_overnight_window(now_utc: chrono::DateTime<Utc>, utc_offset_hours: f32) -> bool {
     let local_hour = local_hour_from_utc(now_utc, utc_offset_hours);
     (WINDOW_START_HOUR..WINDOW_END_HOUR).contains(&local_hour)
@@ -109,7 +133,7 @@ fn local_hour_from_utc(now_utc: chrono::DateTime<Utc>, utc_offset_hours: f32) ->
     now_utc.with_timezone(&offset).hour()
 }
 
-fn attempt_update() {
+fn attempt_update(state: &SharedState) {
     let version = crate::BUILD_VERSION;
     info!(target: "sys", "auto-update: checking stable feed (v{} -> ?)", version);
 
@@ -128,6 +152,15 @@ fn attempt_update() {
         return;
     }
 
+    if self_update::appliance_rollback_version_matches(&info.latest_version) {
+        warn!(
+            target: "sys",
+            "auto-update: skipping v{} because this appliance just rolled it back",
+            info.latest_version
+        );
+        return;
+    }
+
     info!(
         target: "sys",
         "auto-update: applying v{} -> v{}",
@@ -143,8 +176,8 @@ fn attempt_update() {
                 result.installed_targets,
                 result.checksum_verified,
             );
-            // On rpiz, apply_blocking schedules the A/B reboot internally; the
-            // process will exit before we loop back here.
+            self_update::persist_before_restart(state);
+            self_update::schedule_post_update_restart();
         }
         Err(e) => {
             warn!(target: "sys", "auto-update: apply failed: {}", e);
@@ -162,17 +195,17 @@ mod tests {
     }
 
     #[test]
-    fn window_open_at_local_0200() {
-        // UTC 09:00 with -7h offset -> local 02:00, window opens.
-        assert_eq!(local_hour_from_utc(utc_at(9), -7.0), 2);
-        assert!(in_overnight_window(utc_at(9), -7.0));
+    fn window_open_at_local_midnight() {
+        // UTC 07:00 with -7h offset -> local 00:00, window opens.
+        assert_eq!(local_hour_from_utc(utc_at(7), -7.0), 0);
+        assert!(in_overnight_window(utc_at(7), -7.0));
     }
 
     #[test]
-    fn window_closed_at_local_0400() {
-        // UTC 11:00 with -7h offset -> local 04:00, boundary closed.
-        assert_eq!(local_hour_from_utc(utc_at(11), -7.0), 4);
-        assert!(!in_overnight_window(utc_at(11), -7.0));
+    fn window_closed_at_local_0200() {
+        // UTC 09:00 with -7h offset -> local 02:00, boundary closed.
+        assert_eq!(local_hour_from_utc(utc_at(9), -7.0), 2);
+        assert!(!in_overnight_window(utc_at(9), -7.0));
     }
 
     #[test]
@@ -183,8 +216,15 @@ mod tests {
 
     #[test]
     fn window_open_with_positive_offset() {
-        // UTC 23:00 with +3h offset -> local 02:00 next day.
-        assert_eq!(local_hour_from_utc(utc_at(23), 3.0), 2);
-        assert!(in_overnight_window(utc_at(23), 3.0));
+        // UTC 22:00 with +3h offset -> local 01:00 next day.
+        assert_eq!(local_hour_from_utc(utc_at(22), 3.0), 1);
+        assert!(in_overnight_window(utc_at(22), 3.0));
+    }
+
+    #[test]
+    fn clock_sanity_rejects_epoch_boot_time() {
+        let boot_epoch = Utc.with_ymd_and_hms(1970, 1, 1, 0, 0, 30).unwrap();
+        assert!(!clock_is_sane(boot_epoch));
+        assert!(clock_is_sane(utc_at(1)));
     }
 }

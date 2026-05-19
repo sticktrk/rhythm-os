@@ -2,11 +2,15 @@
 
 set -eu
 
-DATA_DIR=/data
-DEFAULTS=/etc/default/rhythm
-DEV_DEFAULTS=/etc/default/rhythm-dev
-LOG_DIR_DEFAULT=/data/log
+DATA_DIR="${RHYTHM_DATA_DIR:-/data}"
+DEFAULTS="${RHYTHM_DEFAULTS:-/etc/default/rhythm}"
+DEV_DEFAULTS="${RHYTHM_DEV_DEFAULTS:-/etc/default/rhythm-dev}"
+SERVER_BIN="${RHYTHM_SERVER_BIN:-/usr/bin/rhythm-server}"
+BOOTSTATE_SCRIPT="${RHYTHM_BOOTSTATE_SCRIPT:-/etc/init.d/S41bootstate}"
+LOG_PRUNE_BIN="${RHYTHM_LOG_PRUNE_BIN:-/usr/bin/rhythm-log-prune}"
+LOG_DIR_DEFAULT="${RHYTHM_LOG_DIR_DEFAULT:-/data/log}"
 LOG_DIR_FALLBACK=/var/log
+CONSOLE="${RHYTHM_CONSOLE:-/dev/console}"
 
 is_truthy() {
     case "${1:-}" in
@@ -30,7 +34,7 @@ resolve_log_dir() {
 
 export RHYTHM_PLATFORM_TYPE=appliance
 export RHYTHM_PLATFORM_CONTEXT=rpiz
-export RHYTHM_MATTER_CHIPD=/usr/bin/rhythm-chipd
+export RHYTHM_MATTER_CHIPD="${RHYTHM_MATTER_CHIPD:-/usr/bin/rhythm-chipd}"
 
 if [ -r "$DEFAULTS" ]; then
     # shellcheck disable=SC1090
@@ -53,11 +57,11 @@ MATTER_LOGFILE_DEFAULT="${LOG_DIR}/rhythm-matter.log"
 
 mkdir -p "$(dirname "$LOGFILE")" "$DATA_DIR"
 
-/usr/bin/rhythm-log-prune run >/dev/null 2>&1 || true
+"$LOG_PRUNE_BIN" run >/dev/null 2>&1 || true
 
 printf 'rhythm-launch: system time %s\n' "$(date -Iseconds 2>/dev/null || date)" >>"$LOGFILE"
-if [ -w /dev/console ]; then
-    printf 'rhythm-launch: system time %s\n' "$(date -Iseconds 2>/dev/null || date)" > /dev/console
+if [ -w "$CONSOLE" ]; then
+    printf 'rhythm-launch: system time %s\n' "$(date -Iseconds 2>/dev/null || date)" > "$CONSOLE"
 fi
 
 export RHYTHM_MATTER_LOGFILE="${RHYTHM_MATTER_LOGFILE-$MATTER_LOGFILE_DEFAULT}"
@@ -67,12 +71,28 @@ if is_truthy "${RHYTHM_DEV_MODE:-}"; then
     export RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION="${RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION:-1}"
 fi
 
-# Run rhythm-server in the foreground as a direct child of BusyBox init. If
-# it exits, init respawns us. OTA bootstate "success" is marked from inside
-# rhythm-server itself (see /etc/init.d/S41bootstate) once it has been up
-# long enough to count as a healthy boot.
-if [ -w /dev/console ]; then
-    exec /bin/sh -c '/usr/bin/rhythm-server --data-dir "$1" --log-level info 2>&1 | tee -a "$2" /dev/console >/dev/null' sh "$DATA_DIR" "$LOGFILE"
-fi
+mark_boot_failed_if_pending() {
+    if [ -x "$BOOTSTATE_SCRIPT" ]; then
+        "$BOOTSTATE_SCRIPT" fail || true
+    fi
+}
 
-exec /usr/bin/rhythm-server --data-dir "$DATA_DIR" --log-level info >>"$LOGFILE" 2>&1
+# Run rhythm-server in the foreground as a direct child of BusyBox init. If it
+# exits, init respawns us. OTA bootstate "success" is marked from inside
+# rhythm-server once startup health is ready. Any early process exit asks
+# S41bootstate to roll back if this boot was pending.
+set +e
+if [ -w "$CONSOLE" ]; then
+    STATUS_FILE="/tmp/rhythm-server-status.$$"
+    /bin/sh -c '"$1" --data-dir "$2" --log-level info 2>&1; printf "%s\n" "$?" > "$3"' sh "$SERVER_BIN" "$DATA_DIR" "$STATUS_FILE" | tee -a "$LOGFILE" "$CONSOLE" >/dev/null
+    status="$(cat "$STATUS_FILE" 2>/dev/null || printf '1')"
+    rm -f "$STATUS_FILE"
+else
+    "$SERVER_BIN" --data-dir "$DATA_DIR" --log-level info >>"$LOGFILE" 2>&1
+    status="$?"
+fi
+set -e
+
+printf 'rhythm-launch: rhythm-server exited with status %s\n' "$status" >>"$LOGFILE"
+mark_boot_failed_if_pending
+exit "$status"
