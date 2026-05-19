@@ -229,6 +229,13 @@ impl MotionTimerState {
             .any(|source| source.target_node_id == target_node_id)
     }
 
+    /// Check if any active motion source for this target is currently tracked.
+    pub fn has_active_sources_for_target(&self, target_node_id: &str) -> bool {
+        self.sensors
+            .values()
+            .any(|source| source.target_node_id == target_node_id && source.stopped_at.is_none())
+    }
+
     /// Compute per-target motion snapshots from current source state.
     pub fn snapshots(
         &self,
@@ -1191,7 +1198,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     spawn_motion_dim_action(state, target_node_id.clone(), 1.0);
                 }
 
-                let is_new_target = !motion.has_sources_for_target(&target_node_id);
+                let is_new_activation = !motion.has_active_sources_for_target(&target_node_id);
                 motion.sensors.insert(
                     source_node_id.clone(),
                     MotionSourceState {
@@ -1202,7 +1209,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     },
                 );
 
-                if is_new_target {
+                if is_new_activation {
                     motion.motion_owned.insert(target_node_id.clone());
 
                     info!(
@@ -1743,6 +1750,7 @@ pub fn apply_pending_motion_seeds(
     let mut hard_off_dropped = 0usize;
     let mut soft_off_dropped = 0usize;
     let mut deferred = Vec::new();
+    let mut turn_on_targets = Vec::new();
 
     for seed in seeds {
         let MotionSeedEntry {
@@ -1772,6 +1780,7 @@ pub fn apply_pending_motion_seeds(
             live_count += 1;
             continue;
         }
+        let should_turn_on = is_active && !motion.has_active_sources_for_target(&target_node_id);
 
         if let Some((hard_off, soft_off)) = target_room_flags(state, &target_node_id) {
             // Hard-off rooms have no motion timers — live mutations clear them
@@ -1837,6 +1846,9 @@ pub fn apply_pending_motion_seeds(
         if warning_active && should_own {
             motion.warning_active.insert(target_node_id.clone());
         }
+        if should_turn_on {
+            turn_on_targets.push(target_node_id.clone());
+        }
         if is_active {
             active_count += 1;
         } else if should_own {
@@ -1850,6 +1862,14 @@ pub fn apply_pending_motion_seeds(
         if let Ok(mut s) = state.lock() {
             s.pending_motion_seed.extend(deferred);
         }
+    }
+    for target_node_id in turn_on_targets {
+        info!(
+            target: "evt",
+            "Motion: active startup seed source -> target {} (owned=true)",
+            target_node_id
+        );
+        spawn_motion_turn_on_action(state, target_node_id);
     }
 
     let applied_count = active_count + owned_inactive_count + idle_count;
@@ -2735,6 +2755,15 @@ mod tests {
 
     fn make_state() -> SharedState {
         std::sync::Arc::new(std::sync::Mutex::new(crate::state::AppState::default()))
+    }
+
+    fn wait_for_atomic_at_least(counter: &AtomicUsize, expected: usize) {
+        for _ in 0..30 {
+            if counter.load(Ordering::SeqCst) >= expected {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[derive(Clone, Default)]
@@ -4564,13 +4593,56 @@ mod tests {
             elapsed
         );
 
-        for _ in 0..30 {
-            if turn_on_room_calls.load(Ordering::SeqCst) >= 1 {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        wait_for_atomic_at_least(&turn_on_room_calls, 1);
         assert_eq!(turn_on_room_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn motion_detected_after_stopped_seed_dispatches_turn_on() {
+        let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
+        let state = make_state_with_counted_turn_on(
+            soft_off_room_snapshot("room_a"),
+            turn_on_room_calls.clone(),
+        );
+        let hub_key = only_hub_key(&state);
+        let source_id = add_canonical_control_source(
+            &state,
+            &hub_key,
+            "sensor_a",
+            "room_a",
+            DeviceType::Motion,
+        );
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            source_id.clone(),
+            motion_source(
+                &source_id,
+                "room_a",
+                Some(Instant::now() - Duration::from_secs(30)),
+            ),
+        );
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                sensor_id: "sensor_a".into(),
+                detected: true,
+            },
+            &mut motion,
+        );
+
+        wait_for_atomic_at_least(&turn_on_room_calls, 1);
+        assert_eq!(turn_on_room_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            motion.motion_owned.contains("room_a"),
+            "motion returning after a stopped seed must reclaim ownership"
+        );
+        assert_eq!(
+            motion.sensors[&source_id].stopped_at, None,
+            "detected=true must mark the seeded source active again"
+        );
     }
 
     #[test]
@@ -5490,6 +5562,31 @@ mod tests {
         assert!(motion.motion_owned.contains("room_a"));
     }
 
+    #[test]
+    fn apply_active_seed_dispatches_turn_on_for_soft_off_room() {
+        let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
+        let state = make_state_with_counted_turn_on(
+            soft_off_room_snapshot("room_a"),
+            turn_on_room_calls.clone(),
+        );
+        push_seed(&state, "sensor_1", "room_a", true);
+
+        let mut motion = MotionTimerState::new();
+        let dirty = apply_pending_motion_seeds(&state, &mut motion, Instant::now());
+
+        wait_for_atomic_at_least(&turn_on_room_calls, 1);
+        assert!(dirty);
+        assert_eq!(turn_on_room_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            motion.motion_owned.contains("room_a"),
+            "active prefetch should claim motion ownership"
+        );
+        assert_eq!(
+            motion.sensors["sensor_1"].stopped_at, None,
+            "active prefetch should seed an active source"
+        );
+    }
+
     /// A stale startup prefetch must not overwrite a source that already
     /// received live event-stream state.
     #[test]
@@ -5581,6 +5678,23 @@ mod tests {
             },
         );
         Arc::new(Mutex::new(app))
+    }
+
+    fn make_state_with_counted_turn_on(
+        snapshot: RoomSnapshot,
+        turn_on_room_calls: Arc<AtomicUsize>,
+    ) -> SharedState {
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(PeriodicWorkerTestRuntime {
+            snapshots: vec![snapshot],
+            periodic_tick_node_calls: Arc::new(Mutex::new(Vec::new())),
+            apply_room_command_calls: Arc::new(AtomicUsize::new(0)),
+            handle_event_calls: Arc::new(AtomicUsize::new(0)),
+            turn_on_room_calls,
+            set_room_brightness_calls: Arc::new(AtomicUsize::new(0)),
+            periodic_entered_tx: None,
+            periodic_release_rx: None,
+        });
+        make_state_with_runtime(runtime)
     }
 
     fn room_snapshot_with_flags(id: &str, soft_off: bool, hard_off: bool) -> RoomSnapshot {
