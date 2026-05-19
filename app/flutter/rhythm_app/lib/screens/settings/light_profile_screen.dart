@@ -2729,42 +2729,58 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                 ),
               ),
               const SizedBox(width: 8),
-              Text(
-                'TIME SIMULATOR',
-                style: TextStyle(
-                  color: _Palette.amber.withValues(alpha: 0.75),
-                  fontSize: 10,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 2.0,
+              Expanded(
+                child: Text(
+                  'TIME SIMULATOR',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: _Palette.amber.withValues(alpha: 0.75),
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 2.0,
+                  ),
                 ),
               ),
-              const Spacer(),
+              const SizedBox(width: 8),
               // Tiny right-side readout: live kelvin value when engaged,
               // otherwise the drag-to-simulate prompt.
-              AnimatedSwitcher(
-                duration: const Duration(milliseconds: 200),
-                child: active
-                    ? Text(
-                        _previewValueLabel(selectedHour),
-                        key: const ValueKey('readout'),
-                        style: TextStyle(
-                          color: previewColor.withValues(alpha: 0.85),
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.2,
-                          fontFeatures: const [FontFeature.tabularFigures()],
-                        ),
-                      )
-                    : Text(
-                        'Drag to simulate',
-                        key: const ValueKey('hint'),
-                        style: TextStyle(
-                          color: _Palette.textSecondary.withValues(alpha: 0.45),
-                          fontSize: 11,
-                          fontWeight: FontWeight.w500,
-                          letterSpacing: 0.1,
-                        ),
-                      ),
+              Flexible(
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 200),
+                    child: active
+                        ? Text(
+                            _previewValueLabel(selectedHour),
+                            key: const ValueKey('readout'),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: previewColor.withValues(alpha: 0.85),
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.2,
+                              fontFeatures: const [
+                                FontFeature.tabularFigures(),
+                              ],
+                            ),
+                          )
+                        : Text(
+                            'Drag to simulate',
+                            key: const ValueKey('hint'),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: _Palette.textSecondary
+                                  .withValues(alpha: 0.45),
+                              fontSize: 11,
+                              fontWeight: FontWeight.w500,
+                              letterSpacing: 0.1,
+                            ),
+                          ),
+                  ),
+                ),
               ),
             ],
           ),

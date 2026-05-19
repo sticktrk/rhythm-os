@@ -386,8 +386,12 @@ class CloudBackedServerApi {
 
   Future<bool> settingsSet({
     bool? powerSave,
+    bool? autoUpdate,
   }) {
-    return _delegate.settingsSet(powerSave: powerSave);
+    return _delegate.settingsSet(
+      powerSave: powerSave,
+      autoUpdate: autoUpdate,
+    );
   }
 
   Future<Map<String, dynamic>?> getCanonicalDevice(String id) {

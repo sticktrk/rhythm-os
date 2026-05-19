@@ -53,6 +53,7 @@ class DemoServerApi extends RhythmServerApi {
   bool _seeded = false;
   int _nextRoomOrdinal = 1;
   bool _powerSave = true;
+  bool _autoUpdate = true;
   RhythmMode _activeMode = RhythmMode.day;
 
   Stream<void> get changes => _changes.stream;
@@ -88,6 +89,7 @@ class DemoServerApi extends RhythmServerApi {
   void reset() {
     _seeded = true;
     _powerSave = true;
+    _autoUpdate = true;
     _activeMode = RhythmMode.day;
     _nextRoomOrdinal = 5;
     _nodeStates.clear();
@@ -487,12 +489,14 @@ class DemoServerApi extends RhythmServerApi {
     ensureSeeded();
     return RhythmSettings.fromJson({
       'power_save': _powerSave,
+      'auto_update': _autoUpdate,
     });
   }
 
   @override
-  Future<bool> settingsSet({bool? powerSave}) async {
+  Future<bool> settingsSet({bool? powerSave, bool? autoUpdate}) async {
     ensureSeeded();
+    var mutated = false;
     if (powerSave != null) {
       _powerSave = powerSave;
       for (final room in _nodeStates.values) {
@@ -505,6 +509,13 @@ class DemoServerApi extends RhythmServerApi {
           }
         }
       }
+      mutated = true;
+    }
+    if (autoUpdate != null) {
+      _autoUpdate = autoUpdate;
+      mutated = true;
+    }
+    if (mutated) {
       _changes.add(null);
     }
     return true;

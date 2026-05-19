@@ -120,6 +120,10 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Whether power-save mode is active on the server.
   bool _powerSave = true;
 
+  /// Whether automatic firmware updates are enabled on the server.
+  /// Default true to match server contract for new installs / missing field.
+  bool _autoUpdate = true;
+
   /// Active global mode from the server (`day` / `sleep`).
   RhythmMode? _activeMode;
 
@@ -196,6 +200,9 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Whether power-save mode is active on the server.
   bool get powerSave => _powerSave;
+
+  /// Whether automatic firmware updates are enabled on the server.
+  bool get autoUpdate => _autoUpdate;
 
   /// Whether sleep mode is active on the server.
   bool get sleepMode => _activeMode == RhythmMode.sleep;
@@ -759,6 +766,7 @@ class ServerSyncProvider extends ChangeNotifier {
       }
     }
     _powerSave = hello.settings?.powerSave ?? true;
+    _autoUpdate = hello.settings?.autoUpdate ?? true;
     _activeMode = hello.mode?.active;
     _modeTransitions = [...hello.transitions];
     _inputBindings = [...hello.inputBindings];
@@ -997,8 +1005,16 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Handle settings updates with payloads so power-save UI updates without
   /// waiting for the compatibility re-hello path.
   void _onSettingsChanged(RhythmSettings settings) {
-    if (_powerSave == settings.powerSave) return;
-    _powerSave = settings.powerSave;
+    var changed = false;
+    if (_powerSave != settings.powerSave) {
+      _powerSave = settings.powerSave;
+      changed = true;
+    }
+    if (_autoUpdate != settings.autoUpdate) {
+      _autoUpdate = settings.autoUpdate;
+      changed = true;
+    }
+    if (!changed) return;
     notifyListeners();
     _enforcePowerSaveEntitlement();
   }
@@ -1122,6 +1138,7 @@ class ServerSyncProvider extends ChangeNotifier {
       _serverPlatformType = 'desktop';
       _serverPlatformContext = 'server';
       _powerSave = true;
+      _autoUpdate = true;
       _activeMode = null;
       _activeProfileId = null;
       _helloNodes = [];
@@ -1335,6 +1352,28 @@ class ServerSyncProvider extends ChangeNotifier {
 
     if (!success && _powerSave == enabled) {
       _powerSave = previous;
+      notifyListeners();
+    }
+    return success;
+  }
+
+  /// Set automatic firmware update mode on the server with an optimistic
+  /// local cache update.
+  Future<bool> setAutoUpdate(bool enabled) async {
+    final previous = _autoUpdate;
+    if (_autoUpdate != enabled) {
+      _autoUpdate = enabled;
+      notifyListeners();
+    }
+
+    final success = HueServiceLocator.isDemoMode
+        ? await DemoServerApi.instance.settingsSet(autoUpdate: enabled)
+        : _connection.connected
+            ? await api.settingsSet(autoUpdate: enabled)
+            : false;
+
+    if (!success && _autoUpdate == enabled) {
+      _autoUpdate = previous;
       notifyListeners();
     }
     return success;
@@ -1847,6 +1886,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _serverPlatformType = DemoServerApi.serverPlatformType;
     _serverPlatformContext = DemoServerApi.serverPlatformContext;
     _powerSave = settings?.powerSave ?? true;
+    _autoUpdate = settings?.autoUpdate ?? true;
     _activeMode = mode?.active;
     _activeProfileId = null;
     _modeTransitions = await DemoServerApi.instance.getTransitions();

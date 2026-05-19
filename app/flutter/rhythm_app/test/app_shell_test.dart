@@ -7,11 +7,13 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_app/app_shell.dart';
 import 'package:rhythm_app/config/platform_capabilities.dart';
 import 'package:rhythm_app/models/config_model.dart';
+import 'package:rhythm_app/models/plan_tier.dart';
 import 'package:rhythm_app/providers/home_provider.dart';
 import 'package:rhythm_app/providers/hub_connection_provider.dart';
 import 'package:rhythm_app/providers/room_page_provider.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
+import 'package:rhythm_app/providers/subscription_provider.dart';
 import 'package:rhythm_app/services/hue/hue_service_locator.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
@@ -44,6 +46,36 @@ class _FakeHomeProvider extends HomeProvider {
 
   @override
   Future<void> onUserSignIn() async {}
+}
+
+class _FakeSubscriptionProvider extends ChangeNotifier
+    implements SubscriptionProvider {
+  @override
+  PlanTier get tier => PlanTier.basic;
+
+  @override
+  bool get isPro => tier == PlanTier.pro;
+
+  @override
+  bool has(Entitlement e) => tier.grants(e) && !e.isComingSoon;
+
+  @override
+  bool isEligibleFor(Entitlement e) => tier.grants(e);
+
+  @override
+  bool get isDemoOverrideActive => false;
+
+  @override
+  PlanTier? get demoOverride => null;
+
+  @override
+  Future<void> setDemoOverride(PlanTier? tier) async {}
+
+  @override
+  Future<void> changePlan(PlanTier tier) async {}
+
+  @override
+  Future<void> refresh() async {}
 }
 
 class _FakeRhythmServerApi extends RhythmServerApi {
@@ -273,6 +305,9 @@ Future<void> _pumpAppShell(
         ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
         ChangeNotifierProvider<HomeProvider>.value(value: homeProvider),
         ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ChangeNotifierProvider<SubscriptionProvider>(
+          create: (_) => _FakeSubscriptionProvider(),
+        ),
         ChangeNotifierProvider<RoomPageProvider>.value(
           value: roomPageProvider ??
               RoomPageProvider(
@@ -584,7 +619,7 @@ void main() {
     expect(api.getProfilesCallCount, 0);
     expect(find.text('Day Profile'), findsNothing);
 
-    await tester.tap(find.text('Transitions'));
+    await tester.tap(find.text('Transition'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 10));
 

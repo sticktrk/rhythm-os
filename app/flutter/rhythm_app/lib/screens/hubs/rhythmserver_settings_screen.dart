@@ -655,6 +655,9 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
         : syncProvider.firmwareVersion;
     final showOtaControls =
         _otaService.isLoadingSupport || _otaService.showUpdateUi;
+    final showAutoUpdateToggle = !_isHaAddon && _otaService.isSelfPull;
+    final autoUpdateEnabled = syncProvider.autoUpdate;
+    final allowManualUpdate = !autoUpdateEnabled || !showAutoUpdateToggle;
 
     return _buildSection(
       title: _isEmbedded ? 'FIRMWARE' : 'VERSION',
@@ -699,7 +702,10 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 ),
               ),
 
-              if (showOtaControls) ..._buildOtaStateContent(currentVersion),
+              if (showAutoUpdateToggle) _buildAutoUpdateRow(autoUpdateEnabled),
+
+              if (showOtaControls && allowManualUpdate)
+                ..._buildOtaStateContent(currentVersion),
 
               // HA addon managed note
               if (_isHaAddon)
@@ -834,6 +840,44 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
         setState(() => _isSubmittingDebugBundle = false);
       }
     }
+  }
+
+  Widget _buildAutoUpdateRow(bool enabled) {
+    return Column(
+      children: [
+        Divider(
+          height: 1,
+          color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Auto Update',
+                  style: TextStyle(
+                    color: CelestialColors.textSecondary
+                        .withValues(alpha: 0.8),
+                    fontSize: 14,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Switch.adaptive(
+                value: enabled,
+                activeTrackColor: _teal,
+                onChanged: (next) {
+                  unawaited(
+                    context.read<ServerSyncProvider>().setAutoUpdate(next),
+                  );
+                },
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 
   List<Widget> _buildOtaStateContent(String currentVersion) {
