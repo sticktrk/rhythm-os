@@ -25,6 +25,7 @@ const DISPATCH_INFO_MS: u128 = 250;
 const DISPATCH_WARN_MS: u128 = 1000;
 const MATTER_IDENTIFY_DURATION_SECS: u16 = 1;
 const MATTER_GROUP_CONTROL_PREFIX: &str = "matter-group-";
+const MATTER_GROUP_FANOUT_ONLY_ENV: &str = "RHYTHM_MATTER_GROUP_FANOUT_ONLY";
 const MATTER_GROUP_SAFETY_FANOUT_ENV: &str = "RHYTHM_MATTER_GROUP_SAFETY_FANOUT";
 const MATTER_ON_OFF_READ_BACKOFF: Duration = Duration::from_secs(120);
 
@@ -58,6 +59,7 @@ pub struct MatterLightController {
     transport: Arc<dyn MatterTransport>,
     hub_data: Arc<MatterHubData>,
     on_off_read_backoff: Mutex<HashMap<(u64, u16), MatterOnOffReadBackoff>>,
+    group_fanout_only: bool,
 }
 
 impl MatterLightController {
@@ -67,6 +69,7 @@ impl MatterLightController {
             transport,
             hub_data,
             on_off_read_backoff: Mutex::new(HashMap::new()),
+            group_fanout_only: Self::group_fanout_only_enabled(),
         }
     }
 
@@ -131,13 +134,42 @@ impl MatterLightController {
         format!("{target_label} fallback-from-group-{group_id}")
     }
 
-    fn group_safety_fanout_enabled() -> bool {
-        std::env::var(MATTER_GROUP_SAFETY_FANOUT_ENV)
+    fn env_flag_enabled(name: &str, default: bool) -> bool {
+        std::env::var(name)
             .map(|value| {
                 let normalized = value.trim().to_ascii_lowercase();
                 !matches!(normalized.as_str(), "0" | "false" | "off" | "no")
             })
-            .unwrap_or(true)
+            .unwrap_or(default)
+    }
+
+    fn group_fanout_only_enabled() -> bool {
+        Self::env_flag_enabled(MATTER_GROUP_FANOUT_ONLY_ENV, true)
+    }
+
+    fn group_safety_fanout_enabled() -> bool {
+        Self::env_flag_enabled(MATTER_GROUP_SAFETY_FANOUT_ENV, true)
+    }
+
+    fn log_group_fanout_only(
+        operation: &'static str,
+        target_label: &str,
+        fallback_target_label: &str,
+        group_id: u16,
+        member_count: usize,
+    ) {
+        tracing::info!(
+            target: "cmd",
+            event = "matter_group_fanout_only",
+            operation,
+            target = %target_label,
+            fallback_target = %fallback_target_label,
+            group_id,
+            member_count,
+            reason = "groupcast_delivery_unverified",
+            disable_env = MATTER_GROUP_FANOUT_ONLY_ENV,
+            "Matter group fan-out-only mode"
+        );
     }
 
     fn log_group_safety_fanout(
@@ -586,6 +618,25 @@ impl MatterLightController {
         device_ids: &[String],
         command: LightingCommand,
     ) -> LightControlResult<()> {
+        if self.group_fanout_only {
+            if device_ids.is_empty() {
+                return Err(LightControlError::CommandFailed(format!(
+                    "Matter group turn_on fan-out-only mode has no members for target {} (group {})",
+                    target_label, group_id,
+                )));
+            }
+
+            let fallback_target_label = Self::group_fallback_target_label(target_label, group_id);
+            Self::log_group_fanout_only(
+                "turn_on",
+                target_label,
+                &fallback_target_label,
+                group_id,
+                device_ids.len(),
+            );
+            return self.turn_on_devices(&fallback_target_label, device_ids, command);
+        }
+
         let started = Instant::now();
         let (caps, quirks) = self.common_metadata_for_devices(device_ids);
         let adapted = rhythm_os::controller_helpers::adapt_lighting_command(
@@ -894,6 +945,25 @@ impl MatterLightController {
         group_id: u16,
         device_ids: &[String],
     ) -> LightControlResult<()> {
+        if self.group_fanout_only {
+            if device_ids.is_empty() {
+                return Err(LightControlError::CommandFailed(format!(
+                    "Matter group turn_off fan-out-only mode has no members for target {} (group {})",
+                    target_label, group_id,
+                )));
+            }
+
+            let fallback_target_label = Self::group_fallback_target_label(target_label, group_id);
+            Self::log_group_fanout_only(
+                "turn_off",
+                target_label,
+                &fallback_target_label,
+                group_id,
+                device_ids.len(),
+            );
+            return self.turn_off_devices(&fallback_target_label, device_ids);
+        }
+
         let started = Instant::now();
         info!(
             target: "cmd",
@@ -1055,6 +1125,25 @@ impl MatterLightController {
         group_id: u16,
         device_ids: &[String],
     ) -> LightControlResult<()> {
+        if self.group_fanout_only {
+            if device_ids.is_empty() {
+                return Err(LightControlError::CommandFailed(format!(
+                    "Matter group identify fan-out-only mode has no members for target {} (group {})",
+                    target_label, group_id,
+                )));
+            }
+
+            let fallback_target_label = Self::group_fallback_target_label(target_label, group_id);
+            Self::log_group_fanout_only(
+                "identify",
+                target_label,
+                &fallback_target_label,
+                group_id,
+                device_ids.len(),
+            );
+            return self.identify_devices(&fallback_target_label, device_ids);
+        }
+
         let started = Instant::now();
         info!(
             target: "cmd",
@@ -1479,7 +1568,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_on_room_with_matter_group_control_sends_group_commands_then_safety_fanout() {
+    fn turn_on_room_with_matter_group_control_fans_out_without_groupcast_by_default() {
         let (controller, spy, registry) = make_controller();
         let group_id = 4097;
         set_kitchen_group(&registry, group_id);
@@ -1489,16 +1578,6 @@ mod tests {
         assert_eq!(
             spy.operations(),
             vec![
-                RecordedOperation::SetGroupColorTemperature {
-                    group_id,
-                    kelvin: 4000,
-                    transition_ms: None,
-                },
-                RecordedOperation::SetGroupBrightness {
-                    group_id,
-                    level: clusters::brightness_to_level(80),
-                    transition_ms: None,
-                },
                 RecordedOperation::SetColorTemperature {
                     node_id: 42,
                     endpoint: 1,
@@ -1528,8 +1607,9 @@ mod tests {
     }
 
     #[test]
-    fn turn_on_group_target_with_matter_group_control_falls_back_to_devices_when_group_fails() {
-        let (controller, spy, _) = make_controller();
+    fn turn_on_group_target_falls_back_when_groupcast_enabled_and_group_fails() {
+        let (mut controller, spy, _) = make_controller();
+        controller.group_fanout_only = false;
         let group_id = 4097;
         spy.fail_group_commands(group_id);
 
@@ -1637,7 +1717,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_off_room_with_matter_group_control_sends_group_on_off_then_safety_fanout() {
+    fn turn_off_room_with_matter_group_control_fans_out_without_groupcast_by_default() {
         let (controller, spy, registry) = make_controller();
         let group_id = 4097;
         set_kitchen_group(&registry, group_id);
@@ -1647,10 +1727,6 @@ mod tests {
         assert_eq!(
             spy.operations(),
             vec![
-                RecordedOperation::SetGroupOnOff {
-                    group_id,
-                    on: false,
-                },
                 RecordedOperation::SetOnOff {
                     node_id: 42,
                     endpoint: 1,
@@ -1666,8 +1742,9 @@ mod tests {
     }
 
     #[test]
-    fn turn_off_group_target_with_matter_group_control_falls_back_to_devices_when_group_fails() {
-        let (controller, spy, _) = make_controller();
+    fn turn_off_group_target_falls_back_when_groupcast_enabled_and_group_fails() {
+        let (mut controller, spy, _) = make_controller();
+        controller.group_fanout_only = false;
         let group_id = 4097;
         spy.fail_group_commands(group_id);
 
@@ -1770,23 +1847,18 @@ mod tests {
     }
 
     #[test]
-    fn flash_group_target_with_matter_group_control_sends_group_identify_then_safety_fanout() {
+    fn flash_group_target_with_matter_group_control_fans_out_without_groupcast_by_default() {
         let (controller, spy, _) = make_controller();
-        let group_id = 4097;
 
         block_on(controller.flash_target(&HubDispatchTarget::Group {
             room_id: "kitchen".to_string(),
-            control_id: format_group_control_id(group_id),
+            control_id: format_group_control_id(4097),
         }))
         .unwrap();
 
         assert_eq!(
             spy.operations(),
             vec![
-                RecordedOperation::IdentifyGroup {
-                    group_id,
-                    duration_secs: MATTER_IDENTIFY_DURATION_SECS,
-                },
                 RecordedOperation::IdentifyLight {
                     node_id: 42,
                     endpoint: 1,
@@ -1802,8 +1874,9 @@ mod tests {
     }
 
     #[test]
-    fn flash_group_target_with_matter_group_control_falls_back_to_devices_when_group_fails() {
-        let (controller, spy, _) = make_controller();
+    fn flash_group_target_falls_back_when_groupcast_enabled_and_group_fails() {
+        let (mut controller, spy, _) = make_controller();
+        controller.group_fanout_only = false;
         let group_id = 4097;
         spy.fail_group_commands(group_id);
 
