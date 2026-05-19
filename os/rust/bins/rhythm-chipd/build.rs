@@ -47,6 +47,12 @@ fn main() {
                         .join(CHIP_FILE_ATTESTATION_TRUST_STORE_SOURCE),
                 )
                 .flag_if_supported("-std=c++17")
+                // Build the bridge with the same RTTI assumptions as the
+                // CHIP static library used by the rpiz toolchain. Otherwise
+                // wrapper classes that derive from CHIP interfaces can emit
+                // references to typeinfo symbols that libCHIP.a does not
+                // provide.
+                .flag_if_supported("-fno-rtti")
                 .warnings(false)
                 .define("CHIP_HAVE_CONFIG_H", "1")
                 .define("OPENSSL_NO_ASM", "1");
