@@ -1,8 +1,11 @@
 //! Axum HTTP server — uses shared routes from rhythm-os plus server-specific endpoints.
 
+use anyhow::{Context, Result};
 use axum::body::Body;
 use axum::http::StatusCode;
+use serde::Serialize;
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
@@ -23,6 +26,7 @@ pub fn create_router(state: SharedState) -> Router {
             // Server-specific endpoints
             .route("/api/discover", get(discover))
             .route("/api/diag/debug-bundle", post(debug_bundle))
+            .route("/api/diag/reset-matter-fabric", post(reset_matter_fabric))
             .route(
                 "/api/ota/capabilities",
                 get({
@@ -414,6 +418,78 @@ async fn restart_device(State(state): State<SharedState>) -> Response {
     json_ok(r#"{"status":"ok","message":"Restart scheduled"}"#.to_string())
 }
 
+#[derive(Debug, Serialize)]
+struct MatterFabricResetSummary {
+    status: &'static str,
+    message: &'static str,
+    matter_dir: String,
+    removed_matter_state: bool,
+    removed_matter_registry: bool,
+    restart_scheduled: bool,
+}
+
+async fn reset_matter_fabric(State(state): State<SharedState>) -> Response {
+    log::warn!(target: "http", "Matter fabric reset requested via undocumented diag endpoint");
+    let reset_state = state.clone();
+    let summary =
+        match tokio::task::spawn_blocking(move || reset_matter_fabric_state(&reset_state)).await {
+            Ok(Ok(summary)) => summary,
+            Ok(Err(error)) => return err_500(error),
+            Err(error) => return err_500(format!("Matter fabric reset task failed: {error}")),
+        };
+
+    crate::self_update::persist_before_restart(&state);
+    crate::self_update::schedule_user_initiated_restart();
+
+    match serde_json::to_string(&summary) {
+        Ok(json) => json_ok(json),
+        Err(error) => err_500(error),
+    }
+}
+
+fn reset_matter_fabric_state(state: &SharedState) -> Result<MatterFabricResetSummary> {
+    let data_dir = {
+        let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if state.data_dir.trim().is_empty() {
+            anyhow::bail!("data_dir not configured on AppState");
+        }
+        PathBuf::from(&state.data_dir)
+    };
+
+    rhythm_os::commands::do_hub_disconnect_one(state, rhythm_os::hub::HubType::MATTER, "local")
+        .context("disconnecting Matter hub before fabric reset")?;
+
+    let matter_dir = data_dir.join("matter");
+    let matter_registry = data_dir.join("hub_registry_matter_local.json");
+    let removed_matter_state = remove_dir_if_exists(&matter_dir)?;
+    let removed_matter_registry = remove_file_if_exists(&matter_registry)?;
+
+    Ok(MatterFabricResetSummary {
+        status: "ok",
+        message: "Matter fabric reset; restart scheduled",
+        matter_dir: matter_dir.display().to_string(),
+        removed_matter_state,
+        removed_matter_registry,
+        restart_scheduled: true,
+    })
+}
+
+fn remove_dir_if_exists(path: &Path) -> Result<bool> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("removing {}", path.display())),
+    }
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<bool> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("removing {}", path.display())),
+    }
+}
+
 async fn do_update(
     state: SharedState,
     ota_status: crate::self_update::OtaStatusHandle,
@@ -609,6 +685,7 @@ mod tests {
     use axum::body::to_bytes;
     use axum::http::{Request, StatusCode};
     use rhythm_os::state::AppState;
+    use rhythm_os::storage::FileStorage;
     use std::sync::{Arc, Mutex, Once};
     use tower::ServiceExt;
 
@@ -619,6 +696,18 @@ mod tests {
     // thread inert so tests can exercise the route without nuking the runner.
     fn init_restart_dry_run() {
         DRY_RUN_INIT.call_once(|| std::env::set_var("RHYTHM_RESTART_DRY_RUN", "1"));
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "rhythm_server_{}_{}_{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
     }
 
     #[tokio::test]
@@ -693,5 +782,63 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         assert_eq!(body["status"], "ok");
         assert_eq!(body["message"], "Restart scheduled");
+    }
+
+    #[tokio::test]
+    async fn reset_matter_fabric_endpoint_removes_matter_state_and_schedules_restart() {
+        init_restart_dry_run();
+
+        let data_dir = unique_test_dir("matter-reset");
+        let matter_chip_dir = data_dir.join("matter").join("chip");
+        std::fs::create_dir_all(&matter_chip_dir).unwrap();
+        std::fs::write(
+            data_dir.join("matter").join("fabric-identity.json"),
+            br#"{"schema_version":1,"label":"default","operational_fabric_id":100,"ipk_hex":"00112233445566778899aabbccddeeff"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            matter_chip_dir.join("chip_tool_config.controller-storage.ini"),
+            b"chip-storage",
+        )
+        .unwrap();
+        std::fs::write(data_dir.join("hub_registry_matter_local.json"), b"{}").unwrap();
+
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        {
+            let mut state = state.lock().unwrap();
+            state.data_dir = data_dir.display().to_string();
+            state.storage = Some(Box::new(FileStorage::new(&state.data_dir).unwrap()));
+        }
+        let router = create_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/diag/reset-matter-fabric")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "POST /api/diag/reset-matter-fabric must be registered and return 200"
+        );
+
+        let body_bytes = to_bytes(response.into_body(), 2048).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["removed_matter_state"], true);
+        assert_eq!(body["removed_matter_registry"], true);
+        assert_eq!(body["restart_scheduled"], true);
+        assert!(
+            !data_dir.join("matter").exists(),
+            "Matter fabric state directory should be removed"
+        );
+        assert!(
+            !data_dir.join("hub_registry_matter_local.json").exists(),
+            "Matter hub registry snapshot should be removed"
+        );
+
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 }

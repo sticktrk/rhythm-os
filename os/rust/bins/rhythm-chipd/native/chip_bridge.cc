@@ -8,6 +8,7 @@
 #include <controller/ExampleOperationalCredentialsIssuer.h>
 #include <controller/InvokeInteraction.h>
 #include <controller/ExamplePersistentStorage.h>
+#include <credentials/CHIPCert.h>
 #include <credentials/GroupDataProviderImpl.h>
 #include <credentials/PersistentStorageOpCertStore.h>
 #include <credentials/attestation_verifier/DefaultDeviceAttestationVerifier.h>
@@ -1454,6 +1455,8 @@ private:
             mStorage->GetLocalNodeId(), mOperationalFabricId, mStorage->GetCommissionerCATs(),
             mOperationalKeypair.Pubkey(), rcacSpan, icacSpan, nocSpan));
 
+        ReturnErrorOnFailure(ValidateExistingFabricCompatibility(chip::ByteSpan(rcacSpan.data(), rcacSpan.size())));
+
         commissionerParams.controllerNOC  = nocSpan;
         commissionerParams.controllerICAC = icacSpan;
         commissionerParams.controllerRCAC = rcacSpan;
@@ -1470,6 +1473,62 @@ private:
 
         mCommissioner = std::move(commissioner);
         return CHIP_NO_ERROR;
+    }
+
+    CHIP_ERROR ValidateExistingFabricCompatibility(const chip::ByteSpan & requestedRcac)
+    {
+        const auto * systemState = DeviceControllerFactory::GetInstance().GetSystemState();
+        VerifyOrReturnError(systemState != nullptr, CHIP_ERROR_INCORRECT_STATE);
+
+        const auto * fabricTable = systemState->Fabrics();
+        VerifyOrReturnError(fabricTable != nullptr, CHIP_ERROR_INCORRECT_STATE);
+        if (fabricTable->FabricCount() == 0)
+        {
+            return CHIP_NO_ERROR;
+        }
+
+        uint8_t requestedRootBuffer[chip::Credentials::kMaxCHIPCertLength] = { 0 };
+        chip::MutableByteSpan requestedRootChip(requestedRootBuffer);
+        ReturnErrorOnFailure(chip::Credentials::ConvertX509CertToChipCert(requestedRcac, requestedRootChip));
+
+        chip::Credentials::P256PublicKeySpan requestedRootPublicKeySpan;
+        ReturnErrorOnFailure(chip::Credentials::ExtractPublicKeyFromChipCert(requestedRootChip, requestedRootPublicKeySpan));
+        chip::Crypto::P256PublicKey requestedRootPublicKey{ requestedRootPublicKeySpan };
+
+        bool foundMatchingFabric = false;
+        bool foundIncompatibleFabric = false;
+        for (const auto & fabric : *fabricTable)
+        {
+            chip::Crypto::P256PublicKey storedRootPublicKey;
+            CHIP_ERROR rootErr = fabric.FetchRootPubkey(storedRootPublicKey);
+            const bool matchesRequestedFabric =
+                rootErr == CHIP_NO_ERROR && fabric.GetFabricId() == mOperationalFabricId &&
+                storedRootPublicKey.Matches(requestedRootPublicKey);
+            foundMatchingFabric = foundMatchingFabric || matchesRequestedFabric;
+            foundIncompatibleFabric = foundIncompatibleFabric || !matchesRequestedFabric;
+
+            if (!matchesRequestedFabric)
+            {
+                ChipLogError(Controller,
+                             "Rhythm Matter controller storage has incompatible fabric index 0x%x fabricId=0x" ChipLogFormatX64
+                             " compressedFabricId=0x" ChipLogFormatX64 " nodeId=0x" ChipLogFormatX64
+                             " rootStatus=%" CHIP_ERROR_FORMAT,
+                             static_cast<unsigned>(fabric.GetFabricIndex()), ChipLogValueX64(fabric.GetFabricId()),
+                             ChipLogValueX64(fabric.GetCompressedFabricId()), ChipLogValueX64(fabric.GetNodeId()),
+                             rootErr.Format());
+            }
+        }
+
+        if (foundMatchingFabric && !foundIncompatibleFabric)
+        {
+            return CHIP_NO_ERROR;
+        }
+
+        ChipLogError(Controller,
+                     "Rhythm Matter controller storage is incompatible with requested fabricId=0x" ChipLogFormatX64
+                     "; reset /data/matter or restore the matching fabric identity instead of adding another local fabric",
+                     ChipLogValueX64(mOperationalFabricId));
+        return CHIP_ERROR_INCORRECT_STATE;
     }
 
     template <typename OperationT>

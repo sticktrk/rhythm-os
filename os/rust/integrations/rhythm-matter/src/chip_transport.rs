@@ -25,6 +25,8 @@ use crate::transport::{
 
 const SOCKET_NAME: &str = "chip-controller.sock";
 const STORAGE_NAME: &str = "controller-storage.json";
+const CHIP_EXAMPLE_STORAGE_PREFIX: &str = "chip_tool_config";
+const CHIP_EXAMPLE_STORAGE_EXT: &str = "ini";
 const CHIPD_LOGFILE_ENV: &str = "RHYTHM_MATTER_LOGFILE";
 const SIDECAR_START_TIMEOUT: Duration = Duration::from_secs(10);
 const RPC_TIMEOUT: Duration = Duration::from_secs(120);
@@ -48,8 +50,14 @@ pub struct ChipTransport {
 impl ChipTransport {
     /// Load or create the local CHIP controller sidecar state.
     pub fn load_or_create(data_path: &str, fabric_id: &str) -> Result<Self> {
-        let fabric_identity = MatterFabricIdentity::load_or_create(data_path, fabric_id)?;
         let chip_dir = Path::new(data_path).join("chip");
+        let storage_path = chip_dir.join(STORAGE_NAME);
+        let storage_artifact_paths = chip_storage_artifact_paths(&chip_dir, &storage_path);
+        let fabric_identity = MatterFabricIdentity::load_or_create_with_controller_storage_paths(
+            data_path,
+            fabric_id,
+            &storage_artifact_paths,
+        )?;
         fs::create_dir_all(&chip_dir)
             .with_context(|| format!("creating CHIP data dir {}", chip_dir.display()))?;
 
@@ -64,7 +72,7 @@ impl ChipTransport {
                 fabric_id: fabric_id.to_string(),
                 operational_fabric_id: fabric_identity.operational_fabric_id,
                 ipk_hex: fabric_identity.ipk_hex.clone(),
-                storage_path: chip_dir.join(STORAGE_NAME).display().to_string(),
+                storage_path: storage_path.display().to_string(),
                 ble_controller,
             },
             sidecar: Mutex::new(None),
@@ -412,6 +420,34 @@ fn resolve_chipd_command() -> Result<PathBuf> {
 
 fn sidecar_log_path_from_env(value: Option<OsString>) -> Option<PathBuf> {
     value.filter(|path| !path.is_empty()).map(PathBuf::from)
+}
+
+fn chip_storage_artifact_paths(chip_dir: &Path, requested_storage_path: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(stem) = requested_storage_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+    {
+        paths.push(chip_dir.join(format!(
+            "{CHIP_EXAMPLE_STORAGE_PREFIX}.{stem}.{CHIP_EXAMPLE_STORAGE_EXT}"
+        )));
+    }
+    paths.push(requested_storage_path.to_path_buf());
+    paths.push(chip_dir.join(format!(
+        "{CHIP_EXAMPLE_STORAGE_PREFIX}.{CHIP_EXAMPLE_STORAGE_EXT}"
+    )));
+    dedup_paths(paths)
+}
+
+fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut deduped = Vec::with_capacity(paths.len());
+    for path in paths {
+        if !deduped.iter().any(|existing| existing == &path) {
+            deduped.push(path);
+        }
+    }
+    deduped
 }
 
 fn sidecar_stdio(log_path: Option<&Path>) -> Result<(Stdio, Stdio)> {
@@ -1111,6 +1147,23 @@ mod tests {
         assert_eq!(
             sidecar_log_path_from_env(Some(OsString::from("/tmp/rhythm-matter.log"))),
             Some(PathBuf::from("/tmp/rhythm-matter.log"))
+        );
+    }
+
+    #[test]
+    fn chip_storage_artifact_paths_include_chip_ini_storage() {
+        let chip_dir = PathBuf::from("/data/matter/chip");
+        let requested = chip_dir.join("controller-storage.json");
+
+        let paths = chip_storage_artifact_paths(&chip_dir, &requested);
+
+        assert_eq!(
+            paths,
+            vec![
+                chip_dir.join("chip_tool_config.controller-storage.ini"),
+                requested,
+                chip_dir.join("chip_tool_config.ini"),
+            ]
         );
     }
 

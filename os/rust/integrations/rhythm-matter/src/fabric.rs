@@ -28,6 +28,31 @@ pub struct MatterFabricIdentity {
 
 impl MatterFabricIdentity {
     pub fn load_or_create(data_path: impl AsRef<Path>, label: &str) -> Result<Self> {
+        Self::load_or_create_guarded(data_path, label, &[])
+    }
+
+    pub fn load_or_create_with_controller_storage(
+        data_path: impl AsRef<Path>,
+        label: &str,
+        controller_storage_path: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let controller_storage_paths = [controller_storage_path.as_ref().to_path_buf()];
+        Self::load_or_create_guarded(data_path, label, &controller_storage_paths)
+    }
+
+    pub fn load_or_create_with_controller_storage_paths(
+        data_path: impl AsRef<Path>,
+        label: &str,
+        controller_storage_paths: &[PathBuf],
+    ) -> Result<Self> {
+        Self::load_or_create_guarded(data_path, label, controller_storage_paths)
+    }
+
+    fn load_or_create_guarded(
+        data_path: impl AsRef<Path>,
+        label: &str,
+        controller_storage_paths: &[PathBuf],
+    ) -> Result<Self> {
         if label.trim().is_empty() {
             anyhow::bail!("Matter fabric label must not be empty");
         }
@@ -48,6 +73,15 @@ impl MatterFabricIdentity {
                 Ok(identity)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(storage_path) =
+                    controller_storage_paths.iter().find(|path| path.is_file())
+                {
+                    anyhow::bail!(
+                        "Matter controller storage exists at {} but {} is missing; reset Matter controller state or restore the matching fabric identity before starting",
+                        storage_path.display(),
+                        path.display()
+                    );
+                }
                 let identity = Self::create(label)?;
                 write_identity_atomic(&path, &identity)?;
                 Ok(identity)
@@ -238,6 +272,51 @@ mod tests {
 
         let err = MatterFabricIdentity::load_or_create(&dir, "default").unwrap_err();
         assert!(err.to_string().contains("IPK"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn load_or_create_rejects_legacy_controller_storage_without_identity() {
+        let dir = temp_dir("legacy-controller-storage");
+        let controller_storage = dir.join("chip").join("controller-storage.json");
+        fs::create_dir_all(controller_storage.parent().unwrap()).unwrap();
+        fs::write(&controller_storage, "{}").unwrap();
+
+        let err = MatterFabricIdentity::load_or_create_with_controller_storage(
+            &dir,
+            "default",
+            &controller_storage,
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("controller storage exists"));
+        assert!(message.contains("fabric-identity.json is missing"));
+        assert!(!identity_path(&dir).exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn load_or_create_rejects_chip_ini_storage_without_identity() {
+        let dir = temp_dir("chip-ini-controller-storage");
+        let json_storage = dir.join("chip").join("controller-storage.json");
+        let ini_storage = dir
+            .join("chip")
+            .join("chip_tool_config.controller-storage.ini");
+        fs::create_dir_all(ini_storage.parent().unwrap()).unwrap();
+        fs::write(&ini_storage, "chip storage").unwrap();
+
+        let err = MatterFabricIdentity::load_or_create_with_controller_storage_paths(
+            &dir,
+            "default",
+            &[json_storage, ini_storage.clone()],
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("controller storage exists"));
+        assert!(message.contains(&ini_storage.display().to_string()));
+        assert!(!identity_path(&dir).exists());
 
         let _ = fs::remove_dir_all(dir);
     }

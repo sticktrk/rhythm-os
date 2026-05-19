@@ -393,6 +393,46 @@ struct GeneratedFileEntry {
 }
 
 #[derive(Clone, Debug, Serialize)]
+struct DebugFileMetadata {
+    path: String,
+    present: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    modified_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MatterFabricIdentityDebug {
+    file: DebugFileMetadata,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    schema_version: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operational_fabric_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operational_fabric_id_hex: Option<String>,
+    ipk_hex_present: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parse_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MatterControllerDebugSnapshot {
+    schema_version: u32,
+    generated_at: String,
+    data_dir: String,
+    fabric_identity: MatterFabricIdentityDebug,
+    chip_controller_storage: DebugFileMetadata,
+    chip_controller_storage_files: Vec<DebugFileMetadata>,
+    chip_device_store: DebugFileMetadata,
+    storage_without_identity: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct BundleDiagnostics {
     schema_version: u32,
     kind: &'static str,
@@ -577,6 +617,9 @@ pub fn build_debug_bundle(state: &SharedState) -> Result<DebugBundle> {
     let process_resources_json =
         build_process_resources_json(created_at, &runtime.data_dir, &mut diagnostics)
             .context("building process resource snapshot")?;
+    let matter_controller_json =
+        build_matter_controller_debug_json(&runtime, created_at, &mut diagnostics)
+            .context("building Matter controller debug snapshot")?;
 
     let log_artifacts = discover_log_artifacts(&searched_log_dirs, &mut diagnostics);
     let log_summary_json = build_log_summary_json(&log_artifacts, created_at, &mut diagnostics)
@@ -628,6 +671,12 @@ pub fn build_debug_bundle(state: &SharedState) -> Result<DebugBundle> {
         &mut generated_files,
         "process_resources.json",
         process_resources_json.as_bytes(),
+    )?;
+    append_generated_file(
+        &mut builder,
+        &mut generated_files,
+        "matter_controller.json",
+        matter_controller_json.as_bytes(),
     )?;
 
     let mut captured_logs = Vec::<CapturedFileEntry>::new();
@@ -865,7 +914,10 @@ fn discover_log_artifacts(
             .cmp(&right.1)
             .then_with(|| left.0.archive_path.cmp(&right.0.archive_path))
     });
-    discovered.into_iter().map(|(artifact, _)| artifact).collect()
+    discovered
+        .into_iter()
+        .map(|(artifact, _)| artifact)
+        .collect()
 }
 
 fn discover_persisted_artifacts(
@@ -966,6 +1018,176 @@ fn discover_persisted_artifacts(
 
     discovered.sort_by(|left, right| left.archive_path.cmp(&right.archive_path));
     discovered
+}
+
+fn build_matter_controller_debug_json(
+    runtime: &RuntimeSnapshot,
+    generated_at: DateTime<Utc>,
+    diagnostics: &mut BundleDiagnostics,
+) -> Result<String> {
+    if runtime.data_dir.is_empty() {
+        diagnostics.add_warning("No data_dir configured for Matter controller debug snapshot.");
+    }
+
+    let matter_dir = PathBuf::from(&runtime.data_dir).join("matter");
+    let identity_path = matter_dir.join("fabric-identity.json");
+    let controller_storage_paths = matter_controller_storage_paths(&matter_dir);
+    let device_store_path = matter_dir.join("chip").join("devices.json");
+
+    let fabric_identity = build_matter_fabric_identity_debug(&identity_path, diagnostics);
+    let chip_controller_storage_files = controller_storage_paths
+        .iter()
+        .map(|path| debug_file_metadata(path, diagnostics))
+        .collect::<Vec<_>>();
+    let chip_controller_storage = chip_controller_storage_files
+        .iter()
+        .find(|metadata| metadata.present)
+        .cloned()
+        .or_else(|| chip_controller_storage_files.first().cloned())
+        .unwrap_or_else(|| debug_file_metadata(&matter_dir.join("chip"), diagnostics));
+    let chip_device_store = debug_file_metadata(&device_store_path, diagnostics);
+    let storage_without_identity = chip_controller_storage_files
+        .iter()
+        .any(|metadata| metadata.present)
+        && !fabric_identity.file.present;
+
+    if storage_without_identity {
+        diagnostics.add_warning(format!(
+            "Matter controller storage exists at {} without {}.",
+            chip_controller_storage.path,
+            identity_path.display()
+        ));
+    }
+
+    let snapshot = MatterControllerDebugSnapshot {
+        schema_version: DEBUG_BUNDLE_SCHEMA_VERSION,
+        generated_at: generated_at.to_rfc3339(),
+        data_dir: runtime.data_dir.clone(),
+        fabric_identity,
+        chip_controller_storage,
+        chip_controller_storage_files,
+        chip_device_store,
+        storage_without_identity,
+    };
+    serde_json::to_string_pretty(&snapshot).context("serializing Matter controller debug snapshot")
+}
+
+fn matter_controller_storage_paths(matter_dir: &Path) -> Vec<PathBuf> {
+    let chip_dir = matter_dir.join("chip");
+    vec![
+        chip_dir.join("chip_tool_config.controller-storage.ini"),
+        chip_dir.join("controller-storage.json"),
+        chip_dir.join("chip_tool_config.ini"),
+    ]
+}
+
+fn build_matter_fabric_identity_debug(
+    path: &Path,
+    diagnostics: &mut BundleDiagnostics,
+) -> MatterFabricIdentityDebug {
+    let file = debug_file_metadata(path, diagnostics);
+    let mut snapshot = MatterFabricIdentityDebug {
+        file,
+        schema_version: None,
+        label: None,
+        operational_fabric_id: None,
+        operational_fabric_id_hex: None,
+        ipk_hex_present: false,
+        parse_error: None,
+    };
+
+    if !snapshot.file.present {
+        return snapshot;
+    }
+
+    let json = match fs::read_to_string(path) {
+        Ok(json) => json,
+        Err(err) => {
+            diagnostics.record_file_error("read", path.display().to_string(), &err);
+            snapshot.parse_error = Some(err.to_string());
+            return snapshot;
+        }
+    };
+
+    let value: serde_json::Value = match serde_json::from_str(&json) {
+        Ok(value) => value,
+        Err(err) => {
+            snapshot.parse_error = Some(err.to_string());
+            return snapshot;
+        }
+    };
+
+    snapshot.schema_version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64);
+    snapshot.label = value
+        .get("label")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    snapshot.operational_fabric_id = value
+        .get("operational_fabric_id")
+        .and_then(serde_json::Value::as_u64);
+    snapshot.operational_fabric_id_hex = snapshot
+        .operational_fabric_id
+        .map(|fabric_id| format!("0x{fabric_id:016X}"));
+    snapshot.ipk_hex_present = value
+        .get("ipk_hex")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|ipk| !ipk.is_empty());
+
+    snapshot
+}
+
+fn debug_file_metadata(path: &Path, diagnostics: &mut BundleDiagnostics) -> DebugFileMetadata {
+    let path_string = path.display().to_string();
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return DebugFileMetadata {
+                path: path_string,
+                present: false,
+                bytes: None,
+                modified_at: None,
+                error: None,
+            };
+        }
+        Err(err) => {
+            diagnostics.record_file_error("metadata", path_string.clone(), &err);
+            return DebugFileMetadata {
+                path: path_string,
+                present: false,
+                bytes: None,
+                modified_at: None,
+                error: Some(err.to_string()),
+            };
+        }
+    };
+
+    if !metadata.is_file() {
+        return DebugFileMetadata {
+            path: path_string,
+            present: false,
+            bytes: None,
+            modified_at: None,
+            error: Some("not a regular file".to_string()),
+        };
+    }
+
+    let modified_at = match metadata.modified() {
+        Ok(modified_at) => Some(DateTime::<Utc>::from(modified_at).to_rfc3339()),
+        Err(err) => {
+            diagnostics.record_file_error("modified", path_string.clone(), &err);
+            None
+        }
+    };
+
+    DebugFileMetadata {
+        path: path_string,
+        present: true,
+        bytes: Some(metadata.len()),
+        modified_at,
+        error: None,
+    }
 }
 
 fn matches_log_name(file_name: &str) -> bool {
@@ -2146,6 +2368,25 @@ mod tests {
             br#"{"rooms":[{"id":"office"}]}"#,
         )
         .unwrap();
+        fs::create_dir_all(data_dir.join("matter").join("chip")).unwrap();
+        fs::write(
+            data_dir.join("matter").join("fabric-identity.json"),
+            br#"{"schema_version":1,"label":"default","operational_fabric_id":100,"ipk_hex":"00112233445566778899aabbccddeeff"}"#,
+        )
+        .unwrap();
+        fs::write(
+            data_dir
+                .join("matter")
+                .join("chip")
+                .join("chip_tool_config.controller-storage.ini"),
+            b"controller-storage",
+        )
+        .unwrap();
+        fs::write(
+            data_dir.join("matter").join("chip").join("devices.json"),
+            b"devices",
+        )
+        .unwrap();
 
         let state: SharedState =
             std::sync::Arc::new(std::sync::Mutex::new(rhythm_os::state::AppState::default()));
@@ -2192,6 +2433,7 @@ mod tests {
         assert!(files.contains_key("runtime_health.json"));
         assert!(files.contains_key("log_summary.json"));
         assert!(files.contains_key("process_resources.json"));
+        assert!(files.contains_key("matter_controller.json"));
         assert!(files.contains_key("bundle_diagnostics.json"));
         assert!(files.contains_key("manifest.json"));
 
@@ -2221,6 +2463,11 @@ mod tests {
             .unwrap()
             .iter()
             .any(|value| value["archive_path"] == "process_resources.json"));
+        assert!(manifest["generated_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value["archive_path"] == "matter_controller.json"));
         assert!(manifest["generated_files"]
             .as_array()
             .unwrap()
@@ -2267,6 +2514,48 @@ mod tests {
             DEBUG_BUNDLE_SCHEMA_VERSION
         );
         assert_eq!(process_resources["target_os"], std::env::consts::OS);
+
+        let matter_controller: Value =
+            serde_json::from_slice(files.get("matter_controller.json").unwrap()).unwrap();
+        assert_eq!(
+            matter_controller["schema_version"],
+            DEBUG_BUNDLE_SCHEMA_VERSION
+        );
+        assert_eq!(matter_controller["fabric_identity"]["label"], "default");
+        assert_eq!(
+            matter_controller["fabric_identity"]["operational_fabric_id_hex"],
+            "0x0000000000000064"
+        );
+        assert_eq!(
+            matter_controller["fabric_identity"]["ipk_hex_present"],
+            true
+        );
+        assert!(matter_controller["fabric_identity"]
+            .get("ipk_hex")
+            .is_none());
+        assert_eq!(
+            matter_controller["chip_controller_storage"]["present"],
+            true
+        );
+        assert!(matter_controller["chip_controller_storage"]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("chip_tool_config.controller-storage.ini"));
+        assert!(matter_controller["chip_controller_storage_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value["path"]
+                .as_str()
+                .unwrap()
+                .ends_with("controller-storage.json")));
+        assert_eq!(matter_controller["storage_without_identity"], false);
+        let matter_controller_text =
+            std::str::from_utf8(files.get("matter_controller.json").unwrap()).unwrap();
+        assert!(
+            !matter_controller_text.contains("00112233445566778899aabbccddeeff"),
+            "Matter debug metadata must not include IPK contents"
+        );
 
         let runtime_health: Value =
             serde_json::from_slice(files.get("runtime_health.json").unwrap()).unwrap();
@@ -2406,7 +2695,8 @@ mod tests {
 
         let tail = log_summary["tail"].as_array().unwrap();
         assert!(
-            tail.iter().any(|entry| entry["archive_path"] == "logs/rhythm-server.log"),
+            tail.iter()
+                .any(|entry| entry["archive_path"] == "logs/rhythm-server.log"),
             "tail should include lines from the active log"
         );
 

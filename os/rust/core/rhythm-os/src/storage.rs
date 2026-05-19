@@ -1877,7 +1877,7 @@ mod tests {
             std::fs::write(
                 path.join("matter")
                     .join("chip")
-                    .join("controller-storage.json"),
+                    .join("chip_tool_config.controller-storage.ini"),
                 "{}",
             )
             .unwrap();
