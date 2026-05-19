@@ -162,6 +162,7 @@ fn main() -> Result<()> {
 
     if appliance_runtime {
         rhythm_server::liveness::spawn_periodic_watchdog(state.clone());
+        rhythm_server::auto_update::spawn(state.clone());
     }
 
     // Start tokio runtime for the async HTTP server + mDNS

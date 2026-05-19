@@ -134,6 +134,14 @@ pub fn factory_default_power_save() -> bool {
     factory_default_profile_bundle_ref().profile.power_save
 }
 
+/// New rpiz appliances ship with auto-update enabled: they poll the curated
+/// "stable" OTA feed and apply updates silently during the overnight window.
+/// Power users can flip this off via `PUT /api/settings` to opt into the beta
+/// feed with manual-only updates.
+pub fn factory_default_auto_update() -> bool {
+    true
+}
+
 pub fn factory_default_active_mode() -> RhythmMode {
     RhythmMode::Day
 }

@@ -391,6 +391,7 @@ fn apply_mode_action(
         None,
         Some(mode_change),
         force_reapply_outputs,
+        None,
     )
     .map(|_| ())
 }
@@ -1684,6 +1685,7 @@ fn persist_settings_locked(s: &AppState) {
             last_active_mode_change_utc_ms: s.last_active_mode_change_utc_ms,
             modes: s.mode_configs(),
             mode_transitions: s.mode_transition_configs(),
+            auto_update: s.auto_update,
         }) {
             warn!(target: "cmd", "Failed to save settings: {}", e);
         }
@@ -2750,6 +2752,7 @@ pub fn build_config(state: &SharedState, profile_id: Option<&str>) -> Result<Str
 fn build_settings_dto_inner(s: &AppState) -> SettingsDto {
     SettingsDto {
         power_save: s.power_save,
+        auto_update: s.auto_update,
     }
 }
 
@@ -4600,6 +4603,7 @@ fn apply_pending_mode_outputs_if_ready(state: &SharedState) {
     persist_state(state);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn do_settings_set_internal(
     state: &SharedState,
     power_save: Option<bool>,
@@ -4608,6 +4612,7 @@ fn do_settings_set_internal(
     mode_transitions: Option<Vec<rhythm_core::ModeTransitionConfig>>,
     mode_change: Option<ModeChangeContext>,
     force_reapply_outputs: bool,
+    auto_update: Option<bool>,
 ) -> Result<String> {
     if let Some(configs) = mode_configs.as_ref() {
         validate_mode_configs(configs)?;
@@ -4646,6 +4651,11 @@ fn do_settings_set_internal(
             if let Some(runtime) = s.hub_runtime() {
                 power_save_refresh_rooms = runtime.set_power_save(ps);
             }
+        }
+
+        if let Some(au) = auto_update {
+            s.auto_update = au;
+            info!(target: "cmd", "settings: auto_update={}", au);
         }
 
         let mut modes_updated = false;
@@ -4889,6 +4899,7 @@ pub fn do_settings_set(
     active_mode: Option<RhythmMode>,
     mode_configs: Option<Vec<ModeConfig>>,
     mode_transitions: Option<Vec<rhythm_core::ModeTransitionConfig>>,
+    auto_update: Option<bool>,
 ) -> Result<String> {
     do_settings_set_internal(
         state,
@@ -4904,6 +4915,7 @@ pub fn do_settings_set(
             )
         }),
         false,
+        auto_update,
     )
 }
 
@@ -4928,6 +4940,7 @@ pub fn do_mode_set(
         None,
         mode_change,
         false,
+        None,
     )?;
     build_mode(state)
 }
@@ -4937,7 +4950,7 @@ pub fn do_transitions_set(
     state: &SharedState,
     mode_transitions: Option<Vec<rhythm_core::ModeTransitionConfig>>,
 ) -> Result<String> {
-    do_settings_set_internal(state, None, None, None, mode_transitions, None, false)?;
+    do_settings_set_internal(state, None, None, None, mode_transitions, None, false, None)?;
     build_transitions(state)
 }
 
@@ -5125,6 +5138,7 @@ pub fn do_profile_bundle_import(
         Some(imported_mode_transitions),
         None,
         false,
+        None,
     )?;
 
     info!(
@@ -5193,6 +5207,7 @@ fn apply_backup_configuration(
         Some(imported_mode_transitions),
         Some(ModeChangeContext::new(ModeChangeCause::Manual, None)),
         true,
+        None,
     )?;
 
     let (applied_rooms, skipped_rooms) =
@@ -5276,6 +5291,7 @@ pub fn do_set_active_mode_with_trigger(
         None,
         Some(mode_change),
         false,
+        None,
     )
     .map(|_| ())
 }
@@ -5298,6 +5314,7 @@ pub fn do_trigger_transition(state: &SharedState, transition_id: &str) -> Result
         None,
         Some(mode_change),
         true,
+        None,
     )?;
     build_mode(state)
 }
@@ -10643,7 +10660,7 @@ mod tests {
     #[test]
     fn settings_partial_update() {
         let (state, _runtime) = setup_state(vec![]);
-        do_settings_set(&state, Some(true), None, None, None).unwrap();
+        do_settings_set(&state, Some(true), None, None, None, None).unwrap();
         let s = state.lock().unwrap();
         assert!(s.power_save);
     }
@@ -10657,7 +10674,7 @@ mod tests {
             s.runtime_config.update_interval_secs
         };
 
-        do_settings_set(&state, Some(true), None, None, None).unwrap();
+        do_settings_set(&state, Some(true), None, None, None, None).unwrap();
 
         let s = state.lock().unwrap();
         assert_eq!(s.runtime_config.update_interval_secs, original_interval);
@@ -10974,9 +10991,10 @@ mod tests {
     #[test]
     fn settings_response_is_valid_settings_json() {
         let (state, _rt) = setup_state(vec![]);
-        let result = do_settings_set(&state, Some(true), None, None, None).unwrap();
+        let result = do_settings_set(&state, Some(true), None, None, None, None).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert!(parsed["power_save"].is_boolean());
+        assert!(parsed["auto_update"].is_boolean());
         assert!(parsed.get("mode").is_none());
         // No status wrapper
         assert!(parsed.get("status").is_none());
@@ -10988,12 +11006,14 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             s.power_save = true;
+            s.auto_update = false;
             s.last_active_mode_cause = ModeChangeCause::Schedule;
             s.last_active_mode_transition_id = Some("sleep_to_day".into());
             s.last_active_mode_change_utc_ms = Some(1_700_000_000_000);
         }
         let dto = build_settings_dto(&state).unwrap();
         assert!(dto.power_save);
+        assert!(!dto.auto_update);
     }
 
     #[test]
@@ -12735,6 +12755,7 @@ mod tests {
         let result = build_state_snapshot(&state).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["settings"]["power_save"], true);
+        assert_eq!(parsed["settings"]["auto_update"], true);
         assert!(parsed["settings"].get("mode").is_none());
         assert!(parsed["mode"].is_object());
         assert!(parsed["mode"].get("transitions").is_none());
@@ -13634,10 +13655,23 @@ mod tests {
     #[test]
     fn settings_power_save() {
         let (state, _rt) = setup_state(vec![]);
-        do_settings_set(&state, Some(true), None, None, None).unwrap();
+        do_settings_set(&state, Some(true), None, None, None, None).unwrap();
         assert!(state.lock().unwrap().power_save);
-        do_settings_set(&state, Some(false), None, None, None).unwrap();
+        do_settings_set(&state, Some(false), None, None, None, None).unwrap();
         assert!(!state.lock().unwrap().power_save);
+    }
+
+    #[test]
+    fn settings_auto_update_partial_update() {
+        let (state, _rt) = setup_state(vec![]);
+        assert!(state.lock().unwrap().auto_update);
+
+        let result = do_settings_set(&state, None, None, None, None, Some(false)).unwrap();
+
+        assert!(!state.lock().unwrap().auto_update);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["auto_update"], false);
+        assert_eq!(parsed["power_save"], true);
     }
 
     #[test]
@@ -13647,16 +13681,19 @@ mod tests {
             tokio::sync::broadcast::channel::<crate::server_event::ServerEvent>(16);
         state.lock().unwrap().event_tx = Some(event_tx);
 
-        do_settings_set(&state, Some(true), None, None, None).unwrap();
+        do_settings_set(&state, Some(true), None, None, None, Some(false)).unwrap();
 
         let mut power_save = None;
+        let mut auto_update = None;
         while let Ok(event) = event_rx.try_recv() {
             if let crate::server_event::ServerEvent::SettingsChanged { settings } = event {
                 power_save = Some(settings.power_save);
+                auto_update = Some(settings.auto_update);
                 break;
             }
         }
         assert_eq!(power_save, Some(true));
+        assert_eq!(auto_update, Some(false));
     }
 
     #[test]
@@ -14207,6 +14244,7 @@ mod tests {
                 room_defaults: vec![],
             }]),
             None,
+            None,
         )
         .unwrap();
 
@@ -14236,6 +14274,7 @@ mod tests {
                 warning_profile_id: None,
                 room_defaults: vec![],
             }]),
+            None,
             None,
         )
         .unwrap();
@@ -14420,6 +14459,7 @@ mod tests {
                     state: RoomModeState::Idle,
                 }],
             }]),
+            None,
             None,
         )
         .unwrap();

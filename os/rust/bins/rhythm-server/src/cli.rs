@@ -59,7 +59,10 @@ fn do_update() -> Result<(), String> {
     println!("Rhythm Server v{}", VERSION);
     println!("Checking for updates...");
 
-    let info = self_update::check_blocking(VERSION)?;
+    // `rhythm-server self-update` is a manual operator action; mirror the
+    // "manual = beta" runtime mapping. Override with RHYTHM_UPDATE_MANIFEST_URL
+    // to pin a different feed.
+    let info = self_update::check_blocking(VERSION, self_update::UpdateChannel::Beta)?;
 
     if !info.update_available {
         println!("Already up to date.");

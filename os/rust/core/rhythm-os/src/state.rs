@@ -15,9 +15,9 @@ use rhythm_profile::profile_config::DEFAULT_FADE_MS;
 use crate::canonical::identity::HubKey;
 use crate::canonical::registry::CanonicalRegistry;
 use crate::factory_default_config::{
-    factory_default_active_mode, factory_default_light_profile_config_map,
-    factory_default_mode_config_map, factory_default_mode_transition_configs,
-    factory_default_power_save,
+    factory_default_active_mode, factory_default_auto_update,
+    factory_default_light_profile_config_map, factory_default_mode_config_map,
+    factory_default_mode_transition_configs, factory_default_power_save,
 };
 use crate::hub::{ActiveHub, HubCredentials, HubEvent};
 use crate::storage::{Storage, StoredMotionTimerEntry};
@@ -391,6 +391,10 @@ pub struct AppState {
     /// Power save mode. When true, idle rooms turn fully off; when false,
     /// idle rooms dim to standby brightness.
     pub power_save: bool,
+    /// When true, the appliance polls the curated "stable" OTA feed and
+    /// auto-applies updates overnight. When false, it polls "beta" and only
+    /// updates on an explicit `POST /api/ota/update`.
+    pub auto_update: bool,
     // ---- Storage ----
     /// Platform-specific storage backend.
     pub storage: Option<Box<dyn Storage>>,
@@ -606,6 +610,7 @@ impl Default for AppState {
             default_motion_timeout_secs: default_motion_timeout,
             default_fade_ms: default_fade,
             power_save: factory_default_power_save(),
+            auto_update: factory_default_auto_update(),
             storage: None,
             work_tx: None,
             periodic_work_tx: None,
@@ -1016,8 +1021,9 @@ pub fn rooms_from_engine(runtime: &dyn RuntimeHandle) -> rhythm_core::room::Room
 mod tests {
     use super::*;
     use crate::factory_default_config::{
-        factory_default_active_mode, factory_default_light_profile_config,
-        factory_default_mode_transition_configs, factory_default_power_save,
+        factory_default_active_mode, factory_default_auto_update,
+        factory_default_light_profile_config, factory_default_mode_transition_configs,
+        factory_default_power_save,
     };
     use crate::hub::HubType;
     use rhythm_core::config::DEFAULT_MOTION_TIMEOUT_SECS;
@@ -1261,6 +1267,7 @@ mod tests {
 
         assert_eq!(state.active_mode, factory_default_active_mode());
         assert_eq!(state.power_save, factory_default_power_save());
+        assert_eq!(state.auto_update, factory_default_auto_update());
         assert_eq!(
             state.mode_transition_configs(),
             factory_default_mode_transition_configs()

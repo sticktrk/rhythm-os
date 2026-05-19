@@ -806,8 +806,9 @@ pub fn handle_put_settings(state: &SharedState, body: &Value) -> ApiResponse {
         return ApiResponse::bad_request("Profiles moved to /api/profiles and /api/config");
     }
     let power_save = body.get("power_save").and_then(|v| v.as_bool());
+    let auto_update = body.get("auto_update").and_then(|v| v.as_bool());
 
-    match commands::do_settings_set(state, power_save, None, None, None) {
+    match commands::do_settings_set(state, power_save, None, None, None, auto_update) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
     }
@@ -3619,10 +3620,11 @@ mod tests {
     #[test]
     fn put_settings_returns_raw_settings() {
         let state = handler_state_with_runtime();
-        let r = handle_put_settings(&state, &json!({"power_save": true}));
+        let r = handle_put_settings(&state, &json!({"power_save": true, "auto_update": false}));
         assert_eq!(r.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert_eq!(parsed["power_save"], true);
+        assert_eq!(parsed["auto_update"], false);
         assert!(parsed.get("mode").is_none());
         assert!(parsed.get("status").is_none());
     }
@@ -3634,6 +3636,7 @@ mod tests {
         assert_eq!(r.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert!(parsed["power_save"].is_boolean());
+        assert!(parsed["auto_update"].is_boolean());
         assert!(parsed.get("mode").is_none());
         assert!(parsed.get("status").is_none());
     }

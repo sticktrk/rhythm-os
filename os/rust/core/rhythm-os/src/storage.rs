@@ -244,6 +244,15 @@ pub struct StoredSettings {
     pub modes: Vec<ModeConfig>,
     #[serde(default)]
     pub mode_transitions: Vec<ModeTransitionConfig>,
+    /// When true, the appliance silently polls the curated "stable" OTA feed
+    /// and applies updates during the overnight window. When false, it polls
+    /// the "beta" feed and only updates on an explicit `POST /api/ota/update`.
+    #[serde(default = "default_auto_update")]
+    pub auto_update: bool,
+}
+
+fn default_auto_update() -> bool {
+    true
 }
 
 /// Runtime motion timer state persisted across process restarts.
@@ -888,6 +897,7 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                     .last_active_mode_change_utc_ms
                     .or_else(|| Some(chrono::Utc::now().timestamp_millis()));
                 s.power_save = settings.power_save;
+                s.auto_update = settings.auto_update;
                 s.active_mode = settings.active_mode;
                 s.last_active_mode_cause = settings.last_active_mode_cause;
                 s.last_active_mode_transition_id = settings.last_active_mode_transition_id.clone();
@@ -914,6 +924,7 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                             last_active_mode_change_utc_ms,
                             modes: normalized_modes.clone(),
                             mode_transitions: normalized_transitions,
+                            auto_update: s.auto_update,
                         }) {
                             warn!(
                                 target: "sys",
@@ -1288,6 +1299,7 @@ mod tests {
                 last_active_mode_change_utc_ms: None,
                 modes: vec![],
                 mode_transitions: vec![],
+                auto_update: true,
             }),
             ..Default::default()
         };
@@ -1325,6 +1337,7 @@ mod tests {
                     room_defaults: vec![],
                 }],
                 mode_transitions: vec![],
+                auto_update: true,
             }),
             ..Default::default()
         };
@@ -1361,6 +1374,7 @@ mod tests {
                     room_defaults: vec![],
                 }],
                 mode_transitions: vec![],
+                auto_update: true,
             }),
             ..Default::default()
         };
@@ -1399,6 +1413,7 @@ mod tests {
                 last_active_mode_change_utc_ms: None,
                 modes: vec![],
                 mode_transitions: vec![],
+                auto_update: true,
             }),
             ..Default::default()
         };
@@ -1502,6 +1517,7 @@ mod tests {
                 last_active_mode_change_utc_ms: None,
                 modes: vec![],
                 mode_transitions: vec![],
+                auto_update: true,
             }),
             ..Default::default()
         };
@@ -1609,10 +1625,12 @@ mod tests {
                 last_active_mode_change_utc_ms: Some(1_234_567_890),
                 modes: rhythm_core::default_mode_configs(),
                 mode_transitions: rhythm_core::default_mode_transition_configs(),
+                auto_update: false,
             };
             storage.save_settings(&settings).unwrap();
             let loaded = storage.load_settings().unwrap();
             assert!(loaded.power_save);
+            assert!(!loaded.auto_update);
             assert_eq!(loaded.active_mode, RhythmMode::Sleep);
             assert_eq!(loaded.last_active_mode_cause, ModeChangeCause::Schedule);
             assert_eq!(
@@ -1630,6 +1648,24 @@ mod tests {
                 loaded.mode_transitions[1].trigger,
                 rhythm_core::ModeTransitionTrigger::NauticalTwilight
             );
+            cleanup(&path);
+        }
+
+        #[test]
+        fn settings_missing_auto_update_defaults_true() {
+            let (storage, path) = temp_storage();
+            let json = r#"{
+              "power_save": false,
+              "active_mode": "day",
+              "modes": [],
+              "mode_transitions": []
+            }"#;
+            std::fs::write(path.join("settings.json"), json).unwrap();
+
+            let loaded = storage.load_settings().unwrap();
+
+            assert!(!loaded.power_save);
+            assert!(loaded.auto_update);
             cleanup(&path);
         }
 
@@ -1786,6 +1822,7 @@ mod tests {
                     last_active_mode_change_utc_ms: Some(123),
                     modes: rhythm_core::default_mode_configs(),
                     mode_transitions: rhythm_core::default_mode_transition_configs(),
+                    auto_update: true,
                 })
                 .unwrap();
             storage
@@ -2088,6 +2125,7 @@ mod tests {
                 last_active_mode_change_utc_ms: None,
                 modes: Vec::new(),
                 mode_transitions: Vec::new(),
+                auto_update: true,
             }
         }
 

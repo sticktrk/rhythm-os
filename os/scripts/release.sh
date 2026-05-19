@@ -8,6 +8,7 @@
 #   ./scripts/release.sh --minor
 #   ./scripts/release.sh --version 0.5.0
 #   ./scripts/release.sh --upload
+#   ./scripts/release.sh --promote-stable [vX.Y.Z]
 
 set -euo pipefail
 
@@ -20,6 +21,8 @@ BUMP_KIND="patch"
 PUSH=true
 DRY_RUN=false
 UPLOAD=false
+PROMOTE_STABLE=false
+PROMOTE_STABLE_VERSION=""
 SKIP_BUILDER_REFRESH=false
 MESSAGE=""
 WORKSPACE_VERSION_FILES=("Cargo.toml" "install/rpiz/builder-image.lock")
@@ -41,6 +44,9 @@ Options:
   --minor           Bump the latest vX.Y.Z tag to the next minor version
   --patch           Bump the latest vX.Y.Z tag to the next patch version (default)
   --upload          Build/package/upload the rpiz OTA feed locally; implies --no-push
+  --promote-stable [VERSION]
+                    Promote the current rpiz beta manifest, or VERSION if
+                    supplied, to the manually curated rpiz-stable feed
   --message TEXT    Annotated tag message (default: "Release vX.Y.Z-beta")
   --remote NAME     Remote to push to (default: origin)
   --no-push         Create the local tag but do not push branch or tag
@@ -63,6 +69,7 @@ Examples:
   $0 --minor
   $0 --version 0.4.1
   $0 --upload
+  $0 --promote-stable v0.4.219
   $0 --version v0.4.1 --dry-run
 EOF
 }
@@ -89,6 +96,15 @@ while [[ $# -gt 0 ]]; do
             UPLOAD=true
             PUSH=false
             shift
+            ;;
+        --promote-stable)
+            PROMOTE_STABLE=true
+            if [ $# -gt 1 ] && [[ "${2:-}" != --* ]]; then
+                PROMOTE_STABLE_VERSION="$2"
+                shift 2
+            else
+                shift
+            fi
             ;;
         --message)
             MESSAGE="$2"
@@ -415,6 +431,24 @@ commit_release_version_update() {
 
 require_command git
 require_command perl
+
+if [ "$PROMOTE_STABLE" = true ]; then
+    if [ "$UPLOAD" = true ]; then
+        echo "Error: --promote-stable cannot be combined with --upload" >&2
+        exit 1
+    fi
+
+    promote_version="${PROMOTE_STABLE_VERSION:-$VERSION}"
+    promote_args=()
+    if [ "$DRY_RUN" = true ]; then
+        promote_args+=(--dry-run)
+    fi
+    if [ -n "$promote_version" ]; then
+        promote_args+=(--version "$(normalize_release_version "$promote_version")")
+    fi
+
+    exec "$SCRIPT_DIR/promote-stable.sh" "${promote_args[@]}"
+fi
 
 if [ "$UPLOAD" = true ]; then
     require_command ssh

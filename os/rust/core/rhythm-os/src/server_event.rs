@@ -306,7 +306,10 @@ mod tests {
     #[test]
     fn server_event_serializes_with_tagged_type_and_data() {
         let event = ServerEvent::SettingsChanged {
-            settings: SettingsDto { power_save: true },
+            settings: SettingsDto {
+                power_save: true,
+                auto_update: true,
+            },
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(
@@ -317,6 +320,11 @@ mod tests {
         assert!(
             json.contains("\"power_save\":true"),
             "expected settings payload, got {}",
+            json
+        );
+        assert!(
+            json.contains("\"auto_update\":true"),
+            "expected auto_update payload, got {}",
             json
         );
     }
@@ -480,7 +488,10 @@ mod tests {
         // Push more events than the channel capacity.
         for _ in 0..32 {
             let _ = tx.send(ServerEvent::SettingsChanged {
-                settings: SettingsDto { power_save: false },
+                settings: SettingsDto {
+                    power_save: false,
+                    auto_update: true,
+                },
             });
         }
 
@@ -526,7 +537,10 @@ mod tests {
         let (tx, rx) = tokio::sync::broadcast::channel::<ServerEvent>(4);
         drop(rx);
         let result = tx.send(ServerEvent::SettingsChanged {
-            settings: SettingsDto { power_save: false },
+            settings: SettingsDto {
+                power_save: false,
+                auto_update: true,
+            },
         });
         assert!(
             result.is_err(),

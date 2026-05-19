@@ -10,7 +10,7 @@ use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use chrono::Utc;
 use flate2::read::GzDecoder;
@@ -34,10 +34,51 @@ const APPLIANCE_BOOT_STATE_PATH: &str = "/boot/rhythm-bootstate.env";
 const APPLIANCE_BOOT_STATE_BACKUP_PATH: &str = "/boot/rhythm-bootstate.env.bak";
 const APPLIANCE_REBOOT_FALLBACK_SECS: u64 = 30;
 
+static APPLY_LOCK: Mutex<()> = Mutex::new(());
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RestartStrategy {
     SupervisorExit,
     ApplianceReboot,
+}
+
+/// Which OTA feed to read from.
+///
+/// `Beta` is the rolling feed populated by every `v*` tag on CI. `Stable` is a
+/// curated subset populated only by manual `scripts/release.sh --promote-stable`
+/// runs and is what auto-updating appliances follow overnight.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UpdateChannel {
+    Beta,
+    Stable,
+}
+
+impl UpdateChannel {
+    fn feed_suffix(self) -> Option<&'static str> {
+        match self {
+            UpdateChannel::Beta => None,
+            UpdateChannel::Stable => Some("-stable"),
+        }
+    }
+}
+
+/// Read the user's preferred OTA channel from shared state.
+///
+/// `auto_update == true` (the factory default) → stable; the user has opted
+/// into curated overnight updates. `false` → beta; the user wants the rolling
+/// CI feed and manual control over when updates apply. Non-appliance runtimes
+/// stay on beta because stable promotion is only defined for the rpiz feed.
+pub fn channel_from_state(state: &rhythm_os::state::SharedState) -> UpdateChannel {
+    if !is_appliance_runtime_default() {
+        return UpdateChannel::Beta;
+    }
+
+    let auto_update = state.lock().map(|s| s.auto_update).unwrap_or(true);
+    if auto_update {
+        UpdateChannel::Stable
+    } else {
+        UpdateChannel::Beta
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -396,6 +437,14 @@ impl UpdateInfo {
     where
         F: Fn(UpdateProgress) + Send + Sync,
     {
+        let _guard = acquire_apply_lock()?;
+        self.apply_blocking_with_progress_locked(progress)
+    }
+
+    fn apply_blocking_with_progress_locked<F>(&self, progress: F) -> Result<ApplyResult, String>
+    where
+        F: Fn(UpdateProgress) + Send + Sync,
+    {
         if restart_strategy() == RestartStrategy::ApplianceReboot {
             if let Some(image_asset) = self.preferred_appliance_image_asset() {
                 return apply_appliance_image_blocking(
@@ -432,6 +481,13 @@ impl UpdateInfo {
             .filter(|asset| asset.kind == ReleaseArtifactKind::RootfsImage)
             .min_by_key(|asset| if artifact_uses_gzip(asset) { 0 } else { 1 })
     }
+}
+
+fn acquire_apply_lock() -> Result<MutexGuard<'static, ()>, String> {
+    APPLY_LOCK.try_lock().map_err(|e| match e {
+        TryLockError::WouldBlock => "Update already in progress".to_string(),
+        TryLockError::Poisoned(_) => "OTA apply lock poisoned".to_string(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -536,12 +592,16 @@ fn platform_feed_name() -> Option<&'static str> {
 }
 
 /// Check the configured OTA feed for an available update (blocking).
-pub fn check_blocking(current_version: &str) -> Result<UpdateInfo, String> {
-    check_manifest_blocking(current_version)
+pub fn check_blocking(current_version: &str, channel: UpdateChannel) -> Result<UpdateInfo, String> {
+    check_manifest_blocking(current_version, channel)
 }
 
-fn check_manifest_blocking(current_version: &str) -> Result<UpdateInfo, String> {
-    let manifest_url = configured_manifest_url()?;
+fn check_manifest_blocking(
+    current_version: &str,
+    channel: UpdateChannel,
+) -> Result<UpdateInfo, String> {
+    let manifest_url_overridden = std::env::var("RHYTHM_UPDATE_MANIFEST_URL").is_ok();
+    let manifest_url = configured_manifest_url(channel)?;
 
     let client = reqwest::blocking::Client::builder()
         .user_agent("rhythm-server")
@@ -554,6 +614,12 @@ fn check_manifest_blocking(current_version: &str) -> Result<UpdateInfo, String> 
         .map_err(|e| format!("Update manifest request failed: {}", e))?;
 
     if !resp.status().is_success() {
+        if channel == UpdateChannel::Stable
+            && resp.status() == reqwest::StatusCode::NOT_FOUND
+            && !manifest_url_overridden
+        {
+            return Ok(no_update_info(current_version));
+        }
         return Err(format!("Update manifest returned {}", resp.status()));
     }
 
@@ -625,7 +691,22 @@ fn check_manifest_blocking(current_version: &str) -> Result<UpdateInfo, String> 
     })
 }
 
-fn configured_manifest_url() -> Result<String, String> {
+fn no_update_info(current_version: &str) -> UpdateInfo {
+    UpdateInfo {
+        current_version: current_version.to_string(),
+        latest_version: current_version.to_string(),
+        update_available: false,
+        update_reason: None,
+        download_url: None,
+        expected_sha256: None,
+        asset_name: None,
+        install_targets: Vec::new(),
+        image_assets: Vec::new(),
+        resolved_install_targets: Vec::new(),
+    }
+}
+
+fn configured_manifest_url(channel: UpdateChannel) -> Result<String, String> {
     if let Ok(url) = std::env::var("RHYTHM_UPDATE_MANIFEST_URL") {
         return Ok(url);
     }
@@ -633,10 +714,14 @@ fn configured_manifest_url() -> Result<String, String> {
     let base_url = std::env::var("RHYTHM_UPDATE_BASE_URL")
         .unwrap_or_else(|_| DEFAULT_UPDATE_BASE_URL.to_string());
     let platform = platform_feed_name().ok_or("Unsupported platform for self-update")?;
+    let feed = match channel.feed_suffix() {
+        Some(suffix) => format!("{}{}", platform, suffix),
+        None => platform.to_string(),
+    };
     Ok(format!(
         "{}/{}/manifest.json",
         base_url.trim_end_matches('/'),
-        platform
+        feed
     ))
 }
 
@@ -1424,6 +1509,15 @@ fn is_appliance_runtime(platform_type: Option<&str>) -> bool {
     matches!(platform_type, Some("appliance"))
 }
 
+/// Returns true when the current process is running on an appliance build
+/// (rpiz), reading `RHYTHM_PLATFORM_TYPE` from the environment. Mirrors what
+/// `install_target_executable` and `restart_strategy` already use, so the
+/// auto-update loop and OTA install share a single source of truth.
+pub fn is_appliance_runtime_default() -> bool {
+    let platform_type = std::env::var("RHYTHM_PLATFORM_TYPE").ok();
+    is_appliance_runtime(platform_type.as_deref())
+}
+
 pub fn schedule_post_update_restart() {
     schedule_restart("self-update");
 }
@@ -1946,6 +2040,31 @@ mod tests {
         });
         thread::sleep(Duration::from_millis(10));
         format!("http://127.0.0.1:{}/artifact", port)
+    }
+
+    fn spawn_status_fixture(status: u16) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = [0_u8; 1024];
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+            let _ = stream.read(&mut request);
+            let reason = match status {
+                404 => "Not Found",
+                500 => "Internal Server Error",
+                _ => "OK",
+            };
+            let headers = format!(
+                "HTTP/1.1 {} {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                status, reason
+            );
+            let _ = stream.write_all(headers.as_bytes());
+        });
+        thread::sleep(Duration::from_millis(10));
+        format!("http://127.0.0.1:{}", port)
     }
 
     fn test_client() -> reqwest::blocking::Client {
@@ -2661,5 +2780,89 @@ mod tests {
 
         std::env::remove_var("RHYTHM_PLATFORM_TYPE");
         std::env::remove_var("RHYTHM_PLATFORM_CONTEXT");
+    }
+
+    #[test]
+    fn configured_manifest_url_appends_stable_suffix() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("RHYTHM_UPDATE_MANIFEST_URL");
+        std::env::set_var("RHYTHM_UPDATE_BASE_URL", "https://example/server");
+
+        let beta = configured_manifest_url(UpdateChannel::Beta).unwrap();
+        let stable = configured_manifest_url(UpdateChannel::Stable).unwrap();
+
+        std::env::remove_var("RHYTHM_UPDATE_BASE_URL");
+
+        let Some(platform) = platform_feed_name() else {
+            return;
+        };
+        assert_eq!(
+            beta,
+            format!("https://example/server/{}/manifest.json", platform)
+        );
+        assert_eq!(
+            stable,
+            format!("https://example/server/{}-stable/manifest.json", platform)
+        );
+    }
+
+    #[test]
+    fn channel_from_state_uses_stable_only_for_auto_updating_appliance() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("RHYTHM_PLATFORM_TYPE", "appliance");
+
+        let state: rhythm_os::state::SharedState =
+            Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
+        assert_eq!(channel_from_state(&state), UpdateChannel::Stable);
+
+        state.lock().unwrap().auto_update = false;
+        assert_eq!(channel_from_state(&state), UpdateChannel::Beta);
+
+        std::env::remove_var("RHYTHM_PLATFORM_TYPE");
+    }
+
+    #[test]
+    fn channel_from_state_keeps_desktop_on_beta_feed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("RHYTHM_PLATFORM_TYPE", "desktop");
+
+        let state: rhythm_os::state::SharedState =
+            Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
+
+        assert_eq!(channel_from_state(&state), UpdateChannel::Beta);
+
+        std::env::remove_var("RHYTHM_PLATFORM_TYPE");
+    }
+
+    #[test]
+    fn stable_manifest_404_without_explicit_manifest_override_is_no_update() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("RHYTHM_UPDATE_MANIFEST_URL");
+        std::env::set_var("RHYTHM_UPDATE_BASE_URL", spawn_status_fixture(404));
+
+        let info = check_blocking("1.2.3", UpdateChannel::Stable).unwrap();
+
+        std::env::remove_var("RHYTHM_UPDATE_BASE_URL");
+
+        assert!(!info.update_available);
+        assert_eq!(info.current_version, "1.2.3");
+        assert_eq!(info.latest_version, "1.2.3");
+    }
+
+    #[test]
+    fn configured_manifest_url_env_override_wins_over_channel() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var(
+            "RHYTHM_UPDATE_MANIFEST_URL",
+            "https://override/manifest.json",
+        );
+
+        let beta = configured_manifest_url(UpdateChannel::Beta).unwrap();
+        let stable = configured_manifest_url(UpdateChannel::Stable).unwrap();
+
+        std::env::remove_var("RHYTHM_UPDATE_MANIFEST_URL");
+
+        assert_eq!(beta, "https://override/manifest.json");
+        assert_eq!(stable, "https://override/manifest.json");
     }
 }

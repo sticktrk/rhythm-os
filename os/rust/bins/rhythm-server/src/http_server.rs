@@ -228,7 +228,10 @@ async fn check_update(
         Vec::new(),
         None,
     );
-    match tokio::task::spawn_blocking(move || crate::self_update::check_blocking(version)).await {
+    let channel = crate::self_update::channel_from_state(&state);
+    match tokio::task::spawn_blocking(move || crate::self_update::check_blocking(version, channel))
+        .await
+    {
         Ok(Ok(info)) => {
             ota_status.record_check_result(&info);
             let (stage, message) = if info.update_available {
@@ -440,8 +443,9 @@ async fn do_update(
     );
 
     // Check for update
+    let channel = crate::self_update::channel_from_state(&state);
     let info = match tokio::task::spawn_blocking(move || {
-        crate::self_update::check_blocking(version)
+        crate::self_update::check_blocking(version, channel)
     })
     .await
     {

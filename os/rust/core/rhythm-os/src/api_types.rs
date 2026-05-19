@@ -267,6 +267,7 @@ pub struct LocationDto {
 #[derive(Debug, Clone, Serialize)]
 pub struct SettingsDto {
     pub power_save: bool,
+    pub auto_update: bool,
 }
 
 /// Mode state and policy in `GET /api/mode` and `GET /api/state`.
@@ -796,9 +797,13 @@ mod tests {
 
     #[test]
     fn settings_dto_serializes() {
-        let dto = SettingsDto { power_save: true };
+        let dto = SettingsDto {
+            power_save: true,
+            auto_update: true,
+        };
         let json: Value = serde_json::to_value(&dto).unwrap();
         assert_eq!(json["power_save"], true);
+        assert_eq!(json["auto_update"], true);
         assert!(json.get("mode").is_none());
         assert!(json.get("profiles").is_none());
     }
@@ -1074,7 +1079,10 @@ mod tests {
                 timezone_name: None,
                 twilight: None,
             },
-            settings: SettingsDto { power_save: false },
+            settings: SettingsDto {
+                power_save: false,
+                auto_update: true,
+            },
             mode: ModeSettingsDto {
                 active: rhythm_core::RhythmMode::Day,
                 last_change: ModeLastChangeDto {
@@ -1179,7 +1187,10 @@ mod tests {
                     },
                 }),
             },
-            settings: SettingsDto { power_save: false },
+            settings: SettingsDto {
+                power_save: false,
+                auto_update: true,
+            },
             mode: ModeSettingsDto {
                 active: rhythm_core::RhythmMode::Day,
                 last_change: ModeLastChangeDto {

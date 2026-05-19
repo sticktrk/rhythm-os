@@ -594,13 +594,13 @@ impl TestHarness {
 
     /// Update global settings (mirrors "Settings → Preferences" screen).
     pub fn set_settings(&self, power_save: Option<bool>) -> String {
-        commands::do_settings_set(&self.state, power_save, None, None, None)
+        commands::do_settings_set(&self.state, power_save, None, None, None, None)
             .expect("do_settings_set failed")
     }
 
     /// Replace the persisted mode profile mappings.
     pub fn set_mode_configs(&self, configs: Vec<ModeConfig>) {
-        commands::do_settings_set(&self.state, None, None, Some(configs), None)
+        commands::do_settings_set(&self.state, None, None, Some(configs), None, None)
             .expect("do_settings_set failed");
     }
 
