@@ -93,7 +93,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   double _sleepBrightness = 20;
   bool _sleepCustomBri = false;
   bool _sleepCustomColor = false;
-  bool _sleepExpanded = false;
 
   // Idle profile state (folded into day/sleep profiles).
   bool _idleCustomBri = false;
@@ -652,7 +651,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       _sleepBrightness = _sleepCustomBri
           ? config.maxBrightness.toDouble().clamp(1, 100)
           : wakeMinBri.toDouble().clamp(1, 100);
-      _sleepExpanded = _sleepCustomBri || _sleepCustomColor;
     } else {
       _sleepBrightness = switch (curve) {
         sdk.RhythmConstantCurve(:final brightness) => (config.minBrightness +
@@ -1272,11 +1270,19 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   Widget _buildAutoToggle({
     required Color color,
     required bool isAuto,
-    required String valueLabel,
+    String? valueLabel,
+    Widget? valueChild,
     required VoidCallback onAuto,
     required VoidCallback onManual,
   }) {
-    Widget chip(String label, bool active, VoidCallback onTap) {
+    assert(valueLabel != null || valueChild != null,
+        'Either valueLabel or valueChild must be provided');
+
+    Widget chipFrame({
+      required bool active,
+      required Widget child,
+      required VoidCallback onTap,
+    }) {
       return GestureDetector(
         onTap: onTap,
         behavior: HitTestBehavior.opaque,
@@ -1293,15 +1299,19 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                   : color.withValues(alpha: 0.14),
             ),
           ),
-          child: Text(
-            label,
-            style: TextStyle(
-              color: active ? color : color.withValues(alpha: 0.45),
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              fontFeatures: const [FontFeature.tabularFigures()],
-            ),
-          ),
+          child: child,
+        ),
+      );
+    }
+
+    Widget textBody(String label, bool active) {
+      return Text(
+        label,
+        style: TextStyle(
+          color: active ? color : color.withValues(alpha: 0.45),
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          fontFeatures: const [FontFeature.tabularFigures()],
         ),
       );
     }
@@ -1309,9 +1319,17 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        chip('Auto', isAuto, isAuto ? () {} : onAuto),
+        chipFrame(
+          active: isAuto,
+          child: textBody('Auto', isAuto),
+          onTap: isAuto ? () {} : onAuto,
+        ),
         const SizedBox(width: 6),
-        chip(valueLabel, !isAuto, !isAuto ? () {} : onManual),
+        chipFrame(
+          active: !isAuto,
+          child: valueChild ?? textBody(valueLabel!, !isAuto),
+          onTap: !isAuto ? () {} : onManual,
+        ),
       ],
     );
   }
@@ -1347,7 +1365,10 @@ class _LightProfileScreenState extends State<LightProfileScreen>
             ),
             const SizedBox(height: 24),
           ],
-          _buildRoomDefaultsSection(canUseStandby: canUseStandby),
+          if (_isSleepProfile)
+            _buildSleepSceneSection(canUseStandby: canUseStandby)
+          else
+            _buildRoomDefaultsSection(canUseStandby: canUseStandby),
           const SizedBox(height: 14),
           _buildAdvancedSection(
             canUseAdvancedDay: canUseAdvancedDay,
@@ -1366,307 +1387,223 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   // ---------------------------------------------------------------------------
-  // Sleep Profile — Primary Settings
+  // Sleep Profile — Brightness & Color
   //
-  // Mirrors the Standby Settings widget. Both Custom Color and Custom
-  // Brightness are optional toggles; when neither is on the sleep profile
-  // inherits CCT + brightness from the wake (rhythm) profile's
-  // min_color_temp and min_brightness.
+  // Each is its own card, but the header chips use the same `_buildAutoToggle`
+  // segmented control as the Timing rows below: `[Auto] [value]`, one filled
+  // / one outlined. Tapping a chip flips the mode; tapping the value chip in
+  // AUTO state enters custom mode at the inherited value. The slider/picker
+  // only renders in custom mode (mirroring how Timing rows hide their slider
+  // in Auto mode).
   // ---------------------------------------------------------------------------
 
-  Widget _buildSleepPrimarySettingsCard() {
-    final isDefault = !_sleepCustomBri && !_sleepCustomColor;
-    final briColor = _sleepCustomBri ? _Palette.amber : _Palette.idle;
-    final colorColor = _sleepCustomColor ? _sleepSelectedColor : _Palette.idle;
-    final expanded = _sleepExpanded;
+  Widget _buildSleepBrightnessCard() {
+    const amber = _Palette.amber;
+    final isCustom = _sleepCustomBri;
+    final autoValue = _wakeMinBrightness;
+    final displayValue =
+        isCustom ? _sleepBrightness.round() : autoValue;
 
     return AnimatedContainer(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeOutCubic,
-      padding: const EdgeInsets.fromLTRB(18, 18, 18, 18),
+      padding: EdgeInsets.fromLTRB(18, 18, 18, isCustom ? 10 : 18),
       decoration: BoxDecoration(
         color: _Palette.card,
         borderRadius: BorderRadius.circular(18),
         border: Border.all(
-          color: expanded
-              ? _Palette.amber.withValues(alpha: 0.25)
+          color: isCustom ? amber.withValues(alpha: 0.25) : _Palette.border,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: amber.withValues(alpha: 0.12),
+                ),
+                child: const Icon(
+                  Icons.brightness_medium_rounded,
+                  color: amber,
+                  size: 18,
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  'Brightness',
+                  style: TextStyle(
+                    color: _Palette.textPrimary,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: -0.1,
+                  ),
+                ),
+              ),
+              _buildAutoToggle(
+                color: amber,
+                isAuto: !isCustom,
+                valueLabel: '$displayValue%',
+                onAuto: () => setState(() {
+                  _sleepCustomBri = false;
+                  // Reset slider value so toggling back to custom starts
+                  // fresh at the inherited AUTO value, not a stale custom.
+                  _sleepBrightness =
+                      _wakeMinBrightness.toDouble().clamp(1, 100);
+                  _markDirty();
+                }),
+                onManual: () => setState(() {
+                  _sleepCustomBri = true;
+                  _markDirty();
+                }),
+              ),
+            ],
+          ),
+          AnimatedSize(
+            duration: const Duration(milliseconds: 250),
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.topCenter,
+            child: isCustom
+                ? Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: _buildInlineSlider(
+                      label: 'Level',
+                      value: _sleepBrightness.clamp(1, 100).toDouble(),
+                      min: 1,
+                      max: 100,
+                      divisions: 99,
+                      format: (v) => '${v.round()}%',
+                      color: amber,
+                      onChanged: (v) => setState(() {
+                        _sleepBrightness = v;
+                        _markDirty();
+                      }),
+                    ),
+                  )
+                : const SizedBox.shrink(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSleepColorCard() {
+    const amber = _Palette.amber;
+    final isCustom = _sleepCustomColor;
+    final swatch = _sleepSelectedColor;
+    final wakeCctColor = ColorUtils.curveColorForCCT(_wakeMinColorTemp);
+    final dotColor = isCustom ? swatch : wakeCctColor;
+
+    // Small swatch dot used in place of the value chip's text label.
+    final swatchDot = Container(
+      width: 12,
+      height: 12,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: dotColor.withValues(alpha: isCustom ? 1.0 : 0.55),
+        boxShadow: isCustom
+            ? [
+                BoxShadow(
+                  color: dotColor.withValues(alpha: 0.55),
+                  blurRadius: 6,
+                  spreadRadius: -1,
+                ),
+              ]
+            : null,
+      ),
+    );
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
+      padding: EdgeInsets.fromLTRB(18, 18, 18, isCustom ? 10 : 18),
+      decoration: BoxDecoration(
+        color: _Palette.card,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: isCustom
+              ? swatch.withValues(alpha: 0.30)
               : _Palette.border,
         ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: () => setState(() => _sleepExpanded = !_sleepExpanded),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Container(
-                      width: 36,
-                      height: 36,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: _Palette.amber.withValues(alpha: 0.12),
-                      ),
-                      child: Icon(
-                        Icons.nights_stay_rounded,
-                        color: _Palette.amber.withValues(alpha: 0.7),
-                        size: 18,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    const Expanded(
-                      child: Text(
-                        'Primary Settings',
-                        style: TextStyle(
-                          color: _Palette.textPrimary,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: -0.1,
-                        ),
-                      ),
-                    ),
-                    if (!expanded && isDefault)
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: _Palette.idle.withValues(alpha: 0.06),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(
-                          'Auto',
-                          style: TextStyle(
-                            color: _Palette.idle.withValues(alpha: 0.5),
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                    if (!expanded && _sleepCustomBri) ...[
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: _Palette.amber.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(
-                              color: _Palette.amber.withValues(alpha: 0.2)),
-                        ),
-                        child: Text(
-                          '${_sleepBrightness.round()}%',
-                          style: TextStyle(
-                            color: _Palette.amber.withValues(alpha: 0.8),
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            fontFeatures: const [FontFeature.tabularFigures()],
-                          ),
-                        ),
-                      ),
+          Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: LinearGradient(
+                    colors: [
+                      dotColor.withValues(alpha: 0.18),
+                      dotColor.withValues(alpha: 0.32),
                     ],
-                    if (!expanded && _sleepCustomColor) ...[
-                      if (_sleepCustomBri) const SizedBox(width: 6),
-                      Container(
-                        width: 26,
-                        height: 26,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: _sleepSelectedColor,
-                          border: Border.all(
-                            color: _sleepSelectedColor.withValues(alpha: 0.4),
-                            width: 2,
-                          ),
-                        ),
-                      ),
-                    ],
-                    const SizedBox(width: 6),
-                    AnimatedRotation(
-                      turns: expanded ? 0.5 : 0,
-                      duration: const Duration(milliseconds: 250),
-                      curve: Curves.easeOutCubic,
-                      child: Icon(
-                        Icons.keyboard_arrow_down_rounded,
-                        color: _Palette.textSecondary.withValues(alpha: 0.3),
-                        size: 20,
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
-              ],
-            ),
+                child: Icon(
+                  Icons.palette_outlined,
+                  color: dotColor,
+                  size: 18,
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  'Color',
+                  style: TextStyle(
+                    color: _Palette.textPrimary,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: -0.1,
+                  ),
+                ),
+              ),
+              _buildAutoToggle(
+                color: amber,
+                isAuto: !isCustom,
+                valueChild: swatchDot,
+                onAuto: () => setState(() {
+                  _sleepCustomColor = false;
+                  // Reset hue to match the inherited wake CCT color so
+                  // toggling back to custom doesn't surface a stale hue.
+                  _sleepHue = HSVColor.fromColor(wakeCctColor).hue;
+                  _markDirty();
+                }),
+                onManual: () => setState(() {
+                  _sleepCustomColor = true;
+                  _markDirty();
+                }),
+              ),
+            ],
           ),
           AnimatedSize(
-            duration: const Duration(milliseconds: 300),
+            duration: const Duration(milliseconds: 250),
             curve: Curves.easeOutCubic,
             alignment: Alignment.topCenter,
-            child: expanded
-                ? Column(
-                    children: [
-                      const SizedBox(height: 18),
-                      Row(
-                        children: [
-                          Icon(
-                            Icons.brightness_medium_rounded,
-                            color: briColor.withValues(
-                                alpha: _sleepCustomBri ? 0.8 : 0.35),
-                            size: 16,
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              'Custom Brightness',
-                              style: TextStyle(
-                                color: _sleepCustomBri
-                                    ? _Palette.textPrimary
-                                    : _Palette.textSecondary
-                                        .withValues(alpha: 0.5),
-                                fontSize: 13,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ),
-                          if (_sleepCustomBri)
-                            Padding(
-                              padding: const EdgeInsets.only(right: 8),
-                              child: Text(
-                                '${_sleepBrightness.round()}%',
-                                style: TextStyle(
-                                  color: briColor.withValues(alpha: 0.7),
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w700,
-                                  fontFeatures: const [
-                                    FontFeature.tabularFigures()
-                                  ],
-                                ),
-                              ),
-                            ),
-                          SizedBox(
-                            height: 28,
-                            child: Switch.adaptive(
-                              value: _sleepCustomBri,
-                              onChanged: (v) {
-                                setState(() {
-                                  _sleepCustomBri = v;
-                                  if (v && _sleepBrightness < 1) {
-                                    _sleepBrightness = 1;
-                                  }
-                                  _markDirty();
-                                });
-                              },
-                              activeTrackColor: briColor,
-                              activeThumbColor: _Palette.textPrimary,
-                            ),
-                          ),
-                        ],
-                      ),
-                      AnimatedSize(
-                        duration: const Duration(milliseconds: 300),
-                        curve: Curves.easeOutCubic,
-                        alignment: Alignment.topCenter,
-                        child: _sleepCustomBri
-                            ? Padding(
-                                padding:
-                                    const EdgeInsets.only(top: 8, left: 26),
-                                child: SliderTheme(
-                                  data: SliderThemeData(
-                                    activeTrackColor: briColor,
-                                    inactiveTrackColor:
-                                        briColor.withValues(alpha: 0.12),
-                                    thumbColor: briColor,
-                                    overlayColor:
-                                        briColor.withValues(alpha: 0.12),
-                                    trackHeight: 4,
-                                    thumbShape: const RoundSliderThumbShape(
-                                        enabledThumbRadius: 7),
-                                    overlayShape: const RoundSliderOverlayShape(
-                                        overlayRadius: 16),
-                                  ),
-                                  child: Slider(
-                                    value: _sleepBrightness.clamp(1, 100),
-                                    min: 1,
-                                    max: 100,
-                                    divisions: 99,
-                                    onChanged: (v) {
-                                      setState(() {
-                                        _sleepBrightness = v;
-                                        _markDirty();
-                                      });
-                                    },
-                                  ),
-                                ),
-                              )
-                            : const SizedBox.shrink(),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        child: Divider(
-                          height: 1,
-                          color: _Palette.border.withValues(alpha: 0.5),
-                        ),
-                      ),
-                      Row(
-                        children: [
-                          Icon(
-                            Icons.palette_outlined,
-                            color: colorColor.withValues(
-                                alpha: _sleepCustomColor ? 0.8 : 0.35),
-                            size: 16,
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              'Custom Color',
-                              style: TextStyle(
-                                color: _sleepCustomColor
-                                    ? _Palette.textPrimary
-                                    : _Palette.textSecondary
-                                        .withValues(alpha: 0.5),
-                                fontSize: 13,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ),
-                          SizedBox(
-                            height: 28,
-                            child: Switch.adaptive(
-                              value: _sleepCustomColor,
-                              onChanged: (v) {
-                                setState(() {
-                                  _sleepCustomColor = v;
-                                  _markDirty();
-                                });
-                              },
-                              activeTrackColor: colorColor,
-                              activeThumbColor: _Palette.textPrimary,
-                            ),
-                          ),
-                        ],
-                      ),
-                      AnimatedSize(
-                        duration: const Duration(milliseconds: 350),
-                        curve: Curves.easeOutCubic,
-                        alignment: Alignment.topCenter,
-                        child: _sleepCustomColor
-                            ? Padding(
-                                padding: const EdgeInsets.only(top: 16),
-                                child: _buildFixedColorPicker(
-                                  hue: _sleepHue,
-                                  selectedColor: _sleepSelectedColor,
-                                  isPresetSelected: _isSleepPresetSelected,
-                                  onHueChanged: (hue) {
-                                    setState(() {
-                                      _sleepHue = hue;
-                                      _markDirty();
-                                    });
-                                  },
-                                ),
-                              )
-                            : const SizedBox.shrink(),
-                      ),
-                    ],
+            child: isCustom
+                ? Padding(
+                    padding: const EdgeInsets.only(top: 14),
+                    child: _buildFixedColorPicker(
+                      hue: _sleepHue,
+                      selectedColor: _sleepSelectedColor,
+                      isPresetSelected: _isSleepPresetSelected,
+                      showSelection: _sleepCustomColor,
+                      onHueChanged: (hue) {
+                        setState(() {
+                          _sleepHue = hue;
+                          _sleepCustomColor = true;
+                          _markDirty();
+                        });
+                      },
+                    ),
                   )
                 : const SizedBox.shrink(),
           ),
@@ -2021,6 +1958,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     required Color selectedColor,
     required bool Function(Color presetColor) isPresetSelected,
     required ValueChanged<double> onHueChanged,
+    bool showSelection = true,
   }) {
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -2063,32 +2001,33 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                         ),
                       ),
                     ),
-                    Positioned(
-                      left: thumbX - 10,
-                      top: 0,
-                      child: Container(
-                        width: 20,
-                        height: 32,
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(
-                            color: Colors.white.withValues(alpha: 0.9),
-                            width: 2.5,
+                    if (showSelection)
+                      Positioned(
+                        left: thumbX - 10,
+                        top: 0,
+                        child: Container(
+                          width: 20,
+                          height: 32,
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: Colors.white.withValues(alpha: 0.9),
+                              width: 2.5,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: selectedColor.withValues(alpha: 0.5),
+                                blurRadius: 12,
+                                spreadRadius: 1,
+                              ),
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.4),
+                                blurRadius: 4,
+                              ),
+                            ],
                           ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: selectedColor.withValues(alpha: 0.5),
-                              blurRadius: 12,
-                              spreadRadius: 1,
-                            ),
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.4),
-                              blurRadius: 4,
-                            ),
-                          ],
                         ),
                       ),
-                    ),
                   ],
                 ),
               ),
@@ -2097,7 +2036,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: _fixedColorPresets.map((preset) {
-                final selected = isPresetSelected(preset.color);
+                final selected =
+                    showSelection && isPresetSelected(preset.color);
                 return GestureDetector(
                   onTap: () => onHueChanged(preset.hue),
                   child: Column(
@@ -2316,32 +2256,20 @@ class _LightProfileScreenState extends State<LightProfileScreen>
               alignment: Alignment.topCenter,
               child: expanded
                   ? Padding(
-                      padding: const EdgeInsets.only(top: 6),
-                      child: Column(
-                        children: [
-                          _buildInlineSlider(
-                            label: 'Min',
-                            value: _minBrightness,
-                            min: 1,
-                            max: 50,
-                            divisions: 49,
-                            format: (v) => '${v.round()}%',
-                            color: color.withValues(alpha: 0.5),
-                            onChanged: (v) => _onPreviewRangeChanged(
-                                () => _minBrightness = v),
-                          ),
-                          _buildInlineSlider(
-                            label: 'Max',
-                            value: _maxBrightness,
-                            min: 20,
-                            max: 100,
-                            divisions: 80,
-                            format: (v) => '${v.round()}%',
-                            color: color,
-                            onChanged: (v) => _onPreviewRangeChanged(
-                                () => _maxBrightness = v),
-                          ),
-                        ],
+                      padding: const EdgeInsets.fromLTRB(2, 10, 2, 4),
+                      child: _DualRangeBar(
+                        minValue: _minBrightness,
+                        maxValue: _maxBrightness,
+                        hardMin: 1,
+                        hardMax: 100,
+                        minThumbMax: 50,
+                        maxThumbMin: 20,
+                        tint: color,
+                        divisions: 99,
+                        onMinChanged: (v) => _onPreviewRangeChanged(
+                            () => _minBrightness = v),
+                        onMaxChanged: (v) => _onPreviewRangeChanged(
+                            () => _maxBrightness = v),
                       ),
                     )
                   : const SizedBox.shrink(),
@@ -2487,32 +2415,28 @@ class _LightProfileScreenState extends State<LightProfileScreen>
               alignment: Alignment.topCenter,
               child: expanded
                   ? Padding(
-                      padding: const EdgeInsets.only(top: 4),
-                      child: Column(
-                        children: [
-                          _buildInlineSlider(
-                            label: 'Min',
-                            value: _minColorTemp,
-                            min: 1500,
-                            max: 4000,
-                            divisions: 25,
-                            format: (v) => '${v.round()}K',
-                            color: warmColor,
-                            onChanged: (v) =>
-                                _onPreviewRangeChanged(() => _minColorTemp = v),
-                          ),
-                          _buildInlineSlider(
-                            label: 'Max',
-                            value: _maxColorTemp,
-                            min: 2000,
-                            max: 6500,
-                            divisions: 45,
-                            format: (v) => '${v.round()}K',
-                            color: coolColor,
-                            onChanged: (v) =>
-                                _onPreviewRangeChanged(() => _maxColorTemp = v),
-                          ),
-                        ],
+                      padding: const EdgeInsets.fromLTRB(2, 12, 2, 4),
+                      child: _DualRangeBar(
+                        minValue: _minColorTemp,
+                        maxValue: _maxColorTemp,
+                        hardMin: 1500,
+                        hardMax: 6500,
+                        minThumbMax: 4000,
+                        maxThumbMin: 2000,
+                        tint: warmColor,
+                        minThumbColor: warmColor,
+                        maxThumbColor: coolColor,
+                        gradient: LinearGradient(
+                          colors: List.generate(12, (i) {
+                            final k = 1500 + (i / 11) * 5000;
+                            return ColorUtils.curveColorForCCT(k.round());
+                          }),
+                        ),
+                        divisions: 50,
+                        onMinChanged: (v) =>
+                            _onPreviewRangeChanged(() => _minColorTemp = v),
+                        onMaxChanged: (v) =>
+                            _onPreviewRangeChanged(() => _maxColorTemp = v),
                       ),
                     )
                   : const SizedBox.shrink(),
@@ -3173,6 +3097,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   // ---------------------------------------------------------------------------
 
   Widget _buildHeroIcon() {
+    if (_isSleepProfile) return _buildSleepHero();
+
     final selectedHour = _selectedHour();
     final previewColor =
         _hasTimeOffset ? _previewColorAtHour(selectedHour) : _Palette.amber;
@@ -3204,6 +3130,96 @@ class _LightProfileScreenState extends State<LightProfileScreen>
               alpha: 0.6 + _glowAnimation.value * 0.4,
             ),
             size: 32,
+          ),
+        );
+      },
+    );
+  }
+
+  /// Sleep hero — a tiny "night window" porthole. Same 72×72 footprint as the
+  /// day hero, but a deep-dark interior with an asymmetric starfield that
+  /// breathes via the existing glow animation. Pairs with the moon medallion
+  /// in the cue section below (stars + moon, not two moons).
+  Widget _buildSleepHero() {
+    return AnimatedBuilder(
+      animation: _glowAnimation,
+      builder: (context, _) {
+        final pulse = _glowAnimation.value;
+        const accent = _Palette.amber;
+        const starColor = Color(0xFFFFF1CC);
+
+        Widget star({
+          required double size,
+          required double left,
+          required double top,
+          required double baseAlpha,
+          required double pulseAmount,
+        }) {
+          final alpha = (baseAlpha + pulse * pulseAmount).clamp(0.0, 1.0);
+          return Positioned(
+            left: left,
+            top: top,
+            child: Container(
+              width: size,
+              height: size,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: starColor.withValues(alpha: alpha),
+                boxShadow: [
+                  BoxShadow(
+                    color: starColor.withValues(alpha: alpha * 0.55),
+                    blurRadius: 5,
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
+
+        return Container(
+          width: 72,
+          height: 72,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: const Color(0xFF06080C),
+            border: Border.all(
+              color: accent.withValues(alpha: 0.18),
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: accent.withValues(alpha: pulse * 0.12),
+                blurRadius: 28,
+                spreadRadius: -4,
+              ),
+            ],
+          ),
+          child: Stack(
+            children: [
+              star(
+                  size: 4,
+                  left: 16,
+                  top: 22,
+                  baseAlpha: 0.45,
+                  pulseAmount: 0.30),
+              star(
+                  size: 6,
+                  left: 32,
+                  top: 30,
+                  baseAlpha: 0.65,
+                  pulseAmount: 0.35),
+              star(
+                  size: 3,
+                  left: 52,
+                  top: 17,
+                  baseAlpha: 0.30,
+                  pulseAmount: 0.25),
+              star(
+                  size: 3,
+                  left: 26,
+                  top: 50,
+                  baseAlpha: 0.25,
+                  pulseAmount: 0.20),
+            ],
           ),
         );
       },
@@ -3332,6 +3348,128 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     AnalyticsService().logLightProfileRoomDefaultChanged(
       profile: _selectedProfileId,
       cleared: newState == null,
+    );
+  }
+
+  /// Sleep-profile rooms list — exposed inline (no dropdown).
+  ///
+  /// Framed as a "stage cue": when Sleep is activated, each room takes its
+  /// mark below. The amber crescent + kerned eyebrow + italic stage-direction
+  /// body explain cause-and-effect without burying it behind a collapsible.
+  Widget _buildSleepSceneSection({required bool canUseStandby}) {
+    return Selector<RoomProvider, List<RoomDto>>(
+      selector: (_, provider) =>
+          provider.rooms.where(showsInAllRooms).toList(growable: false),
+      builder: (context, rooms, _) {
+        if (rooms.isEmpty) return const SizedBox.shrink();
+
+        final defaults = _roomDefaultsForCurrentMode();
+        const accent = _Palette.amber;
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Stage-cue header
+            Padding(
+              padding: const EdgeInsets.fromLTRB(4, 2, 4, 14),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: 38,
+                    height: 38,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: accent.withValues(alpha: 0.08),
+                      border: Border.all(
+                        color: accent.withValues(alpha: 0.20),
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: accent.withValues(alpha: 0.12),
+                          blurRadius: 18,
+                          spreadRadius: -6,
+                        ),
+                      ],
+                    ),
+                    child: Icon(
+                      Icons.bedtime_rounded,
+                      color: accent.withValues(alpha: 0.78),
+                      size: 18,
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Text(
+                            'WHEN SLEEP IS ACTIVATED',
+                            style: TextStyle(
+                              color: accent.withValues(alpha: 0.78),
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 1.6,
+                              fontFeatures: const [
+                                FontFeature.tabularFigures(),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'Each room takes its mark below.',
+                          style: TextStyle(
+                            color: _Palette.textPrimary.withValues(alpha: 0.92),
+                            fontSize: 15,
+                            fontWeight: FontWeight.w400,
+                            fontStyle: FontStyle.italic,
+                            height: 1.35,
+                            letterSpacing: -0.1,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            // Cue line — gradient hairline that fades to nothing, evoking
+            // the line a stage cue runs along.
+            Container(
+              height: 1,
+              margin: const EdgeInsets.fromLTRB(4, 0, 4, 14),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.centerLeft,
+                  end: Alignment.centerRight,
+                  colors: [
+                    accent.withValues(alpha: 0.30),
+                    accent.withValues(alpha: 0.06),
+                    Colors.transparent,
+                  ],
+                  stops: const [0, 0.5, 1],
+                ),
+              ),
+            ),
+            // Rooms — exposed directly, no wrapper card.
+            for (int i = 0; i < rooms.length; i++) ...[
+              if (i > 0) const SizedBox(height: 6),
+              _RoomDefaultCard(
+                key: ValueKey(rooms[i].id),
+                roomId: rooms[i].id,
+                roomName: rooms[i].name,
+                state: defaults[rooms[i].id],
+                canUseStandby: canUseStandby,
+                onStateChanged: (newState) =>
+                    _onRoomDefaultChanged(rooms[i].id, newState),
+              ),
+            ],
+          ],
+        );
+      },
     );
   }
 
@@ -3620,7 +3758,13 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                               _ProLockWrap(
                                 unlocked: canUseSleepPrimary,
                                 entitlement: Entitlement.sleepPrimarySettings,
-                                child: _buildSleepPrimarySettingsCard(),
+                                child: _buildSleepBrightnessCard(),
+                              ),
+                              const SizedBox(height: 10),
+                              _ProLockWrap(
+                                unlocked: canUseSleepPrimary,
+                                entitlement: Entitlement.sleepPrimarySettings,
+                                child: _buildSleepColorCard(),
                               ),
                               const SizedBox(height: 10),
                               _ProLockWrap(
@@ -5090,4 +5234,320 @@ class _LockedCardState extends State<_LockedCard>
   }
 
   Widget child() => widget.child;
+}
+
+// ---------------------------------------------------------------------------
+// Dual-thumb range bar
+//
+// A single horizontal track that holds two draggable handles — one for the
+// min, one for the max. Used on the Day Profile screen so Brightness and
+// Color Temperature are each tuned as a single "window" you stretch and
+// shrink with two thumbs instead of two separate sliders.
+//
+// The track always shows the full hardMin..hardMax span: a gradient (CCT) or
+// a tint ramp (brightness). The inactive regions outside the selected window
+// are dimmed with a scrim, so the active slice reads as a luminous opening
+// cut into the spectrum. Thumbs are aperture-style discs with a tinted ring
+// and an inner iris — distinctive, on-brand for a lighting app.
+// ---------------------------------------------------------------------------
+
+enum _DualRangeThumb { min, max }
+
+class _DualRangeBar extends StatefulWidget {
+  const _DualRangeBar({
+    required this.minValue,
+    required this.maxValue,
+    required this.hardMin,
+    required this.hardMax,
+    required this.minThumbMax,
+    required this.maxThumbMin,
+    required this.tint,
+    required this.onMinChanged,
+    required this.onMaxChanged,
+    this.minThumbColor,
+    this.maxThumbColor,
+    this.gradient,
+    this.divisions,
+  });
+
+  /// Smallest allowed gap (in value units) between the two thumbs.
+  static const double minSeparation = 1.0;
+
+  final double minValue;
+  final double maxValue;
+  final double hardMin;
+  final double hardMax;
+
+  /// The min thumb cannot move above this value.
+  final double minThumbMax;
+
+  /// The max thumb cannot move below this value.
+  final double maxThumbMin;
+
+  /// Tint used for the active fill (when no gradient is supplied) and as the
+  /// default thumb color.
+  final Color tint;
+
+  /// Optional per-thumb tint override; falls back to [tint].
+  final Color? minThumbColor;
+  final Color? maxThumbColor;
+
+  /// Optional gradient painted across the full track. When null the track is
+  /// rendered as a single-tint alpha ramp (low → high).
+  final Gradient? gradient;
+
+  /// Snap to this many equally-spaced divisions across [hardMin, hardMax].
+  final int? divisions;
+
+  final ValueChanged<double> onMinChanged;
+  final ValueChanged<double> onMaxChanged;
+
+  @override
+  State<_DualRangeBar> createState() => _DualRangeBarState();
+}
+
+class _DualRangeBarState extends State<_DualRangeBar> {
+  static const double _trackHeight = 10;
+  static const double _thumbDiameter = 22;
+  static const double _verticalSlack = 12;
+
+  _DualRangeThumb? _active;
+
+  /// Pixel offset between the active thumb's position and the finger at
+  /// pan-down. Preserved for the life of the drag so the thumb follows the
+  /// finger's *motion* rather than snapping to its absolute position — a tap
+  /// near a thumb shouldn't make it leap onto the fingertip before any drag.
+  double _grabOffsetPx = 0;
+
+  double _normalize(double v) {
+    final span = widget.hardMax - widget.hardMin;
+    if (span <= 0) return 0;
+    return ((v - widget.hardMin) / span).clamp(0.0, 1.0);
+  }
+
+  double _denormalize(double frac) =>
+      widget.hardMin + frac.clamp(0.0, 1.0) * (widget.hardMax - widget.hardMin);
+
+  double _snap(double v) {
+    final divisions = widget.divisions;
+    if (divisions == null || divisions <= 0) return v;
+    final step = (widget.hardMax - widget.hardMin) / divisions;
+    return ((v - widget.hardMin) / step).round() * step + widget.hardMin;
+  }
+
+  void _dispatch(double localX, double usableWidth) {
+    if (usableWidth <= 0) return;
+    final frac = (localX / usableWidth).clamp(0.0, 1.0);
+    final snapped = _snap(_denormalize(frac));
+
+    if (_active == _DualRangeThumb.min) {
+      final cap = math.min(
+          widget.minThumbMax, widget.maxValue - _DualRangeBar.minSeparation);
+      final clamped = snapped
+          .clamp(widget.hardMin, math.max(widget.hardMin, cap))
+          .toDouble();
+      if (clamped != widget.minValue) widget.onMinChanged(clamped);
+    } else if (_active == _DualRangeThumb.max) {
+      final floor = math.max(
+          widget.maxThumbMin, widget.minValue + _DualRangeBar.minSeparation);
+      final clamped = snapped
+          .clamp(math.min(widget.hardMax, floor), widget.hardMax)
+          .toDouble();
+      if (clamped != widget.maxValue) widget.onMaxChanged(clamped);
+    }
+  }
+
+  _DualRangeThumb _pickThumb(double localX, double usableWidth) {
+    final minX = _normalize(widget.minValue) * usableWidth;
+    final maxX = _normalize(widget.maxValue) * usableWidth;
+    final dMin = (localX - minX).abs();
+    final dMax = (localX - maxX).abs();
+    // Tie-break: if values are equal, the side of the tap decides.
+    if (dMin == dMax) {
+      return localX < minX ? _DualRangeThumb.min : _DualRangeThumb.max;
+    }
+    return dMin <= dMax ? _DualRangeThumb.min : _DualRangeThumb.max;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final height = _thumbDiameter + _verticalSlack * 2;
+    return SizedBox(
+      height: height,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final width = constraints.maxWidth;
+          final inset = _thumbDiameter / 2;
+          final usableWidth = math.max(0.0, width - _thumbDiameter);
+
+          return GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onPanDown: (d) {
+              final x = d.localPosition.dx - inset;
+              final thumb = _pickThumb(x, usableWidth);
+              final thumbX = (thumb == _DualRangeThumb.min
+                      ? _normalize(widget.minValue)
+                      : _normalize(widget.maxValue)) *
+                  usableWidth;
+              setState(() => _active = thumb);
+              _grabOffsetPx = thumbX - x;
+              HapticFeedback.selectionClick();
+              // Intentionally no dispatch here — wait for actual motion so a
+              // tap near a thumb doesn't yank it to the touch point.
+            },
+            onPanUpdate: (d) {
+              _dispatch(
+                  d.localPosition.dx - inset + _grabOffsetPx, usableWidth);
+            },
+            onPanEnd: (_) {
+              if (_active != null) HapticFeedback.selectionClick();
+              setState(() => _active = null);
+            },
+            onPanCancel: () => setState(() => _active = null),
+            child: CustomPaint(
+              size: Size(width, height),
+              painter: _DualRangePainter(
+                minFrac: _normalize(widget.minValue),
+                maxFrac: _normalize(widget.maxValue),
+                trackHeight: _trackHeight,
+                thumbDiameter: _thumbDiameter,
+                inset: inset,
+                tint: widget.tint,
+                minThumbColor: widget.minThumbColor ?? widget.tint,
+                maxThumbColor: widget.maxThumbColor ?? widget.tint,
+                gradient: widget.gradient,
+                draggingMin: _active == _DualRangeThumb.min,
+                draggingMax: _active == _DualRangeThumb.max,
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _DualRangePainter extends CustomPainter {
+  _DualRangePainter({
+    required this.minFrac,
+    required this.maxFrac,
+    required this.trackHeight,
+    required this.thumbDiameter,
+    required this.inset,
+    required this.tint,
+    required this.minThumbColor,
+    required this.maxThumbColor,
+    required this.gradient,
+    required this.draggingMin,
+    required this.draggingMax,
+  });
+
+  final double minFrac;
+  final double maxFrac;
+  final double trackHeight;
+  final double thumbDiameter;
+  final double inset;
+  final Color tint;
+  final Color minThumbColor;
+  final Color maxThumbColor;
+  final Gradient? gradient;
+  final bool draggingMin;
+  final bool draggingMax;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final cy = size.height / 2;
+    final usableWidth = size.width - thumbDiameter;
+    final minX = inset + minFrac * usableWidth;
+    final maxX = inset + maxFrac * usableWidth;
+    final leftEdge = inset;
+    final rightEdge = size.width - inset;
+    final radius = Radius.circular(trackHeight / 2);
+
+    final trackRect = Rect.fromLTRB(
+      leftEdge,
+      cy - trackHeight / 2,
+      rightEdge,
+      cy + trackHeight / 2,
+    );
+
+    // 1. Full-width spectrum / luminance ramp. When no explicit gradient is
+    // supplied (brightness use case) we derive a value ramp from `tint`: a
+    // near-black tinted dark on the dim end through to a near-white warm glow
+    // on the bright end. The hue stays tied to the brand color while the
+    // *luminance* actually communicates "more light" across the track.
+    final basePaint = Paint();
+    if (gradient != null) {
+      basePaint.shader = gradient!.createShader(trackRect);
+    } else {
+      final hsl = HSLColor.fromColor(tint);
+      final dark = hsl
+          .withLightness(0.07)
+          .withSaturation((hsl.saturation - 0.15).clamp(0.0, 1.0))
+          .toColor();
+      final bright = hsl
+          .withLightness(0.84)
+          .withSaturation((hsl.saturation - 0.30).clamp(0.0, 1.0))
+          .toColor();
+      basePaint.shader = LinearGradient(
+        colors: [dark, bright],
+      ).createShader(trackRect);
+    }
+    canvas.drawRRect(RRect.fromRectAndRadius(trackRect, radius), basePaint);
+
+    // 2. Scrim over the inactive regions. The scrim deepens the surrounding
+    // spectrum so the active window reads as a luminous slice cut out of it.
+    final scrim = Paint()..color = _Palette.bg.withValues(alpha: 0.74);
+    if (minX > leftEdge + 0.5) {
+      final r = Rect.fromLTRB(leftEdge, trackRect.top, minX, trackRect.bottom);
+      canvas.drawRRect(
+        RRect.fromRectAndCorners(r, topLeft: radius, bottomLeft: radius),
+        scrim,
+      );
+    }
+    if (maxX < rightEdge - 0.5) {
+      final r = Rect.fromLTRB(maxX, trackRect.top, rightEdge, trackRect.bottom);
+      canvas.drawRRect(
+        RRect.fromRectAndCorners(r, topRight: radius, bottomRight: radius),
+        scrim,
+      );
+    }
+
+    // 3. Hairline highlight along the top of the active slice — gives it the
+    // sense of a polished, recessed light.
+    if (maxX > minX) {
+      canvas.drawRect(
+        Rect.fromLTRB(minX, trackRect.top, maxX, trackRect.top + 1.2),
+        Paint()..color = Colors.white.withValues(alpha: 0.16),
+      );
+    }
+
+    // 4. Thumbs.
+    _drawThumb(canvas, Offset(minX, cy), minThumbColor, draggingMin);
+    _drawThumb(canvas, Offset(maxX, cy), maxThumbColor, draggingMax);
+  }
+
+  void _drawThumb(Canvas canvas, Offset center, Color color, bool active) {
+    // Match the simple filled-circle look of the rest of the screen's
+    // sliders: a flat 7px-radius dot, with a soft overlay halo when active.
+    const visibleRadius = 7.0;
+    if (active) {
+      canvas.drawCircle(
+        center,
+        16,
+        Paint()..color = color.withValues(alpha: 0.10),
+      );
+    }
+    canvas.drawCircle(center, visibleRadius, Paint()..color = color);
+  }
+
+  @override
+  bool shouldRepaint(_DualRangePainter old) =>
+      old.minFrac != minFrac ||
+      old.maxFrac != maxFrac ||
+      old.draggingMin != draggingMin ||
+      old.draggingMax != draggingMax ||
+      old.tint != tint ||
+      old.minThumbColor != minThumbColor ||
+      old.maxThumbColor != maxThumbColor;
 }
