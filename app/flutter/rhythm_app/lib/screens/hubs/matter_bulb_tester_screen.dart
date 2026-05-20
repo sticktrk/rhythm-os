@@ -25,6 +25,7 @@ class MatterBulbTesterScreen extends StatefulWidget {
 class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   static const _uuid = Uuid();
   static const _lowDimMinBrightnessHint = 10;
+  static const _rapidGapsMs = [50, 100, 200, 500, 1000];
 
   final _notesController = TextEditingController();
   final _throttleController = TextEditingController(text: '250');
@@ -36,9 +37,16 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       runLabel: 'Blink bulb',
     ),
     _MatterBulbTestStep(
+      id: 'turn_off',
+      title: 'Baseline Off',
+      prompt: 'Did the bulb turn fully off?',
+      runLabel: 'Turn off bulb',
+    ),
+    _MatterBulbTestStep(
       id: 'brightness_without_on',
       title: 'Brightness Without On',
-      prompt: 'Did the bulb turn on after only a brightness command?',
+      prompt:
+          'Starting from off, did the bulb turn on after only a brightness command?',
       runLabel: 'Test brightness',
     ),
     _MatterBulbTestStep(
@@ -50,32 +58,163 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
     _MatterBulbTestStep(
       id: 'dim_low',
       title: 'Low Dim',
-      prompt: 'Did the bulb stay on at a stable low dim level?',
+      prompt:
+          'It should first reset to neutral white, then drop low. Did it stay on at a stable low dim level?',
       runLabel: 'Test low dim',
     ),
     _MatterBulbTestStep(
       id: 'dim_ramp',
       title: 'Dimming Ramp',
-      prompt: 'Did the bulb fade down smoothly instead of jumping or failing?',
+      prompt:
+          'It should first reset to neutral white, then fade down. Did it fade smoothly instead of jumping or failing?',
       runLabel: 'Test fade',
     ),
     _MatterBulbTestStep(
-      id: 'color_temperature',
-      title: 'Color Temperature',
-      prompt: 'Did the bulb move to warm white?',
+      id: 'brightness_steps',
+      title: 'Brightness Range',
+      prompt:
+          'It should first reset to neutral white, then step low, medium, and full. Were the steps visible?',
+      runLabel: 'Test range',
+    ),
+    _MatterBulbTestStep(
+      id: 'color_temperature_warm',
+      title: 'Warm White',
+      prompt:
+          'It should first reset to neutral white, then move warm. Did it become warm white?',
       runLabel: 'Test warm white',
     ),
     _MatterBulbTestStep(
-      id: 'xy_color',
-      title: 'XY Color',
-      prompt: 'Did the bulb change to a saturated color?',
-      runLabel: 'Test color',
+      id: 'color_temperature_cool',
+      title: 'Cool White',
+      prompt:
+          'It should first reset to neutral white, then move cool. Did it become cool white?',
+      runLabel: 'Test cool white',
+    ),
+    _MatterBulbTestStep(
+      id: 'xy_red',
+      title: 'Red',
+      prompt:
+          'It should first reset to neutral white, then turn red. Did it turn red?',
+      runLabel: 'Test red',
+    ),
+    _MatterBulbTestStep(
+      id: 'xy_green',
+      title: 'Green',
+      prompt:
+          'It should first reset to neutral white, then turn green. Did it turn green?',
+      runLabel: 'Test green',
+    ),
+    _MatterBulbTestStep(
+      id: 'xy_blue',
+      title: 'Blue',
+      prompt:
+          'It should first reset to neutral white, then turn blue. Did it turn blue?',
+      runLabel: 'Test blue',
+    ),
+    _MatterBulbTestStep(
+      id: 'hue_sat_red',
+      title: 'Hue/Sat Red',
+      prompt:
+          'It should first reset to neutral white, then use Hue/Sat red. Did it turn red?',
+      runLabel: 'Test HS red',
+    ),
+    _MatterBulbTestStep(
+      id: 'hue_sat_green',
+      title: 'Hue/Sat Green',
+      prompt:
+          'It should first reset to neutral white, then use Hue/Sat green. Did it turn green?',
+      runLabel: 'Test HS green',
+    ),
+    _MatterBulbTestStep(
+      id: 'hue_sat_blue',
+      title: 'Hue/Sat Blue',
+      prompt:
+          'It should first reset to neutral white, then use Hue/Sat blue. Did it turn blue?',
+      runLabel: 'Test HS blue',
+    ),
+    _MatterBulbTestStep(
+      id: 'ct_to_xy',
+      title: 'CT to XY',
+      prompt:
+          'It should first reset to neutral white, move warm, then switch to XY red. Did it end red?',
+      runLabel: 'Test CT to XY',
+    ),
+    _MatterBulbTestStep(
+      id: 'xy_to_ct',
+      title: 'XY to CT',
+      prompt:
+          'It should first reset to neutral white, move XY blue, then switch to warm white. Did it end warm white?',
+      runLabel: 'Test XY to CT',
+    ),
+    _MatterBulbTestStep(
+      id: 'ct_to_hue_sat',
+      title: 'CT to Hue/Sat',
+      prompt:
+          'It should first reset to neutral white, move warm, then switch to Hue/Sat blue. Did it end blue?',
+      runLabel: 'Test CT to HS',
+    ),
+    _MatterBulbTestStep(
+      id: 'hue_sat_to_ct',
+      title: 'Hue/Sat to CT',
+      prompt:
+          'It should first reset to neutral white, move Hue/Sat blue, then switch to warm white. Did it end warm white?',
+      runLabel: 'Test HS to CT',
+    ),
+    _MatterBulbTestStep(
+      id: 'on_level_restore',
+      title: 'On Level Restore',
+      prompt:
+          'It should first reset to neutral white, dim to 10%, turn off, then turn on. Did it come back at the low level?',
+      runLabel: 'Test restore',
+    ),
+    _MatterBulbTestStep(
+      id: 'power_on_behavior',
+      title: 'Power-On Restore',
+      prompt:
+          'After it sets warm white at 50%, physically power-cycle the bulb. Did it come back warm at about 50%?',
+      runLabel: 'Set power test',
     ),
     _MatterBulbTestStep(
       id: 'rapid_commands',
       title: 'Rapid Commands',
-      prompt: 'Did the bulb keep up with the command burst?',
+      prompt:
+          'It should first reset to neutral white, then jump through a burst. Did it keep up?',
       runLabel: 'Test burst',
+    ),
+    _MatterBulbTestStep(
+      id: 'rapid_50ms',
+      title: 'Rapid 50 ms',
+      prompt:
+          'It should first reset to neutral white, then step brightness with 50 ms gaps. Did it keep up?',
+      runLabel: 'Test 50 ms',
+    ),
+    _MatterBulbTestStep(
+      id: 'rapid_100ms',
+      title: 'Rapid 100 ms',
+      prompt:
+          'It should first reset to neutral white, then step brightness with 100 ms gaps. Did it keep up?',
+      runLabel: 'Test 100 ms',
+    ),
+    _MatterBulbTestStep(
+      id: 'rapid_200ms',
+      title: 'Rapid 200 ms',
+      prompt:
+          'It should first reset to neutral white, then step brightness with 200 ms gaps. Did it keep up?',
+      runLabel: 'Test 200 ms',
+    ),
+    _MatterBulbTestStep(
+      id: 'rapid_500ms',
+      title: 'Rapid 500 ms',
+      prompt:
+          'It should first reset to neutral white, then step brightness with 500 ms gaps. Did it keep up?',
+      runLabel: 'Test 500 ms',
+    ),
+    _MatterBulbTestStep(
+      id: 'rapid_1000ms',
+      title: 'Rapid 1000 ms',
+      prompt:
+          'It should first reset to neutral white, then step brightness with 1000 ms gaps. Did it keep up?',
+      runLabel: 'Test 1000 ms',
     ),
   ];
 
@@ -411,7 +550,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
                   ),
               ],
             ),
-          if (_observations['rapid_commands']?.worked == false) ...[
+          if (_needsThrottleInput()) ...[
             const SizedBox(height: 12),
             TextField(
               controller: _throttleController,
@@ -591,7 +730,12 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
 
   Map<String, dynamic> _buildReport() {
     final capabilityHints = _capabilityHints();
+    final claimedCapabilities = _firstServerMap('claimed_capabilities');
+    final endpointValidation = _firstServerMap('endpoint_validation');
+    final testParameters = _firstServerMap('test_parameters');
+    final operatorNotes = _notesController.text.trim();
     return {
+      'schema_version': 2,
       'report_id': _uuid.v4(),
       'device_id': widget.nativeDeviceId,
       'canonical_device_id': widget.device.id,
@@ -602,6 +746,13 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
         'model': widget.device.model,
         'native_device_id': widget.nativeDeviceId,
       },
+      'claimed_capabilities': claimedCapabilities ?? <String, dynamic>{},
+      if (endpointValidation != null) 'endpoint_validation': endpointValidation,
+      if (testParameters != null) 'test_parameters': testParameters,
+      'tested_capabilities': _testedCapabilities(),
+      'command_results': _commandResults(),
+      'readback_consistency': _readbackConsistency(),
+      'visual_observations': _visualObservations(),
       'observations': [
         for (final step in _steps)
           if (_observations[step.id] != null)
@@ -617,6 +768,8 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
             },
       ],
       'inferred_quirks': _inferredQuirks(),
+      'inferred_behavioral_quirks': _inferredBehavioralQuirks(),
+      'recommended_control_strategy': _recommendedControlStrategy(),
       if (capabilityHints.isNotEmpty) 'capability_hints': capabilityHints,
       'dimming': {
         'low_dim_test_percent': 3,
@@ -626,8 +779,324 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
         'low_dim_worked': _observations['dim_low']?.worked,
         'ramp_worked': _observations['dim_ramp']?.worked,
       },
-      'notes': _notesController.text.trim(),
+      'color_coverage': {
+        'warm_white_worked': _observations['color_temperature_warm']?.worked,
+        'cool_white_worked': _observations['color_temperature_cool']?.worked,
+        'red_worked': _observations['xy_red']?.worked,
+        'green_worked': _observations['xy_green']?.worked,
+        'blue_worked': _observations['xy_blue']?.worked,
+        'hue_sat_red_worked': _observations['hue_sat_red']?.worked,
+        'hue_sat_green_worked': _observations['hue_sat_green']?.worked,
+        'hue_sat_blue_worked': _observations['hue_sat_blue']?.worked,
+        'ct_to_xy_worked': _observations['ct_to_xy']?.worked,
+        'xy_to_ct_worked': _observations['xy_to_ct']?.worked,
+        'ct_to_hue_sat_worked': _observations['ct_to_hue_sat']?.worked,
+        'hue_sat_to_ct_worked': _observations['hue_sat_to_ct']?.worked,
+      },
+      'operator_notes': operatorNotes,
+      'notes': _reportNotes(operatorNotes),
     };
+  }
+
+  Map<String, dynamic>? _firstServerMap(String key) {
+    for (final step in _steps) {
+      final value = _observations[step.id]?.serverResult?[key];
+      if (value is Map) {
+        return Map<String, dynamic>.from(value);
+      }
+    }
+    return null;
+  }
+
+  Map<String, dynamic> _commandResults() {
+    return {
+      for (final step in _steps)
+        if (_observations[step.id]?.serverResult != null)
+          step.id: {
+            'status': _observations[step.id]!.serverResult?['status'],
+            'command_count':
+                _observations[step.id]!.serverResult?['command_count'],
+            'failed_count':
+                _observations[step.id]!.serverResult?['failed_count'],
+            'commands': _observations[step.id]!.serverResult?['commands'],
+          },
+    };
+  }
+
+  Map<String, dynamic> _visualObservations() {
+    return {
+      for (final step in _steps)
+        if (_observations[step.id] != null)
+          step.id: {
+            'title': step.title,
+            'answer': _answerLabel(_observations[step.id]!),
+            'worked': _observations[step.id]!.worked,
+            'answered': _observations[step.id]!.answered,
+            'recorded_at':
+                _observations[step.id]!.recordedAt.toUtc().toIso8601String(),
+          },
+    };
+  }
+
+  Map<String, dynamic> _testedCapabilities() {
+    return {
+      'onoff': {
+        'identify': _observations['identify']?.worked,
+        'turn_off': _observations['turn_off']?.worked,
+      },
+      'level_control': {
+        'move_to_level_with_onoff_without_explicit_on':
+            _observations['brightness_without_on']?.worked,
+        'move_to_level_with_onoff_after_explicit_on':
+            _observations['brightness_with_on']?.worked,
+        'brightness_steps': _observations['brightness_steps']?.worked,
+        'low_dim': _observations['dim_low']?.worked,
+        'on_level_restore': _observations['on_level_restore']?.worked,
+      },
+      'level_command_variants': {
+        'move_to_level_with_onoff': {
+          'tested': true,
+          'worked_without_explicit_on':
+              _observations['brightness_without_on']?.worked,
+          'worked_after_explicit_on':
+              _observations['brightness_with_on']?.worked,
+        },
+        'move_to_level': {'tested': false},
+        'step': {'tested': false},
+        'step_with_onoff': {'tested': false},
+      },
+      'color_temperature': {
+        'warm': _observations['color_temperature_warm']?.worked,
+        'cool': _observations['color_temperature_cool']?.worked,
+      },
+      'xy_color': {
+        'red': _observations['xy_red']?.worked,
+        'green': _observations['xy_green']?.worked,
+        'blue': _observations['xy_blue']?.worked,
+      },
+      'hue_saturation': {
+        'red': _observations['hue_sat_red']?.worked,
+        'green': _observations['hue_sat_green']?.worked,
+        'blue': _observations['hue_sat_blue']?.worked,
+      },
+      'color_mode_switching': {
+        'ct_to_xy': _observations['ct_to_xy']?.worked,
+        'xy_to_ct': _observations['xy_to_ct']?.worked,
+        'ct_to_hue_sat': _observations['ct_to_hue_sat']?.worked,
+        'hue_sat_to_ct': _observations['hue_sat_to_ct']?.worked,
+      },
+      'transitions': {
+        'dim_ramp': _observations['dim_ramp']?.worked,
+        'transition_behavior': _transitionBehavior(),
+      },
+      'rapid_commands': {
+        'zero_gap': _observations['rapid_commands']?.worked,
+        for (final gapMs in _rapidGapsMs)
+          '${gapMs}ms': _observations['rapid_${gapMs}ms']?.worked,
+      },
+      'power_on_behavior': {
+        'restored_warm_50_percent': _observations['power_on_behavior']?.worked,
+      },
+    };
+  }
+
+  Map<String, dynamic> _readbackConsistency() {
+    return {
+      'onoff': 'tracked',
+      'level': 'not_available',
+      'color': 'not_available',
+      'by_test': {
+        for (final step in _steps)
+          if (_observations[step.id] != null)
+            step.id: {
+              'command_ack': _commandAckStatus(
+                _observations[step.id]?.serverResult,
+              ),
+              'onoff_readback': _onOffReadbackStatus(
+                _observations[step.id]?.serverResult,
+              ),
+              'visible_behavior': _answerLabel(_observations[step.id]!),
+            },
+      },
+    };
+  }
+
+  Map<String, dynamic> _recommendedControlStrategy() {
+    final minBrightness = _capabilityHints()['min_brightness'];
+    final spacingMs = _recommendedCommandSpacingMs();
+    return {
+      'turn_on_sequence': _turnOnSequence(),
+      'brightness_command': 'move_to_level_with_onoff',
+      'preferred_level_command': 'move_to_level_with_onoff',
+      'level_command_variants_not_tested': [
+        'move_to_level',
+        'step',
+        'step_with_onoff',
+      ],
+      'color_command': _preferredColorCommand(),
+      'min_brightness': minBrightness,
+      'transition_behavior': _transitionBehavior(),
+      'recommended_command_spacing_ms': spacingMs,
+      'on_restores_previous_level': _observations['on_level_restore']?.worked,
+      'power_on_behavior': _powerOnBehavior(),
+    };
+  }
+
+  List<dynamic> _inferredBehavioralQuirks() {
+    final quirks = <dynamic>[];
+    if (_observations['on_level_restore']?.worked == false) {
+      quirks.add('on_does_not_restore_previous_level');
+    }
+    if (_observations['power_on_behavior']?.worked == true) {
+      quirks.add({'power_on_behavior': 'restore_previous'});
+    } else if (_observations['power_on_behavior']?.worked == false) {
+      quirks.add({'power_on_behavior': 'not_restore_previous'});
+    }
+    for (final entry in {
+      'ct_to_xy_fails': _observations['ct_to_xy']?.worked,
+      'xy_to_ct_fails': _observations['xy_to_ct']?.worked,
+      'ct_to_hue_sat_fails': _observations['ct_to_hue_sat']?.worked,
+      'hue_sat_to_ct_fails': _observations['hue_sat_to_ct']?.worked,
+    }.entries) {
+      if (entry.value == false) quirks.add(entry.key);
+    }
+    return quirks;
+  }
+
+  List<String> _reportNotes(String operatorNotes) {
+    final notes = <String>[];
+    if (operatorNotes.isNotEmpty) notes.add(operatorNotes);
+    notes.add(
+      'Raw Matter attribute lists, accepted command lists, feature maps, and level/color readbacks are not exposed by the current native bridge.',
+    );
+    return notes;
+  }
+
+  String _answerLabel(_StepObservation observation) {
+    if (!observation.answered) return 'unanswered';
+    if (observation.worked == true) return 'yes';
+    if (observation.worked == false) return 'no';
+    return 'unsure';
+  }
+
+  String _commandAckStatus(Map<String, dynamic>? serverResult) {
+    if (serverResult == null) return 'not_run';
+    final failedCount = serverResult['failed_count'];
+    final commandCount = serverResult['command_count'];
+    if (failedCount is int && failedCount == 0) return 'success';
+    if (failedCount is int &&
+        commandCount is int &&
+        failedCount < commandCount) {
+      return 'partial';
+    }
+    if (failedCount is int) return 'failed';
+    return serverResult['status']?.toString() ?? 'unknown';
+  }
+
+  String _onOffReadbackStatus(Map<String, dynamic>? serverResult) {
+    if (serverResult == null) return 'not_run';
+    var sawOk = false;
+    var sawError = false;
+
+    void inspectReadback(dynamic value) {
+      if (value is! Map) return;
+      final onOff = value['onoff'];
+      if (onOff is! Map) return;
+      if (onOff['ok'] == true) sawOk = true;
+      if (onOff['ok'] == false) sawError = true;
+    }
+
+    final commands = serverResult['commands'];
+    if (commands is List) {
+      for (final command in commands) {
+        if (command is! Map) continue;
+        inspectReadback(command['readback_before']);
+        inspectReadback(command['readback_after_immediate']);
+        inspectReadback(command['readback_after_500ms']);
+        inspectReadback(command['readback_after_1500ms']);
+      }
+    }
+
+    if (!sawOk && !sawError) return 'not_available';
+    if (sawOk && sawError) return 'mixed';
+    if (sawOk) return 'available';
+    return 'failed';
+  }
+
+  String _turnOnSequence() {
+    final brightnessWithoutOn = _observations['brightness_without_on']?.worked;
+    final brightnessWithOn = _observations['brightness_with_on']?.worked;
+    if (brightnessWithoutOn == true) return 'level_command_turns_on';
+    if (brightnessWithoutOn == false && brightnessWithOn == true) {
+      return 'explicit_on_then_level';
+    }
+    if (brightnessWithoutOn == false && brightnessWithOn == false) {
+      return 'explicit_on_then_level_unreliable';
+    }
+    return 'unknown';
+  }
+
+  String _preferredColorCommand() {
+    final hueSatWorked = [
+      _observations['hue_sat_red']?.worked,
+      _observations['hue_sat_green']?.worked,
+      _observations['hue_sat_blue']?.worked,
+    ].any((worked) => worked == true);
+    if (hueSatWorked) return 'hue_saturation';
+
+    final xyWorked = [
+      _observations['xy_red']?.worked,
+      _observations['xy_green']?.worked,
+      _observations['xy_blue']?.worked,
+    ].any((worked) => worked == true);
+    if (xyWorked) return 'xy';
+
+    final colorTemperatureWorked = [
+      _observations['color_temperature_warm']?.worked,
+      _observations['color_temperature_cool']?.worked,
+    ].any((worked) => worked == true);
+    if (colorTemperatureWorked) return 'color_temperature';
+
+    return 'onoff_or_dimming_only';
+  }
+
+  String _transitionBehavior() {
+    final worked = _observations['dim_ramp']?.worked;
+    if (worked == true) return 'smooth';
+    if (worked == false) return 'instant_jump_or_ignored';
+    return 'unknown';
+  }
+
+  int? _recommendedCommandSpacingMs() {
+    for (final gapMs in _rapidGapsMs) {
+      if (_observations['rapid_${gapMs}ms']?.worked == true) return gapMs;
+    }
+    final anyRapidFailure = _observations['rapid_commands']?.worked == false ||
+        _rapidGapsMs.any(
+          (gapMs) => _observations['rapid_${gapMs}ms']?.worked == false,
+        );
+    if (_observations['rapid_commands']?.worked == true && !anyRapidFailure) {
+      return 50;
+    }
+    if (anyRapidFailure) {
+      final throttleMs = int.tryParse(_throttleController.text.trim()) ?? 250;
+      return throttleMs.clamp(50, 2000);
+    }
+    return null;
+  }
+
+  bool _needsThrottleInput() {
+    if (_observations['rapid_commands']?.worked == false) return true;
+    return _rapidGapsMs.any(
+      (gapMs) => _observations['rapid_${gapMs}ms']?.worked == false,
+    );
+  }
+
+  String _powerOnBehavior() {
+    final worked = _observations['power_on_behavior']?.worked;
+    if (worked == true) return 'restore_previous';
+    if (worked == false) return 'not_restore_previous';
+    return 'unknown';
   }
 
   List<dynamic> _inferredQuirks() {
@@ -638,15 +1107,25 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       quirks.add('needs_explicit_on');
     }
 
-    final colorTemperature = _observations['color_temperature']?.worked;
-    final xyColor = _observations['xy_color']?.worked;
-    if (colorTemperature == false && xyColor == true) {
+    final colorTemperatureResults = [
+      _observations['color_temperature_warm']?.worked,
+      _observations['color_temperature_cool']?.worked,
+    ];
+    final xyResults = [
+      _observations['xy_red']?.worked,
+      _observations['xy_green']?.worked,
+      _observations['xy_blue']?.worked,
+    ];
+    final colorTemperatureFailed =
+        colorTemperatureResults.any((worked) => worked == false);
+    final xyWorked = xyResults.any((worked) => worked == true);
+    if (colorTemperatureFailed && xyWorked) {
       quirks.add('needs_xy_not_ct');
     }
 
-    if (_observations['rapid_commands']?.worked == false) {
-      final throttleMs = int.tryParse(_throttleController.text.trim()) ?? 250;
-      quirks.add({'command_throttle_ms': throttleMs.clamp(50, 2000)});
+    final spacingMs = _recommendedCommandSpacingMs();
+    if (spacingMs != null && spacingMs > 50) {
+      quirks.add({'command_throttle_ms': spacingMs});
     }
     return quirks;
   }
