@@ -622,6 +622,47 @@ class RhythmServerApi {
     return null;
   }
 
+  /// Run a raw Matter bulb tester command variant against a Matter light.
+  ///
+  /// [deviceId] may be either a canonical Rhythm device ID or a Matter native
+  /// ID such as `matter-100`.
+  Future<Map<String, dynamic>?> runMatterBulbTest({
+    required String deviceId,
+    required String test,
+  }) async {
+    try {
+      final response = await _dio.post('api/matter/bulb-test/run', data: {
+        'device_id': deviceId,
+        'test': test,
+      });
+      return response.data as Map<String, dynamic>?;
+    } catch (e) {
+      _log.warning('runMatterBulbTest failed', e);
+    }
+    return null;
+  }
+
+  /// Save a Matter bulb tester report on the server and optionally apply the
+  /// inferred local quirks immediately.
+  Future<Map<String, dynamic>?> saveMatterBulbTestReport(
+    Map<String, dynamic> report, {
+    bool applyLocal = true,
+  }) async {
+    try {
+      final response = await _dio.post(
+        'api/matter/bulb-test/report',
+        data: {
+          ...report,
+          'apply_local': applyLocal,
+        },
+      );
+      return response.data as Map<String, dynamic>?;
+    } catch (e) {
+      _log.warning('saveMatterBulbTestReport failed', e);
+    }
+    return null;
+  }
+
   // =========================================================================
   // Triage
   // =========================================================================
