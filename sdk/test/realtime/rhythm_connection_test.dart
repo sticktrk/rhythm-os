@@ -144,5 +144,141 @@ void main() {
       expect(hub.hubType, 'hue');
       expect(hub.address, '192.168.1.20:443');
     });
+
+    test(
+        'parses mode_changed SSE without re-helloing on compatibility settings_changed',
+        () async {
+      sseEventChunks = [
+        'event: mode_changed\n'
+            'data: {"type":"mode_changed","data":{"active":"sleep","cause":"sunset","transition_id":"day_to_sleep","epoch_ms":1778058932588}}\n\n',
+        'event: settings_changed\n'
+            'data: {"type":"settings_changed","data":{}}\n\n',
+      ];
+      sseCloseDelay = const Duration(milliseconds: 100);
+
+      final connection = RhythmConnection();
+      addTearDown(connection.dispose);
+
+      var newNodesDetected = false;
+      final newNodesSub = connection.newNodesDetected.listen((_) {
+        newNodesDetected = true;
+      });
+      addTearDown(newNodesSub.cancel);
+
+      final modeFuture = connection.modeChangedEvents.first.timeout(
+        const Duration(seconds: 2),
+      );
+
+      await connection.connect('127.0.0.1', port: server.port);
+
+      final mode = await modeFuture;
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+
+      expect(mode.active, RhythmMode.sleep);
+      expect(mode.lastChange?.cause, 'sunset');
+      expect(mode.lastChange?.transitionId, 'day_to_sleep');
+      expect(mode.lastChange?.epochMs, 1778058932588);
+      expect(newNodesDetected, isFalse);
+    });
+
+    test('parses settings_changed SSE payload', () async {
+      sseEventChunks = [
+        'event: settings_changed\n'
+            'data: {"type":"settings_changed","data":{"settings":{"power_save":true}}}\n\n',
+      ];
+      sseCloseDelay = const Duration(milliseconds: 100);
+
+      final connection = RhythmConnection();
+      addTearDown(connection.dispose);
+
+      final settingsFuture = connection.settingsChangedEvents.first.timeout(
+        const Duration(seconds: 2),
+      );
+
+      await connection.connect('127.0.0.1', port: server.port);
+
+      final settings = await settingsFuture;
+      expect(settings.powerSave, isTrue);
+    });
+
+    test('parses input_event SSE events', () async {
+      sseEventChunks = [
+        'event: input_event\n'
+            'data: {"type":"input_event","data":{"kind":"button","epoch_ms":1778058932588,"route":"node_control","hub_type":"hue","source_node_id":"button-1","target_node_id":"room-1","native_device_id":"native-button","button_action":"on_press"}}\n\n',
+      ];
+      sseCloseDelay = const Duration(milliseconds: 100);
+
+      final connection = RhythmConnection();
+      addTearDown(connection.dispose);
+
+      final inputFuture = connection.inputEvents.first.timeout(
+        const Duration(seconds: 2),
+      );
+
+      await connection.connect('127.0.0.1', port: server.port);
+
+      final input = await inputFuture;
+      expect(input, isA<RhythmButtonInputEvent>());
+      final button = input as RhythmButtonInputEvent;
+      expect(button.sourceNodeId, 'button-1');
+      expect(button.targetNodeId, 'room-1');
+      expect(button.nativeDeviceId, 'native-button');
+      expect(button.buttonAction, RhythmButtonAction.onPress);
+    });
+
+    test('parses pairing_progress SSE events', () async {
+      sseEventChunks = [
+        'event: pairing_progress\n'
+            'data: {"type":"pairing_progress","data":{"hub_type":"matter","session_id":"pair-1","status":"commissioning","stage":"commissioning","message":"Commissioning Matter device"}}\n\n',
+        'event: pairing_progress\n'
+            'data: {"type":"pairing_progress","data":{"hub_type":"matter","session_id":"pair-1","status":"complete","stage":"complete","message":"Pairing complete","device":{"device_id":"matter-100","name":"Test Bulb","device_type":"light","manufacturer":"Acme","model":"A19"}}}\n\n',
+      ];
+      sseCloseDelay = const Duration(milliseconds: 100);
+
+      final connection = RhythmConnection();
+      addTearDown(connection.dispose);
+
+      final events = <RhythmPairingProgress>[];
+      final sub = connection.pairingProgressEvents.listen(events.add);
+      addTearDown(sub.cancel);
+
+      await connection.connect('127.0.0.1', port: server.port);
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+
+      expect(events.length, 2);
+      expect(events[0].sessionId, 'pair-1');
+      expect(events[0].stage, RhythmPairingStage.commissioning);
+      expect(events[0].status, RhythmPairingStatus.commissioning);
+      expect(events[1].stage, RhythmPairingStage.complete);
+      expect(events[1].device?.deviceId, 'matter-100');
+      expect(events[1].device?.name, 'Test Bulb');
+    });
+
+    test('parses ota_update_progress SSE events with percent', () async {
+      sseEventChunks = [
+        'event: ota_update_progress\n'
+            'data: {"type":"ota_update_progress","data":{"stage":"downloading","message":"Downloading update bundle","current_version":"0.4.192-beta","target_version":"0.4.193-beta","update_available":true,"downloaded_bytes":50,"total_bytes":100,"percent":50}}\n\n',
+        'event: ota_update_progress\n'
+            'data: {"type":"ota_update_progress","data":{"stage":"restarting","message":"Restarting"}}\n\n',
+      ];
+      sseCloseDelay = const Duration(milliseconds: 100);
+
+      final connection = RhythmConnection();
+      addTearDown(connection.dispose);
+
+      final events = <RhythmOtaUpdateProgress>[];
+      final sub = connection.otaUpdateProgressEvents.listen(events.add);
+      addTearDown(sub.cancel);
+
+      await connection.connect('127.0.0.1', port: server.port);
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+
+      expect(events.length, 2);
+      expect(events[0].stage, RhythmOtaUpdateStage.downloading);
+      expect(events[0].percent, 50);
+      expect(events[0].targetVersion, '0.4.193-beta');
+      expect(events[1].stage, RhythmOtaUpdateStage.restarting);
+      expect(events[1].isTerminal, isTrue);
+    });
   });
 }

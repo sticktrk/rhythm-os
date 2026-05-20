@@ -14,14 +14,24 @@ import '../rhythm_log_interceptor.dart';
 /// like health checks and diagnostics.
 class RhythmDiagnosticsApi {
   static final _log = Logger('rhythm_sdk.api');
+  static const Duration defaultConnectTimeout = Duration(seconds: 5);
+  static const Duration defaultReceiveTimeout = Duration(seconds: 5);
+  static const Duration defaultDebugBundleReceiveTimeout = Duration(minutes: 2);
 
   final Dio _dio;
+  final Duration _debugBundleReceiveTimeout;
 
-  RhythmDiagnosticsApi({required String host, int port = 80})
-      : _dio = Dio(BaseOptions(
+  RhythmDiagnosticsApi({
+    required String host,
+    int port = 80,
+    Duration connectTimeout = defaultConnectTimeout,
+    Duration receiveTimeout = defaultReceiveTimeout,
+    Duration debugBundleReceiveTimeout = defaultDebugBundleReceiveTimeout,
+  })  : _debugBundleReceiveTimeout = debugBundleReceiveTimeout,
+        _dio = Dio(BaseOptions(
           baseUrl: 'http://$host:$port/',
-          connectTimeout: const Duration(seconds: 5),
-          receiveTimeout: const Duration(seconds: 5),
+          connectTimeout: connectTimeout,
+          receiveTimeout: receiveTimeout,
         )) {
     _dio.interceptors.add(RhythmLogInterceptor(_log));
   }
@@ -73,6 +83,7 @@ class RhythmDiagnosticsApi {
         'api/diag/debug-bundle',
         options: Options(
           responseType: ResponseType.bytes,
+          receiveTimeout: _debugBundleReceiveTimeout,
           validateStatus: (_) => true,
         ),
       );

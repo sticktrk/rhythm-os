@@ -16,8 +16,12 @@ import 'package:logging/logging.dart';
 import '../api/rhythm_server_api.dart';
 import '../json_parsing.dart';
 import '../models/rhythm_connection_state.dart';
+import '../models/rhythm_firmware.dart';
 import '../models/rhythm_hello.dart';
+import '../models/rhythm_input_event.dart';
+import '../models/rhythm_pairing.dart';
 import '../models/rhythm_room.dart';
+import '../models/rhythm_settings.dart';
 import '../rhythm_log_interceptor.dart';
 
 /// Cached node state for diff detection.
@@ -28,6 +32,8 @@ class _CachedNodeState {
   final RoomModeState state;
   final bool transitioning;
   final RhythmMode? mode;
+  final bool? powerFresh;
+  final String? powerSource;
   final bool? lightsOn;
   final int? brightness;
   final int? kelvin;
@@ -45,6 +51,8 @@ class _CachedNodeState {
     required this.state,
     this.transitioning = false,
     this.mode,
+    this.powerFresh,
+    this.powerSource,
     this.lightsOn,
     this.brightness,
     this.kelvin,
@@ -67,15 +75,24 @@ class RhythmConnection {
   // Stream controllers (broadcast so multiple listeners work).
   final _helloController = StreamController<RhythmHello>.broadcast();
   final _rhythmStateController = StreamController<RhythmRoomState>.broadcast();
-  final _hubEventController =
-      StreamController<({String event, String? hubType, String? address})>.broadcast();
+  final _hubEventController = StreamController<
+      ({String event, String? hubType, String? address})>.broadcast();
   final _motionTimerController =
       StreamController<RhythmMotionTimer>.broadcast();
+  final _inputEventController = StreamController<RhythmInputEvent>.broadcast();
+  final _modeChangedController =
+      StreamController<RhythmModeResource>.broadcast();
+  final _settingsChangedController =
+      StreamController<RhythmSettings>.broadcast();
   final _newNodesController = StreamController<void>.broadcast();
   final _triageChangedController =
       StreamController<Map<String, dynamic>>.broadcast();
   final _connectionStateController =
       StreamController<RhythmConnectionState>.broadcast();
+  final _pairingProgressController =
+      StreamController<RhythmPairingProgress>.broadcast();
+  final _otaUpdateProgressController =
+      StreamController<RhythmOtaUpdateProgress>.broadcast();
 
   // Connection state.
   RhythmConnectionState _connectionState = RhythmConnectionState.disconnected;
@@ -101,6 +118,8 @@ class RhythmConnection {
   Timer? _sseReconnectTimer;
   int _sseReconnectAttempts = 0;
   bool _sseConnecting = false;
+  bool _suppressNextSettingsChangedAfterMode = false;
+  Timer? _settingsChangedSuppressTimer;
 
   // Direct SSE state (for HA addon web).
   String? _serverPlatformContext;
@@ -141,12 +160,26 @@ class RhythmConnection {
       _hubEventController.stream;
   Stream<RhythmMotionTimer> get motionTimerEvents =>
       _motionTimerController.stream;
+  Stream<RhythmInputEvent> get inputEvents => _inputEventController.stream;
+  Stream<RhythmModeResource> get modeChangedEvents =>
+      _modeChangedController.stream;
+  Stream<RhythmSettings> get settingsChangedEvents =>
+      _settingsChangedController.stream;
   Stream<void> get newNodesDetected => _newNodesController.stream;
   Stream<void> get newRoomsDetected => newNodesDetected;
   Stream<Map<String, dynamic>> get triageChangedEvents =>
       _triageChangedController.stream;
   Stream<RhythmConnectionState> get connectionStateStream =>
       _connectionStateController.stream;
+
+  /// Real-time pairing progress events from the server (matter, zigbee, etc.).
+  Stream<RhythmPairingProgress> get pairingProgressEvents =>
+      _pairingProgressController.stream;
+
+  /// Real-time OTA update progress events for the server's own self-update
+  /// flow (`/api/ota/check` and `/api/ota/update`).
+  Stream<RhythmOtaUpdateProgress> get otaUpdateProgressEvents =>
+      _otaUpdateProgressController.stream;
 
   RhythmConnectionState get connectionState => _connectionState;
   bool get connected => _connectionState == RhythmConnectionState.connected;
@@ -213,7 +246,10 @@ class RhythmConnection {
   }
 
   /// Force a full reconnect.
-  Future<void> reconnect() async {
+  ///
+  /// When [authoritative] is true, the initial hello fetch uses
+  /// `GET /api/state?authoritative=true`.
+  Future<void> reconnect({bool authoritative = false}) async {
     if (_host == null) return;
     _stopPolling();
     _disconnectSse();
@@ -228,7 +264,7 @@ class RhythmConnection {
     // stream's initial hub_status event from looking like a new change
     // (which would trigger another reconnect → infinite loop).
     _sseDirectAttempted = false;
-    await _connectInternal();
+    await _connectInternal(authoritative: authoritative);
   }
 
   /// Disconnect from the server.
@@ -304,16 +340,22 @@ class RhythmConnection {
     _rhythmStateController.close();
     _hubEventController.close();
     _motionTimerController.close();
+    _inputEventController.close();
+    _modeChangedController.close();
+    _settingsChangedController.close();
     _newNodesController.close();
     _triageChangedController.close();
     _connectionStateController.close();
+    _pairingProgressController.close();
+    _otaUpdateProgressController.close();
+    _settingsChangedSuppressTimer?.cancel();
   }
 
   // --------------------------------------------------------------------------
   // Internal: connect
   // --------------------------------------------------------------------------
 
-  Future<void> _connectInternal() async {
+  Future<void> _connectInternal({bool authoritative = false}) async {
     if (_dio == null || _host == null) return;
 
     _sseReconnectTimer?.cancel();
@@ -325,7 +367,7 @@ class RhythmConnection {
         : RhythmConnectionState.connecting);
 
     try {
-      final data = await _getHelloPayload();
+      final data = await _getHelloPayload(authoritative: authoritative);
       final hello = RhythmHello.fromJson(data);
       _log.fine('hello last_tick_epoch_ms=${hello.lastTickEpochMs}');
       _serverPlatformContext = hello.platformContext;
@@ -340,6 +382,8 @@ class RhythmConnection {
           brightnessOffset: node.brightnessOffset,
           state: node.state,
           transitioning: node.transitioning,
+          powerFresh: node.powerFresh,
+          powerSource: node.powerSource,
           lightsOn: node.lightsOn,
           brightness: node.brightness,
           kelvin: node.kelvin,
@@ -384,8 +428,13 @@ class RhythmConnection {
     }
   }
 
-  Future<Map<String, dynamic>> _getHelloPayload() async {
-    final response = await _dio!.get('api/state');
+  Future<Map<String, dynamic>> _getHelloPayload({
+    bool authoritative = false,
+  }) async {
+    final response = await _dio!.get(
+      'api/state',
+      queryParameters: authoritative ? const {'authoritative': 'true'} : null,
+    );
     return Map<String, dynamic>.from(response.data as Map<String, dynamic>);
   }
 
@@ -449,6 +498,8 @@ class RhythmConnection {
         final warningActive = nodeJson['warning_active'] as bool?;
 
         final cached = _cachedNodeStates[nodeId];
+        final nextPowerFresh = nodeState.powerFresh ?? cached?.powerFresh;
+        final nextPowerSource = nodeState.powerSource ?? cached?.powerSource;
         final hasMotionSensor = motionActive != null ||
             motionOwned != null ||
             motionRemaining != null ||
@@ -462,6 +513,8 @@ class RhythmConnection {
             cached.state != nodeState.state ||
             cached.transitioning != nodeState.transitioning ||
             cached.lightsOn != nodeState.lightsOn ||
+            cached.powerFresh != nextPowerFresh ||
+            cached.powerSource != nextPowerSource ||
             cached.brightness != nodeState.brightness ||
             cached.kelvin != nodeState.kelvin;
 
@@ -480,6 +533,8 @@ class RhythmConnection {
             state: nodeState.state,
             transitioning: nodeState.transitioning,
             mode: nodeState.mode,
+            powerFresh: nextPowerFresh,
+            powerSource: nextPowerSource,
             lightsOn: nodeState.lightsOn,
             brightness: nodeState.brightness,
             kelvin: nodeState.kelvin,
@@ -532,6 +587,8 @@ class RhythmConnection {
             state: entry.value.state,
             transitioning: entry.value.transitioning,
             mode: entry.value.mode,
+            powerFresh: entry.value.powerFresh,
+            powerSource: entry.value.powerSource,
             lightsOn: entry.value.lightsOn,
             brightness: entry.value.brightness,
             kelvin: entry.value.kelvin,
@@ -705,6 +762,8 @@ class RhythmConnection {
               state: nodeState.state,
               transitioning: nodeState.transitioning,
               mode: nodeState.mode,
+              powerFresh: nodeState.powerFresh ?? existing?.powerFresh,
+              powerSource: nodeState.powerSource ?? existing?.powerSource,
               lightsOn: nodeState.lightsOn ?? existing?.lightsOn,
               brightness: nodeState.brightness ?? existing?.brightness,
               kelvin: nodeState.kelvin ?? existing?.kelvin,
@@ -713,8 +772,7 @@ class RhythmConnection {
               motionRemaining:
                   nodeState.remainingSecs ?? existing?.motionRemaining,
               motionTimeout: nodeState.timeoutSecs ?? existing?.motionTimeout,
-              warningActive:
-                  nodeState.warningActive ?? existing?.warningActive,
+              warningActive: nodeState.warningActive ?? existing?.warningActive,
               hasMotionSensor: hasMotionSensor,
             );
 
@@ -756,6 +814,8 @@ class RhythmConnection {
                 state: cached.state,
                 transitioning: cached.transitioning,
                 mode: cached.mode,
+                powerFresh: cached.powerFresh,
+                powerSource: cached.powerSource,
                 lightsOn: cached.lightsOn,
                 brightness: cached.brightness,
                 kelvin: cached.kelvin,
@@ -799,6 +859,14 @@ class RhythmConnection {
           }
           break;
 
+        case 'input_event':
+          final json = jsonDecode(data) as Map<String, dynamic>;
+          final payload = json['data'] as Map<String, dynamic>? ?? json;
+          final eventPayload =
+              payload['event'] as Map<String, dynamic>? ?? payload;
+          _inputEventController.add(RhythmInputEvent.fromJson(eventPayload));
+          break;
+
         case 'hub_status':
           final json = jsonDecode(data) as Map<String, dynamic>;
           final payload = json['data'] as Map<String, dynamic>? ?? json;
@@ -817,7 +885,39 @@ class RhythmConnection {
           }
           break;
 
+        case 'mode_changed':
+          final json = jsonDecode(data) as Map<String, dynamic>;
+          final payload = json['data'] as Map<String, dynamic>? ?? json;
+          _modeChangedController.add(RhythmModeResource.fromJson(payload));
+          _suppressNextSettingsChangedAfterMode = true;
+          _settingsChangedSuppressTimer?.cancel();
+          _settingsChangedSuppressTimer = Timer(const Duration(seconds: 2), () {
+            _suppressNextSettingsChangedAfterMode = false;
+            _settingsChangedSuppressTimer = null;
+          });
+          break;
+
         case 'settings_changed':
+          final json = jsonDecode(data) as Map<String, dynamic>;
+          final payload = json['data'] as Map<String, dynamic>? ?? json;
+          final settingsJson =
+              payload['settings'] as Map<String, dynamic>? ?? payload;
+          if (settingsJson.containsKey('power_save') ||
+              settingsJson.containsKey('auto_update')) {
+            _settingsChangedController.add(RhythmSettings.fromJson(
+              Map<String, dynamic>.from(settingsJson),
+            ));
+          }
+          if (_suppressNextSettingsChangedAfterMode) {
+            _suppressNextSettingsChangedAfterMode = false;
+            _settingsChangedSuppressTimer?.cancel();
+            _settingsChangedSuppressTimer = null;
+            break;
+          }
+          _reHelloSuppressedNodeIds.clear();
+          _newNodesController.add(null);
+          break;
+
         case 'config_changed':
         case 'nodes_changed':
         case 'rooms_changed':
@@ -829,6 +929,20 @@ class RhythmConnection {
           final json = jsonDecode(data) as Map<String, dynamic>;
           final payload = json['data'] as Map<String, dynamic>? ?? json;
           _triageChangedController.add(payload);
+          break;
+
+        case 'pairing_progress':
+          final json = jsonDecode(data) as Map<String, dynamic>;
+          final payload = json['data'] as Map<String, dynamic>? ?? json;
+          _pairingProgressController
+              .add(RhythmPairingProgress.fromJson(payload));
+          break;
+
+        case 'ota_update_progress':
+          final json = jsonDecode(data) as Map<String, dynamic>;
+          final payload = json['data'] as Map<String, dynamic>? ?? json;
+          _otaUpdateProgressController
+              .add(RhythmOtaUpdateProgress.fromJson(payload));
           break;
 
         case 'lagged':
@@ -934,6 +1048,8 @@ class RhythmConnection {
         state: state.state,
         transitioning: state.transitioning,
         mode: state.mode ?? existing?.mode,
+        powerFresh: state.powerFresh ?? existing?.powerFresh,
+        powerSource: state.powerSource ?? existing?.powerSource,
         lightsOn: state.lightsOn ?? existing?.lightsOn,
         brightness: state.brightness ?? existing?.brightness,
         kelvin: state.kelvin ?? existing?.kelvin,

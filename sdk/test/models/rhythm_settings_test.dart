@@ -6,15 +6,18 @@ void main() {
     test('parses the split settings payload', () {
       final settings = RhythmSettings.fromJson({
         'power_save': true,
+        'auto_update': false,
       });
 
       expect(settings.powerSave, isTrue);
+      expect(settings.autoUpdate, isFalse);
     });
 
     test('uses safe defaults for missing fields', () {
       final settings = RhythmSettings.fromJson({});
 
-      expect(settings.powerSave, isFalse);
+      expect(settings.powerSave, isTrue);
+      expect(settings.autoUpdate, isTrue);
     });
   });
 
@@ -29,7 +32,8 @@ void main() {
           'kind': 'solar',
           'event': 'nautical_twilight',
         },
-        'duration_ms': 5000,
+        'trigger_enabled': false,
+        'duration_ms': {'mode': 'fixed', 'value': 5000},
         'preserve_hard_off': true,
       });
 
@@ -39,6 +43,7 @@ void main() {
       expect(transition.toMode, RhythmMode.sleep);
       expect(transition.trigger.kind, 'solar');
       expect(transition.trigger.event, 'nautical_twilight');
+      expect(transition.triggerEnabled, isFalse);
       expect(transition.duration, isA<TransitionDurationFixed>());
       expect(transition.durationMs, 5000);
       expect(transition.preserveHardOff, isTrue);
@@ -51,9 +56,22 @@ void main() {
           'kind': 'solar',
           'event': 'nautical_twilight',
         },
-        'duration_ms': 5000,
+        'trigger_enabled': false,
+        'duration_ms': {'mode': 'fixed', 'value': 5000},
         'preserve_hard_off': true,
       });
+    });
+
+    test('defaults missing trigger_enabled to true', () {
+      final transition = RhythmModeTransitionConfig.fromJson({
+        'from_mode': 'sleep',
+        'to_mode': 'day',
+        'trigger': 'sunrise',
+        'duration_ms': 3000,
+      });
+
+      expect(transition.triggerEnabled, isTrue);
+      expect(transition.toJson()['trigger_enabled'], isTrue);
     });
 
     test('accepts legacy string triggers as solar events', () {
@@ -104,7 +122,23 @@ void main() {
       expect(transition.toJson()['duration_ms'], {'mode': 'auto'});
     });
 
-    test('fixed duration round-trips as bare number', () {
+    test('fixed duration round-trips as tagged object', () {
+      final transition = RhythmModeTransitionConfig.fromJson({
+        'from_mode': 'day',
+        'to_mode': 'sleep',
+        'duration_ms': {'mode': 'fixed', 'value': 10000},
+        'preserve_hard_off': false,
+      });
+
+      expect(transition.duration, isA<TransitionDurationFixed>());
+      expect(transition.durationMs, 10000);
+      expect(
+        transition.toJson()['duration_ms'],
+        {'mode': 'fixed', 'value': 10000},
+      );
+    });
+
+    test('accepts legacy bare number fixed durations', () {
       final transition = RhythmModeTransitionConfig.fromJson({
         'from_mode': 'day',
         'to_mode': 'sleep',
@@ -114,7 +148,10 @@ void main() {
 
       expect(transition.duration, isA<TransitionDurationFixed>());
       expect(transition.durationMs, 10000);
-      expect(transition.toJson()['duration_ms'], 10000);
+      expect(
+        transition.toJson()['duration_ms'],
+        {'mode': 'fixed', 'value': 10000},
+      );
     });
   });
 

@@ -111,16 +111,19 @@ class RhythmMatterApi {
     String network = 'wifi',
     String rendezvous = 'auto',
     Duration receiveTimeout = const Duration(seconds: 45),
+    String? sessionId,
   }) async {
     try {
       final response = await _dio.post(
         'api/devices/pair',
         data: {
           'hub_type': 'matter',
+          if (sessionId != null) 'session_id': sessionId,
           'params': {
             'setup_payload': setupPayload,
             'network': network,
             'rendezvous': rendezvous,
+            if (sessionId != null) 'session_id': sessionId,
           },
         },
         options: Options(

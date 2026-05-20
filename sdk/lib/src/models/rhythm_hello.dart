@@ -2,6 +2,7 @@ import '../json_parsing.dart';
 import 'rhythm_capabilities.dart';
 import 'rhythm_curve_config.dart';
 import 'rhythm_hub_info.dart';
+import 'rhythm_input_binding.dart';
 import 'rhythm_review.dart';
 import 'rhythm_room.dart';
 import 'rhythm_settings.dart';
@@ -20,6 +21,7 @@ class RhythmHello {
   final Map<String, dynamic> activeProfile;
   final RhythmModeResource? mode;
   final List<RhythmModeTransitionConfig> transitions;
+  final List<RhythmInputBinding> inputBindings;
   final List<RhythmCurveConfig> profiles;
   final Map<String, dynamic> location;
   final RhythmSettings? settings;
@@ -45,6 +47,7 @@ class RhythmHello {
     required this.activeProfile,
     this.mode,
     this.transitions = const [],
+    this.inputBindings = const [],
     this.profiles = const [],
     required this.location,
     this.settings,
@@ -109,6 +112,12 @@ class RhythmHello {
               .map(jsonMap)
               .nonNulls
               .map(RhythmModeTransitionConfig.fromJson)
+              .toList(),
+      inputBindings:
+          ((json['input_bindings'] as List<dynamic>?) ?? const <dynamic>[])
+              .map(jsonMap)
+              .nonNulls
+              .map(RhythmInputBinding.fromJson)
               .toList(),
       profiles: profiles,
       location: location,

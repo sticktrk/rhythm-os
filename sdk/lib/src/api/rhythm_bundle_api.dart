@@ -8,7 +8,7 @@ import 'package:logging/logging.dart';
 import '../errors/rhythm_exception.dart';
 import '../rhythm_log_interceptor.dart';
 
-/// Stateless API client for backup and portable configuration bundle routes.
+/// Stateless API client for backup and portable profile bundle routes.
 class RhythmBundleApi {
   static final _log = Logger('rhythm_sdk.api');
 
@@ -36,7 +36,7 @@ class RhythmBundleApi {
   Future<Map<String, dynamic>> getConfigurationBundle() async {
     try {
       final response = await _dio.get(
-        'api/configuration',
+        'api/profile-bundle',
         options: Options(validateStatus: (_) => true),
       );
       _throwForUnexpectedStatus(
@@ -60,7 +60,7 @@ class RhythmBundleApi {
   ) async {
     try {
       final response = await _dio.put(
-        'api/configuration',
+        'api/profile-bundle',
         data: bundle,
         options: Options(validateStatus: (_) => true),
       );

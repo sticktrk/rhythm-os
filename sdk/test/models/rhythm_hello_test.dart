@@ -316,6 +316,38 @@ void main() {
       expect(RhythmHello.fromJson({'listen_port': 8080.0}).listenPort, 8080);
     });
 
+    test('parses input bindings from state snapshots', () {
+      final hello = RhythmHello.fromJson({
+        'input_bindings': [
+          {
+            'id': 'day_sleep_toggle:button-1:on_press',
+            'preset': 'day_sleep_toggle',
+            'source_node_id': 'button-1',
+            'trigger': {
+              'kind': 'button',
+              'button_action': 'on_press',
+            },
+            'action': {
+              'kind': 'mode_cycle',
+              'modes': ['day', 'sleep'],
+              'transition': {'kind': 'auto'},
+            },
+            'enabled': true,
+          },
+        ],
+      });
+
+      expect(hello.inputBindings, hasLength(1));
+      expect(
+        hello.inputBindings.single.preset,
+        RhythmInputBindingPreset.daySleepToggle,
+      );
+      expect(
+        hello.inputBindings.single.trigger.buttonAction,
+        RhythmButtonAction.onPress,
+      );
+    });
+
     test('flattens active_profile config/effective payloads', () {
       final hello = RhythmHello.fromJson({
         'active_profile': {
