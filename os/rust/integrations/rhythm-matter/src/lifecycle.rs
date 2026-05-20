@@ -26,7 +26,7 @@ pub fn connect_matter(
 ) -> Result<(ActiveHub, Receiver<HubEvent>)> {
     let hub_key = HubKey::new(HubType::new("matter"), "local");
     let commissioned = transport.list_devices().unwrap_or_default();
-    let initial_metadata = load_initial_device_metadata(&transport, &commissioned);
+    let initial_metadata = load_initial_device_metadata(state, &transport, &commissioned);
     let next_node_id = next_node_id_seed(&commissioned);
     let fabric_id = configured_fabric_id(state, &hub_key);
 
@@ -115,12 +115,14 @@ struct InitialDeviceMetadata {
 }
 
 fn load_initial_device_metadata(
+    state: &SharedState,
     transport: &Arc<dyn MatterTransport>,
     commissioned: &[MatterDeviceInfo],
 ) -> InitialDeviceMetadata {
     let mut device_caps = HashMap::new();
     let mut device_quirks = HashMap::new();
     let mut subscription_targets = Vec::new();
+    let local_overrides = crate::local_quirks::load_overrides_for_state(state);
 
     for info in commissioned {
         match transport.probe_light(info.node_id) {
@@ -130,14 +132,17 @@ fn load_initial_device_metadata(
                     node_id: device.node_id,
                     endpoint: device.light_endpoint,
                 });
-                device_caps.insert(
-                    device_id.clone(),
-                    crate::commissioning::build_device_capabilities(&device),
-                );
-                device_quirks.insert(
-                    device_id,
-                    crate::commissioning::build_device_quirks(&device),
-                );
+                let mut caps = crate::commissioning::build_device_capabilities(&device);
+                if let Some(override_caps) = local_overrides.capabilities.get(&device_id) {
+                    crate::local_quirks::apply_capability_override(&mut caps, override_caps);
+                }
+                device_caps.insert(device_id.clone(), caps);
+                let quirks = local_overrides
+                    .quirks
+                    .get(&device_id)
+                    .cloned()
+                    .unwrap_or_else(|| crate::commissioning::build_device_quirks(&device));
+                device_quirks.insert(device_id, quirks);
             }
             Err(error) => {
                 warn!(

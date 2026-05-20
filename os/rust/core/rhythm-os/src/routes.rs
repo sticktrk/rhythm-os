@@ -146,6 +146,14 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         path: "/api/matter/captures/:id",
         methods: &["GET"],
     },
+    SharedRoute {
+        path: "/api/matter/bulb-test/run",
+        methods: &["POST"],
+    },
+    SharedRoute {
+        path: "/api/matter/bulb-test/report",
+        methods: &["POST"],
+    },
     // Canonical device management
     SharedRoute {
         path: "/api/devices/canonical",

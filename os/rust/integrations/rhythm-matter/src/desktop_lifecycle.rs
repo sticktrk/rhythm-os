@@ -466,6 +466,22 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
             }
         }
     }
+
+    fn run_device_test(
+        &self,
+        state: &SharedState,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        crate::bulb_test::run_bulb_test(state, params)
+    }
+
+    fn save_device_test_report(
+        &self,
+        state: &SharedState,
+        report: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        crate::bulb_test::save_bulb_test_report(state, report)
+    }
 }
 
 pub static INTEGRATION: MatterIntegration = MatterIntegration;

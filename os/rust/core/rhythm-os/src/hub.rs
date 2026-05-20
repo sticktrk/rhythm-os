@@ -433,6 +433,36 @@ pub trait ExternalLightHubIntegration: Send + Sync {
             self.hub_type()
         ))
     }
+
+    /// Run a hub-specific device diagnostic/test command.
+    ///
+    /// Direct-connection integrations can use this to exercise raw protocol
+    /// command variants without going through the normal quirk-adapted runtime
+    /// path. The request/response shape is intentionally JSON so shared HTTP
+    /// routing stays protocol-neutral.
+    fn run_device_test(
+        &self,
+        _state: &SharedState,
+        _params: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        Err(anyhow::anyhow!(
+            "Device testing not supported for {}",
+            self.hub_type()
+        ))
+    }
+
+    /// Save a hub-specific device diagnostic report and optionally apply local
+    /// quirks discovered by that report.
+    fn save_device_test_report(
+        &self,
+        _state: &SharedState,
+        _report: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        Err(anyhow::anyhow!(
+            "Device test reports not supported for {}",
+            self.hub_type()
+        ))
+    }
 }
 
 /// Look up an integration by hub type string.
@@ -957,6 +987,14 @@ pub struct IntegrationCallbacks {
             + Send
             + Sync,
     >,
+    /// Run a device diagnostic/test command.
+    pub run_device_test_fn: Arc<
+        dyn Fn(&SharedState, &str, &serde_json::Value) -> Result<serde_json::Value> + Send + Sync,
+    >,
+    /// Save a device diagnostic/test report.
+    pub save_device_test_report_fn: Arc<
+        dyn Fn(&SharedState, &str, &serde_json::Value) -> Result<serde_json::Value> + Send + Sync,
+    >,
     /// API-facing capability metadata for all registered integrations.
     pub hub_capabilities: Vec<HubIntegrationCapability>,
 }
@@ -1051,6 +1089,28 @@ pub fn integration_callbacks(
         },
     );
 
+    let run_device_test_fn = Arc::new(
+        move |state: &SharedState,
+              hub_type: &str,
+              params: &serde_json::Value|
+              -> Result<serde_json::Value> {
+            let integration = find_integration(integrations, hub_type)
+                .ok_or_else(|| anyhow::anyhow!("No integration for hub type '{}'", hub_type))?;
+            integration.run_device_test(state, params)
+        },
+    );
+
+    let save_device_test_report_fn = Arc::new(
+        move |state: &SharedState,
+              hub_type: &str,
+              report: &serde_json::Value|
+              -> Result<serde_json::Value> {
+            let integration = find_integration(integrations, hub_type)
+                .ok_or_else(|| anyhow::anyhow!("No integration for hub type '{}'", hub_type))?;
+            integration.save_device_test_report(state, report)
+        },
+    );
+
     IntegrationCallbacks {
         ensure_runtime_fn,
         get_hub_provider_fn,
@@ -1058,6 +1118,8 @@ pub fn integration_callbacks(
         sync_topology_groups_fn,
         start_pairing_fn,
         start_unpairing_fn,
+        run_device_test_fn,
+        save_device_test_report_fn,
         hub_capabilities,
     }
 }

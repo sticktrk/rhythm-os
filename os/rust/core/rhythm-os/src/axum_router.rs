@@ -153,6 +153,11 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/devices/unpair", post(post_unpair_device))
         .route("/api/matter/captures", get(get_matter_captures))
         .route("/api/matter/captures/:id", get(get_matter_capture))
+        .route("/api/matter/bulb-test/run", post(post_matter_bulb_test_run))
+        .route(
+            "/api/matter/bulb-test/report",
+            post(post_matter_bulb_test_report),
+        )
         // Curve visualization
         .route("/api/curve", get(get_curve).post(post_curve_preview))
         .route("/api/curve/now", get(get_curve_now))
@@ -673,6 +678,20 @@ pub async fn get_matter_capture(
     Path(id): Path<String>,
 ) -> ApiResponse {
     handlers::handle_get_matter_capture(&state, &id)
+}
+
+pub async fn post_matter_bulb_test_run(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_matter_bulb_test_run(&state, &body)).await
+}
+
+pub async fn post_matter_bulb_test_report(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_matter_bulb_test_report(&state, &body)).await
 }
 
 // ---------------------------------------------------------------------------

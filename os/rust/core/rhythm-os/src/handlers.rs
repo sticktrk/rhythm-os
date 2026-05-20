@@ -321,6 +321,48 @@ pub fn handle_get_matter_capture(state: &SharedState, id: &str) -> ApiResponse {
     ApiResponse::json_ok(body)
 }
 
+pub fn handle_matter_bulb_test_run(state: &SharedState, body: &Value) -> ApiResponse {
+    let run_test = {
+        let Ok(s) = state.lock() else {
+            return ApiResponse::server_error("lock");
+        };
+        s.run_device_test_fn.clone()
+    };
+
+    let Some(run_fn) = run_test else {
+        return ApiResponse::server_error("No device test support configured");
+    };
+
+    match run_fn(state, "matter", body) {
+        Ok(result) => match serde_json::to_string(&result) {
+            Ok(body) => ApiResponse::json_ok(body),
+            Err(err) => ApiResponse::server_error(err),
+        },
+        Err(err) => ApiResponse::server_error(err),
+    }
+}
+
+pub fn handle_matter_bulb_test_report(state: &SharedState, body: &Value) -> ApiResponse {
+    let save_report = {
+        let Ok(s) = state.lock() else {
+            return ApiResponse::server_error("lock");
+        };
+        s.save_device_test_report_fn.clone()
+    };
+
+    let Some(save_fn) = save_report else {
+        return ApiResponse::server_error("No device test report support configured");
+    };
+
+    match save_fn(state, "matter", body) {
+        Ok(result) => match serde_json::to_string(&result) {
+            Ok(body) => ApiResponse::json_ok(body),
+            Err(err) => ApiResponse::server_error(err),
+        },
+        Err(err) => ApiResponse::server_error(err),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------

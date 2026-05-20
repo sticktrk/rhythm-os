@@ -513,6 +513,29 @@ pub struct AppState {
         >,
     >,
 
+    /// Run a device diagnostic/test command.
+    /// Built from the integration registry by `integration_callbacks`.
+    #[allow(clippy::type_complexity)]
+    pub run_device_test_fn: Option<
+        Arc<
+            dyn Fn(&SharedState, &str, &serde_json::Value) -> anyhow::Result<serde_json::Value>
+                + Send
+                + Sync,
+        >,
+    >,
+
+    /// Save a device diagnostic/test report and optionally apply discovered
+    /// local quirks.
+    /// Built from the integration registry by `integration_callbacks`.
+    #[allow(clippy::type_complexity)]
+    pub save_device_test_report_fn: Option<
+        Arc<
+            dyn Fn(&SharedState, &str, &serde_json::Value) -> anyhow::Result<serde_json::Value>
+                + Send
+                + Sync,
+        >,
+    >,
+
     /// Optional pre-handler for hub credential requests.
     ///
     /// Returns `Some(Ok(json))` to respond with 200, `Some(Err(msg))` for 500,
@@ -637,6 +660,8 @@ impl Default for AppState {
             get_hub_provider_fn: None,
             start_pairing_fn: None,
             start_unpairing_fn: None,
+            run_device_test_fn: None,
+            save_device_test_report_fn: None,
             hub_credentials_interceptor: None,
             request_hub_bootstrap_fn: None,
             after_factory_reset_fn: None,
