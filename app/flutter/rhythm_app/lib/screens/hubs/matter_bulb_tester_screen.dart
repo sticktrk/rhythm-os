@@ -206,42 +206,42 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       id: 'rapid_commands',
       title: 'Rapid Commands',
       prompt:
-          'It should first reset to neutral white, then jump through a burst. Did it keep up?',
+          'It should first reset to neutral white, then rapidly cycle high-contrast colors, warm/cool white, or brightness. Did it visibly change more than once and land on the final state?',
       runLabel: 'Test burst',
     ),
     _MatterBulbTestStep(
       id: 'rapid_50ms',
       title: 'Rapid 50 ms',
       prompt:
-          'It should first reset to neutral white, then step brightness with 50 ms gaps. Did it keep up?',
+          'It should first reset to neutral white, then rapidly cycle high-contrast changes with 50 ms gaps. Did it visibly change more than once and land on the final state?',
       runLabel: 'Test 50 ms',
     ),
     _MatterBulbTestStep(
       id: 'rapid_100ms',
       title: 'Rapid 100 ms',
       prompt:
-          'It should first reset to neutral white, then step brightness with 100 ms gaps. Did it keep up?',
+          'It should first reset to neutral white, then rapidly cycle high-contrast changes with 100 ms gaps. Did it visibly change more than once and land on the final state?',
       runLabel: 'Test 100 ms',
     ),
     _MatterBulbTestStep(
       id: 'rapid_200ms',
       title: 'Rapid 200 ms',
       prompt:
-          'It should first reset to neutral white, then step brightness with 200 ms gaps. Did it keep up?',
+          'It should first reset to neutral white, then rapidly cycle high-contrast changes with 200 ms gaps. Did it visibly change more than once and land on the final state?',
       runLabel: 'Test 200 ms',
     ),
     _MatterBulbTestStep(
       id: 'rapid_500ms',
       title: 'Rapid 500 ms',
       prompt:
-          'It should first reset to neutral white, then step brightness with 500 ms gaps. Did it keep up?',
+          'It should first reset to neutral white, then rapidly cycle high-contrast changes with 500 ms gaps. Did it visibly change more than once and land on the final state?',
       runLabel: 'Test 500 ms',
     ),
     _MatterBulbTestStep(
       id: 'rapid_1000ms',
       title: 'Rapid 1000 ms',
       prompt:
-          'It should first reset to neutral white, then step brightness with 1000 ms gaps. Did it keep up?',
+          'It should first reset to neutral white, then rapidly cycle high-contrast changes with 1000 ms gaps. Did it visibly change more than once and land on the final state?',
       runLabel: 'Test 1000 ms',
     ),
   ];
