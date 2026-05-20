@@ -223,7 +223,10 @@ resolve_public_url() {
 # Verify every URL the appliance may apply before publishing. A package-only
 # probe is not enough when a promoted rpiz manifest includes rootfs images,
 # because the appliance install path prefers the rootfs payload.
-mapfile -t ARTIFACT_URLS < <(jq -r '
+ARTIFACT_URLS=()
+while IFS= read -r ARTIFACT_URL; do
+    ARTIFACT_URLS+=("$ARTIFACT_URL")
+done < <(jq -r '
     [.package.url] + ((.images // []) | map(.url))
     | .[]
     | select(type == "string" and length > 0)
