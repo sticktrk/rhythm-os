@@ -479,6 +479,11 @@ uint16_t MiredsToKelvin(uint16_t mireds)
     return static_cast<uint16_t>(std::clamp<uint32_t>(1000000u / mireds, 1u, UINT16_MAX));
 }
 
+bool IsReasonableColorTemperatureKelvin(uint16_t kelvin)
+{
+    return kelvin >= 1500 && kelvin <= 10000;
+}
+
 uint16_t XyToMatterCoordinate(float value)
 {
     const float clamped = std::clamp(value, 0.0f, 1.0f);
@@ -1124,13 +1129,13 @@ public:
                                                                                                           minMireds) == CHIP_NO_ERROR)
                     {
                         device.max_kelvin     = MiredsToKelvin(minMireds);
-                        device.has_max_kelvin = device.max_kelvin != 0;
+                        device.has_max_kelvin = IsReasonableColorTemperatureKelvin(device.max_kelvin);
                     }
                     if (ReadValueAttribute<ColorControl::Attributes::ColorTempPhysicalMaxMireds::TypeInfo>(nodeId, lightEndpoint,
                                                                                                           maxMireds) == CHIP_NO_ERROR)
                     {
                         device.min_kelvin     = MiredsToKelvin(maxMireds);
-                        device.has_min_kelvin = device.min_kelvin != 0;
+                        device.has_min_kelvin = IsReasonableColorTemperatureKelvin(device.min_kelvin);
                     }
                 }
             }

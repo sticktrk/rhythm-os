@@ -24,6 +24,8 @@ const VISUAL_BASELINE_PERCENT: u8 = 70;
 const VISUAL_BASELINE_KELVIN: u16 = 4000;
 const DEFAULT_WARM_KELVIN: u16 = 2700;
 const DEFAULT_COOL_KELVIN: u16 = 6500;
+const MIN_REASONABLE_CT_KELVIN: u16 = 1500;
+const MAX_REASONABLE_CT_KELVIN: u16 = 10000;
 const LOW_DIM_PERCENT: u8 = 3;
 const DIM_RAMP_START_PERCENT: u8 = 85;
 const DIM_RAMP_END_PERCENT: u8 = 10;
@@ -75,7 +77,8 @@ pub fn run_bulb_test(state: &SharedState, params: &Value) -> Result<Value> {
         raw_capability_snapshot.as_ref(),
     );
     let endpoint_validation = endpoint_validation(endpoint, claimed_device.as_ref());
-    let (warm_kelvin, cool_kelvin) = color_temperature_targets(claimed_device.as_ref());
+    let (warm_kelvin, cool_kelvin, color_temperature_range_source) =
+        color_temperature_targets(claimed_device.as_ref());
 
     let mut commands = Vec::new();
     match test {
@@ -652,7 +655,16 @@ pub fn run_bulb_test(state: &SharedState, params: &Value) -> Result<Value> {
                 endpoint,
                 claimed_device.as_ref(),
             );
-            run_rapid_burst(&mut commands, &transport, node_id, endpoint, 0);
+            run_rapid_burst(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                claimed_device.as_ref(),
+                0,
+                warm_kelvin,
+                cool_kelvin,
+            );
         }
         "read_on_off" => {
             read_on_off_command(&mut commands, &transport, node_id, endpoint);
@@ -666,7 +678,16 @@ pub fn run_bulb_test(state: &SharedState, params: &Value) -> Result<Value> {
                     endpoint,
                     claimed_device.as_ref(),
                 );
-                run_rapid_burst(&mut commands, &transport, node_id, endpoint, gap_ms);
+                run_rapid_burst(
+                    &mut commands,
+                    &transport,
+                    node_id,
+                    endpoint,
+                    claimed_device.as_ref(),
+                    gap_ms,
+                    warm_kelvin,
+                    cool_kelvin,
+                );
             } else {
                 anyhow::bail!("Unknown Matter bulb test: {}", other);
             }
@@ -696,6 +717,7 @@ pub fn run_bulb_test(state: &SharedState, params: &Value) -> Result<Value> {
             "color_temperature": {
                 "warm_kelvin": warm_kelvin,
                 "cool_kelvin": cool_kelvin,
+                "range_source": color_temperature_range_source,
             },
             "level_command_variants": {
                 "tested": ["move_to_level", "move_to_level_with_onoff", "step", "step_with_onoff"],
@@ -921,6 +943,7 @@ fn claimed_capabilities(
             (kelvin_to_mireds(cool_kelvin), kelvin_to_mireds(warm_kelvin))
         })
         .unwrap_or((None, None));
+    let usable_ct_range = usable_color_temperature_range(device);
     let level_control = raw_snapshot.and_then(|value| value.get("level_control"));
     let color_control = raw_snapshot.and_then(|value| value.get("color_control"));
     let physical_min_mireds = color_control
@@ -933,6 +956,28 @@ fn claimed_capabilities(
         .cloned()
         .or_else(|| fallback_max_mireds.map(Value::from))
         .unwrap_or(Value::Null);
+    let unavailable_raw_claims = if raw_snapshot.is_some() {
+        Value::Array(Vec::new())
+    } else {
+        Value::Array(
+            [
+                "endpoint_list",
+                "server_clusters",
+                "accepted_command_lists",
+                "attribute_lists",
+                "level_control_feature_map",
+                "color_control_feature_map",
+                "current_level",
+                "current_x",
+                "current_y",
+                "current_hue",
+                "current_saturation",
+            ]
+            .into_iter()
+            .map(Value::from)
+            .collect(),
+        )
+    };
 
     json!({
         "node_id": node_id,
@@ -962,29 +1007,16 @@ fn claimed_capabilities(
         "color_temp_physical_max_mireds": physical_max_mireds,
         "min_kelvin": device.and_then(|device| device.min_kelvin),
         "max_kelvin": device.and_then(|device| device.max_kelvin),
+        "usable_min_kelvin": usable_ct_range.map(|(warm_kelvin, _)| warm_kelvin),
+        "usable_max_kelvin": usable_ct_range.map(|(_, cool_kelvin)| cool_kelvin),
+        "ct_range_valid_for_testing": usable_ct_range.is_some(),
         "current_level": level_control.and_then(|value| value.get("current_level")).cloned().unwrap_or(Value::Null),
         "current_x": color_control.and_then(|value| value.get("current_x")).cloned().unwrap_or(Value::Null),
         "current_y": color_control.and_then(|value| value.get("current_y")).cloned().unwrap_or(Value::Null),
         "current_hue": color_control.and_then(|value| value.get("current_hue")).cloned().unwrap_or(Value::Null),
         "current_saturation": color_control.and_then(|value| value.get("current_saturation")).cloned().unwrap_or(Value::Null),
         "raw_attribute_reads_available": raw_snapshot.is_some(),
-        "unavailable_raw_claims": if raw_snapshot.is_some() {
-            json!([])
-        } else {
-            json!([
-                "endpoint_list",
-                "server_clusters",
-                "accepted_command_lists",
-                "attribute_lists",
-                "level_control_feature_map",
-                "color_control_feature_map",
-                "current_level",
-                "current_x",
-                "current_y",
-                "current_hue",
-                "current_saturation"
-            ])
-        },
+        "unavailable_raw_claims": unavailable_raw_claims,
     })
 }
 
@@ -1004,27 +1036,44 @@ fn endpoint_validation(endpoint: u16, device: Option<&CommissionedDevice>) -> Va
     }
 }
 
-fn color_temperature_targets(device: Option<&CommissionedDevice>) -> (u16, u16) {
-    let low_kelvin = device
-        .and_then(|device| device.min_kelvin)
-        .unwrap_or(DEFAULT_WARM_KELVIN);
-    let high_kelvin = device
-        .and_then(|device| device.max_kelvin)
-        .unwrap_or(DEFAULT_COOL_KELVIN);
-    let (low_kelvin, high_kelvin) = if low_kelvin <= high_kelvin {
-        (low_kelvin, high_kelvin)
-    } else {
-        (high_kelvin, low_kelvin)
-    };
+fn color_temperature_targets(device: Option<&CommissionedDevice>) -> (u16, u16, &'static str) {
+    let (low_kelvin, high_kelvin, source) =
+        if let Some((low_kelvin, high_kelvin)) = usable_color_temperature_range(device) {
+            (low_kelvin, high_kelvin, "device_physical_range")
+        } else {
+            (
+                DEFAULT_WARM_KELVIN,
+                DEFAULT_COOL_KELVIN,
+                "default_sane_range",
+            )
+        };
+
     let span = high_kelvin.saturating_sub(low_kelvin);
     if span < 200 {
-        return (low_kelvin, high_kelvin);
+        return (low_kelvin, high_kelvin, source);
     }
     let margin = (span / 10).clamp(50, 500);
     (
         low_kelvin.saturating_add(margin),
         high_kelvin.saturating_sub(margin),
+        source,
     )
+}
+
+fn usable_color_temperature_range(device: Option<&CommissionedDevice>) -> Option<(u16, u16)> {
+    let low_kelvin = device?.min_kelvin?;
+    let high_kelvin = device?.max_kelvin?;
+    let (low_kelvin, high_kelvin) = if low_kelvin <= high_kelvin {
+        (low_kelvin, high_kelvin)
+    } else {
+        (high_kelvin, low_kelvin)
+    };
+
+    if low_kelvin < MIN_REASONABLE_CT_KELVIN || high_kelvin > MAX_REASONABLE_CT_KELVIN {
+        return None;
+    }
+
+    (high_kelvin > low_kelvin).then_some((low_kelvin, high_kelvin))
 }
 
 fn supports_color_mode(device: Option<&CommissionedDevice>, mode: MatterColorMode) -> bool {
@@ -1354,6 +1403,164 @@ fn run_rapid_burst(
     transport: &Arc<dyn MatterTransport>,
     node_id: u64,
     endpoint: u16,
+    device: Option<&CommissionedDevice>,
+    gap_ms: u64,
+    warm_kelvin: u16,
+    cool_kelvin: u16,
+) {
+    if supports_color_mode(device, MatterColorMode::HueSaturation) {
+        run_rapid_hue_saturation_burst(commands, transport, node_id, endpoint, gap_ms);
+        return;
+    }
+    if supports_color_mode(device, MatterColorMode::Xy) {
+        run_rapid_xy_burst(commands, transport, node_id, endpoint, gap_ms);
+        return;
+    }
+    if supports_color_mode(device, MatterColorMode::ColorTemperature) {
+        run_rapid_color_temperature_burst(
+            commands,
+            transport,
+            node_id,
+            endpoint,
+            gap_ms,
+            warm_kelvin,
+            cool_kelvin,
+        );
+        return;
+    }
+    run_rapid_brightness_burst(commands, transport, node_id, endpoint, gap_ms);
+}
+
+fn run_rapid_hue_saturation_burst(
+    commands: &mut Vec<Value>,
+    transport: &Arc<dyn MatterTransport>,
+    node_id: u64,
+    endpoint: u16,
+    gap_ms: u64,
+) {
+    let colors = [
+        ("red", HS_RED),
+        ("green", HS_GREEN),
+        ("blue", HS_BLUE),
+        ("red", HS_RED),
+    ];
+    run_rapid_burst_with(
+        commands,
+        transport,
+        node_id,
+        endpoint,
+        gap_ms,
+        |index| {
+            let (label, (hue, saturation)) = colors[index];
+            let payload = json!({
+                "color": label,
+                "hue": hue,
+                "saturation": saturation,
+                "transition_ms": Value::Null,
+            });
+            let result = transport.set_hue_saturation(node_id, endpoint, hue, saturation, None);
+            rapid_subcommand_result(
+                "ColorControl.MoveToHueAndSaturation",
+                label,
+                payload,
+                result,
+            )
+        },
+        "hue_saturation_colors",
+        "ColorControl.MoveToHueAndSaturation.burst",
+        json!({
+            "expected_visible_sequence": colors.map(|(label, _)| label),
+        }),
+    );
+}
+
+fn run_rapid_xy_burst(
+    commands: &mut Vec<Value>,
+    transport: &Arc<dyn MatterTransport>,
+    node_id: u64,
+    endpoint: u16,
+    gap_ms: u64,
+) {
+    let colors = [
+        ("red", XY_RED),
+        ("green", XY_GREEN),
+        ("blue", XY_BLUE),
+        ("red", XY_RED),
+    ];
+    run_rapid_burst_with(
+        commands,
+        transport,
+        node_id,
+        endpoint,
+        gap_ms,
+        |index| {
+            let (label, (x, y)) = colors[index];
+            let payload = json!({
+                "color": label,
+                "x": x,
+                "y": y,
+                "transition_ms": Value::Null,
+            });
+            let result = transport.set_xy(node_id, endpoint, x, y, None);
+            rapid_subcommand_result("ColorControl.MoveToColor", label, payload, result)
+        },
+        "xy_colors",
+        "ColorControl.MoveToColor.burst",
+        json!({
+            "expected_visible_sequence": colors.map(|(label, _)| label),
+        }),
+    );
+}
+
+fn run_rapid_color_temperature_burst(
+    commands: &mut Vec<Value>,
+    transport: &Arc<dyn MatterTransport>,
+    node_id: u64,
+    endpoint: u16,
+    gap_ms: u64,
+    warm_kelvin: u16,
+    cool_kelvin: u16,
+) {
+    let temperatures = [
+        ("warm", warm_kelvin),
+        ("cool", cool_kelvin),
+        ("warm", warm_kelvin),
+        ("cool", cool_kelvin),
+    ];
+    run_rapid_burst_with(
+        commands,
+        transport,
+        node_id,
+        endpoint,
+        gap_ms,
+        |index| {
+            let (label, kelvin) = temperatures[index];
+            let payload = json!({
+                "temperature": label,
+                "kelvin": kelvin,
+                "transition_ms": Value::Null,
+            });
+            let result = transport.set_color_temperature(node_id, endpoint, kelvin, None);
+            rapid_subcommand_result(
+                "ColorControl.MoveToColorTemperature",
+                label,
+                payload,
+                result,
+            )
+        },
+        "color_temperature_steps",
+        "ColorControl.MoveToColorTemperature.burst",
+        json!({
+            "expected_visible_sequence": temperatures.map(|(label, _)| label),
+        }),
+    );
+}
+
+fn run_rapid_brightness_burst(
+    commands: &mut Vec<Value>,
+    transport: &Arc<dyn MatterTransport>,
+    node_id: u64,
+    endpoint: u16,
     gap_ms: u64,
 ) {
     let levels = [
@@ -1362,33 +1569,53 @@ fn run_rapid_burst(
         crate::clusters::brightness_to_level(35),
         crate::clusters::brightness_to_level(75),
     ];
+    run_rapid_burst_with(
+        commands,
+        transport,
+        node_id,
+        endpoint,
+        gap_ms,
+        |index| {
+            let level = levels[index];
+            let payload = json!({
+                "level": level,
+                "transition_ms": Value::Null,
+            });
+            let result = transport.set_brightness(node_id, endpoint, level, None);
+            rapid_subcommand_result(
+                "LevelControl.MoveToLevelWithOnOff",
+                &format!("level_{}", level),
+                payload,
+                result,
+            )
+        },
+        "brightness_levels",
+        "LevelControl.MoveToLevelWithOnOff.burst",
+        json!({
+            "levels": levels,
+        }),
+    );
+}
+
+fn run_rapid_burst_with<F>(
+    commands: &mut Vec<Value>,
+    transport: &Arc<dyn MatterTransport>,
+    node_id: u64,
+    endpoint: u16,
+    gap_ms: u64,
+    mut run_step: F,
+    sequence_kind: &str,
+    command_name: &str,
+    extra_payload: Value,
+) where
+    F: FnMut(usize) -> Value,
+{
     let readback_before = readback_snapshot(transport, node_id, endpoint);
     let started_at_unix_ms = now_unix_ms();
     let mut subcommands = Vec::new();
-    for (index, level) in levels.iter().enumerate() {
-        let result = transport.set_brightness(node_id, endpoint, *level, None);
-        subcommands.push(match result {
-            Ok(()) => json!({
-                "command": "LevelControl.MoveToLevelWithOnOff",
-                "payload": {
-                    "level": level,
-                    "transition_ms": Value::Null,
-                },
-                "ok": true,
-                "command_status": "success",
-            }),
-            Err(error) => json!({
-                "command": "LevelControl.MoveToLevelWithOnOff",
-                "payload": {
-                    "level": level,
-                    "transition_ms": Value::Null,
-                },
-                "ok": false,
-                "command_status": "error",
-                "error": error.to_string(),
-            }),
-        });
-        if gap_ms > 0 && index < levels.len() - 1 {
+    for index in 0..4 {
+        subcommands.push(run_step(index));
+        if gap_ms > 0 && index < 3 {
             sleep_ms(gap_ms);
         }
     }
@@ -1402,10 +1629,11 @@ fn run_rapid_burst(
         .all(|command| command.get("ok").and_then(Value::as_bool) == Some(true));
     commands.push(json!({
         "name": format!("rapid_burst_{}ms", gap_ms),
-        "command": "LevelControl.MoveToLevelWithOnOff.burst",
+        "command": command_name,
         "payload": {
             "gap_ms": gap_ms,
-            "levels": levels,
+            "sequence_kind": sequence_kind,
+            "details": extra_payload,
         },
         "ok": ok,
         "command_status": if ok { "success" } else { "error" },
@@ -1416,6 +1644,31 @@ fn run_rapid_burst(
         "readback_after_500ms": readback_after_500ms,
         "readback_after_1500ms": readback_after_1500ms,
     }));
+}
+
+fn rapid_subcommand_result(
+    command: &str,
+    label: &str,
+    payload: Value,
+    result: Result<()>,
+) -> Value {
+    match result {
+        Ok(()) => json!({
+            "command": command,
+            "label": label,
+            "payload": payload,
+            "ok": true,
+            "command_status": "success",
+        }),
+        Err(error) => json!({
+            "command": command,
+            "label": label,
+            "payload": payload,
+            "ok": false,
+            "command_status": "error",
+            "error": error.to_string(),
+        }),
+    }
 }
 
 fn rapid_threshold_ms(test: &str) -> Option<u64> {
@@ -1498,4 +1751,44 @@ fn now_unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn commissioned_device(min_kelvin: Option<u16>, max_kelvin: Option<u16>) -> CommissionedDevice {
+        CommissionedDevice {
+            node_id: 1,
+            vendor_name: "Vendor".to_string(),
+            product_name: "Bulb".to_string(),
+            vendor_id: 1,
+            product_id: 1,
+            serial_number: None,
+            light_endpoint: 1,
+            color_modes: vec![MatterColorMode::ColorTemperature],
+            min_kelvin,
+            max_kelvin,
+        }
+    }
+
+    #[test]
+    fn color_temperature_targets_use_sane_margin_inside_valid_range() {
+        let device = commissioned_device(Some(2000), Some(6500));
+
+        assert_eq!(
+            color_temperature_targets(Some(&device)),
+            (2450, 6050, "device_physical_range")
+        );
+    }
+
+    #[test]
+    fn color_temperature_targets_ignore_impossible_device_range() {
+        let device = commissioned_device(Some(15), Some(6500));
+
+        assert_eq!(
+            color_temperature_targets(Some(&device)),
+            (3080, 6120, "default_sane_range")
+        );
+    }
 }
