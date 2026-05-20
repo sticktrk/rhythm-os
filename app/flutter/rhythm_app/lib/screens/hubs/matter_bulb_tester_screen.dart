@@ -56,6 +56,34 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       runLabel: 'Test explicit on',
     ),
     _MatterBulbTestStep(
+      id: 'level_move_to_level',
+      title: 'MoveToLevel',
+      prompt:
+          'Starting from off, did plain MoveToLevel turn the bulb on or visibly set brightness?',
+      runLabel: 'Test MoveToLevel',
+    ),
+    _MatterBulbTestStep(
+      id: 'level_move_to_level_with_onoff',
+      title: 'MoveToLevelWithOnOff',
+      prompt:
+          'Starting from off, did MoveToLevelWithOnOff turn the bulb on and set brightness?',
+      runLabel: 'Test MTL OnOff',
+    ),
+    _MatterBulbTestStep(
+      id: 'level_step',
+      title: 'Step',
+      prompt:
+          'It should first reset to neutral white, then run a plain Step down command. Did brightness step down?',
+      runLabel: 'Test Step',
+    ),
+    _MatterBulbTestStep(
+      id: 'level_step_with_onoff',
+      title: 'StepWithOnOff',
+      prompt:
+          'Starting from off, did StepWithOnOff turn the bulb on or visibly step brightness?',
+      runLabel: 'Test Step OnOff',
+    ),
+    _MatterBulbTestStep(
       id: 'dim_low',
       title: 'Low Dim',
       prompt:
@@ -849,6 +877,11 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
             _observations['brightness_without_on']?.worked,
         'move_to_level_with_onoff_after_explicit_on':
             _observations['brightness_with_on']?.worked,
+        'move_to_level': _observations['level_move_to_level']?.worked,
+        'move_to_level_with_onoff':
+            _observations['level_move_to_level_with_onoff']?.worked,
+        'step': _observations['level_step']?.worked,
+        'step_with_onoff': _observations['level_step_with_onoff']?.worked,
         'brightness_steps': _observations['brightness_steps']?.worked,
         'low_dim': _observations['dim_low']?.worked,
         'on_level_restore': _observations['on_level_restore']?.worked,
@@ -860,10 +893,21 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
               _observations['brightness_without_on']?.worked,
           'worked_after_explicit_on':
               _observations['brightness_with_on']?.worked,
+          'worked_variant_test':
+              _observations['level_move_to_level_with_onoff']?.worked,
         },
-        'move_to_level': {'tested': false},
-        'step': {'tested': false},
-        'step_with_onoff': {'tested': false},
+        'move_to_level': {
+          'tested': true,
+          'worked': _observations['level_move_to_level']?.worked,
+        },
+        'step': {
+          'tested': true,
+          'worked': _observations['level_step']?.worked,
+        },
+        'step_with_onoff': {
+          'tested': true,
+          'worked': _observations['level_step_with_onoff']?.worked,
+        },
       },
       'color_temperature': {
         'warm': _observations['color_temperature_warm']?.worked,
@@ -903,8 +947,8 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   Map<String, dynamic> _readbackConsistency() {
     return {
       'onoff': 'tracked',
-      'level': 'not_available',
-      'color': 'not_available',
+      'level': 'tracked_when_native_bridge_available',
+      'color': 'tracked_when_native_bridge_available',
       'by_test': {
         for (final step in _steps)
           if (_observations[step.id] != null)
@@ -926,13 +970,8 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
     final spacingMs = _recommendedCommandSpacingMs();
     return {
       'turn_on_sequence': _turnOnSequence(),
-      'brightness_command': 'move_to_level_with_onoff',
-      'preferred_level_command': 'move_to_level_with_onoff',
-      'level_command_variants_not_tested': [
-        'move_to_level',
-        'step',
-        'step_with_onoff',
-      ],
+      'brightness_command': _preferredLevelCommand(),
+      'preferred_level_command': _preferredLevelCommand(),
       'color_command': _preferredColorCommand(),
       'min_brightness': minBrightness,
       'transition_behavior': _transitionBehavior(),
@@ -966,9 +1005,6 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   List<String> _reportNotes(String operatorNotes) {
     final notes = <String>[];
     if (operatorNotes.isNotEmpty) notes.add(operatorNotes);
-    notes.add(
-      'Raw Matter attribute lists, accepted command lists, feature maps, and level/color readbacks are not exposed by the current native bridge.',
-    );
     return notes;
   }
 
@@ -1026,14 +1062,36 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   String _turnOnSequence() {
     final brightnessWithoutOn = _observations['brightness_without_on']?.worked;
     final brightnessWithOn = _observations['brightness_with_on']?.worked;
+    final moveToLevelWithOnOff =
+        _observations['level_move_to_level_with_onoff']?.worked;
     if (brightnessWithoutOn == true) return 'level_command_turns_on';
-    if (brightnessWithoutOn == false && brightnessWithOn == true) {
+    if (brightnessWithoutOn == false &&
+        (brightnessWithOn == true || moveToLevelWithOnOff == true)) {
       return 'explicit_on_then_level';
     }
     if (brightnessWithoutOn == false && brightnessWithOn == false) {
       return 'explicit_on_then_level_unreliable';
     }
     return 'unknown';
+  }
+
+  String _preferredLevelCommand() {
+    if (_observations['level_move_to_level_with_onoff']?.worked == true) {
+      return 'move_to_level_with_onoff';
+    }
+    if (_observations['brightness_with_on']?.worked == true) {
+      return 'move_to_level_with_onoff';
+    }
+    if (_observations['level_move_to_level']?.worked == true) {
+      return 'move_to_level';
+    }
+    if (_observations['level_step_with_onoff']?.worked == true) {
+      return 'step_with_onoff';
+    }
+    if (_observations['level_step']?.worked == true) {
+      return 'step';
+    }
+    return 'move_to_level_with_onoff';
   }
 
   String _preferredColorCommand() {
