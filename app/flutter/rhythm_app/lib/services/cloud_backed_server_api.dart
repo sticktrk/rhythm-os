@@ -406,6 +406,23 @@ class CloudBackedServerApi {
     return _delegate.flashCanonicalDevice(id);
   }
 
+  Future<Map<String, dynamic>?> runMatterBulbTest({
+    required String deviceId,
+    required String test,
+  }) {
+    return _delegate.runMatterBulbTest(deviceId: deviceId, test: test);
+  }
+
+  Future<Map<String, dynamic>?> saveMatterBulbTestReport(
+    Map<String, dynamic> report, {
+    bool applyLocal = true,
+  }) {
+    return _delegate.saveMatterBulbTestReport(
+      report,
+      applyLocal: applyLocal,
+    );
+  }
+
   Future<List<Map<String, dynamic>>?> getTriageEntries() {
     return _delegate.getTriageEntries();
   }

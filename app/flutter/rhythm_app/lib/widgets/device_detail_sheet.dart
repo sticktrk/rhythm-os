@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType;
 import '../providers/server_sync_provider.dart';
+import '../screens/hubs/matter_bulb_tester_screen.dart';
 import 'room_picker_sheet.dart';
 import 'solar_orbit.dart'; // For CelestialColors
 
@@ -318,6 +319,11 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                       ),
                       const SizedBox(height: 12),
                     ],
+                    if (device.type == RhythmDeviceType.light &&
+                        _matterNativeId != null) ...[
+                      _buildMatterTesterButton(context, _matterNativeId!),
+                      const SizedBox(height: 12),
+                    ],
                     _buildMoveButton(context),
                     if (_matterNativeId != null && canUnpairMatter) ...[
                       const SizedBox(height: 12),
@@ -437,6 +443,55 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
               child: Text(
                 label,
                 style: const TextStyle(
+                  color: CelestialColors.textPrimary,
+                  fontSize: 15,
+                ),
+              ),
+            ),
+            const Icon(
+              Icons.chevron_right,
+              color: CelestialColors.textSecondary,
+              size: 20,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMatterTesterButton(BuildContext context, String nativeId) {
+    return GestureDetector(
+      onTap: () {
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => MatterBulbTesterScreen(
+              device: widget.device,
+              nativeDeviceId: nativeId,
+            ),
+          ),
+        );
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: CelestialColors.backgroundDark.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              Icons.science_outlined,
+              color: CelestialColors.accentBlue.withValues(alpha: 0.9),
+              size: 20,
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text(
+                'Matter Bulb Tester',
+                style: TextStyle(
                   color: CelestialColors.textPrimary,
                   fontSize: 15,
                 ),
