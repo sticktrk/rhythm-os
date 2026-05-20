@@ -761,6 +761,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
     final claimedCapabilities = _firstServerMap('claimed_capabilities');
     final endpointValidation = _firstServerMap('endpoint_validation');
     final testParameters = _firstServerMap('test_parameters');
+    final rawCapabilitySnapshot = _firstServerMap('raw_capability_snapshot');
     final operatorNotes = _notesController.text.trim();
     return {
       'schema_version': 2,
@@ -775,6 +776,8 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
         'native_device_id': widget.nativeDeviceId,
       },
       'claimed_capabilities': claimedCapabilities ?? <String, dynamic>{},
+      if (rawCapabilitySnapshot != null)
+        'raw_capability_snapshot': rawCapabilitySnapshot,
       if (endpointValidation != null) 'endpoint_validation': endpointValidation,
       if (testParameters != null) 'test_parameters': testParameters,
       'tested_capabilities': _testedCapabilities(),
@@ -983,6 +986,26 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
 
   List<dynamic> _inferredBehavioralQuirks() {
     final quirks = <dynamic>[];
+    final xyResults = [
+      _observations['xy_red']?.worked,
+      _observations['xy_green']?.worked,
+      _observations['xy_blue']?.worked,
+    ];
+    final hueSatResults = [
+      _observations['hue_sat_red']?.worked,
+      _observations['hue_sat_green']?.worked,
+      _observations['hue_sat_blue']?.worked,
+    ];
+    final ctResults = [
+      _observations['color_temperature_warm']?.worked,
+      _observations['color_temperature_cool']?.worked,
+    ];
+    final xyWasTested = xyResults.any((worked) => worked != null);
+    final xyAllFailed =
+        xyWasTested && xyResults.every((worked) => worked == false);
+    final hueSatWorks = hueSatResults.any((worked) => worked == true);
+    final ctWorks = ctResults.any((worked) => worked == true);
+
     if (_observations['on_level_restore']?.worked == false) {
       quirks.add('on_does_not_restore_previous_level');
     }
@@ -991,12 +1014,20 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
     } else if (_observations['power_on_behavior']?.worked == false) {
       quirks.add({'power_on_behavior': 'not_restore_previous'});
     }
-    for (final entry in {
-      'ct_to_xy_fails': _observations['ct_to_xy']?.worked,
-      'xy_to_ct_fails': _observations['xy_to_ct']?.worked,
-      'ct_to_hue_sat_fails': _observations['ct_to_hue_sat']?.worked,
-      'hue_sat_to_ct_fails': _observations['hue_sat_to_ct']?.worked,
-    }.entries) {
+    if (xyAllFailed) {
+      quirks.add('xy_color_commands_ack_but_no_visible_change');
+    }
+
+    final modeSwitchResults = <String, bool?>{
+      if (!xyAllFailed) 'ct_to_xy_fails': _observations['ct_to_xy']?.worked,
+      if (!xyAllFailed && ctWorks)
+        'xy_to_ct_fails': _observations['xy_to_ct']?.worked,
+      if (hueSatWorks)
+        'ct_to_hue_sat_fails': _observations['ct_to_hue_sat']?.worked,
+      if (hueSatWorks && ctWorks)
+        'hue_sat_to_ct_fails': _observations['hue_sat_to_ct']?.worked,
+    };
+    for (final entry in modeSwitchResults.entries) {
       if (entry.value == false) quirks.add(entry.key);
     }
     return quirks;
