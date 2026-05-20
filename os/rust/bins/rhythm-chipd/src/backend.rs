@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use rhythm_matter::chip_rpc::ChipInitControllerResponse;
 use rhythm_matter::transport::{
     CommissionedDevice, MatterAttributeReport, MatterCommissionRequest, MatterGroup,
-    MatterGroupMember, MatterSubscriptionTarget,
+    MatterGroupMember, MatterLevelCommandVariant, MatterLevelStepMode, MatterSubscriptionTarget,
 };
 
 use crate::service::CommissioningState;
@@ -63,6 +63,15 @@ pub trait ChipControllerBackend {
         level: u8,
         transition_ms: Option<u32>,
     ) -> Result<()>;
+    fn run_level_command(
+        &mut self,
+        node_id: u64,
+        endpoint: u16,
+        command: MatterLevelCommandVariant,
+        level_or_step: u8,
+        step_mode: Option<MatterLevelStepMode>,
+        transition_ms: Option<u32>,
+    ) -> Result<()>;
     fn set_color_temperature(
         &mut self,
         node_id: u64,
@@ -87,6 +96,12 @@ pub trait ChipControllerBackend {
         transition_ms: Option<u32>,
     ) -> Result<()>;
     fn read_on_off(&mut self, node_id: u64, endpoint: u16) -> Result<bool>;
+    fn read_light_capability_snapshot(
+        &mut self,
+        node_id: u64,
+        endpoint: u16,
+    ) -> Result<serde_json::Value>;
+    fn read_light_state(&mut self, node_id: u64, endpoint: u16) -> Result<serde_json::Value>;
     fn subscribe_on_off(
         &mut self,
         targets: &[MatterSubscriptionTarget],
@@ -228,6 +243,27 @@ impl ChipControllerBackend for NativeChipBackend {
         })
     }
 
+    fn run_level_command(
+        &mut self,
+        node_id: u64,
+        endpoint: u16,
+        command: MatterLevelCommandVariant,
+        level_or_step: u8,
+        step_mode: Option<MatterLevelStepMode>,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        self.controller_mut().and_then(|controller| {
+            controller.run_level_command(
+                node_id,
+                endpoint,
+                command,
+                level_or_step,
+                step_mode,
+                transition_ms,
+            )
+        })
+    }
+
     fn set_color_temperature(
         &mut self,
         node_id: u64,
@@ -267,6 +303,19 @@ impl ChipControllerBackend for NativeChipBackend {
 
     fn read_on_off(&mut self, node_id: u64, endpoint: u16) -> Result<bool> {
         self.controller_mut()?.read_on_off(node_id, endpoint)
+    }
+
+    fn read_light_capability_snapshot(
+        &mut self,
+        node_id: u64,
+        endpoint: u16,
+    ) -> Result<serde_json::Value> {
+        self.controller_mut()?
+            .read_light_capability_snapshot(node_id, endpoint)
+    }
+
+    fn read_light_state(&mut self, node_id: u64, endpoint: u16) -> Result<serde_json::Value> {
+        self.controller_mut()?.read_light_state(node_id, endpoint)
     }
 
     fn subscribe_on_off(
@@ -475,11 +524,32 @@ impl ChipControllerBackend for FakeChipBackend {
     fn set_brightness(
         &mut self,
         node_id: u64,
-        _endpoint: u16,
-        _level: u8,
+        endpoint: u16,
+        level: u8,
         _transition_ms: Option<u32>,
     ) -> Result<()> {
         let _ = self.require_device_mut(node_id)?;
+        self.on_off.insert((node_id, endpoint), level > 0);
+        Ok(())
+    }
+
+    fn run_level_command(
+        &mut self,
+        node_id: u64,
+        endpoint: u16,
+        command: MatterLevelCommandVariant,
+        level_or_step: u8,
+        _step_mode: Option<MatterLevelStepMode>,
+        _transition_ms: Option<u32>,
+    ) -> Result<()> {
+        self.require_device(node_id)?;
+        match command {
+            MatterLevelCommandVariant::MoveToLevelWithOnOff
+            | MatterLevelCommandVariant::StepWithOnOff => {
+                self.on_off.insert((node_id, endpoint), level_or_step > 0);
+            }
+            MatterLevelCommandVariant::MoveToLevel | MatterLevelCommandVariant::Step => {}
+        }
         Ok(())
     }
 
@@ -523,6 +593,65 @@ impl ChipControllerBackend for FakeChipBackend {
     fn read_on_off(&mut self, node_id: u64, endpoint: u16) -> Result<bool> {
         self.require_device(node_id)?;
         Ok(*self.on_off.get(&(node_id, endpoint)).unwrap_or(&false))
+    }
+
+    fn read_light_capability_snapshot(
+        &mut self,
+        node_id: u64,
+        endpoint: u16,
+    ) -> Result<serde_json::Value> {
+        let device = self.require_device(node_id)?;
+        Ok(serde_json::json!({
+            "node_id": node_id,
+            "selected_endpoint": endpoint,
+            "endpoint_list": [0, device.light_endpoint],
+            "server_clusters": [3, 4, 6, 8, 29, 768],
+            "client_clusters": [],
+            "device_type_list": [
+                {"device_type": 0x010C, "revision": 1}
+            ],
+            "accepted_command_lists": {
+                "level_control": [0, 2, 4, 6],
+                "color_control": [0, 7, 10],
+                "onoff": [0, 1],
+            },
+            "attribute_lists": {
+                "level_control": [0, 65528, 65529, 65531],
+                "color_control": [0, 1, 3, 4, 7, 16394, 16395, 65528, 65529, 65531],
+                "onoff": [0, 65528, 65529, 65531],
+            },
+            "level_control": {
+                "feature_map": 3,
+                "accepted_command_list": [0, 2, 4, 6],
+                "attribute_list": [0, 65528, 65529, 65531],
+                "current_level": 128,
+            },
+            "color_control": {
+                "feature_map": 25,
+                "color_capabilities": 25,
+                "accepted_command_list": [0, 7, 10],
+                "attribute_list": [0, 1, 3, 4, 7, 16394, 16395, 65528, 65529, 65531],
+                "color_temp_physical_min_mireds": device.max_kelvin.map(|kelvin| 1_000_000u32 / kelvin as u32),
+                "color_temp_physical_max_mireds": device.min_kelvin.map(|kelvin| 1_000_000u32 / kelvin as u32),
+                "current_x": 0,
+                "current_y": 0,
+                "current_hue": 0,
+                "current_saturation": 0,
+            },
+            "raw_attribute_reads_available": true,
+        }))
+    }
+
+    fn read_light_state(&mut self, node_id: u64, endpoint: u16) -> Result<serde_json::Value> {
+        let on = self.read_on_off(node_id, endpoint)?;
+        Ok(serde_json::json!({
+            "onoff": {"ok": true, "value": on},
+            "current_level": {"ok": true, "value": 128},
+            "current_x": {"ok": true, "value": 0},
+            "current_y": {"ok": true, "value": 0},
+            "current_hue": {"ok": true, "value": 0},
+            "current_saturation": {"ok": true, "value": 0},
+        }))
     }
 
     fn subscribe_on_off(

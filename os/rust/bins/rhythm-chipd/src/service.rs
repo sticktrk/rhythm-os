@@ -6,8 +6,9 @@ use anyhow::{Context, Result};
 
 use rhythm_matter::chip_rpc::{
     ChipInitControllerRequest, ChipInitControllerResponse, ChipRpcAttributeReportsResponse,
-    ChipRpcCommissionLightResponse, ChipRpcEmpty, ChipRpcListDevicesResponse,
-    ChipRpcProbeLightResponse, ChipRpcReadOnOffResponse, ChipRpcRequest,
+    ChipRpcCommissionLightResponse, ChipRpcEmpty, ChipRpcJsonValueResponse,
+    ChipRpcListDevicesResponse, ChipRpcProbeLightResponse, ChipRpcReadOnOffResponse,
+    ChipRpcRequest,
 };
 use rhythm_matter::transport::{CommissionedDevice, MatterDeviceInfo};
 
@@ -168,6 +169,25 @@ impl ChipControllerService {
                     .set_brightness(node_id, endpoint, level, transition_ms)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
+            ChipRpcRequest::RunLevelCommand {
+                node_id,
+                endpoint,
+                command,
+                level_or_step,
+                step_mode,
+                transition_ms,
+            } => {
+                self.require_initialized()?;
+                self.backend.run_level_command(
+                    node_id,
+                    endpoint,
+                    command,
+                    level_or_step,
+                    step_mode,
+                    transition_ms,
+                )?;
+                Ok(serde_json::to_value(ChipRpcEmpty::new())?)
+            }
             ChipRpcRequest::SetColorTemperature {
                 node_id,
                 endpoint,
@@ -212,6 +232,18 @@ impl ChipControllerService {
                 self.require_initialized()?;
                 let on = self.backend.read_on_off(node_id, endpoint)?;
                 Ok(serde_json::to_value(ChipRpcReadOnOffResponse { on })?)
+            }
+            ChipRpcRequest::ReadLightCapabilitySnapshot { node_id, endpoint } => {
+                self.require_initialized()?;
+                let value = self
+                    .backend
+                    .read_light_capability_snapshot(node_id, endpoint)?;
+                Ok(serde_json::to_value(ChipRpcJsonValueResponse { value })?)
+            }
+            ChipRpcRequest::ReadLightState { node_id, endpoint } => {
+                self.require_initialized()?;
+                let value = self.backend.read_light_state(node_id, endpoint)?;
+                Ok(serde_json::to_value(ChipRpcJsonValueResponse { value })?)
             }
             ChipRpcRequest::SubscribeOnOff {
                 targets,

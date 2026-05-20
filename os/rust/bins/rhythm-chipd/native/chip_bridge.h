@@ -58,6 +58,20 @@ enum rhythm_chip_bridge_attribute_value_type
     RHYTHM_CHIP_BRIDGE_ATTRIBUTE_VALUE_BOOL = 1,
 };
 
+enum rhythm_chip_bridge_level_command
+{
+    RHYTHM_CHIP_BRIDGE_LEVEL_COMMAND_MOVE_TO_LEVEL = 0,
+    RHYTHM_CHIP_BRIDGE_LEVEL_COMMAND_MOVE_TO_LEVEL_WITH_ON_OFF = 1,
+    RHYTHM_CHIP_BRIDGE_LEVEL_COMMAND_STEP = 2,
+    RHYTHM_CHIP_BRIDGE_LEVEL_COMMAND_STEP_WITH_ON_OFF = 3,
+};
+
+enum rhythm_chip_bridge_level_step_mode
+{
+    RHYTHM_CHIP_BRIDGE_LEVEL_STEP_MODE_UP = 0,
+    RHYTHM_CHIP_BRIDGE_LEVEL_STEP_MODE_DOWN = 1,
+};
+
 struct rhythm_chip_bridge_subscription_target
 {
     uint64_t node_id;
@@ -120,6 +134,9 @@ bool rhythm_chip_bridge_identify_light(uint64_t node_id, uint16_t endpoint, uint
                                        size_t error_message_size);
 bool rhythm_chip_bridge_set_brightness(uint64_t node_id, uint16_t endpoint, uint8_t level, bool has_transition_ms,
                                        uint32_t transition_ms, char * error_message, size_t error_message_size);
+bool rhythm_chip_bridge_run_level_command(uint64_t node_id, uint16_t endpoint, uint8_t command, uint8_t level_or_step,
+                                          uint8_t step_mode, bool has_transition_ms, uint32_t transition_ms,
+                                          char * error_message, size_t error_message_size);
 bool rhythm_chip_bridge_set_color_temperature(uint64_t node_id, uint16_t endpoint, uint16_t kelvin, bool has_transition_ms,
                                               uint32_t transition_ms, char * error_message, size_t error_message_size);
 bool rhythm_chip_bridge_set_xy(uint64_t node_id, uint16_t endpoint, float x, float y, bool has_transition_ms,
@@ -129,6 +146,11 @@ bool rhythm_chip_bridge_set_hue_saturation(uint64_t node_id, uint16_t endpoint, 
                                            size_t error_message_size);
 bool rhythm_chip_bridge_read_on_off(uint64_t node_id, uint16_t endpoint, bool * out_on, char * error_message,
                                     size_t error_message_size);
+bool rhythm_chip_bridge_read_light_capability_snapshot(uint64_t node_id, uint16_t endpoint, char * out_json,
+                                                       size_t json_size, size_t * out_json_len, char * error_message,
+                                                       size_t error_message_size);
+bool rhythm_chip_bridge_read_light_state(uint64_t node_id, uint16_t endpoint, char * out_json, size_t json_size,
+                                         size_t * out_json_len, char * error_message, size_t error_message_size);
 bool rhythm_chip_bridge_subscribe_on_off(const struct rhythm_chip_bridge_subscription_target * targets, size_t target_count,
                                          uint16_t min_interval_secs, uint16_t max_interval_secs, char * error_message,
                                          size_t error_message_size);

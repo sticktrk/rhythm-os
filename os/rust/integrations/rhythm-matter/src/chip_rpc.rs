@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::transport::{
     CommissionedDevice, MatterAttributeReport, MatterCommissionRequest, MatterDeviceInfo,
-    MatterGroup, MatterGroupMember, MatterSubscriptionTarget,
+    MatterGroup, MatterGroupMember, MatterLevelCommandVariant, MatterLevelStepMode,
+    MatterSubscriptionTarget,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +100,16 @@ pub enum ChipRpcRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         transition_ms: Option<u32>,
     },
+    RunLevelCommand {
+        node_id: u64,
+        endpoint: u16,
+        command: MatterLevelCommandVariant,
+        level_or_step: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        step_mode: Option<MatterLevelStepMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transition_ms: Option<u32>,
+    },
     SetColorTemperature {
         node_id: u64,
         endpoint: u16,
@@ -123,6 +134,14 @@ pub enum ChipRpcRequest {
         transition_ms: Option<u32>,
     },
     ReadOnOff {
+        node_id: u64,
+        endpoint: u16,
+    },
+    ReadLightCapabilitySnapshot {
+        node_id: u64,
+        endpoint: u16,
+    },
+    ReadLightState {
         node_id: u64,
         endpoint: u16,
     },
@@ -194,6 +213,11 @@ impl ChipRpcEmpty {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChipRpcReadOnOffResponse {
     pub on: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChipRpcJsonValueResponse {
+    pub value: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

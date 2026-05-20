@@ -40,6 +40,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -315,6 +316,142 @@ CHIP_ERROR ParseSetupPayload(const std::string & setupPayload, chip::SetupPayloa
 bool HasCluster(const std::vector<ClusterId> & clusters, ClusterId clusterId)
 {
     return std::find(clusters.begin(), clusters.end(), clusterId) != clusters.end();
+}
+
+template <typename T>
+void AppendNumberArray(std::ostringstream & json, const std::vector<T> & values)
+{
+    json << '[';
+    for (size_t i = 0; i < values.size(); ++i)
+    {
+        if (i > 0)
+        {
+            json << ',';
+        }
+        json << static_cast<uint64_t>(values[i]);
+    }
+    json << ']';
+}
+
+void AppendJsonString(std::ostringstream & json, std::string_view value)
+{
+    json << '"';
+    for (char ch : value)
+    {
+        switch (ch)
+        {
+        case '"':
+            json << "\\\"";
+            break;
+        case '\\':
+            json << "\\\\";
+            break;
+        case '\n':
+            json << "\\n";
+            break;
+        case '\r':
+            json << "\\r";
+            break;
+        case '\t':
+            json << "\\t";
+            break;
+        default:
+            json << ch;
+            break;
+        }
+    }
+    json << '"';
+}
+
+void AppendJsonError(std::ostringstream & json, CHIP_ERROR err)
+{
+    AppendJsonString(json, chip::ErrorStr(err));
+}
+
+template <typename T>
+void AppendRawJsonValue(std::ostringstream & json, T value)
+{
+    json << static_cast<uint64_t>(value);
+}
+
+void AppendRawJsonValue(std::ostringstream & json, bool value)
+{
+    json << (value ? "true" : "false");
+}
+
+template <typename T>
+void AppendReadValue(std::ostringstream & json, const char * name, CHIP_ERROR err, T value)
+{
+    json << ",\"" << name << "\":";
+    if (err == CHIP_NO_ERROR)
+    {
+        AppendRawJsonValue(json, value);
+    }
+    else
+    {
+        json << "null";
+    }
+}
+
+template <typename T>
+void AppendReadObject(std::ostringstream & json, const char * name, CHIP_ERROR err, T value, bool leadingComma)
+{
+    if (leadingComma)
+    {
+        json << ',';
+    }
+    json << '"' << name << "\":{\"ok\":" << (err == CHIP_NO_ERROR ? "true" : "false");
+    if (err == CHIP_NO_ERROR)
+    {
+        json << ",\"value\":";
+        AppendRawJsonValue(json, value);
+    }
+    else
+    {
+        json << ",\"error\":";
+        AppendJsonError(json, err);
+    }
+    json << '}';
+}
+
+void AppendReadBoolObject(std::ostringstream & json, const char * name, CHIP_ERROR err, bool value, bool leadingComma)
+{
+    AppendReadObject(json, name, err, value, leadingComma);
+}
+
+template <typename NullableT>
+void AppendNullableValue(std::ostringstream & json, CHIP_ERROR err, const NullableT & value)
+{
+    if (err == CHIP_NO_ERROR && !value.IsNull())
+    {
+        AppendRawJsonValue(json, value.Value());
+    }
+    else
+    {
+        json << "null";
+    }
+}
+
+template <typename NullableT>
+void AppendNullableReadObject(std::ostringstream & json, const char * name, CHIP_ERROR err, const NullableT & value,
+                              bool leadingComma)
+{
+    if (leadingComma)
+    {
+        json << ',';
+    }
+    json << '"' << name << "\":{\"ok\":" << (err == CHIP_NO_ERROR ? "true" : "false");
+    if (err == CHIP_NO_ERROR)
+    {
+        json << ",\"value\":";
+        AppendNullableValue(json, err, value);
+    }
+    else
+    {
+        json << ",\"error\":";
+        AppendJsonError(json, err);
+    }
+    json << '}';
 }
 
 uint16_t MillisecondsToTenths(uint32_t transitionMs)
@@ -1241,6 +1378,57 @@ public:
         return InvokeCommand(nodeId, endpoint, request);
     }
 
+    CHIP_ERROR RunLevelCommand(NodeId nodeId, EndpointId endpoint, uint8_t command, uint8_t levelOrStep, uint8_t stepMode,
+                               std::optional<uint32_t> transitionMs)
+    {
+        const auto transition = transitionMs.has_value()
+            ? chip::app::DataModel::Nullable<uint16_t>(MillisecondsToTenths(*transitionMs))
+            : chip::app::DataModel::Nullable<uint16_t>();
+        const auto mappedStepMode = stepMode == RHYTHM_CHIP_BRIDGE_LEVEL_STEP_MODE_DOWN
+            ? LevelControl::StepModeEnum::kDown
+            : LevelControl::StepModeEnum::kUp;
+
+        switch (command)
+        {
+        case RHYTHM_CHIP_BRIDGE_LEVEL_COMMAND_MOVE_TO_LEVEL: {
+            LevelControl::Commands::MoveToLevel::Type request;
+            request.level          = levelOrStep;
+            request.transitionTime = transition;
+            request.optionsMask     = chip::BitMask<LevelControl::OptionsBitmap>();
+            request.optionsOverride = chip::BitMask<LevelControl::OptionsBitmap>();
+            return InvokeCommand(nodeId, endpoint, request);
+        }
+        case RHYTHM_CHIP_BRIDGE_LEVEL_COMMAND_MOVE_TO_LEVEL_WITH_ON_OFF: {
+            LevelControl::Commands::MoveToLevelWithOnOff::Type request;
+            request.level          = levelOrStep;
+            request.transitionTime = transition;
+            request.optionsMask     = chip::BitMask<LevelControl::OptionsBitmap>();
+            request.optionsOverride = chip::BitMask<LevelControl::OptionsBitmap>();
+            return InvokeCommand(nodeId, endpoint, request);
+        }
+        case RHYTHM_CHIP_BRIDGE_LEVEL_COMMAND_STEP: {
+            LevelControl::Commands::Step::Type request;
+            request.stepMode        = mappedStepMode;
+            request.stepSize        = levelOrStep;
+            request.transitionTime  = transition;
+            request.optionsMask     = chip::BitMask<LevelControl::OptionsBitmap>();
+            request.optionsOverride = chip::BitMask<LevelControl::OptionsBitmap>();
+            return InvokeCommand(nodeId, endpoint, request);
+        }
+        case RHYTHM_CHIP_BRIDGE_LEVEL_COMMAND_STEP_WITH_ON_OFF: {
+            LevelControl::Commands::StepWithOnOff::Type request;
+            request.stepMode        = mappedStepMode;
+            request.stepSize        = levelOrStep;
+            request.transitionTime  = transition;
+            request.optionsMask     = chip::BitMask<LevelControl::OptionsBitmap>();
+            request.optionsOverride = chip::BitMask<LevelControl::OptionsBitmap>();
+            return InvokeCommand(nodeId, endpoint, request);
+        }
+        default:
+            return CHIP_ERROR_INVALID_ARGUMENT;
+        }
+    }
+
     CHIP_ERROR SetColorTemperature(NodeId nodeId, EndpointId endpoint, uint16_t kelvin, std::optional<uint32_t> transitionMs)
     {
         VerifyOrReturnError(kelvin > 0, CHIP_ERROR_INVALID_ARGUMENT);
@@ -1275,6 +1463,190 @@ public:
     CHIP_ERROR ReadOnOff(NodeId nodeId, EndpointId endpoint, bool & on)
     {
         return ReadValueAttribute<OnOff::Attributes::OnOff::TypeInfo>(nodeId, endpoint, on);
+    }
+
+    CHIP_ERROR ReadLightCapabilitySnapshot(NodeId nodeId, EndpointId endpoint, std::string & out)
+    {
+        VerifyOrReturnError(mCommissioner != nullptr, CHIP_ERROR_INCORRECT_STATE);
+
+        std::vector<EndpointId> endpoints;
+        CHIP_ERROR endpointErr =
+            ReadEndpointListAttribute<Descriptor::Attributes::PartsList::TypeInfo>(nodeId, kRootEndpoint, endpoints);
+        if (endpointErr != CHIP_NO_ERROR || endpoints.empty())
+        {
+            endpoints = { endpoint };
+        }
+        if (std::find(endpoints.begin(), endpoints.end(), kRootEndpoint) == endpoints.end())
+        {
+            endpoints.insert(endpoints.begin(), kRootEndpoint);
+        }
+
+        std::vector<ClusterId> serverClusters;
+        std::vector<ClusterId> clientClusters;
+        std::vector<Descriptor::Structs::DeviceTypeStruct::DecodableType> deviceTypes;
+        (void) ReadClusterListAttribute<Descriptor::Attributes::ServerList::TypeInfo>(nodeId, endpoint, serverClusters);
+        (void) ReadClusterListAttribute<Descriptor::Attributes::ClientList::TypeInfo>(nodeId, endpoint, clientClusters);
+        (void) ReadDeviceTypeListAttribute(nodeId, endpoint, deviceTypes);
+
+        std::vector<CommandId> onOffAccepted;
+        std::vector<AttributeId> onOffAttributes;
+        uint32_t onOffFeatureMap = 0;
+        (void) ReadCommandListAttribute<OnOff::Attributes::AcceptedCommandList::TypeInfo>(nodeId, endpoint, onOffAccepted);
+        (void) ReadAttributeIdListAttribute<OnOff::Attributes::AttributeList::TypeInfo>(nodeId, endpoint, onOffAttributes);
+        (void) ReadValueAttribute<OnOff::Attributes::FeatureMap::TypeInfo>(nodeId, endpoint, onOffFeatureMap);
+
+        std::vector<CommandId> levelAccepted;
+        std::vector<AttributeId> levelAttributes;
+        uint32_t levelFeatureMap = 0;
+        chip::app::DataModel::Nullable<uint8_t> currentLevel;
+        (void) ReadCommandListAttribute<LevelControl::Attributes::AcceptedCommandList::TypeInfo>(nodeId, endpoint,
+                                                                                                 levelAccepted);
+        (void) ReadAttributeIdListAttribute<LevelControl::Attributes::AttributeList::TypeInfo>(nodeId, endpoint,
+                                                                                               levelAttributes);
+        (void) ReadValueAttribute<LevelControl::Attributes::FeatureMap::TypeInfo>(nodeId, endpoint, levelFeatureMap);
+        CHIP_ERROR currentLevelErr =
+            ReadValueAttribute<LevelControl::Attributes::CurrentLevel::TypeInfo>(nodeId, endpoint, currentLevel);
+
+        std::vector<CommandId> colorAccepted;
+        std::vector<AttributeId> colorAttributes;
+        uint32_t colorFeatureMap = 0;
+        chip::BitMask<ColorControl::ColorCapabilitiesBitmap> colorCapabilities;
+        uint16_t minMireds = 0;
+        uint16_t maxMireds = 0;
+        uint16_t currentX = 0;
+        uint16_t currentY = 0;
+        uint8_t currentHue = 0;
+        uint8_t currentSaturation = 0;
+        (void) ReadCommandListAttribute<ColorControl::Attributes::AcceptedCommandList::TypeInfo>(nodeId, endpoint,
+                                                                                                 colorAccepted);
+        (void) ReadAttributeIdListAttribute<ColorControl::Attributes::AttributeList::TypeInfo>(nodeId, endpoint,
+                                                                                               colorAttributes);
+        (void) ReadValueAttribute<ColorControl::Attributes::FeatureMap::TypeInfo>(nodeId, endpoint, colorFeatureMap);
+        CHIP_ERROR colorCapabilitiesErr =
+            ReadValueAttribute<ColorControl::Attributes::ColorCapabilities::TypeInfo>(nodeId, endpoint, colorCapabilities);
+        CHIP_ERROR minMiredsErr =
+            ReadValueAttribute<ColorControl::Attributes::ColorTempPhysicalMinMireds::TypeInfo>(nodeId, endpoint, minMireds);
+        CHIP_ERROR maxMiredsErr =
+            ReadValueAttribute<ColorControl::Attributes::ColorTempPhysicalMaxMireds::TypeInfo>(nodeId, endpoint, maxMireds);
+        CHIP_ERROR currentXErr =
+            ReadValueAttribute<ColorControl::Attributes::CurrentX::TypeInfo>(nodeId, endpoint, currentX);
+        CHIP_ERROR currentYErr =
+            ReadValueAttribute<ColorControl::Attributes::CurrentY::TypeInfo>(nodeId, endpoint, currentY);
+        CHIP_ERROR currentHueErr =
+            ReadValueAttribute<ColorControl::Attributes::CurrentHue::TypeInfo>(nodeId, endpoint, currentHue);
+        CHIP_ERROR currentSaturationErr =
+            ReadValueAttribute<ColorControl::Attributes::CurrentSaturation::TypeInfo>(nodeId, endpoint, currentSaturation);
+
+        std::ostringstream json;
+        json << "{\"node_id\":" << static_cast<uint64_t>(nodeId) << ",\"selected_endpoint\":"
+             << static_cast<unsigned>(endpoint) << ",\"raw_attribute_reads_available\":true";
+        json << ",\"endpoint_list\":";
+        AppendNumberArray(json, endpoints);
+        json << ",\"server_clusters\":";
+        AppendNumberArray(json, serverClusters);
+        json << ",\"client_clusters\":";
+        AppendNumberArray(json, clientClusters);
+        json << ",\"device_type_list\":[";
+        for (size_t i = 0; i < deviceTypes.size(); ++i)
+        {
+            if (i > 0)
+            {
+                json << ',';
+            }
+            json << "{\"device_type\":" << static_cast<uint32_t>(deviceTypes[i].deviceType)
+                 << ",\"revision\":" << static_cast<uint16_t>(deviceTypes[i].revision) << '}';
+        }
+        json << ']';
+
+        json << ",\"accepted_command_lists\":{\"onoff\":";
+        AppendNumberArray(json, onOffAccepted);
+        json << ",\"level_control\":";
+        AppendNumberArray(json, levelAccepted);
+        json << ",\"color_control\":";
+        AppendNumberArray(json, colorAccepted);
+        json << '}';
+
+        json << ",\"attribute_lists\":{\"onoff\":";
+        AppendNumberArray(json, onOffAttributes);
+        json << ",\"level_control\":";
+        AppendNumberArray(json, levelAttributes);
+        json << ",\"color_control\":";
+        AppendNumberArray(json, colorAttributes);
+        json << '}';
+
+        json << ",\"onoff\":{\"feature_map\":" << onOffFeatureMap << ",\"accepted_command_list\":";
+        AppendNumberArray(json, onOffAccepted);
+        json << ",\"attribute_list\":";
+        AppendNumberArray(json, onOffAttributes);
+        json << '}';
+
+        json << ",\"level_control\":{\"feature_map\":" << levelFeatureMap << ",\"accepted_command_list\":";
+        AppendNumberArray(json, levelAccepted);
+        json << ",\"attribute_list\":";
+        AppendNumberArray(json, levelAttributes);
+        json << ",\"current_level\":";
+        AppendNullableValue(json, currentLevelErr, currentLevel);
+        json << '}';
+
+        json << ",\"color_control\":{\"feature_map\":" << colorFeatureMap << ",\"color_capabilities\":";
+        if (colorCapabilitiesErr == CHIP_NO_ERROR)
+        {
+            json << colorCapabilities.Raw();
+        }
+        else
+        {
+            json << "null";
+        }
+        json << ",\"accepted_command_list\":";
+        AppendNumberArray(json, colorAccepted);
+        json << ",\"attribute_list\":";
+        AppendNumberArray(json, colorAttributes);
+        AppendReadValue(json, "color_temp_physical_min_mireds", minMiredsErr, minMireds);
+        AppendReadValue(json, "color_temp_physical_max_mireds", maxMiredsErr, maxMireds);
+        AppendReadValue(json, "current_x", currentXErr, currentX);
+        AppendReadValue(json, "current_y", currentYErr, currentY);
+        AppendReadValue(json, "current_hue", currentHueErr, currentHue);
+        AppendReadValue(json, "current_saturation", currentSaturationErr, currentSaturation);
+        json << '}';
+        json << '}';
+        out = json.str();
+        return CHIP_NO_ERROR;
+    }
+
+    CHIP_ERROR ReadLightStateJson(NodeId nodeId, EndpointId endpoint, std::string & out)
+    {
+        bool on = false;
+        chip::app::DataModel::Nullable<uint8_t> currentLevel;
+        uint16_t colorTemperatureMireds = 0;
+        uint16_t currentX = 0;
+        uint16_t currentY = 0;
+        uint8_t currentHue = 0;
+        uint8_t currentSaturation = 0;
+
+        CHIP_ERROR onErr = ReadValueAttribute<OnOff::Attributes::OnOff::TypeInfo>(nodeId, endpoint, on);
+        CHIP_ERROR levelErr =
+            ReadValueAttribute<LevelControl::Attributes::CurrentLevel::TypeInfo>(nodeId, endpoint, currentLevel);
+        CHIP_ERROR colorTemperatureErr =
+            ReadValueAttribute<ColorControl::Attributes::ColorTemperatureMireds::TypeInfo>(nodeId, endpoint,
+                                                                                          colorTemperatureMireds);
+        CHIP_ERROR xErr = ReadValueAttribute<ColorControl::Attributes::CurrentX::TypeInfo>(nodeId, endpoint, currentX);
+        CHIP_ERROR yErr = ReadValueAttribute<ColorControl::Attributes::CurrentY::TypeInfo>(nodeId, endpoint, currentY);
+        CHIP_ERROR hueErr = ReadValueAttribute<ColorControl::Attributes::CurrentHue::TypeInfo>(nodeId, endpoint, currentHue);
+        CHIP_ERROR saturationErr =
+            ReadValueAttribute<ColorControl::Attributes::CurrentSaturation::TypeInfo>(nodeId, endpoint, currentSaturation);
+
+        std::ostringstream json;
+        json << '{';
+        AppendReadBoolObject(json, "onoff", onErr, on, false);
+        AppendNullableReadObject(json, "current_level", levelErr, currentLevel, true);
+        AppendReadObject(json, "color_temperature_mireds", colorTemperatureErr, colorTemperatureMireds, true);
+        AppendReadObject(json, "current_x", xErr, currentX, true);
+        AppendReadObject(json, "current_y", yErr, currentY, true);
+        AppendReadObject(json, "current_hue", hueErr, currentHue, true);
+        AppendReadObject(json, "current_saturation", saturationErr, currentSaturation, true);
+        json << '}';
+        out = json.str();
+        return CHIP_NO_ERROR;
     }
 
     CHIP_ERROR SubscribeOnOff(const rhythm_chip_bridge_subscription_target * targets, size_t targetCount,
@@ -1866,6 +2238,56 @@ private:
         return err == CHIP_NO_ERROR ? iterErr : err;
     }
 
+    template <typename AttributeInfo>
+    CHIP_ERROR ReadCommandListAttribute(NodeId nodeId, EndpointId endpoint, std::vector<CommandId> & out)
+    {
+        CHIP_ERROR iterErr = CHIP_NO_ERROR;
+        CHIP_ERROR err     = ReadAttribute<AttributeInfo>(nodeId, endpoint, [&out, &iterErr](const auto & value) {
+            out.clear();
+            auto iter = value.begin();
+            while (iter.Next())
+            {
+                out.push_back(iter.GetValue());
+            }
+            iterErr = iter.GetStatus();
+        });
+        return err == CHIP_NO_ERROR ? iterErr : err;
+    }
+
+    template <typename AttributeInfo>
+    CHIP_ERROR ReadAttributeIdListAttribute(NodeId nodeId, EndpointId endpoint, std::vector<AttributeId> & out)
+    {
+        CHIP_ERROR iterErr = CHIP_NO_ERROR;
+        CHIP_ERROR err     = ReadAttribute<AttributeInfo>(nodeId, endpoint, [&out, &iterErr](const auto & value) {
+            out.clear();
+            auto iter = value.begin();
+            while (iter.Next())
+            {
+                out.push_back(iter.GetValue());
+            }
+            iterErr = iter.GetStatus();
+        });
+        return err == CHIP_NO_ERROR ? iterErr : err;
+    }
+
+    CHIP_ERROR ReadDeviceTypeListAttribute(
+        NodeId nodeId, EndpointId endpoint,
+        std::vector<Descriptor::Structs::DeviceTypeStruct::DecodableType> & out)
+    {
+        CHIP_ERROR iterErr = CHIP_NO_ERROR;
+        CHIP_ERROR err = ReadAttribute<Descriptor::Attributes::DeviceTypeList::TypeInfo>(
+            nodeId, endpoint, [&out, &iterErr](const auto & value) {
+                out.clear();
+                auto iter = value.begin();
+                while (iter.Next())
+                {
+                    out.push_back(iter.GetValue());
+                }
+                iterErr = iter.GetStatus();
+            });
+        return err == CHIP_NO_ERROR ? iterErr : err;
+    }
+
     bool HasOnOffSubscription(NodeId nodeId, EndpointId endpoint) const
     {
         return std::any_of(mOnOffSubscriptionKeys.begin(), mOnOffSubscriptionKeys.end(),
@@ -1924,6 +2346,31 @@ bool HandleBridgeResult(CHIP_ERROR err, char * errorMessage, size_t errorMessage
         return false;
     }
 
+    WriteErrorMessage(errorMessage, errorMessageSize, "");
+    return true;
+}
+
+bool WriteJsonOutput(const std::string & json, char * outJson, size_t jsonSize, size_t * outJsonLen,
+                     char * errorMessage, size_t errorMessageSize)
+{
+    if (outJsonLen == nullptr)
+    {
+        WriteErrorMessage(errorMessage, errorMessageSize, "JSON read requires output length pointer");
+        return false;
+    }
+    *outJsonLen = json.size();
+    if (outJson == nullptr || jsonSize == 0)
+    {
+        WriteErrorMessage(errorMessage, errorMessageSize, "JSON read requires output buffer");
+        return false;
+    }
+    if (json.size() >= jsonSize)
+    {
+        WriteErrorMessage(errorMessage, errorMessageSize, "JSON read output buffer too small");
+        return false;
+    }
+    std::memcpy(outJson, json.data(), json.size());
+    outJson[json.size()] = '\0';
     WriteErrorMessage(errorMessage, errorMessageSize, "");
     return true;
 }
@@ -2074,6 +2521,15 @@ bool rhythm_chip_bridge_set_brightness(uint64_t node_id, uint16_t endpoint, uint
                               "setting Matter brightness");
 }
 
+bool rhythm_chip_bridge_run_level_command(uint64_t node_id, uint16_t endpoint, uint8_t command, uint8_t level_or_step,
+                                          uint8_t step_mode, bool has_transition_ms, uint32_t transition_ms,
+                                          char * error_message, size_t error_message_size)
+{
+    const std::optional<uint32_t> transition = has_transition_ms ? std::optional<uint32_t>(transition_ms) : std::nullopt;
+    return HandleBridgeResult(gContext.RunLevelCommand(node_id, endpoint, command, level_or_step, step_mode, transition),
+                              error_message, error_message_size, "running Matter level command");
+}
+
 bool rhythm_chip_bridge_set_color_temperature(uint64_t node_id, uint16_t endpoint, uint16_t kelvin, bool has_transition_ms,
                                               uint32_t transition_ms, char * error_message, size_t error_message_size)
 {
@@ -2116,6 +2572,31 @@ bool rhythm_chip_bridge_read_on_off(uint64_t node_id, uint16_t endpoint, bool * 
     }
 
     return HandleBridgeResult(err, error_message, error_message_size, "reading Matter on/off");
+}
+
+bool rhythm_chip_bridge_read_light_capability_snapshot(uint64_t node_id, uint16_t endpoint, char * out_json,
+                                                       size_t json_size, size_t * out_json_len, char * error_message,
+                                                       size_t error_message_size)
+{
+    std::string json;
+    CHIP_ERROR err = gContext.ReadLightCapabilitySnapshot(node_id, endpoint, json);
+    if (err != CHIP_NO_ERROR)
+    {
+        return HandleBridgeResult(err, error_message, error_message_size, "reading Matter light capability snapshot");
+    }
+    return WriteJsonOutput(json, out_json, json_size, out_json_len, error_message, error_message_size);
+}
+
+bool rhythm_chip_bridge_read_light_state(uint64_t node_id, uint16_t endpoint, char * out_json, size_t json_size,
+                                         size_t * out_json_len, char * error_message, size_t error_message_size)
+{
+    std::string json;
+    CHIP_ERROR err = gContext.ReadLightStateJson(node_id, endpoint, json);
+    if (err != CHIP_NO_ERROR)
+    {
+        return HandleBridgeResult(err, error_message, error_message_size, "reading Matter light state");
+    }
+    return WriteJsonOutput(json, out_json, json_size, out_json_len, error_message, error_message_size);
 }
 
 bool rhythm_chip_bridge_subscribe_on_off(const struct rhythm_chip_bridge_subscription_target * targets, size_t target_count,

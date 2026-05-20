@@ -14,13 +14,15 @@ use anyhow::{Context, Result};
 
 use crate::chip_rpc::{
     ChipInitControllerRequest, ChipInitControllerResponse, ChipRpcAttributeReportsResponse,
-    ChipRpcCommissionLightResponse, ChipRpcListDevicesResponse, ChipRpcProbeLightResponse,
-    ChipRpcReadOnOffResponse, ChipRpcRequest, ChipRpcRequestEnvelope, ChipRpcResponseEnvelope,
+    ChipRpcCommissionLightResponse, ChipRpcJsonValueResponse, ChipRpcListDevicesResponse,
+    ChipRpcProbeLightResponse, ChipRpcReadOnOffResponse, ChipRpcRequest, ChipRpcRequestEnvelope,
+    ChipRpcResponseEnvelope,
 };
 use crate::fabric::MatterFabricIdentity;
 use crate::transport::{
     CommissionedDevice, MatterAttributeReport, MatterCommissionRequest, MatterDeviceInfo,
-    MatterGroup, MatterGroupMember, MatterSubscriptionTarget, MatterTransport,
+    MatterGroup, MatterGroupMember, MatterLevelCommandVariant, MatterLevelStepMode,
+    MatterSubscriptionTarget, MatterTransport,
 };
 
 const SOCKET_NAME: &str = "chip-controller.sock";
@@ -723,6 +725,26 @@ impl MatterTransport for ChipTransport {
         Ok(())
     }
 
+    fn run_level_command(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        command: MatterLevelCommandVariant,
+        level_or_step: u8,
+        step_mode: Option<MatterLevelStepMode>,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        let _: crate::chip_rpc::ChipRpcEmpty = self.call(ChipRpcRequest::RunLevelCommand {
+            node_id,
+            endpoint,
+            command,
+            level_or_step,
+            step_mode,
+            transition_ms,
+        })?;
+        Ok(())
+    }
+
     fn set_color_temperature(
         &self,
         node_id: u64,
@@ -779,6 +801,22 @@ impl MatterTransport for ChipTransport {
         let response: ChipRpcReadOnOffResponse =
             self.call(ChipRpcRequest::ReadOnOff { node_id, endpoint })?;
         Ok(response.on)
+    }
+
+    fn read_light_capability_snapshot(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+    ) -> Result<serde_json::Value> {
+        let response: ChipRpcJsonValueResponse =
+            self.call(ChipRpcRequest::ReadLightCapabilitySnapshot { node_id, endpoint })?;
+        Ok(response.value)
+    }
+
+    fn read_light_state(&self, node_id: u64, endpoint: u16) -> Result<serde_json::Value> {
+        let response: ChipRpcJsonValueResponse =
+            self.call(ChipRpcRequest::ReadLightState { node_id, endpoint })?;
+        Ok(response.value)
     }
 
     fn subscribe_on_off(

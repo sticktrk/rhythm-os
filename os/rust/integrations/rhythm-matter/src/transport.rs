@@ -8,6 +8,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Default minimum interval for Matter attribute subscriptions.
 pub const DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS: u16 = 1;
@@ -155,6 +156,27 @@ pub trait MatterTransport: Send + Sync {
         transition_ms: Option<u32>,
     ) -> Result<()>;
 
+    /// Run a specific Matter Level Control command variant.
+    fn run_level_command(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        command: MatterLevelCommandVariant,
+        level_or_step: u8,
+        step_mode: Option<MatterLevelStepMode>,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        let _ = (
+            node_id,
+            endpoint,
+            command,
+            level_or_step,
+            step_mode,
+            transition_ms,
+        );
+        anyhow::bail!("Matter Level Control command variants are not supported by this transport")
+    }
+
     /// Set a color temperature in Kelvin.
     fn set_color_temperature(
         &self,
@@ -186,6 +208,18 @@ pub trait MatterTransport: Send + Sync {
 
     /// Read the On/Off state from a light endpoint.
     fn read_on_off(&self, node_id: u64, endpoint: u16) -> Result<bool>;
+
+    /// Read a raw capability snapshot for a Matter light endpoint.
+    fn read_light_capability_snapshot(&self, node_id: u64, endpoint: u16) -> Result<Value> {
+        let _ = (node_id, endpoint);
+        anyhow::bail!("Matter light capability snapshots are not supported by this transport")
+    }
+
+    /// Read the current light attributes available to this transport.
+    fn read_light_state(&self, node_id: u64, endpoint: u16) -> Result<Value> {
+        let _ = (node_id, endpoint);
+        anyhow::bail!("Matter light state snapshots are not supported by this transport")
+    }
 
     /// Subscribe to On/Off attribute reports for the given light endpoints.
     fn subscribe_on_off(
@@ -282,6 +316,24 @@ pub enum MatterColorMode {
     HueSaturation,
     Xy,
     ColorTemperature,
+}
+
+/// Matter Level Control command variants used by bulb profiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatterLevelCommandVariant {
+    MoveToLevel,
+    MoveToLevelWithOnOff,
+    Step,
+    StepWithOnOff,
+}
+
+/// Matter Level Control step direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatterLevelStepMode {
+    Up,
+    Down,
 }
 
 /// Basic device info returned by `MatterTransport::list_devices()`.

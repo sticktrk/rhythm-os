@@ -13,6 +13,10 @@ use rhythm_os::state::SharedState;
 use serde_json::{json, Map, Value};
 
 use crate::hub_state::MatterHubData;
+use crate::transport::{
+    CommissionedDevice, MatterColorMode, MatterLevelCommandVariant, MatterLevelStepMode,
+    MatterTransport,
+};
 
 const DEFAULT_IDENTIFY_SECS: u16 = 2;
 const DEFAULT_BRIGHTNESS_LEVEL: u8 = 128;
@@ -24,9 +28,17 @@ const LOW_DIM_PERCENT: u8 = 3;
 const DIM_RAMP_START_PERCENT: u8 = 85;
 const DIM_RAMP_END_PERCENT: u8 = 10;
 const DIM_RAMP_TRANSITION_MS: u32 = 3000;
+const ON_LEVEL_RESTORE_PERCENT: u8 = 10;
+const POWER_CYCLE_SETUP_PERCENT: u8 = 50;
 const XY_RED: (f32, f32) = (0.70, 0.30);
 const XY_GREEN: (f32, f32) = (0.17, 0.70);
 const XY_BLUE: (f32, f32) = (0.15, 0.06);
+const XY_NEUTRAL_WHITE: (f32, f32) = (0.3127, 0.3290);
+const HS_RED: (u8, u8) = (0, 254);
+const HS_GREEN: (u8, u8) = (85, 254);
+const HS_BLUE: (u8, u8) = (170, 254);
+const HS_NEUTRAL_WHITE: (u8, u8) = (0, 0);
+const RAPID_THRESHOLDS_MS: [u64; 5] = [50, 100, 200, 500, 1000];
 
 pub fn run_bulb_test(state: &SharedState, params: &Value) -> Result<Value> {
     let device_id = params
@@ -48,146 +60,617 @@ pub fn run_bulb_test(state: &SharedState, params: &Value) -> Result<Value> {
         .cloned()
         .context("Matter transport not initialized")?;
 
+    let (claimed_device, probe_error) = match transport.probe_light(node_id) {
+        Ok(device) => (Some(device), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+    let raw_capability_snapshot = transport
+        .read_light_capability_snapshot(node_id, endpoint)
+        .ok();
+    let claimed_capabilities = claimed_capabilities(
+        node_id,
+        endpoint,
+        claimed_device.as_ref(),
+        probe_error.as_deref(),
+        raw_capability_snapshot.as_ref(),
+    );
+    let endpoint_validation = endpoint_validation(endpoint, claimed_device.as_ref());
+    let (warm_kelvin, cool_kelvin) = color_temperature_targets(claimed_device.as_ref());
+
     let mut commands = Vec::new();
     match test {
         "identify" => {
-            run_command(&mut commands, "identify", || {
-                transport.identify_light(node_id, endpoint, DEFAULT_IDENTIFY_SECS)
-            });
+            run_light_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "identify",
+                "Identify.Identify",
+                json!({"duration_secs": DEFAULT_IDENTIFY_SECS}),
+                false,
+                || transport.identify_light(node_id, endpoint, DEFAULT_IDENTIFY_SECS),
+            );
         }
         "turn_off" => {
-            run_command(&mut commands, "set_on_off_false", || {
-                transport.set_on_off(node_id, endpoint, false)
-            });
-            sleep_ms(200);
-            read_on_off(&mut commands, &transport, node_id, endpoint);
+            run_light_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_on_off_false",
+                "OnOff.Off",
+                json!({"on": false}),
+                true,
+                || transport.set_on_off(node_id, endpoint, false),
+            );
         }
         "brightness_without_on" => {
-            run_command(&mut commands, "set_on_off_false", || {
-                transport.set_on_off(node_id, endpoint, false)
-            });
+            run_light_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_on_off_false",
+                "OnOff.Off",
+                json!({"on": false}),
+                false,
+                || transport.set_on_off(node_id, endpoint, false),
+            );
             sleep_ms(250);
-            run_command(&mut commands, "set_brightness_without_on", || {
-                transport.set_brightness(node_id, endpoint, DEFAULT_BRIGHTNESS_LEVEL, None)
-            });
-            sleep_ms(350);
-            read_on_off(&mut commands, &transport, node_id, endpoint);
+            run_brightness_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_brightness_without_on",
+                DEFAULT_BRIGHTNESS_LEVEL,
+                None,
+                true,
+            );
         }
         "brightness_with_on" => {
-            run_command(&mut commands, "set_on_off_false", || {
-                transport.set_on_off(node_id, endpoint, false)
-            });
+            run_light_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_on_off_false",
+                "OnOff.Off",
+                json!({"on": false}),
+                false,
+                || transport.set_on_off(node_id, endpoint, false),
+            );
             sleep_ms(250);
-            run_command(&mut commands, "set_on_off_true", || {
-                transport.set_on_off(node_id, endpoint, true)
-            });
+            run_light_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_on_off_true",
+                "OnOff.On",
+                json!({"on": true}),
+                false,
+                || transport.set_on_off(node_id, endpoint, true),
+            );
             sleep_ms(100);
-            run_command(&mut commands, "set_brightness_after_on", || {
-                transport.set_brightness(node_id, endpoint, DEFAULT_BRIGHTNESS_LEVEL, None)
-            });
-            sleep_ms(350);
-            read_on_off(&mut commands, &transport, node_id, endpoint);
+            run_brightness_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_brightness_after_on",
+                DEFAULT_BRIGHTNESS_LEVEL,
+                None,
+                true,
+            );
+        }
+        "level_move_to_level" => {
+            run_light_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_on_off_false",
+                "OnOff.Off",
+                json!({"on": false}),
+                false,
+                || transport.set_on_off(node_id, endpoint, false),
+            );
+            sleep_ms(250);
+            run_level_variant_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "level_move_to_level",
+                MatterLevelCommandVariant::MoveToLevel,
+                DEFAULT_BRIGHTNESS_LEVEL,
+                None,
+                None,
+                true,
+            );
+        }
+        "level_move_to_level_with_onoff" => {
+            run_light_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_on_off_false",
+                "OnOff.Off",
+                json!({"on": false}),
+                false,
+                || transport.set_on_off(node_id, endpoint, false),
+            );
+            sleep_ms(250);
+            run_level_variant_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "level_move_to_level_with_onoff",
+                MatterLevelCommandVariant::MoveToLevelWithOnOff,
+                DEFAULT_BRIGHTNESS_LEVEL,
+                None,
+                None,
+                true,
+            );
+        }
+        "level_step" => {
+            set_visual_baseline(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                claimed_device.as_ref(),
+            );
+            run_level_variant_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "level_step_down",
+                MatterLevelCommandVariant::Step,
+                80,
+                Some(MatterLevelStepMode::Down),
+                Some(600),
+                true,
+            );
+        }
+        "level_step_with_onoff" => {
+            run_light_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_on_off_false",
+                "OnOff.Off",
+                json!({"on": false}),
+                false,
+                || transport.set_on_off(node_id, endpoint, false),
+            );
+            sleep_ms(250);
+            run_level_variant_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "level_step_with_onoff_up",
+                MatterLevelCommandVariant::StepWithOnOff,
+                80,
+                Some(MatterLevelStepMode::Up),
+                Some(600),
+                true,
+            );
         }
         "dim_low" => {
-            set_visual_baseline(&mut commands, &transport, node_id, endpoint);
-            run_command(&mut commands, "set_brightness_low_dim", || {
-                transport.set_brightness(
-                    node_id,
-                    endpoint,
-                    crate::clusters::brightness_to_level(LOW_DIM_PERCENT),
-                    None,
-                )
-            });
-            sleep_ms(700);
-            read_on_off(&mut commands, &transport, node_id, endpoint);
+            set_visual_baseline(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                claimed_device.as_ref(),
+            );
+            run_brightness_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_brightness_low_dim",
+                crate::clusters::brightness_to_level(LOW_DIM_PERCENT),
+                None,
+                true,
+            );
         }
         "dim_ramp" => {
-            set_visual_baseline(&mut commands, &transport, node_id, endpoint);
-            run_command(&mut commands, "set_brightness_ramp_start", || {
-                transport.set_brightness(
-                    node_id,
-                    endpoint,
-                    crate::clusters::brightness_to_level(DIM_RAMP_START_PERCENT),
-                    None,
-                )
-            });
+            set_visual_baseline(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                claimed_device.as_ref(),
+            );
+            run_brightness_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_brightness_ramp_start",
+                crate::clusters::brightness_to_level(DIM_RAMP_START_PERCENT),
+                None,
+                false,
+            );
             sleep_ms(400);
-            run_command(&mut commands, "set_brightness_ramp_down", || {
-                transport.set_brightness(
-                    node_id,
-                    endpoint,
-                    crate::clusters::brightness_to_level(DIM_RAMP_END_PERCENT),
-                    Some(DIM_RAMP_TRANSITION_MS),
-                )
-            });
-            sleep_ms(700);
-            read_on_off(&mut commands, &transport, node_id, endpoint);
+            run_brightness_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_brightness_ramp_down",
+                crate::clusters::brightness_to_level(DIM_RAMP_END_PERCENT),
+                Some(DIM_RAMP_TRANSITION_MS),
+                true,
+            );
         }
         "brightness_steps" => {
-            set_visual_baseline(&mut commands, &transport, node_id, endpoint);
+            set_visual_baseline(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                claimed_device.as_ref(),
+            );
             for brightness in [20, 60, 100, 40] {
-                run_command(
+                run_brightness_command(
                     &mut commands,
+                    &transport,
+                    node_id,
+                    endpoint,
                     &format!("set_brightness_{}", brightness),
-                    || {
-                        transport.set_brightness(
-                            node_id,
-                            endpoint,
-                            crate::clusters::brightness_to_level(brightness),
-                            None,
-                        )
-                    },
+                    crate::clusters::brightness_to_level(brightness),
+                    None,
+                    false,
                 );
                 sleep_ms(450);
             }
-            read_on_off(&mut commands, &transport, node_id, endpoint);
+            read_on_off_command(&mut commands, &transport, node_id, endpoint);
         }
         "color_temperature" | "color_temperature_warm" => {
-            set_visual_baseline(&mut commands, &transport, node_id, endpoint);
-            run_command(&mut commands, "set_color_temperature", || {
-                transport.set_color_temperature(node_id, endpoint, DEFAULT_WARM_KELVIN, None)
-            });
+            set_visual_baseline(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                claimed_device.as_ref(),
+            );
+            run_color_temperature_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_color_temperature_warm",
+                warm_kelvin,
+                None,
+                true,
+            );
         }
         "color_temperature_cool" => {
-            set_visual_baseline(&mut commands, &transport, node_id, endpoint);
-            run_command(&mut commands, "set_color_temperature_cool", || {
-                transport.set_color_temperature(node_id, endpoint, DEFAULT_COOL_KELVIN, None)
-            });
+            set_visual_baseline(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                claimed_device.as_ref(),
+            );
+            run_color_temperature_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_color_temperature_cool",
+                cool_kelvin,
+                None,
+                true,
+            );
         }
         "xy_color" | "xy_red" => {
-            set_visual_baseline(&mut commands, &transport, node_id, endpoint);
-            run_command(&mut commands, "set_xy_red", || {
-                transport.set_xy(node_id, endpoint, XY_RED.0, XY_RED.1, None)
-            });
+            set_visual_baseline(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                claimed_device.as_ref(),
+            );
+            run_xy_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_xy_red",
+                XY_RED,
+                true,
+            );
         }
         "xy_green" => {
-            set_visual_baseline(&mut commands, &transport, node_id, endpoint);
-            run_command(&mut commands, "set_xy_green", || {
-                transport.set_xy(node_id, endpoint, XY_GREEN.0, XY_GREEN.1, None)
-            });
+            set_visual_baseline(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                claimed_device.as_ref(),
+            );
+            run_xy_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_xy_green",
+                XY_GREEN,
+                true,
+            );
         }
         "xy_blue" => {
-            set_visual_baseline(&mut commands, &transport, node_id, endpoint);
-            run_command(&mut commands, "set_xy_blue", || {
-                transport.set_xy(node_id, endpoint, XY_BLUE.0, XY_BLUE.1, None)
-            });
+            set_visual_baseline(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                claimed_device.as_ref(),
+            );
+            run_xy_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_xy_blue",
+                XY_BLUE,
+                true,
+            );
+        }
+        "hue_sat_red" => {
+            set_visual_baseline(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                claimed_device.as_ref(),
+            );
+            run_hue_saturation_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_hue_sat_red",
+                HS_RED,
+                true,
+            );
+        }
+        "hue_sat_green" => {
+            set_visual_baseline(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                claimed_device.as_ref(),
+            );
+            run_hue_saturation_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_hue_sat_green",
+                HS_GREEN,
+                true,
+            );
+        }
+        "hue_sat_blue" => {
+            set_visual_baseline(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                claimed_device.as_ref(),
+            );
+            run_hue_saturation_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_hue_sat_blue",
+                HS_BLUE,
+                true,
+            );
+        }
+        "ct_to_xy" => {
+            set_visual_baseline(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                claimed_device.as_ref(),
+            );
+            run_color_temperature_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "switch_start_color_temperature",
+                warm_kelvin,
+                None,
+                false,
+            );
+            sleep_ms(500);
+            run_xy_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "switch_ct_to_xy_red",
+                XY_RED,
+                true,
+            );
+        }
+        "xy_to_ct" => {
+            set_visual_baseline(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                claimed_device.as_ref(),
+            );
+            run_xy_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "switch_start_xy_blue",
+                XY_BLUE,
+                false,
+            );
+            sleep_ms(500);
+            run_color_temperature_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "switch_xy_to_color_temperature",
+                warm_kelvin,
+                None,
+                true,
+            );
+        }
+        "ct_to_hue_sat" => {
+            set_visual_baseline(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                claimed_device.as_ref(),
+            );
+            run_color_temperature_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "switch_start_color_temperature",
+                warm_kelvin,
+                None,
+                false,
+            );
+            sleep_ms(500);
+            run_hue_saturation_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "switch_ct_to_hue_sat_blue",
+                HS_BLUE,
+                true,
+            );
+        }
+        "hue_sat_to_ct" => {
+            set_visual_baseline(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                claimed_device.as_ref(),
+            );
+            run_hue_saturation_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "switch_start_hue_sat_blue",
+                HS_BLUE,
+                false,
+            );
+            sleep_ms(500);
+            run_color_temperature_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "switch_hue_sat_to_color_temperature",
+                warm_kelvin,
+                None,
+                true,
+            );
+        }
+        "on_level_restore" => {
+            set_visual_baseline(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                claimed_device.as_ref(),
+            );
+            run_brightness_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "set_restore_test_low_level",
+                crate::clusters::brightness_to_level(ON_LEVEL_RESTORE_PERCENT),
+                None,
+                false,
+            );
+            sleep_ms(400);
+            run_light_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "restore_test_set_off",
+                "OnOff.Off",
+                json!({"on": false}),
+                false,
+                || transport.set_on_off(node_id, endpoint, false),
+            );
+            sleep_ms(500);
+            run_light_command(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                "restore_test_set_on",
+                "OnOff.On",
+                json!({"on": true}),
+                true,
+                || transport.set_on_off(node_id, endpoint, true),
+            );
+        }
+        "power_on_behavior" => {
+            run_power_cycle_setup(&mut commands, &transport, node_id, endpoint, warm_kelvin);
         }
         "rapid_commands" => {
-            set_visual_baseline(&mut commands, &transport, node_id, endpoint);
-            run_command(&mut commands, "set_brightness_40", || {
-                transport.set_brightness(node_id, endpoint, 40, None)
-            });
-            run_command(&mut commands, "set_brightness_200", || {
-                transport.set_brightness(node_id, endpoint, 200, None)
-            });
-            run_command(&mut commands, "set_brightness_90", || {
-                transport.set_brightness(node_id, endpoint, 90, None)
-            });
+            set_visual_baseline(
+                &mut commands,
+                &transport,
+                node_id,
+                endpoint,
+                claimed_device.as_ref(),
+            );
+            run_rapid_burst(&mut commands, &transport, node_id, endpoint, 0);
         }
         "read_on_off" => {
-            read_on_off(&mut commands, &transport, node_id, endpoint);
+            read_on_off_command(&mut commands, &transport, node_id, endpoint);
         }
-        other => anyhow::bail!("Unknown Matter bulb test: {}", other),
+        other => {
+            if let Some(gap_ms) = rapid_threshold_ms(other) {
+                set_visual_baseline(
+                    &mut commands,
+                    &transport,
+                    node_id,
+                    endpoint,
+                    claimed_device.as_ref(),
+                );
+                run_rapid_burst(&mut commands, &transport, node_id, endpoint, gap_ms);
+            } else {
+                anyhow::bail!("Unknown Matter bulb test: {}", other);
+            }
+        }
     }
 
     let command_count = commands.len();
@@ -202,6 +685,23 @@ pub fn run_bulb_test(state: &SharedState, params: &Value) -> Result<Value> {
         "device_id": native_id,
         "node_id": node_id,
         "endpoint": endpoint,
+        "claimed_capabilities": claimed_capabilities,
+        "raw_capability_snapshot": raw_capability_snapshot,
+        "endpoint_validation": endpoint_validation,
+        "test_parameters": {
+            "visual_baseline": {
+                "brightness_percent": VISUAL_BASELINE_PERCENT,
+                "kelvin": VISUAL_BASELINE_KELVIN,
+            },
+            "color_temperature": {
+                "warm_kelvin": warm_kelvin,
+                "cool_kelvin": cool_kelvin,
+            },
+            "level_command_variants": {
+                "tested": ["move_to_level", "move_to_level_with_onoff", "step", "step_with_onoff"],
+            },
+            "rapid_thresholds_ms": RAPID_THRESHOLDS_MS,
+        },
         "command_count": command_count,
         "failed_count": failed_count,
         "commands": commands,
@@ -232,7 +732,14 @@ pub fn save_bulb_test_report(state: &SharedState, report: &Value) -> Result<Valu
         "received_at_unix_ms".to_string(),
         Value::Number(received_at.into()),
     );
-    enriched.insert("schema_version".to_string(), Value::Number(1.into()));
+    let schema_version = report
+        .get("schema_version")
+        .and_then(Value::as_u64)
+        .unwrap_or(2);
+    enriched.insert(
+        "schema_version".to_string(),
+        Value::Number(schema_version.into()),
+    );
 
     let report_dir = report_dir(state).context("data_dir not configured on AppState")?;
     fs::create_dir_all(&report_dir)
@@ -373,31 +880,6 @@ fn apply_runtime_capabilities(
     Ok(())
 }
 
-fn set_visual_baseline(
-    commands: &mut Vec<Value>,
-    transport: &Arc<dyn crate::transport::MatterTransport>,
-    node_id: u64,
-    endpoint: u16,
-) {
-    run_command(commands, "baseline_set_on_off_true", || {
-        transport.set_on_off(node_id, endpoint, true)
-    });
-    sleep_ms(100);
-    run_command(commands, "baseline_set_brightness_70", || {
-        transport.set_brightness(
-            node_id,
-            endpoint,
-            crate::clusters::brightness_to_level(VISUAL_BASELINE_PERCENT),
-            None,
-        )
-    });
-    sleep_ms(150);
-    run_command(commands, "baseline_set_neutral_white", || {
-        transport.set_color_temperature(node_id, endpoint, VISUAL_BASELINE_KELVIN, None)
-    });
-    sleep_ms(350);
-}
-
 fn report_dir(state: &SharedState) -> Option<PathBuf> {
     let data_dir = state.lock().ok()?.data_dir.clone();
     if data_dir.is_empty() {
@@ -410,37 +892,593 @@ fn report_dir(state: &SharedState) -> Option<PathBuf> {
     )
 }
 
-fn run_command<F>(commands: &mut Vec<Value>, name: &str, f: F)
-where
-    F: FnOnce() -> Result<()>,
-{
-    match f() {
-        Ok(()) => commands.push(json!({"name": name, "ok": true})),
-        Err(error) => commands.push(json!({
-            "name": name,
-            "ok": false,
-            "error": error.to_string(),
-        })),
+fn claimed_capabilities(
+    node_id: u64,
+    endpoint: u16,
+    device: Option<&CommissionedDevice>,
+    probe_error: Option<&str>,
+    raw_snapshot: Option<&Value>,
+) -> Value {
+    let supports_ct = supports_color_mode(device, MatterColorMode::ColorTemperature);
+    let supports_xy = supports_color_mode(device, MatterColorMode::Xy);
+    let supports_hue_sat = supports_color_mode(device, MatterColorMode::HueSaturation);
+    let color_modes = device
+        .map(|device| {
+            device
+                .color_modes
+                .iter()
+                .map(|mode| match mode {
+                    MatterColorMode::HueSaturation => "hue_saturation",
+                    MatterColorMode::Xy => "xy",
+                    MatterColorMode::ColorTemperature => "color_temperature",
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let (fallback_min_mireds, fallback_max_mireds) = device
+        .and_then(|device| Some((device.max_kelvin?, device.min_kelvin?)))
+        .map(|(cool_kelvin, warm_kelvin)| {
+            (kelvin_to_mireds(cool_kelvin), kelvin_to_mireds(warm_kelvin))
+        })
+        .unwrap_or((None, None));
+    let level_control = raw_snapshot.and_then(|value| value.get("level_control"));
+    let color_control = raw_snapshot.and_then(|value| value.get("color_control"));
+    let physical_min_mireds = color_control
+        .and_then(|value| value.get("color_temp_physical_min_mireds"))
+        .cloned()
+        .or_else(|| fallback_min_mireds.map(Value::from))
+        .unwrap_or(Value::Null);
+    let physical_max_mireds = color_control
+        .and_then(|value| value.get("color_temp_physical_max_mireds"))
+        .cloned()
+        .or_else(|| fallback_max_mireds.map(Value::from))
+        .unwrap_or(Value::Null);
+
+    json!({
+        "node_id": node_id,
+        "selected_endpoint": endpoint,
+        "device_type": if device.is_some() { json!("light") } else { Value::Null },
+        "probe_succeeded": device.is_some(),
+        "probe_error": probe_error,
+        "endpoint_list": raw_snapshot.and_then(|value| value.get("endpoint_list")).cloned().unwrap_or(Value::Null),
+        "light_endpoint": device.map(|device| device.light_endpoint),
+        "endpoint_matches_light_endpoint": device.map(|device| device.light_endpoint == endpoint),
+        "server_clusters": raw_snapshot.and_then(|value| value.get("server_clusters")).cloned().unwrap_or(Value::Null),
+        "client_clusters": raw_snapshot.and_then(|value| value.get("client_clusters")).cloned().unwrap_or(Value::Null),
+        "device_type_list": raw_snapshot.and_then(|value| value.get("device_type_list")).cloned().unwrap_or(Value::Null),
+        "accepted_command_lists": raw_snapshot.and_then(|value| value.get("accepted_command_lists")).cloned().unwrap_or(Value::Null),
+        "attribute_lists": raw_snapshot.and_then(|value| value.get("attribute_lists")).cloned().unwrap_or(Value::Null),
+        "onoff": device.is_some(),
+        "level_control": device.is_some(),
+        "color_temperature": supports_ct,
+        "xy_color": supports_xy,
+        "hue_saturation": supports_hue_sat,
+        "transitions": true,
+        "color_modes": color_modes.clone(),
+        "level_control_feature_map": level_control.and_then(|value| value.get("feature_map")).cloned().unwrap_or(Value::Null),
+        "color_control_feature_map": color_control.and_then(|value| value.get("feature_map")).cloned().unwrap_or(Value::Null),
+        "color_capabilities": color_control.and_then(|value| value.get("color_capabilities")).cloned().unwrap_or_else(|| json!(color_modes)),
+        "color_temp_physical_min_mireds": physical_min_mireds,
+        "color_temp_physical_max_mireds": physical_max_mireds,
+        "min_kelvin": device.and_then(|device| device.min_kelvin),
+        "max_kelvin": device.and_then(|device| device.max_kelvin),
+        "current_level": level_control.and_then(|value| value.get("current_level")).cloned().unwrap_or(Value::Null),
+        "current_x": color_control.and_then(|value| value.get("current_x")).cloned().unwrap_or(Value::Null),
+        "current_y": color_control.and_then(|value| value.get("current_y")).cloned().unwrap_or(Value::Null),
+        "current_hue": color_control.and_then(|value| value.get("current_hue")).cloned().unwrap_or(Value::Null),
+        "current_saturation": color_control.and_then(|value| value.get("current_saturation")).cloned().unwrap_or(Value::Null),
+        "raw_attribute_reads_available": raw_snapshot.is_some(),
+        "unavailable_raw_claims": if raw_snapshot.is_some() {
+            json!([])
+        } else {
+            json!([
+                "endpoint_list",
+                "server_clusters",
+                "accepted_command_lists",
+                "attribute_lists",
+                "level_control_feature_map",
+                "color_control_feature_map",
+                "current_level",
+                "current_x",
+                "current_y",
+                "current_hue",
+                "current_saturation"
+            ])
+        },
+    })
+}
+
+fn endpoint_validation(endpoint: u16, device: Option<&CommissionedDevice>) -> Value {
+    match device {
+        Some(device) => json!({
+            "selected_endpoint": endpoint,
+            "claimed_light_endpoint": device.light_endpoint,
+            "is_light_endpoint": endpoint == device.light_endpoint,
+        }),
+        None => json!({
+            "selected_endpoint": endpoint,
+            "claimed_light_endpoint": Value::Null,
+            "is_light_endpoint": Value::Null,
+            "validation_error": "probe_failed",
+        }),
     }
 }
 
-fn read_on_off(
+fn color_temperature_targets(device: Option<&CommissionedDevice>) -> (u16, u16) {
+    let low_kelvin = device
+        .and_then(|device| device.min_kelvin)
+        .unwrap_or(DEFAULT_WARM_KELVIN);
+    let high_kelvin = device
+        .and_then(|device| device.max_kelvin)
+        .unwrap_or(DEFAULT_COOL_KELVIN);
+    let (low_kelvin, high_kelvin) = if low_kelvin <= high_kelvin {
+        (low_kelvin, high_kelvin)
+    } else {
+        (high_kelvin, low_kelvin)
+    };
+    let span = high_kelvin.saturating_sub(low_kelvin);
+    if span < 200 {
+        return (low_kelvin, high_kelvin);
+    }
+    let margin = (span / 10).clamp(50, 500);
+    (
+        low_kelvin.saturating_add(margin),
+        high_kelvin.saturating_sub(margin),
+    )
+}
+
+fn supports_color_mode(device: Option<&CommissionedDevice>, mode: MatterColorMode) -> bool {
+    device
+        .map(|device| device.color_modes.contains(&mode))
+        .unwrap_or(false)
+}
+
+fn kelvin_to_mireds(kelvin: u16) -> Option<u16> {
+    if kelvin == 0 {
+        None
+    } else {
+        Some((1_000_000u32 / kelvin as u32) as u16)
+    }
+}
+
+fn set_visual_baseline(
     commands: &mut Vec<Value>,
-    transport: &Arc<dyn crate::transport::MatterTransport>,
+    transport: &Arc<dyn MatterTransport>,
+    node_id: u64,
+    endpoint: u16,
+    device: Option<&CommissionedDevice>,
+) {
+    run_light_command(
+        commands,
+        transport,
+        node_id,
+        endpoint,
+        "baseline_set_on_off_true",
+        "OnOff.On",
+        json!({"on": true}),
+        false,
+        || transport.set_on_off(node_id, endpoint, true),
+    );
+    sleep_ms(100);
+    run_brightness_command(
+        commands,
+        transport,
+        node_id,
+        endpoint,
+        "baseline_set_brightness_70",
+        crate::clusters::brightness_to_level(VISUAL_BASELINE_PERCENT),
+        None,
+        false,
+    );
+    sleep_ms(150);
+    if supports_color_mode(device, MatterColorMode::ColorTemperature) || device.is_none() {
+        run_color_temperature_command(
+            commands,
+            transport,
+            node_id,
+            endpoint,
+            "baseline_set_neutral_white",
+            VISUAL_BASELINE_KELVIN,
+            None,
+            false,
+        );
+    } else if supports_color_mode(device, MatterColorMode::Xy) {
+        run_xy_command(
+            commands,
+            transport,
+            node_id,
+            endpoint,
+            "baseline_set_neutral_white_xy",
+            XY_NEUTRAL_WHITE,
+            false,
+        );
+    } else if supports_color_mode(device, MatterColorMode::HueSaturation) {
+        run_hue_saturation_command(
+            commands,
+            transport,
+            node_id,
+            endpoint,
+            "baseline_set_neutral_white_hue_sat",
+            HS_NEUTRAL_WHITE,
+            false,
+        );
+    }
+    sleep_ms(350);
+}
+
+fn run_power_cycle_setup(
+    commands: &mut Vec<Value>,
+    transport: &Arc<dyn MatterTransport>,
+    node_id: u64,
+    endpoint: u16,
+    warm_kelvin: u16,
+) {
+    run_light_command(
+        commands,
+        transport,
+        node_id,
+        endpoint,
+        "power_cycle_setup_set_on",
+        "OnOff.On",
+        json!({"on": true}),
+        false,
+        || transport.set_on_off(node_id, endpoint, true),
+    );
+    sleep_ms(150);
+    run_brightness_command(
+        commands,
+        transport,
+        node_id,
+        endpoint,
+        "power_cycle_setup_brightness_50",
+        crate::clusters::brightness_to_level(POWER_CYCLE_SETUP_PERCENT),
+        None,
+        false,
+    );
+    sleep_ms(200);
+    run_color_temperature_command(
+        commands,
+        transport,
+        node_id,
+        endpoint,
+        "power_cycle_setup_warm_white",
+        warm_kelvin,
+        None,
+        true,
+    );
+}
+
+fn run_brightness_command(
+    commands: &mut Vec<Value>,
+    transport: &Arc<dyn MatterTransport>,
+    node_id: u64,
+    endpoint: u16,
+    name: &str,
+    level: u8,
+    transition_ms: Option<u32>,
+    delayed_readback: bool,
+) {
+    run_light_command(
+        commands,
+        transport,
+        node_id,
+        endpoint,
+        name,
+        "LevelControl.MoveToLevelWithOnOff",
+        json!({
+            "level": level,
+            "transition_ms": transition_ms,
+        }),
+        delayed_readback,
+        || transport.set_brightness(node_id, endpoint, level, transition_ms),
+    );
+}
+
+fn run_level_variant_command(
+    commands: &mut Vec<Value>,
+    transport: &Arc<dyn MatterTransport>,
+    node_id: u64,
+    endpoint: u16,
+    name: &str,
+    command: MatterLevelCommandVariant,
+    level_or_step: u8,
+    step_mode: Option<MatterLevelStepMode>,
+    transition_ms: Option<u32>,
+    delayed_readback: bool,
+) {
+    run_light_command(
+        commands,
+        transport,
+        node_id,
+        endpoint,
+        name,
+        level_command_name(command),
+        json!({
+            "level_or_step": level_or_step,
+            "step_mode": step_mode,
+            "transition_ms": transition_ms,
+        }),
+        delayed_readback,
+        || {
+            transport.run_level_command(
+                node_id,
+                endpoint,
+                command,
+                level_or_step,
+                step_mode,
+                transition_ms,
+            )
+        },
+    );
+}
+
+fn level_command_name(command: MatterLevelCommandVariant) -> &'static str {
+    match command {
+        MatterLevelCommandVariant::MoveToLevel => "LevelControl.MoveToLevel",
+        MatterLevelCommandVariant::MoveToLevelWithOnOff => "LevelControl.MoveToLevelWithOnOff",
+        MatterLevelCommandVariant::Step => "LevelControl.Step",
+        MatterLevelCommandVariant::StepWithOnOff => "LevelControl.StepWithOnOff",
+    }
+}
+
+fn run_color_temperature_command(
+    commands: &mut Vec<Value>,
+    transport: &Arc<dyn MatterTransport>,
+    node_id: u64,
+    endpoint: u16,
+    name: &str,
+    kelvin: u16,
+    transition_ms: Option<u32>,
+    delayed_readback: bool,
+) {
+    run_light_command(
+        commands,
+        transport,
+        node_id,
+        endpoint,
+        name,
+        "ColorControl.MoveToColorTemperature",
+        json!({
+            "kelvin": kelvin,
+            "transition_ms": transition_ms,
+        }),
+        delayed_readback,
+        || transport.set_color_temperature(node_id, endpoint, kelvin, transition_ms),
+    );
+}
+
+fn run_xy_command(
+    commands: &mut Vec<Value>,
+    transport: &Arc<dyn MatterTransport>,
+    node_id: u64,
+    endpoint: u16,
+    name: &str,
+    xy: (f32, f32),
+    delayed_readback: bool,
+) {
+    run_light_command(
+        commands,
+        transport,
+        node_id,
+        endpoint,
+        name,
+        "ColorControl.MoveToColor",
+        json!({
+            "x": xy.0,
+            "y": xy.1,
+            "transition_ms": Value::Null,
+        }),
+        delayed_readback,
+        || transport.set_xy(node_id, endpoint, xy.0, xy.1, None),
+    );
+}
+
+fn run_hue_saturation_command(
+    commands: &mut Vec<Value>,
+    transport: &Arc<dyn MatterTransport>,
+    node_id: u64,
+    endpoint: u16,
+    name: &str,
+    hue_saturation: (u8, u8),
+    delayed_readback: bool,
+) {
+    run_light_command(
+        commands,
+        transport,
+        node_id,
+        endpoint,
+        name,
+        "ColorControl.MoveToHueAndSaturation",
+        json!({
+            "hue": hue_saturation.0,
+            "saturation": hue_saturation.1,
+            "transition_ms": Value::Null,
+        }),
+        delayed_readback,
+        || {
+            transport.set_hue_saturation(
+                node_id,
+                endpoint,
+                hue_saturation.0,
+                hue_saturation.1,
+                None,
+            )
+        },
+    );
+}
+
+fn run_light_command<F>(
+    commands: &mut Vec<Value>,
+    transport: &Arc<dyn MatterTransport>,
+    node_id: u64,
+    endpoint: u16,
+    name: &str,
+    command: &str,
+    payload: Value,
+    delayed_readback: bool,
+    f: F,
+) where
+    F: FnOnce() -> Result<()>,
+{
+    let readback_before = readback_snapshot(transport, node_id, endpoint);
+    let started_at_unix_ms = now_unix_ms();
+    let (ok, command_status, error) = match f() {
+        Ok(()) => (true, "success".to_string(), None),
+        Err(error) => (false, "error".to_string(), Some(error.to_string())),
+    };
+    let readback_after_immediate = readback_snapshot(transport, node_id, endpoint);
+    let mut entry = json!({
+        "name": name,
+        "command": command,
+        "payload": payload,
+        "ok": ok,
+        "command_status": command_status,
+        "started_at_unix_ms": started_at_unix_ms,
+        "readback_before": readback_before,
+        "readback_after_immediate": readback_after_immediate,
+    });
+    if let Some(error) = error {
+        entry["error"] = Value::String(error);
+    }
+    if delayed_readback {
+        sleep_ms(500);
+        entry["readback_after_500ms"] = readback_snapshot(transport, node_id, endpoint);
+        sleep_ms(1000);
+        entry["readback_after_1500ms"] = readback_snapshot(transport, node_id, endpoint);
+    }
+    commands.push(entry);
+}
+
+fn run_rapid_burst(
+    commands: &mut Vec<Value>,
+    transport: &Arc<dyn MatterTransport>,
+    node_id: u64,
+    endpoint: u16,
+    gap_ms: u64,
+) {
+    let levels = [
+        crate::clusters::brightness_to_level(20),
+        crate::clusters::brightness_to_level(90),
+        crate::clusters::brightness_to_level(35),
+        crate::clusters::brightness_to_level(75),
+    ];
+    let readback_before = readback_snapshot(transport, node_id, endpoint);
+    let started_at_unix_ms = now_unix_ms();
+    let mut subcommands = Vec::new();
+    for (index, level) in levels.iter().enumerate() {
+        let result = transport.set_brightness(node_id, endpoint, *level, None);
+        subcommands.push(match result {
+            Ok(()) => json!({
+                "command": "LevelControl.MoveToLevelWithOnOff",
+                "payload": {
+                    "level": level,
+                    "transition_ms": Value::Null,
+                },
+                "ok": true,
+                "command_status": "success",
+            }),
+            Err(error) => json!({
+                "command": "LevelControl.MoveToLevelWithOnOff",
+                "payload": {
+                    "level": level,
+                    "transition_ms": Value::Null,
+                },
+                "ok": false,
+                "command_status": "error",
+                "error": error.to_string(),
+            }),
+        });
+        if gap_ms > 0 && index < levels.len() - 1 {
+            sleep_ms(gap_ms);
+        }
+    }
+    let readback_after_immediate = readback_snapshot(transport, node_id, endpoint);
+    sleep_ms(500);
+    let readback_after_500ms = readback_snapshot(transport, node_id, endpoint);
+    sleep_ms(1000);
+    let readback_after_1500ms = readback_snapshot(transport, node_id, endpoint);
+    let ok = subcommands
+        .iter()
+        .all(|command| command.get("ok").and_then(Value::as_bool) == Some(true));
+    commands.push(json!({
+        "name": format!("rapid_burst_{}ms", gap_ms),
+        "command": "LevelControl.MoveToLevelWithOnOff.burst",
+        "payload": {
+            "gap_ms": gap_ms,
+            "levels": levels,
+        },
+        "ok": ok,
+        "command_status": if ok { "success" } else { "error" },
+        "started_at_unix_ms": started_at_unix_ms,
+        "subcommands": subcommands,
+        "readback_before": readback_before,
+        "readback_after_immediate": readback_after_immediate,
+        "readback_after_500ms": readback_after_500ms,
+        "readback_after_1500ms": readback_after_1500ms,
+    }));
+}
+
+fn rapid_threshold_ms(test: &str) -> Option<u64> {
+    let raw = test.strip_prefix("rapid_")?.strip_suffix("ms")?;
+    let gap_ms = raw.parse::<u64>().ok()?;
+    RAPID_THRESHOLDS_MS.contains(&gap_ms).then_some(gap_ms)
+}
+
+fn read_on_off_command(
+    commands: &mut Vec<Value>,
+    transport: &Arc<dyn MatterTransport>,
     node_id: u64,
     endpoint: u16,
 ) {
+    let snapshot = readback_snapshot(transport, node_id, endpoint);
+    let ok = snapshot
+        .get("onoff")
+        .and_then(|value| value.get("ok"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    let value = snapshot
+        .get("onoff")
+        .and_then(|value| value.get("value"))
+        .cloned();
+    let error = snapshot
+        .get("onoff")
+        .and_then(|value| value.get("error"))
+        .cloned();
+    let mut entry = json!({
+        "name": "read_on_off",
+        "command": "OnOff.ReadAttribute.OnOff",
+        "payload": {},
+        "ok": ok,
+        "command_status": if ok { "success" } else { "error" },
+        "readback_after_immediate": snapshot,
+    });
+    if let Some(value) = value {
+        entry["value"] = value;
+    }
+    if let Some(error) = error {
+        entry["error"] = error;
+    }
+    commands.push(entry);
+}
+
+fn readback_snapshot(transport: &Arc<dyn MatterTransport>, node_id: u64, endpoint: u16) -> Value {
+    if let Ok(value) = transport.read_light_state(node_id, endpoint) {
+        return value;
+    }
+
     match transport.read_on_off(node_id, endpoint) {
-        Ok(value) => commands.push(json!({
-            "name": "read_on_off",
-            "ok": true,
-            "value": value,
-        })),
-        Err(error) => commands.push(json!({
-            "name": "read_on_off",
-            "ok": false,
-            "error": error.to_string(),
-        })),
+        Ok(value) => json!({
+            "onoff": {
+                "ok": true,
+                "value": value,
+            }
+        }),
+        Err(error) => json!({
+            "onoff": {
+                "ok": false,
+                "error": error.to_string(),
+            }
+        }),
     }
 }
 

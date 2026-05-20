@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use rhythm_matter::transport::{
     CommissionedDevice, MatterAttributeReport, MatterCommissionRequest, MatterGroup,
-    MatterGroupMember, MatterSubscriptionTarget,
+    MatterGroupMember, MatterLevelCommandVariant, MatterLevelStepMode, MatterSubscriptionTarget,
 };
 
 use crate::service::CommissioningState;
@@ -253,6 +253,41 @@ impl ChipFfiController {
         }
     }
 
+    pub fn run_level_command(
+        &mut self,
+        node_id: u64,
+        endpoint: u16,
+        command: MatterLevelCommandVariant,
+        level_or_step: u8,
+        step_mode: Option<MatterLevelStepMode>,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            ffi_probe::run_level_command(
+                node_id,
+                endpoint,
+                command,
+                level_or_step,
+                step_mode,
+                transition_ms,
+            )
+        }
+
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            let _ = (
+                node_id,
+                endpoint,
+                command,
+                level_or_step,
+                step_mode,
+                transition_ms,
+            );
+            Err(self.unsupported("run_level_command"))
+        }
+    }
+
     pub fn set_color_temperature(
         &mut self,
         node_id: u64,
@@ -322,6 +357,36 @@ impl ChipFfiController {
         {
             let _ = (node_id, endpoint);
             Err(self.unsupported("read_on_off"))
+        }
+    }
+
+    pub fn read_light_capability_snapshot(
+        &mut self,
+        node_id: u64,
+        endpoint: u16,
+    ) -> Result<serde_json::Value> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            ffi_probe::read_light_capability_snapshot(node_id, endpoint)
+        }
+
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            let _ = (node_id, endpoint);
+            Err(self.unsupported("read_light_capability_snapshot"))
+        }
+    }
+
+    pub fn read_light_state(&mut self, node_id: u64, endpoint: u16) -> Result<serde_json::Value> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            ffi_probe::read_light_state(node_id, endpoint)
+        }
+
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            let _ = (node_id, endpoint);
+            Err(self.unsupported("read_light_state"))
         }
     }
 
@@ -399,7 +464,7 @@ mod ffi_probe {
     use rhythm_matter::transport::{
         CommissionedDevice, MatterAttributeReport, MatterAttributeValue, MatterColorMode,
         MatterCommissionRequest, MatterCommissioningRendezvous, MatterGroup, MatterGroupMember,
-        MatterSubscriptionTarget,
+        MatterLevelCommandVariant, MatterLevelStepMode, MatterSubscriptionTarget,
     };
 
     const ERROR_BUFFER_SIZE: usize = 512;
@@ -415,6 +480,13 @@ mod ffi_probe {
     const COLOR_MODE_COLOR_TEMPERATURE: u32 = 1 << 2;
     const ATTRIBUTE_VALUE_BOOL: u8 = 1;
     const MAX_DRAINED_REPORTS: usize = 128;
+    const JSON_BUFFER_SIZE: usize = 64 * 1024;
+    const LEVEL_COMMAND_MOVE_TO_LEVEL: u8 = 0;
+    const LEVEL_COMMAND_MOVE_TO_LEVEL_WITH_ON_OFF: u8 = 1;
+    const LEVEL_COMMAND_STEP: u8 = 2;
+    const LEVEL_COMMAND_STEP_WITH_ON_OFF: u8 = 3;
+    const LEVEL_STEP_MODE_UP: u8 = 0;
+    const LEVEL_STEP_MODE_DOWN: u8 = 1;
 
     #[repr(C)]
     struct ChipBridgeCommissionRequest {
@@ -587,6 +659,17 @@ mod ffi_probe {
             error_message: *mut c_char,
             error_message_size: usize,
         ) -> bool;
+        fn rhythm_chip_bridge_run_level_command(
+            node_id: u64,
+            endpoint: c_ushort,
+            command: c_uchar,
+            level_or_step: u8,
+            step_mode: c_uchar,
+            has_transition_ms: bool,
+            transition_ms: u32,
+            error_message: *mut c_char,
+            error_message_size: usize,
+        ) -> bool;
         fn rhythm_chip_bridge_set_color_temperature(
             node_id: u64,
             endpoint: c_ushort,
@@ -620,6 +703,24 @@ mod ffi_probe {
             node_id: u64,
             endpoint: c_ushort,
             out_on: *mut bool,
+            error_message: *mut c_char,
+            error_message_size: usize,
+        ) -> bool;
+        fn rhythm_chip_bridge_read_light_capability_snapshot(
+            node_id: u64,
+            endpoint: c_ushort,
+            out_json: *mut c_char,
+            json_size: usize,
+            out_json_len: *mut usize,
+            error_message: *mut c_char,
+            error_message_size: usize,
+        ) -> bool;
+        fn rhythm_chip_bridge_read_light_state(
+            node_id: u64,
+            endpoint: c_ushort,
+            out_json: *mut c_char,
+            json_size: usize,
+            out_json_len: *mut usize,
             error_message: *mut c_char,
             error_message_size: usize,
         ) -> bool;
@@ -1021,6 +1122,35 @@ mod ffi_probe {
         }
     }
 
+    pub fn run_level_command(
+        node_id: u64,
+        endpoint: u16,
+        command: MatterLevelCommandVariant,
+        level_or_step: u8,
+        step_mode: Option<MatterLevelStepMode>,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
+        let success = unsafe {
+            rhythm_chip_bridge_run_level_command(
+                node_id,
+                endpoint,
+                map_level_command(command),
+                level_or_step,
+                map_step_mode(step_mode.unwrap_or(MatterLevelStepMode::Up)),
+                transition_ms.is_some(),
+                transition_ms.unwrap_or_default(),
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        };
+        if success {
+            Ok(())
+        } else {
+            Err(read_error_buffer(&error_buffer))
+        }
+    }
+
     pub fn set_color_temperature(
         node_id: u64,
         endpoint: u16,
@@ -1117,6 +1247,37 @@ mod ffi_probe {
         } else {
             Err(read_error_buffer(&error_buffer))
         }
+    }
+
+    pub fn read_light_capability_snapshot(
+        node_id: u64,
+        endpoint: u16,
+    ) -> Result<serde_json::Value> {
+        read_json_value(|json_buffer, json_len, error_buffer| unsafe {
+            rhythm_chip_bridge_read_light_capability_snapshot(
+                node_id,
+                endpoint,
+                json_buffer.as_mut_ptr(),
+                json_buffer.len(),
+                json_len,
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        })
+    }
+
+    pub fn read_light_state(node_id: u64, endpoint: u16) -> Result<serde_json::Value> {
+        read_json_value(|json_buffer, json_len, error_buffer| unsafe {
+            rhythm_chip_bridge_read_light_state(
+                node_id,
+                endpoint,
+                json_buffer.as_mut_ptr(),
+                json_buffer.len(),
+                json_len,
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        })
     }
 
     pub fn subscribe_on_off(
@@ -1217,6 +1378,47 @@ mod ffi_probe {
             MatterCommissioningRendezvous::Ble => RENDEZVOUS_BLE,
             MatterCommissioningRendezvous::OnNetwork => RENDEZVOUS_ON_NETWORK,
         }
+    }
+
+    fn map_level_command(command: MatterLevelCommandVariant) -> c_uchar {
+        match command {
+            MatterLevelCommandVariant::MoveToLevel => LEVEL_COMMAND_MOVE_TO_LEVEL,
+            MatterLevelCommandVariant::MoveToLevelWithOnOff => {
+                LEVEL_COMMAND_MOVE_TO_LEVEL_WITH_ON_OFF
+            }
+            MatterLevelCommandVariant::Step => LEVEL_COMMAND_STEP,
+            MatterLevelCommandVariant::StepWithOnOff => LEVEL_COMMAND_STEP_WITH_ON_OFF,
+        }
+    }
+
+    fn map_step_mode(mode: MatterLevelStepMode) -> c_uchar {
+        match mode {
+            MatterLevelStepMode::Up => LEVEL_STEP_MODE_UP,
+            MatterLevelStepMode::Down => LEVEL_STEP_MODE_DOWN,
+        }
+    }
+
+    fn read_json_value<F>(f: F) -> Result<serde_json::Value>
+    where
+        F: FnOnce(
+            &mut [c_char; JSON_BUFFER_SIZE],
+            *mut usize,
+            &mut [c_char; ERROR_BUFFER_SIZE],
+        ) -> bool,
+    {
+        let mut json_buffer = [0 as c_char; JSON_BUFFER_SIZE];
+        let mut json_len = 0usize;
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
+        let success = f(&mut json_buffer, &mut json_len, &mut error_buffer);
+        if !success {
+            return Err(read_error_buffer(&error_buffer));
+        }
+
+        let bytes = json_buffer[..json_len]
+            .iter()
+            .map(|byte| *byte as u8)
+            .collect::<Vec<_>>();
+        serde_json::from_slice(&bytes).context("decoding CHIP JSON response")
     }
 
     fn decode_device(device: ChipBridgeDevice) -> Result<CommissionedDevice> {
