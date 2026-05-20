@@ -16,11 +16,17 @@ use crate::hub_state::MatterHubData;
 
 const DEFAULT_IDENTIFY_SECS: u16 = 2;
 const DEFAULT_BRIGHTNESS_LEVEL: u8 = 128;
+const VISUAL_BASELINE_PERCENT: u8 = 70;
+const VISUAL_BASELINE_KELVIN: u16 = 4000;
 const DEFAULT_WARM_KELVIN: u16 = 2700;
+const DEFAULT_COOL_KELVIN: u16 = 6500;
 const LOW_DIM_PERCENT: u8 = 3;
 const DIM_RAMP_START_PERCENT: u8 = 85;
 const DIM_RAMP_END_PERCENT: u8 = 10;
 const DIM_RAMP_TRANSITION_MS: u32 = 3000;
+const XY_RED: (f32, f32) = (0.70, 0.30);
+const XY_GREEN: (f32, f32) = (0.17, 0.70);
+const XY_BLUE: (f32, f32) = (0.15, 0.06);
 
 pub fn run_bulb_test(state: &SharedState, params: &Value) -> Result<Value> {
     let device_id = params
@@ -83,10 +89,7 @@ pub fn run_bulb_test(state: &SharedState, params: &Value) -> Result<Value> {
             read_on_off(&mut commands, &transport, node_id, endpoint);
         }
         "dim_low" => {
-            run_command(&mut commands, "set_on_off_true", || {
-                transport.set_on_off(node_id, endpoint, true)
-            });
-            sleep_ms(150);
+            set_visual_baseline(&mut commands, &transport, node_id, endpoint);
             run_command(&mut commands, "set_brightness_low_dim", || {
                 transport.set_brightness(
                     node_id,
@@ -99,10 +102,7 @@ pub fn run_bulb_test(state: &SharedState, params: &Value) -> Result<Value> {
             read_on_off(&mut commands, &transport, node_id, endpoint);
         }
         "dim_ramp" => {
-            run_command(&mut commands, "set_on_off_true", || {
-                transport.set_on_off(node_id, endpoint, true)
-            });
-            sleep_ms(100);
+            set_visual_baseline(&mut commands, &transport, node_id, endpoint);
             run_command(&mut commands, "set_brightness_ramp_start", || {
                 transport.set_brightness(
                     node_id,
@@ -123,28 +123,57 @@ pub fn run_bulb_test(state: &SharedState, params: &Value) -> Result<Value> {
             sleep_ms(700);
             read_on_off(&mut commands, &transport, node_id, endpoint);
         }
-        "color_temperature" => {
-            run_command(&mut commands, "set_on_off_true", || {
-                transport.set_on_off(node_id, endpoint, true)
-            });
-            sleep_ms(100);
+        "brightness_steps" => {
+            set_visual_baseline(&mut commands, &transport, node_id, endpoint);
+            for brightness in [20, 60, 100, 40] {
+                run_command(
+                    &mut commands,
+                    &format!("set_brightness_{}", brightness),
+                    || {
+                        transport.set_brightness(
+                            node_id,
+                            endpoint,
+                            crate::clusters::brightness_to_level(brightness),
+                            None,
+                        )
+                    },
+                );
+                sleep_ms(450);
+            }
+            read_on_off(&mut commands, &transport, node_id, endpoint);
+        }
+        "color_temperature" | "color_temperature_warm" => {
+            set_visual_baseline(&mut commands, &transport, node_id, endpoint);
             run_command(&mut commands, "set_color_temperature", || {
                 transport.set_color_temperature(node_id, endpoint, DEFAULT_WARM_KELVIN, None)
             });
         }
-        "xy_color" => {
-            run_command(&mut commands, "set_on_off_true", || {
-                transport.set_on_off(node_id, endpoint, true)
+        "color_temperature_cool" => {
+            set_visual_baseline(&mut commands, &transport, node_id, endpoint);
+            run_command(&mut commands, "set_color_temperature_cool", || {
+                transport.set_color_temperature(node_id, endpoint, DEFAULT_COOL_KELVIN, None)
             });
-            sleep_ms(100);
-            run_command(&mut commands, "set_xy", || {
-                transport.set_xy(node_id, endpoint, 0.70, 0.30, None)
+        }
+        "xy_color" | "xy_red" => {
+            set_visual_baseline(&mut commands, &transport, node_id, endpoint);
+            run_command(&mut commands, "set_xy_red", || {
+                transport.set_xy(node_id, endpoint, XY_RED.0, XY_RED.1, None)
+            });
+        }
+        "xy_green" => {
+            set_visual_baseline(&mut commands, &transport, node_id, endpoint);
+            run_command(&mut commands, "set_xy_green", || {
+                transport.set_xy(node_id, endpoint, XY_GREEN.0, XY_GREEN.1, None)
+            });
+        }
+        "xy_blue" => {
+            set_visual_baseline(&mut commands, &transport, node_id, endpoint);
+            run_command(&mut commands, "set_xy_blue", || {
+                transport.set_xy(node_id, endpoint, XY_BLUE.0, XY_BLUE.1, None)
             });
         }
         "rapid_commands" => {
-            run_command(&mut commands, "set_on_off_true", || {
-                transport.set_on_off(node_id, endpoint, true)
-            });
+            set_visual_baseline(&mut commands, &transport, node_id, endpoint);
             run_command(&mut commands, "set_brightness_40", || {
                 transport.set_brightness(node_id, endpoint, 40, None)
             });
@@ -342,6 +371,31 @@ fn apply_runtime_capabilities(
         crate::local_quirks::apply_capability_override(caps, override_caps);
     }
     Ok(())
+}
+
+fn set_visual_baseline(
+    commands: &mut Vec<Value>,
+    transport: &Arc<dyn crate::transport::MatterTransport>,
+    node_id: u64,
+    endpoint: u16,
+) {
+    run_command(commands, "baseline_set_on_off_true", || {
+        transport.set_on_off(node_id, endpoint, true)
+    });
+    sleep_ms(100);
+    run_command(commands, "baseline_set_brightness_70", || {
+        transport.set_brightness(
+            node_id,
+            endpoint,
+            crate::clusters::brightness_to_level(VISUAL_BASELINE_PERCENT),
+            None,
+        )
+    });
+    sleep_ms(150);
+    run_command(commands, "baseline_set_neutral_white", || {
+        transport.set_color_temperature(node_id, endpoint, VISUAL_BASELINE_KELVIN, None)
+    });
+    sleep_ms(350);
 }
 
 fn report_dir(state: &SharedState) -> Option<PathBuf> {
