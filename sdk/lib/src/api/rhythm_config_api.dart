@@ -174,9 +174,9 @@ class RhythmConfigApi {
   }
 
   /// Fetch full server state (GET /api/state) as a one-off request.
-  Future<RhythmHello> getState() async {
+  Future<RhythmHello> getState({bool authoritative = false}) async {
     try {
-      final data = await _getStatePayload();
+      final data = await _getStatePayload(authoritative: authoritative);
       return RhythmHello.fromJson(data);
     } on DioException catch (e) {
       throw RhythmApiException(
@@ -211,8 +211,13 @@ class RhythmConfigApi {
     return RhythmModeResource.fromJson(json).activeConfig?.activeProfileId;
   }
 
-  Future<Map<String, dynamic>> _getStatePayload() async {
-    final response = await _dio.get('api/state');
+  Future<Map<String, dynamic>> _getStatePayload({
+    bool authoritative = false,
+  }) async {
+    final response = await _dio.get(
+      'api/state',
+      queryParameters: authoritative ? const {'authoritative': 'true'} : null,
+    );
     return Map<String, dynamic>.from(response.data as Map<String, dynamic>);
   }
 

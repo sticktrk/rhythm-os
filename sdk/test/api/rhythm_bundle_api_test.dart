@@ -27,23 +27,57 @@ void main() {
         ),
       ).thenAnswer(
         (_) async => Response(
-          requestOptions: RequestOptions(path: 'api/configuration'),
+          requestOptions: RequestOptions(path: 'api/profile-bundle'),
           statusCode: 200,
-          data: {'kind': 'configuration_bundle'},
+          data: {'kind': 'profile_bundle'},
         ),
       );
 
       final result = await api.getConfigurationBundle();
 
-      expect(result, {'kind': 'configuration_bundle'});
+      expect(result, {'kind': 'profile_bundle'});
       final captured = verify(
         () => dio.get(
           captureAny(),
           options: captureAny(named: 'options'),
         ),
       ).captured;
-      expect(captured[0], 'api/configuration');
+      expect(captured[0], 'api/profile-bundle');
       expect((captured[1] as Options).validateStatus?.call(500), isTrue);
+    });
+  });
+
+  group('putConfigurationBundle', () {
+    test('sends profile bundles to the server profile-bundle route', () async {
+      when(
+        () => dio.put(
+          any(),
+          data: any(named: 'data'),
+          options: any(named: 'options'),
+        ),
+      ).thenAnswer(
+        (_) async => Response(
+          requestOptions: RequestOptions(path: 'api/profile-bundle'),
+          statusCode: 200,
+          data: {'kind': 'profile_bundle'},
+        ),
+      );
+
+      final result = await api.putConfigurationBundle(
+        const {'kind': 'profile_bundle'},
+      );
+
+      expect(result, {'kind': 'profile_bundle'});
+      final captured = verify(
+        () => dio.put(
+          captureAny(),
+          data: captureAny(named: 'data'),
+          options: captureAny(named: 'options'),
+        ),
+      ).captured;
+      expect(captured[0], 'api/profile-bundle');
+      expect(captured[1], {'kind': 'profile_bundle'});
+      expect((captured[2] as Options).validateStatus?.call(500), isTrue);
     });
   });
 

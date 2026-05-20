@@ -220,6 +220,44 @@ RhythmTimerSetting? _timerSettingFromJson(
   return RhythmTimerSetting.fromJson(value);
 }
 
+class RhythmObservedPower {
+  final bool? lightsOn;
+  final bool? fresh;
+  final String? source;
+
+  const RhythmObservedPower({
+    this.lightsOn,
+    this.fresh,
+    this.source,
+  });
+
+  factory RhythmObservedPower.fromJson(Map<String, dynamic> json) {
+    return RhythmObservedPower(
+      lightsOn: json['lights_on'] as bool?,
+      fresh: json['fresh'] as bool?,
+      source: json['source'] as String?,
+    );
+  }
+
+  static RhythmObservedPower? maybeFromJson(
+    Map<String, dynamic> json, {
+    bool synthesizeLegacy = false,
+  }) {
+    final observedPowerJson = jsonMap(json['observed_power']);
+    if (observedPowerJson != null) {
+      return RhythmObservedPower.fromJson(observedPowerJson);
+    }
+    if (!synthesizeLegacy || !json.containsKey('lights_on')) {
+      return null;
+    }
+    return RhythmObservedPower(
+      lightsOn: json['lights_on'] as bool?,
+      fresh: true,
+      source: 'legacy_lights_on',
+    );
+  }
+}
+
 /// A device from the Rhythm device registry.
 class RhythmDevice {
   final String id;
@@ -286,6 +324,7 @@ class RhythmRoom {
   final List<String> deviceIds;
   final List<RhythmDevice> devices;
   final RhythmNodeProfileSettings? profileSettings;
+  final RhythmObservedPower? observedPower;
   final bool? lightsOn;
   final int? brightness;
   final int? kelvin;
@@ -315,6 +354,7 @@ class RhythmRoom {
     this.devices = const [],
     RhythmNodeProfileSettings? profileSettings,
     RhythmNodeProfileSettings? roomProfile,
+    this.observedPower,
     this.lightsOn,
     this.brightness,
     this.kelvin,
@@ -340,6 +380,10 @@ class RhythmRoom {
   bool get isLightAddressable => kind.isLightAddressable;
 
   RhythmNodeProfileSettings? get roomProfile => profileSettings;
+
+  bool? get powerFresh => observedPower?.fresh;
+
+  String? get powerSource => observedPower?.source;
 
   List<RhythmDevice> get lights =>
       devices.where((d) => d.type == RhythmDeviceType.light).toList();
@@ -377,6 +421,10 @@ class RhythmRoom {
   }
 
   factory RhythmRoom.fromJson(Map<String, dynamic> json) {
+    final observedPower = RhythmObservedPower.maybeFromJson(
+      json,
+      synthesizeLegacy: json.containsKey('lights_on'),
+    );
     // Prefer hub_types array; fall back to legacy singular hub_type.
     var hubTypes = (json['hub_types'] as List<dynamic>?)?.cast<String>() ?? [];
     if (hubTypes.isEmpty) {
@@ -423,7 +471,8 @@ class RhythmRoom {
           ),
         _ => null,
       },
-      lightsOn: json['lights_on'] as bool?,
+      observedPower: observedPower,
+      lightsOn: observedPower?.lightsOn ?? json['lights_on'] as bool?,
       brightness: jsonInt(
         json['brightness'],
         preferredKeys: const ['brightness', 'brightness_pct'],
@@ -547,6 +596,7 @@ class RhythmRoomState {
   final List<String> hubTypes;
   final String? manufacturer;
   final String? model;
+  final RhythmObservedPower? observedPower;
   final bool? lightsOn;
   final int? brightness;
   final int? kelvin;
@@ -574,6 +624,7 @@ class RhythmRoomState {
     this.hubTypes = const [],
     this.manufacturer,
     this.model,
+    this.observedPower,
     this.lightsOn,
     this.brightness,
     this.kelvin,
@@ -593,9 +644,17 @@ class RhythmRoomState {
 
   RhythmNodeProfileSettings? get roomProfile => profileSettings;
 
+  bool? get powerFresh => observedPower?.fresh;
+
+  String? get powerSource => observedPower?.source;
+
   bool get softOff => state == RoomModeState.idle;
 
   factory RhythmRoomState.fromJson(Map<String, dynamic> json) {
+    final observedPower = RhythmObservedPower.maybeFromJson(
+      json,
+      synthesizeLegacy: json.containsKey('lights_on'),
+    );
     var hubTypes = (json['hub_types'] as List<dynamic>?)?.cast<String>() ?? [];
     if (hubTypes.isEmpty) {
       final legacy = json['hub_type'] as String?;
@@ -627,7 +686,8 @@ class RhythmRoomState {
       hubTypes: hubTypes,
       manufacturer: json['manufacturer'] as String?,
       model: json['model'] as String?,
-      lightsOn: json['lights_on'] as bool?,
+      observedPower: observedPower,
+      lightsOn: observedPower?.lightsOn ?? json['lights_on'] as bool?,
       brightness: jsonInt(
         json['brightness'],
         preferredKeys: const ['brightness', 'brightness_pct'],

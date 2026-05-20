@@ -246,6 +246,107 @@ void main() {
     });
   });
 
+  group('node offset batch dispatch metadata', () {
+    test('roomOffsetBatchResult parses queued response metadata', () async {
+      when(() => dio.put(any(),
+              data: any(named: 'data'), options: any(named: 'options')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(path: 'api/nodes/offset'),
+                statusCode: 200,
+                data: {
+                  'nodes': [
+                    {
+                      'node_id': 'room-1',
+                      'rhythm_enabled': true,
+                      'time_offset': 30.0,
+                      'brightness_offset': 0.0,
+                      'state': 'active',
+                    },
+                    {
+                      'node_id': 'room-2',
+                      'rhythm_enabled': true,
+                      'time_offset': 30.0,
+                      'brightness_offset': 0.0,
+                      'state': 'active',
+                    },
+                  ],
+                  'queued': true,
+                  'dispatch_count': 2,
+                  'dispatch_spacing_ms': 500,
+                  'estimated_dispatch_ms': 500,
+                },
+              ));
+
+      final result = await api.roomOffsetBatchResult([
+        (roomId: 'room-1', timeOffset: 30.0),
+        (roomId: 'room-2', timeOffset: 30.0),
+      ]);
+
+      expect(result.states, hasLength(2));
+      expect(result.queued, isTrue);
+      expect(result.dispatchCount, 2);
+      expect(result.dispatchSpacingMs, 500);
+      expect(
+          result.estimatedDispatchDuration, const Duration(milliseconds: 500));
+
+      verify(() => dio.put(
+            'api/nodes/offset',
+            data: {
+              'time_offset': 30.0,
+              'nodes': ['room-1', 'room-2'],
+            },
+            options: any(named: 'options'),
+          )).called(1);
+    });
+
+    test('nodeOffsetBatchResult can send custom dispatch spacing', () async {
+      when(() => dio.put(any(),
+              data: any(named: 'data'), options: any(named: 'options')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(path: 'api/nodes/offset'),
+                statusCode: 200,
+                data: {'nodes': const []},
+              ));
+
+      await api.nodeOffsetBatchResult(
+        [
+          (nodeId: 'room-1', timeOffset: 0.0),
+          (nodeId: 'room-2', timeOffset: 0.0),
+        ],
+        dispatchSpacingMs: 250,
+      );
+
+      verify(() => dio.put(
+            'api/nodes/offset',
+            data: {
+              'time_offset': 0.0,
+              'nodes': ['room-1', 'room-2'],
+              'dispatch_spacing_ms': 250,
+            },
+            options: any(named: 'options'),
+          )).called(1);
+    });
+
+    test('nodeOffsetPreviewResult sends periodic tick scope by default',
+        () async {
+      when(() => dio.put(any(),
+              data: any(named: 'data'), options: any(named: 'options')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(path: 'api/nodes/offset'),
+                statusCode: 200,
+                data: {'nodes': const []},
+              ));
+
+      await api.nodeOffsetPreviewResult(timeOffset: -40.0);
+
+      verify(() => dio.put(
+            'api/nodes/offset',
+            data: {'time_offset': -40.0},
+            options: any(named: 'options'),
+          )).called(1);
+    });
+  });
+
   group('node preference writes', () {
     test('nodePreferencesSet sends profile_settings on the node endpoint',
         () async {
@@ -287,10 +388,11 @@ void main() {
       when(() => dio.put(
             any(),
             data: any(named: 'data'),
-            queryParameters: any(named: 'queryParameters'),
+            options: any(named: 'options'),
           )).thenAnswer((_) async => Response(
             requestOptions: RequestOptions(path: 'api/nodes/preferences'),
-            statusCode: 204,
+            statusCode: 200,
+            data: {'nodes': const []},
           ));
 
       await api.nodePreferencesBatchSet([
@@ -323,7 +425,48 @@ void main() {
                 },
               },
             ],
-            queryParameters: null,
+            options: any(named: 'options'),
+          )).called(1);
+    });
+
+    test('nodePreferencesBatchSet can send dispatch spacing metadata',
+        () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/nodes/preferences'),
+            statusCode: 200,
+            data: {
+              'nodes': const [],
+              'queued': true,
+              'dispatch_count': 2,
+              'dispatch_spacing_ms': 250,
+              'estimated_dispatch_ms': 250,
+            },
+          ));
+
+      final result = await api.nodePreferencesBatchSetResult(
+        [
+          {'node_id': 'room-1', 'state': 'active'},
+          {'node_id': 'room-2', 'state': 'idle'},
+        ],
+        dispatchSpacingMs: 250,
+      );
+
+      expect(result.queued, isTrue);
+      expect(result.dispatchSpacingMs, 250);
+      verify(() => dio.put(
+            'api/nodes/preferences',
+            data: {
+              'nodes': [
+                {'node_id': 'room-1', 'state': 'active'},
+                {'node_id': 'room-2', 'state': 'idle'},
+              ],
+              'dispatch_spacing_ms': 250,
+            },
+            options: any(named: 'options'),
           )).called(1);
     });
   });
@@ -796,6 +939,151 @@ void main() {
       );
 
       expect(ok, isFalse);
+    });
+  });
+
+  group('input bindings', () {
+    Map<String, dynamic> bindingJson({
+      String id = 'day_sleep_toggle:button-1:on_press',
+      String sourceNodeId = 'button-1',
+    }) {
+      return {
+        'id': id,
+        'preset': 'day_sleep_toggle',
+        'source_node_id': sourceNodeId,
+        'trigger': {
+          'kind': 'button',
+          'button_action': 'on_press',
+        },
+        'action': {
+          'kind': 'mode_cycle',
+          'modes': ['day', 'sleep'],
+          'transition': {'kind': 'auto'},
+        },
+        'enabled': true,
+      };
+    }
+
+    test('getInputBindings parses the bindings wrapper', () async {
+      when(() => dio.get(any())).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/input-bindings'),
+            statusCode: 200,
+            data: {
+              'bindings': [bindingJson()],
+            },
+          ));
+
+      final bindings = await api.getInputBindings();
+
+      expect(bindings, hasLength(1));
+      expect(bindings.single.preset, RhythmInputBindingPreset.daySleepToggle);
+      verify(() => dio.get('api/input-bindings')).called(1);
+    });
+
+    test('createDaySleepToggleInputBinding posts the preset request', () async {
+      when(() => dio.post(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(path: 'api/input-bindings'),
+                statusCode: 200,
+                data: {
+                  'bindings': [bindingJson()],
+                },
+              ));
+
+      final bindings = await api.createDaySleepToggleInputBinding(
+        sourceNodeId: 'button-1',
+      );
+
+      expect(bindings.single.id, 'day_sleep_toggle:button-1:on_press');
+      verify(() => dio.post('api/input-bindings', data: {
+            'preset': 'day_sleep_toggle',
+            'source_node_id': 'button-1',
+            'button_action': 'on_press',
+            'enabled': true,
+          })).called(1);
+    });
+
+    test('setPresetInputBinding puts an explicit binding id', () async {
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions:
+                    RequestOptions(path: 'api/input-bindings/bedroom'),
+                statusCode: 200,
+                data: {
+                  'bindings': [bindingJson(id: 'bedroom')],
+                },
+              ));
+
+      final bindings = await api.setPresetInputBinding(
+        id: 'bedroom',
+        preset: RhythmInputBindingPreset.daySleepToggle,
+        sourceNodeId: 'button-1',
+        buttonAction: RhythmButtonAction.offPress,
+        enabled: false,
+      );
+
+      expect(bindings.single.id, 'bedroom');
+      verify(() => dio.put('api/input-bindings/bedroom', data: {
+            'preset': 'day_sleep_toggle',
+            'source_node_id': 'button-1',
+            'button_action': 'off_press',
+            'enabled': false,
+          })).called(1);
+    });
+
+    test('setInputBinding puts generic trigger and action JSON', () async {
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions:
+                    RequestOptions(path: 'api/input-bindings/custom'),
+                statusCode: 200,
+                data: {
+                  'bindings': [bindingJson(id: 'custom')],
+                },
+              ));
+
+      const binding = RhythmInputBinding(
+        id: 'custom',
+        sourceNodeId: 'button-1',
+        trigger: RhythmInputBindingTrigger.button(
+          buttonAction: RhythmButtonAction.offPress,
+        ),
+        action: RhythmModeCycleAction(
+          modes: [RhythmMode.day, RhythmMode.sleep],
+          transition: RhythmModeTransitionSelection.none(),
+        ),
+      );
+
+      await api.setInputBinding(binding);
+
+      verify(() => dio.put('api/input-bindings/custom', data: {
+            'id': 'custom',
+            'source_node_id': 'button-1',
+            'trigger': {
+              'kind': 'button',
+              'button_action': 'off_press',
+            },
+            'action': {
+              'kind': 'mode_cycle',
+              'modes': ['day', 'sleep'],
+              'transition': {'kind': 'none'},
+            },
+            'enabled': true,
+          })).called(1);
+    });
+
+    test('deleteInputBinding returns the updated binding list', () async {
+      when(() => dio.delete(any())).thenAnswer((_) async => Response(
+            requestOptions:
+                RequestOptions(path: 'api/input-bindings/old-binding'),
+            statusCode: 200,
+            data: {'bindings': <dynamic>[]},
+          ));
+
+      final bindings = await api.deleteInputBinding('old-binding');
+
+      expect(bindings, isEmpty);
+      verify(() => dio.delete('api/input-bindings/old-binding')).called(1);
     });
   });
 

@@ -3,9 +3,76 @@ import 'package:logging/logging.dart';
 
 import '../models/rhythm_curve_config.dart';
 import '../models/rhythm_curve_data.dart';
+import '../models/rhythm_input_binding.dart';
 import '../models/rhythm_room.dart';
 import '../models/rhythm_settings.dart';
 import '../models/rhythm_time_info.dart';
+
+class RhythmDispatchMetadata {
+  final bool queued;
+  final int? dispatchCount;
+  final int? dispatchSpacingMs;
+  final int? estimatedDispatchMs;
+
+  const RhythmDispatchMetadata({
+    this.queued = false,
+    this.dispatchCount,
+    this.dispatchSpacingMs,
+    this.estimatedDispatchMs,
+  });
+
+  factory RhythmDispatchMetadata.fromJson(Map<String, dynamic> json) {
+    return RhythmDispatchMetadata(
+      queued: json['queued'] as bool? ?? false,
+      dispatchCount: _jsonInt(json['dispatch_count']),
+      dispatchSpacingMs: _jsonInt(json['dispatch_spacing_ms']),
+      estimatedDispatchMs: _jsonInt(json['estimated_dispatch_ms']),
+    );
+  }
+
+  Duration? get estimatedDispatchDuration {
+    final explicitMs = estimatedDispatchMs;
+    if (explicitMs != null) return Duration(milliseconds: explicitMs);
+
+    final count = dispatchCount;
+    final spacingMs = dispatchSpacingMs;
+    if (count == null || spacingMs == null || count <= 1) return null;
+    return Duration(milliseconds: (count - 1) * spacingMs);
+  }
+
+  bool get hasLoadingMetadata =>
+      queued ||
+      dispatchCount != null ||
+      dispatchSpacingMs != null ||
+      estimatedDispatchMs != null;
+}
+
+class RhythmDispatchResult {
+  final List<RhythmRoomState> states;
+  final RhythmDispatchMetadata metadata;
+
+  const RhythmDispatchResult({
+    this.states = const [],
+    this.metadata = const RhythmDispatchMetadata(),
+  });
+
+  List<RhythmRoomState> get nodes => states;
+  bool get queued => metadata.queued;
+  int? get dispatchCount => metadata.dispatchCount;
+  int? get dispatchSpacingMs => metadata.dispatchSpacingMs;
+  int? get estimatedDispatchMs => metadata.estimatedDispatchMs;
+  Duration? get estimatedDispatchDuration => metadata.estimatedDispatchDuration;
+}
+
+class RhythmAbsorbTimeOffsetResult {
+  final RhythmCurveConfig? config;
+  final RhythmDispatchResult dispatch;
+
+  const RhythmAbsorbTimeOffsetResult({
+    this.config,
+    this.dispatch = const RhythmDispatchResult(),
+  });
+}
 
 /// Callback to update the connection manager's internal cache after action
 /// responses. This keeps SSE/poll diffs from re-emitting state that was
@@ -70,32 +137,53 @@ class RhythmServerApi {
 
   /// Dispatch actions for multiple nodes in a single request.
   Future<List<RhythmRoomState>> nodeActionBatch(
-    List<({String nodeId, String action})> actions,
-  ) async {
-    if (actions.isEmpty) return [];
+      List<({String nodeId, String action})> actions,
+      {int? dispatchSpacingMs}) async {
+    return (await nodeActionBatchResult(
+      actions,
+      dispatchSpacingMs: dispatchSpacingMs,
+    ))
+        .states;
+  }
+
+  /// Dispatch actions for multiple nodes in a single request.
+  Future<RhythmDispatchResult> nodeActionBatchResult(
+      List<({String nodeId, String action})> actions,
+      {int? dispatchSpacingMs}) async {
+    if (actions.isEmpty) return const RhythmDispatchResult();
     try {
       final response = await _dio.put(
         'api/nodes/action',
-        data: [
+        data: _nodesBatchBody([
           for (final a in actions) {'node_id': a.nodeId, 'action': a.action}
-        ],
+        ], dispatchSpacingMs: dispatchSpacingMs),
         options: Options(receiveTimeout: const Duration(seconds: 30)),
       );
-      return _parseAndCacheStatesResponse(response.data);
+      return _parseAndCacheDispatchResponse(response.data);
     } catch (e) {
       _log.warning('nodeActionBatch failed', e);
     }
-    return [];
+    return const RhythmDispatchResult();
   }
 
   /// Dispatch actions for multiple rooms in a single request.
   Future<List<RhythmRoomState>> roomActionBatch(
-    List<({String roomId, String action})> actions,
-  ) {
+      List<({String roomId, String action})> actions,
+      {int? dispatchSpacingMs}) {
     return nodeActionBatch([
       for (final action in actions)
         (nodeId: action.roomId, action: action.action),
-    ]);
+    ], dispatchSpacingMs: dispatchSpacingMs);
+  }
+
+  /// Dispatch actions for multiple rooms in a single request.
+  Future<RhythmDispatchResult> roomActionBatchResult(
+      List<({String roomId, String action})> actions,
+      {int? dispatchSpacingMs}) {
+    return nodeActionBatchResult([
+      for (final action in actions)
+        (nodeId: action.roomId, action: action.action),
+    ], dispatchSpacingMs: dispatchSpacingMs);
   }
 
   /// Set node brightness via the server runtime.
@@ -119,33 +207,54 @@ class RhythmServerApi {
 
   /// Set brightness for multiple nodes in a single request.
   Future<List<RhythmRoomState>> nodeBrightnessBatch(
-    List<({String nodeId, int brightness})> items,
-  ) async {
-    if (items.isEmpty) return [];
+      List<({String nodeId, int brightness})> items,
+      {int? dispatchSpacingMs}) async {
+    return (await nodeBrightnessBatchResult(
+      items,
+      dispatchSpacingMs: dispatchSpacingMs,
+    ))
+        .states;
+  }
+
+  /// Set brightness for multiple nodes in a single request.
+  Future<RhythmDispatchResult> nodeBrightnessBatchResult(
+      List<({String nodeId, int brightness})> items,
+      {int? dispatchSpacingMs}) async {
+    if (items.isEmpty) return const RhythmDispatchResult();
     try {
       final response = await _dio.put(
         'api/nodes/brightness',
-        data: [
+        data: _nodesBatchBody([
           for (final i in items)
             {'node_id': i.nodeId, 'brightness': i.brightness}
-        ],
+        ], dispatchSpacingMs: dispatchSpacingMs),
         options: Options(receiveTimeout: const Duration(seconds: 30)),
       );
-      return _parseAndCacheStatesResponse(response.data);
+      return _parseAndCacheDispatchResponse(response.data);
     } catch (e) {
       _log.warning('nodeBrightnessBatch failed', e);
     }
-    return [];
+    return const RhythmDispatchResult();
   }
 
   /// Set brightness for multiple rooms in a single request.
   Future<List<RhythmRoomState>> roomBrightnessBatch(
-    List<({String roomId, int brightness})> items,
-  ) {
+      List<({String roomId, int brightness})> items,
+      {int? dispatchSpacingMs}) {
     return nodeBrightnessBatch([
       for (final item in items)
         (nodeId: item.roomId, brightness: item.brightness),
-    ]);
+    ], dispatchSpacingMs: dispatchSpacingMs);
+  }
+
+  /// Set brightness for multiple rooms in a single request.
+  Future<RhythmDispatchResult> roomBrightnessBatchResult(
+      List<({String roomId, int brightness})> items,
+      {int? dispatchSpacingMs}) {
+    return nodeBrightnessBatchResult([
+      for (final item in items)
+        (nodeId: item.roomId, brightness: item.brightness),
+    ], dispatchSpacingMs: dispatchSpacingMs);
   }
 
   /// Set the time offset for a single node.
@@ -153,10 +262,10 @@ class RhythmServerApi {
     required String nodeId,
     required double timeOffset,
   }) async {
-    await _safePut('api/nodes/offset', data: {
-      'node_id': nodeId,
-      'time_offset': timeOffset,
-    });
+    await nodeOffsetPreviewResult(
+      timeOffset: timeOffset,
+      nodes: [nodeId],
+    );
   }
 
   /// Set the time offset for a single room via the node-first contract.
@@ -169,33 +278,81 @@ class RhythmServerApi {
 
   /// Set time offset for multiple nodes in a single request.
   Future<List<RhythmRoomState>> nodeOffsetBatch(
-    List<({String nodeId, double timeOffset})> items,
-  ) async {
-    if (items.isEmpty) return [];
+      List<({String nodeId, double timeOffset})> items,
+      {int? dispatchSpacingMs}) async {
+    return (await nodeOffsetBatchResult(
+      items,
+      dispatchSpacingMs: dispatchSpacingMs,
+    ))
+        .states;
+  }
+
+  /// Set time offset for multiple nodes in a single request.
+  Future<RhythmDispatchResult> nodeOffsetBatchResult(
+      List<({String nodeId, double timeOffset})> items,
+      {int? dispatchSpacingMs}) async {
+    if (items.isEmpty) return const RhythmDispatchResult();
+    final timeOffset = items.first.timeOffset;
+    final hasMixedOffsets = items.any((i) => i.timeOffset != timeOffset);
+    if (hasMixedOffsets) {
+      throw ArgumentError.value(
+        items,
+        'items',
+        'nodeOffsetBatchResult requires the same timeOffset for every node',
+      );
+    }
+    return nodeOffsetPreviewResult(
+      timeOffset: timeOffset,
+      nodes: [for (final i in items) i.nodeId],
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
+  }
+
+  /// Preview a time offset using the server-owned periodic tick target scope.
+  ///
+  /// When [nodes] is omitted or empty, the server targets the same nodes it
+  /// would target during a periodic tick.
+  Future<RhythmDispatchResult> nodeOffsetPreviewResult({
+    required double timeOffset,
+    List<String>? nodes,
+    int? dispatchSpacingMs,
+  }) async {
     try {
       final response = await _dio.put(
         'api/nodes/offset',
-        data: [
-          for (final i in items)
-            {'node_id': i.nodeId, 'time_offset': i.timeOffset}
-        ],
+        data: <String, Object?>{
+          'time_offset': timeOffset,
+          if (nodes != null) 'nodes': nodes,
+          if (dispatchSpacingMs != null)
+            'dispatch_spacing_ms': dispatchSpacingMs,
+        },
         options: Options(receiveTimeout: const Duration(seconds: 30)),
       );
-      return _parseAndCacheStatesResponse(response.data);
+      return _parseAndCacheDispatchResponse(response.data);
     } catch (e) {
-      _log.warning('nodeOffsetBatch failed', e);
+      _log.warning('nodeOffsetPreview failed', e);
     }
-    return [];
+    return const RhythmDispatchResult();
   }
 
   /// Set time offset for multiple rooms in a single request.
   Future<List<RhythmRoomState>> roomOffsetBatch(
-    List<({String roomId, double timeOffset})> items,
-  ) {
+      List<({String roomId, double timeOffset})> items,
+      {int? dispatchSpacingMs}) {
     return nodeOffsetBatch([
       for (final item in items)
         (nodeId: item.roomId, timeOffset: item.timeOffset),
-    ]);
+    ], dispatchSpacingMs: dispatchSpacingMs);
+  }
+
+  /// Set time offset for multiple rooms in a single request.
+  Future<RhythmDispatchResult> roomOffsetBatchResult(
+      List<({String roomId, double timeOffset})> items,
+      {int? dispatchSpacingMs}) {
+    return nodeOffsetBatchResult([
+      for (final item in items)
+        (nodeId: item.roomId, timeOffset: item.timeOffset),
+    ], dispatchSpacingMs: dispatchSpacingMs);
   }
 
   /// Push node preferences (rhythm_enabled, disabled, soft_off).
@@ -243,21 +400,60 @@ class RhythmServerApi {
   }
 
   /// Push node preferences for multiple nodes.
-  Future<void> nodePreferencesBatchSet(List<Map<String, dynamic>> items) async {
-    if (items.isEmpty) return;
-    await _safePut('api/nodes/preferences',
-        data: [for (final item in items) _normalizeNodePreferencesItem(item)]);
+  Future<void> nodePreferencesBatchSet(
+    List<Map<String, dynamic>> items, {
+    int? dispatchSpacingMs,
+  }) async {
+    await nodePreferencesBatchSetResult(
+      items,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
+  }
+
+  /// Push node preferences for multiple nodes.
+  Future<RhythmDispatchResult> nodePreferencesBatchSetResult(
+    List<Map<String, dynamic>> items, {
+    int? dispatchSpacingMs,
+  }) async {
+    if (items.isEmpty) return const RhythmDispatchResult();
+    try {
+      final response = await _dio.put(
+        'api/nodes/preferences',
+        data: _nodesBatchBody(
+            [for (final item in items) _normalizeNodePreferencesItem(item)],
+            dispatchSpacingMs: dispatchSpacingMs),
+        options: Options(receiveTimeout: const Duration(seconds: 30)),
+      );
+      return _parseAndCacheDispatchResponse(response.data);
+    } catch (e) {
+      _log.warning('nodePreferencesBatchSet failed', e);
+    }
+    return const RhythmDispatchResult();
   }
 
   /// Push room preferences for multiple rooms.
-  Future<void> roomPreferencesBatchSet(List<Map<String, dynamic>> items) async {
-    await nodePreferencesBatchSet([
+  Future<void> roomPreferencesBatchSet(
+    List<Map<String, dynamic>> items, {
+    int? dispatchSpacingMs,
+  }) async {
+    await roomPreferencesBatchSetResult(
+      items,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
+  }
+
+  /// Push room preferences for multiple rooms.
+  Future<RhythmDispatchResult> roomPreferencesBatchSetResult(
+    List<Map<String, dynamic>> items, {
+    int? dispatchSpacingMs,
+  }) async {
+    return nodePreferencesBatchSetResult([
       for (final item in items)
         {
           ...item,
           'node_id': item['room_id'],
         },
-    ]);
+    ], dispatchSpacingMs: dispatchSpacingMs);
   }
 
   /// Reset the provided nodes back to their current adaptive curve position.
@@ -348,6 +544,14 @@ class RhythmServerApi {
     double offsetMinutes, {
     String? id,
   }) async {
+    return (await absorbTimeOffsetResult(offsetMinutes, id: id)).config;
+  }
+
+  /// Absorb a time offset and return dispatch metadata for UI loading.
+  Future<RhythmAbsorbTimeOffsetResult> absorbTimeOffsetResult(
+    double offsetMinutes, {
+    String? id,
+  }) async {
     try {
       final response = await _dio.post(
         'api/config/absorb-offset',
@@ -358,12 +562,22 @@ class RhythmServerApi {
       );
       final data = response.data;
       if (data is Map<String, dynamic>) {
-        return _parseCurveConfig(data);
+        final configData = data['config'] is Map<String, dynamic>
+            ? data['config'] as Map<String, dynamic>
+            : data['profile'] is Map<String, dynamic>
+                ? data['profile'] as Map<String, dynamic>
+                : data;
+        final dispatchData =
+            data['dispatch'] ?? data['dispatch_result'] ?? data;
+        return RhythmAbsorbTimeOffsetResult(
+          config: _parseCurveConfig(configData),
+          dispatch: _parseAndCacheDispatchResponse(dispatchData),
+        );
       }
     } catch (e) {
-      _log.warning('absorbTimeOffset failed', e);
+      _log.warning('absorbTimeOffsetResult failed', e);
     }
-    return null;
+    return const RhythmAbsorbTimeOffsetResult();
   }
 
   /// Reset a stored profile config to built-in defaults.
@@ -387,10 +601,15 @@ class RhythmServerApi {
 
   /// Push a full profile configuration to the server.
   ///
+  /// When [apply] is true and [id] is the server's currently active profile,
+  /// the server immediately re-dispatches lights with the new tuning without
+  /// changing mode or transition state. Inactive profiles save silently.
+  ///
   /// Returns `true` when the server accepts the update and `false` on failure.
   Future<bool> configSet(
     RhythmCurveConfig config, {
     String? id,
+    bool apply = false,
   }) async {
     final profileId = id ?? config.id;
     if (profileId.isEmpty) {
@@ -400,7 +619,10 @@ class RhythmServerApi {
     try {
       await _dio.put(
         'api/config',
-        queryParameters: {'id': profileId},
+        queryParameters: {
+          'id': profileId,
+          if (apply) 'apply': 'true',
+        },
         data: config.toJson(),
       );
       return true;
@@ -569,9 +791,11 @@ class RhythmServerApi {
   /// Returns `true` when the server accepts the update and `false` on failure.
   Future<bool> settingsSet({
     bool? powerSave,
+    bool? autoUpdate,
   }) async {
     final data = <String, dynamic>{
       if (powerSave != null) 'power_save': powerSave,
+      if (autoUpdate != null) 'auto_update': autoUpdate,
     };
     if (data.isEmpty) return true;
     try {
@@ -648,6 +872,19 @@ class RhythmServerApi {
       _log.warning('saveMatterBulbTestReport failed', e);
     }
     return null;
+  }
+
+  /// Briefly pulse a Light device for physical identification. The server
+  /// only supports this for Light devices; other types return an error.
+  Future<bool> flashCanonicalDevice(String id) async {
+    try {
+      final response = await _dio.post('api/devices/canonical/$id/flash');
+      final code = response.statusCode ?? 0;
+      return code >= 200 && code < 300;
+    } catch (e) {
+      _log.warning('flashCanonicalDevice failed', e);
+    }
+    return false;
   }
 
   // =========================================================================
@@ -754,6 +991,122 @@ class RhythmServerApi {
       _log.warning('triggerTransition failed', e);
     }
     return false;
+  }
+
+  /// Fetch persisted physical input bindings.
+  Future<List<RhythmInputBinding>> getInputBindings() async {
+    try {
+      final response = await _dio.get('api/input-bindings');
+      return _parseInputBindingsResponse(response.data);
+    } catch (e) {
+      _log.warning('getInputBindings failed', e);
+    }
+    return const [];
+  }
+
+  /// Create a preset-backed input binding with a server-generated stable ID.
+  Future<List<RhythmInputBinding>> createPresetInputBinding({
+    required RhythmInputBindingPreset preset,
+    required String sourceNodeId,
+    RhythmButtonAction? buttonAction,
+    bool enabled = true,
+  }) async {
+    try {
+      final response = await _dio.post('api/input-bindings', data: {
+        'preset': preset.wireValue,
+        'source_node_id': sourceNodeId,
+        if (buttonAction != null) 'button_action': buttonAction.wireValue,
+        'enabled': enabled,
+      });
+      return _parseInputBindingsResponse(response.data);
+    } catch (e) {
+      _log.warning('createPresetInputBinding failed', e);
+    }
+    return const [];
+  }
+
+  /// Create the built-in day/sleep toggle binding for a selected button.
+  Future<List<RhythmInputBinding>> createDaySleepToggleInputBinding({
+    required String sourceNodeId,
+    RhythmButtonAction? buttonAction = RhythmButtonAction.onPress,
+    bool enabled = true,
+  }) {
+    return createPresetInputBinding(
+      preset: RhythmInputBindingPreset.daySleepToggle,
+      sourceNodeId: sourceNodeId,
+      buttonAction: buttonAction,
+      enabled: enabled,
+    );
+  }
+
+  /// Set or replace a preset-backed input binding with an explicit ID.
+  Future<List<RhythmInputBinding>> setPresetInputBinding({
+    required String id,
+    required RhythmInputBindingPreset preset,
+    required String sourceNodeId,
+    RhythmButtonAction? buttonAction,
+    bool enabled = true,
+  }) async {
+    try {
+      final response = await _dio.put(
+        'api/input-bindings/${Uri.encodeComponent(id)}',
+        data: {
+          'preset': preset.wireValue,
+          'source_node_id': sourceNodeId,
+          if (buttonAction != null) 'button_action': buttonAction.wireValue,
+          'enabled': enabled,
+        },
+      );
+      return _parseInputBindingsResponse(response.data);
+    } catch (e) {
+      _log.warning('setPresetInputBinding failed', e);
+    }
+    return const [];
+  }
+
+  /// Set or replace a built-in day/sleep toggle binding with an explicit ID.
+  Future<List<RhythmInputBinding>> setDaySleepToggleInputBinding({
+    required String id,
+    required String sourceNodeId,
+    RhythmButtonAction? buttonAction = RhythmButtonAction.onPress,
+    bool enabled = true,
+  }) {
+    return setPresetInputBinding(
+      id: id,
+      preset: RhythmInputBindingPreset.daySleepToggle,
+      sourceNodeId: sourceNodeId,
+      buttonAction: buttonAction,
+      enabled: enabled,
+    );
+  }
+
+  /// Set or replace a generic input binding with explicit trigger/action JSON.
+  Future<List<RhythmInputBinding>> setInputBinding(
+    RhythmInputBinding binding,
+  ) async {
+    try {
+      final response = await _dio.put(
+        'api/input-bindings/${Uri.encodeComponent(binding.id)}',
+        data: binding.toJson(),
+      );
+      return _parseInputBindingsResponse(response.data);
+    } catch (e) {
+      _log.warning('setInputBinding failed', e);
+    }
+    return const [];
+  }
+
+  /// Delete a persisted input binding by ID.
+  Future<List<RhythmInputBinding>> deleteInputBinding(String id) async {
+    try {
+      final response = await _dio.delete(
+        'api/input-bindings/${Uri.encodeComponent(id)}',
+      );
+      return _parseInputBindingsResponse(response.data);
+    } catch (e) {
+      _log.warning('deleteInputBinding failed', e);
+    }
+    return const [];
   }
 
   /// Resolve a triage entry by creating a new canonical device.
@@ -919,17 +1272,26 @@ class RhythmServerApi {
   /// Commission a new device (Matter, Zigbee, etc.).
   ///
   /// Returns the [PairingSession] JSON from the server, or `null` on error.
+  ///
+  /// [sessionId] is an optional client-generated correlation ID. When
+  /// supplied, the server echoes it on `pairing_progress` SSE events so the
+  /// caller can match streamed progress to its own pairing request.
   Future<Map<String, dynamic>?> pairDevice({
     required String hubType,
     Map<String, dynamic> params = const {},
     Duration receiveTimeout = const Duration(seconds: 45),
+    String? sessionId,
   }) async {
     try {
+      final mergedParams = sessionId == null
+          ? params
+          : <String, dynamic>{...params, 'session_id': sessionId};
       final response = await _dio.post(
         'api/devices/pair',
         data: {
           'hub_type': hubType,
-          'params': params,
+          if (sessionId != null) 'session_id': sessionId,
+          'params': mergedParams,
         },
         options: Options(
           receiveTimeout: receiveTimeout,
@@ -1111,12 +1473,21 @@ class RhythmServerApi {
     return RhythmCurveConfig.fromJson(json);
   }
 
-  List<RhythmRoomState> _parseAndCacheStatesResponse(dynamic responseData) {
+  RhythmDispatchResult _parseAndCacheDispatchResponse(dynamic responseData) {
+    if (responseData is List<dynamic>) {
+      return RhythmDispatchResult(
+        states: _parseAndCacheStatesList(responseData),
+      );
+    }
     final data = responseData as Map<String, dynamic>?;
     final states =
         data?['nodes'] as List<dynamic>? ?? data?['rooms'] as List<dynamic>?;
-    if (states == null) return [];
-    return _parseAndCacheStatesList(states);
+    return RhythmDispatchResult(
+      states: states == null ? const [] : _parseAndCacheStatesList(states),
+      metadata: data == null
+          ? const RhythmDispatchMetadata()
+          : RhythmDispatchMetadata.fromJson(data),
+    );
   }
 
   List<RhythmRoomState> _parseAndCacheStatesList(List<dynamic> states) {
@@ -1203,4 +1574,40 @@ class RhythmServerApi {
     }
     return value;
   }
+
+  Object _nodesBatchBody(
+    List<Map<String, dynamic>> nodes, {
+    int? dispatchSpacingMs,
+  }) {
+    final normalizedSpacing = _normalizedDispatchSpacingMs(dispatchSpacingMs);
+    if (normalizedSpacing == null) return nodes;
+    return {
+      'nodes': nodes,
+      'dispatch_spacing_ms': normalizedSpacing,
+    };
+  }
+}
+
+int? _jsonInt(Object? value) => switch (value) {
+      int v => v,
+      num v => v.toInt(),
+      String v => int.tryParse(v),
+      _ => null,
+    };
+
+List<RhythmInputBinding> _parseInputBindingsResponse(Object? data) {
+  if (data is Map<String, dynamic>) {
+    return RhythmInputBindings.fromJson(data).bindings;
+  }
+  if (data is Map) {
+    return RhythmInputBindings.fromJson(data.cast<String, dynamic>()).bindings;
+  }
+  return const [];
+}
+
+int? _normalizedDispatchSpacingMs(int? value) {
+  if (value == null) return null;
+  if (value < 0) return 0;
+  if (value > 60000) return 60000;
+  return value;
 }

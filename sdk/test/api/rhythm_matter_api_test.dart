@@ -55,6 +55,71 @@ void main() {
         contains('appliance Wi-Fi must already be provisioned on the server'),
       );
     });
+
+    test('forwards sessionId at top level and in params', () async {
+      Map<String, dynamic>? capturedBody;
+      server = await _FakeMatterServer.start(
+        pairHandler: (request) async {
+          final raw = await utf8.decoder.bind(request).join();
+          capturedBody = jsonDecode(raw) as Map<String, dynamic>;
+          request.response.headers.contentType = ContentType.json;
+          request.response.write(jsonEncode({
+            'hub_type': 'matter',
+            'status': 'complete',
+            'device': {
+              'device_id': 'matter-1',
+              'name': 'Bulb',
+              'device_type': 'light',
+            },
+          }));
+          await request.response.close();
+        },
+      );
+      api = RhythmMatterApi(baseUrl: 'http://127.0.0.1:${server!.port}');
+
+      await api!.pairDevice(
+        setupPayload: 'MT:Y.K908OC16750648G00',
+        sessionId: 'pair-42',
+      );
+
+      expect(capturedBody, isNotNull);
+      expect(capturedBody!['hub_type'], 'matter');
+      expect(capturedBody!['session_id'], 'pair-42');
+      final params = capturedBody!['params'] as Map<String, dynamic>;
+      expect(params['session_id'], 'pair-42');
+      expect(params['setup_payload'], 'MT:Y.K908OC16750648G00');
+      expect(params['network'], 'wifi');
+      expect(params['rendezvous'], 'auto');
+    });
+
+    test('omits sessionId fields when not provided', () async {
+      Map<String, dynamic>? capturedBody;
+      server = await _FakeMatterServer.start(
+        pairHandler: (request) async {
+          final raw = await utf8.decoder.bind(request).join();
+          capturedBody = jsonDecode(raw) as Map<String, dynamic>;
+          request.response.headers.contentType = ContentType.json;
+          request.response.write(jsonEncode({
+            'hub_type': 'matter',
+            'status': 'complete',
+            'device': {
+              'device_id': 'matter-2',
+              'name': 'Bulb',
+              'device_type': 'light',
+            },
+          }));
+          await request.response.close();
+        },
+      );
+      api = RhythmMatterApi(baseUrl: 'http://127.0.0.1:${server!.port}');
+
+      await api!.pairDevice(setupPayload: 'MT:Y.K908OC16750648G00');
+
+      expect(capturedBody, isNotNull);
+      expect(capturedBody!.containsKey('session_id'), isFalse);
+      final params = capturedBody!['params'] as Map<String, dynamic>;
+      expect(params.containsKey('session_id'), isFalse);
+    });
   });
 }
 

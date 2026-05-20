@@ -106,6 +106,10 @@ sealed class TransitionDuration {
     if (json is Map && json['mode'] == 'auto') {
       return const TransitionDurationAuto();
     }
+    if (json is Map && json['mode'] == 'fixed') {
+      final value = json['value'];
+      if (value is num) return TransitionDurationFixed(value.toInt());
+    }
     return const TransitionDurationAuto();
   }
 
@@ -121,7 +125,10 @@ class TransitionDurationFixed extends TransitionDuration {
   const TransitionDurationFixed(this.milliseconds);
 
   @override
-  dynamic toJson() => milliseconds;
+  dynamic toJson() => {
+        'mode': 'fixed',
+        'value': milliseconds,
+      };
   @override
   bool get isAuto => false;
   @override
@@ -160,6 +167,7 @@ class RhythmModeTransitionConfig {
   final RhythmMode fromMode;
   final RhythmMode toMode;
   final RhythmTransitionTrigger trigger;
+  final bool triggerEnabled;
   final TransitionDuration duration;
   final bool preserveHardOff;
 
@@ -169,6 +177,7 @@ class RhythmModeTransitionConfig {
     required this.fromMode,
     required this.toMode,
     this.trigger = const RhythmTransitionTrigger.manual(),
+    this.triggerEnabled = true,
     required this.duration,
     required this.preserveHardOff,
   });
@@ -192,6 +201,7 @@ class RhythmModeTransitionConfig {
           : rawTrigger is String
               ? RhythmTransitionTrigger.fromLegacyValue(rawTrigger)
               : const RhythmTransitionTrigger.manual(),
+      triggerEnabled: json['trigger_enabled'] as bool? ?? true,
       duration: TransitionDuration.fromJson(json['duration_ms']),
       preserveHardOff: json['preserve_hard_off'] as bool? ?? true,
     );
@@ -204,6 +214,7 @@ class RhythmModeTransitionConfig {
       'from_mode': fromMode.wireValue,
       'to_mode': toMode.wireValue,
       'trigger': trigger.toJson(),
+      'trigger_enabled': triggerEnabled,
       'duration_ms': duration.toJson(),
       'preserve_hard_off': preserveHardOff,
     };
@@ -215,6 +226,7 @@ class RhythmModeTransitionConfig {
     RhythmMode? fromMode,
     RhythmMode? toMode,
     RhythmTransitionTrigger? trigger,
+    bool? triggerEnabled,
     TransitionDuration? duration,
     bool? preserveHardOff,
   }) {
@@ -224,6 +236,7 @@ class RhythmModeTransitionConfig {
       fromMode: fromMode ?? this.fromMode,
       toMode: toMode ?? this.toMode,
       trigger: trigger ?? this.trigger,
+      triggerEnabled: triggerEnabled ?? this.triggerEnabled,
       duration: duration ?? this.duration,
       preserveHardOff: preserveHardOff ?? this.preserveHardOff,
     );
@@ -326,14 +339,21 @@ class RhythmModeResource {
   });
 
   factory RhythmModeResource.fromJson(Map<String, dynamic> json) {
+    final lastChangeJson = json['last_change'];
+    final hasFlatLastChange = json.containsKey('cause') ||
+        json.containsKey('transition_id') ||
+        json.containsKey('epoch_ms') ||
+        json.containsKey('utc_ms');
     return RhythmModeResource(
       active:
           RhythmMode.fromString(json['active'] as String?) ?? RhythmMode.day,
-      lastChange: json['last_change'] is Map<String, dynamic>
+      lastChange: lastChangeJson is Map<String, dynamic>
           ? RhythmModeLastChange.fromJson(
-              json['last_change'] as Map<String, dynamic>,
+              lastChangeJson,
             )
-          : null,
+          : hasFlatLastChange
+              ? RhythmModeLastChange.fromJson(json)
+              : null,
       configs: ((json['configs'] as List<dynamic>?) ?? const <dynamic>[])
           .map((e) => RhythmModeConfig.fromJson(e as Map<String, dynamic>))
           .toList(),
@@ -353,14 +373,17 @@ class RhythmModeResource {
 /// App-level settings from the Rhythm server.
 class RhythmSettings {
   final bool powerSave;
+  final bool autoUpdate;
 
   const RhythmSettings({
     required this.powerSave,
+    this.autoUpdate = true,
   });
 
   factory RhythmSettings.fromJson(Map<String, dynamic> json) {
     return RhythmSettings(
-      powerSave: json['power_save'] as bool? ?? false,
+      powerSave: json['power_save'] as bool? ?? true,
+      autoUpdate: json['auto_update'] as bool? ?? true,
     );
   }
 }

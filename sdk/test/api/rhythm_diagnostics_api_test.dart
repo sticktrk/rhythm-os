@@ -62,6 +62,23 @@ void main() {
       expect(server!.requests, ['/api/diag/debug-bundle']);
     });
 
+    test('downloadDebugBundle uses its extended receive timeout', () async {
+      server = await _FakeDiagnosticsServer.start(
+        debugBundleDelay: const Duration(milliseconds: 60),
+      );
+      final api = RhythmDiagnosticsApi(
+        host: '127.0.0.1',
+        port: server!.port,
+        receiveTimeout: const Duration(milliseconds: 10),
+        debugBundleReceiveTimeout: const Duration(seconds: 1),
+      );
+
+      final bundle = await api.downloadDebugBundle();
+
+      expect(bundle.bytes, [1, 2, 3, 4]);
+      expect(server!.requests, ['/api/diag/debug-bundle']);
+    });
+
     test('downloadDebugBundle surfaces server errors', () async {
       server = await _FakeDiagnosticsServer.start(
         debugBundleStatusCode: HttpStatus.internalServerError,
@@ -138,21 +155,25 @@ class _FakeDiagnosticsServer {
   _FakeDiagnosticsServer._(
     this._server, {
     required this.debugBundleStatusCode,
+    required this.debugBundleDelay,
   });
 
   final HttpServer _server;
   final int debugBundleStatusCode;
+  final Duration debugBundleDelay;
   final List<String> requests = [];
 
   int get port => _server.port;
 
   static Future<_FakeDiagnosticsServer> start({
     int debugBundleStatusCode = HttpStatus.ok,
+    Duration debugBundleDelay = Duration.zero,
   }) async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final fake = _FakeDiagnosticsServer._(
       server,
       debugBundleStatusCode: debugBundleStatusCode,
+      debugBundleDelay: debugBundleDelay,
     );
     server.listen(fake._handleRequest);
     return fake;
@@ -170,6 +191,10 @@ class _FakeDiagnosticsServer {
 
     if (request.method == 'POST' &&
         request.uri.path == '/api/diag/debug-bundle') {
+      if (debugBundleDelay > Duration.zero) {
+        await Future<void>.delayed(debugBundleDelay);
+      }
+
       if (debugBundleStatusCode != HttpStatus.ok) {
         request.response.statusCode = debugBundleStatusCode;
         request.response.write('bundle failed');
