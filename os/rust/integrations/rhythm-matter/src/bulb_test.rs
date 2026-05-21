@@ -982,6 +982,10 @@ fn claimed_capabilities(
     json!({
         "node_id": node_id,
         "selected_endpoint": endpoint,
+        "matter_vendor_id": device.map(|device| device.vendor_id),
+        "matter_product_id": device.map(|device| device.product_id),
+        "matter_vendor_name": device.map(|device| device.vendor_name.clone()),
+        "matter_product_name": device.map(|device| device.product_name.clone()),
         "device_type": if device.is_some() { json!("light") } else { Value::Null },
         "probe_succeeded": device.is_some(),
         "probe_error": probe_error,

@@ -15,6 +15,7 @@ pub mod capture;
 pub mod chip_rpc;
 pub mod chip_transport;
 pub mod clusters;
+pub mod cloud_profiles;
 pub mod commissioning;
 pub mod controller;
 pub mod discovery;

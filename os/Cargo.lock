@@ -1783,6 +1783,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "log",
+ "reqwest",
  "rhythm-core",
  "rhythm-devices",
  "rhythm-os",

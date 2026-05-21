@@ -221,8 +221,11 @@ impl MatterLightController {
 
         match self.transport.probe_light(node_id) {
             Ok(device) => {
-                let caps = crate::commissioning::build_device_capabilities(&device);
-                let quirks = crate::commissioning::build_device_quirks(&device);
+                let mut caps = crate::commissioning::build_device_capabilities(&device);
+                let mut quirks = crate::commissioning::build_device_quirks(&device);
+                if let Ok(cloud_profiles) = self.hub_data.cloud_profiles.lock() {
+                    cloud_profiles.apply_to_device(&device, &mut caps, &mut quirks);
+                }
                 let probed_id =
                     crate::lifecycle::format_device_id(device.node_id, device.light_endpoint);
 
@@ -1413,6 +1416,9 @@ mod tests {
             next_node_id: std::sync::atomic::AtomicU64::new(100),
             device_caps: std::sync::Mutex::new(std::collections::HashMap::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::new()),
+            cloud_profiles: std::sync::Mutex::new(
+                crate::cloud_profiles::CloudMatterProfileCatalog::default(),
+            ),
             event_tx: tx,
         });
 
@@ -2033,6 +2039,9 @@ mod tests {
             next_node_id: std::sync::atomic::AtomicU64::new(100),
             device_caps: std::sync::Mutex::new(std::collections::HashMap::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::new()),
+            cloud_profiles: std::sync::Mutex::new(
+                crate::cloud_profiles::CloudMatterProfileCatalog::default(),
+            ),
             event_tx: tx,
         });
 
@@ -2130,6 +2139,9 @@ mod tests {
                 "matter-42".to_string(),
                 vec![DeviceQuirk::NeedsXyNotCt],
             )])),
+            cloud_profiles: std::sync::Mutex::new(
+                crate::cloud_profiles::CloudMatterProfileCatalog::default(),
+            ),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -2182,6 +2194,9 @@ mod tests {
                 "matter-42".to_string(),
                 Vec::new(),
             )])),
+            cloud_profiles: std::sync::Mutex::new(
+                crate::cloud_profiles::CloudMatterProfileCatalog::default(),
+            ),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -2233,6 +2248,9 @@ mod tests {
                 "matter-42".to_string(),
                 vec![DeviceQuirk::NeedsExplicitOn],
             )])),
+            cloud_profiles: std::sync::Mutex::new(
+                crate::cloud_profiles::CloudMatterProfileCatalog::default(),
+            ),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -2436,6 +2454,9 @@ mod tests {
                 "matter-42".to_string(),
                 vec![DeviceQuirk::NeedsXyNotCt],
             )])),
+            cloud_profiles: std::sync::Mutex::new(
+                crate::cloud_profiles::CloudMatterProfileCatalog::default(),
+            ),
             event_tx: tx,
         });
         let controller = MatterLightController::new(transport.clone(), hub_data);

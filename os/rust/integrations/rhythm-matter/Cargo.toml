@@ -19,3 +19,4 @@ anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
 tracing = { workspace = true }
+reqwest = { workspace = true }

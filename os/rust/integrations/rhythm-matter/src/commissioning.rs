@@ -304,8 +304,11 @@ pub(crate) fn store_device_metadata(
     device: &CommissionedDevice,
     device_id: &str,
 ) {
-    let caps = build_device_capabilities(device);
-    let quirks = build_device_quirks(device);
+    let mut caps = build_device_capabilities(device);
+    let mut quirks = build_device_quirks(device);
+    if let Ok(cloud_profiles) = hub_data.cloud_profiles.lock() {
+        cloud_profiles.apply_to_device(device, &mut caps, &mut quirks);
+    }
 
     if let Ok(mut device_caps) = hub_data.device_caps.lock() {
         device_caps.insert(device_id.to_string(), caps);

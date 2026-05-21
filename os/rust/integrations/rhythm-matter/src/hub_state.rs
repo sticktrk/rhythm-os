@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use rhythm_devices::{DeviceQuirk, LightCapabilities};
 use rhythm_os::hub::HubEvent;
 
+use crate::cloud_profiles::CloudMatterProfileCatalog;
 use crate::controller::MatterDeviceRegistry;
 use crate::transport::MatterTransport;
 use crate::transport::{CommissionedDevice, MatterDeviceInfo};
@@ -29,6 +30,8 @@ pub struct MatterHubData {
     pub device_caps: Mutex<HashMap<String, LightCapabilities>>,
     /// Per-device Matter quirks from `rhythm-devices`.
     pub device_quirks: Mutex<HashMap<String, Vec<DeviceQuirk>>>,
+    /// Approved cloud profile overlay catalog cached at hub startup.
+    pub cloud_profiles: Mutex<CloudMatterProfileCatalog>,
     /// Event channel sender kept alive by the hub data.
     pub event_tx: std::sync::mpsc::Sender<HubEvent>,
 }
@@ -121,6 +124,7 @@ mod tests {
             next_node_id: AtomicU64::new(100),
             device_caps: Mutex::new(HashMap::new()),
             device_quirks: Mutex::new(HashMap::new()),
+            cloud_profiles: Mutex::new(CloudMatterProfileCatalog::default()),
             event_tx,
         }
     }
