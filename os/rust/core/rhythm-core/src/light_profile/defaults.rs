@@ -65,8 +65,8 @@ pub fn default_sleep_profile() -> LightProfileConfig {
             color_temp: 0.0,
             direct_color: None,
         },
-        min_brightness: wake.min_brightness,
-        max_brightness: wake.min_brightness,
+        min_brightness: 1,
+        max_brightness: 1,
         min_color_temp: wake.min_color_temp,
         max_color_temp: wake.min_color_temp,
         max_dim_steps: 1,
@@ -175,8 +175,8 @@ mod tests {
             } if brightness.abs() < f32::EPSILON
                 && color_temp.abs() < f32::EPSILON
         ));
-        assert_eq!(p.min_brightness, wake.min_brightness);
-        assert_eq!(p.max_brightness, wake.min_brightness);
+        assert_eq!(p.min_brightness, 1);
+        assert_eq!(p.max_brightness, 1);
         assert_eq!(p.min_color_temp, wake.min_color_temp);
         assert_eq!(p.max_color_temp, wake.min_color_temp);
         assert!(p.rhythm_interval_secs.is_auto());

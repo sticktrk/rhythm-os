@@ -239,8 +239,8 @@ mod tests {
 
         let sleep = profiles.get(SLEEP_PROFILE_ID).unwrap();
         assert_eq!(sleep.name, "Sleep");
-        assert_eq!(sleep.min_brightness, rhythm.min_brightness);
-        assert_eq!(sleep.max_brightness, rhythm.min_brightness);
+        assert_eq!(sleep.min_brightness, 1);
+        assert_eq!(sleep.max_brightness, 1);
         assert_eq!(sleep.min_color_temp, rhythm.min_color_temp);
         assert_eq!(sleep.max_color_temp, rhythm.min_color_temp);
         assert!(matches!(

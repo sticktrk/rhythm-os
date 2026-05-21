@@ -653,13 +653,12 @@ mod tests {
     }
 
     #[test]
-    fn test_sleep_brightness_is_constant_wake_minimum() {
+    fn test_sleep_brightness_is_constant_one_percent() {
         let profile = LightProfile::new(default_sleep_profile());
-        let wake = default_rhythm_profile();
         let noon = profile.calculate(&test_context(12.0));
         let midnight = profile.calculate(&test_context(0.0));
-        assert_eq!(noon.brightness, wake.min_brightness);
-        assert_eq!(midnight.brightness, wake.min_brightness);
+        assert_eq!(noon.brightness, 1);
+        assert_eq!(midnight.brightness, 1);
     }
 
     #[test]
