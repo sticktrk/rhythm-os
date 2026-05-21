@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -11,6 +12,7 @@ import '../../providers/server_sync_provider.dart';
 import '../../services/demo_server_api.dart';
 import '../../services/hue/hue_service_locator.dart';
 import '../../services/matter_setup_payload.dart';
+import '../../widgets/bulb_pairing_instructions.dart';
 import '../../widgets/solar_orbit.dart';
 import '../../widgets/stage_timeline.dart';
 import 'matter_add_method.dart';
@@ -35,6 +37,11 @@ class MatterDevicePairingResult {
 enum _PairingPhase { input, pairing, failed }
 
 /// Full-screen modal for pairing a Matter device through Rhythm's backend.
+///
+/// Design language: "Signal Acquisition Console" — engineering blueprint dark,
+/// editorial monospace eyebrows, a QR viewfinder treated as a capture surface,
+/// a terminal-style payload console, and a radar-lock visualization while the
+/// server is commissioning.
 class MatterDeviceAddScreen extends StatefulWidget {
   const MatterDeviceAddScreen({
     super.key,
@@ -85,17 +92,21 @@ class MatterDeviceAddScreen extends StatefulWidget {
 }
 
 class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   static const _teal = Color(0xFF00BCD4);
   static const _tealDeep = Color(0xFF00838F);
+  static const _amber = CelestialColors.sunWarm;
+  static const _danger = Color(0xFFEF5350);
 
   final _setupPayloadController = TextEditingController();
   late final AnimationController _pulseController;
+  late final AnimationController _sweepController;
   late final RhythmMatterApi _pairingApi;
   late final String _sessionId;
 
   _PairingPhase _phase = _PairingPhase.input;
   String? _errorText;
+  bool _hasFailedOnce = false;
   StreamSubscription<RhythmPairingProgress>? _progressSub;
   RhythmPairingProgress? _latestProgress;
 
@@ -109,6 +120,10 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       vsync: this,
       duration: const Duration(milliseconds: 2000),
     )..repeat(reverse: true);
+    _sweepController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 2400),
+    )..repeat();
     _setupPayloadController.addListener(_handlePayloadChanged);
   }
 
@@ -117,6 +132,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     _setupPayloadController.removeListener(_handlePayloadChanged);
     _setupPayloadController.dispose();
     _pulseController.dispose();
+    _sweepController.dispose();
     _progressSub?.cancel();
     super.dispose();
   }
@@ -158,6 +174,23 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
 
   bool get _usesWifiCommissioningPreflight =>
       widget.addMethod.requiresWifiCommissioningPreflight;
+
+  String get _sessionShortId {
+    final tail = _sessionId.split('-').last;
+    return tail.length > 8 ? tail.substring(tail.length - 8) : tail;
+  }
+
+  String get _phaseTag => switch (_phase) {
+        _PairingPhase.input => '01 / CAPTURE',
+        _PairingPhase.pairing => '02 / TRANSMIT',
+        _PairingPhase.failed => '03 / ABORT',
+      };
+
+  Color get _phaseAccent => switch (_phase) {
+        _PairingPhase.input => _teal,
+        _PairingPhase.pairing => _amber,
+        _PairingPhase.failed => _danger,
+      };
 
   void _handlePayloadChanged() {
     if (mounted) {
@@ -297,6 +330,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     _progressSub = null;
     setState(() {
       _phase = _PairingPhase.failed;
+      _hasFailedOnce = true;
       _errorText =
           detail == null || detail.isEmpty ? message : '$message\n\n$detail';
     });
@@ -320,12 +354,22 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
             _buildHeader(),
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 24),
-                child: switch (_phase) {
-                  _PairingPhase.input => _buildInputPhase(),
-                  _PairingPhase.pairing => _buildPairingPhase(),
-                  _PairingPhase.failed => _buildFailurePhase(),
-                },
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 280),
+                  transitionBuilder: (child, anim) => FadeTransition(
+                    opacity: anim,
+                    child: child,
+                  ),
+                  child: KeyedSubtree(
+                    key: ValueKey(_phase),
+                    child: switch (_phase) {
+                      _PairingPhase.input => _buildInputPhase(),
+                      _PairingPhase.pairing => _buildPairingPhase(),
+                      _PairingPhase.failed => _buildFailurePhase(),
+                    },
+                  ),
+                ),
               ),
             ),
           ],
@@ -334,273 +378,115 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     );
   }
 
+  // ──────────────────────────────────────────────────────────────────────────
+  // Header
+  // ──────────────────────────────────────────────────────────────────────────
+
   Widget _buildHeader() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
+      child: Column(
         children: [
-          GestureDetector(
-            onTap: () => Navigator.of(context).pop(),
-            child: Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _teal.withValues(alpha: 0.15),
-                border: Border.all(
-                  color: _teal.withValues(alpha: 0.3),
-                  width: 1,
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              _CloseButton(onTap: () => Navigator.of(context).pop()),
+              const Spacer(),
+              _PhaseTag(text: _phaseTag, accent: _phaseAccent),
+            ],
+          ),
+          const SizedBox(height: 18),
+          Row(
+            children: [
+              _BreathingPip(
+                controller: _pulseController,
+                color: _phaseAccent,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  widget.addMethod.actionLabel.toUpperCase(),
+                  style: const TextStyle(
+                    color: CelestialColors.textPrimary,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 2.6,
+                  ),
                 ),
               ),
-              child: const Icon(Icons.close, color: _teal, size: 20),
-            ),
-          ),
-          Expanded(
-            child: Text(
-              widget.addMethod.actionLabel,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                color: CelestialColors.textPrimary,
-                fontSize: 18,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.3,
+              Text(
+                _sessionShortId,
+                style: TextStyle(
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.55),
+                  fontSize: 10.5,
+                  fontFamily: 'monospace',
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 1.6,
+                ),
               ),
-            ),
+            ],
           ),
-          const SizedBox(width: 40),
+          const SizedBox(height: 12),
+          const _HairlineRule(),
         ],
       ),
     );
   }
 
+  // ──────────────────────────────────────────────────────────────────────────
+  // Phase 1 — input
+  // ──────────────────────────────────────────────────────────────────────────
+
   Widget _buildInputPhase() {
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const SizedBox(height: 40),
-        AnimatedBuilder(
-          animation: _pulseController,
-          builder: (context, child) {
-            final glow = 0.1 + _pulseController.value * 0.1;
-            return Container(
-              width: 96,
-              height: 96,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: RadialGradient(
-                  colors: [
-                    _teal.withValues(alpha: glow),
-                    Colors.transparent,
-                  ],
-                  radius: 1.5,
-                ),
-              ),
-              child: Center(
-                child: Container(
-                  width: 64,
-                  height: 64,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [_teal, _tealDeep],
-                    ),
-                  ),
-                  child: const Icon(
-                    Icons.memory_outlined,
-                    color: Colors.white,
-                    size: 28,
-                  ),
-                ),
-              ),
-            );
-          },
+        const SizedBox(height: 14),
+        BulbPairingInstructions(showResetSection: _hasFailedOnce),
+        const SizedBox(height: 30),
+        const _SectionKicker(
+          accent: _teal,
+          label: 'SIGNAL CAPTURE',
+          counter: '02 / 02',
         ),
-        const SizedBox(height: 32),
-        Text(
-          switch (widget.addMethod) {
-            MatterAddMethod.automatic => 'Add Device',
-            MatterAddMethod.onNetworkSetupCode => 'Add Device',
-            MatterAddMethod.bleWifiCommissioning => 'Add Device',
-          },
-          style: TextStyle(
-            color: CelestialColors.textPrimary,
-            fontSize: 20,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          switch (widget.addMethod) {
-            MatterAddMethod.automatic =>
-              'Scan the QR code, paste the setup payload, or enter the manual code from the device.',
-            MatterAddMethod.onNetworkSetupCode =>
-              'Enter the setup code or scan the QR payload from the device.',
-            MatterAddMethod.bleWifiCommissioning =>
-              'Power on the device nearby, then enter its setup code or QR payload to continue.',
-          },
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: CelestialColors.textSecondary.withValues(alpha: 0.7),
-            fontSize: 14,
-          ),
-        ),
-        const SizedBox(height: 12),
-        Text(
-          switch (widget.addMethod) {
-            MatterAddMethod.automatic =>
-              'Rhythm sends the setup data to the server and the server chooses the best available path.',
-            MatterAddMethod.onNetworkSetupCode =>
-              'Rhythm sends the setup data to the server and asks it to add the device.',
-            MatterAddMethod.bleWifiCommissioning =>
-              'Rhythm sends the setup data to the server and asks it to finish setup for the device.',
-          },
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: CelestialColors.textSecondary.withValues(alpha: 0.55),
-            fontSize: 13,
-            height: 1.4,
-          ),
-        ),
-        const SizedBox(height: 32),
+        const SizedBox(height: 18),
         if (_supportsQrScan) ...[
-          SizedBox(
-            width: double.infinity,
-            height: 52,
-            child: OutlinedButton.icon(
-              onPressed: _scanQrCode,
-              style: OutlinedButton.styleFrom(
-                side: BorderSide(color: _teal.withValues(alpha: 0.45)),
-                backgroundColor: _teal.withValues(alpha: 0.06),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
-              ),
-              icon: const Icon(
-                Icons.qr_code_scanner_rounded,
-                color: _teal,
-              ),
-              label: const Text(
-                'Scan QR Code',
-                style: TextStyle(
-                  color: _teal,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
+          _QrViewfinderButton(
+            accent: _teal,
+            sweep: _sweepController,
+            pulse: _pulseController,
+            onTap: _scanQrCode,
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 18),
+          const _OrDivider(label: 'OR ENTER MANUALLY'),
+          const SizedBox(height: 18),
         ],
-        TextField(
+        _PayloadConsole(
           controller: _setupPayloadController,
-          keyboardType: TextInputType.visiblePassword,
-          textInputAction: TextInputAction.done,
-          autocorrect: false,
-          enableSuggestions: false,
-          style: const TextStyle(
-            color: CelestialColors.textPrimary,
-            fontSize: 15,
-            fontWeight: FontWeight.w500,
-          ),
-          minLines: 1,
-          maxLines: 3,
-          decoration: InputDecoration(
-            labelText: 'Setup payload or manual code',
-            hintText: 'MT:Y.K908OC16750648G00 or 3497-123-4567',
-            helperText: _setupPayloadController.text.isEmpty
-                ? 'Paste the setup payload or the code printed on the device.'
-                : (_looksLikeMatterPayload
-                    ? 'Ready to send to the server.'
-                    : 'This does not look like a typical setup code, but you can still try adding the device.'),
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 16,
-              vertical: 16,
-            ),
-            filled: true,
-            fillColor: CelestialColors.backgroundCard,
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(14),
-              borderSide: BorderSide(
-                color: CelestialColors.orbitRing.withValues(alpha: 0.5),
-              ),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(14),
-              borderSide: const BorderSide(color: _teal, width: 1.5),
-            ),
-            labelStyle: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.8),
-            ),
-            hintStyle: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.45),
-            ),
-            helperStyle: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.65),
-            ),
-          ),
+          accent: _teal,
+          warning: _amber,
+          helperText: _setupPayloadController.text.isEmpty
+              ? 'Paste the setup payload or the code printed on the device.'
+              : (_looksLikeMatterPayload
+                  ? 'Ready to send to the server.'
+                  : 'This does not look like a typical setup code, but you '
+                      'can still try adding the device.'),
+          isValidLooking: _looksLikeMatterPayload,
         ),
-        const SizedBox(height: 32),
-        SizedBox(
-          width: double.infinity,
-          height: 52,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(14),
-              gradient: _hasSetupPayload
-                  ? const LinearGradient(colors: [_teal, _tealDeep])
-                  : null,
-              color: _hasSetupPayload
-                  ? null
-                  : CelestialColors.textSecondary.withValues(alpha: 0.15),
-            ),
-            child: MaterialButton(
-              onPressed: _hasSetupPayload ? _startPairing : null,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: Text(
-                switch (widget.addMethod) {
-                  MatterAddMethod.automatic => 'Add Device',
-                  MatterAddMethod.onNetworkSetupCode => 'Add Device',
-                  MatterAddMethod.bleWifiCommissioning => 'Add Device',
-                },
-                style: TextStyle(
-                  color: _hasSetupPayload
-                      ? Colors.white
-                      : CelestialColors.textSecondary.withValues(alpha: 0.4),
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(height: 20),
-        _buildInfoCard(
-          title: 'What Happens Next',
-          lines: switch (widget.addMethod) {
-            MatterAddMethod.automatic => const [
-                'Rhythm sends the setup data to the server.',
-                'The server picks the best available way to add the device.',
-                'You do not need a separate hub setup flow here.',
-              ],
-            MatterAddMethod.onNetworkSetupCode => const [
-                'Use this when the device is already ready to be added.',
-                'Rhythm sends the setup data to the server.',
-                'You do not need a separate hub setup flow here.',
-              ],
-            MatterAddMethod.bleWifiCommissioning => const [
-                'Use this when the device still needs a full setup path.',
-                'The server appliance must already be connected and ready.',
-                'You do not need to enter network credentials here.',
-              ],
-          },
+        const SizedBox(height: 28),
+        _PrimaryTransmitButton(
+          label: widget.addMethod.actionLabel,
+          enabled: _hasSetupPayload,
+          onTap: _startPairing,
         ),
         const SizedBox(height: 40),
       ],
     );
   }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Phase 2 — pairing
+  // ──────────────────────────────────────────────────────────────────────────
 
   Widget _buildPairingPhase() {
     final progress = _latestProgress;
@@ -610,79 +496,30 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const SizedBox(height: 48),
+        const SizedBox(height: 28),
         Center(
-          child: AnimatedBuilder(
-            animation: _pulseController,
-            builder: (context, child) {
-              final pulse = _pulseController.value;
-              return SizedBox(
-                width: 140,
-                height: 140,
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    Container(
-                      width: 140,
-                      height: 140,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                          color: _teal.withValues(alpha: 0.08 + pulse * 0.12),
-                          width: 1,
-                        ),
-                      ),
-                    ),
-                    Container(
-                      width: 100,
-                      height: 100,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                          color: _teal.withValues(alpha: 0.14 + pulse * 0.18),
-                          width: 1.5,
-                        ),
-                      ),
-                    ),
-                    Container(
-                      width: 64,
-                      height: 64,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        gradient: const LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [_teal, _tealDeep],
-                        ),
-                        boxShadow: [
-                          BoxShadow(
-                            color: _teal.withValues(alpha: 0.3 + pulse * 0.2),
-                            blurRadius: 20 + pulse * 10,
-                            spreadRadius: pulse * 4,
-                          ),
-                        ],
-                      ),
-                      child: const Icon(
-                        Icons.memory_outlined,
-                        color: Colors.white,
-                        size: 28,
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            },
+          child: _SignalLockHero(
+            pulse: _pulseController,
+            sweep: _sweepController,
+            accent: _teal,
+            accentDeep: _tealDeep,
+            accentSecondary: _amber,
           ),
         ),
-        const SizedBox(height: 28),
+        const SizedBox(height: 32),
+        _SectionKicker(
+          accent: _amber,
+          label: 'TRANSMITTING',
+          counter: 'SESSION $_sessionShortId',
+        ),
+        const SizedBox(height: 14),
         Text(
-          'Adding Device',
-          textAlign: TextAlign.center,
+          'Acquiring device signal',
           style: const TextStyle(
             color: CelestialColors.textPrimary,
-            fontSize: 22,
+            fontSize: 20,
             fontWeight: FontWeight.w600,
-            letterSpacing: 0.2,
+            letterSpacing: 0.3,
           ),
         ),
         const SizedBox(height: 6),
@@ -692,18 +529,19 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
                 MatterAddMethod.automatic =>
                   'Keep this screen open while Rhythm adds the device.',
                 MatterAddMethod.onNetworkSetupCode =>
-                  'Keep this screen open while Rhythm finds the device and adds it.',
+                  'Keep this screen open while Rhythm finds the device and '
+                      'adds it.',
                 MatterAddMethod.bleWifiCommissioning =>
-                  'Keep this screen open while Rhythm completes setup and adds the device.',
+                  'Keep this screen open while Rhythm completes setup and '
+                      'adds the device.',
               },
-          textAlign: TextAlign.center,
           style: TextStyle(
-            color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+            color: CelestialColors.textSecondary.withValues(alpha: 0.75),
             fontSize: 14,
-            height: 1.45,
+            height: 1.5,
           ),
         ),
-        const SizedBox(height: 28),
+        const SizedBox(height: 22),
         Container(
           padding: const EdgeInsets.fromLTRB(20, 22, 20, 22),
           decoration: BoxDecoration(
@@ -739,18 +577,9 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
             accent: _teal,
           ),
         ),
-        const SizedBox(height: 18),
-        Text(
-          _setupPayload,
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: CelestialColors.textSecondary.withValues(alpha: 0.4),
-            fontSize: 11.5,
-            fontFamily: 'monospace',
-            letterSpacing: 0.3,
-          ),
-        ),
-        const SizedBox(height: 28),
+        const SizedBox(height: 20),
+        _PayloadEcho(payload: _setupPayload),
+        const SizedBox(height: 32),
       ],
     );
   }
@@ -786,132 +615,1187 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     return trimmed;
   }
 
+  // ──────────────────────────────────────────────────────────────────────────
+  // Phase 3 — failure
+  // ──────────────────────────────────────────────────────────────────────────
+
   Widget _buildFailurePhase() {
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const SizedBox(height: 60),
-        Container(
-          width: 72,
-          height: 72,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: Colors.red.shade900.withValues(alpha: 0.22),
-            border: Border.all(
-              color: Colors.red.shade300.withValues(alpha: 0.35),
-            ),
-          ),
-          child: Icon(Icons.close, color: Colors.red.shade300, size: 28),
+        const SizedBox(height: 36),
+        Center(
+          child: _FailureGlyph(pulse: _pulseController),
         ),
-        const SizedBox(height: 28),
-        Text(
-          'Pairing Failed',
-          style: TextStyle(
-            color: Colors.red.shade300,
-            fontSize: 20,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: 10),
-        Text(
-          _errorText ?? 'Pairing failed.',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: CelestialColors.textSecondary.withValues(alpha: 0.75),
-            fontSize: 14,
-            height: 1.45,
-          ),
-        ),
-        const SizedBox(height: 32),
-        SizedBox(
-          width: double.infinity,
-          height: 52,
-          child: DecoratedBox(
+        const SizedBox(height: 24),
+        Center(
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(14),
-              gradient: const LinearGradient(colors: [_teal, _tealDeep]),
-            ),
-            child: MaterialButton(
-              onPressed: _resetToInput,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(14),
+              color: _danger.withValues(alpha: 0.10),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(
+                color: _danger.withValues(alpha: 0.35),
+                width: 1,
               ),
-              child: const Text(
-                'Try Again',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
+            ),
+            child: Text(
+              'TRANSMISSION FAILED · RETRY AVAILABLE',
+              style: TextStyle(
+                color: _danger.withValues(alpha: 0.95),
+                fontSize: 10.5,
+                fontFamily: 'monospace',
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.6,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 20),
+        Container(
+          padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
+          decoration: BoxDecoration(
+            color: CelestialColors.backgroundCard.withValues(alpha: 0.55),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: _danger.withValues(alpha: 0.18),
+              width: 1,
+            ),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                margin: const EdgeInsets.only(top: 5, right: 12),
+                width: 6,
+                height: 6,
+                decoration: BoxDecoration(
+                  color: _danger.withValues(alpha: 0.85),
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: _danger.withValues(alpha: 0.5),
+                      blurRadius: 6,
+                      spreadRadius: 0.5,
+                    ),
+                  ],
                 ),
               ),
-            ),
+              Expanded(
+                child: Text(
+                  _errorText ?? 'Pairing failed.',
+                  style: TextStyle(
+                    color: CelestialColors.textPrimary.withValues(alpha: 0.88),
+                    fontSize: 13.5,
+                    height: 1.55,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
+        const SizedBox(height: 28),
+        _PrimaryTransmitButton(
+          label: 'Try Again',
+          enabled: true,
+          onTap: _resetToInput,
+        ),
         const SizedBox(height: 12),
-        SizedBox(
-          width: double.infinity,
-          height: 52,
-          child: OutlinedButton(
-            onPressed: () => Navigator.of(context).pop(),
-            style: OutlinedButton.styleFrom(
-              side: BorderSide(color: _teal.withValues(alpha: 0.35)),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(14),
-              ),
-            ),
-            child: const Text(
-              'Close',
-              style: TextStyle(
-                color: _teal,
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
+        _SecondaryGhostButton(
+          label: 'Close',
+          onTap: () => Navigator.of(context).pop(),
         ),
         const SizedBox(height: 40),
       ],
     );
   }
+}
 
-  Widget _buildInfoCard({
-    required String title,
-    required List<String> lines,
-  }) {
+// ─────────────────────────────────────────────────────────────────────────────
+// Header chrome
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _CloseButton extends StatelessWidget {
+  const _CloseButton({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        width: 38,
+        height: 38,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: CelestialColors.backgroundCard.withValues(alpha: 0.7),
+          border: Border.all(
+            color: CelestialColors.orbitRing.withValues(alpha: 0.75),
+            width: 1,
+          ),
+        ),
+        child: Icon(
+          Icons.close_rounded,
+          color: CelestialColors.textPrimary.withValues(alpha: 0.85),
+          size: 18,
+        ),
+      ),
+    );
+  }
+}
+
+class _PhaseTag extends StatelessWidget {
+  const _PhaseTag({required this.text, required this.accent});
+  final String text;
+  final Color accent;
+
+  @override
+  Widget build(BuildContext context) {
     return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color: CelestialColors.backgroundCard,
+        color: accent.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: accent.withValues(alpha: 0.30),
+          width: 1,
+        ),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: accent.withValues(alpha: 0.95),
+          fontSize: 10.5,
+          fontFamily: 'monospace',
+          fontWeight: FontWeight.w700,
+          letterSpacing: 1.6,
+        ),
+      ),
+    );
+  }
+}
+
+class _BreathingPip extends StatelessWidget {
+  const _BreathingPip({required this.controller, required this.color});
+  final AnimationController controller;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        final t = Curves.easeInOut.transform(controller.value);
+        return Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(
+            color: color,
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: color.withValues(alpha: 0.4 + t * 0.4),
+                blurRadius: 6 + t * 6,
+                spreadRadius: t * 1.5,
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _HairlineRule extends StatelessWidget {
+  const _HairlineRule();
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Container(
+          width: 16,
+          height: 1,
+          color: CelestialColors.textSecondary.withValues(alpha: 0.35),
+        ),
+        const SizedBox(width: 6),
+        Container(
+          width: 3,
+          height: 3,
+          decoration: BoxDecoration(
+            color: CelestialColors.textSecondary.withValues(alpha: 0.45),
+            shape: BoxShape.circle,
+          ),
+        ),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Container(
+            height: 1,
+            color: CelestialColors.textSecondary.withValues(alpha: 0.18),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Section kicker (matches the BulbPairingInstructions editorial header)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _SectionKicker extends StatelessWidget {
+  const _SectionKicker({
+    required this.accent,
+    required this.label,
+    required this.counter,
+  });
+  final Color accent;
+  final String label;
+  final String counter;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Container(
+          width: 6,
+          height: 6,
+          decoration: BoxDecoration(
+            color: accent.withValues(alpha: 0.95),
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: accent.withValues(alpha: 0.55),
+                blurRadius: 8,
+                spreadRadius: 1,
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            label,
+            style: TextStyle(
+              color: CelestialColors.textPrimary.withValues(alpha: 0.95),
+              fontSize: 11.5,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 2.4,
+            ),
+          ),
+        ),
+        Text(
+          counter,
+          style: TextStyle(
+            color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+            fontSize: 11,
+            fontFamily: 'monospace',
+            fontWeight: FontWeight.w600,
+            letterSpacing: 1.4,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _OrDivider extends StatelessWidget {
+  const _OrDivider({required this.label});
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Container(
+            height: 1,
+            color: CelestialColors.textSecondary.withValues(alpha: 0.18),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.55),
+              fontSize: 10,
+              fontFamily: 'monospace',
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.6,
+            ),
+          ),
+        ),
+        Expanded(
+          child: Container(
+            height: 1,
+            color: CelestialColors.textSecondary.withValues(alpha: 0.18),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QR viewfinder button — primary scan affordance
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _QrViewfinderButton extends StatelessWidget {
+  const _QrViewfinderButton({
+    required this.accent,
+    required this.sweep,
+    required this.pulse,
+    required this.onTap,
+  });
+
+  final Color accent;
+  final Animation<double> sweep;
+  final Animation<double> pulse;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedBuilder(
+        animation: Listenable.merge([sweep, pulse]),
+        builder: (context, _) {
+          final breath = Curves.easeInOutSine.transform(pulse.value);
+          return Container(
+            height: 172,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(18),
+              color: CelestialColors.backgroundCard.withValues(alpha: 0.7),
+              border: Border.all(
+                color: accent.withValues(alpha: 0.20 + breath * 0.08),
+                width: 1,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: accent.withValues(alpha: 0.08 + breath * 0.07),
+                  blurRadius: 18,
+                  offset: const Offset(0, 8),
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(18),
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: CustomPaint(
+                      painter: _ViewfinderPainter(
+                        accent: accent,
+                        sweep: sweep.value,
+                      ),
+                    ),
+                  ),
+                  Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            gradient: RadialGradient(
+                              colors: [
+                                accent.withValues(alpha: 0.22 + breath * 0.08),
+                                accent.withValues(alpha: 0.0),
+                              ],
+                            ),
+                          ),
+                          child: Icon(
+                            Icons.qr_code_scanner_rounded,
+                            color: accent,
+                            size: 36,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'SCAN PAIRING CODE',
+                          style: TextStyle(
+                            color: accent.withValues(alpha: 0.95),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 2.4,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'tap to engage camera',
+                          style: TextStyle(
+                            color: CelestialColors.textSecondary
+                                .withValues(alpha: 0.55),
+                            fontSize: 11,
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _ViewfinderPainter extends CustomPainter {
+  _ViewfinderPainter({required this.accent, required this.sweep});
+  final Color accent;
+  final double sweep; // 0..1
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const inset = 14.0;
+    final rect = Rect.fromLTRB(
+      inset,
+      inset,
+      size.width - inset,
+      size.height - inset,
+    );
+
+    // Corner brackets (viewfinder).
+    const cornerLen = 22.0;
+    final cornerPaint = Paint()
+      ..color = accent.withValues(alpha: 0.85)
+      ..strokeWidth = 1.8
+      ..strokeCap = StrokeCap.round
+      ..style = PaintingStyle.stroke;
+
+    // Top-left
+    canvas.drawLine(
+      rect.topLeft,
+      rect.topLeft.translate(cornerLen, 0),
+      cornerPaint,
+    );
+    canvas.drawLine(
+      rect.topLeft,
+      rect.topLeft.translate(0, cornerLen),
+      cornerPaint,
+    );
+    // Top-right
+    canvas.drawLine(
+      rect.topRight,
+      rect.topRight.translate(-cornerLen, 0),
+      cornerPaint,
+    );
+    canvas.drawLine(
+      rect.topRight,
+      rect.topRight.translate(0, cornerLen),
+      cornerPaint,
+    );
+    // Bottom-left
+    canvas.drawLine(
+      rect.bottomLeft,
+      rect.bottomLeft.translate(cornerLen, 0),
+      cornerPaint,
+    );
+    canvas.drawLine(
+      rect.bottomLeft,
+      rect.bottomLeft.translate(0, -cornerLen),
+      cornerPaint,
+    );
+    // Bottom-right
+    canvas.drawLine(
+      rect.bottomRight,
+      rect.bottomRight.translate(-cornerLen, 0),
+      cornerPaint,
+    );
+    canvas.drawLine(
+      rect.bottomRight,
+      rect.bottomRight.translate(0, -cornerLen),
+      cornerPaint,
+    );
+
+    // Sweep — a horizontal line that drops from top to bottom, with a soft
+    // trailing gradient above it.
+    final sweepY = rect.top + (rect.height - 6) * sweep + 3;
+
+    final trail = Rect.fromLTRB(
+      rect.left + 6,
+      sweepY - 36,
+      rect.right - 6,
+      sweepY,
+    );
+    canvas.drawRect(
+      trail,
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            accent.withValues(alpha: 0.0),
+            accent.withValues(alpha: 0.10),
+          ],
+        ).createShader(trail),
+    );
+
+    final linePaint = Paint()
+      ..shader = LinearGradient(
+        colors: [
+          accent.withValues(alpha: 0.0),
+          accent.withValues(alpha: 0.7),
+          accent.withValues(alpha: 0.0),
+        ],
+        stops: const [0.0, 0.5, 1.0],
+      ).createShader(Rect.fromLTWH(rect.left, sweepY - 1, rect.width, 2))
+      ..strokeWidth = 1.3
+      ..strokeCap = StrokeCap.round;
+    canvas.drawLine(
+      Offset(rect.left + 6, sweepY),
+      Offset(rect.right - 6, sweepY),
+      linePaint,
+    );
+
+    // Tiny tick marks along the left edge inside the frame, like a sensor
+    // scale.
+    final tick = Paint()
+      ..color = accent.withValues(alpha: 0.30)
+      ..strokeWidth = 0.8;
+    for (var i = 0; i < 5; i++) {
+      final y = rect.top + 28 + i * (rect.height - 56) / 4;
+      canvas.drawLine(
+        Offset(rect.left + 4, y),
+        Offset(rect.left + 4 + (i.isEven ? 6 : 3), y),
+        tick,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _ViewfinderPainter old) =>
+      old.sweep != sweep || old.accent != accent;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Payload console — terminal-style text field
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _PayloadConsole extends StatelessWidget {
+  const _PayloadConsole({
+    required this.controller,
+    required this.accent,
+    required this.warning,
+    required this.helperText,
+    required this.isValidLooking,
+  });
+
+  final TextEditingController controller;
+  final Color accent;
+  final Color warning;
+  final String helperText;
+  final bool isValidLooking;
+
+  @override
+  Widget build(BuildContext context) {
+    final empty = controller.text.isEmpty;
+    final statusColor = empty
+        ? CelestialColors.textSecondary.withValues(alpha: 0.55)
+        : (isValidLooking ? accent : warning);
+    final statusLabel = empty
+        ? 'AWAITING INPUT'
+        : (isValidLooking ? 'READY' : 'UNVERIFIED');
+
+    return Container(
+      decoration: BoxDecoration(
+        color: CelestialColors.backgroundCard.withValues(alpha: 0.7),
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
-          color: CelestialColors.orbitRing.withValues(alpha: 0.35),
+          color: empty
+              ? CelestialColors.orbitRing.withValues(alpha: 0.7)
+              : statusColor.withValues(alpha: 0.45),
+          width: 1,
         ),
       ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            title,
-            style: TextStyle(
-              color: CelestialColors.textPrimary,
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 8),
-          for (final line in lines) ...[
-            Text(
-              line,
-              style: TextStyle(
-                color: CelestialColors.textSecondary.withValues(alpha: 0.7),
-                fontSize: 13,
-                height: 1.4,
+          // Top metadata strip.
+          Container(
+            padding: const EdgeInsets.fromLTRB(14, 10, 12, 8),
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(
+                  color: CelestialColors.orbitRing.withValues(alpha: 0.35),
+                  width: 1,
+                ),
               ),
             ),
-            if (line != lines.last) const SizedBox(height: 6),
-          ],
+            child: Row(
+              children: [
+                Container(
+                  width: 5,
+                  height: 5,
+                  decoration: BoxDecoration(
+                    color: statusColor,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'PAYLOAD · MT://',
+                  style: TextStyle(
+                    color: CelestialColors.textSecondary.withValues(alpha: 0.75),
+                    fontSize: 10.5,
+                    fontFamily: 'monospace',
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.5,
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  statusLabel,
+                  style: TextStyle(
+                    color: statusColor,
+                    fontSize: 10,
+                    fontFamily: 'monospace',
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.5,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // Text field.
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 14, 14, 6),
+            child: TextField(
+              controller: controller,
+              keyboardType: TextInputType.visiblePassword,
+              textInputAction: TextInputAction.done,
+              autocorrect: false,
+              enableSuggestions: false,
+              cursorColor: accent,
+              cursorWidth: 1.5,
+              style: const TextStyle(
+                color: CelestialColors.textPrimary,
+                fontSize: 15,
+                fontFamily: 'monospace',
+                letterSpacing: 0.4,
+                fontWeight: FontWeight.w500,
+              ),
+              minLines: 1,
+              maxLines: 3,
+              decoration: InputDecoration(
+                isCollapsed: true,
+                border: InputBorder.none,
+                hintText: 'MT:Y.K908OC16750648G00   ·   3497-123-4567',
+                hintStyle: TextStyle(
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.35),
+                  fontSize: 13,
+                  fontFamily: 'monospace',
+                  letterSpacing: 0.4,
+                ),
+              ),
+            ),
+          ),
+          // Helper text.
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 6, 14, 12),
+            child: Text(
+              helperText,
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.65),
+                fontSize: 11.5,
+                height: 1.45,
+              ),
+            ),
+          ),
         ],
       ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Buttons
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _PrimaryTransmitButton extends StatelessWidget {
+  const _PrimaryTransmitButton({
+    required this.label,
+    required this.enabled,
+    required this.onTap,
+  });
+  final String label;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  static const _teal = Color(0xFF00BCD4);
+  static const _tealDeep = Color(0xFF00838F);
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: enabled ? onTap : null,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        height: 58,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(14),
+          gradient: enabled
+              ? const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [_teal, _tealDeep],
+                )
+              : null,
+          color: enabled
+              ? null
+              : CelestialColors.backgroundCard.withValues(alpha: 0.55),
+          border: Border.all(
+            color: enabled
+                ? _teal.withValues(alpha: 0.55)
+                : CelestialColors.orbitRing.withValues(alpha: 0.5),
+            width: 1,
+          ),
+          boxShadow: enabled
+              ? [
+                  BoxShadow(
+                    color: _teal.withValues(alpha: 0.32),
+                    blurRadius: 20,
+                    offset: const Offset(0, 8),
+                  ),
+                ]
+              : null,
+        ),
+        child: Stack(
+          children: [
+            // Inner top highlight line.
+            if (enabled)
+              Positioned(
+                top: 0,
+                left: 14,
+                right: 14,
+                child: Container(
+                  height: 1,
+                  color: Colors.white.withValues(alpha: 0.22),
+                ),
+              ),
+            Positioned(
+              left: 18,
+              top: 0,
+              bottom: 0,
+              child: Center(
+                child: Icon(
+                  Icons.bolt_rounded,
+                  size: 18,
+                  color: (enabled
+                          ? Colors.white
+                          : CelestialColors.textSecondary)
+                      .withValues(alpha: enabled ? 0.9 : 0.4),
+                ),
+              ),
+            ),
+            Center(
+              child: Text(
+                label,
+                style: TextStyle(
+                  color: enabled
+                      ? Colors.white
+                      : CelestialColors.textSecondary.withValues(alpha: 0.45),
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ),
+            Positioned(
+              right: 18,
+              top: 0,
+              bottom: 0,
+              child: Center(
+                child: Icon(
+                  Icons.arrow_forward_rounded,
+                  size: 18,
+                  color: (enabled
+                          ? Colors.white
+                          : CelestialColors.textSecondary)
+                      .withValues(alpha: enabled ? 0.85 : 0.35),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SecondaryGhostButton extends StatelessWidget {
+  const _SecondaryGhostButton({required this.label, required this.onTap});
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        height: 50,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: CelestialColors.orbitRing.withValues(alpha: 0.7),
+            width: 1,
+          ),
+        ),
+        child: Center(
+          child: Text(
+            label,
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.95),
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.4,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pairing hero — radar / signal lock
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _SignalLockHero extends StatelessWidget {
+  const _SignalLockHero({
+    required this.pulse,
+    required this.sweep,
+    required this.accent,
+    required this.accentDeep,
+    required this.accentSecondary,
+  });
+
+  final Animation<double> pulse;
+  final Animation<double> sweep;
+  final Color accent;
+  final Color accentDeep;
+  final Color accentSecondary;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 220,
+      height: 220,
+      child: AnimatedBuilder(
+        animation: Listenable.merge([pulse, sweep]),
+        builder: (context, _) {
+          return Stack(
+            alignment: Alignment.center,
+            children: [
+              Positioned.fill(
+                child: CustomPaint(
+                  painter: _SignalLockPainter(
+                    pulse: pulse.value,
+                    sweep: sweep.value,
+                    accent: accent,
+                    accentSecondary: accentSecondary,
+                  ),
+                ),
+              ),
+              Container(
+                width: 64,
+                height: 64,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [accent, accentDeep],
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: accent.withValues(
+                        alpha: 0.35 + pulse.value * 0.25,
+                      ),
+                      blurRadius: 24 + pulse.value * 12,
+                      spreadRadius: 1 + pulse.value * 2,
+                    ),
+                  ],
+                ),
+                child: const Icon(
+                  Icons.memory_outlined,
+                  color: Colors.white,
+                  size: 26,
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _SignalLockPainter extends CustomPainter {
+  _SignalLockPainter({
+    required this.pulse,
+    required this.sweep,
+    required this.accent,
+    required this.accentSecondary,
+  });
+
+  final double pulse;
+  final double sweep;
+  final Color accent;
+  final Color accentSecondary;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final maxR = size.shortestSide / 2;
+
+    // Three concentric expanding rings, phase-shifted.
+    for (var i = 0; i < 3; i++) {
+      final phase = (pulse + i / 3) % 1.0;
+      final radius = maxR * (0.30 + phase * 0.68);
+      final opacity = (1.0 - phase) * 0.32;
+      canvas.drawCircle(
+        center,
+        radius,
+        Paint()
+          ..color = accent.withValues(alpha: opacity)
+          ..strokeWidth = 1.1
+          ..style = PaintingStyle.stroke,
+      );
+    }
+
+    // Outer dotted ring — 60 tiny dots around the circumference.
+    final dotPaint = Paint()..color = accent.withValues(alpha: 0.30);
+    const dotCount = 60;
+    for (var i = 0; i < dotCount; i++) {
+      final angle = (i / dotCount) * math.pi * 2;
+      final r = maxR * 0.96;
+      canvas.drawCircle(
+        center.translate(math.cos(angle) * r, math.sin(angle) * r),
+        i % 5 == 0 ? 1.4 : 0.8,
+        dotPaint,
+      );
+    }
+
+    // Radar sweep cone — a soft sector that rotates.
+    final sweepAngle = sweep * math.pi * 2;
+    const coneWidth = 0.7;
+    final cone = Path()
+      ..moveTo(center.dx, center.dy)
+      ..arcTo(
+        Rect.fromCircle(center: center, radius: maxR * 0.9),
+        sweepAngle - coneWidth,
+        coneWidth,
+        false,
+      )
+      ..close();
+    canvas.drawPath(
+      cone,
+      Paint()
+        ..shader = SweepGradient(
+          startAngle: sweepAngle - coneWidth,
+          endAngle: sweepAngle,
+          colors: [
+            accent.withValues(alpha: 0.0),
+            accent.withValues(alpha: 0.20),
+          ],
+          transform: const GradientRotation(0),
+        ).createShader(Rect.fromCircle(center: center, radius: maxR * 0.9)),
+    );
+
+    // Leading edge of the sweep, a bright radial line.
+    canvas.drawLine(
+      center,
+      Offset(
+        center.dx + math.cos(sweepAngle) * maxR * 0.9,
+        center.dy + math.sin(sweepAngle) * maxR * 0.9,
+      ),
+      Paint()
+        ..shader = LinearGradient(
+          colors: [
+            accent.withValues(alpha: 0.0),
+            accent.withValues(alpha: 0.85),
+            accentSecondary.withValues(alpha: 0.9),
+          ],
+          stops: const [0.0, 0.7, 1.0],
+        ).createShader(
+          Rect.fromPoints(
+            center,
+            Offset(
+              center.dx + math.cos(sweepAngle) * maxR * 0.9,
+              center.dy + math.sin(sweepAngle) * maxR * 0.9,
+            ),
+          ),
+        )
+        ..strokeWidth = 1.5
+        ..strokeCap = StrokeCap.round,
+    );
+
+    // Crosshair reticle — 4 ticks just outside the central chip.
+    final reticle = Paint()
+      ..color = accent.withValues(alpha: 0.55)
+      ..strokeWidth = 1
+      ..strokeCap = StrokeCap.round;
+    const tickLen = 8.0;
+    final tickRadius = maxR * 0.42;
+    canvas.drawLine(
+      center.translate(-tickRadius - tickLen, 0),
+      center.translate(-tickRadius, 0),
+      reticle,
+    );
+    canvas.drawLine(
+      center.translate(tickRadius, 0),
+      center.translate(tickRadius + tickLen, 0),
+      reticle,
+    );
+    canvas.drawLine(
+      center.translate(0, -tickRadius - tickLen),
+      center.translate(0, -tickRadius),
+      reticle,
+    );
+    canvas.drawLine(
+      center.translate(0, tickRadius),
+      center.translate(0, tickRadius + tickLen),
+      reticle,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _SignalLockPainter old) =>
+      old.pulse != pulse || old.sweep != sweep;
+}
+
+class _PayloadEcho extends StatelessWidget {
+  const _PayloadEcho({required this.payload});
+  final String payload;
+
+  @override
+  Widget build(BuildContext context) {
+    if (payload.isEmpty) return const SizedBox.shrink();
+    return Center(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: CelestialColors.backgroundCard.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+            width: 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'MT://  ',
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.45),
+                fontSize: 11,
+                fontFamily: 'monospace',
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.0,
+              ),
+            ),
+            Flexible(
+              child: Text(
+                payload,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+                  fontSize: 11.5,
+                  fontFamily: 'monospace',
+                  letterSpacing: 0.4,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Failure glyph — a red ringed cross with a slow breathing halo.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _FailureGlyph extends StatelessWidget {
+  const _FailureGlyph({required this.pulse});
+  final Animation<double> pulse;
+
+  static const _danger = Color(0xFFEF5350);
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: pulse,
+      builder: (context, _) {
+        final t = pulse.value;
+        return SizedBox(
+          width: 110,
+          height: 110,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              Container(
+                width: 110,
+                height: 110,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: _danger.withValues(alpha: 0.10 + t * 0.10),
+                    width: 1,
+                  ),
+                ),
+              ),
+              Container(
+                width: 82,
+                height: 82,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: _danger.withValues(alpha: 0.20 + t * 0.15),
+                    width: 1,
+                  ),
+                ),
+              ),
+              Container(
+                width: 56,
+                height: 56,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _danger.withValues(alpha: 0.18),
+                  border: Border.all(
+                    color: _danger.withValues(alpha: 0.55),
+                    width: 1.5,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: _danger.withValues(alpha: 0.25 + t * 0.20),
+                      blurRadius: 18 + t * 8,
+                      spreadRadius: t * 2,
+                    ),
+                  ],
+                ),
+                child: const Icon(
+                  Icons.close_rounded,
+                  color: Colors.white,
+                  size: 28,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

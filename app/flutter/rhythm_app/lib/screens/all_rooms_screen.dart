@@ -13,6 +13,7 @@ import '../widgets/editable_room_card.dart';
 import '../widgets/room_card.dart';
 import '../widgets/hub_connection_banner.dart';
 import '../widgets/solar_orbit.dart'; // For CelestialColors
+import 'hubs/matter_pairing_flow.dart';
 
 /// All Rooms screen — horizontally paged room cards with edit-mode drag support.
 ///
@@ -720,10 +721,22 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
       );
     }
 
+    final canAddMatter =
+        context.watch<ServerSyncProvider>().canAddMatterDevice;
+
     return Padding(
       padding: EdgeInsets.fromLTRB(20, vPad, 20, vPad),
       child: Row(
         children: [
+          if (canAddMatter) ...[
+            _AddMatterDeviceButton(
+              onTap: () {
+                HapticFeedback.lightImpact();
+                startMatterPairingFlow(context);
+              },
+            ),
+            const SizedBox(width: 12),
+          ],
           Text(
             'Rooms',
             style: TextStyle(
@@ -742,6 +755,47 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
               onActiveModeDoubleTap: widget.onActiveModeDoubleTap,
             ),
         ],
+      ),
+    );
+  }
+}
+
+/// Circular (+) action button paired opposite the day/sleep mode toggle.
+///
+/// Matches the 34-px pill height of [_CurveProfileToggle] so the header reads
+/// as bookended: action on the left, mode on the right.
+class _AddMatterDeviceButton extends StatelessWidget {
+  const _AddMatterDeviceButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  static const _teal = Color(0xFF00BCD4);
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: 'Add Matter device',
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: CelestialColors.backgroundCard.withValues(alpha: 0.85),
+            border: Border.all(
+              color: _teal.withValues(alpha: 0.35),
+              width: 1,
+            ),
+          ),
+          child: const Icon(
+            Icons.add_rounded,
+            color: _teal,
+            size: 20,
+          ),
+        ),
       ),
     );
   }
