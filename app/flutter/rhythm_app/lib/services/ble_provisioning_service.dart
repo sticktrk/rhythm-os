@@ -47,12 +47,13 @@ class WifiFailedException implements Exception {
   String toString() => 'WifiFailedException: $message';
 }
 
-class _ProvisioningStatusMessage {
+@visibleForTesting
+class ProvisioningStatusMessage {
   final String status;
   final String? ip;
   final String? error;
 
-  const _ProvisioningStatusMessage({
+  const ProvisioningStatusMessage({
     required this.status,
     this.ip,
     this.error,
@@ -63,6 +64,9 @@ class _ProvisioningStatusMessage {
 }
 
 class BleProvisioningService {
+  static const _provisioningTimeout = Duration(seconds: 30);
+  static const _statusPollInterval = Duration(milliseconds: 500);
+
   StreamSubscription<List<ScanResult>>? _scanSubscription;
   StreamController<BleDevice>? _scanController;
   BluetoothDevice? _connectedDevice;
@@ -272,8 +276,6 @@ class BleProvisioningService {
       throw StateError('Not connected to a provisioning device');
     }
 
-    await statusChar.setNotifyValue(true);
-
     final payload = utf8.encode(
       json.encode({
         'ssid': ssid,
@@ -281,35 +283,100 @@ class BleProvisioningService {
       }),
     );
 
-    await wifiCommandChar.write(
-      payload,
-      withoutResponse: false,
+    final status = await waitForTerminalProvisioningStatus(
+      enableNotifications: () => statusChar.setNotifyValue(true),
+      writePayload: () => wifiCommandChar.write(
+        payload,
+        withoutResponse: false,
+      ),
+      statusUpdates: statusChar.onValueReceived.map(_parseStatus),
+      readStatus: () => _readStatus(statusChar),
+      timeout: _provisioningTimeout,
+      pollInterval: _statusPollInterval,
     );
 
+    switch (status.status) {
+      case 'connected':
+        final ip = status.ip;
+        if (ip == null || ip.isEmpty) {
+          throw StateError('Provisioning succeeded without an IP address');
+        }
+        return ip;
+      case 'wifi_failed':
+        throw WifiFailedException(status.error ?? 'Wi-Fi connection failed');
+      case 'failed':
+        throw StateError(status.error ?? 'Provisioning failed');
+      default:
+        throw StateError('Unexpected provisioning status: ${status.status}');
+    }
+  }
+
+  @visibleForTesting
+  static Future<ProvisioningStatusMessage> waitForTerminalProvisioningStatus({
+    required Future<void> Function() enableNotifications,
+    required Future<void> Function() writePayload,
+    required Stream<ProvisioningStatusMessage> statusUpdates,
+    required Future<ProvisioningStatusMessage> Function() readStatus,
+    Duration timeout = _provisioningTimeout,
+    Duration pollInterval = _statusPollInterval,
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    Future<ProvisioningStatusMessage>? notificationStatus;
+
     try {
-      final status = await statusChar.onValueReceived
-          .map(_parseStatus)
+      await enableNotifications();
+      notificationStatus = statusUpdates
           .where((update) => update.isTerminal)
           .first
-          .timeout(const Duration(seconds: 30));
+          .timeout(timeout);
+    } catch (error) {
+      debugPrint(
+        '[BLE] status notifications unavailable; falling back to polling: '
+        '$error',
+      );
+    }
 
-      switch (status.status) {
-        case 'connected':
-          final ip = status.ip;
-          if (ip == null || ip.isEmpty) {
-            throw StateError('Provisioning succeeded without an IP address');
-          }
-          return ip;
-        case 'wifi_failed':
-          throw WifiFailedException(status.error ?? 'Wi-Fi connection failed');
-        case 'failed':
-          throw StateError(status.error ?? 'Provisioning failed');
-        default:
-          throw StateError('Unexpected provisioning status: ${status.status}');
-      }
+    await writePayload();
+
+    final pollingStatus = _pollTerminalStatus(
+      readStatus: readStatus,
+      deadline: deadline,
+      pollInterval: pollInterval,
+    );
+    final notificationOrPolling = notificationStatus?.catchError((error) {
+      debugPrint(
+        '[BLE] status notification stream failed; waiting for polling: '
+        '$error',
+      );
+      return pollingStatus;
+    });
+
+    try {
+      return await (notificationOrPolling == null
+          ? pollingStatus
+          : Future.any([notificationOrPolling, pollingStatus]));
     } on TimeoutException {
       throw TimeoutException('Timed out waiting for Wi-Fi connection');
     }
+  }
+
+  static Future<ProvisioningStatusMessage> _pollTerminalStatus({
+    required Future<ProvisioningStatusMessage> Function() readStatus,
+    required DateTime deadline,
+    required Duration pollInterval,
+  }) async {
+    while (DateTime.now().isBefore(deadline)) {
+      final status = await readStatus();
+      if (status.isTerminal) {
+        return status;
+      }
+      final remaining = deadline.difference(DateTime.now());
+      if (remaining <= Duration.zero) break;
+      await Future<void>.delayed(
+        remaining < pollInterval ? remaining : pollInterval,
+      );
+    }
+    throw TimeoutException('Timed out waiting for Wi-Fi connection');
   }
 
   Future<void> disconnect() async {
@@ -357,21 +424,21 @@ class BleProvisioningService {
     );
   }
 
-  Future<_ProvisioningStatusMessage> _readStatus(
+  Future<ProvisioningStatusMessage> _readStatus(
     BluetoothCharacteristic characteristic,
   ) async {
     final bytes = await characteristic.read();
     return _parseStatus(bytes);
   }
 
-  _ProvisioningStatusMessage _parseStatus(List<int> bytes) {
+  ProvisioningStatusMessage _parseStatus(List<int> bytes) {
     final jsonMap = _decodeJson(bytes);
     final status = jsonMap['status'] as String?;
     if (status == null || status.isEmpty) {
       throw const FormatException('Provisioning status payload missing status');
     }
 
-    return _ProvisioningStatusMessage(
+    return ProvisioningStatusMessage(
       status: status,
       ip: jsonMap['ip'] as String?,
       error: jsonMap['error'] as String?,
