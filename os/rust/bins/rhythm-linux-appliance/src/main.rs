@@ -154,6 +154,8 @@ fn main() -> Result<()> {
         s.request_hub_bootstrap_fn = Some(Arc::new(|state| {
             rhythm_os::hub::spawn_stored_hub_bootstrap(state.clone(), hub::INTEGRATIONS);
         }));
+        s.commissioning_wifi_credentials_provider =
+            Some(Arc::new(wifi::load_configured_credentials));
     }
     install_factory_reset_hook(&state)?;
     hydrate_persisted_wifi_credentials(&state);
@@ -309,9 +311,11 @@ fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StartupWifiRestoreAction {
-    SkipNoStoredCredentials,
+    SkipNoKnownCredentials,
     SkipAlreadyConnected,
     RestorePersistedCredentials,
+    StoreSystemConfigCredentials,
+    RestoreSystemConfigCredentials,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -323,14 +327,19 @@ enum PeriodicStartupAction {
 
 fn startup_wifi_restore_action(
     has_stored_credentials: bool,
+    has_system_config_credentials: bool,
     has_active_connection: bool,
 ) -> StartupWifiRestoreAction {
-    if !has_stored_credentials {
-        StartupWifiRestoreAction::SkipNoStoredCredentials
-    } else if has_active_connection {
+    if has_stored_credentials && has_active_connection {
         StartupWifiRestoreAction::SkipAlreadyConnected
-    } else {
+    } else if has_stored_credentials {
         StartupWifiRestoreAction::RestorePersistedCredentials
+    } else if has_system_config_credentials && has_active_connection {
+        StartupWifiRestoreAction::StoreSystemConfigCredentials
+    } else if has_system_config_credentials {
+        StartupWifiRestoreAction::RestoreSystemConfigCredentials
+    } else {
+        StartupWifiRestoreAction::SkipNoKnownCredentials
     }
 }
 
@@ -429,19 +438,56 @@ fn hydrate_persisted_wifi_credentials(state: &SharedState) {
         }
     };
 
-    match startup_wifi_restore_action(stored_credentials.is_some(), wifi::has_active_connection()) {
-        StartupWifiRestoreAction::SkipNoStoredCredentials
-        | StartupWifiRestoreAction::SkipAlreadyConnected => return,
-        StartupWifiRestoreAction::RestorePersistedCredentials => {}
-    }
+    let system_config_credentials = if stored_credentials.is_none() {
+        match wifi::load_configured_credentials() {
+            Ok(creds) => creds,
+            Err(error) => {
+                warn!(
+                    target: "sys",
+                    "Failed to load appliance Wi-Fi credentials from system config at startup: {:#}",
+                    error
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
 
-    let Some(creds) = stored_credentials else {
-        return;
+    let action = startup_wifi_restore_action(
+        stored_credentials.is_some(),
+        system_config_credentials.is_some(),
+        wifi::has_active_connection(),
+    );
+
+    let creds = match action {
+        StartupWifiRestoreAction::SkipNoKnownCredentials
+        | StartupWifiRestoreAction::SkipAlreadyConnected => return,
+        StartupWifiRestoreAction::StoreSystemConfigCredentials => {
+            let Some(creds) = system_config_credentials else {
+                return;
+            };
+            save_commissioning_wifi_credentials(state, &creds, "system Wi-Fi config");
+            return;
+        }
+        StartupWifiRestoreAction::RestorePersistedCredentials => {
+            let Some(creds) = stored_credentials else {
+                return;
+            };
+            creds
+        }
+        StartupWifiRestoreAction::RestoreSystemConfigCredentials => {
+            let Some(creds) = system_config_credentials else {
+                return;
+            };
+            save_commissioning_wifi_credentials(state, &creds, "system Wi-Fi config");
+            creds
+        }
     };
 
     info!(
         target: "sys",
-        "No active Wi-Fi IP detected at startup; restoring persisted appliance Wi-Fi credentials for SSID '{}'",
+        "No active Wi-Fi IP detected at startup; restoring appliance Wi-Fi credentials for SSID '{}'",
         creds.ssid
     );
 
@@ -466,6 +512,39 @@ fn hydrate_persisted_wifi_credentials(state: &SharedState) {
         Err(error) => warn!(
             target: "sys",
             "Failed to restore appliance Wi-Fi from persisted credentials for SSID '{}': {:#}",
+            creds.ssid,
+            error
+        ),
+    }
+}
+
+fn save_commissioning_wifi_credentials(
+    state: &SharedState,
+    creds: &rhythm_os::provisioning::WifiCredentials,
+    source: &str,
+) {
+    let result = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("state lock poisoned"))
+        .and_then(|state| {
+            let storage = state
+                .storage
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("storage not configured"))?;
+            storage.save_commissioning_wifi_credentials(creds)
+        });
+
+    match result {
+        Ok(()) => info!(
+            target: "sys",
+            "Persisted Matter commissioning Wi-Fi credentials from {} for SSID '{}'",
+            source,
+            creds.ssid
+        ),
+        Err(error) => warn!(
+            target: "sys",
+            "Failed to persist Matter commissioning Wi-Fi credentials from {} for SSID '{}': {:#}",
+            source,
             creds.ssid,
             error
         ),
@@ -707,15 +786,15 @@ mod tests {
     #[test]
     fn startup_wifi_restore_skips_when_no_credentials_are_stored() {
         assert_eq!(
-            startup_wifi_restore_action(false, false),
-            StartupWifiRestoreAction::SkipNoStoredCredentials
+            startup_wifi_restore_action(false, false, false),
+            StartupWifiRestoreAction::SkipNoKnownCredentials
         );
     }
 
     #[test]
     fn startup_wifi_restore_skips_when_wifi_is_already_connected() {
         assert_eq!(
-            startup_wifi_restore_action(true, true),
+            startup_wifi_restore_action(true, false, true),
             StartupWifiRestoreAction::SkipAlreadyConnected
         );
     }
@@ -723,10 +802,26 @@ mod tests {
     #[test]
     fn startup_wifi_restore_uses_persisted_credentials_when_disconnected() {
         assert_eq!(
-            startup_wifi_restore_action(true, false),
+            startup_wifi_restore_action(true, false, false),
             StartupWifiRestoreAction::RestorePersistedCredentials
         );
         assert_eq!(STARTUP_WIFI_RESTORE_TIMEOUT.as_secs(), 30);
+    }
+
+    #[test]
+    fn startup_wifi_restore_stores_system_credentials_when_already_connected() {
+        assert_eq!(
+            startup_wifi_restore_action(false, true, true),
+            StartupWifiRestoreAction::StoreSystemConfigCredentials
+        );
+    }
+
+    #[test]
+    fn startup_wifi_restore_uses_system_credentials_when_disconnected() {
+        assert_eq!(
+            startup_wifi_restore_action(false, true, false),
+            StartupWifiRestoreAction::RestoreSystemConfigCredentials
+        );
     }
 
     #[test]

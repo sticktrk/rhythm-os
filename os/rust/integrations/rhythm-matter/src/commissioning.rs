@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use anyhow::Context;
 use anyhow::Result;
 use log::{error, info, warn};
 use rhythm_core::runtime::hub_registry::DeviceType;
@@ -186,25 +187,82 @@ fn summarize_commissioning_error(error: &anyhow::Error) -> String {
 fn load_commissioning_wifi_credentials(
     state: &SharedState,
 ) -> Result<MatterCommissioningWifiCredentials> {
-    let wifi = state
-        .lock()
-        .ok()
-        .and_then(|state| state.storage.as_ref().and_then(|storage| {
-            storage
-                .load_commissioning_wifi_credentials()
-                .ok()
-                .flatten()
-        }))
-        .ok_or_else(|| {
+    let wifi = match load_stored_commissioning_wifi_credentials(state)? {
+        Some(wifi) => wifi,
+        None => load_platform_commissioning_wifi_credentials(state)?.ok_or_else(|| {
             anyhow::anyhow!(
                 "Matter Wi-Fi commissioning requires stored appliance Wi-Fi credentials; provision the appliance over Wi-Fi before pairing Matter lights"
             )
-        })?;
+        })?,
+    };
 
     Ok(MatterCommissioningWifiCredentials {
         ssid: wifi.ssid,
         password: wifi.password,
     })
+}
+
+fn load_stored_commissioning_wifi_credentials(
+    state: &SharedState,
+) -> Result<Option<rhythm_os::provisioning::WifiCredentials>> {
+    let state = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+    let Some(storage) = state.storage.as_ref() else {
+        return Ok(None);
+    };
+
+    storage
+        .load_commissioning_wifi_credentials()
+        .context("loading stored appliance Wi-Fi credentials")
+}
+
+fn load_platform_commissioning_wifi_credentials(
+    state: &SharedState,
+) -> Result<Option<rhythm_os::provisioning::WifiCredentials>> {
+    let provider = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("state lock poisoned"))?
+        .commissioning_wifi_credentials_provider
+        .clone();
+    let Some(provider) = provider else {
+        return Ok(None);
+    };
+
+    let creds = provider().context("loading platform appliance Wi-Fi credentials")?;
+    if let Some(creds) = creds.as_ref() {
+        persist_commissioning_wifi_credentials(state, creds);
+        info!(
+            target: "pair",
+            "Recovered Matter commissioning Wi-Fi credentials from platform network config for SSID '{}'",
+            creds.ssid
+        );
+    }
+    Ok(creds)
+}
+
+fn persist_commissioning_wifi_credentials(
+    state: &SharedState,
+    creds: &rhythm_os::provisioning::WifiCredentials,
+) {
+    let result = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("state lock poisoned"))
+        .and_then(|state| {
+            let storage = state
+                .storage
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("storage not configured"))?;
+            storage.save_commissioning_wifi_credentials(creds)
+        });
+
+    if let Err(error) = result {
+        warn!(
+            target: "pair",
+            "Failed to persist recovered Matter commissioning Wi-Fi credentials: {:#}",
+            error
+        );
+    }
 }
 
 fn build_success_session(

@@ -104,6 +104,17 @@ pub fn store_commissioning_wifi(state: &SharedState, ssid: &str, password: &str)
         .unwrap();
 }
 
+pub fn set_platform_commissioning_wifi_provider(state: &SharedState, ssid: &str, password: &str) {
+    let creds = WifiCredentials {
+        ssid: ssid.to_string(),
+        password: password.to_string(),
+    };
+    state
+        .lock()
+        .unwrap()
+        .commissioning_wifi_credentials_provider = Some(Arc::new(move || Ok(Some(creds.clone()))));
+}
+
 fn unique_data_dir() -> PathBuf {
     let base = std::env::temp_dir().join(format!("rhythm-matter-test-{}", std::process::id()));
     base.join(

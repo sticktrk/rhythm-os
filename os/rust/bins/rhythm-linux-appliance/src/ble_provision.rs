@@ -202,16 +202,10 @@ impl ProvisioningBackend for LinuxWifiBackend {
             .spawn(move || {
                 let result = match wifi::connect_with_credentials(&creds, timeout) {
                     Ok(ip) => {
-                        if let Err(error) =
-                            time_sync::sync_system_clock("BLE provisioning Wi-Fi connection")
-                        {
-                            warn!(
-                                target: "sys",
-                                "Failed to sync wall clock after BLE provisioning connected Wi-Fi: {:#}",
-                                error
-                            );
-                        }
-                        ProvisioningConnectResult::Connected { ip }
+                        let _ =
+                            result_tx.send((attempt, ProvisioningConnectResult::Connected { ip }));
+                        sync_clock_after_wifi_connect();
+                        return;
                     }
                     Err(e) => ProvisioningConnectResult::Failed {
                         error: e.to_string(),
@@ -264,6 +258,23 @@ impl ProvisioningBackend for LinuxWifiBackend {
                 }
             }
         }
+    }
+}
+
+fn sync_clock_after_wifi_connect() {
+    match std::panic::catch_unwind(|| {
+        time_sync::sync_system_clock("BLE provisioning Wi-Fi connection")
+    }) {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => warn!(
+            target: "sys",
+            "Failed to sync wall clock after BLE provisioning connected Wi-Fi: {:#}",
+            error
+        ),
+        Err(_) => warn!(
+            target: "sys",
+            "Wall-clock sync panicked after BLE provisioning connected Wi-Fi; continuing because Wi-Fi credentials were already accepted"
+        ),
     }
 }
 

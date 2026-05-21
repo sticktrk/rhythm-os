@@ -61,6 +61,18 @@ pub fn has_wifi_config() -> bool {
         .unwrap_or(false)
 }
 
+pub fn load_configured_credentials() -> Result<Option<WifiCredentials>> {
+    let content = match fs::read_to_string(WPA_CONF) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", WPA_CONF)),
+    };
+    let preferred_ssid = find_wifi_iface()
+        .as_deref()
+        .and_then(|iface| wpa_status_field(iface, "ssid"));
+    Ok(parse_wpa_credentials(&content, preferred_ssid.as_deref()))
+}
+
 pub fn connect_with_credentials(creds: &WifiCredentials, timeout: Duration) -> Result<String> {
     write_wifi_credentials(creds)?;
     restart_wifi()?;
@@ -222,6 +234,101 @@ fn escape_wpa_value(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedWifiNetwork {
+    ssid: String,
+    password: String,
+}
+
+fn parse_wpa_credentials(content: &str, preferred_ssid: Option<&str>) -> Option<WifiCredentials> {
+    let mut networks = Vec::new();
+    let mut in_network = false;
+    let mut ssid: Option<String> = None;
+    let mut password: Option<String> = None;
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if !in_network {
+            if line == "network={" {
+                in_network = true;
+                ssid = None;
+                password = None;
+            }
+            continue;
+        }
+
+        if line == "}" {
+            if let (Some(ssid), Some(password)) = (ssid.take(), password.take()) {
+                networks.push(ParsedWifiNetwork { ssid, password });
+            }
+            in_network = false;
+            continue;
+        }
+
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "ssid" => ssid = parse_wpa_scalar(value.trim()),
+            "psk" => password = parse_wpa_scalar(value.trim()),
+            _ => {}
+        }
+    }
+
+    let selected = preferred_ssid
+        .and_then(|preferred| networks.iter().find(|network| network.ssid == preferred))
+        .or_else(|| match networks.as_slice() {
+            [single] => Some(single),
+            _ => None,
+        })?;
+
+    Some(WifiCredentials {
+        ssid: selected.ssid.clone(),
+        password: selected.password.clone(),
+    })
+}
+
+fn parse_wpa_scalar(value: &str) -> Option<String> {
+    if value.starts_with('"') {
+        parse_wpa_quoted_scalar(value)
+    } else {
+        value
+            .split('#')
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    }
+}
+
+fn parse_wpa_quoted_scalar(value: &str) -> Option<String> {
+    let mut chars = value.chars();
+    if chars.next()? != '"' {
+        return None;
+    }
+
+    let mut parsed = String::new();
+    let mut escaped = false;
+    for ch in chars {
+        if escaped {
+            parsed.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => return Some(parsed),
+            _ => parsed.push(ch),
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,6 +396,59 @@ mod tests {
         };
         assert!(render_wpa_conf(&creds, "DE").contains("country=DE\n"));
         assert!(render_wpa_conf(&creds, "JP").contains("country=JP\n"));
+    }
+
+    #[test]
+    fn parse_wpa_credentials_reads_written_network() {
+        let creds = WifiCredentials {
+            ssid: "Guest Wi-Fi".into(),
+            password: "pa\\\"ss".into(),
+        };
+        let body = render_wpa_conf(&creds, "US");
+
+        assert_eq!(parse_wpa_credentials(&body, None), Some(creds));
+    }
+
+    #[test]
+    fn parse_wpa_credentials_prefers_active_ssid() {
+        let body = r#"
+ctrl_interface=/var/run/wpa_supplicant
+network={
+  ssid="first"
+  psk="wrong"
+}
+network={
+  ssid="robnet"
+  psk="correct"
+}
+"#;
+
+        assert_eq!(
+            parse_wpa_credentials(body, Some("robnet")),
+            Some(WifiCredentials {
+                ssid: "robnet".into(),
+                password: "correct".into(),
+            })
+        );
+        assert_eq!(parse_wpa_credentials(body, None), None);
+    }
+
+    #[test]
+    fn parse_wpa_credentials_accepts_unquoted_psk() {
+        let body = r#"
+network={
+  ssid="robnet"
+  psk=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+}
+"#;
+
+        assert_eq!(
+            parse_wpa_credentials(body, Some("robnet")),
+            Some(WifiCredentials {
+                ssid: "robnet".into(),
+                password: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            })
+        );
     }
 
     #[test]

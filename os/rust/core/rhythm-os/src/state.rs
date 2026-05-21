@@ -557,6 +557,18 @@ pub struct AppState {
     #[allow(clippy::type_complexity)]
     pub request_hub_bootstrap_fn: Option<Arc<dyn Fn(&SharedState) + Send + Sync>>,
 
+    /// Platform-owned fallback for Wi-Fi credentials used during accessory
+    /// commissioning.
+    ///
+    /// Appliance targets may have a live Wi-Fi connection backed by system
+    /// network config even when Rhythm's persisted commissioning cache is
+    /// missing. Integrations use this callback only as a fallback so they stay
+    /// portable and do not read platform files directly.
+    #[allow(clippy::type_complexity)]
+    pub commissioning_wifi_credentials_provider: Option<
+        Arc<dyn Fn() -> anyhow::Result<Option<crate::provisioning::WifiCredentials>> + Send + Sync>,
+    >,
+
     /// Optional platform-owned follow-up for a full factory reset.
     ///
     /// Shared reset logic clears in-memory and persisted Rhythm state, then
@@ -664,6 +676,7 @@ impl Default for AppState {
             save_device_test_report_fn: None,
             hub_credentials_interceptor: None,
             request_hub_bootstrap_fn: None,
+            commissioning_wifi_credentials_provider: None,
             after_factory_reset_fn: None,
             firmware_version: "0.0.0",
             platform_type: "desktop",
