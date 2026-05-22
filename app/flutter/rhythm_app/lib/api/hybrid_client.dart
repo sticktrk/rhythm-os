@@ -45,10 +45,11 @@ class HybridApiClient implements RhythmApi {
     Iterable<Hub> storedHubs = const [],
     bool syncSolarDataOnCreate = true,
   }) async {
+    final startupServerHub = _selectStartupServerHub(storedHubs);
     final effectiveBaseUrl = resolveHybridApiBaseUrl(
       baseUrl: baseUrl,
       isWeb: kIsWeb,
-      storedHubs: storedHubs,
+      storedHubs: startupServerHub == null ? const [] : [startupServerHub],
     );
     NativeBrain? brain;
     try {
@@ -58,11 +59,18 @@ class HybridApiClient implements RhythmApi {
       // Fall back to remote-only mode
       debugPrint('NativeBrain not available, using remote-only mode: $e');
     }
+    final authToken = effectiveBaseUrl ==
+            _normalizeBaseUrl(startupServerHub?.endpoint.baseUrl)
+        ? startupServerHub?.token
+        : null;
 
     final client = HybridApiClient._(
       remote: effectiveBaseUrl == null
           ? _LocalOnlyApi()
-          : _SdkConfigAdapter(sdk.RhythmConfigApi(baseUrl: effectiveBaseUrl)),
+          : _SdkConfigAdapter(sdk.RhythmConfigApi(
+              baseUrl: effectiveBaseUrl,
+              authToken: authToken,
+            )),
       brain: brain,
     );
 

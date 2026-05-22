@@ -47,15 +47,18 @@ class MatterDeviceAddScreen extends StatefulWidget {
     super.key,
     required this.endpoint,
     required this.addMethod,
+    this.authToken,
   });
 
   final HubEndpoint endpoint;
   final MatterAddMethod addMethod;
+  final String? authToken;
 
   static Future<MatterDevicePairingResult?> show(
     BuildContext context, {
     required HubEndpoint endpoint,
     required MatterAddMethod addMethod,
+    String? authToken,
   }) {
     return Navigator.of(context).push(
       PageRouteBuilder(
@@ -65,6 +68,7 @@ class MatterDeviceAddScreen extends StatefulWidget {
           return MatterDeviceAddScreen(
             endpoint: endpoint,
             addMethod: addMethod,
+            authToken: authToken,
           );
         },
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
@@ -113,7 +117,10 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   @override
   void initState() {
     super.initState();
-    _pairingApi = RhythmMatterApi(baseUrl: widget.endpoint.baseUrl);
+    _pairingApi = RhythmMatterApi(
+      baseUrl: widget.endpoint.baseUrl,
+      authToken: widget.authToken,
+    );
     _sessionId =
         'matter-pair-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
     _pulseController = AnimationController(

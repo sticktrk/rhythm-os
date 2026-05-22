@@ -295,7 +295,10 @@ class CloudBackupService {
     required String reason,
     Home? home,
   }) async {
-    final api = RhythmBundleApi(baseUrl: serverHub.endpoint.baseUrl);
+    final api = RhythmBundleApi(
+      baseUrl: serverHub.endpoint.baseUrl,
+      authToken: serverHub.token,
+    );
 
     // Persist the secret-bearing GET /api/backup payload. The PUT response is
     // intentionally redacted and must not replace the stored backup.

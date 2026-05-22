@@ -139,6 +139,7 @@ Future<void> showReportBugFlow(
       final client = RhythmDiagnosticsApi(
         host: serverHub.endpoint.host,
         port: serverHub.endpoint.port,
+        authToken: serverHub.token,
       );
       final bundle = await client.downloadDebugBundle();
       submission = await DebugBundleSubmissionService.instance.submit(
@@ -161,8 +162,7 @@ Future<void> showReportBugFlow(
     if (!context.mounted) return;
     Navigator.of(context, rootNavigator: true).pop();
     final message = switch (error) {
-      RhythmApiException apiError =>
-        apiError.serverMessage ?? apiError.message,
+      RhythmApiException apiError => apiError.serverMessage ?? apiError.message,
       DebugBundleSubmissionException submitError => submitError.message,
       _ => 'Failed to report the bug.',
     };

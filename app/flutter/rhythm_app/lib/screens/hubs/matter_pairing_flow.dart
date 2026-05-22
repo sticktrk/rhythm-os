@@ -1,8 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmDevice, RhythmDeviceType;
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType;
 
 import '../../providers/home_provider.dart';
 import '../../providers/server_sync_provider.dart';
@@ -32,6 +31,7 @@ Future<void> startMatterPairingFlow(
   final pairingResult = await MatterDeviceAddScreen.show(
     context,
     endpoint: serverHub.endpoint,
+    authToken: serverHub.token,
     addMethod: addMethod,
   );
   if (!context.mounted || pairingResult == null) return;

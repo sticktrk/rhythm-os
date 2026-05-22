@@ -506,6 +506,7 @@ class HomeProvider extends ChangeNotifier {
     required String name,
     required String host,
     int port = 54448,
+    String? token,
   }) async {
     if (_currentHome == null) {
       _error = 'No home selected';
@@ -519,6 +520,7 @@ class HomeProvider extends ChangeNotifier {
         name: name,
         host: host,
         port: port,
+        token: token,
       );
 
       _loadCurrentHomeHubs();

@@ -145,9 +145,14 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   void initState() {
     super.initState();
     _client = RhythmDiagnosticsApi(
-        host: widget.hub.endpoint.host, port: widget.hub.endpoint.port);
-    _restartService =
-        DeviceRestartService(baseUrl: widget.hub.endpoint.baseUrl);
+      host: widget.hub.endpoint.host,
+      port: widget.hub.endpoint.port,
+      authToken: widget.hub.token,
+    );
+    _restartService = DeviceRestartService(
+      baseUrl: widget.hub.endpoint.baseUrl,
+      authToken: widget.hub.token,
+    );
 
     _glowController = AnimationController(
       duration: const Duration(milliseconds: 2000),
@@ -210,6 +215,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       fallbackPlatformType: syncProvider.serverPlatformType,
       fallbackPlatformContext: syncProvider.serverPlatformContext,
       resetCheckStateOnInitialize: true,
+      authToken: widget.hub.token,
     );
   }
 
@@ -857,8 +863,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 child: Text(
                   'Auto Update',
                   style: TextStyle(
-                    color: CelestialColors.textSecondary
-                        .withValues(alpha: 0.8),
+                    color: CelestialColors.textSecondary.withValues(alpha: 0.8),
                     fontSize: 14,
                   ),
                 ),
@@ -1004,8 +1009,11 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 currentVersion,
                 release.version,
               );
-              _otaService.startUpdate(widget.hub.endpoint.host,
-                  port: widget.hub.endpoint.port);
+              _otaService.startUpdate(
+                widget.hub.endpoint.host,
+                port: widget.hub.endpoint.port,
+                authToken: widget.hub.token,
+              );
               _OtaUpdateOverlay.show(
                 context,
                 otaService: _otaService,

@@ -656,7 +656,8 @@ class ServerSyncProvider extends ChangeNotifier {
     if (serverHub != null) {
       if (serverHub.id == _serverHub?.id &&
           serverHub.endpoint.host == _serverHub?.endpoint.host &&
-          serverHub.endpoint.port == _serverHub?.endpoint.port) {
+          serverHub.endpoint.port == _serverHub?.endpoint.port &&
+          serverHub.token == _serverHub?.token) {
         return; // Same hub, no change
       }
       debugPrint(
@@ -665,9 +666,13 @@ class ServerSyncProvider extends ChangeNotifier {
       // Defer all side-effects to avoid notifyListeners during ProxyProvider build phase
       final host = serverHub.endpoint.host;
       final port = serverHub.endpoint.port;
+      final pendingHub = serverHub;
       Future.microtask(() async {
         _roomProvider.clearTransientState();
-        _connection.connect(host, port: port);
+        final hub = await _claimServerHubIfNeeded(pendingHub);
+        if (_serverHub?.id != pendingHub.id) return;
+        _serverHub = hub;
+        _connection.connect(host, port: port, authToken: hub.token);
       });
     } else if (_serverHub != null) {
       debugPrint('ServerSync: connectIfAvailable — hub removed, disconnecting');
@@ -676,6 +681,32 @@ class ServerSyncProvider extends ChangeNotifier {
         await _roomProvider.clearAllRooms();
         _connection.disconnect();
       });
+    }
+  }
+
+  Future<Hub> _claimServerHubIfNeeded(Hub hub) async {
+    final existingToken = hub.token?.trim();
+    if (existingToken != null && existingToken.isNotEmpty) return hub;
+
+    try {
+      final authApi = RhythmAuthApi(baseUrl: hub.endpoint.baseUrl);
+      final status = await authApi.getStatus();
+      if (!status.requiresAuth || !status.claimAvailable) {
+        return hub;
+      }
+
+      final claim = await authApi.claimOwnerToken();
+      final claimedHub = hub.copyWith(token: claim.token);
+      await _homeProvider.updateHub(claimedHub);
+      debugPrint(
+        'ServerSync: claimed owner token for ${hub.endpoint.host}:${hub.endpoint.port}',
+      );
+      return claimedHub;
+    } catch (error) {
+      debugPrint(
+        'ServerSync: unable to claim owner token for ${hub.endpoint.host}:${hub.endpoint.port}: $error',
+      );
+      return hub;
     }
   }
 

@@ -526,7 +526,10 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
       debugPrint(
         'BackupRestoreScreen: manual restore using ${serverHub.endpoint.baseUrl}',
       );
-      final api = RhythmBundleApi(baseUrl: serverHub.endpoint.baseUrl);
+      final api = RhythmBundleApi(
+        baseUrl: serverHub.endpoint.baseUrl,
+        authToken: serverHub.token,
+      );
       await api.putBackupBundle(snapshot.backupBundle);
       final scopeKey = RoomPageProvider.layoutScopeFor(
         home: homeProvider.currentHome,

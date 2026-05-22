@@ -27,11 +27,13 @@ class DeviceRestartService {
     required String baseUrl,
     Duration connectTimeout = defaultConnectTimeout,
     Duration receiveTimeout = defaultReceiveTimeout,
+    String? authToken,
   }) : _dio = Dio(
           BaseOptions(
             baseUrl: baseUrl,
             connectTimeout: connectTimeout,
             receiveTimeout: receiveTimeout,
+            headers: _bearerAuthHeaders(authToken),
           ),
         );
 
@@ -85,4 +87,10 @@ class DeviceRestartService {
       _ => 'Failed to schedule restart.',
     };
   }
+}
+
+Map<String, String>? _bearerAuthHeaders(String? authToken) {
+  final token = authToken?.trim();
+  if (token == null || token.isEmpty) return null;
+  return {'Authorization': 'Bearer $token'};
 }

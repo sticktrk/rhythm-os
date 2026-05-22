@@ -229,6 +229,7 @@ class Hub {
     required String name,
     required String host,
     int port = 54448,
+    String? token,
   }) {
     return Hub.create(
       id: id,
@@ -236,7 +237,7 @@ class Hub {
       type: HubType.server,
       name: name,
       endpoint: HubEndpoint(host: host, port: port, useSsl: false),
-      token: null, // Server doesn't require auth
+      token: token,
     );
   }
 

@@ -429,7 +429,8 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     });
 
     try {
-      final ip = await _bleService.sendWifiCredentials(ssid, password);
+      final result = await _bleService.sendWifiCredentials(ssid, password);
+      final ip = result.ip;
       if (!mounted) return;
 
       setState(() {
@@ -450,7 +451,11 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         return;
       }
 
-      await _persistServerHub(ip);
+      final ownerToken = result.ownerToken ?? _existingServerOwnerToken();
+      if (ownerToken == null || ownerToken.isEmpty) {
+        throw StateError('Provisioning succeeded without an owner token');
+      }
+      await _persistServerHub(ip, ownerToken);
       if (!mounted) return;
 
       AnalyticsService().logEvent('ble_provisioning_completed');
@@ -498,7 +503,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     return false;
   }
 
-  Future<void> _persistServerHub(String ip) async {
+  Future<void> _persistServerHub(String ip, String ownerToken) async {
     final homeProvider = context.read<HomeProvider>();
     final exists = homeProvider.currentHomeHubs.any(
       (hub) =>
@@ -512,7 +517,17 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       name: _deviceInfo?.name ?? 'RhythmServer',
       host: ip,
       port: 54448,
+      token: ownerToken,
     );
+  }
+
+  String? _existingServerOwnerToken() {
+    for (final hub in context.read<HomeProvider>().currentHomeHubs) {
+      if (hub.type != HubType.server) continue;
+      final token = hub.token?.trim();
+      if (token != null && token.isNotEmpty) return token;
+    }
+    return null;
   }
 
   Future<void> _startOver() async {

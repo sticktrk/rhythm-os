@@ -38,6 +38,16 @@ class BleDeviceInfo {
   });
 }
 
+class BleProvisioningResult {
+  final String ip;
+  final String? ownerToken;
+
+  const BleProvisioningResult({
+    required this.ip,
+    this.ownerToken,
+  });
+}
+
 class WifiFailedException implements Exception {
   final String message;
 
@@ -51,11 +61,13 @@ class WifiFailedException implements Exception {
 class ProvisioningStatusMessage {
   final String status;
   final String? ip;
+  final String? ownerToken;
   final String? error;
 
   const ProvisioningStatusMessage({
     required this.status,
     this.ip,
+    this.ownerToken,
     this.error,
   });
 
@@ -269,7 +281,10 @@ class BleProvisioningService {
     return _readDeviceInfo(_deviceInfoChar!);
   }
 
-  Future<String> sendWifiCredentials(String ssid, String password) async {
+  Future<BleProvisioningResult> sendWifiCredentials(
+    String ssid,
+    String password,
+  ) async {
     final wifiCommandChar = _wifiCommandChar;
     final statusChar = _statusChar;
     if (wifiCommandChar == null || statusChar == null) {
@@ -301,7 +316,12 @@ class BleProvisioningService {
         if (ip == null || ip.isEmpty) {
           throw StateError('Provisioning succeeded without an IP address');
         }
-        return ip;
+        final ownerToken = status.ownerToken?.trim();
+        return BleProvisioningResult(
+          ip: ip,
+          ownerToken:
+              ownerToken == null || ownerToken.isEmpty ? null : ownerToken,
+        );
       case 'wifi_failed':
         throw WifiFailedException(status.error ?? 'Wi-Fi connection failed');
       case 'failed':
@@ -441,6 +461,7 @@ class BleProvisioningService {
     return ProvisioningStatusMessage(
       status: status,
       ip: jsonMap['ip'] as String?,
+      ownerToken: jsonMap['owner_token'] as String?,
       error: jsonMap['error'] as String?,
     );
   }

@@ -218,6 +218,12 @@ class OtaBundleEntry {
   }
 }
 
+Map<String, String>? _bearerAuthHeaders(String? authToken) {
+  final token = authToken?.trim();
+  if (token == null || token.isEmpty) return null;
+  return {'Authorization': 'Bearer $token'};
+}
+
 /// Firmware release metadata from an update check.
 class FirmwareRelease {
   final String version;
@@ -411,6 +417,7 @@ class OtaService extends ChangeNotifier {
 
   Dio? _dio;
   String? _host;
+  String? _authToken;
   int _port = 80;
 
   OtaState _state = OtaState.idle;
@@ -467,8 +474,9 @@ class OtaService extends ChangeNotifier {
     String? fallbackPlatformType,
     String? fallbackPlatformContext,
     bool resetCheckStateOnInitialize = false,
+    String? authToken,
   }) async {
-    _configureClient(host, port);
+    _configureClient(host, port, authToken);
 
     final fallbackVersion = _normalizeVersion(fallbackCurrentVersion);
     if (fallbackVersion != null) {
@@ -586,7 +594,12 @@ class OtaService extends ChangeNotifier {
   }
 
   /// Start the selected update flow.
-  Future<void> startUpdate(String deviceIp, {int port = 80}) async {
+  Future<void> startUpdate(
+    String deviceIp, {
+    int port = 80,
+    String? authToken,
+  }) async {
+    _configureClient(deviceIp, port, authToken ?? _authToken);
     if (_strategy == _OtaStrategy.selfPull) {
       await _startSelfPullUpdate();
       return;
@@ -941,16 +954,23 @@ class OtaService extends ChangeNotifier {
     }
   }
 
-  void _configureClient(String host, int port) {
-    if (_host == host && _port == port && _dio != null) return;
+  void _configureClient(String host, int port, String? authToken) {
+    if (_host == host &&
+        _port == port &&
+        _authToken == authToken &&
+        _dio != null) {
+      return;
+    }
 
     _host = host;
     _port = port;
+    _authToken = authToken;
     _dio?.close();
     _dio = Dio(BaseOptions(
       baseUrl: port == 80 ? 'http://$host/' : 'http://$host:$port/',
       connectTimeout: const Duration(seconds: 5),
       receiveTimeout: const Duration(seconds: 10),
+      headers: _bearerAuthHeaders(authToken),
     ));
   }
 

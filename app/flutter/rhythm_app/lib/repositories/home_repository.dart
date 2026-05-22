@@ -186,6 +186,7 @@ class HomeRepository {
     required String name,
     required String host,
     int port = 54448,
+    String? token,
   }) async {
     final hub = Hub.server(
       id: _uuid.v4(),
@@ -193,6 +194,7 @@ class HomeRepository {
       name: name,
       host: host,
       port: port,
+      token: token,
     );
 
     await _localDataSource.saveHub(hub);
