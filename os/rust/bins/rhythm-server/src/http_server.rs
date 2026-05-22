@@ -413,9 +413,23 @@ fn scan_mdns() -> Vec<serde_json::Value> {
 
 async fn restart_device(State(state): State<SharedState>) -> Response {
     log::info!(target: "http", "Restart requested via /api/restart");
-    crate::self_update::persist_before_restart(&state);
     crate::self_update::schedule_user_initiated_restart();
+    persist_before_restart_async(state, "user request");
     json_ok(r#"{"status":"ok","message":"Restart scheduled"}"#.to_string())
+}
+
+fn persist_before_restart_async(state: SharedState, reason: &'static str) {
+    if let Err(error) = std::thread::Builder::new()
+        .name("restart-persist".to_string())
+        .spawn(move || crate::self_update::persist_before_restart(&state))
+    {
+        log::warn!(
+            target: "http",
+            "Failed to spawn restart persistence worker for {}: {}",
+            reason,
+            error
+        );
+    }
 }
 
 #[derive(Debug, Serialize)]

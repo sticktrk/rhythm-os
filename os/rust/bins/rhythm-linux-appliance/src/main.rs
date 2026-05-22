@@ -10,7 +10,6 @@ mod http_server;
 mod time_sync;
 mod wifi;
 
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -280,30 +279,7 @@ fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
             }
 
             info!(target: "sys", "Rebooting appliance after factory reset...");
-
-            let reboot_result = Command::new("/sbin/reboot")
-                .status()
-                .or_else(|_| Command::new("reboot").status());
-
-            match reboot_result {
-                Ok(status) if status.success() => {}
-                Ok(status) => {
-                    warn!(
-                        target: "sys",
-                        "Appliance reboot after factory reset exited with status {:?}; falling back to process exit",
-                        status.code()
-                    );
-                    std::process::exit(1);
-                }
-                Err(error) => {
-                    warn!(
-                        target: "sys",
-                        "Failed to reboot appliance after factory reset: {:#}; falling back to process exit",
-                        error
-                    );
-                    std::process::exit(1);
-                }
-            }
+            rhythm_server::self_update::schedule_factory_reset_restart();
         });
     }));
     Ok(())

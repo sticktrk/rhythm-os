@@ -34,6 +34,14 @@ const LOG_BASENAMES: &[&str] = &[
 ];
 const EXACT_PERSISTED_FILES: &[&str] = &["topology.json", "canonical_registry.json", "rooms.json"];
 const PERSISTED_HUB_REGISTRY_GLOB: &str = "hub_registry_*.json";
+#[cfg(target_os = "linux")]
+const THREAD_SNAPSHOT_ENTRY_LIMIT: usize = 64;
+#[cfg(target_os = "linux")]
+const THREAD_WAIT_CHANNEL_BYTES_LIMIT: usize = 128;
+#[cfg(target_os = "linux")]
+const THREAD_KERNEL_STACK_BYTES_LIMIT: usize = 2 * 1024;
+#[cfg(target_os = "linux")]
+const THREAD_KERNEL_STACK_CAPTURE_LIMIT: usize = 8;
 
 pub struct DebugBundle {
     pub file_name: String,
@@ -102,6 +110,14 @@ struct ThreadSnapshotEntry {
     name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wait_channel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kernel_stack: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kernel_stack_truncated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kernel_stack_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -115,6 +131,8 @@ struct ProcessResourceSnapshot {
     open_fds: Vec<FdSnapshotEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     thread_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thread_entries_truncated: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     threads: Vec<ThreadSnapshotEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1592,6 +1610,7 @@ fn build_process_resources_json(
             open_fd_count: None,
             open_fds: Vec::new(),
             thread_count: None,
+            thread_entries_truncated: None,
             threads: Vec::new(),
             status: None,
             limits: None,
@@ -1614,8 +1633,10 @@ fn build_process_resources_json(
 
         snapshot.open_fds = linux_open_fd_snapshot(diagnostics);
         snapshot.open_fd_count = Some(snapshot.open_fds.len());
-        snapshot.threads = linux_thread_snapshot(diagnostics);
-        snapshot.thread_count = Some(snapshot.threads.len());
+        let thread_snapshot = linux_thread_snapshot(diagnostics);
+        snapshot.thread_count = Some(thread_snapshot.total_count);
+        snapshot.thread_entries_truncated = thread_snapshot.truncated.then_some(true);
+        snapshot.threads = thread_snapshot.entries;
         snapshot.status = linux_read_optional_proc_file("/proc/self/status", diagnostics);
         snapshot.limits = linux_read_optional_proc_file("/proc/self/limits", diagnostics);
         snapshot.loadavg = linux_read_optional_proc_file("/proc/loadavg", diagnostics);
@@ -1643,6 +1664,7 @@ fn build_process_resources_json(
         open_fd_count: None,
         open_fds: Vec::new(),
         thread_count: None,
+        thread_entries_truncated: None,
         threads: Vec::new(),
         status: None,
         limits: None,
@@ -1773,16 +1795,35 @@ fn linux_open_fd_snapshot(diagnostics: &mut BundleDiagnostics) -> Vec<FdSnapshot
 }
 
 #[cfg(target_os = "linux")]
-fn linux_thread_snapshot(diagnostics: &mut BundleDiagnostics) -> Vec<ThreadSnapshotEntry> {
+#[derive(Clone, Debug)]
+struct LinuxTaskEntry {
+    tid: String,
+    task_dir: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug)]
+struct LinuxThreadSnapshot {
+    entries: Vec<ThreadSnapshotEntry>,
+    total_count: usize,
+    truncated: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn linux_thread_snapshot(diagnostics: &mut BundleDiagnostics) -> LinuxThreadSnapshot {
     let entries = match fs::read_dir("/proc/self/task") {
         Ok(entries) => entries,
         Err(err) => {
             diagnostics.record_file_error("read_dir", "/proc/self/task", &err);
-            return Vec::new();
+            return LinuxThreadSnapshot {
+                entries: Vec::new(),
+                total_count: 0,
+                truncated: false,
+            };
         }
     };
 
-    let mut threads = Vec::<ThreadSnapshotEntry>::new();
+    let mut tasks = Vec::<LinuxTaskEntry>::new();
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -1792,7 +1833,27 @@ fn linux_thread_snapshot(diagnostics: &mut BundleDiagnostics) -> Vec<ThreadSnaps
             }
         };
         let tid = entry.file_name().to_string_lossy().to_string();
-        let task_dir = entry.path();
+        tasks.push(LinuxTaskEntry {
+            tid,
+            task_dir: entry.path(),
+        });
+    }
+
+    tasks.sort_by(|left, right| {
+        let left_tid = left.tid.parse::<u64>().ok();
+        let right_tid = right.tid.parse::<u64>().ok();
+        left_tid
+            .cmp(&right_tid)
+            .then_with(|| left.tid.cmp(&right.tid))
+    });
+
+    let total_count = tasks.len();
+    let truncated = total_count > THREAD_SNAPSHOT_ENTRY_LIMIT;
+    tasks.truncate(THREAD_SNAPSHOT_ENTRY_LIMIT);
+
+    let mut threads = Vec::<ThreadSnapshotEntry>::new();
+    for task in tasks {
+        let LinuxTaskEntry { tid, task_dir } = task;
         let comm_path = task_dir.join("comm");
         let status_path = task_dir.join("status");
         let name = fs::read_to_string(&comm_path)
@@ -1805,17 +1866,104 @@ fn linux_thread_snapshot(diagnostics: &mut BundleDiagnostics) -> Vec<ThreadSnaps
                 None
             }
         };
-        threads.push(ThreadSnapshotEntry { tid, name, state });
+        let wait_channel =
+            linux_read_task_text_limited(&task_dir.join("wchan"), THREAD_WAIT_CHANNEL_BYTES_LIMIT)
+                .value;
+        threads.push(ThreadSnapshotEntry {
+            tid,
+            name,
+            state,
+            wait_channel,
+            kernel_stack: None,
+            kernel_stack_truncated: None,
+            kernel_stack_error: None,
+        });
     }
 
-    threads.sort_by(|left, right| {
-        let left_tid = left.tid.parse::<u64>().ok();
-        let right_tid = right.tid.parse::<u64>().ok();
-        left_tid
-            .cmp(&right_tid)
-            .then_with(|| left.tid.cmp(&right.tid))
-    });
-    threads
+    let mut stack_captures = 0usize;
+    for thread in &mut threads {
+        if stack_captures >= THREAD_KERNEL_STACK_CAPTURE_LIMIT {
+            break;
+        }
+        if !linux_thread_kernel_stack_candidate(thread.name.as_deref()) {
+            continue;
+        }
+
+        stack_captures += 1;
+        let stack_path = Path::new("/proc/self/task").join(&thread.tid).join("stack");
+        let stack = linux_read_task_text_limited(&stack_path, THREAD_KERNEL_STACK_BYTES_LIMIT);
+        thread.kernel_stack = stack.value;
+        thread.kernel_stack_truncated = stack.truncated.then_some(true);
+        thread.kernel_stack_error = stack.error;
+    }
+
+    LinuxThreadSnapshot {
+        entries: threads,
+        total_count,
+        truncated,
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug)]
+struct LimitedTaskTextRead {
+    value: Option<String>,
+    truncated: bool,
+    error: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+fn linux_read_task_text_limited(path: &Path, byte_limit: usize) -> LimitedTaskTextRead {
+    use std::io::Read as _;
+
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) => {
+            return LimitedTaskTextRead {
+                value: None,
+                truncated: false,
+                error: Some(err.to_string()),
+            };
+        }
+    };
+
+    let mut bytes = Vec::with_capacity(byte_limit.saturating_add(1).min(4096));
+    let mut reader = file.take(byte_limit.saturating_add(1) as u64);
+    if let Err(err) = reader.read_to_end(&mut bytes) {
+        return LimitedTaskTextRead {
+            value: None,
+            truncated: false,
+            error: Some(err.to_string()),
+        };
+    }
+
+    let truncated = bytes.len() > byte_limit;
+    bytes.truncate(byte_limit);
+    let value = String::from_utf8_lossy(&bytes).trim().to_string();
+    LimitedTaskTextRead {
+        value: (!value.is_empty()).then_some(value),
+        truncated,
+        error: None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_thread_kernel_stack_candidate(name: Option<&str>) -> bool {
+    let Some(name) = name else {
+        return false;
+    };
+
+    matches!(
+        name,
+        "periodic"
+            | "periodic-worker"
+            | "cmd-worker"
+            | "event-loop"
+            | "liveness-watchd"
+            | "liveness-watchdog"
+            | "reboot-fallback"
+            | "restart-persist"
+    ) || name.starts_with("rhythm-main")
 }
 
 #[cfg(target_os = "linux")]
@@ -2609,6 +2757,22 @@ mod tests {
         }
 
         if cfg!(target_os = "linux") {
+            let thread_count = process_resources["thread_count"]
+                .as_u64()
+                .expect("thread_count missing on linux") as usize;
+            let captured_threads = process_resources["threads"]
+                .as_array()
+                .expect("threads missing on linux");
+            assert!(
+                thread_count >= captured_threads.len(),
+                "thread_count should report the total observed thread count"
+            );
+            if process_resources["thread_entries_truncated"] == true {
+                assert!(
+                    thread_count > captured_threads.len(),
+                    "thread_entries_truncated requires omitted thread rows"
+                );
+            }
             assert!(
                 process_resources["mounts"].is_string(),
                 "/proc/mounts capture missing on linux"
@@ -2620,6 +2784,37 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn task_text_limited_caps_bytes_and_reports_truncation() {
+        let root = unique_test_dir("task-text-limit");
+        let path = root.join("task-file");
+        fs::write(&path, "abcdef\n").unwrap();
+
+        let read = linux_read_task_text_limited(&path, 3);
+
+        assert_eq!(read.value.as_deref(), Some("abc"));
+        assert!(read.truncated);
+        assert!(read.error.is_none());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kernel_stack_capture_targets_runtime_control_threads() {
+        assert!(linux_thread_kernel_stack_candidate(Some("periodic")));
+        assert!(linux_thread_kernel_stack_candidate(Some("periodic-worker")));
+        assert!(linux_thread_kernel_stack_candidate(Some("cmd-worker")));
+        assert!(linux_thread_kernel_stack_candidate(Some("event-loop")));
+        assert!(linux_thread_kernel_stack_candidate(Some("liveness-watchd")));
+        assert!(linux_thread_kernel_stack_candidate(Some("rhythm-main-rt")));
+        assert!(!linux_thread_kernel_stack_candidate(Some(
+            "reqwest-internal"
+        )));
+        assert!(!linux_thread_kernel_stack_candidate(None));
     }
 
     #[test]

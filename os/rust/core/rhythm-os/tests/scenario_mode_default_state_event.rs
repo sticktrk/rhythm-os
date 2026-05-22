@@ -33,6 +33,7 @@ use rhythm_core::{
 use rhythm_os::commands;
 use rhythm_os::server_event::ServerEvent;
 use rhythm_os::state::WorkItem;
+use std::time::Duration;
 
 #[test]
 fn mode_default_flip_emits_node_state_event_synchronously() {
@@ -145,5 +146,67 @@ fn mode_default_flip_emits_node_state_event_synchronously() {
         last.state,
         RoomModeState::Idle,
         "the emitted NodeState event for master must report state=Idle, matching the engine"
+    );
+}
+
+#[test]
+fn mode_apply_uses_command_worker_even_when_periodic_worker_exists() {
+    let (rooms, devices) = rooms_with_lights(&[("master", "Master")]);
+    let (h, _spy) = TestHarness::with_spy_controller_at(6.04, 118);
+    let h = h.with_discovery(rooms, devices);
+    h.sync();
+    h.set_settings(Some(false));
+
+    let master_id = h.resolve("master");
+
+    let mut day_config = ModeConfig::default_for_mode(RhythmMode::Day);
+    day_config.room_defaults = vec![RoomModeDefault {
+        room_id: master_id.clone(),
+        state: RoomModeState::Idle,
+    }];
+    let mut sleep_config = ModeConfig::default_for_mode(RhythmMode::Sleep);
+    sleep_config.room_defaults = vec![RoomModeDefault {
+        room_id: master_id.clone(),
+        state: RoomModeState::Active,
+    }];
+    h.set_mode_configs(vec![day_config, sleep_config]);
+
+    commands::do_set_active_mode(&h.state, RhythmMode::Sleep).unwrap();
+    {
+        let mut s = h.state.lock().unwrap();
+        s.set_mode_transition_configs(vec![ModeTransitionConfig::new(
+            RhythmMode::Sleep,
+            RhythmMode::Day,
+            DEFAULT_MODE_TRANSITION_DURATION_MS,
+        )
+        .with_trigger(ModeTransitionTrigger::Sunrise)]);
+        s.active_mode = RhythmMode::Sleep;
+    }
+
+    let (work_tx, work_rx) = std::sync::mpsc::sync_channel::<WorkItem>(64);
+    let (periodic_tx, periodic_rx) = std::sync::mpsc::sync_channel::<WorkItem>(64);
+    {
+        let mut s = h.state.lock().unwrap();
+        s.work_tx = Some(work_tx);
+        s.periodic_work_tx = Some(periodic_tx);
+    }
+
+    commands::do_set_active_mode_with_trigger(
+        &h.state,
+        RhythmMode::Day,
+        ModeTransitionTrigger::Sunrise,
+    )
+    .unwrap();
+
+    let queued = work_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("mode apply should queue light work on the command worker");
+    match queued {
+        WorkItem::ApplyNodeCommand { node_id, .. } => assert_eq!(node_id, master_id),
+        _ => panic!("expected ApplyNodeCommand on command worker"),
+    }
+    assert!(
+        periodic_rx.try_recv().is_err(),
+        "mode apply must not enqueue interactive light work on the periodic worker"
     );
 }

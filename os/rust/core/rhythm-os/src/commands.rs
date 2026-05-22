@@ -4058,7 +4058,7 @@ fn dispatch_room_commands(
     let dispatch_tx = state
         .lock()
         .ok()
-        .and_then(|s| s.periodic_work_tx.clone().or_else(|| s.work_tx.clone()));
+        .and_then(|s| s.work_tx.clone().or_else(|| s.periodic_work_tx.clone()));
 
     let Some(tx) = dispatch_tx else {
         apply_room_commands_inline(

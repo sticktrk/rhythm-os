@@ -1666,6 +1666,10 @@ pub fn schedule_user_initiated_restart() {
     schedule_restart("user request");
 }
 
+pub fn schedule_factory_reset_restart() {
+    schedule_restart("factory reset");
+}
+
 pub fn schedule_liveness_restart() {
     schedule_restart("liveness watchdog");
 }
@@ -1682,29 +1686,14 @@ fn schedule_restart(reason: &'static str) {
                 log::info!(target: "sys", "Rebooting appliance after {}...", reason);
                 spawn_forced_reboot_fallback(reason);
 
-                let reboot_result = Command::new("/sbin/reboot")
-                    .status()
-                    .or_else(|_| Command::new("reboot").status());
-
-                match reboot_result {
-                    Ok(status) if status.success() => {}
-                    Ok(status) => {
-                        log::error!(
-                            target: "sys",
-                            "Appliance reboot command exited with status {:?}; falling back to process exit",
-                            status.code()
-                        );
-                        std::process::exit(1);
-                    }
-                    Err(error) => {
-                        log::error!(
-                            target: "sys",
-                            "Failed to invoke appliance reboot after {}: {}; falling back to process exit",
-                            reason,
-                            error
-                        );
-                        std::process::exit(1);
-                    }
+                if let Err(error) = spawn_external_reboot_command(false) {
+                    log::error!(
+                        target: "sys",
+                        "Failed to invoke appliance reboot after {}: {}; forcing reboot",
+                        reason,
+                        error
+                    );
+                    force_appliance_reboot_or_exit(reason);
                 }
             }
             RestartStrategy::SupervisorExit => {
@@ -1728,37 +1717,7 @@ fn spawn_forced_reboot_fallback(reason: &'static str) {
                 APPLIANCE_REBOOT_FALLBACK_SECS,
                 reason
             );
-
-            let forced_result = Command::new("/sbin/reboot")
-                .arg("-f")
-                .status()
-                .or_else(|_| Command::new("reboot").arg("-f").status());
-
-            match forced_result {
-                Ok(status) if status.success() => {
-                    log::error!(
-                        target: "sys",
-                        "Forced appliance reboot command returned; exiting process"
-                    );
-                    std::process::exit(1);
-                }
-                Ok(status) => {
-                    log::error!(
-                        target: "sys",
-                        "Forced appliance reboot command exited with status {:?}; exiting process",
-                        status.code()
-                    );
-                    std::process::exit(1);
-                }
-                Err(error) => {
-                    log::error!(
-                        target: "sys",
-                        "Failed to invoke forced appliance reboot: {}; exiting process",
-                        error
-                    );
-                    std::process::exit(1);
-                }
-            }
+            force_appliance_reboot_or_exit(reason);
         });
 
     if let Err(error) = spawn_result {
@@ -1768,6 +1727,115 @@ fn spawn_forced_reboot_fallback(reason: &'static str) {
             error
         );
     }
+}
+
+fn spawn_external_reboot_command(forced: bool) -> std::io::Result<()> {
+    let args = external_reboot_args(forced);
+    let mut command = Command::new("/sbin/reboot");
+    command.args(args);
+    match command.spawn() {
+        Ok(_) => Ok(()),
+        Err(primary_error) => {
+            let mut fallback = Command::new("reboot");
+            fallback.args(args);
+            fallback.spawn().map(|_| ()).map_err(|fallback_error| {
+                std::io::Error::new(
+                    fallback_error.kind(),
+                    format!(
+                        "/sbin/reboot failed: {}; reboot failed: {}",
+                        primary_error, fallback_error
+                    ),
+                )
+            })
+        }
+    }
+}
+
+fn external_reboot_args(forced: bool) -> &'static [&'static str] {
+    if forced {
+        &["-f"]
+    } else {
+        &[]
+    }
+}
+
+fn force_appliance_reboot_or_exit(reason: &'static str) -> ! {
+    if let Err(error) = request_kernel_reboot() {
+        log::error!(
+            target: "sys",
+            "Kernel reboot syscall failed for {}: {}; trying sysrq",
+            reason,
+            error
+        );
+    } else {
+        log::error!(
+            target: "sys",
+            "Kernel reboot syscall returned for {}; continuing forced fallback",
+            reason
+        );
+    }
+
+    if let Err(error) = trigger_sysrq_reboot() {
+        log::error!(
+            target: "sys",
+            "SysRq reboot trigger failed for {}: {}; spawning forced reboot command",
+            reason,
+            error
+        );
+    } else {
+        log::error!(
+            target: "sys",
+            "SysRq reboot trigger returned for {}; spawning forced reboot command",
+            reason
+        );
+    }
+
+    if let Err(error) = spawn_external_reboot_command(true) {
+        log::error!(
+            target: "sys",
+            "Failed to spawn forced appliance reboot command for {}: {}; exiting process",
+            reason,
+            error
+        );
+    }
+
+    std::process::exit(1);
+}
+
+#[cfg(target_os = "linux")]
+fn request_kernel_reboot() -> std::io::Result<()> {
+    let rc = unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_RESTART) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn request_kernel_reboot() -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "kernel reboot syscall is only available on Linux",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn trigger_sysrq_reboot() -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let mut trigger = fs::OpenOptions::new()
+        .write(true)
+        .open("/proc/sysrq-trigger")?;
+    trigger.write_all(b"b\n")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn trigger_sysrq_reboot() -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "sysrq reboot trigger is only available on Linux",
+    ))
 }
 
 fn compute_sha256_hex(path: &Path) -> Result<String, String> {
@@ -3035,6 +3103,12 @@ mod tests {
 
         std::env::remove_var("RHYTHM_PLATFORM_TYPE");
         std::env::remove_var("RHYTHM_PLATFORM_CONTEXT");
+    }
+
+    #[test]
+    fn external_reboot_args_are_empty_for_graceful_and_forced_for_fallback() {
+        assert!(external_reboot_args(false).is_empty());
+        assert_eq!(external_reboot_args(true), &["-f"]);
     }
 
     #[test]
