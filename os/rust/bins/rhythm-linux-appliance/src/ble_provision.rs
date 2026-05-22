@@ -78,7 +78,7 @@ impl ProvisioningManager {
                     reason
                 );
 
-                let result = run_service(&manager.inner.version);
+                let result = run_service(&manager.inner.version, manager.inner.state.clone());
                 match result {
                     Ok(creds) => {
                         persist_commissioning_wifi_credentials(&manager.inner.state, &creds);
@@ -140,10 +140,10 @@ fn persist_commissioning_wifi_credentials(state: &SharedState, creds: &WifiCrede
     }
 }
 
-fn run_service(version: &str) -> Result<WifiCredentials> {
+fn run_service(version: &str, state: SharedState) -> Result<WifiCredentials> {
     let identity = build_identity(version);
     let mut frontend = BluezFrontend::new()?;
-    let mut backend = LinuxWifiBackend::new(Duration::from_secs(30));
+    let mut backend = LinuxWifiBackend::new(Duration::from_secs(30), state);
     let config = ProvisioningSessionConfig::default();
 
     run_provisioning_session(&mut frontend, &mut backend, &identity, &config)
@@ -169,6 +169,7 @@ fn build_identity(version: &str) -> ProvisioningDeviceInfo {
 }
 
 struct LinuxWifiBackend {
+    state: SharedState,
     result_tx: Sender<(u64, ProvisioningConnectResult)>,
     result_rx: Receiver<(u64, ProvisioningConnectResult)>,
     connect_timeout: Duration,
@@ -177,9 +178,10 @@ struct LinuxWifiBackend {
 }
 
 impl LinuxWifiBackend {
-    fn new(connect_timeout: Duration) -> Self {
+    fn new(connect_timeout: Duration, state: SharedState) -> Self {
         let (result_tx, result_rx) = mpsc::channel();
         Self {
+            state,
             result_tx,
             result_rx,
             connect_timeout,
@@ -197,13 +199,34 @@ impl ProvisioningBackend for LinuxWifiBackend {
 
         let result_tx = self.result_tx.clone();
         let timeout = self.connect_timeout;
+        let state = self.state.clone();
         thread::Builder::new()
             .name(format!("wifi-prov-{}", attempt))
             .spawn(move || {
                 let result = match wifi::connect_with_credentials(&creds, timeout) {
                     Ok(ip) => {
-                        let _ =
-                            result_tx.send((attempt, ProvisioningConnectResult::Connected { ip }));
+                        let owner_token = match rhythm_os::auth::issue_owner_token(
+                            &state,
+                            Some("BLE owner".to_string()),
+                        ) {
+                            Ok(rhythm_os::auth::IssueOwnerTokenResult::Issued(issued)) => {
+                                Some(issued.token)
+                            }
+                            Ok(rhythm_os::auth::IssueOwnerTokenResult::AlreadyConfigured) => None,
+                            Err(e) => {
+                                let _ = result_tx.send((
+                                    attempt,
+                                    ProvisioningConnectResult::Failed {
+                                        error: format!("failed to issue owner token: {e}"),
+                                    },
+                                ));
+                                return;
+                            }
+                        };
+                        let _ = result_tx.send((
+                            attempt,
+                            ProvisioningConnectResult::Connected { ip, owner_token },
+                        ));
                         sync_clock_after_wifi_connect();
                         return;
                     }

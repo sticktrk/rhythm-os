@@ -3172,6 +3172,7 @@ fn clear_factory_reset_ephemeral_state(state: &SharedState) -> Result<()> {
     s.last_check_hour = None;
     s.last_check_instant = None;
     s.last_check_utc_offset_hours = None;
+    s.api_auth = crate::auth::StoredApiAuth::default();
     s.invalidate_queued_light_dispatches();
     s.pending_hub_event_rxs.clear();
     s.pending_motion_clear.clear();
@@ -9364,7 +9365,7 @@ mod tests {
     use crate::topology::InputBindingPreset;
     use chrono::{Datelike, Timelike};
     use rhythm_core::{
-        HubDispatchTarget, HubLightController, HubRegistry, LightController, LightControlResult,
+        HubDispatchTarget, HubLightController, HubRegistry, LightControlResult, LightController,
         LightProfileConfig, Room, RoomSnapshot, RuntimeHandle,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};

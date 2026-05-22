@@ -132,6 +132,7 @@ fn main() -> Result<()> {
         s.listen_port = Some(args.port);
         s.data_dir = args.data_dir.clone();
         s.storage = Some(Box::new(file_storage));
+        s.require_api_auth = true;
         // Linux appliances are active platforms and should match the other
         // desktop/server-class runtimes for bootstrap behavior.
         s.platform = PlatformConfig::desktop();

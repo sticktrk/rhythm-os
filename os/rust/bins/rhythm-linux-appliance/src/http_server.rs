@@ -3,6 +3,7 @@
 //! Wraps the standard server router with platform-specific Wi-Fi recovery
 //! endpoints for Linux appliances.
 
+use axum::middleware;
 use axum::routing::get;
 use axum::Router;
 use rhythm_os::handlers::ApiResponse;
@@ -13,18 +14,23 @@ use crate::wifi;
 
 pub fn create_router(state: SharedState, provisioning: ProvisioningManager) -> Router {
     let router_state = state.clone();
-    rhythm_server::http_server::create_router(router_state).route(
-        "/api/wifi",
-        get({
-            let provisioning = provisioning.clone();
-            move || async move { handle_get_wifi(&provisioning) }
-        })
-        .delete({
-            let provisioning = provisioning.clone();
-            let state = state.clone();
-            move || async move { handle_delete_wifi(&state, &provisioning) }
-        }),
-    )
+    rhythm_server::http_server::create_router(router_state)
+        .route(
+            "/api/wifi",
+            get({
+                let provisioning = provisioning.clone();
+                move || async move { handle_get_wifi(&provisioning) }
+            })
+            .delete({
+                let provisioning = provisioning.clone();
+                let state = state.clone();
+                move || async move { handle_delete_wifi(&state, &provisioning) }
+            }),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rhythm_os::auth::require_api_auth_middleware,
+        ))
 }
 
 fn handle_get_wifi(provisioning: &ProvisioningManager) -> ApiResponse {

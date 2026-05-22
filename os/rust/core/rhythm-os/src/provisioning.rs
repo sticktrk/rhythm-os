@@ -77,9 +77,16 @@ pub fn provisioning_device_name(target: &str, id: &str) -> String {
 pub enum ProvisioningStatus {
     Waiting,
     Connecting,
-    Connected { ip: String },
-    WifiFailed { error: String },
-    Failed { error: String },
+    Connected {
+        ip: String,
+        owner_token: Option<String>,
+    },
+    WifiFailed {
+        error: String,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -87,6 +94,8 @@ struct ProvisioningStatusPayload<'a> {
     status: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     ip: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_token: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<&'a str>,
 }
@@ -107,21 +116,25 @@ impl ProvisioningStatus {
             Self::Waiting => ProvisioningStatusPayload {
                 status: self.code(),
                 ip: None,
+                owner_token: None,
                 error: None,
             },
             Self::Connecting => ProvisioningStatusPayload {
                 status: self.code(),
                 ip: None,
+                owner_token: None,
                 error: None,
             },
-            Self::Connected { ip } => ProvisioningStatusPayload {
+            Self::Connected { ip, owner_token } => ProvisioningStatusPayload {
                 status: self.code(),
                 ip: Some(ip),
+                owner_token: owner_token.as_deref(),
                 error: None,
             },
             Self::WifiFailed { error } | Self::Failed { error } => ProvisioningStatusPayload {
                 status: self.code(),
                 ip: None,
+                owner_token: None,
                 error: Some(error),
             },
         };
@@ -140,8 +153,13 @@ pub enum ProvisioningEvent {
 /// Result of a hardware-specific network verification attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProvisioningConnectResult {
-    Connected { ip: String },
-    Failed { error: String },
+    Connected {
+        ip: String,
+        owner_token: Option<String>,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 /// Transport frontend for provisioning sessions.
@@ -244,8 +262,11 @@ where
             if let Some(active) = pending.as_ref() {
                 if let Some(result) = backend.poll_result(Duration::from_millis(0))? {
                     match result {
-                        ProvisioningConnectResult::Connected { ip } => {
-                            frontend.publish_status(&ProvisioningStatus::Connected { ip })?;
+                        ProvisioningConnectResult::Connected { ip, owner_token } => {
+                            frontend.publish_status(&ProvisioningStatus::Connected {
+                                ip,
+                                owner_token,
+                            })?;
                             std::thread::sleep(config.success_grace_period);
                             frontend.stop()?;
                             return Ok(active.creds.clone());
@@ -369,6 +390,7 @@ mod tests {
         let mut frontend = FakeFrontend::new(vec![ProvisioningEvent::Credentials(creds.clone())]);
         let mut backend = FakeBackend::new(vec![Some(ProvisioningConnectResult::Connected {
             ip: "192.168.1.10".to_string(),
+            owner_token: Some("owner-token".to_string()),
         })]);
 
         let config = ProvisioningSessionConfig {
@@ -389,6 +411,7 @@ mod tests {
                 ProvisioningStatus::Connecting,
                 ProvisioningStatus::Connected {
                     ip: "192.168.1.10".to_string(),
+                    owner_token: Some("owner-token".to_string()),
                 },
             ]
         );
@@ -441,6 +464,7 @@ mod tests {
         let mut frontend = FakeFrontend::new(vec![ProvisioningEvent::Credentials(creds.clone())]);
         let mut backend = FakeBackend::new(vec![Some(ProvisioningConnectResult::Connected {
             ip: "10.0.0.1".into(),
+            owner_token: None,
         })]);
 
         let config = ProvisioningSessionConfig {
@@ -484,6 +508,7 @@ mod tests {
             }),
             Some(ProvisioningConnectResult::Connected {
                 ip: "10.0.0.5".to_string(),
+                owner_token: None,
             }),
         ]);
 
@@ -508,6 +533,7 @@ mod tests {
                 ProvisioningStatus::Connecting,
                 ProvisioningStatus::Connected {
                     ip: "10.0.0.5".to_string(),
+                    owner_token: None,
                 },
             ]
         );

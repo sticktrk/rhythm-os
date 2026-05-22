@@ -106,13 +106,29 @@ pub trait Storage: Send + Sync {
         Ok(())
     }
 
+    /// Load local API auth state. Default: no configured tokens.
+    fn load_api_auth(&self) -> Result<Option<crate::auth::StoredApiAuth>> {
+        Ok(None)
+    }
+
+    /// Persist local API auth state. Default: no-op.
+    fn save_api_auth(&self, _auth: &crate::auth::StoredApiAuth) -> Result<()> {
+        Ok(())
+    }
+
+    /// Clear local API auth state. Default: no-op.
+    fn clear_api_auth(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Clear all persisted state that should not survive a full factory reset.
     ///
     /// Active desktop/server platforms use this to remove stale keyed hub
     /// registries and any other persisted artifacts that would otherwise be
     /// resurrected after a reset.
     fn clear_factory_reset_state(&self) -> Result<()> {
-        self.clear_commissioning_wifi_credentials()
+        self.clear_commissioning_wifi_credentials()?;
+        self.clear_api_auth()
     }
 }
 
@@ -798,6 +814,35 @@ impl Storage for FileStorage {
         }
     }
 
+    fn load_api_auth(&self) -> Result<Option<crate::auth::StoredApiAuth>> {
+        let path = self.file_path("auth.json");
+        match self.read_json::<crate::auth::StoredApiAuth>("auth.json") {
+            Ok(auth) => Ok(Some(auth)),
+            Err(e) => {
+                if path.exists() {
+                    warn!(
+                        target: "sys",
+                        "Failed to load API auth state {}: {}",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    debug!(target: "sys", "No persisted API auth state at {}", path.display());
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    fn save_api_auth(&self, auth: &crate::auth::StoredApiAuth) -> Result<()> {
+        let json = serde_json::to_string_pretty(auth)?;
+        self.write_atomic("auth.json", json.as_bytes())
+    }
+
+    fn clear_api_auth(&self) -> Result<()> {
+        self.remove_if_exists("auth.json")
+    }
+
     fn clear_factory_reset_state(&self) -> Result<()> {
         for name in [
             "rooms.json",
@@ -809,6 +854,7 @@ impl Storage for FileStorage {
             "canonical_registry.json",
             "topology.json",
             "commissioning_wifi.json",
+            "auth.json",
         ] {
             self.remove_if_exists(name)?;
         }
@@ -962,6 +1008,26 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
             Ok(None) => {}
             Err(e) => {
                 debug!(target: "sys", "No persisted motion timers loaded: {}", e);
+            }
+        }
+    }
+
+    if let Some(storage) = s.storage.as_ref() {
+        match storage.load_api_auth() {
+            Ok(Some(auth)) => {
+                let count = auth.tokens.len();
+                let owner_configured = auth.has_owner();
+                s.api_auth = auth;
+                info!(
+                    target: "sys",
+                    "Loaded API auth state: tokens={}, owner_configured={}",
+                    count,
+                    owner_configured
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(target: "sys", "Failed to load API auth state: {}", e);
             }
         }
     }
