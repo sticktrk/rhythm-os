@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:logging/logging.dart';
 
+import '../api_auth.dart';
 import '../rhythm_log_interceptor.dart';
 
 class RhythmMatterWifiStatus {
@@ -78,15 +79,20 @@ class RhythmMatterApi {
 
   final Dio _dio;
 
-  RhythmMatterApi({required String baseUrl, Dio? dio})
+  RhythmMatterApi({required String baseUrl, Dio? dio, String? authToken})
       : _dio = dio ??
             Dio(
               BaseOptions(
                 baseUrl: '$baseUrl/',
                 connectTimeout: const Duration(seconds: 5),
                 receiveTimeout: const Duration(seconds: 45),
+                headers: bearerAuthHeaders(authToken),
               ),
             ) {
+    final headers = bearerAuthHeaders(authToken);
+    if (headers != null) {
+      _dio.options.headers.addAll(headers);
+    }
     _dio.interceptors.add(RhythmLogInterceptor(_log));
   }
 

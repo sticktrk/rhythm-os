@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:logging/logging.dart';
 
+import '../api_auth.dart';
 import '../errors/rhythm_exception.dart';
 import '../json_parsing.dart';
 import '../rhythm_log_interceptor.dart';
@@ -18,15 +19,20 @@ class RhythmConfigApi {
 
   final Dio _dio;
 
-  RhythmConfigApi({required String baseUrl, Dio? dio})
+  RhythmConfigApi({required String baseUrl, Dio? dio, String? authToken})
       : _dio = dio ??
             Dio(
               BaseOptions(
                 baseUrl: baseUrl,
                 connectTimeout: const Duration(seconds: 10),
                 receiveTimeout: const Duration(seconds: 10),
+                headers: bearerAuthHeaders(authToken),
               ),
             ) {
+    final headers = bearerAuthHeaders(authToken);
+    if (headers != null) {
+      _dio.options.headers.addAll(headers);
+    }
     _dio.interceptors.add(RhythmLogInterceptor(_log));
   }
 

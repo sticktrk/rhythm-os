@@ -13,6 +13,7 @@ import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:logging/logging.dart';
 
+import '../api_auth.dart';
 import '../api/rhythm_server_api.dart';
 import '../json_parsing.dart';
 import '../models/rhythm_connection_state.dart';
@@ -145,6 +146,7 @@ class RhythmConnection {
 
   // Optional web base URL (consumer passes Uri.base.toString() on web).
   String? _webBaseUrl;
+  String? _authToken;
 
   // The server API (uses the shared Dio instance).
   RhythmServerApi? _api;
@@ -206,14 +208,21 @@ class RhythmConnection {
   /// Connect to a server device.
   ///
   /// [webBaseUrl] is required on web platforms (pass `Uri.base.toString()`).
-  Future<void> connect(String host, {int port = 80, String? webBaseUrl}) async {
+  Future<void> connect(
+    String host, {
+    int port = 80,
+    String? webBaseUrl,
+    String? authToken,
+  }) async {
     if (_connectionState == RhythmConnectionState.connected &&
         _host == host &&
-        _port == port) {
+        _port == port &&
+        _authToken == authToken) {
       return;
     }
 
-    if (_host != null && (_host != host || _port != port)) {
+    if (_host != null &&
+        (_host != host || _port != port || _authToken != authToken)) {
       _stopPolling();
       _disconnectSse();
       _sseReconnectTimer?.cancel();
@@ -232,11 +241,13 @@ class RhythmConnection {
     _host = host;
     _port = port;
     _webBaseUrl = webBaseUrl;
+    _authToken = authToken;
     final baseUrl = _buildBaseUrl(host, port, webBaseUrl);
     _dio = Dio(BaseOptions(
       baseUrl: baseUrl,
       connectTimeout: const Duration(seconds: 5),
       receiveTimeout: const Duration(seconds: 10),
+      headers: bearerAuthHeaders(authToken),
     ));
     _dio!.interceptors.add(RhythmLogInterceptor(_log));
     _api = RhythmServerApi(_dio!, onStatesReceived: _updateCacheFromStates);
@@ -279,6 +290,7 @@ class RhythmConnection {
     _reconnectAttempts = 0;
 
     _host = null;
+    _authToken = null;
     _dio?.close();
     _dio = null;
     _api = null;
@@ -644,7 +656,10 @@ class RhythmConnection {
         'api/events',
         options: Options(
           responseType: ResponseType.stream,
-          headers: {'Accept': 'text/event-stream'},
+          headers: bearerAuthHeaders(
+            _authToken,
+            extra: {'Accept': 'text/event-stream'},
+          ),
         ),
         cancelToken: cancelToken,
       );

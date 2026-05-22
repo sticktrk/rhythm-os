@@ -5,6 +5,7 @@ import 'package:dio/dio.dart';
 import 'package:http/http.dart' as http;
 import 'package:logging/logging.dart';
 
+import '../api_auth.dart';
 import '../errors/rhythm_exception.dart';
 import '../rhythm_log_interceptor.dart';
 
@@ -15,21 +16,29 @@ class RhythmBundleApi {
   final Dio _dio;
   final Uri _baseUri;
   final http.Client _httpClient;
+  final String? _authToken;
 
   RhythmBundleApi({
     required String baseUrl,
     Dio? dio,
     http.Client? httpClient,
+    String? authToken,
   })  : _baseUri = Uri.parse(_normalizeBaseUrl(baseUrl)),
         _httpClient = httpClient ?? http.Client(),
+        _authToken = authToken,
         _dio = dio ??
             Dio(
               BaseOptions(
                 baseUrl: _normalizeBaseUrl(baseUrl),
                 connectTimeout: const Duration(seconds: 5),
                 receiveTimeout: const Duration(seconds: 15),
+                headers: bearerAuthHeaders(authToken),
               ),
             ) {
+    final headers = bearerAuthHeaders(authToken);
+    if (headers != null) {
+      _dio.options.headers.addAll(headers);
+    }
     _dio.interceptors.add(RhythmLogInterceptor(_log));
   }
 
@@ -95,7 +104,10 @@ class RhythmBundleApi {
     try {
       final response = await _httpClient.get(
         _backupUri(includeSecrets: includeSecrets),
-        headers: const {'Accept': 'application/json'},
+        headers: bearerAuthHeaders(
+          _authToken,
+          extra: {'Accept': 'application/json'},
+        ),
       );
       _throwForUnexpectedHttpStatus(
         response.statusCode,
@@ -124,7 +136,10 @@ class RhythmBundleApi {
     try {
       final response = await _httpClient.put(
         _backupUri(),
-        headers: const {'Content-Type': 'application/json'},
+        headers: bearerAuthHeaders(
+          _authToken,
+          extra: {'Content-Type': 'application/json'},
+        ),
         body: backupJson,
       );
       _throwForUnexpectedHttpStatus(

@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:logging/logging.dart';
 
+import '../api_auth.dart';
 import '../errors/rhythm_exception.dart';
 import '../models/rhythm_debug_bundle.dart';
 import '../rhythm_log_interceptor.dart';
@@ -27,11 +28,13 @@ class RhythmDiagnosticsApi {
     Duration connectTimeout = defaultConnectTimeout,
     Duration receiveTimeout = defaultReceiveTimeout,
     Duration debugBundleReceiveTimeout = defaultDebugBundleReceiveTimeout,
+    String? authToken,
   })  : _debugBundleReceiveTimeout = debugBundleReceiveTimeout,
         _dio = Dio(BaseOptions(
           baseUrl: 'http://$host:$port/',
           connectTimeout: connectTimeout,
           receiveTimeout: receiveTimeout,
+          headers: bearerAuthHeaders(authToken),
         )) {
     _dio.interceptors.add(RhythmLogInterceptor(_log));
   }
