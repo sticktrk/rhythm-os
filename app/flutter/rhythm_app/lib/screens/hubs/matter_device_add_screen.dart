@@ -458,10 +458,9 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         ),
         const SizedBox(height: 18),
         if (_supportsQrScan) ...[
-          _QrViewfinderButton(
+          _QrScanButton(
             accent: _teal,
-            sweep: _sweepController,
-            pulse: _pulseController,
+            accentDeep: _tealDeep,
             onTap: _scanQrCode,
           ),
           const SizedBox(height: 18),
@@ -947,240 +946,165 @@ class _OrDivider extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// QR viewfinder button — primary scan affordance
+// QR scan button — primary scan affordance.
+//
+// Deliberately styled like a tactile button (icon tile + label + chevron),
+// not a camera viewfinder, so it reads as "tap to launch the scanner"
+// rather than "the camera is already live."
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _QrViewfinderButton extends StatelessWidget {
-  const _QrViewfinderButton({
+class _QrScanButton extends StatefulWidget {
+  const _QrScanButton({
     required this.accent,
-    required this.sweep,
-    required this.pulse,
+    required this.accentDeep,
     required this.onTap,
   });
 
   final Color accent;
-  final Animation<double> sweep;
-  final Animation<double> pulse;
+  final Color accentDeep;
   final VoidCallback onTap;
+
+  @override
+  State<_QrScanButton> createState() => _QrScanButtonState();
+}
+
+class _QrScanButtonState extends State<_QrScanButton> {
+  bool _pressed = false;
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: onTap,
+      onTap: widget.onTap,
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapCancel: () => setState(() => _pressed = false),
+      onTapUp: (_) => setState(() => _pressed = false),
       behavior: HitTestBehavior.opaque,
-      child: AnimatedBuilder(
-        animation: Listenable.merge([sweep, pulse]),
-        builder: (context, _) {
-          final breath = Curves.easeInOutSine.transform(pulse.value);
-          return Container(
-            height: 172,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(18),
-              color: CelestialColors.backgroundCard.withValues(alpha: 0.7),
-              border: Border.all(
-                color: accent.withValues(alpha: 0.20 + breath * 0.08),
-                width: 1,
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: accent.withValues(alpha: 0.08 + breath * 0.07),
-                  blurRadius: 18,
-                  offset: const Offset(0, 8),
-                ),
+      child: AnimatedScale(
+        scale: _pressed ? 0.985 : 1.0,
+        duration: const Duration(milliseconds: 120),
+        curve: Curves.easeOut,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                widget.accent.withValues(alpha: 0.12),
+                widget.accent.withValues(alpha: 0.04),
               ],
             ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(18),
-              child: Stack(
-                children: [
-                  Positioned.fill(
-                    child: CustomPaint(
-                      painter: _ViewfinderPainter(
-                        accent: accent,
-                        sweep: sweep.value,
+            border: Border.all(
+              color: widget.accent.withValues(alpha: 0.55),
+              width: 1.2,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: widget.accent.withValues(alpha: _pressed ? 0.10 : 0.22),
+                blurRadius: _pressed ? 8 : 18,
+                offset: Offset(0, _pressed ? 2 : 8),
+              ),
+            ],
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              // Tactile icon tile.
+              Container(
+                width: 56,
+                height: 56,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(13),
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [widget.accent, widget.accentDeep],
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: widget.accent.withValues(alpha: 0.45),
+                      blurRadius: 14,
+                      offset: const Offset(0, 6),
+                    ),
+                  ],
+                ),
+                child: Stack(
+                  children: [
+                    // Subtle top highlight.
+                    Positioned(
+                      top: 0,
+                      left: 10,
+                      right: 10,
+                      child: Container(
+                        height: 1,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.28),
+                          borderRadius: BorderRadius.circular(1),
+                        ),
                       ),
                     ),
-                  ),
-                  Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(14),
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            gradient: RadialGradient(
-                              colors: [
-                                accent.withValues(alpha: 0.22 + breath * 0.08),
-                                accent.withValues(alpha: 0.0),
-                              ],
-                            ),
-                          ),
-                          child: Icon(
-                            Icons.qr_code_scanner_rounded,
-                            color: accent,
-                            size: 36,
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          'SCAN PAIRING CODE',
-                          style: TextStyle(
-                            color: accent.withValues(alpha: 0.95),
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: 2.4,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          'tap to engage camera',
-                          style: TextStyle(
-                            color: CelestialColors.textSecondary
-                                .withValues(alpha: 0.55),
-                            fontSize: 11,
-                            fontStyle: FontStyle.italic,
-                          ),
-                        ),
-                      ],
+                    const Center(
+                      child: Icon(
+                        Icons.qr_code_scanner_rounded,
+                        color: Colors.white,
+                        size: 28,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-          );
-        },
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Scan pairing code',
+                      style: TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 0.2,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      'Opens the camera to read the QR on the device.',
+                      style: TextStyle(
+                        color: CelestialColors.textSecondary
+                            .withValues(alpha: 0.7),
+                        fontSize: 12,
+                        height: 1.35,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              Container(
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: widget.accent.withValues(alpha: 0.16),
+                  border: Border.all(
+                    color: widget.accent.withValues(alpha: 0.5),
+                    width: 1,
+                  ),
+                ),
+                child: Icon(
+                  Icons.arrow_forward_rounded,
+                  color: widget.accent,
+                  size: 16,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
-}
-
-class _ViewfinderPainter extends CustomPainter {
-  _ViewfinderPainter({required this.accent, required this.sweep});
-  final Color accent;
-  final double sweep; // 0..1
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    const inset = 14.0;
-    final rect = Rect.fromLTRB(
-      inset,
-      inset,
-      size.width - inset,
-      size.height - inset,
-    );
-
-    // Corner brackets (viewfinder).
-    const cornerLen = 22.0;
-    final cornerPaint = Paint()
-      ..color = accent.withValues(alpha: 0.85)
-      ..strokeWidth = 1.8
-      ..strokeCap = StrokeCap.round
-      ..style = PaintingStyle.stroke;
-
-    // Top-left
-    canvas.drawLine(
-      rect.topLeft,
-      rect.topLeft.translate(cornerLen, 0),
-      cornerPaint,
-    );
-    canvas.drawLine(
-      rect.topLeft,
-      rect.topLeft.translate(0, cornerLen),
-      cornerPaint,
-    );
-    // Top-right
-    canvas.drawLine(
-      rect.topRight,
-      rect.topRight.translate(-cornerLen, 0),
-      cornerPaint,
-    );
-    canvas.drawLine(
-      rect.topRight,
-      rect.topRight.translate(0, cornerLen),
-      cornerPaint,
-    );
-    // Bottom-left
-    canvas.drawLine(
-      rect.bottomLeft,
-      rect.bottomLeft.translate(cornerLen, 0),
-      cornerPaint,
-    );
-    canvas.drawLine(
-      rect.bottomLeft,
-      rect.bottomLeft.translate(0, -cornerLen),
-      cornerPaint,
-    );
-    // Bottom-right
-    canvas.drawLine(
-      rect.bottomRight,
-      rect.bottomRight.translate(-cornerLen, 0),
-      cornerPaint,
-    );
-    canvas.drawLine(
-      rect.bottomRight,
-      rect.bottomRight.translate(0, -cornerLen),
-      cornerPaint,
-    );
-
-    // Sweep — a horizontal line that drops from top to bottom, with a soft
-    // trailing gradient above it.
-    final sweepY = rect.top + (rect.height - 6) * sweep + 3;
-
-    final trail = Rect.fromLTRB(
-      rect.left + 6,
-      sweepY - 36,
-      rect.right - 6,
-      sweepY,
-    );
-    canvas.drawRect(
-      trail,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            accent.withValues(alpha: 0.0),
-            accent.withValues(alpha: 0.10),
-          ],
-        ).createShader(trail),
-    );
-
-    final linePaint = Paint()
-      ..shader = LinearGradient(
-        colors: [
-          accent.withValues(alpha: 0.0),
-          accent.withValues(alpha: 0.7),
-          accent.withValues(alpha: 0.0),
-        ],
-        stops: const [0.0, 0.5, 1.0],
-      ).createShader(Rect.fromLTWH(rect.left, sweepY - 1, rect.width, 2))
-      ..strokeWidth = 1.3
-      ..strokeCap = StrokeCap.round;
-    canvas.drawLine(
-      Offset(rect.left + 6, sweepY),
-      Offset(rect.right - 6, sweepY),
-      linePaint,
-    );
-
-    // Tiny tick marks along the left edge inside the frame, like a sensor
-    // scale.
-    final tick = Paint()
-      ..color = accent.withValues(alpha: 0.30)
-      ..strokeWidth = 0.8;
-    for (var i = 0; i < 5; i++) {
-      final y = rect.top + 28 + i * (rect.height - 56) / 4;
-      canvas.drawLine(
-        Offset(rect.left + 4, y),
-        Offset(rect.left + 4 + (i.isEven ? 6 : 3), y),
-        tick,
-      );
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _ViewfinderPainter old) =>
-      old.sweep != sweep || old.accent != accent;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -4,18 +4,18 @@ import 'package:flutter/material.dart';
 
 import 'solar_orbit.dart';
 
-/// Editorial-style "pre-pair ritual" diagram for Matter bulbs.
+/// Editorial-style readiness diagram for Matter bulbs.
 ///
 /// Two parts:
-///   • A two-step circuit (power off → power on) that explains how to put
-///     a bulb into pairing mode. Always shown.
-///   • A five-pulse reset row used when pairing won't engage. Shown only
-///     when [showResetSection] is true — typically after a failed attempt,
-///     so first-time users with a fresh bulb aren't asked to factory-reset
-///     it preemptively.
+///   • A "powered on / listening" status panel that affirms a fresh bulb
+///     auto-enters pairing on first power-up. Always shown. No off→on
+///     cycle is implied, because asking a first-time user to cycle a
+///     fresh bulb is wrong (and was previously misread that way).
+///   • A five-pulse factory-reset row, shown only when [showResetSection]
+///     is true — typically after a failed attempt — for bulbs that won't
+///     engage and need to be reset.
 ///
-/// The bulb at the top breathes cool → warm in time with the diagram so
-/// the user can read the "off / on" rhythm at a glance.
+/// The bulb illustration stays "on" and breathes subtly to feel alive.
 class BulbPairingInstructions extends StatefulWidget {
   const BulbPairingInstructions({
     super.key,
@@ -84,13 +84,15 @@ class _BulbPairingInstructionsState extends State<BulbPairingInstructions>
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _editorialHeader(
-            kicker: 'PRE-PAIR RITUAL',
-            counter: '01 / 02',
+            kicker: 'READY THE BULB',
+            counter: 'STATUS',
           ),
           const SizedBox(height: 18),
           _bulbStage(),
           const SizedBox(height: 14),
-          _twoStepCircuit(),
+          _poweredStatus(),
+          const SizedBox(height: 10),
+          _poweredCopy(),
           if (widget.showResetSection) ...[
             const SizedBox(height: 22),
             _hairlineDivider(),
@@ -160,8 +162,10 @@ class _BulbPairingInstructionsState extends State<BulbPairingInstructions>
       child: AnimatedBuilder(
         animation: _breath,
         builder: (context, _) {
-          // Smooth 0..1 ease for breathing.
-          final t = Curves.easeInOutSine.transform(_breath.value);
+          // Keep the bulb steadily lit — gently pulse the glow without
+          // ever swinging back through an "off" state.
+          final t = 0.78 +
+              Curves.easeInOutSine.transform(_breath.value) * 0.22;
           return CustomPaint(
             painter: _BulbDiagramPainter(
               progress: t,
@@ -177,100 +181,87 @@ class _BulbPairingInstructionsState extends State<BulbPairingInstructions>
     );
   }
 
-  Widget _twoStepCircuit() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+  Widget _poweredStatus() {
+    return Row(
       children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: _stepLabel(
-                index: '01',
-                title: 'POWER OFF',
-                accent: _teal,
-                alignEnd: false,
+        AnimatedBuilder(
+          animation: _breath,
+          builder: (context, _) {
+            final t = Curves.easeInOutSine.transform(_breath.value);
+            return Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: _amber.withValues(alpha: 0.95),
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: _amber.withValues(alpha: 0.45 + t * 0.35),
+                    blurRadius: 8 + t * 6,
+                    spreadRadius: 1 + t * 1.2,
+                  ),
+                ],
               ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: _stepLabel(
-                index: '02',
-                title: 'POWER ON',
-                accent: _amber,
-                alignEnd: true,
-              ),
-            ),
-          ],
+            );
+          },
         ),
-        const SizedBox(height: 14),
-        SizedBox(
-          height: 14,
-          child: AnimatedBuilder(
-            animation: _breath,
-            builder: (context, _) {
-              final t = Curves.easeInOutSine.transform(_breath.value);
-              return CustomPaint(
-                painter: _CircuitPainter(
-                  progress: t,
-                  teal: _teal,
-                  amber: _amber,
-                  track: _muted.withValues(alpha: 0.22),
-                ),
-                size: Size.infinite,
-              );
-            },
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            'POWERED · LISTENING',
+            style: TextStyle(
+              color: _ink.withValues(alpha: 0.95),
+              fontSize: 11.5,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 2.0,
+              fontFamily: 'monospace',
+            ),
+          ),
+        ),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          decoration: BoxDecoration(
+            color: _amber.withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(
+              color: _amber.withValues(alpha: 0.35),
+              width: 1,
+            ),
+          ),
+          child: Text(
+            'READY',
+            style: TextStyle(
+              color: _amber.withValues(alpha: 0.95),
+              fontSize: 10,
+              fontFamily: 'monospace',
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.4,
+            ),
           ),
         ),
       ],
     );
   }
 
-  Widget _stepLabel({
-    required String index,
-    required String title,
-    required Color accent,
-    required bool alignEnd,
-  }) {
-    final children = <Widget>[
-      Text(
-        index,
+  Widget _poweredCopy() {
+    return RichText(
+      text: TextSpan(
         style: TextStyle(
-          color: accent,
-          fontSize: 11,
-          fontFamily: 'monospace',
-          fontWeight: FontWeight.w700,
-          letterSpacing: 1.6,
-        ),
-      ),
-      const SizedBox(height: 4),
-      Text(
-        title,
-        style: TextStyle(
-          color: _ink,
+          color: _muted.withValues(alpha: 0.85),
           fontSize: 12.5,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 1.6,
+          height: 1.5,
         ),
+        children: const [
+          TextSpan(text: 'Fresh bulbs enter pairing mode automatically for '),
+          TextSpan(
+            text: 'about 15 minutes',
+            style: TextStyle(fontWeight: FontWeight.w700),
+          ),
+          TextSpan(
+            text: ' after first power-up. No need to flip the switch.',
+          ),
+        ],
       ),
-      const SizedBox(height: 6),
-      Text(
-        alignEnd
-            ? 'Bulb wakes into\npairing mode.'
-            : 'Cut power at the\nswitch or bulb.',
-        textAlign: alignEnd ? TextAlign.end : TextAlign.start,
-        style: TextStyle(
-          color: _muted.withValues(alpha: 0.75),
-          fontSize: 11.5,
-          height: 1.35,
-        ),
-      ),
-    ];
-
-    return Column(
-      crossAxisAlignment:
-          alignEnd ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-      children: children,
     );
   }
 
@@ -340,8 +331,7 @@ class _BulbPairingInstructionsState extends State<BulbPairingInstructions>
             ),
           ),
           const TextSpan(
-            text:
-                ', pausing about a second between flips. The bulb pulses to '
+            text: ', pausing about a second between flips. The bulb pulses to '
                 'confirm a factory reset — then try pairing again.',
           ),
         ],
@@ -462,14 +452,20 @@ class _BulbDiagramPainter extends CustomPainter {
 
     path.moveTo(bottomLeft.dx, bottomLeft.dy);
     path.cubicTo(
-      center.dx - r * 1.05, center.dy + r * 0.2,
-      center.dx - r * 1.05, center.dy - r * 0.5,
-      top.dx, top.dy,
+      center.dx - r * 1.05,
+      center.dy + r * 0.2,
+      center.dx - r * 1.05,
+      center.dy - r * 0.5,
+      top.dx,
+      top.dy,
     );
     path.cubicTo(
-      center.dx + r * 1.05, center.dy - r * 0.5,
-      center.dx + r * 1.05, center.dy + r * 0.2,
-      bottomRight.dx, bottomRight.dy,
+      center.dx + r * 1.05,
+      center.dy - r * 0.5,
+      center.dx + r * 1.05,
+      center.dy + r * 0.2,
+      bottomRight.dx,
+      bottomRight.dy,
     );
     canvas.drawPath(path, outline);
   }
@@ -558,8 +554,8 @@ class _BulbDiagramPainter extends CustomPainter {
     const tickLen = 6.0;
     final y = size.height * 0.52;
     for (final x in [16.0, size.width - 16.0]) {
-      canvas.drawLine(Offset(x, y), Offset(x + (x < 20 ? tickLen : -tickLen), y),
-          paint);
+      canvas.drawLine(
+          Offset(x, y), Offset(x + (x < 20 ? tickLen : -tickLen), y), paint);
     }
   }
 
@@ -587,86 +583,6 @@ class _BulbDiagramPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _BulbDiagramPainter old) =>
-      old.progress != progress;
-}
-
-/// Two-step circuit: a dashed track with an animated "current" segment
-/// that sweeps from the 01 endpoint to the 02 endpoint, ending in an
-/// amber dot when "on".
-class _CircuitPainter extends CustomPainter {
-  _CircuitPainter({
-    required this.progress,
-    required this.teal,
-    required this.amber,
-    required this.track,
-  });
-
-  final double progress;
-  final Color teal;
-  final Color amber;
-  final Color track;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final y = size.height / 2;
-    final left = Offset(10, y);
-    final right = Offset(size.width - 10, y);
-
-    // Dashed background track.
-    final dash = Paint()
-      ..color = track
-      ..strokeWidth = 1.2
-      ..strokeCap = StrokeCap.round;
-    const dashLen = 6.0;
-    const gap = 5.0;
-    var x = left.dx;
-    while (x < right.dx) {
-      final segEnd = math.min(x + dashLen, right.dx);
-      canvas.drawLine(Offset(x, y), Offset(segEnd, y), dash);
-      x += dashLen + gap;
-    }
-
-    // Animated current segment that flows left → right.
-    final headX = left.dx + (right.dx - left.dx) * progress;
-    final current = Paint()
-      ..shader = LinearGradient(
-        colors: [
-          teal.withValues(alpha: 0.0),
-          teal.withValues(alpha: 0.85),
-          amber.withValues(alpha: 0.95),
-        ],
-        stops: const [0.0, 0.6, 1.0],
-      ).createShader(Rect.fromPoints(left, Offset(headX, y + 1)))
-      ..strokeWidth = 2
-      ..strokeCap = StrokeCap.round;
-    canvas.drawLine(left, Offset(headX, y), current);
-
-    // Endpoint dots.
-    final offDot = Paint()..color = teal.withValues(alpha: 0.9);
-    canvas.drawCircle(left, 4.5, offDot);
-    canvas.drawCircle(
-      left,
-      4.5,
-      Paint()
-        ..color = teal.withValues(alpha: 0.25)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 4,
-    );
-
-    final onDotColor = Color.lerp(track, amber, progress)!;
-    canvas.drawCircle(right, 4.5, Paint()..color = onDotColor);
-    canvas.drawCircle(
-      right,
-      4.5 + 3 * progress,
-      Paint()
-        ..color = amber.withValues(alpha: 0.18 * progress)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 4,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _CircuitPainter old) =>
       old.progress != progress;
 }
 

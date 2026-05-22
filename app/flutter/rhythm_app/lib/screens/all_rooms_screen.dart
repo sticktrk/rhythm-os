@@ -721,8 +721,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
       );
     }
 
-    final canAddMatter =
-        context.watch<ServerSyncProvider>().canAddMatterDevice;
+    final canAddMatter = context.watch<ServerSyncProvider>().canAddMatterDevice;
 
     return Padding(
       padding: EdgeInsets.fromLTRB(20, vPad, 20, vPad),
