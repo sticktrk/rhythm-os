@@ -1,5 +1,7 @@
 //! Local RPC protocol shared by the Rust Matter transport and the native CHIP daemon.
 
+use std::fmt;
+
 use anyhow::Result;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -160,11 +162,148 @@ pub struct ChipRpcRequestEnvelope {
     pub request: ChipRpcRequest,
 }
 
+pub const BLE_RECOVERY_RETRY_AFTER_MS: u64 = 3_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChipRpcErrorKind {
+    #[default]
+    Other,
+    ControllerUninitialized,
+    BleCommissioningStack,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChipRpcError {
+    pub message: String,
+    #[serde(default, skip_serializing_if = "chip_rpc_error_kind_is_other")]
+    pub kind: ChipRpcErrorKind,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub recoverable: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub requires_restart: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+}
+
+impl ChipRpcError {
+    pub fn from_message(message: impl Into<String>) -> Self {
+        let message = message.into();
+        let lower = message.to_ascii_lowercase();
+
+        if is_controller_uninitialized_message(&lower) {
+            return Self {
+                message,
+                kind: ChipRpcErrorKind::ControllerUninitialized,
+                recoverable: true,
+                requires_restart: true,
+                retry_after_ms: None,
+            };
+        }
+
+        if is_ble_commissioning_stack_message(&lower) {
+            return Self {
+                message,
+                kind: ChipRpcErrorKind::BleCommissioningStack,
+                recoverable: true,
+                requires_restart: true,
+                retry_after_ms: Some(BLE_RECOVERY_RETRY_AFTER_MS),
+            };
+        }
+
+        Self {
+            message,
+            kind: ChipRpcErrorKind::Other,
+            recoverable: false,
+            requires_restart: false,
+            retry_after_ms: None,
+        }
+    }
+
+    fn normalized(self) -> Self {
+        if self.kind == ChipRpcErrorKind::Other
+            && !self.recoverable
+            && !self.requires_restart
+            && self.retry_after_ms.is_none()
+        {
+            return Self::from_message(self.message);
+        }
+        self
+    }
+
+    pub fn is_controller_uninitialized(&self) -> bool {
+        self.kind == ChipRpcErrorKind::ControllerUninitialized
+    }
+
+    pub fn is_recoverable_ble_commissioning_stack_failure(&self) -> bool {
+        self.kind == ChipRpcErrorKind::BleCommissioningStack
+            && self.recoverable
+            && self.requires_restart
+    }
+}
+
+impl fmt::Display for ChipRpcError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ChipRpcError {}
+
+fn chip_rpc_error_kind_is_other(kind: &ChipRpcErrorKind) -> bool {
+    *kind == ChipRpcErrorKind::Other
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_controller_uninitialized_message(lower_message: &str) -> bool {
+    lower_message.contains("incorrect state")
+        || lower_message.contains("controller not initialized")
+        || lower_message.contains("controller backend not initialized")
+}
+
+fn is_ble_commissioning_stack_message(lower_message: &str) -> bool {
+    let has_ble_source = [
+        "blemanagerimpl.cpp",
+        "bluezendpoint.cpp",
+        "bluezobjectmanager.cpp",
+        "pasesession.cpp",
+        "chipoble",
+        "ble adapter unavailable",
+        "d-bus system bus",
+        "operation was cancelled",
+    ]
+    .iter()
+    .any(|needle| lower_message.contains(needle));
+
+    let has_recoverable_failure = [
+        "chip error 0x00000032",
+        "chip error 0x000000ac",
+        "ble error 0x00000401",
+        "timeout",
+        "internal error",
+        "connection refused",
+        "unavailable",
+        "operation was cancelled",
+    ]
+    .iter()
+    .any(|needle| lower_message.contains(needle));
+
+    has_ble_source && has_recoverable_failure
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ChipRpcResponse {
-    Ok { result: serde_json::Value },
-    Error { message: String },
+    Ok {
+        result: serde_json::Value,
+    },
+    Error {
+        #[serde(flatten)]
+        error: ChipRpcError,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,7 +317,7 @@ impl ChipRpcResponseEnvelope {
     pub fn into_result<T: DeserializeOwned>(self) -> Result<T> {
         match self.response {
             ChipRpcResponse::Ok { result } => Ok(serde_json::from_value(result)?),
-            ChipRpcResponse::Error { message } => Err(anyhow::anyhow!(message)),
+            ChipRpcResponse::Error { error } => Err(anyhow::Error::new(error.normalized())),
         }
     }
 
@@ -195,7 +334,7 @@ impl ChipRpcResponseEnvelope {
         Self {
             id,
             response: ChipRpcResponse::Error {
-                message: message.into(),
+                error: ChipRpcError::from_message(message),
             },
         }
     }
@@ -238,4 +377,144 @@ pub struct ChipRpcCommissionLightResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChipRpcProbeLightResponse {
     pub device: CommissionedDevice,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rpc_error_classifies_ble_stack_failures() {
+        for message in [
+            "commissioning Matter light: src/platform/Linux/bluez/BluezEndpoint.cpp:623: CHIP Error 0x000000AC: Internal error",
+            "commissioning Matter light: src/platform/Linux/BLEManagerImpl.cpp:887: CHIP Error 0x00000032: Timeout",
+            "Disabling CHIPoBLE service due to error: src/platform/Linux/BLEManagerImpl.cpp:245: Ble Error 0x00000401: BLE adapter unavailable",
+            "FAIL: Get D-Bus system bus: Could not connect: Connection refused",
+            "commissioning Matter light: src/protocols/secure_channel/PASESession.cpp:310: CHIP Error 0x00000032: Timeout",
+            "commissioning Matter light: src/platform/Linux/bluez/BluezObjectManager.cpp:118: CHIP Error 0x000000AC: Internal error",
+            "commissioning Matter light: src/platform/Linux/bluez/BluezEndpoint.cpp:493: Operation was cancelled",
+        ] {
+            let error = ChipRpcError::from_message(message);
+
+            assert_eq!(
+                error.kind,
+                ChipRpcErrorKind::BleCommissioningStack,
+                "expected BLE stack classification for {message}"
+            );
+            assert!(error.recoverable);
+            assert!(error.requires_restart);
+            assert_eq!(error.retry_after_ms, Some(BLE_RECOVERY_RETRY_AFTER_MS));
+        }
+    }
+
+    #[test]
+    fn rpc_error_does_not_classify_generic_timeouts_as_ble_recovery() {
+        let error =
+            ChipRpcError::from_message("reading Matter on/off: CHIP Error 0x00000032: Timeout");
+
+        assert_eq!(error.kind, ChipRpcErrorKind::Other);
+        assert!(!error.recoverable);
+        assert!(!error.requires_restart);
+        assert_eq!(error.retry_after_ms, None);
+    }
+
+    #[test]
+    fn rpc_error_classifies_controller_uninitialized_failures() {
+        for message in [
+            "Controller not initialized",
+            "setting Matter on/off: native/chip_bridge.cc:1014: CHIP Error 0x00000003: Incorrect state",
+            "CHIP controller backend not initialized",
+        ] {
+            let error = ChipRpcError::from_message(message);
+
+            assert_eq!(
+                error.kind,
+                ChipRpcErrorKind::ControllerUninitialized,
+                "expected uninitialized-controller classification for {message}"
+            );
+            assert!(error.recoverable);
+            assert!(error.requires_restart);
+            assert_eq!(error.retry_after_ms, None);
+        }
+    }
+
+    #[test]
+    fn legacy_string_error_responses_are_classified_on_decode() {
+        for (json, expected_kind) in [
+            (
+                r#"{
+            "id": 7,
+            "status": "error",
+            "message": "Controller not initialized"
+        }"#,
+                ChipRpcErrorKind::ControllerUninitialized,
+            ),
+            (
+                r#"{
+            "id": 8,
+            "status": "error",
+            "message": "FAIL: Get D-Bus system bus: Could not connect: Connection refused"
+        }"#,
+                ChipRpcErrorKind::BleCommissioningStack,
+            ),
+        ] {
+            let envelope: ChipRpcResponseEnvelope = serde_json::from_str(json).unwrap();
+
+            let error = envelope.into_result::<ChipRpcEmpty>().unwrap_err();
+            let rpc_error = error.downcast_ref::<ChipRpcError>().unwrap();
+
+            assert_eq!(rpc_error.kind, expected_kind);
+            assert!(rpc_error.recoverable);
+            assert!(rpc_error.requires_restart);
+        }
+    }
+
+    #[test]
+    fn typed_recoverable_rpc_errors_include_metadata_on_the_wire() {
+        let envelope = ChipRpcResponseEnvelope::error(
+            9,
+            "commissioning Matter light: src/platform/Linux/bluez/BluezEndpoint.cpp:623: CHIP Error 0x000000AC: Internal error",
+        );
+        let json = serde_json::to_value(envelope).unwrap();
+
+        assert_eq!(json["status"], "error");
+        assert_eq!(json["kind"], "ble_commissioning_stack");
+        assert_eq!(json["recoverable"], true);
+        assert_eq!(json["requires_restart"], true);
+        assert_eq!(json["retry_after_ms"], BLE_RECOVERY_RETRY_AFTER_MS);
+    }
+
+    #[test]
+    fn typed_rpc_error_response_round_trips_recovery_metadata() {
+        let json = r#"{
+            "id": 11,
+            "status": "error",
+            "message": "commissioning failed",
+            "kind": "ble_commissioning_stack",
+            "recoverable": true,
+            "requires_restart": true,
+            "retry_after_ms": 125
+        }"#;
+        let envelope: ChipRpcResponseEnvelope = serde_json::from_str(json).unwrap();
+
+        let error = envelope.into_result::<ChipRpcEmpty>().unwrap_err();
+        let rpc_error = error.downcast_ref::<ChipRpcError>().unwrap();
+
+        assert_eq!(rpc_error.message, "commissioning failed");
+        assert_eq!(rpc_error.kind, ChipRpcErrorKind::BleCommissioningStack);
+        assert!(rpc_error.recoverable);
+        assert!(rpc_error.requires_restart);
+        assert_eq!(rpc_error.retry_after_ms, Some(125));
+    }
+
+    #[test]
+    fn ordinary_rpc_errors_keep_the_legacy_wire_shape() {
+        let envelope = ChipRpcResponseEnvelope::error(3, "boom");
+        let json = serde_json::to_value(envelope).unwrap();
+
+        assert_eq!(json["status"], "error");
+        assert_eq!(json["message"], "boom");
+        assert!(json.get("kind").is_none());
+        assert!(json.get("recoverable").is_none());
+    }
 }

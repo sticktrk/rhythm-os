@@ -14,9 +14,9 @@ use anyhow::{Context, Result};
 
 use crate::chip_rpc::{
     ChipInitControllerRequest, ChipInitControllerResponse, ChipRpcAttributeReportsResponse,
-    ChipRpcCommissionLightResponse, ChipRpcJsonValueResponse, ChipRpcListDevicesResponse,
-    ChipRpcProbeLightResponse, ChipRpcReadOnOffResponse, ChipRpcRequest, ChipRpcRequestEnvelope,
-    ChipRpcResponseEnvelope,
+    ChipRpcCommissionLightResponse, ChipRpcError, ChipRpcJsonValueResponse,
+    ChipRpcListDevicesResponse, ChipRpcProbeLightResponse, ChipRpcReadOnOffResponse,
+    ChipRpcRequest, ChipRpcRequestEnvelope, ChipRpcResponseEnvelope,
 };
 use crate::fabric::MatterFabricIdentity;
 use crate::transport::{
@@ -32,11 +32,21 @@ const CHIP_EXAMPLE_STORAGE_EXT: &str = "ini";
 const CHIPD_LOGFILE_ENV: &str = "RHYTHM_MATTER_LOGFILE";
 const SIDECAR_START_TIMEOUT: Duration = Duration::from_secs(10);
 const RPC_TIMEOUT: Duration = Duration::from_secs(120);
+const BLE_RECOVERY_COOLDOWN: Duration = Duration::from_secs(3);
 
 struct SidecarConfig {
     command: PathBuf,
     working_dir: PathBuf,
     log_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidecarHealth {
+    Uninitialized,
+    Ready,
+    Recovering,
+    BleCooldown,
+    Unavailable,
 }
 
 /// Desktop Matter transport backed by a native CHIP daemon over a Unix socket.
@@ -45,8 +55,11 @@ pub struct ChipTransport {
     init_request: ChipInitControllerRequest,
     sidecar: Mutex<Option<Child>>,
     sidecar_config: Option<SidecarConfig>,
+    sidecar_health: Mutex<SidecarHealth>,
     initialized: AtomicBool,
     next_request_id: AtomicU64,
+    commissioning_lock: Mutex<()>,
+    ble_commissioning_ready_after: Mutex<Option<Instant>>,
 }
 
 impl ChipTransport {
@@ -83,8 +96,11 @@ impl ChipTransport {
                 working_dir: chip_dir.clone(),
                 log_path: sidecar_log_path_from_env(std::env::var_os(CHIPD_LOGFILE_ENV)),
             }),
+            sidecar_health: Mutex::new(SidecarHealth::Uninitialized),
             initialized: AtomicBool::new(false),
             next_request_id: AtomicU64::new(1),
+            commissioning_lock: Mutex::new(()),
+            ble_commissioning_ready_after: Mutex::new(None),
         };
 
         transport.ensure_sidecar()?;
@@ -104,13 +120,40 @@ impl ChipTransport {
             },
             sidecar: Mutex::new(None),
             sidecar_config: None,
+            sidecar_health: Mutex::new(SidecarHealth::Ready),
             initialized: AtomicBool::new(true),
             next_request_id: AtomicU64::new(1),
+            commissioning_lock: Mutex::new(()),
+            ble_commissioning_ready_after: Mutex::new(None),
         }
     }
 
+    fn sidecar_health(&self) -> SidecarHealth {
+        self.sidecar_health
+            .lock()
+            .map(|health| *health)
+            .unwrap_or(SidecarHealth::Unavailable)
+    }
+
+    fn set_sidecar_health(&self, health: SidecarHealth) {
+        if let Ok(mut current) = self.sidecar_health.lock() {
+            *current = health;
+        }
+    }
+
+    #[cfg(test)]
+    fn sidecar_health_for_test(&self) -> SidecarHealth {
+        self.sidecar_health()
+    }
+
     fn ensure_sidecar(&self) -> Result<()> {
-        if self.initialized.load(Ordering::SeqCst) && self.socket_path.exists() {
+        if self.initialized.load(Ordering::SeqCst)
+            && self.socket_path.exists()
+            && matches!(
+                self.sidecar_health(),
+                SidecarHealth::Ready | SidecarHealth::BleCooldown
+            )
+        {
             return Ok(());
         }
 
@@ -137,7 +180,10 @@ impl ChipTransport {
                     )
                 })
             }
-            Err(first_error) => Err(first_error),
+            Err(first_error) => {
+                self.set_sidecar_health(SidecarHealth::Unavailable);
+                Err(first_error)
+            }
         }
     }
 
@@ -159,6 +205,7 @@ impl ChipTransport {
         }
 
         self.initialized.store(true, Ordering::SeqCst);
+        self.set_sidecar_health(SidecarHealth::Ready);
         Ok(())
     }
 
@@ -174,6 +221,7 @@ impl ChipTransport {
             },
             Err(first_error) => {
                 self.initialized.store(false, Ordering::SeqCst);
+                self.set_sidecar_health(SidecarHealth::Unavailable);
                 if self.sidecar_config.is_some() {
                     self.restart_sidecar()?;
                     self.ensure_sidecar()?;
@@ -203,6 +251,7 @@ impl ChipTransport {
         first_error: anyhow::Error,
     ) -> Result<T> {
         self.initialized.store(false, Ordering::SeqCst);
+        self.set_sidecar_health(SidecarHealth::Recovering);
         if self.sidecar_config.is_some() {
             self.restart_sidecar().with_context(|| {
                 format!(
@@ -301,6 +350,80 @@ impl ChipTransport {
             .with_context(|| format!("connecting to {}", self.socket_path.display()))
     }
 
+    fn prepare_ble_commissioning(&self, request: &MatterCommissionRequest) -> Result<()> {
+        if !uses_ble_commissioning(request) {
+            return Ok(());
+        }
+
+        self.wait_for_ble_recovery_cooldown()?;
+        ensure_linux_ble_commissioning_ready(self.init_request.ble_controller.unwrap_or(0)).map_err(
+            |error| {
+                self.set_sidecar_health(SidecarHealth::Unavailable);
+                error
+            },
+        )
+    }
+
+    fn wait_for_ble_recovery_cooldown(&self) -> Result<()> {
+        let (delay, cooldown_finished) = {
+            let mut ready_after = self
+                .ble_commissioning_ready_after
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Matter BLE recovery cooldown lock poisoned"))?;
+            let now = Instant::now();
+            match *ready_after {
+                Some(deadline) if deadline > now => (Some(deadline - now), false),
+                Some(_) => {
+                    *ready_after = None;
+                    (None, true)
+                }
+                None => (None, false),
+            }
+        };
+
+        if let Some(delay) = delay {
+            std::thread::sleep(delay);
+            self.set_sidecar_health(SidecarHealth::Ready);
+        } else if cooldown_finished {
+            self.set_sidecar_health(SidecarHealth::Ready);
+        }
+        Ok(())
+    }
+
+    fn mark_ble_recovery_cooldown(&self, cooldown: Duration) {
+        if let Ok(mut ready_after) = self.ble_commissioning_ready_after.lock() {
+            *ready_after = Some(Instant::now() + cooldown);
+        }
+        self.set_sidecar_health(SidecarHealth::BleCooldown);
+    }
+
+    fn recover_ble_commissioning_stack(
+        &self,
+        first_error: &anyhow::Error,
+        cooldown: Duration,
+    ) -> Result<()> {
+        self.initialized.store(false, Ordering::SeqCst);
+        self.set_sidecar_health(SidecarHealth::Recovering);
+
+        if self.sidecar_config.is_some() {
+            self.restart_sidecar().with_context(|| {
+                format!(
+                    "restarting CHIP sidecar after Matter BLE commissioning error: {:#}",
+                    first_error
+                )
+            })?;
+        }
+
+        self.ensure_sidecar().with_context(|| {
+            format!(
+                "re-initializing CHIP controller after Matter BLE commissioning error: {:#}",
+                first_error
+            )
+        })?;
+        self.mark_ble_recovery_cooldown(cooldown);
+        Ok(())
+    }
+
     fn start_sidecar(&self) -> Result<()> {
         self.start_sidecar_inner(false)
     }
@@ -313,6 +436,8 @@ impl ChipTransport {
         let Some(config) = &self.sidecar_config else {
             return Ok(());
         };
+
+        self.set_sidecar_health(SidecarHealth::Recovering);
 
         let mut guard = self
             .sidecar
@@ -342,6 +467,10 @@ impl ChipTransport {
                     "starting CHIP controller daemon with {}",
                     config.command.display()
                 )
+            })
+            .map_err(|error| {
+                self.set_sidecar_health(SidecarHealth::Unavailable);
+                error
             })?;
 
         *guard = Some(child);
@@ -355,6 +484,7 @@ impl ChipTransport {
             std::thread::sleep(Duration::from_millis(100));
         }
 
+        self.set_sidecar_health(SidecarHealth::Unavailable);
         anyhow::bail!(
             "Timed out waiting for CHIP sidecar socket at {}",
             self.socket_path.display()
@@ -424,6 +554,55 @@ fn sidecar_log_path_from_env(value: Option<OsString>) -> Option<PathBuf> {
     value.filter(|path| !path.is_empty()).map(PathBuf::from)
 }
 
+fn uses_ble_commissioning(request: &MatterCommissionRequest) -> bool {
+    !matches!(
+        request.rendezvous,
+        crate::transport::MatterCommissioningRendezvous::OnNetwork
+    )
+}
+
+#[cfg(all(target_os = "linux", not(test)))]
+fn ensure_linux_ble_commissioning_ready(ble_controller: u16) -> Result<()> {
+    let adapter_path = PathBuf::from(format!("/sys/class/bluetooth/hci{ble_controller}"));
+    if !adapter_path.exists() {
+        anyhow::bail!(
+            "Matter BLE commissioning requires Bluetooth adapter hci{} to be present",
+            ble_controller
+        );
+    }
+
+    use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
+    use dbus::blocking::Connection;
+
+    const DBUS_TIMEOUT: Duration = Duration::from_secs(2);
+    let connection = Connection::new_system()
+        .context("Matter BLE commissioning requires the D-Bus system bus to be reachable")?;
+    let bluez_path = format!("/org/bluez/hci{ble_controller}");
+    let proxy = connection.with_proxy("org.bluez", bluez_path, DBUS_TIMEOUT);
+    let powered: bool = proxy
+        .get("org.bluez.Adapter1", "Powered")
+        .with_context(|| {
+            format!(
+                "Matter BLE commissioning requires bluetoothd/BlueZ adapter hci{} to be present and reachable",
+                ble_controller
+            )
+        })?;
+
+    if !powered {
+        anyhow::bail!(
+            "Matter BLE commissioning requires Bluetooth adapter hci{} to be powered on",
+            ble_controller
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(any(not(target_os = "linux"), test))]
+fn ensure_linux_ble_commissioning_ready(_ble_controller: u16) -> Result<()> {
+    Ok(())
+}
+
 fn chip_storage_artifact_paths(chip_dir: &Path, requested_storage_path: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(stem) = requested_storage_path
@@ -490,8 +669,30 @@ fn open_sidecar_log_file(path: &Path) -> Result<std::fs::File> {
 ///  * the Rust service emits `Controller not initialized` from
 ///    `service::require_initialized` when state was never set.
 fn is_uninitialized_controller_error(error: &anyhow::Error) -> bool {
-    let message = format!("{:#}", error);
-    message.contains("Incorrect state") || message.contains("Controller not initialized")
+    error
+        .downcast_ref::<ChipRpcError>()
+        .map(ChipRpcError::is_controller_uninitialized)
+        .unwrap_or_else(|| {
+            ChipRpcError::from_message(format!("{:#}", error)).is_controller_uninitialized()
+        })
+}
+
+fn is_recoverable_ble_commissioning_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ChipRpcError>()
+        .map(ChipRpcError::is_recoverable_ble_commissioning_stack_failure)
+        .unwrap_or_else(|| {
+            ChipRpcError::from_message(format!("{:#}", error))
+                .is_recoverable_ble_commissioning_stack_failure()
+        })
+}
+
+fn ble_recovery_cooldown(error: &anyhow::Error) -> Duration {
+    error
+        .downcast_ref::<ChipRpcError>()
+        .and_then(|rpc_error| rpc_error.retry_after_ms)
+        .map(Duration::from_millis)
+        .unwrap_or(BLE_RECOVERY_COOLDOWN)
 }
 
 impl Drop for ChipTransport {
@@ -507,9 +708,33 @@ impl Drop for ChipTransport {
 
 impl MatterTransport for ChipTransport {
     fn commission_light(&self, request: &MatterCommissionRequest) -> Result<CommissionedDevice> {
-        let response: ChipRpcCommissionLightResponse =
-            self.call(ChipRpcRequest::CommissionLight(request.clone()))?;
-        Ok(response.device)
+        let _guard = self
+            .commissioning_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Matter commissioning lock poisoned"))?;
+
+        self.prepare_ble_commissioning(request)?;
+
+        let result: Result<ChipRpcCommissionLightResponse> =
+            self.call(ChipRpcRequest::CommissionLight(request.clone()));
+        match result {
+            Ok(response) => Ok(response.device),
+            Err(error)
+                if uses_ble_commissioning(request)
+                    && is_recoverable_ble_commissioning_error(&error) =>
+            {
+                match self.recover_ble_commissioning_stack(&error, ble_recovery_cooldown(&error)) {
+                    Ok(()) => Err(error.context(
+                        "Matter BLE commissioning failed; reset CHIP sidecar before next attempt",
+                    )),
+                    Err(recovery_error) => Err(error.context(format!(
+                        "Matter BLE commissioning failed and CHIP sidecar recovery failed: {:#}",
+                        recovery_error
+                    ))),
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn decommission_device(&self, node_id: u64, force: bool) -> Result<()> {
@@ -847,10 +1072,14 @@ mod tests {
     use std::thread;
 
     use crate::chip_rpc::{
-        ChipInitControllerResponse, ChipRpcAttributeReportsResponse, ChipRpcEmpty,
-        ChipRpcListDevicesResponse, ChipRpcResponseEnvelope,
+        ChipInitControllerResponse, ChipRpcAttributeReportsResponse,
+        ChipRpcCommissionLightResponse, ChipRpcEmpty, ChipRpcError, ChipRpcErrorKind,
+        ChipRpcListDevicesResponse, ChipRpcResponse, ChipRpcResponseEnvelope,
     };
-    use crate::transport::MatterAttributeValue;
+    use crate::transport::{
+        MatterAttributeValue, MatterColorMode, MatterCommissioningNetwork,
+        MatterCommissioningRendezvous, MatterCommissioningWifiCredentials,
+    };
 
     fn test_temp_root() -> PathBuf {
         std::env::var_os("CARGO_TARGET_TMPDIR")
@@ -868,6 +1097,49 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    fn ble_commission_request() -> MatterCommissionRequest {
+        MatterCommissionRequest {
+            setup_payload: "MT:Y.K908OC16750648G00".to_string(),
+            node_id: 100,
+            network: MatterCommissioningNetwork::Wifi,
+            rendezvous: MatterCommissioningRendezvous::Ble,
+            wifi_credentials: MatterCommissioningWifiCredentials {
+                ssid: "wifi".to_string(),
+                password: "secret".to_string(),
+            },
+        }
+    }
+
+    fn commissioned_test_device(node_id: u64) -> CommissionedDevice {
+        CommissionedDevice {
+            node_id,
+            vendor_name: "Test Vendor".to_string(),
+            product_name: "Test Lamp".to_string(),
+            vendor_id: 1,
+            product_id: 2,
+            serial_number: None,
+            light_endpoint: 1,
+            color_modes: vec![MatterColorMode::ColorTemperature],
+            min_kelvin: Some(2200),
+            max_kelvin: Some(6500),
+        }
+    }
+
+    fn legacy_rpc_error(id: u64, message: impl Into<String>) -> ChipRpcResponseEnvelope {
+        ChipRpcResponseEnvelope {
+            id,
+            response: ChipRpcResponse::Error {
+                error: ChipRpcError {
+                    message: message.into(),
+                    kind: ChipRpcErrorKind::Other,
+                    recoverable: false,
+                    requires_restart: false,
+                    retry_after_ms: None,
+                },
+            },
+        }
     }
 
     fn spawn_fake_server<F>(socket_path: PathBuf, handler: F) -> thread::JoinHandle<()>
@@ -1176,6 +1448,313 @@ mod tests {
         );
 
         let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn ble_commissioning_error_reinitializes_controller_without_retrying_commission() {
+        const BLUEZ_ENDPOINT_ERROR: &str = concat!(
+            "commissioning Matter light: ",
+            "src/platform/Linux/bluez/BluezEndpoint.cpp:623: ",
+            "CHIP Error 0x000000AC: Internal error"
+        );
+
+        let socket_path = temp_socket_path("recover-ble-commissioning");
+        let commission_attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_attempts = commission_attempts.clone();
+        let handler = move |request: &ChipRpcRequestEnvelope| -> ChipRpcResponseEnvelope {
+            match &request.request {
+                ChipRpcRequest::CommissionLight(_) => {
+                    observed_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    ChipRpcResponseEnvelope::error(request.id, BLUEZ_ENDPOINT_ERROR)
+                }
+                ChipRpcRequest::InitController(_) => ChipRpcResponseEnvelope::ok(
+                    request.id,
+                    ChipInitControllerResponse {
+                        fabric_id: "test".to_string(),
+                        operational_fabric_id: 1,
+                    },
+                ),
+                ChipRpcRequest::SetOnOff { .. } => {
+                    ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+                }
+                other => panic!("unexpected RPC during recovery test: {:?}", other),
+            }
+        };
+        let server = spawn_fake_server_multi(socket_path.clone(), 3, handler);
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        let error = transport
+            .commission_light(&ble_commission_request())
+            .expect_err("commissioning should surface the original BLE failure");
+        assert!(format!("{:#}", error).contains("reset CHIP sidecar"));
+        assert_eq!(
+            transport.sidecar_health_for_test(),
+            SidecarHealth::BleCooldown,
+            "recoverable BLE failures should leave the sidecar initialized but gate the next BLE attempt"
+        );
+
+        transport
+            .set_on_off(102, 1, true)
+            .expect("subsequent commands should use the re-initialized controller");
+
+        let requests = server.join().unwrap();
+        let kinds: Vec<&'static str> = requests
+            .iter()
+            .map(|envelope| match envelope.request {
+                ChipRpcRequest::CommissionLight(_) => "commission_light",
+                ChipRpcRequest::InitController(_) => "init_controller",
+                ChipRpcRequest::SetOnOff { .. } => "set_on_off",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["commission_light", "init_controller", "set_on_off"],
+            "expected the failed commission to reset and re-init the controller without retrying the commission"
+        );
+        assert_eq!(
+            commission_attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "commissioning should not be retried automatically after a BLE stack failure"
+        );
+
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn legacy_ble_error_response_without_metadata_still_triggers_recovery() {
+        const BLUEZ_OBJECT_MANAGER_ERROR: &str = concat!(
+            "commissioning Matter light: ",
+            "src/platform/Linux/bluez/BluezObjectManager.cpp:118: ",
+            "CHIP Error 0x000000AC: Internal error"
+        );
+
+        let socket_path = temp_socket_path("legacy-ble-recovery");
+        let handler = move |request: &ChipRpcRequestEnvelope| -> ChipRpcResponseEnvelope {
+            match &request.request {
+                ChipRpcRequest::CommissionLight(_) => {
+                    legacy_rpc_error(request.id, BLUEZ_OBJECT_MANAGER_ERROR)
+                }
+                ChipRpcRequest::InitController(_) => ChipRpcResponseEnvelope::ok(
+                    request.id,
+                    ChipInitControllerResponse {
+                        fabric_id: "test".to_string(),
+                        operational_fabric_id: 1,
+                    },
+                ),
+                other => panic!("unexpected RPC during recovery test: {:?}", other),
+            }
+        };
+        let server = spawn_fake_server_multi(socket_path.clone(), 2, handler);
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        let error = transport
+            .commission_light(&ble_commission_request())
+            .expect_err("legacy BLE error response should surface the original failure");
+        assert!(format!("{:#}", error).contains("reset CHIP sidecar"));
+        assert_eq!(
+            transport.sidecar_health_for_test(),
+            SidecarHealth::BleCooldown
+        );
+
+        let requests = server.join().unwrap();
+        let kinds: Vec<&'static str> = requests
+            .iter()
+            .map(|envelope| match envelope.request {
+                ChipRpcRequest::CommissionLight(_) => "commission_light",
+                ChipRpcRequest::InitController(_) => "init_controller",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, vec!["commission_light", "init_controller"]);
+
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn ble_recovery_cooldown_uses_rpc_retry_after_metadata() {
+        let typed_error = anyhow::Error::new(ChipRpcError {
+            message: "commissioning failed".to_string(),
+            kind: ChipRpcErrorKind::BleCommissioningStack,
+            recoverable: true,
+            requires_restart: true,
+            retry_after_ms: Some(125),
+        });
+        assert_eq!(
+            ble_recovery_cooldown(&typed_error),
+            Duration::from_millis(125)
+        );
+
+        let legacy_error = anyhow::anyhow!(
+            "commissioning Matter light: src/platform/Linux/bluez/BluezEndpoint.cpp:623: CHIP Error 0x000000AC: Internal error"
+        );
+        assert_eq!(ble_recovery_cooldown(&legacy_error), BLE_RECOVERY_COOLDOWN);
+    }
+
+    #[test]
+    fn typed_ble_error_requires_recoverable_restart_metadata() {
+        for error in [
+            ChipRpcError {
+                message: "commissioning failed".to_string(),
+                kind: ChipRpcErrorKind::BleCommissioningStack,
+                recoverable: false,
+                requires_restart: true,
+                retry_after_ms: Some(1),
+            },
+            ChipRpcError {
+                message: "commissioning failed".to_string(),
+                kind: ChipRpcErrorKind::BleCommissioningStack,
+                recoverable: true,
+                requires_restart: false,
+                retry_after_ms: Some(1),
+            },
+        ] {
+            assert!(
+                !is_recoverable_ble_commissioning_error(&anyhow::Error::new(error)),
+                "BLE stack kind without both recovery flags must not reset the sidecar"
+            );
+        }
+    }
+
+    #[test]
+    fn non_ble_commissioning_error_does_not_reinitialize_or_enter_cooldown() {
+        let socket_path = temp_socket_path("non-ble-commission-error");
+        let server = spawn_fake_server_multi(socket_path.clone(), 1, |request| {
+            assert!(matches!(
+                request.request,
+                ChipRpcRequest::CommissionLight(_)
+            ));
+            ChipRpcResponseEnvelope::error(
+                request.id,
+                "commissioning Matter light: CHIP Error 0x00000032: Timeout",
+            )
+        });
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        let error = transport
+            .commission_light(&ble_commission_request())
+            .expect_err(
+                "generic commissioning timeout should be surfaced without sidecar recovery",
+            );
+        assert!(!format!("{:#}", error).contains("reset CHIP sidecar"));
+        assert_eq!(
+            transport.sidecar_health_for_test(),
+            SidecarHealth::Ready,
+            "non-BLE failures should leave sidecar health unchanged"
+        );
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            requests[0].request,
+            ChipRpcRequest::CommissionLight(_)
+        ));
+
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn typed_ble_commissioning_error_uses_retry_after_and_allows_next_ble_attempt_after_cooldown() {
+        let socket_path = temp_socket_path("typed-ble-recovery-cooldown");
+        let commission_attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_attempts = commission_attempts.clone();
+        let handler = move |request: &ChipRpcRequestEnvelope| -> ChipRpcResponseEnvelope {
+            match &request.request {
+                ChipRpcRequest::CommissionLight(_) => {
+                    let attempt =
+                        observed_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if attempt == 0 {
+                        ChipRpcResponseEnvelope {
+                            id: request.id,
+                            response: ChipRpcResponse::Error {
+                                error: ChipRpcError {
+                                    message: "commissioning failed".to_string(),
+                                    kind: ChipRpcErrorKind::BleCommissioningStack,
+                                    recoverable: true,
+                                    requires_restart: true,
+                                    retry_after_ms: Some(1),
+                                },
+                            },
+                        }
+                    } else {
+                        ChipRpcResponseEnvelope::ok(
+                            request.id,
+                            ChipRpcCommissionLightResponse {
+                                device: commissioned_test_device(100),
+                            },
+                        )
+                    }
+                }
+                ChipRpcRequest::InitController(_) => ChipRpcResponseEnvelope::ok(
+                    request.id,
+                    ChipInitControllerResponse {
+                        fabric_id: "test".to_string(),
+                        operational_fabric_id: 1,
+                    },
+                ),
+                other => panic!("unexpected RPC during recovery test: {:?}", other),
+            }
+        };
+        let server = spawn_fake_server_multi(socket_path.clone(), 3, handler);
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        let error = transport
+            .commission_light(&ble_commission_request())
+            .expect_err("first BLE commissioning attempt should surface the CHIP failure");
+        assert!(format!("{:#}", error).contains("reset CHIP sidecar"));
+        assert_eq!(
+            transport.sidecar_health_for_test(),
+            SidecarHealth::BleCooldown
+        );
+
+        let device = transport
+            .commission_light(&ble_commission_request())
+            .expect("second BLE commissioning attempt should run after the short cooldown");
+        assert_eq!(device.node_id, 100);
+        assert_eq!(transport.sidecar_health_for_test(), SidecarHealth::Ready);
+
+        let requests = server.join().unwrap();
+        let kinds: Vec<&'static str> = requests
+            .iter()
+            .map(|envelope| match envelope.request {
+                ChipRpcRequest::CommissionLight(_) => "commission_light",
+                ChipRpcRequest::InitController(_) => "init_controller",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["commission_light", "init_controller", "commission_light"],
+            "expected failed BLE commission, controller re-init, then the next user retry"
+        );
+        assert_eq!(
+            commission_attempts.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn recoverable_ble_commissioning_errors_match_bundle_failures() {
+        for message in [
+            "commissioning Matter light: src/protocols/secure_channel/PASESession.cpp:310: CHIP Error 0x00000032: Timeout",
+            "commissioning Matter light: src/platform/Linux/BLEManagerImpl.cpp:887: CHIP Error 0x00000032: Timeout",
+            "commissioning Matter light: src/platform/Linux/bluez/BluezEndpoint.cpp:623: CHIP Error 0x000000AC: Internal error",
+            "Disabling CHIPoBLE service due to error: src/platform/Linux/BLEManagerImpl.cpp:245: Ble Error 0x00000401: BLE adapter unavailable",
+            "FAIL: Get D-Bus system bus: Could not connect: Connection refused",
+            "commissioning Matter light: src/platform/Linux/bluez/BluezObjectManager.cpp:118: CHIP Error 0x000000AC: Internal error",
+            "commissioning Matter light: src/platform/Linux/bluez/BluezEndpoint.cpp:493: Operation was cancelled",
+        ] {
+            assert!(
+                is_recoverable_ble_commissioning_error(&anyhow::anyhow!(message)),
+                "expected bundle error to trigger BLE recovery: {message}"
+            );
+        }
+
+        assert!(!is_recoverable_ble_commissioning_error(&anyhow::anyhow!(
+            "Controller not initialized"
+        )));
     }
 
     #[test]

@@ -182,11 +182,11 @@ fn summarize_commissioning_error(error: &anyhow::Error) -> String {
         return "Matter BLE commissioning timed out while discovering the bulb from this host. Factory-reset the bulb, keep it close to the machine, and if it still fails, try Linux/BlueZ or the appliance target.".to_string();
     }
 
-    if lower.contains("bluezendpoint.cpp")
+    if is_linux_ble_stack_error(&lower)
         || lower.contains("chip error 0x000000ac")
         || lower.contains("ble device doesn't seem to support chip")
     {
-        return "Matter BLE commissioning reached BlueZ but the connection failed before commissioning completed. Factory-reset the bulb, keep it close to the appliance, and retry with only one pairing attempt active.".to_string();
+        return "Matter BLE pairing reached the appliance Bluetooth stack, but BlueZ/CHIP lost the BLE connection during commissioning. Rhythm reset the Matter controller; wait a few seconds, keep the light close, and retry pairing.".to_string();
     }
 
     if lower.contains("matter wi-fi commissioning requires stored appliance wi-fi credentials") {
@@ -194,6 +194,22 @@ fn summarize_commissioning_error(error: &anyhow::Error) -> String {
     }
 
     detail
+}
+
+fn is_linux_ble_stack_error(lower_detail: &str) -> bool {
+    [
+        "matter ble commissioning failed",
+        "blemanagerimpl.cpp",
+        "bluezendpoint.cpp",
+        "bluezobjectmanager.cpp",
+        "pasesession.cpp",
+        "chipoble",
+        "ble adapter unavailable",
+        "d-bus system bus",
+        "operation was cancelled",
+    ]
+    .iter()
+    .any(|needle| lower_detail.contains(needle))
 }
 
 fn load_commissioning_wifi_credentials(
@@ -541,6 +557,26 @@ mod tests {
 
         assert!(message.contains("timed out while discovering the bulb"));
         assert!(!message.contains("PASESession.cpp"));
+    }
+
+    #[test]
+    fn commissioning_error_summarizes_linux_ble_stack_failures() {
+        for detail in [
+            "Matter BLE commissioning failed; reset CHIP sidecar before next attempt: commissioning Matter light: src/platform/Linux/bluez/BluezEndpoint.cpp:623: CHIP Error 0x000000AC: Internal error",
+            "Matter BLE commissioning failed; reset CHIP sidecar before next attempt: FAIL: Get D-Bus system bus: Could not connect: Connection refused",
+            "Matter BLE commissioning failed; reset CHIP sidecar before next attempt: commissioning Matter light: src/platform/Linux/bluez/BluezObjectManager.cpp:118: CHIP Error 0x000000AC: Internal error",
+            "Matter BLE commissioning failed; reset CHIP sidecar before next attempt: commissioning Matter light: src/platform/Linux/bluez/BluezEndpoint.cpp:493: Operation was cancelled",
+        ] {
+            let error = anyhow::anyhow!(detail);
+
+            let message = summarize_commissioning_error(&error);
+
+            assert!(
+                message.contains("BlueZ/CHIP lost the BLE connection"),
+                "expected BlueZ summary for {detail}"
+            );
+            assert!(message.contains("retry pairing"));
+        }
     }
 
     #[test]

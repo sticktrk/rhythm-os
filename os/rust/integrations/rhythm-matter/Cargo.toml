@@ -20,3 +20,6 @@ async-trait = "0.1"
 log = "0.4"
 tracing = { workspace = true }
 reqwest = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus = { version = "0.9.10", features = ["vendored"] }
