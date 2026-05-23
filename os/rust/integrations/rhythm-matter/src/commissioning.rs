@@ -173,8 +173,20 @@ fn summarize_commissioning_error(error: &anyhow::Error) -> String {
         return "Matter BLE commissioning reached the bulb, but macOS CoreBluetooth failed the GATT write. This matches the current official Matter controller behavior on this host. Try Linux/BlueZ or the appliance target for real commissioning.".to_string();
     }
 
-    if lower.contains("connectiondelegate timeout") || lower.contains("discovery timed out") {
+    if lower.contains("connectiondelegate timeout")
+        || lower.contains("discovery timed out")
+        || lower.contains("pasesession.cpp")
+        || lower.contains("blemanagerimpl.cpp")
+        || lower.contains("chip error 0x00000032: timeout")
+    {
         return "Matter BLE commissioning timed out while discovering the bulb from this host. Factory-reset the bulb, keep it close to the machine, and if it still fails, try Linux/BlueZ or the appliance target.".to_string();
+    }
+
+    if lower.contains("bluezendpoint.cpp")
+        || lower.contains("chip error 0x000000ac")
+        || lower.contains("ble device doesn't seem to support chip")
+    {
+        return "Matter BLE commissioning reached BlueZ but the connection failed before commissioning completed. Factory-reset the bulb, keep it close to the appliance, and retry with only one pairing attempt active.".to_string();
     }
 
     if lower.contains("matter wi-fi commissioning requires stored appliance wi-fi credentials") {
@@ -517,5 +529,29 @@ mod tests {
         let message = summarize_commissioning_error(&error);
 
         assert!(message.contains("timed out while discovering the bulb"));
+    }
+
+    #[test]
+    fn commissioning_error_summarizes_linux_chip_timeouts() {
+        let error = anyhow::anyhow!(
+            "commissioning Matter light: src/protocols/secure_channel/PASESession.cpp:310: CHIP Error 0x00000032: Timeout"
+        );
+
+        let message = summarize_commissioning_error(&error);
+
+        assert!(message.contains("timed out while discovering the bulb"));
+        assert!(!message.contains("PASESession.cpp"));
+    }
+
+    #[test]
+    fn commissioning_error_summarizes_bluez_internal_errors() {
+        let error = anyhow::anyhow!(
+            "commissioning Matter light: src/platform/Linux/bluez/BluezEndpoint.cpp:623: CHIP Error 0x000000AC: Internal error"
+        );
+
+        let message = summarize_commissioning_error(&error);
+
+        assert!(message.contains("BlueZ"));
+        assert!(!message.contains("BluezEndpoint.cpp"));
     }
 }

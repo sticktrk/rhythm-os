@@ -72,6 +72,10 @@ impl HubDiscovery for MatterDiscovery {
         let mut identities = Vec::with_capacity(devices.len());
 
         for info in devices {
+            if self.hub_data.is_decommission_suppressed(info.node_id) {
+                continue;
+            }
+
             let commissioned = match self.transport.probe_light(info.node_id) {
                 Ok(device) => device,
                 Err(error) => {
@@ -84,6 +88,13 @@ impl HubDiscovery for MatterDiscovery {
                     Self::fallback_commissioned(&info)
                 }
             };
+
+            if self
+                .hub_data
+                .is_decommission_suppressed(commissioned.node_id)
+            {
+                continue;
+            }
 
             self.hub_data.record_commissioned_device(&commissioned);
 

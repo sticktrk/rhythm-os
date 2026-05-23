@@ -62,6 +62,14 @@ where
                 [&rhythm_matter::desktop_lifecycle::INTEGRATION];
             rhythm_os::lifecycle::ensure_composite_runtime(state, &integrations)
         }));
+        state_guard.start_unpairing_fn = Some(Arc::new(
+            |state: &SharedState, hub_type: &str, params: &serde_json::Value| {
+                if hub_type != "matter" {
+                    anyhow::bail!("unsupported test hub type '{}'", hub_type);
+                }
+                rhythm_matter::desktop_lifecycle::INTEGRATION.start_unpairing(state, params)
+            },
+        ));
         if load_persisted_state {
             rhythm_os::storage::load_persisted_state(&mut state_guard);
         }

@@ -1419,6 +1419,8 @@ mod tests {
             cloud_profiles: std::sync::Mutex::new(
                 crate::cloud_profiles::CloudMatterProfileCatalog::default(),
             ),
+            decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
+            recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
 
@@ -2042,6 +2044,8 @@ mod tests {
             cloud_profiles: std::sync::Mutex::new(
                 crate::cloud_profiles::CloudMatterProfileCatalog::default(),
             ),
+            decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
+            recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
 
@@ -2142,6 +2146,8 @@ mod tests {
             cloud_profiles: std::sync::Mutex::new(
                 crate::cloud_profiles::CloudMatterProfileCatalog::default(),
             ),
+            decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
+            recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -2197,6 +2203,8 @@ mod tests {
             cloud_profiles: std::sync::Mutex::new(
                 crate::cloud_profiles::CloudMatterProfileCatalog::default(),
             ),
+            decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
+            recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -2251,6 +2259,8 @@ mod tests {
             cloud_profiles: std::sync::Mutex::new(
                 crate::cloud_profiles::CloudMatterProfileCatalog::default(),
             ),
+            decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
+            recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -2457,6 +2467,8 @@ mod tests {
             cloud_profiles: std::sync::Mutex::new(
                 crate::cloud_profiles::CloudMatterProfileCatalog::default(),
             ),
+            decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
+            recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
         let controller = MatterLightController::new(transport.clone(), hub_data);

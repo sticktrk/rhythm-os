@@ -85,6 +85,8 @@ pub fn connect_matter(
                 device_caps: std::sync::Mutex::new(initial_metadata.device_caps.clone()),
                 device_quirks: std::sync::Mutex::new(initial_metadata.device_quirks.clone()),
                 cloud_profiles: std::sync::Mutex::new(cloud_profiles.clone()),
+                decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
+                recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
                 event_tx,
             }))
         },

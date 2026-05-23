@@ -1,8 +1,9 @@
 //! Matter hub-specific state stored in `ActiveHub::hub_data`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use rhythm_devices::{DeviceQuirk, LightCapabilities};
 use rhythm_os::hub::HubEvent;
@@ -11,6 +12,8 @@ use crate::cloud_profiles::CloudMatterProfileCatalog;
 use crate::controller::MatterDeviceRegistry;
 use crate::transport::MatterTransport;
 use crate::transport::{CommissionedDevice, MatterDeviceInfo};
+
+const DECOMMISSION_SUPPRESSION_WINDOW: Duration = Duration::from_secs(120);
 
 /// Matter-specific state stored in `ActiveHub::hub_data`.
 pub struct MatterHubData {
@@ -32,6 +35,10 @@ pub struct MatterHubData {
     pub device_quirks: Mutex<HashMap<String, Vec<DeviceQuirk>>>,
     /// Approved cloud profile overlay catalog cached at hub startup.
     pub cloud_profiles: Mutex<CloudMatterProfileCatalog>,
+    /// Matter nodes currently being decommissioned.
+    pub decommissioning: Mutex<HashSet<u64>>,
+    /// Matter nodes recently decommissioned and temporarily ignored by sync.
+    pub recently_decommissioned: Mutex<HashMap<u64, Instant>>,
     /// Event channel sender kept alive by the hub data.
     pub event_tx: std::sync::mpsc::Sender<HubEvent>,
 }
@@ -44,6 +51,8 @@ impl MatterHubData {
 
     /// Upsert a newly commissioned device into the in-memory fabric cache.
     pub fn record_commissioned_device(&self, device: &CommissionedDevice) {
+        self.clear_decommission_suppression(device.node_id);
+
         let info = MatterDeviceInfo {
             node_id: device.node_id,
             vendor_name: device.vendor_name.clone(),
@@ -88,6 +97,77 @@ impl MatterHubData {
             quirks.retain(|key, _| key != &prefix && !key.starts_with(&format!("{}-", prefix)));
         }
     }
+
+    /// Mark a Matter node as actively decommissioning.
+    ///
+    /// Returns `false` if another unpair request is already in progress for the
+    /// same node.
+    pub fn begin_decommission(&self, node_id: u64) -> bool {
+        let Ok(mut decommissioning) = self.decommissioning.lock() else {
+            return true;
+        };
+        decommissioning.insert(node_id)
+    }
+
+    /// Finish a Matter node decommission attempt.
+    pub fn finish_decommission(&self, node_id: u64, succeeded: bool) {
+        if let Ok(mut decommissioning) = self.decommissioning.lock() {
+            decommissioning.remove(&node_id);
+        }
+
+        if succeeded {
+            self.mark_recently_decommissioned(node_id);
+            self.remove_device(node_id);
+        } else if let Ok(mut recent) = self.recently_decommissioned.lock() {
+            recent.remove(&node_id);
+        }
+    }
+
+    /// Whether discovery should ignore a node because it is being removed.
+    pub fn is_decommission_suppressed(&self, node_id: u64) -> bool {
+        if self
+            .decommissioning
+            .lock()
+            .map(|nodes| nodes.contains(&node_id))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
+        self.is_recently_decommissioned(node_id)
+    }
+
+    /// Whether the node was successfully decommissioned recently.
+    pub fn is_recently_decommissioned(&self, node_id: u64) -> bool {
+        let Ok(mut recent) = self.recently_decommissioned.lock() else {
+            return false;
+        };
+        Self::prune_recent_decommissions(&mut recent);
+        recent.contains_key(&node_id)
+    }
+
+    fn mark_recently_decommissioned(&self, node_id: u64) {
+        if let Ok(mut recent) = self.recently_decommissioned.lock() {
+            Self::prune_recent_decommissions(&mut recent);
+            recent.insert(node_id, Instant::now());
+        }
+    }
+
+    fn clear_decommission_suppression(&self, node_id: u64) {
+        if let Ok(mut decommissioning) = self.decommissioning.lock() {
+            decommissioning.remove(&node_id);
+        }
+        if let Ok(mut recent) = self.recently_decommissioned.lock() {
+            recent.remove(&node_id);
+        }
+    }
+
+    fn prune_recent_decommissions(recent: &mut HashMap<u64, Instant>) {
+        let now = Instant::now();
+        recent.retain(|_, marked_at| {
+            now.duration_since(*marked_at) < DECOMMISSION_SUPPRESSION_WINDOW
+        });
+    }
 }
 
 #[cfg(test)]
@@ -125,6 +205,8 @@ mod tests {
             device_caps: Mutex::new(HashMap::new()),
             device_quirks: Mutex::new(HashMap::new()),
             cloud_profiles: Mutex::new(CloudMatterProfileCatalog::default()),
+            decommissioning: Mutex::new(HashSet::new()),
+            recently_decommissioned: Mutex::new(HashMap::new()),
             event_tx,
         }
     }
@@ -157,5 +239,21 @@ mod tests {
         drop(commissioned);
 
         assert_eq!(hub_data.reserve_node_id(), 102);
+    }
+
+    #[test]
+    fn decommission_suppression_tracks_inflight_and_recent_nodes() {
+        let hub_data = hub_data();
+
+        assert!(!hub_data.is_decommission_suppressed(101));
+        assert!(hub_data.begin_decommission(101));
+        assert!(!hub_data.begin_decommission(101));
+        assert!(hub_data.is_decommission_suppressed(101));
+
+        hub_data.finish_decommission(101, true);
+        assert!(hub_data.is_decommission_suppressed(101));
+
+        hub_data.record_commissioned_device(&commissioned_device(101, "Vendor", "Lamp"));
+        assert!(!hub_data.is_decommission_suppressed(101));
     }
 }

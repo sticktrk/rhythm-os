@@ -437,16 +437,36 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
         let transport = get_transport(state)?;
         let hub_data = get_hub_data(state)?;
 
+        if hub_data.is_recently_decommissioned(node_id) {
+            info!(
+                target: "sys",
+                "Matter: node {} was already decommissioned recently",
+                node_id
+            );
+            return Ok(UnpairingResult {
+                hub_type: "matter".to_string(),
+                status: PairingStatus::Complete,
+                device_id: Some(device_id.to_string()),
+                error: None,
+            });
+        }
+
+        if !hub_data.begin_decommission(node_id) {
+            return Ok(UnpairingResult {
+                hub_type: "matter".to_string(),
+                status: PairingStatus::Failed,
+                device_id: Some(device_id.to_string()),
+                error: Some(format!(
+                    "Matter node {} is already being decommissioned",
+                    node_id
+                )),
+            });
+        }
+
         match transport.decommission_device(node_id, force) {
             Ok(()) => {
                 info!(target: "sys", "Matter: decommissioned node {}", node_id);
-                hub_data.remove_device(node_id);
-                let matter_hub_key = HubKey::new(HubType::new("matter"), "local");
-                rhythm_os::commands::do_device_hard_remove(
-                    state,
-                    &device_id,
-                    Some(&matter_hub_key),
-                )?;
+                hub_data.finish_decommission(node_id, true);
 
                 Ok(UnpairingResult {
                     hub_type: "matter".to_string(),
@@ -456,6 +476,7 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
                 })
             }
             Err(e) => {
+                hub_data.finish_decommission(node_id, false);
                 log::error!(target: "pair", "Matter decommission error: {:#}", e);
                 Ok(UnpairingResult {
                     hub_type: "matter".to_string(),
