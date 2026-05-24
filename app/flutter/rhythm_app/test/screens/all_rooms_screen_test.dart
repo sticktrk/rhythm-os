@@ -142,7 +142,7 @@ const _bulb2 = RoomDto(
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('idle compact bulb cards do not show the standby pill',
+  testWidgets('idle compact bulb cards do not show the mood pill',
       (tester) async {
     final roomProvider = RoomProvider();
     final homeProvider = _FakeHomeProvider();
@@ -191,7 +191,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('Bulb 1'), findsOneWidget);
-    expect(find.text('Standby'), findsNothing);
+    expect(find.text('Mood'), findsNothing);
   });
 
   testWidgets(

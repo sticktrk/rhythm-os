@@ -92,7 +92,7 @@ extension EntitlementX on Entitlement {
         Entitlement.cloudBackupRestore => 'Cloud Backup & Restore',
         Entitlement.multiDeviceSync => 'All Rooms Sync',
         Entitlement.multiUserAccess => 'Multi-user Access',
-        Entitlement.standby => 'Standby Lighting',
+        Entitlement.standby => 'Mood Lighting',
         Entitlement.advancedDayControls => 'Advanced Day Controls',
         Entitlement.sleepPrimarySettings => 'Sleep Primary Settings',
         Entitlement.transitionButton => 'Button Trigger',

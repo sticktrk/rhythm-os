@@ -249,7 +249,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       mode == sdk.RhythmMode.sleep ? 'sleep_idle' : 'day_idle';
 
   String _defaultIdleProfileNameForMode(sdk.RhythmMode mode) =>
-      mode == sdk.RhythmMode.sleep ? 'Sleep Standby' : 'Day Standby';
+      mode == sdk.RhythmMode.sleep ? 'Sleep Mood' : 'Day Mood';
 
   sdk.RhythmModeConfig? _modeConfigForMode(sdk.RhythmMode mode) {
     for (final config in _modeConfigs) {
@@ -1663,7 +1663,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                     const SizedBox(width: 12),
                     const Expanded(
                       child: Text(
-                        'Standby Settings',
+                        'Mood Settings',
                         style: TextStyle(
                           color: _Palette.textPrimary,
                           fontSize: 15,
@@ -3013,7 +3013,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
             format: (v) => _formatMotionTimeout(v.round()),
             tooltip:
                 'How long the lights stay on after motion is last detected '
-                'before timing out to standby.',
+                'before timing out to mood.',
             onSliderChanged: (v) => setState(() {
               _motionTimeoutSecs = v.round();
               _markDirty();
@@ -3544,7 +3544,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                                 'Override the default state for each room '
                                 'while this profile is active. Useful for '
                                 'keeping certain rooms always on, off, or in '
-                                'standby regardless of the curve.',
+                                'mood regardless of the curve.',
                             iconSize: 13,
                           ),
                         ],
@@ -3715,8 +3715,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                       const SizedBox(height: 2),
                       Text(
                         _isSleepProfile
-                            ? 'Custom sleep colors & standby'
-                            : 'Fine-tune timing & standby',
+                            ? 'Custom sleep colors & mood'
+                            : 'Fine-tune timing & mood',
                         style: const TextStyle(
                           color: _Palette.textSecondary,
                           fontSize: 11,
@@ -4484,7 +4484,7 @@ class _RoomDefaultCard extends StatelessWidget {
 
     final stateLabel = switch (mode) {
       _RoomDefaultMode.active => 'On',
-      _RoomDefaultMode.idle => 'Standby',
+      _RoomDefaultMode.idle => 'Mood',
       _RoomDefaultMode.off => 'Off',
       _RoomDefaultMode.none => 'No override',
     };

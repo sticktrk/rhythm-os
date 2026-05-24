@@ -18,8 +18,8 @@ enum RoomMode { on, idle, off }
 /// Default idle brightness percentage — very dim nightlight level.
 const _kDefaultIdleBrightness = 1;
 
-/// Hue-style room card with CCT-tinted background, three-state celestial
-/// toggle (on / idle / off), rhythm controls, and brightness slider.
+/// Hue-style room card with CCT-tinted background, big segmented power
+/// control (mood / off / on), rhythm controls, and brightness slider.
 class RoomCard extends StatefulWidget {
   final String roomId;
   final CurveConfigDto globalConfig;
@@ -54,11 +54,8 @@ class _RoomCardState extends State<RoomCard> {
     return mode.name;
   }
 
-  /// Handle three-state mode transitions.
-  ///
-  /// Tap: ON ↔ IDLE (the common path)
-  /// Long-press: → OFF (deliberate action)
-  /// Tap from OFF: → ON
+  /// Handle three-state mode transitions. Driven by the segmented toggle:
+  /// each segment is a tap target, plus horizontal drag for fluency.
   void _onModeChanged(RoomMode newMode) {
     final roomProvider = context.read<RoomProvider>();
     final room = roomProvider.getRoom(widget.roomId);
@@ -184,11 +181,6 @@ class _RoomCardState extends State<RoomCard> {
           _sliderBrightness = null;
         }
 
-        final idleLikeState = roomState == RoomModeState.idle ||
-            roomState == RoomModeState.warning;
-        final showIdlePill = !widget.powerSave &&
-            idleLikeState &&
-            room.kind != RoomNodeKind.lightDevice;
         final mode = switch (roomState) {
           RoomModeState.hardOff => RoomMode.off,
           RoomModeState.idle ||
@@ -228,12 +220,13 @@ class _RoomCardState extends State<RoomCard> {
           dimT,
         )!;
 
-        // Card background per mode
+        // Card background per mode. Mood reuses the same dark warm base as
+        // ON's dim form, with a clear CCT tint so it reads as "softly lit
+        // in the room's color" instead of looking off.
         final bgColor = switch (mode) {
           RoomMode.on => dimmedCct,
-          // Idle: warm nightlight glow on dark card
           RoomMode.idle =>
-            Color.lerp(CelestialColors.backgroundCard, cctColor, 0.18)!,
+            Color.lerp(const Color(0xFF1A1410), cctColor, 0.32)!,
           RoomMode.off => CelestialColors.backgroundCard,
         };
 
@@ -246,7 +239,7 @@ class _RoomCardState extends State<RoomCard> {
                   ? const Color(0xFF3A2A1A) // warm dark brown
                   : const Color(0xFF2A2C30)) // cool dark grey
               : Colors.white,
-          RoomMode.idle => const Color(0xFFB8A890), // warm muted
+          RoomMode.idle => const Color(0xFFEFE0C4), // soft warm cream
           RoomMode.off => CelestialColors.textSecondary,
         };
         final iconColor = switch (mode) {
@@ -255,7 +248,7 @@ class _RoomCardState extends State<RoomCard> {
                   ? const Color(0xFF4A3828) // warm brown
                   : const Color(0xFF3A3C42)) // cool grey
               : Colors.white.withValues(alpha: 0.85),
-          RoomMode.idle => const Color(0xFFA08E78),
+          RoomMode.idle => const Color(0xFFD8C5A4),
           RoomMode.off => CelestialColors.textSecondary,
         };
 
@@ -301,18 +294,39 @@ class _RoomCardState extends State<RoomCard> {
                 ),
                 child: Stack(
                   children: [
-                    // Subtle radial glow for idle mode — like moonlight
-                    if (mode == RoomMode.idle)
+                    // Mood: prominent CCT-colored glow plus a softer counter-
+                    // glow for atmospheric depth — sells "lights are softly on
+                    // in this color" rather than reading as off.
+                    if (mode == RoomMode.idle) ...[
                       Positioned.fill(
                         child: IgnorePointer(
                           child: DecoratedBox(
                             decoration: BoxDecoration(
                               borderRadius: BorderRadius.circular(20),
                               gradient: RadialGradient(
-                                center: const Alignment(0.65, -0.4),
+                                center: const Alignment(0.7, -0.6),
+                                radius: 1.3,
+                                colors: [
+                                  cctColor.withValues(alpha: 0.45),
+                                  cctColor.withValues(alpha: 0.12),
+                                  Colors.transparent,
+                                ],
+                                stops: const [0.0, 0.5, 1.0],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      Positioned.fill(
+                        child: IgnorePointer(
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(20),
+                              gradient: RadialGradient(
+                                center: const Alignment(-0.5, 0.9),
                                 radius: 0.9,
                                 colors: [
-                                  cctColor.withValues(alpha: 0.12),
+                                  cctColor.withValues(alpha: 0.20),
                                   Colors.transparent,
                                 ],
                               ),
@@ -320,119 +334,111 @@ class _RoomCardState extends State<RoomCard> {
                           ),
                         ),
                       ),
+                    ],
                     // Main content
                     Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        // Top row: [motion+name]  [pill]  [toggle]
+                        // Top row: motion/sensor + room name
                         Padding(
-                          padding: const EdgeInsets.fromLTRB(12, 14, 8, 0),
+                          padding: const EdgeInsets.fromLTRB(14, 14, 14, 0),
                           child: Row(
                             children: [
-                              // Left: motion + name
-                              Expanded(
-                                child: Row(
-                                  children: [
-                                    if (motionTimer != null)
-                                      Padding(
-                                        padding:
-                                            const EdgeInsets.only(right: 8),
-                                        child: _MotionIndicator(
-                                          info: motionTimer,
-                                          color: iconColor,
-                                          onExpired: () => context
-                                              .read<RoomProvider>()
-                                              .clearMotionTimer(widget.roomId),
-                                        ),
-                                      )
-                                    else if (hasSensor)
-                                      Padding(
-                                        padding:
-                                            const EdgeInsets.only(right: 8),
-                                        child: Icon(
-                                          Icons.sensors_rounded,
-                                          size: 18,
-                                          color:
-                                              iconColor.withValues(alpha: 0.45),
-                                        ),
-                                      ),
-                                    if (room.kind == RoomNodeKind.lightDevice)
-                                      Padding(
-                                        padding:
-                                            const EdgeInsets.only(right: 8),
-                                        child: Icon(
-                                          Icons.lightbulb_outline_rounded,
-                                          size: 18,
-                                          color:
-                                              iconColor.withValues(alpha: 0.55),
-                                        ),
-                                      ),
-                                    Flexible(
-                                      child: Text(
-                                        room.name,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          color: textColor,
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              if (showIdlePill)
+                              if (motionTimer != null)
                                 Padding(
                                   padding: const EdgeInsets.only(right: 8),
-                                  child: _IdlePill(
+                                  child: _MotionIndicator(
+                                    info: motionTimer,
                                     color: iconColor,
-                                    bgColor: cctColor.withValues(alpha: 0.08),
+                                    onExpired: () => context
+                                        .read<RoomProvider>()
+                                        .clearMotionTimer(widget.roomId),
+                                  ),
+                                )
+                              else if (hasSensor)
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 8),
+                                  child: Icon(
+                                    Icons.sensors_rounded,
+                                    size: 18,
+                                    color: iconColor.withValues(alpha: 0.45),
                                   ),
                                 ),
-                              // Right: celestial toggle
-                              _CelestialToggle(
-                                mode: mode,
-                                onModeChanged: _onModeChanged,
-                                powerSave: widget.powerSave,
-                                offCurve: offCurve,
+                              if (room.kind == RoomNodeKind.lightDevice)
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 8),
+                                  child: Icon(
+                                    Icons.lightbulb_outline_rounded,
+                                    size: 18,
+                                    color: iconColor.withValues(alpha: 0.55),
+                                  ),
+                                ),
+                              Expanded(
+                                child: Text(
+                                  room.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: textColor,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
                               ),
                             ],
                           ),
                         ),
-                        // Brightness slider
+                        // Big three-segment power control.
                         Padding(
-                          padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
-                          child: SliderTheme(
+                          padding:
+                              const EdgeInsets.fromLTRB(12, 12, 12, 0),
+                          child: _SegmentedToggle(
+                            mode: mode,
+                            onModeChanged: _onModeChanged,
+                            powerSave: widget.powerSave,
+                            offCurve: offCurve,
+                            cctColor: cctColor,
+                          ),
+                        ),
+                        // Chunky brightness slider — easy to grab. Hidden
+                        // when the room is hard-off (nothing to dim).
+                        if (mode != RoomMode.off)
+                          Padding(
+                            padding:
+                                const EdgeInsets.fromLTRB(12, 10, 12, 14),
+                            child: SliderTheme(
                             data: SliderThemeData(
-                              trackHeight: 6,
+                              trackHeight: 14,
                               thumbShape: const RoundSliderThumbShape(
-                                enabledThumbRadius: 8,
+                                enabledThumbRadius: 13,
+                                elevation: 3,
+                                pressedElevation: 6,
                               ),
                               overlayShape: const RoundSliderOverlayShape(
-                                overlayRadius: 16,
+                                overlayRadius: 26,
                               ),
-                              // Active colors (ON mode)
+                              // Active colors (ON mode): bright fill on the
+                              // left clearly reads as "how much brightness".
                               activeTrackColor:
-                                  Colors.black.withValues(alpha: 0.08),
+                                  Colors.white.withValues(alpha: 0.55),
                               inactiveTrackColor:
-                                  Colors.black.withValues(alpha: 0.06),
+                                  Colors.black.withValues(alpha: 0.20),
                               thumbColor: Colors.white,
                               overlayColor:
-                                  Colors.black.withValues(alpha: 0.06),
+                                  Colors.white.withValues(alpha: 0.12),
                               // Disabled colors (idle or off)
                               disabledActiveTrackColor: mode == RoomMode.idle
-                                  ? cctColor.withValues(alpha: 0.12)
+                                  ? cctColor.withValues(alpha: 0.30)
                                   : CelestialColors.orbitRing
-                                      .withValues(alpha: 0.3),
+                                      .withValues(alpha: 0.35),
                               disabledInactiveTrackColor: mode == RoomMode.idle
-                                  ? cctColor.withValues(alpha: 0.06)
+                                  ? Colors.black.withValues(alpha: 0.15)
                                   : CelestialColors.orbitRing
-                                      .withValues(alpha: 0.2),
+                                      .withValues(alpha: 0.18),
                               disabledThumbColor: mode == RoomMode.idle
-                                  ? cctColor.withValues(alpha: 0.3)
+                                  ? Color.lerp(Colors.white, cctColor, 0.25)!
                                   : CelestialColors.textSecondary
-                                      .withValues(alpha: 0.5),
+                                      .withValues(alpha: 0.55),
                               trackShape: const RoundedRectSliderTrackShape(),
                             ),
                             child: Slider(
@@ -451,7 +457,9 @@ class _RoomCardState extends State<RoomCard> {
                                   : null,
                             ),
                           ),
-                        ),
+                          )
+                        else
+                          const SizedBox(height: 14),
                       ],
                     ),
                     // Rhythm-active breathing border
@@ -478,162 +486,274 @@ class _RoomCardState extends State<RoomCard> {
 // Sub-widgets
 // ---------------------------------------------------------------------------
 
-/// Celestial toggle: three-state (OFF → IDLE → ON) or two-state (OFF ↔ ON)
-/// when power save is active.
+/// Big segmented power control: Mood | Off | On (or Off | On in power save).
 ///
-/// Three-state: Tap toggles ON ↔ IDLE. Long-press goes to OFF. Tap from OFF → ON.
-/// Two-state:   Tap toggles ON ↔ OFF.
-/// Track warms from dark to amber as mode brightens.
-class _CelestialToggle extends StatelessWidget {
+/// Each segment is a discrete tap target with a stacked icon + label, so
+/// every state is visible and discoverable — no hidden long-press. A
+/// highlight pill slides behind the active segment. Horizontal drag also
+/// works for users who prefer to flick.
+class _SegmentedToggle extends StatefulWidget {
   final RoomMode mode;
   final ValueChanged<RoomMode> onModeChanged;
   final bool powerSave;
   final bool offCurve;
+  final Color cctColor;
 
-  const _CelestialToggle({
+  const _SegmentedToggle({
     required this.mode,
     required this.onModeChanged,
+    required this.cctColor,
     this.powerSave = false,
     this.offCurve = false,
   });
 
-  void _onTap() {
-    if (powerSave) {
-      // Two-state: simple ON ↔ OFF toggle
-      onModeChanged(mode == RoomMode.on ? RoomMode.off : RoomMode.on);
-    } else {
-      // Three-state: toggle ON ↔ IDLE; from OFF → ON
-      switch (mode) {
-        case RoomMode.on:
-          onModeChanged(RoomMode.idle);
-        case RoomMode.idle:
-          onModeChanged(RoomMode.on);
-        case RoomMode.off:
-          onModeChanged(RoomMode.on);
-      }
+  @override
+  State<_SegmentedToggle> createState() => _SegmentedToggleState();
+}
+
+class _SegmentedToggleState extends State<_SegmentedToggle> {
+  static const double _height = 54;
+  static const double _padding = 4;
+
+  /// Index of the segment currently under the dragging finger; null when
+  /// not dragging. Lets the highlight preview the drag in real time and
+  /// commit to the segment under the finger on release.
+  int? _dragIndex;
+
+  static const List<_SegmentSpec> _threeState = [
+    _SegmentSpec(RoomMode.idle, Icons.spa_rounded, 'Mood'),
+    _SegmentSpec(RoomMode.off, Icons.power_settings_new_rounded, 'Off'),
+    _SegmentSpec(RoomMode.on, Icons.wb_sunny_rounded, 'On'),
+  ];
+  static const List<_SegmentSpec> _twoState = [
+    _SegmentSpec(RoomMode.off, Icons.power_settings_new_rounded, 'Off'),
+    _SegmentSpec(RoomMode.on, Icons.wb_sunny_rounded, 'On'),
+  ];
+
+  List<_SegmentSpec> get _segments =>
+      widget.powerSave ? _twoState : _threeState;
+
+  int _indexFor(RoomMode m) {
+    final segs = _segments;
+    for (var i = 0; i < segs.length; i++) {
+      if (segs[i].mode == m) return i;
     }
+    return widget.powerSave ? 0 : 1;
   }
 
-  void _onLongPress() {
-    // Long-press: hard off from any state
-    if (mode != RoomMode.off) {
-      onModeChanged(RoomMode.off);
-    }
+  int _indexAtX(double x, double trackWidth) {
+    final segs = _segments;
+    final usable = trackWidth - _padding * 2;
+    if (usable <= 0) return 0;
+    final segWidth = usable / segs.length;
+    final localX = (x - _padding).clamp(0.0, usable);
+    return (localX / segWidth).floor().clamp(0, segs.length - 1);
+  }
+
+  void _select(int i) {
+    final target = _segments[i].mode;
+    if (target != widget.mode) widget.onModeChanged(target);
   }
 
   @override
   Widget build(BuildContext context) {
-    // Power save: two positions only (left/right). Normal: three positions.
-    final alignment = switch (mode) {
-      RoomMode.off => Alignment.centerLeft,
-      RoomMode.idle => Alignment.center,
-      RoomMode.on => Alignment.centerRight,
-    };
+    final segments = _segments;
+    final restingIndex = _indexFor(widget.mode);
+    final activeIndex = _dragIndex ?? restingIndex;
+    final activeMode = segments[activeIndex].mode;
+    final activeText = _activeTextColor(activeMode);
+    final inactiveText = const Color(0xFF8B949E);
 
-    // Track gradient: dark → dim warm → warm amber (desaturated when off-curve)
-    final trackGradient = switch (mode) {
-      RoomMode.off => const LinearGradient(
-          colors: [Color(0xFF2A2F38), Color(0xFF30363D)],
-        ),
-      RoomMode.idle => const LinearGradient(
-          colors: [Color(0xFF221C14), Color(0xFF2E2518)],
-        ),
-      RoomMode.on => offCurve
-          ? const LinearGradient(
-              colors: [Color(0xFF6B5A30), Color(0xFF9A8040)],
-            )
-          : const LinearGradient(
-              colors: [Color(0xFF8B6B20), Color(0xFFD4A020)],
-            ),
-    };
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final trackWidth = constraints.maxWidth;
+        final usable = trackWidth - _padding * 2;
+        final segWidth = usable / segments.length;
 
-    // Thumb colors: void → dim warm → bright (muted warm when off-curve)
-    final thumbColor = switch (mode) {
-      RoomMode.off => CelestialColors.textSecondary,
-      RoomMode.idle => const Color(0xFFCDBFAA), // dim warm
-      RoomMode.on => offCurve ? const Color(0xFFE8D5B0) : Colors.white,
-    };
-
-    // Thumb glow per state (subtler when off-curve)
-    final thumbShadow = switch (mode) {
-      RoomMode.on => [
-          BoxShadow(
-            color: offCurve
-                ? const Color(0xFFD4A574).withValues(alpha: 0.25)
-                : CelestialColors.sunWarm.withValues(alpha: 0.4),
-            blurRadius: offCurve ? 6 : 8,
-            spreadRadius: offCurve ? 0 : 1,
-          ),
-        ],
-      RoomMode.idle => [
-          BoxShadow(
-            color: const Color(0xFFD4A574).withValues(alpha: 0.2),
-            blurRadius: 6,
-          ),
-        ],
-      RoomMode.off => <BoxShadow>[],
-    };
-
-    return GestureDetector(
-      onTap: _onTap,
-      onLongPress: _onLongPress,
-      behavior: HitTestBehavior.opaque,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeInOut,
-        width: 64,
-        height: 28,
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(14),
-          gradient: trackGradient,
-        ),
-        padding: const EdgeInsets.all(3),
-        child: AnimatedAlign(
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeInOut,
-          alignment: alignment,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 300),
-            width: 22,
-            height: 22,
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onHorizontalDragStart: (details) {
+            setState(() {
+              _dragIndex = _indexAtX(details.localPosition.dx, trackWidth);
+            });
+          },
+          onHorizontalDragUpdate: (details) {
+            final idx = _indexAtX(details.localPosition.dx, trackWidth);
+            if (idx != _dragIndex) {
+              setState(() => _dragIndex = idx);
+            }
+          },
+          onHorizontalDragEnd: (_) {
+            final idx = _dragIndex;
+            if (idx == null) return;
+            setState(() => _dragIndex = null);
+            _select(idx);
+          },
+          onHorizontalDragCancel: () {
+            if (_dragIndex == null) return;
+            setState(() => _dragIndex = null);
+          },
+          child: Container(
+            height: _height,
+            clipBehavior: Clip.antiAlias,
             decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: thumbColor,
-              boxShadow: thumbShadow,
+              borderRadius: BorderRadius.circular(_height / 2),
+              gradient: const LinearGradient(
+                colors: [Color(0xFF161B22), Color(0xFF1C222B)],
+              ),
             ),
-            child: null,
+            padding: const EdgeInsets.all(_padding),
+            child: Stack(
+              children: [
+                // Sliding highlight pill behind the active segment.
+                AnimatedPositioned(
+                  duration: _dragIndex != null
+                      ? const Duration(milliseconds: 120)
+                      : const Duration(milliseconds: 280),
+                  curve: Curves.easeOutCubic,
+                  left: activeIndex * segWidth,
+                  top: 0,
+                  bottom: 0,
+                  width: segWidth,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 280),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(
+                        (_height - _padding * 2) / 2,
+                      ),
+                      gradient: _highlightGradient(activeMode),
+                      boxShadow: _highlightShadow(activeMode),
+                    ),
+                  ),
+                ),
+                // Tap targets + icon/label stacks.
+                Row(
+                  children: [
+                    for (var i = 0; i < segments.length; i++)
+                      Expanded(
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () => _select(i),
+                          child: Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                AnimatedSwitcher(
+                                  duration:
+                                      const Duration(milliseconds: 200),
+                                  child: Icon(
+                                    segments[i].icon,
+                                    key: ValueKey(
+                                        '${segments[i].label}-${i == activeIndex}'),
+                                    size: 21,
+                                    color: i == activeIndex
+                                        ? activeText
+                                        : inactiveText,
+                                  ),
+                                ),
+                                const SizedBox(height: 3),
+                                AnimatedDefaultTextStyle(
+                                  duration:
+                                      const Duration(milliseconds: 220),
+                                  style: TextStyle(
+                                    color: i == activeIndex
+                                        ? activeText
+                                        : inactiveText,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    letterSpacing: 0.3,
+                                  ),
+                                  child: Text(segments[i].label),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ],
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
+  }
+
+  Gradient _highlightGradient(RoomMode m) {
+    switch (m) {
+      case RoomMode.on:
+        return widget.offCurve
+            ? const LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [Color(0xFF8C6E2C), Color(0xFFC79832)],
+              )
+            : const LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [Color(0xFFB48420), Color(0xFFEDB72A)],
+              );
+      case RoomMode.idle:
+        return LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color.lerp(const Color(0xFF2A1F14), widget.cctColor, 0.55)!,
+            Color.lerp(const Color(0xFF1F1610), widget.cctColor, 0.35)!,
+          ],
+        );
+      case RoomMode.off:
+        return const LinearGradient(
+          colors: [Color(0xFF353B45), Color(0xFF3F454F)],
+        );
+    }
+  }
+
+  List<BoxShadow> _highlightShadow(RoomMode m) {
+    switch (m) {
+      case RoomMode.on:
+        return [
+          BoxShadow(
+            color: widget.offCurve
+                ? const Color(0xFFD4A574).withValues(alpha: 0.30)
+                : CelestialColors.sunWarm.withValues(alpha: 0.40),
+            blurRadius: 14,
+            spreadRadius: -2,
+          ),
+        ];
+      case RoomMode.idle:
+        return [
+          BoxShadow(
+            color: widget.cctColor.withValues(alpha: 0.35),
+            blurRadius: 12,
+            spreadRadius: -2,
+          ),
+        ];
+      case RoomMode.off:
+        return const <BoxShadow>[];
+    }
+  }
+
+  Color _activeTextColor(RoomMode m) {
+    switch (m) {
+      case RoomMode.on:
+        return widget.offCurve
+            ? const Color(0xFF2A1E0C)
+            : const Color(0xFF1A1208);
+      case RoomMode.idle:
+        return const Color(0xFFFFF3DC);
+      case RoomMode.off:
+        return const Color(0xFFE6E8EB);
+    }
   }
 }
 
-/// Standby indicator pill.
-class _IdlePill extends StatelessWidget {
-  final Color color;
-  final Color bgColor;
-
-  const _IdlePill({required this.color, required this.bgColor});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-      decoration: BoxDecoration(
-        color: bgColor,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Text(
-        'Standby',
-        style: TextStyle(
-          color: color,
-          fontSize: 13,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
-  }
+class _SegmentSpec {
+  final RoomMode mode;
+  final IconData icon;
+  final String label;
+  const _SegmentSpec(this.mode, this.icon, this.label);
 }
 
 /// Compact motion indicator: walk icon when active, countdown text when timing out.
