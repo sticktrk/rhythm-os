@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
@@ -119,6 +122,44 @@ void main() {
 
       expect(provider.getRoomState('room-1'), RoomModeState.idle);
       expect(provider.getDisplayRoomState('room-1'), RoomModeState.hardOff);
+    });
+
+    test('clears stale transitioning flag after defensive timeout', () {
+      fakeAsync((async) {
+        unawaited(provider.addRoom(
+          const RoomDto(
+            id: 'room-1',
+            name: 'Kitchen',
+            source: RoomSourceDto.hue,
+            deviceIds: ['light-1'],
+            rhythmEnabled: true,
+            disabled: false,
+            lightsOn: true,
+            timeOffsetMinutes: 0,
+            brightnessOffset: 0,
+          ),
+        ));
+        async.flushMicrotasks();
+
+        unawaited(provider.applyServerNodeState(
+          'room-1',
+          rhythmEnabled: true,
+          timeOffset: 0,
+          brightnessOffset: 0,
+          state: RoomModeState.active,
+          transitioning: true,
+          lightsOn: true,
+        ));
+        async.flushMicrotasks();
+
+        expect(provider.isRoomTransitioning('room-1'), isTrue);
+
+        async.elapse(const Duration(seconds: 14));
+        expect(provider.isRoomTransitioning('room-1'), isTrue);
+
+        async.elapse(const Duration(seconds: 1));
+        expect(provider.isRoomTransitioning('room-1'), isFalse);
+      });
     });
   });
 }
