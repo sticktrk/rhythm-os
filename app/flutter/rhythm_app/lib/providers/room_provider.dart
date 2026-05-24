@@ -13,6 +13,8 @@ import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmMode, RoomModeState;
 import '../services/analytics_service.dart';
 import '../services/settings_service.dart';
 
+const _roomTransitionFallbackTimeout = Duration(seconds: 15);
+
 /// Replace rooms from a source while preserving runtime state.
 ///
 /// Preserves:
@@ -161,6 +163,7 @@ class RoomProvider extends ChangeNotifier {
 
   /// Per-room global mode-transition flag from the server.
   final Map<String, bool> _roomTransitioning = {};
+  final Map<String, Timer> _roomTransitionTimers = {};
 
   /// Per-room brightness from server (effective brightness after offsets).
   final Map<String, int> _roomBrightness = {};
@@ -222,6 +225,45 @@ class RoomProvider extends ChangeNotifier {
   /// Whether any current room is inside a server-side mode transition.
   bool get anyRoomTransitioning =>
       rooms.any((room) => _roomTransitioning[room.id] ?? false);
+
+  bool _setRoomTransitioning(
+    String roomId,
+    bool transitioning, {
+    Duration timeout = _roomTransitionFallbackTimeout,
+  }) {
+    _roomTransitionTimers.remove(roomId)?.cancel();
+
+    final current = _roomTransitioning[roomId] ?? false;
+    if (transitioning) {
+      _roomTransitioning[roomId] = true;
+      _roomTransitionTimers[roomId] = Timer(timeout, () {
+        if ((_roomTransitioning[roomId] ?? false) == false) return;
+        _roomTransitioning.remove(roomId);
+        _roomTransitionTimers.remove(roomId);
+        notifyListeners();
+      });
+      return !current;
+    }
+
+    if (!current) {
+      _roomTransitioning.remove(roomId);
+      return false;
+    }
+    _roomTransitioning.remove(roomId);
+    return true;
+  }
+
+  void _cancelRoomTransitionTimers() {
+    for (final timer in _roomTransitionTimers.values) {
+      timer.cancel();
+    }
+    _roomTransitionTimers.clear();
+  }
+
+  void _clearRoomTransitioningState(String roomId) {
+    _roomTransitionTimers.remove(roomId)?.cancel();
+    _roomTransitioning.remove(roomId);
+  }
 
   /// Set room state locally with a 3s optimistic lock.
   void setRoomStateLocal(String roomId, RoomModeState state) {
@@ -368,6 +410,16 @@ class RoomProvider extends ChangeNotifier {
   /// This ensures a clean sync without duplicates.
   Future<void> addRoomsFromSource(
       RoomSourceDto source, List<RoomDto> rooms) async {
+    final previousIds = room_state
+        .roomsBySource(state: _state, source: source)
+        .map((r) => r.id);
+    final nextIds = rooms.map((r) => r.id).toSet();
+    for (final roomId in previousIds) {
+      if (!nextIds.contains(roomId)) {
+        _clearRoomTransitioningState(roomId);
+      }
+    }
+
     _state = replaceRoomsPreservingUserState(
       _state,
       source: source,
@@ -396,6 +448,7 @@ class RoomProvider extends ChangeNotifier {
   /// Remove a room by ID.
   Future<void> removeRoom(String roomId) async {
     _state = room_state.removeRoom(state: _state, roomId: roomId);
+    _clearRoomTransitioningState(roomId);
 
     // Adjust current index if needed
     if (_currentIndex >= _state.rooms.length && _state.rooms.isNotEmpty) {
@@ -417,6 +470,7 @@ class RoomProvider extends ChangeNotifier {
         room_state.roomsBySource(state: _state, source: source);
     for (final room in roomsToRemove) {
       _state = room_state.removeRoom(state: _state, roomId: room.id);
+      _clearRoomTransitioningState(room.id);
     }
     if (_currentIndex >= _state.rooms.length && _state.rooms.isNotEmpty) {
       _currentIndex = _state.rooms.length - 1;
@@ -555,8 +609,7 @@ class RoomProvider extends ChangeNotifier {
       _roomStates[roomId] = state;
       changed = true;
     }
-    if (_roomTransitioning[roomId] != transitioning) {
-      _roomTransitioning[roomId] = transitioning;
+    if (_setRoomTransitioning(roomId, transitioning)) {
       changed = true;
     }
     if (mode != null && _roomModes[roomId] != mode) {
@@ -792,6 +845,7 @@ class RoomProvider extends ChangeNotifier {
     _roomStateLockedUntil.clear();
     _roomStates.clear();
     _roomModes.clear();
+    _cancelRoomTransitionTimers();
     _roomTransitioning.clear();
     _roomBrightness.clear();
     _roomKelvin.clear();
@@ -802,6 +856,7 @@ class RoomProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _cancelRoomTransitionTimers();
     _sourceChangedController.close();
     super.dispose();
   }
@@ -816,6 +871,7 @@ class RoomProvider extends ChangeNotifier {
     _roomStateLockedUntil.clear();
     _roomStates.clear();
     _roomModes.clear();
+    _cancelRoomTransitionTimers();
     _roomTransitioning.clear();
     _roomBrightness.clear();
     _roomKelvin.clear();
