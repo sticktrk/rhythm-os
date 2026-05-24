@@ -7133,7 +7133,8 @@ pub fn do_node_preferences_set(
 
     let prev_soft_off = snap.soft_off;
     let prev_hard_off = snap.hard_off;
-    let rhythm_enabled = rhythm_enabled.unwrap_or(snap.rhythm_enabled);
+    let requested_rhythm_enabled = rhythm_enabled;
+    let rhythm_enabled = requested_rhythm_enabled.unwrap_or(snap.rhythm_enabled);
     let disabled = disabled.unwrap_or(snap.disabled);
     let explicit_state_request = target_state.is_some();
     let requested_state = target_state
@@ -7156,8 +7157,13 @@ pub fn do_node_preferences_set(
         }
     }
 
-    // Soft-off rooms need rhythm enabled for periodic soft-off ticks
-    let rhythm_enabled = if soft_off { true } else { rhythm_enabled };
+    // Soft-off rooms need rhythm enabled for periodic soft-off ticks unless
+    // the caller is explicitly pausing rhythm for that room.
+    let rhythm_enabled = if soft_off && requested_rhythm_enabled != Some(false) {
+        true
+    } else {
+        rhythm_enabled
+    };
 
     runtime.restore_node_state(
         node_id,
@@ -9364,7 +9370,7 @@ mod tests {
     use crate::topology::InputBindingPreset;
     use chrono::{Datelike, Timelike};
     use rhythm_core::{
-        HubDispatchTarget, HubLightController, HubRegistry, LightController, LightControlResult,
+        HubDispatchTarget, HubLightController, HubRegistry, LightControlResult, LightController,
         LightProfileConfig, Room, RoomSnapshot, RuntimeHandle,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -13454,16 +13460,17 @@ mod tests {
     }
 
     #[test]
-    fn room_preferences_idle_implies_rhythm_enabled() {
-        // Idle should force rhythm enabled so standby ticks still render.
+    fn room_preferences_idle_without_explicit_pause_implies_rhythm_enabled() {
+        // Idle should force rhythm enabled so standby ticks still render when
+        // the request is only changing room state.
         let mut snap = make_snapshot("r1", false, false);
         snap.rhythm_enabled = false;
-        let (state, _rt) = setup_state(vec![snap]);
+        let (state, runtime) = setup_state(vec![snap]);
         state.lock().unwrap().power_save = false;
         let result = do_node_preferences_set(
             &state,
             "r1",
-            Some(false),
+            None,
             None,
             Some(RoomModeState::Idle),
             None,
@@ -13472,6 +13479,27 @@ mod tests {
         assert!(result.is_ok());
         // Idle implies lights conceptually on.
         assert_eq!(observed_lights_on(&state.lock().unwrap(), "r1"), Some(true));
+        let snap = runtime.engine_room_snapshot("r1").unwrap();
+        assert!(snap.rhythm_enabled);
+        assert!(snap.soft_off);
+        assert!(!snap.hard_off);
+    }
+
+    #[test]
+    fn room_preferences_explicit_pause_preserved_while_idle() {
+        let snap = make_snapshot("r1", false, true);
+        let (state, runtime) = setup_state(vec![snap]);
+        state.lock().unwrap().power_save = false;
+
+        let result = do_node_preferences_set(&state, "r1", Some(false), None, None, None, false)
+            .expect("pause rhythm while idle");
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["rhythm_enabled"], false);
+        let snap = runtime.engine_room_snapshot("r1").unwrap();
+        assert!(!snap.rhythm_enabled);
+        assert!(snap.soft_off);
+        assert!(!snap.hard_off);
     }
 
     #[test]
