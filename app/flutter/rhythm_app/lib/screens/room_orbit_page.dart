@@ -293,7 +293,7 @@ class _RoomOrbitPageState extends State<RoomOrbitPage> {
           break;
         case RoomSourceDto.matter:
         case RoomSourceDto.homeAssistant:
-        case RoomSourceDto.esp32:
+        case RoomSourceDto.bridge:
         case RoomSourceDto.unknown:
           break;
       }
@@ -614,8 +614,8 @@ class _RoomOrbitPageState extends State<RoomOrbitPage> {
         return 'Philips Hue';
       case RoomSourceDto.homeAssistant:
         return 'Home Assistant';
-      case RoomSourceDto.esp32:
-        return 'ESP32';
+      case RoomSourceDto.bridge:
+        return 'Bridge';
       case RoomSourceDto.unknown:
         return 'Unknown';
     }

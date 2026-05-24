@@ -180,7 +180,7 @@ class HomeRepository {
     return hub;
   }
 
-  /// Create a new server hub (rhythm-server, HA addon, or ESP32).
+  /// Create a new server hub (rhythm-server, HA addon, or Rhythm bridge).
   Future<Hub> createServerHub({
     required String homeId,
     required String name,

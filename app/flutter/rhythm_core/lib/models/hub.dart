@@ -89,7 +89,7 @@ class HubEndpoint {
   int get hashCode => host.hashCode ^ port.hashCode ^ useSsl.hashCode;
 }
 
-/// A Hub represents a lighting controller (Home Assistant, Hue Bridge, ESP32).
+/// A Hub represents a lighting controller (Home Assistant, Hue Bridge, Rhythm bridge).
 ///
 /// Hubs belong to a Home and can have credentials stored for cloud sync.
 /// Credentials are protected by Firestore security rules (only memberIds can access).
@@ -119,7 +119,7 @@ class Hub {
   @HiveField(5)
   final bool enabled;
 
-  /// Whether this hub requires credentials (false for ESP32, true for HA/Hue)
+  /// Whether this hub requires credentials (false for Rhythm bridge, true for HA/Hue)
   @HiveField(6)
   final bool requiresCredentials;
 
@@ -222,7 +222,7 @@ class Hub {
     );
   }
 
-  /// Create a server hub (rhythm-server, HA addon, or ESP32).
+  /// Create a server hub (rhythm-server, HA addon, or Rhythm bridge).
   factory Hub.server({
     required String id,
     required String homeId,
@@ -247,7 +247,7 @@ class Hub {
       homeId: json['homeId'] as String,
       type: HubType.values.firstWhere(
         (t) => t.name == json['type'],
-        orElse: () => json['type'] == 'esp32' ? HubType.server : HubType.homeAssistant,
+        orElse: () => HubType.homeAssistant,
       ),
       name: json['name'] as String,
       endpoint: HubEndpoint.fromJson(json['endpoint'] as Map<String, dynamic>),
@@ -325,12 +325,12 @@ class Hub {
       homeId: row['home_id'] as String,
       type: HubType.values.firstWhere(
         (t) => t.name == row['type'],
-        orElse: () => row['type'] == 'esp32' ? HubType.server : HubType.homeAssistant,
+        orElse: () => HubType.homeAssistant,
       ),
       name: row['name'] as String,
       endpoint: HubEndpoint.fromJson(row['endpoint'] as Map<String, dynamic>),
       enabled: row['enabled'] as bool? ?? true,
-      requiresCredentials: row['type'] != 'esp32' && row['type'] != 'server',
+      requiresCredentials: row['type'] != 'server',
       token: row['token'] as String?,
       lastConnected: row['last_connected'] != null
           ? DateTime.parse(row['last_connected'] as String)

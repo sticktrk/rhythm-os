@@ -362,22 +362,22 @@ class AnalyticsService {
   }
 
   // ===========================================================================
-  // ESP32 Provisioning Events
+  // Bridge Provisioning Events
   // ===========================================================================
 
-  /// Track ESP32 provisioning started.
-  Future<void> logEsp32ProvisioningStarted() async {
-    await logEvent('esp32_provisioning_started');
+  /// Track Rhythm bridge provisioning started.
+  Future<void> logBridgeProvisioningStarted() async {
+    await logEvent('bridge_provisioning_started');
   }
 
-  /// Track ESP32 provisioning completed.
-  Future<void> logEsp32ProvisioningCompleted() async {
-    await logEvent('esp32_provisioning_completed');
+  /// Track Rhythm bridge provisioning completed.
+  Future<void> logBridgeProvisioningCompleted() async {
+    await logEvent('bridge_provisioning_completed');
   }
 
-  /// Track ESP32 provisioning failed.
-  Future<void> logEsp32ProvisioningFailed(String error) async {
-    await logEvent('esp32_provisioning_failed', {
+  /// Track Rhythm bridge provisioning failed.
+  Future<void> logBridgeProvisioningFailed(String error) async {
+    await logEvent('bridge_provisioning_failed', {
       'error': error.length > 100 ? error.substring(0, 100) : error,
     });
   }

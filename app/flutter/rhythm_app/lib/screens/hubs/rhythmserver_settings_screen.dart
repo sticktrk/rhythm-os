@@ -39,7 +39,7 @@ String _formatOtaVersionLabel(String version) {
       : 'v$version';
 }
 
-/// Settings screen for a connected server hub (ESP32, standalone, HA addon).
+/// Settings screen for a connected server hub (bridge, standalone, HA addon).
 ///
 /// Adapts visible sections based on the server's platform context.
 class RhythmServerSettingsScreen extends StatefulWidget {
@@ -121,11 +121,13 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
   String get _serverContext =>
       context.read<ServerSyncProvider>().serverPlatformContext;
-  bool get _isEmbedded =>
-      _serverContext == 'embedded' || _serverContext == 'esp32';
+  bool get _isBridge =>
+      _serverContext == 'bridge' ||
+      _serverContext == 'embedded' ||
+      _serverContext == 'rpiz';
   bool get _isHaAddon => _serverContext == 'ha_addon';
-  bool get _supportsDebugBundle => !_isEmbedded;
-  bool get _supportsRestartEndpoint => !_isEmbedded && !_isHaAddon;
+  bool get _supportsDebugBundle => !_isBridge;
+  bool get _supportsRestartEndpoint => !_isBridge && !_isHaAddon;
 
   String get _headerTitle =>
       widget.headerTitleOverride ??
@@ -376,7 +378,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                         _buildDebugSection(),
                       ],
                       const SizedBox(height: 24),
-                      if (_isEmbedded) ...[
+                      if (_isBridge) ...[
                         _buildDiagnosticsButton(),
                         const SizedBox(height: 12),
                         _buildRebootButton(),
@@ -666,7 +668,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     final allowManualUpdate = !autoUpdateEnabled || !showAutoUpdateToggle;
 
     return _buildSection(
-      title: _isEmbedded ? 'FIRMWARE' : 'VERSION',
+      title: _isBridge ? 'FIRMWARE' : 'VERSION',
       children: [
         Container(
           decoration: BoxDecoration(

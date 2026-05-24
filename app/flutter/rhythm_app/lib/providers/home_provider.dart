@@ -501,7 +501,7 @@ class HomeProvider extends ChangeNotifier {
     }
   }
 
-  /// Add a server hub (rhythm-server, HA addon, or ESP32) to the current home.
+  /// Add a server hub (rhythm-server, HA addon, or Rhythm bridge) to the current home.
   Future<Hub?> addServerHub({
     required String name,
     required String host,

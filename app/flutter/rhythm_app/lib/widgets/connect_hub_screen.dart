@@ -130,7 +130,7 @@ bool _hasResolvableHostShape(String host) {
 
 /// Full-screen empty state shown when setup is incomplete.
 ///
-/// [ConnectHubMode.rhythmServer] — teal, developer_board icon, opens ESP32 provisioning.
+/// [ConnectHubMode.rhythmServer] — teal, developer_board icon, opens Rhythm bridge provisioning.
 /// [ConnectHubMode.hue] — amber, lightbulb icon, opens Hue configurator.
 class ConnectHubScreen extends StatefulWidget {
   final ConnectHubMode mode;

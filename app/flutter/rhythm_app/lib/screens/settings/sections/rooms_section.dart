@@ -30,7 +30,7 @@ class RoomsSection extends StatelessWidget {
         final hueRooms = roomProvider.getRoomsBySource(RoomSourceDto.hue);
         final haRooms =
             roomProvider.getRoomsBySource(RoomSourceDto.homeAssistant);
-        final esp32Rooms = roomProvider.getRoomsBySource(RoomSourceDto.esp32);
+        final bridgeRooms = roomProvider.getRoomsBySource(RoomSourceDto.bridge);
 
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -78,11 +78,11 @@ class RoomsSection extends StatelessWidget {
               _buildRoomGroup(context, roomProvider, haRooms),
               const SizedBox(height: 16),
             ],
-            // ESP32 rooms
-            if (esp32Rooms.isNotEmpty) ...[
-              _buildSourceHeader('ESP32', const Color(0xFF4CAF50)),
+            // Bridge rooms
+            if (bridgeRooms.isNotEmpty) ...[
+              _buildSourceHeader('Bridge', const Color(0xFF4CAF50)),
               const SizedBox(height: 8),
-              _buildRoomGroup(context, roomProvider, esp32Rooms),
+              _buildRoomGroup(context, roomProvider, bridgeRooms),
               const SizedBox(height: 16),
             ],
           ],

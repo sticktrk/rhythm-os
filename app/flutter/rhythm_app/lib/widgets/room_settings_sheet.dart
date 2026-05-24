@@ -591,8 +591,8 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
         return 'Philips Hue';
       case RoomSourceDto.homeAssistant:
         return 'Home Assistant';
-      case RoomSourceDto.esp32:
-        return 'ESP32';
+      case RoomSourceDto.bridge:
+        return 'Bridge';
       case RoomSourceDto.unknown:
         return 'Unknown';
     }

@@ -27,7 +27,7 @@ class HubsSection extends StatelessWidget {
                 // ── RhythmServer ──
                 Builder(
                   builder: (context) {
-                    final esp32Hub =
+                    final bridgeHub =
                         homeProvider.getFirstHubOfType(HubType.server);
                     final serverState = serverSync.connectionState;
                     final isOnline =
@@ -38,7 +38,7 @@ class HubsSection extends StatelessWidget {
 
                     String? statusText;
                     Color? statusColor;
-                    if (esp32Hub != null) {
+                    if (bridgeHub != null) {
                       if (isOnline) {
                         statusText = 'Online';
                         statusColor = const Color(0xFF22C55E);
@@ -58,7 +58,7 @@ class HubsSection extends StatelessWidget {
                       trailing: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          if (esp32Hub != null && statusText != null) ...[
+                          if (bridgeHub != null && statusText != null) ...[
                             Container(
                               width: 8,
                               height: 8,
@@ -87,9 +87,9 @@ class HubsSection extends StatelessWidget {
                         ],
                       ),
                       showChevron: false,
-                      onTap: esp32Hub != null
+                      onTap: bridgeHub != null
                           ? () => RhythmServerSettingsScreen.show(context,
-                              hub: esp32Hub)
+                              hub: bridgeHub)
                           : () => ConnectHubScreen.show(context,
                               mode: ConnectHubMode.rhythmServer),
                     );

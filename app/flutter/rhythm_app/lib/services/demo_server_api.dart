@@ -900,7 +900,7 @@ class DemoServerApi extends RhythmServerApi {
         hubTypes.contains('home_assistant')) {
       return RoomSourceDto.homeAssistant;
     }
-    if (hubTypes.contains('esp32')) return RoomSourceDto.esp32;
+    if (hubTypes.contains('bridge')) return RoomSourceDto.bridge;
     return RoomSourceDto.unknown;
   }
 

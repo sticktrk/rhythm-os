@@ -1,6 +1,6 @@
 /// Room management provider for Rhythm Lighting.
 ///
-/// Manages rooms across multiple sources (Hue, Home Assistant, ESP32)
+/// Manages rooms across multiple sources (Hue, Home Assistant, Rhythm bridge)
 /// with Dart-side room state and local Rust curve math.
 library;
 
@@ -17,7 +17,7 @@ import '../services/settings_service.dart';
 ///
 /// Preserves:
 /// - `disabled` (user preference)
-/// - `rhythmEnabled`, `timeOffset`, `brightnessOffset` (ESP32-authoritative)
+/// - `rhythmEnabled`, `timeOffset`, `brightnessOffset` (bridge-authoritative)
 /// - `lightsOn` (replaced from server-observed power on refresh)
 /// - `curveConfig` (per-room override)
 ///
@@ -107,7 +107,7 @@ class MotionTimerInfo {
 /// Manages room state across all connected hubs.
 ///
 /// Features:
-/// - Syncs rooms from Hue, Home Assistant, ESP32
+/// - Syncs rooms from Hue, Home Assistant, Rhythm bridge
 /// - Persists state via SettingsService (Hive)
 /// - Tracks current room index for swipeable UI
 /// - Provides enabled/disabled room filtering
@@ -129,7 +129,7 @@ class RoomProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Per-room motion timer state from ESP32 (not part of RoomDto to avoid FRB regen).
+  /// Per-room motion timer state from the Rhythm bridge (not part of RoomDto to avoid FRB regen).
   final Map<String, MotionTimerInfo> _motionTimers = {};
 
   /// Rooms that have at least one motion sensor configured (sticky).
@@ -142,7 +142,7 @@ class RoomProvider extends ChangeNotifier {
   /// Per-room lock timestamps to suppress stale external lightsOn overrides.
   ///
   /// When the user toggles a light locally, the room is locked for 3s so that
-  /// incoming ESP32/Hue state (which may still reflect the old value) doesn't
+  /// incoming hub state (which may still reflect the old value) doesn't
   /// flicker the UI back.
   final Map<String, DateTime> _lightsOnLockedUntil = {};
 
@@ -654,7 +654,7 @@ class RoomProvider extends ChangeNotifier {
 
   /// Set lights_on from a local UI toggle with a 3s lock.
   ///
-  /// Locks the room so that incoming ESP32/Hue state events don't
+  /// Locks the room so that incoming hub state events don't
   /// immediately overwrite the optimistic value before the bridge
   /// has processed the command.
   ///

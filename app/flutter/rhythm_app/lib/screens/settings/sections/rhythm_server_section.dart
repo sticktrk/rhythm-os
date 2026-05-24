@@ -21,13 +21,13 @@ class RhythmServerDetailScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final esp32Hub = context.watch<HomeProvider>().getFirstHubOfType(
+    final bridgeHub = context.watch<HomeProvider>().getFirstHubOfType(
           HubType.server,
         );
 
-    if (esp32Hub != null) {
+    if (bridgeHub != null) {
       return RhythmServerSettingsScreen(
-        hub: esp32Hub,
+        hub: bridgeHub,
         headerTitleOverride: 'RhythmOS Server',
         useBackButton: true,
       );

@@ -85,7 +85,7 @@ String _sourceToString(RoomSourceDto source) {
     RoomSourceDto.matter => 'matter',
     RoomSourceDto.hue => 'hue',
     RoomSourceDto.homeAssistant => 'home_assistant',
-    RoomSourceDto.esp32 => 'esp32',
+    RoomSourceDto.bridge => 'bridge',
     RoomSourceDto.unknown => 'unknown',
   };
 }
@@ -95,7 +95,7 @@ RoomSourceDto _sourceFromString(String s) {
     'matter' => RoomSourceDto.matter,
     'hue' => RoomSourceDto.hue,
     'home_assistant' || 'homeassistant' => RoomSourceDto.homeAssistant,
-    'esp32' => RoomSourceDto.esp32,
+    'bridge' || 'embedded' || 'esp32' => RoomSourceDto.bridge,
     _ => RoomSourceDto.unknown,
   };
 }

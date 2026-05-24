@@ -96,7 +96,7 @@ void main() async {
     );
 
     // Fail explicitly if local brain isn't available (except on web,
-    // where the app works as a remote client to rhythm-server/ESP32)
+    // where the app works as a remote client to rhythm-server)
     if (!client.hasLocalBrain && !kIsWeb) {
       initError =
           'WASM brain failed to initialize. The Rust WASM module must be built and loaded for the app to function.';
@@ -182,7 +182,7 @@ class RhythmApp extends StatelessWidget {
             return hubConnection!;
           },
         ),
-        // Room management (syncs rooms from Hue, HA, ESP32)
+        // Room management (syncs rooms from Hue, HA, Rhythm bridge)
         ChangeNotifierProvider(create: (_) => RoomProvider()..initialize()),
         // Room page assignments (multi-screen room organization)
         ChangeNotifierProxyProvider<HomeProvider, RoomPageProvider>(

@@ -17,7 +17,7 @@ import 'settings_service.dart';
 
 /// Options for controlling what gets synced.
 class SyncOptions {
-  /// Sync rooms from configured hubs (Hue, HA, ESP32).
+  /// Sync rooms from configured hubs (Hue, HA, bridge).
   final bool rooms;
 
   /// Verify hub connections after sync.

@@ -1,7 +1,7 @@
 /// OTA update service for Rhythm devices.
 ///
 /// Supports two flows:
-/// - Legacy ESP32 binary upload via the SDK
+/// - Legacy Rhythm bridge binary upload via the SDK
 /// - Capability-driven self-pull updates for rhythm-server / rpi builds
 library;
 
@@ -505,16 +505,16 @@ class OtaService extends ChangeNotifier {
       final capsJson = await _getJson('api/ota/capabilities');
       final capabilities = OtaCapabilities.fromJson(capsJson);
       _capabilities = capabilities;
-      final isEmbedded = _looksLikeLegacyEmbedded(
+      final isBridge = _looksLikeLegacyBridge(
         platformType: platformType,
         platformContext: platformContext,
       );
-      _strategy = capabilities.supportsSelfPullUpdate && !isEmbedded
+      _strategy = capabilities.supportsSelfPullUpdate && !isBridge
           ? _OtaStrategy.selfPull
-          : (isEmbedded ? _OtaStrategy.legacyUpload : _OtaStrategy.unsupported);
+          : (isBridge ? _OtaStrategy.legacyUpload : _OtaStrategy.unsupported);
     } catch (_) {
       _capabilities = null;
-      _strategy = _looksLikeLegacyEmbedded(
+      _strategy = _looksLikeLegacyBridge(
         platformType: platformType,
         platformContext: platformContext,
       )
@@ -983,13 +983,14 @@ class OtaService extends ChangeNotifier {
     return Map<String, dynamic>.from(data);
   }
 
-  bool _looksLikeLegacyEmbedded({
+  bool _looksLikeLegacyBridge({
     String? platformType,
     String? platformContext,
   }) {
-    return platformType == 'embedded' ||
-        platformContext == 'embedded' ||
-        platformContext == 'esp32';
+    return platformType == 'bridge' ||
+        platformContext == 'bridge' ||
+        platformType == 'embedded' ||
+        platformContext == 'embedded';
   }
 
   bool _statusShowsCompletedUpdate(_OtaStatusPayload status) {

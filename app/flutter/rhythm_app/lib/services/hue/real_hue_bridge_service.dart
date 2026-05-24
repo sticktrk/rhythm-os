@@ -91,7 +91,7 @@ class RealHueBridgeService implements HueBridgeService {
     }
 
     // Restore persisted device registry (gives immediate device data
-    // when ESP32 connects before a fresh room fetch)
+    // when the Rhythm bridge connects before a fresh room fetch)
     if (_deviceRegistry == null) {
       final cachedRegistry = SettingsService.instance.getHueDeviceRegistry();
       if (cachedRegistry != null) {
@@ -230,7 +230,7 @@ class RealHueBridgeService implements HueBridgeService {
 
     debugPrint('RealHueBridgeService: Fetched ${updatedRooms.length} rooms via v2 API');
 
-    // Discover devices alongside rooms so they flow to ESP32
+    // Discover devices alongside rooms so they flow to the Rhythm bridge
     await _discoverDevices(updatedRooms);
 
     return updatedRooms;

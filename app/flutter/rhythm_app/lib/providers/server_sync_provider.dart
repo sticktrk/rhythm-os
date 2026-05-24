@@ -28,7 +28,7 @@ import 'room_provider.dart';
 /// Abbreviations like "EST", "PST" don't handle DST transitions.
 bool _isIanaTimezone(String? tz) => tz != null && tz.contains('/');
 
-/// Syncs app state with a server (ESP32, rhythm-server, addon) via
+/// Syncs app state with a server (bridge, rhythm-server, addon) via
 /// [RhythmConnection] from the SDK.
 ///
 /// This provider is the glue between [RhythmConnection], [RoomProvider],
@@ -111,10 +111,10 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Firmware version reported by server in the hello message.
   String _firmwareVersion = '0.0.0';
 
-  /// Platform type reported by server ("desktop" or "embedded").
+  /// Platform type reported by server ("desktop" or "embedded"/"bridge").
   String _serverPlatformType = 'desktop';
 
-  /// Deployment context reported by server ("ha_addon", "server", "embedded", etc.).
+  /// Deployment context reported by server ("ha_addon", "server", "rpiz", "bridge", etc.).
   String _serverPlatformContext = 'server';
 
   /// Whether power-save mode is active on the server.
@@ -189,14 +189,15 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Firmware version reported by server.
   String get firmwareVersion => _firmwareVersion;
 
-  /// Platform type reported by server ("desktop" or "embedded").
+  /// Platform type reported by server ("desktop" or "embedded"/"bridge").
   String get serverPlatformType => _serverPlatformType;
 
-  /// Deployment context reported by server ("ha_addon", "server", "embedded", etc.).
+  /// Deployment context reported by server ("ha_addon", "server", "rpiz", "bridge", etc.).
   String get serverPlatformContext => _serverPlatformContext;
 
-  /// Whether the connected server is embedded (constrained sockets/memory).
-  bool get isEmbeddedServer => _serverPlatformType == 'embedded';
+  /// Whether the connected server is a Rhythm bridge (constrained sockets/memory).
+  bool get isBridgeServer =>
+      _serverPlatformType == 'bridge' || _serverPlatformType == 'embedded';
 
   /// Whether power-save mode is active on the server.
   bool get powerSave => _powerSave;
@@ -373,7 +374,7 @@ class ServerSyncProvider extends ChangeNotifier {
       RoomSourceDto.matter => 'matter',
       RoomSourceDto.hue => 'hue',
       RoomSourceDto.homeAssistant => 'homeassistant',
-      RoomSourceDto.esp32 => 'esp32',
+      RoomSourceDto.bridge => 'bridge',
       _ => null,
     };
     // If we don't know the hub type, or have no hub info yet, assume connected.
@@ -1301,7 +1302,7 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Push node preferences for multiple nodes in a single batch request.
   ///
-  /// Avoids per-node socket overhead on constrained servers (ESP32).
+  /// Avoids per-node socket overhead on a constrained Rhythm bridge.
   void pushBatchNodePreferences(List<Map<String, dynamic>> items) {
     if (!_connection.connected || _receivingFromServer || items.isEmpty) return;
     debugPrint('ServerSync: pushBatchNodePreferences (${items.length} nodes)');
@@ -2245,7 +2246,7 @@ class ServerSyncProvider extends ChangeNotifier {
       RoomSourceDto.matter,
       RoomSourceDto.hue,
       RoomSourceDto.homeAssistant,
-      RoomSourceDto.esp32,
+      RoomSourceDto.bridge,
     ]) {
       if (sources.contains(candidate)) return candidate;
     }
@@ -2258,7 +2259,7 @@ class ServerSyncProvider extends ChangeNotifier {
       'matter' => RoomSourceDto.matter,
       'hue' => RoomSourceDto.hue,
       'homeassistant' || 'home_assistant' => RoomSourceDto.homeAssistant,
-      'esp32' => RoomSourceDto.esp32,
+      'bridge' => RoomSourceDto.bridge,
       _ => null,
     };
   }

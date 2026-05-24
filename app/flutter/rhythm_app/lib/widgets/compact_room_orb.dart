@@ -549,7 +549,7 @@ class _CompactRoomOrbState extends State<CompactRoomOrb> {
 ///
 /// When motion is active: shows a walk icon with pulse animation.
 /// When counting down: shows a depleting ring with time text.
-/// Smooth countdown interpolates locally between 15s ESP32 polls.
+/// Smooth countdown interpolates locally between 15s Rhythm bridge polls.
 class _MotionTimerSatellite extends StatefulWidget {
   final MotionTimerInfo info;
   final double size;

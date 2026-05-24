@@ -305,7 +305,7 @@ class HueSseSource extends EventSource {
           if (resourceType == 'button') {
             _processButtonEvent(resource);
           } else if (resourceType == 'motion') {
-            // Motion sensor events — ESP32 handles timer logic.
+            // Motion sensor events — the Rhythm bridge handles timer logic.
             // No action needed on the Flutter side.
           } else if (resourceType == 'grouped_light') {
             _processGroupedLightEvent(resource);

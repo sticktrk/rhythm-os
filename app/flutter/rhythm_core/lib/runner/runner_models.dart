@@ -9,7 +9,7 @@ enum RoomSourceDto {
   matter,
   hue,
   homeAssistant,
-  esp32,
+  bridge,
 }
 
 enum RoomNodeKind {
