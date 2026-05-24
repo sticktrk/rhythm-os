@@ -118,6 +118,18 @@ fn last_periodic_node_index_by_emit_target(
     indices
 }
 
+fn expire_room_mode_transitions(state: &mut AppState, now: Instant) -> Vec<String> {
+    let mut expired_room_ids = Vec::new();
+    state.room_mode_transitions.retain(|room_id, transition| {
+        let active = transition.periodic_resume_at > now;
+        if !active {
+            expired_room_ids.push(room_id.clone());
+        }
+        active
+    });
+    expired_room_ids
+}
+
 fn periodic_settings_node_id(
     snapshot: &rhythm_core::NodeSnapshot,
     collapse_attached_light_nodes: bool,
@@ -690,6 +702,8 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             rhythm_disabled_skipped,
             hard_off_rooms,
             expired_transitions,
+            expired_transition_room_ids,
+            transition_event_runtime,
             periodic_work_tx,
             work_tx,
         ) = {
@@ -698,10 +712,13 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                 continue;
             };
             let now = Instant::now();
-            let transitions_before = s.room_mode_transitions.len();
-            s.room_mode_transitions
-                .retain(|_, transition| transition.periodic_resume_at > now);
-            let expired_transitions = transitions_before - s.room_mode_transitions.len();
+            let expired_transition_room_ids = expire_room_mode_transitions(&mut s, now);
+            let expired_transitions = expired_transition_room_ids.len();
+            let transition_event_runtime = if expired_transition_room_ids.is_empty() {
+                None
+            } else {
+                s.hub_runtime()
+            };
             let all_rooms: Vec<rhythm_core::NodeSnapshot> = s
                 .hub_runtime()
                 .map(|rt| rt.engine_all_effective_node_snapshots())
@@ -752,10 +769,18 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                 rhythm_disabled_skipped,
                 hard_off_rooms,
                 expired_transitions,
+                expired_transition_room_ids,
+                transition_event_runtime,
                 s.periodic_work_tx.clone(),
                 s.work_tx.clone(),
             )
         };
+
+        emit_expired_transition_node_states(
+            &state,
+            transition_event_runtime.as_ref(),
+            &expired_transition_room_ids,
+        );
 
         room_snapshots.sort_by_key(|room| stable_room_phase_key(&room.id));
         periodic_nodes.sort_by_key(|node| stable_room_phase_key(&node.node_id));
@@ -1033,6 +1058,33 @@ pub fn post_tick_node(state: &SharedState, runtime: &Arc<dyn RuntimeHandle>, nod
 
     // Suppress unused variable warnings on non-desktop builds
     let _ = (&state, &snap);
+}
+
+fn emit_expired_transition_node_states(
+    state: &SharedState,
+    runtime: Option<&Arc<dyn RuntimeHandle>>,
+    room_ids: &[String],
+) {
+    if room_ids.is_empty() {
+        return;
+    }
+    let Some(runtime) = runtime else {
+        return;
+    };
+
+    let events: Vec<_> = room_ids
+        .iter()
+        .filter_map(|room_id| runtime.engine_effective_node_snapshot(room_id))
+        .map(|snap| crate::commands::build_node_state_event(state, &snap))
+        .collect();
+    if events.is_empty() {
+        return;
+    }
+
+    crate::state::emit_server_event(
+        state,
+        crate::server_event::ServerEvent::NodeState { nodes: events },
+    );
 }
 
 /// Choose the modulo-24 local-hour delta that best matches expected wall-clock movement.
@@ -1808,6 +1860,68 @@ mod tests {
                 assert_eq!(nodes[0].id, "room1");
                 assert!(!nodes[0].lights_on);
                 assert!(nodes[0].tick);
+            }
+            _ => panic!("unexpected event type"),
+        }
+    }
+
+    #[test]
+    fn expired_transition_emits_node_state_for_rhythm_disabled_room() {
+        use rhythm_core::controller::NoOpController;
+        use rhythm_core::runtime::orchestrator::RhythmRuntime;
+        use rhythm_core::runtime::registry::SimpleDeviceRegistry;
+        use rhythm_core::runtime::scheduler::NoOpScheduler;
+        use rhythm_core::runtime::time::MockTimeProvider;
+        use rhythm_core::RuntimeConfig;
+
+        let state = make_state();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(4);
+        {
+            let mut s = state.lock().unwrap();
+            s.event_tx = Some(tx);
+        }
+
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(RhythmRuntime::new(
+            Arc::new(NoOpController::new()),
+            MockTimeProvider::new(14.0, 172, 2026),
+            NoOpScheduler::new(),
+            SimpleDeviceRegistry::new(),
+            RuntimeConfig::default(),
+        ));
+        runtime.add_room("room1", "Room 1");
+        let snap = runtime
+            .engine_effective_node_snapshot("room1")
+            .expect("room should exist");
+        let mut restored = RestoredNodeState::from(&snap);
+        restored.rhythm_enabled = false;
+        runtime.restore_node_state("room1", restored);
+
+        let now = Instant::now();
+        {
+            let mut s = state.lock().unwrap();
+            s.room_mode_transitions.insert(
+                "room1".into(),
+                crate::state::RoomModeTransition {
+                    ends_at: now - Duration::from_secs(1),
+                    periodic_resume_at: now - Duration::from_secs(1),
+                },
+            );
+            let expired = expire_room_mode_transitions(&mut s, now);
+            assert_eq!(expired, vec!["room1".to_string()]);
+        }
+        emit_expired_transition_node_states(&state, Some(&runtime), &["room1".to_string()]);
+
+        assert!(state.lock().unwrap().room_mode_transitions.is_empty());
+        match rx
+            .try_recv()
+            .expect("expired transition should emit a node event")
+        {
+            crate::server_event::ServerEvent::NodeState { nodes } => {
+                assert_eq!(nodes.len(), 1);
+                assert_eq!(nodes[0].id, "room1");
+                assert!(!nodes[0].rhythm_enabled);
+                assert!(!nodes[0].transitioning);
+                assert!(!nodes[0].tick);
             }
             _ => panic!("unexpected event type"),
         }
