@@ -205,6 +205,31 @@ class RhythmServerApi {
     return nodeBrightness(nodeId: roomId, brightness: brightness);
   }
 
+  /// Set node color via the server runtime.
+  Future<void> nodeColor({
+    required String nodeId,
+    required int r,
+    required int g,
+    required int b,
+  }) async {
+    await _safePut('api/nodes/color', data: {
+      'node_id': nodeId,
+      'r': r,
+      'g': g,
+      'b': b,
+    });
+  }
+
+  /// Set room color via the node-first server contract.
+  Future<void> roomColor({
+    required String roomId,
+    required int r,
+    required int g,
+    required int b,
+  }) {
+    return nodeColor(nodeId: roomId, r: r, g: g, b: b);
+  }
+
   /// Set brightness for multiple nodes in a single request.
   Future<List<RhythmRoomState>> nodeBrightnessBatch(
       List<({String nodeId, int brightness})> items,
@@ -743,6 +768,32 @@ class RhythmServerApi {
       _log.warning('getSettings failed', e);
     }
     return null;
+  }
+
+  /// Fetch the global autonomous light-control switch from the server.
+  Future<RhythmLightBreaker?> getLightBreaker() async {
+    try {
+      final response = await _dio.get('api/light-breaker');
+      return RhythmLightBreaker.fromJson(
+        response.data as Map<String, dynamic>,
+      );
+    } catch (e) {
+      _log.warning('getLightBreaker failed', e);
+    }
+    return null;
+  }
+
+  /// Set the global autonomous light-control switch on the server.
+  ///
+  /// Returns `true` when the server accepts the update and `false` on failure.
+  Future<bool> setLightBreaker(bool enabled) async {
+    try {
+      await _dio.put('api/light-breaker', data: {'enabled': enabled});
+      return true;
+    } catch (e) {
+      _log.warning('setLightBreaker failed', e);
+      return false;
+    }
   }
 
   /// Activate the sleep profile.

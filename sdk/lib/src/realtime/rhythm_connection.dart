@@ -85,6 +85,8 @@ class RhythmConnection {
       StreamController<RhythmModeResource>.broadcast();
   final _settingsChangedController =
       StreamController<RhythmSettings>.broadcast();
+  final _lightBreakerChangedController =
+      StreamController<RhythmLightBreaker>.broadcast();
   final _newNodesController = StreamController<void>.broadcast();
   final _triageChangedController =
       StreamController<Map<String, dynamic>>.broadcast();
@@ -167,6 +169,8 @@ class RhythmConnection {
       _modeChangedController.stream;
   Stream<RhythmSettings> get settingsChangedEvents =>
       _settingsChangedController.stream;
+  Stream<RhythmLightBreaker> get lightBreakerChangedEvents =>
+      _lightBreakerChangedController.stream;
   Stream<void> get newNodesDetected => _newNodesController.stream;
   Stream<void> get newRoomsDetected => newNodesDetected;
   Stream<Map<String, dynamic>> get triageChangedEvents =>
@@ -355,6 +359,7 @@ class RhythmConnection {
     _inputEventController.close();
     _modeChangedController.close();
     _settingsChangedController.close();
+    _lightBreakerChangedController.close();
     _newNodesController.close();
     _triageChangedController.close();
     _connectionStateController.close();
@@ -931,6 +936,16 @@ class RhythmConnection {
           }
           _reHelloSuppressedNodeIds.clear();
           _newNodesController.add(null);
+          break;
+
+        case 'light_breaker_changed':
+          final json = jsonDecode(data) as Map<String, dynamic>;
+          final payload = json['data'] as Map<String, dynamic>? ?? json;
+          final lightBreakerJson =
+              payload['light_breaker'] as Map<String, dynamic>? ?? payload;
+          _lightBreakerChangedController.add(RhythmLightBreaker.fromJson(
+            Map<String, dynamic>.from(lightBreakerJson),
+          ));
           break;
 
         case 'config_changed':

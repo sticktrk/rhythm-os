@@ -25,6 +25,7 @@ class RhythmHello {
   final List<RhythmCurveConfig> profiles;
   final Map<String, dynamic> location;
   final RhythmSettings? settings;
+  final RhythmLightBreaker? lightBreaker;
   final RhythmReviewSummary review;
   final int? lastTickEpochMs;
 
@@ -51,6 +52,7 @@ class RhythmHello {
     this.profiles = const [],
     required this.location,
     this.settings,
+    this.lightBreaker,
     this.review = const RhythmReviewSummary(),
     this.lastTickEpochMs,
     this.effectiveFadeMs,
@@ -61,6 +63,7 @@ class RhythmHello {
 
   factory RhythmHello.fromJson(Map<String, dynamic> json) {
     final settingsJson = jsonMap(json['settings']);
+    final lightBreakerJson = jsonMap(json['light_breaker']);
     final rawHub = jsonMap(json['hub']) ?? const <String, dynamic>{};
     final hubsList =
         (json['hubs'] as List<dynamic>?)?.map(jsonMap).nonNulls.toList();
@@ -123,6 +126,9 @@ class RhythmHello {
       location: location,
       settings:
           settingsJson != null ? RhythmSettings.fromJson(settingsJson) : null,
+      lightBreaker: lightBreakerJson != null
+          ? RhythmLightBreaker.fromJson(lightBreakerJson)
+          : null,
       review: reviewJson == null
           ? const RhythmReviewSummary()
           : RhythmReviewSummary.fromJson(reviewJson),

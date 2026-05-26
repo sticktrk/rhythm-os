@@ -388,6 +388,25 @@ class RhythmSettings {
   }
 }
 
+/// Global switch controlling autonomous Rhythm light actions.
+class RhythmLightBreaker {
+  final bool enabled;
+
+  const RhythmLightBreaker({
+    required this.enabled,
+  });
+
+  factory RhythmLightBreaker.fromJson(Map<String, dynamic> json) {
+    return RhythmLightBreaker(
+      enabled: json['enabled'] as bool? ?? true,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'enabled': enabled,
+      };
+}
+
 class RhythmProfiles {
   final List<RhythmCurveConfig> profiles;
 

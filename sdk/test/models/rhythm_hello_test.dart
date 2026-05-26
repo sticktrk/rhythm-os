@@ -68,6 +68,7 @@ void main() {
         'settings': {
           'power_save': true,
         },
+        'light_breaker': {'enabled': false},
       });
 
       expect(hello.version, '1.2.3');
@@ -86,6 +87,8 @@ void main() {
       expect(hello.location, {'lat': 40.7128, 'lon': -74.006});
       expect(hello.settings, isNotNull);
       expect(hello.settings!.powerSave, isTrue);
+      expect(hello.lightBreaker, isNotNull);
+      expect(hello.lightBreaker!.enabled, isFalse);
       expect(hello.mode, isNotNull);
       expect(hello.mode!.active, RhythmMode.sleep);
       expect(hello.mode!.activeConfig?.idleProfileId, 'sleep_idle');

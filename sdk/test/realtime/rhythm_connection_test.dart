@@ -201,6 +201,27 @@ void main() {
       expect(settings.powerSave, isTrue);
     });
 
+    test('parses light_breaker_changed SSE payload', () async {
+      sseEventChunks = [
+        'event: light_breaker_changed\n'
+            'data: {"type":"light_breaker_changed","data":{"light_breaker":{"enabled":false}}}\n\n',
+      ];
+      sseCloseDelay = const Duration(milliseconds: 100);
+
+      final connection = RhythmConnection();
+      addTearDown(connection.dispose);
+
+      final lightBreakerFuture =
+          connection.lightBreakerChangedEvents.first.timeout(
+        const Duration(seconds: 2),
+      );
+
+      await connection.connect('127.0.0.1', port: server.port);
+
+      final lightBreaker = await lightBreakerFuture;
+      expect(lightBreaker.enabled, isFalse);
+    });
+
     test('parses input_event SSE events', () async {
       sseEventChunks = [
         'event: input_event\n'

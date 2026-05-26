@@ -645,6 +645,53 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
+  // light breaker
+  // ---------------------------------------------------------------------------
+  group('light breaker', () {
+    test('getLightBreaker parses enabled state', () async {
+      when(() => dio.get(any())).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/light-breaker'),
+            statusCode: 200,
+            data: {'enabled': false},
+          ));
+
+      final lightBreaker = await api.getLightBreaker();
+
+      expect(lightBreaker, isNotNull);
+      expect(lightBreaker!.enabled, isFalse);
+      verify(() => dio.get('api/light-breaker')).called(1);
+    });
+
+    test('setLightBreaker sends enabled to /api/light-breaker', () async {
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(path: 'api/light-breaker'),
+                statusCode: 200,
+              ));
+
+      final saved = await api.setLightBreaker(false);
+
+      expect(saved, isTrue);
+      final captured = verify(() => dio.put(
+            'api/light-breaker',
+            data: captureAny(named: 'data'),
+          )).captured.single;
+      expect(captured, {'enabled': false});
+    });
+
+    test('setLightBreaker returns false on DioException', () async {
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenThrow(DioException(
+        requestOptions: RequestOptions(path: 'api/light-breaker'),
+      ));
+
+      final saved = await api.setLightBreaker(false);
+
+      expect(saved, isFalse);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // settingsSet
   // ---------------------------------------------------------------------------
   group('settingsSet', () {
