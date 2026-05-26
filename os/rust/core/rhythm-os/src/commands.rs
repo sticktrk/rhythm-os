@@ -23,11 +23,11 @@ use serde_json::Value;
 
 use crate::api_types::{
     ActiveProfileDto, ActiveProfileEffectiveDto, ApiCapabilitiesDto, HubCapabilityDto, HubDto,
-    HubStartupRetryDto, InputBindingsDto, LocationDto, ModeLastChangeDto, ModeSettingsDto,
-    ModeTransitionsDto, NodeStateDto, NodesPollResponse, ObservedPowerDto, PreferredEndpointDto,
-    ProfilesDto, ReviewCountsDto, ReviewEntryDto, ReviewHubDto, ReviewSummaryDto, RoomPollState,
-    RoomRhythmState, RoomsPollResponse, SettingsDto, StateSnapshot, TopologyNodeControlDto,
-    TopologyNodeDto,
+    HubStartupRetryDto, InputBindingsDto, LightBreakerDto, LocationDto, ModeLastChangeDto,
+    ModeSettingsDto, ModeTransitionsDto, NodeStateDto, NodesPollResponse, ObservedPowerDto,
+    PreferredEndpointDto, ProfilesDto, ReviewCountsDto, ReviewEntryDto, ReviewHubDto,
+    ReviewSummaryDto, RoomPollState, RoomRhythmState, RoomsPollResponse, SettingsDto,
+    StateSnapshot, TopologyNodeControlDto, TopologyNodeDto,
 };
 use crate::bundle::{
     BackupBundle, BackupConfiguration, BackupConfigurationRoom, BackupHubCredentials,
@@ -1679,6 +1679,7 @@ fn persist_settings_locked(s: &AppState) {
     if let Some(ref storage) = s.storage {
         if let Err(e) = storage.save_settings(&crate::storage::StoredSettings {
             power_save: s.power_save,
+            light_breaker_enabled: s.light_breaker_enabled,
             active_mode: s.active_mode,
             last_active_mode_cause: s.last_active_mode_cause,
             last_active_mode_transition_id: s.last_active_mode_transition_id.clone(),
@@ -1923,6 +1924,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         mut active_profile_effective,
         location_dto,
         settings_dto,
+        light_breaker_dto,
         mode_dto,
         transitions_dto,
         input_bindings_dto,
@@ -2053,6 +2055,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             active_profile_effective,
             location_dto,
             build_settings_dto_inner(&s),
+            build_light_breaker_dto_inner(&s),
             build_mode_dto_inner(&s),
             build_transitions_dto_inner(&s),
             build_input_bindings_dto_inner(&s),
@@ -2144,6 +2147,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         },
         location: location_dto,
         settings: settings_dto,
+        light_breaker: light_breaker_dto,
         mode: mode_dto,
         transitions: transitions_dto.transitions,
         input_bindings: input_bindings_dto.bindings,
@@ -2756,6 +2760,12 @@ fn build_settings_dto_inner(s: &AppState) -> SettingsDto {
     }
 }
 
+fn build_light_breaker_dto_inner(s: &AppState) -> LightBreakerDto {
+    LightBreakerDto {
+        enabled: s.light_breaker_enabled,
+    }
+}
+
 /// Build `ModeSettingsDto` from an already-locked `AppState`.
 fn build_mode_dto_inner(s: &AppState) -> ModeSettingsDto {
     let last_change_utc_ms = s
@@ -2803,6 +2813,12 @@ pub fn build_settings_dto(state: &SharedState) -> Result<SettingsDto> {
 pub fn build_settings(state: &SharedState) -> Result<String> {
     let dto = build_settings_dto(state)?;
     serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize settings: {}", e))
+}
+
+pub fn build_light_breaker(state: &SharedState) -> Result<String> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let dto = build_light_breaker_dto_inner(&s);
+    serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize light breaker: {}", e))
 }
 
 /// Build the current mode state and policy.
@@ -3089,6 +3105,7 @@ fn backup_configuration_from_parts(
 
     BackupConfiguration {
         power_save: s.power_save,
+        light_breaker_enabled: s.light_breaker_enabled,
         active_mode: s.active_mode,
         profiles: s.light_profile_configs.values().cloned().collect(),
         mode_configs: s.mode_configs(),
@@ -3186,6 +3203,7 @@ fn clear_factory_reset_ephemeral_state(state: &SharedState) -> Result<()> {
 fn factory_default_backup_configuration() -> BackupConfiguration {
     BackupConfiguration {
         power_save: factory_default_power_save(),
+        light_breaker_enabled: true,
         active_mode: factory_default_active_mode(),
         profiles: factory_default_light_profile_config_map()
             .into_values()
@@ -4892,6 +4910,42 @@ fn do_settings_set_internal(
     serde_json::to_string(&settings).map_err(|e| anyhow::anyhow!("serialize: {}", e))
 }
 
+/// Enable or disable Rhythm's autonomous light breaker.
+pub fn do_light_breaker_set(state: &SharedState, enabled: bool) -> Result<String> {
+    let (dto, changed, dispatch_generation) = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let changed = s.light_breaker_enabled != enabled;
+        s.light_breaker_enabled = enabled;
+        let dispatch_generation = if changed {
+            Some(s.invalidate_queued_light_dispatches())
+        } else {
+            None
+        };
+        persist_settings_locked(&s);
+        (
+            build_light_breaker_dto_inner(&s),
+            changed,
+            dispatch_generation,
+        )
+    };
+
+    if changed {
+        info!(
+            target: "cmd",
+            "light_breaker: enabled={} dispatch_generation={:?}",
+            enabled, dispatch_generation
+        );
+        crate::state::emit_server_event(
+            state,
+            crate::server_event::ServerEvent::LightBreakerChanged {
+                light_breaker: dto.clone(),
+            },
+        );
+    }
+
+    serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+}
+
 /// Update global settings (partial: only provided fields are changed).
 pub fn do_settings_set(
     state: &SharedState,
@@ -5165,6 +5219,7 @@ fn apply_backup_configuration(
 
     let imported_profiles = configuration.profiles;
     let imported_power_save = configuration.power_save;
+    let imported_light_breaker_enabled = configuration.light_breaker_enabled;
     let imported_active_mode = configuration.active_mode;
     let imported_mode_configs = configuration.mode_configs;
     let imported_mode_transitions = configuration.mode_transitions;
@@ -5198,6 +5253,8 @@ fn apply_backup_configuration(
             }
         }
     }
+
+    do_light_breaker_set(state, imported_light_breaker_enabled)?;
 
     do_settings_set_internal(
         state,
@@ -11249,11 +11306,16 @@ mod tests {
             serde_json::json!({ "username": "secret-user" }),
         );
         let hub_key = creds.hub_key().unwrap();
-        state.lock().unwrap().hub_credentials.insert(hub_key, creds);
+        {
+            let mut s = state.lock().unwrap();
+            s.light_breaker_enabled = false;
+            s.hub_credentials.insert(hub_key, creds);
+        }
 
         let redacted = build_backup_bundle_dto(&state, false).unwrap();
         assert!(!redacted.secrets_included);
         assert_eq!(redacted.kind, BundleKind::BackupBundle);
+        assert!(!redacted.configuration.light_breaker_enabled);
         assert_eq!(
             redacted.configuration.active_mode,
             factory_default_active_mode()
@@ -11272,6 +11334,21 @@ mod tests {
             included.installation.hub_credentials[0].data,
             Some(serde_json::json!({ "username": "secret-user" }))
         );
+    }
+
+    #[test]
+    fn backup_configuration_missing_light_breaker_defaults_enabled() {
+        let configuration: BackupConfiguration = serde_json::from_value(serde_json::json!({
+            "power_save": false,
+            "active_mode": "day",
+            "profiles": [],
+            "mode_configs": [],
+            "mode_transitions": [],
+            "rooms": []
+        }))
+        .unwrap();
+
+        assert!(configuration.light_breaker_enabled);
     }
 
     #[test]
@@ -11426,6 +11503,7 @@ mod tests {
             secrets_included: true,
             configuration: BackupConfiguration {
                 power_save: true,
+                light_breaker_enabled: false,
                 active_mode: RhythmMode::Sleep,
                 profiles: vec![focus.clone()],
                 mode_configs: vec![
@@ -11481,6 +11559,7 @@ mod tests {
         assert_eq!(restored.kind, BundleKind::BackupBundle);
         assert_eq!(restored.configuration.active_mode, RhythmMode::Day);
         assert!(restored.configuration.power_save);
+        assert!(!restored.configuration.light_breaker_enabled);
         assert_eq!(restored.installation.hub_credentials.len(), 1);
         assert_eq!(
             restored.installation.hub_credentials[0].address,
@@ -11505,6 +11584,7 @@ mod tests {
         );
 
         let saved = storage.inner.lock().unwrap();
+        assert!(!saved.settings.as_ref().unwrap().light_breaker_enabled);
         assert_eq!(
             saved.settings.as_ref().unwrap().last_active_mode_cause,
             ModeChangeCause::Schedule
@@ -11540,6 +11620,7 @@ mod tests {
 
         let s = state.lock().unwrap();
         assert_eq!(s.active_mode, RhythmMode::Day);
+        assert!(!s.light_breaker_enabled);
         assert_eq!(s.last_active_mode_cause, ModeChangeCause::Schedule);
         assert_eq!(
             s.last_active_mode_transition_id.as_deref(),
@@ -11580,6 +11661,7 @@ mod tests {
             secrets_included: false,
             configuration: BackupConfiguration {
                 power_save: false,
+                light_breaker_enabled: true,
                 active_mode: RhythmMode::Day,
                 profiles: Vec::new(),
                 // Conflict: Day mode's room_default for "living" is HardOff. If
@@ -12106,6 +12188,7 @@ mod tests {
             secrets_included: false,
             configuration: BackupConfiguration {
                 power_save: false,
+                light_breaker_enabled: true,
                 active_mode: RhythmMode::Sleep,
                 profiles: vec![],
                 mode_configs: vec![],
@@ -12207,6 +12290,7 @@ mod tests {
                 secrets_included: false,
                 configuration: BackupConfiguration {
                     power_save: false,
+                    light_breaker_enabled: true,
                     active_mode: RhythmMode::Day,
                     profiles: vec![],
                     mode_configs: vec![],
@@ -12721,6 +12805,7 @@ mod tests {
         assert!(parsed["active_profile"]["effective"].is_object());
         assert!(parsed["location"].is_object());
         assert!(parsed["settings"].is_object());
+        assert!(parsed["light_breaker"].is_object());
         assert!(parsed["mode"].is_object());
         assert!(parsed["transitions"].is_array());
         assert!(parsed["profiles"].is_array());
@@ -12818,11 +12903,15 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             s.power_save = true;
+            s.light_breaker_enabled = false;
         }
         let result = build_state_snapshot(&state).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["settings"]["power_save"], true);
         assert_eq!(parsed["settings"]["auto_update"], true);
+        assert!(parsed["settings"].get("light_breaker_enabled").is_none());
+        assert!(parsed["settings"].get("light_breaker").is_none());
+        assert_eq!(parsed["light_breaker"]["enabled"], false);
         assert!(parsed["settings"].get("mode").is_none());
         assert!(parsed["mode"].is_object());
         assert!(parsed["mode"].get("transitions").is_none());
@@ -13783,6 +13872,29 @@ mod tests {
         }
         assert_eq!(power_save, Some(true));
         assert_eq!(auto_update, Some(false));
+    }
+
+    #[test]
+    fn light_breaker_toggle_emits_dedicated_event() {
+        let (state, _rt) = setup_state(vec![]);
+        let (event_tx, mut event_rx) =
+            tokio::sync::broadcast::channel::<crate::server_event::ServerEvent>(16);
+        state.lock().unwrap().event_tx = Some(event_tx);
+
+        let json = do_light_breaker_set(&state, false).unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["enabled"], false);
+        let event = event_rx
+            .try_recv()
+            .expect("expected light breaker changed event");
+        match event {
+            crate::server_event::ServerEvent::LightBreakerChanged { light_breaker } => {
+                assert!(!light_breaker.enabled);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]

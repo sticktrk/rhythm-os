@@ -391,6 +391,11 @@ pub struct AppState {
     /// Power save mode. When true, idle rooms turn fully off; when false,
     /// idle rooms dim to standby brightness.
     pub power_save: bool,
+    /// Global switch for Rhythm's autonomous light breaker.
+    ///
+    /// When false, Rhythm keeps hub/status/API plumbing alive but drops
+    /// control events from hub streams and does not run periodic light ticks.
+    pub light_breaker_enabled: bool,
     /// When true, the appliance polls the curated "stable" OTA feed and
     /// auto-applies updates overnight. When false, it polls "beta" and only
     /// updates on an explicit `POST /api/ota/update`.
@@ -442,7 +447,7 @@ pub struct AppState {
 
     // ---- Composite controller ----
     /// The composite controller shared between AppState (for dynamic registration)
-    /// and the RhythmEngine (for light control). Both hold Arc refs to the same instance.
+    /// and the RhythmEngine (for light breaker). Both hold Arc refs to the same instance.
     /// None on constrained blocking targets or before runtime creation.
     pub composite_controller: Option<Arc<rhythm_core::CompositeController>>,
 
@@ -651,6 +656,7 @@ impl Default for AppState {
             default_motion_timeout_secs: default_motion_timeout,
             default_fade_ms: default_fade,
             power_save: factory_default_power_save(),
+            light_breaker_enabled: true,
             auto_update: factory_default_auto_update(),
             storage: None,
             work_tx: None,
@@ -1034,6 +1040,11 @@ impl AppState {
 
 /// Shared state type for thread-safe access.
 pub type SharedState = Arc<Mutex<AppState>>;
+
+/// Return whether Rhythm's autonomous light breaker is currently enabled.
+pub fn light_breaker_enabled(state: &SharedState) -> bool {
+    state.lock().ok().is_some_and(|s| s.light_breaker_enabled)
+}
 
 /// Emit a server event, briefly locking state to access the broadcast sender.
 pub fn emit_server_event(state: &SharedState, event: crate::server_event::ServerEvent) {

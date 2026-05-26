@@ -435,10 +435,9 @@ pub(crate) fn light_dispatch_generation_current(
     state: &SharedState,
     dispatch_generation: u64,
 ) -> bool {
-    state
-        .lock()
-        .ok()
-        .is_some_and(|s| s.light_dispatch_generation == dispatch_generation)
+    state.lock().ok().is_some_and(|s| {
+        s.light_breaker_enabled && s.light_dispatch_generation == dispatch_generation
+    })
 }
 
 pub(crate) fn wait_for_node_dispatch_slot_if_current(
@@ -505,6 +504,18 @@ pub(crate) fn enqueue_periodic_tick(
         let Ok(mut s) = state.lock() else {
             return false;
         };
+        if !s.light_breaker_enabled {
+            tracing::debug!(
+                target: "sys",
+                event = "periodic_tick_skipped",
+                command_id = %tick.command_id,
+                node_id = %tick.node_id,
+                settings_node_id = %tick.settings_node_id,
+                reason = "light_breaker_disabled",
+                "Periodic tick skipped before enqueue"
+            );
+            return true;
+        }
         if s.light_dispatch_generation != tick.dispatch_generation {
             tracing::debug!(
                 target: "sys",
@@ -706,6 +717,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             transition_event_runtime,
             periodic_work_tx,
             work_tx,
+            light_breaker_enabled,
         ) = {
             let Ok(mut s) = state.lock() else {
                 thread::sleep(update_interval);
@@ -727,38 +739,43 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             let mut transition_skipped = 0usize;
             let mut rhythm_disabled_skipped = 0usize;
             let mut hard_off_rooms = 0usize;
-            let rooms: Vec<rhythm_core::NodeSnapshot> = all_rooms
-                .into_iter()
-                .filter(|room| {
-                    if !room.kind.is_light_addressable() {
-                        return false;
-                    }
-                    let event_room_id = room.parent_id.as_deref().unwrap_or(&room.id);
-                    if !room.rhythm_enabled {
-                        rhythm_disabled_skipped += 1;
-                        return false;
-                    }
-                    if room.hard_off {
-                        hard_off_rooms += 1;
-                    }
-                    if s.room_mode_transitions
-                        .get(event_room_id)
-                        .is_some_and(|transition| transition.periodic_resume_at > now)
-                    {
-                        transition_skipped += 1;
-                        return false;
-                    }
-                    if s.motion_snapshots
-                        .get(event_room_id)
-                        .is_some_and(|ms| ms.warning_active)
-                    {
-                        warning_skipped += 1;
-                        false
-                    } else {
-                        true
-                    }
-                })
-                .collect();
+            let light_breaker_enabled = s.light_breaker_enabled;
+            let rooms: Vec<rhythm_core::NodeSnapshot> = if light_breaker_enabled {
+                all_rooms
+                    .into_iter()
+                    .filter(|room| {
+                        if !room.kind.is_light_addressable() {
+                            return false;
+                        }
+                        let event_room_id = room.parent_id.as_deref().unwrap_or(&room.id);
+                        if !room.rhythm_enabled {
+                            rhythm_disabled_skipped += 1;
+                            return false;
+                        }
+                        if room.hard_off {
+                            hard_off_rooms += 1;
+                        }
+                        if s.room_mode_transitions
+                            .get(event_room_id)
+                            .is_some_and(|transition| transition.periodic_resume_at > now)
+                        {
+                            transition_skipped += 1;
+                            return false;
+                        }
+                        if s.motion_snapshots
+                            .get(event_room_id)
+                            .is_some_and(|ms| ms.warning_active)
+                        {
+                            warning_skipped += 1;
+                            false
+                        } else {
+                            true
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let periodic_nodes = periodic_dispatch_nodes_from_state(&s, &rooms);
             (
                 rooms,
@@ -773,6 +790,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
                 transition_event_runtime,
                 s.periodic_work_tx.clone(),
                 s.work_tx.clone(),
+                light_breaker_enabled,
             )
         };
 
@@ -842,6 +860,7 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             rhythm_disabled_skipped,
             hard_off_rooms,
             expired_transitions,
+            light_breaker_enabled,
             cycle_secs = cycle_duration.as_secs_f32(),
             phase_gap_ms = phase_gap.as_millis(),
             "Periodic cycle"
@@ -1015,13 +1034,15 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             }
         }
 
-        let current_hour = SystemTimeProvider::new(utc_offset).current_hour();
-        match check_solar_midnight_at(&state, current_hour, utc_offset, Instant::now()) {
-            PeriodicTimeCheckResult::Continuous { last_hour } => {
-                check_mode_transitions(&state, last_hour, current_hour);
-            }
-            PeriodicTimeCheckResult::Seeded | PeriodicTimeCheckResult::Discontinuous { .. } => {
-                replay_missed_mode_transitions(&state);
+        if light_breaker_enabled {
+            let current_hour = SystemTimeProvider::new(utc_offset).current_hour();
+            match check_solar_midnight_at(&state, current_hour, utc_offset, Instant::now()) {
+                PeriodicTimeCheckResult::Continuous { last_hour } => {
+                    check_mode_transitions(&state, last_hour, current_hour);
+                }
+                PeriodicTimeCheckResult::Seeded | PeriodicTimeCheckResult::Discontinuous { .. } => {
+                    replay_missed_mode_transitions(&state);
+                }
             }
         }
 

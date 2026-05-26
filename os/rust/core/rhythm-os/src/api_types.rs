@@ -118,6 +118,7 @@ pub struct StateSnapshot {
     pub active_profile: ActiveProfileDto,
     pub location: LocationDto,
     pub settings: SettingsDto,
+    pub light_breaker: LightBreakerDto,
     pub mode: ModeSettingsDto,
     pub transitions: Vec<ModeTransitionConfig>,
     pub input_bindings: Vec<InputBinding>,
@@ -268,6 +269,12 @@ pub struct LocationDto {
 pub struct SettingsDto {
     pub power_save: bool,
     pub auto_update: bool,
+}
+
+/// Global Rhythm light-breaker switch in `GET/PUT /api/light-breaker`.
+#[derive(Debug, Clone, Serialize)]
+pub struct LightBreakerDto {
+    pub enabled: bool,
 }
 
 /// Mode state and policy in `GET /api/mode` and `GET /api/state`.
@@ -804,6 +811,7 @@ mod tests {
         let json: Value = serde_json::to_value(&dto).unwrap();
         assert_eq!(json["power_save"], true);
         assert_eq!(json["auto_update"], true);
+        assert!(json.get("light_breaker_enabled").is_none());
         assert!(json.get("mode").is_none());
         assert!(json.get("profiles").is_none());
     }
@@ -1083,6 +1091,7 @@ mod tests {
                 power_save: false,
                 auto_update: true,
             },
+            light_breaker: LightBreakerDto { enabled: true },
             mode: ModeSettingsDto {
                 active: rhythm_core::RhythmMode::Day,
                 last_change: ModeLastChangeDto {
@@ -1191,6 +1200,7 @@ mod tests {
                 power_save: false,
                 auto_update: true,
             },
+            light_breaker: LightBreakerDto { enabled: true },
             mode: ModeSettingsDto {
                 active: rhythm_core::RhythmMode::Day,
                 last_change: ModeLastChangeDto {

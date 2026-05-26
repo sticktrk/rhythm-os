@@ -9,7 +9,7 @@ use rhythm_core::{
     ButtonAction, ModeChangeCause, NodeSnapshot, RhythmMode, RoomModeState, RoomProfileSettings,
 };
 
-use crate::api_types::{ObservedPowerDto, SettingsDto};
+use crate::api_types::{LightBreakerDto, ObservedPowerDto, SettingsDto};
 use crate::pairing::{PairedDeviceInfo, PairingStage, PairingStatus};
 use crate::state::MotionSnapshot;
 
@@ -61,6 +61,8 @@ pub enum ServerEvent {
     },
     /// Settings changed.
     SettingsChanged { settings: SettingsDto },
+    /// Global autonomous light breaker changed.
+    LightBreakerChanged { light_breaker: LightBreakerDto },
     /// Active mode flipped — carries the new mode + last_change metadata so
     /// clients can update the displayed mode without an HTTP roundtrip and
     /// without waiting for the paced per-node `NodeState` events that follow.
@@ -325,6 +327,29 @@ mod tests {
         assert!(
             json.contains("\"auto_update\":true"),
             "expected auto_update payload, got {}",
+            json
+        );
+        assert!(
+            !json.contains("light_breaker"),
+            "settings payload must not include light breaker state, got {}",
+            json
+        );
+    }
+
+    #[test]
+    fn light_breaker_event_serializes_with_dedicated_payload() {
+        let event = ServerEvent::LightBreakerChanged {
+            light_breaker: LightBreakerDto { enabled: false },
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(
+            json.contains("\"type\":\"light_breaker_changed\""),
+            "expected light breaker tagged type, got {}",
+            json
+        );
+        assert!(
+            json.contains("\"enabled\":false"),
+            "expected light breaker payload, got {}",
             json
         );
     }

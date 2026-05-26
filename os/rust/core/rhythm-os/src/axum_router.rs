@@ -87,6 +87,10 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/config/reset", post(reset_config))
         .route("/api/location", put(put_location))
         .route("/api/settings", get(get_settings).put(put_settings))
+        .route(
+            "/api/light-breaker",
+            get(get_light_breaker).put(put_light_breaker),
+        )
         .route("/api/mode", get(get_mode).put(put_mode))
         .route(
             "/api/transitions",
@@ -313,6 +317,17 @@ async fn get_settings(State(state): State<SharedState>) -> ApiResponse {
 
 async fn put_settings(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {
     run_blocking(move || handlers::handle_put_settings(&state, &body)).await
+}
+
+async fn get_light_breaker(State(state): State<SharedState>) -> ApiResponse {
+    handlers::handle_get_light_breaker(&state)
+}
+
+async fn put_light_breaker(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_put_light_breaker(&state, &body)).await
 }
 
 async fn get_mode(State(state): State<SharedState>) -> ApiResponse {
@@ -709,6 +724,7 @@ fn server_event_name(event: &ServerEvent) -> &'static str {
         ServerEvent::InputEvent(_) => "input_event",
         ServerEvent::HubStatus { .. } => "hub_status",
         ServerEvent::SettingsChanged { .. } => "settings_changed",
+        ServerEvent::LightBreakerChanged { .. } => "light_breaker_changed",
         ServerEvent::ModeChanged { .. } => "mode_changed",
         ServerEvent::ConfigChanged => "config_changed",
         ServerEvent::NodesChanged => "nodes_changed",

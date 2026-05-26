@@ -72,7 +72,7 @@ Rhythm OS exposes a complete REST API for managing lights, rooms, and curves. Al
 | **Topology** | `GET/POST /api/topology/rooms`, `PUT /api/topology/rooms/:id`, `PUT /api/topology/rooms/:id/merge`, `PUT /api/topology/rooms/:id/devices/move` | Manage user-facing room/device graph |
 | **Canonical & Triage** | `GET /api/devices/canonical`, `PUT /api/devices/canonical/:id/room`, `PUT /api/devices/canonical/:id/parent`, `GET /api/triage` | Review normalized devices and resolve merge/binding decisions |
 | **Config** | `GET /api/config`, `PUT /api/config`, `PUT /api/location` | Read/write curve config and location |
-| **Settings** | `GET /api/settings`, `PUT /api/settings`, `GET/PUT /api/mode`, `GET/PUT /api/transitions`, `GET /api/profiles` | Runtime settings, mode state, transitions, and profiles |
+| **Settings** | `GET /api/settings`, `PUT /api/settings`, `GET/PUT /api/light-breaker`, `GET/PUT /api/mode`, `GET/PUT /api/transitions`, `GET /api/profiles` | Runtime settings, light breaker, mode state, transitions, and profiles |
 | **Hub** | `PUT /api/hub/credentials`, `POST /api/sync`, `POST /api/devices/pair`, `POST /api/devices/unpair` | Connect hubs, resync, and pair/unpair devices |
 
 See [CLAUDE.md](CLAUDE.md#api-endpoints) for the full endpoint reference.

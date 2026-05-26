@@ -233,6 +233,8 @@ impl StoredLocation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredSettings {
     pub power_save: bool,
+    #[serde(default = "default_light_breaker_enabled")]
+    pub light_breaker_enabled: bool,
     pub active_mode: RhythmMode,
     #[serde(default)]
     pub last_active_mode_cause: ModeChangeCause,
@@ -252,6 +254,10 @@ pub struct StoredSettings {
 }
 
 fn default_auto_update() -> bool {
+    true
+}
+
+fn default_light_breaker_enabled() -> bool {
     true
 }
 
@@ -897,6 +903,7 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                     .last_active_mode_change_utc_ms
                     .or_else(|| Some(chrono::Utc::now().timestamp_millis()));
                 s.power_save = settings.power_save;
+                s.light_breaker_enabled = settings.light_breaker_enabled;
                 s.auto_update = settings.auto_update;
                 s.active_mode = settings.active_mode;
                 s.last_active_mode_cause = settings.last_active_mode_cause;
@@ -916,6 +923,7 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                     if let Some(storage) = s.storage.as_ref() {
                         if let Err(e) = storage.save_settings(&StoredSettings {
                             power_save: s.power_save,
+                            light_breaker_enabled: s.light_breaker_enabled,
                             active_mode: s.active_mode,
                             last_active_mode_cause: s.last_active_mode_cause,
                             last_active_mode_transition_id: s
@@ -936,8 +944,9 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                 }
                 info!(
                     target: "sys",
-                    "Loaded settings: active_mode={:?}, modes={}, transitions={}",
+                    "Loaded settings: active_mode={:?}, light_breaker_enabled={}, modes={}, transitions={}",
                     s.active_mode,
+                    s.light_breaker_enabled,
                     s.mode_configs.len(),
                     s.mode_transition_configs.len()
                 );
@@ -1293,6 +1302,7 @@ mod tests {
             }),
             settings: Some(StoredSettings {
                 power_save: false,
+                light_breaker_enabled: true,
                 active_mode: RhythmMode::Day,
                 last_active_mode_cause: ModeChangeCause::Manual,
                 last_active_mode_transition_id: None,
@@ -1324,6 +1334,7 @@ mod tests {
             }),
             settings: Some(StoredSettings {
                 power_save: false,
+                light_breaker_enabled: true,
                 active_mode: RhythmMode::Day,
                 last_active_mode_cause: ModeChangeCause::Manual,
                 last_active_mode_transition_id: None,
@@ -1361,6 +1372,7 @@ mod tests {
             }),
             settings: Some(StoredSettings {
                 power_save: false,
+                light_breaker_enabled: true,
                 active_mode: RhythmMode::Sleep,
                 last_active_mode_cause: ModeChangeCause::Manual,
                 last_active_mode_transition_id: None,
@@ -1407,6 +1419,7 @@ mod tests {
             }),
             settings: Some(StoredSettings {
                 power_save: false,
+                light_breaker_enabled: true,
                 active_mode: RhythmMode::Sleep,
                 last_active_mode_cause: ModeChangeCause::Manual,
                 last_active_mode_transition_id: None,
@@ -1511,6 +1524,7 @@ mod tests {
             }),
             settings: Some(StoredSettings {
                 power_save: false,
+                light_breaker_enabled: true,
                 active_mode: RhythmMode::Day,
                 last_active_mode_cause: ModeChangeCause::Manual,
                 last_active_mode_transition_id: None,
@@ -1619,6 +1633,7 @@ mod tests {
             let (storage, path) = temp_storage();
             let settings = StoredSettings {
                 power_save: true,
+                light_breaker_enabled: false,
                 active_mode: RhythmMode::Sleep,
                 last_active_mode_cause: ModeChangeCause::Schedule,
                 last_active_mode_transition_id: Some("sleep_to_day".into()),
@@ -1630,6 +1645,7 @@ mod tests {
             storage.save_settings(&settings).unwrap();
             let loaded = storage.load_settings().unwrap();
             assert!(loaded.power_save);
+            assert!(!loaded.light_breaker_enabled);
             assert!(!loaded.auto_update);
             assert_eq!(loaded.active_mode, RhythmMode::Sleep);
             assert_eq!(loaded.last_active_mode_cause, ModeChangeCause::Schedule);
@@ -1665,6 +1681,7 @@ mod tests {
             let loaded = storage.load_settings().unwrap();
 
             assert!(!loaded.power_save);
+            assert!(loaded.light_breaker_enabled);
             assert!(loaded.auto_update);
             cleanup(&path);
         }
@@ -1816,6 +1833,7 @@ mod tests {
             storage
                 .save_settings(&StoredSettings {
                     power_save: true,
+                    light_breaker_enabled: true,
                     active_mode: RhythmMode::Sleep,
                     last_active_mode_cause: ModeChangeCause::Manual,
                     last_active_mode_transition_id: None,
@@ -2119,6 +2137,7 @@ mod tests {
         fn sample_settings() -> StoredSettings {
             StoredSettings {
                 power_save: false,
+                light_breaker_enabled: true,
                 active_mode: RhythmMode::Day,
                 last_active_mode_cause: ModeChangeCause::default(),
                 last_active_mode_transition_id: None,

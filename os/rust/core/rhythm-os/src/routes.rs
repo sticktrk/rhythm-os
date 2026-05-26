@@ -98,6 +98,10 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["GET", "PUT"],
     },
     SharedRoute {
+        path: "/api/light-breaker",
+        methods: &["GET", "PUT"],
+    },
+    SharedRoute {
         path: "/api/mode",
         methods: &["GET", "PUT"],
     },

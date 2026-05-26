@@ -827,6 +827,28 @@ pub fn handle_get_settings(state: &SharedState) -> ApiResponse {
     }
 }
 
+pub fn handle_get_light_breaker(state: &SharedState) -> ApiResponse {
+    match commands::build_light_breaker(state) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_put_light_breaker(state: &SharedState, body: &Value) -> ApiResponse {
+    let enabled = if let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) {
+        enabled
+    } else if let Some(enabled) = body.as_bool() {
+        enabled
+    } else {
+        return ApiResponse::bad_request("Missing enabled");
+    };
+
+    match commands::do_light_breaker_set(state, enabled) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
 pub fn handle_put_settings(state: &SharedState, body: &Value) -> ApiResponse {
     if body.get("rhythm_interval_secs").is_some() {
         return ApiResponse::bad_request(
@@ -846,6 +868,9 @@ pub fn handle_put_settings(state: &SharedState, body: &Value) -> ApiResponse {
     }
     if body.get("profiles").is_some() {
         return ApiResponse::bad_request("Profiles moved to /api/profiles and /api/config");
+    }
+    if body.get("light_breaker_enabled").is_some() || body.get("light_breaker").is_some() {
+        return ApiResponse::bad_request("Light breaker moved to /api/light-breaker");
     }
     let power_save = body.get("power_save").and_then(|v| v.as_bool());
     let auto_update = body.get("auto_update").and_then(|v| v.as_bool());
@@ -2322,6 +2347,48 @@ mod tests {
         let state = test_state();
         let r = handle_put_location(&state, &json!({"lat": 1.0}));
         assert_eq!(r.status, 400);
+    }
+
+    #[test]
+    fn light_breaker_endpoint_toggles_global_control() {
+        let state = test_state();
+
+        let r = handle_get_light_breaker(&state);
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["enabled"], true);
+
+        let r = handle_put_light_breaker(&state, &json!({"enabled": false}));
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["enabled"], false);
+        assert!(!state.lock().unwrap().light_breaker_enabled);
+
+        let r = handle_put_light_breaker(&state, &json!(true));
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["enabled"], true);
+        assert!(state.lock().unwrap().light_breaker_enabled);
+    }
+
+    #[test]
+    fn settings_rejects_light_breaker_mutation() {
+        let state = test_state();
+        let r = handle_put_settings(&state, &json!({"light_breaker_enabled": false}));
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("/api/light-breaker"));
+    }
+
+    #[test]
+    fn settings_response_omits_light_breaker() {
+        let state = test_state();
+        state.lock().unwrap().light_breaker_enabled = false;
+
+        let r = handle_get_settings(&state);
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert!(parsed.get("light_breaker_enabled").is_none());
+        assert!(parsed.get("light_breaker").is_none());
     }
 
     #[test]

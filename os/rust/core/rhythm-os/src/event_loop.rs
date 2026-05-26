@@ -940,6 +940,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             action,
             ref device_id,
         } => {
+            let light_breaker_enabled = crate::state::light_breaker_enabled(state);
             let Some((key, native_device_id)) = hub_key.as_ref().zip(device_id.as_deref()) else {
                 emit_button_input_event(
                     state,
@@ -1006,6 +1007,20 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     device_id = ?device_id.as_deref(),
                     "Button event matched input binding"
                 );
+                if !light_breaker_enabled {
+                    tracing::info!(
+                        target: "evt",
+                        event = "button_binding_suppressed",
+                        command_id = %command_id,
+                        action = ?action,
+                        source_node_id = %source_node_id,
+                        source_room_id = %room_id,
+                        device_id = ?device_id.as_deref(),
+                        reason = "light_breaker_disabled",
+                        "Button input binding suppressed while light breaker is disabled"
+                    );
+                    return;
+                }
                 if !motion.admit_button(&source_node_id, action, device_id.as_deref()) {
                     tracing::info!(
                         target: "evt",
@@ -1075,6 +1090,21 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 hub_present = hub_key.is_some(),
                 "Button event received"
             );
+            if !light_breaker_enabled {
+                tracing::info!(
+                    target: "evt",
+                    event = "button_node_control_suppressed",
+                    command_id = %command_id,
+                    action = ?action,
+                    node_id = %node_id,
+                    source_node_id = %source_node_id,
+                    source_room_id = %room_id,
+                    device_id = ?device_id.as_deref(),
+                    reason = "light_breaker_disabled",
+                    "Button node control suppressed while light breaker is disabled"
+                );
+                return;
+            }
             if !motion.admit_button(&node_id, action, device_id.as_deref()) {
                 tracing::info!(
                     target: "evt",
@@ -1110,6 +1140,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             ref sensor_id,
             detected,
         } => {
+            let light_breaker_enabled = crate::state::light_breaker_enabled(state);
             let Some(hub_key) = hub_key.as_ref() else {
                 emit_motion_input_event(
                     state,
@@ -1188,6 +1219,20 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     route: InputEventRoute::NodeControl,
                 },
             );
+            if !light_breaker_enabled {
+                tracing::info!(
+                    target: "evt",
+                    event = "motion_node_control_suppressed",
+                    source_node_id = %source_node_id,
+                    target_node_id = %target_node_id,
+                    source_room_id = %room_id,
+                    native_sensor_id = %sensor_id,
+                    detected,
+                    reason = "light_breaker_disabled",
+                    "Motion node control suppressed while light breaker is disabled"
+                );
+                return;
+            }
             if detected {
                 if motion.warning_active.remove(&target_node_id) {
                     info!(
@@ -1416,6 +1461,22 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
 /// start. Per-target timeout is resolved from the target node's effective
 /// profile settings. Timeout=0 disables auto-off.
 pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
+    if !crate::state::light_breaker_enabled(state) {
+        if !motion.sensors.is_empty()
+            || !motion.motion_owned.is_empty()
+            || !motion.warning_active.is_empty()
+        {
+            info!(
+                target: "evt",
+                "Motion: clearing timers because light breaker is disabled"
+            );
+            motion.sensors.clear();
+            motion.motion_owned.clear();
+            motion.warning_active.clear();
+        }
+        return;
+    }
+
     let now = Instant::now();
 
     let (timeouts, _) = commands::resolved_motion_timeout_map(state);
@@ -1618,13 +1679,26 @@ pub fn run_event_loop(
             force_motion_persist = true;
         }
 
-        // Apply any motion seeds queued by startup prefetch. Hub bootstrap
-        // populates the queue asynchronously, so this must be inside the
-        // loop — checking once before the loop drops every seed.
-        if apply_pending_motion_seeds(&state, &mut motion_state, Instant::now()) {
-            motion_dirty = true;
-            motion_persistence.mark_dirty();
-            force_motion_persist = true;
+        let light_breaker_enabled = crate::state::light_breaker_enabled(&state);
+        if !light_breaker_enabled {
+            if !motion_state.sensors.is_empty()
+                || !motion_state.motion_owned.is_empty()
+                || !motion_state.warning_active.is_empty()
+            {
+                check_motion_timers(&state, &mut motion_state);
+                motion_dirty = true;
+                motion_persistence.mark_dirty();
+                force_motion_persist = true;
+            }
+        } else {
+            // Apply any motion seeds queued by startup prefetch. Hub bootstrap
+            // populates the queue asynchronously, so this must be inside the
+            // loop — checking once before the loop drops every seed.
+            if apply_pending_motion_seeds(&state, &mut motion_state, Instant::now()) {
+                motion_dirty = true;
+                motion_persistence.mark_dirty();
+                force_motion_persist = true;
+            }
         }
 
         // Process hub events from all receivers, removing disconnected ones
@@ -1651,7 +1725,7 @@ pub fn run_event_loop(
         // event-loop sleep interval.
         if last_motion_check.elapsed() >= MOTION_TIMER_CHECK_INTERVAL {
             last_motion_check = Instant::now();
-            if !motion_state.sensors.is_empty() {
+            if light_breaker_enabled && !motion_state.sensors.is_empty() {
                 check_motion_timers(&state, &mut motion_state);
                 motion_dirty = true;
                 motion_persistence.mark_dirty();
@@ -2357,6 +2431,23 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             dispatch_spacing,
             dispatch_generation,
         } => {
+            if !crate::state::light_breaker_enabled(state) {
+                tracing::debug!(
+                    target: "sys",
+                    event = "periodic_node_tick_skipped",
+                    command_id = %command_id,
+                    node_id = %node_id,
+                    settings_node_id = %settings_node_id,
+                    reason = "light_breaker_disabled",
+                    "Skipping periodic tick"
+                );
+                crate::periodic::clear_pending_periodic_tick_generation(
+                    state,
+                    &node_id,
+                    dispatch_generation,
+                );
+                return;
+            }
             let current_hour = {
                 let Ok(s) = state.lock() else { return };
                 if s.light_dispatch_generation != dispatch_generation {
@@ -5235,10 +5326,12 @@ mod tests {
     #[test]
     fn motion_persistence_skips_unchanged_payloads() {
         let saved = Arc::new(Mutex::new(Vec::new()));
-        let mut app = crate::state::AppState::default();
-        app.storage = Some(Box::new(MotionTimerTestStorage {
-            saved_motion_timers: saved.clone(),
-        }));
+        let app = crate::state::AppState {
+            storage: Some(Box::new(MotionTimerTestStorage {
+                saved_motion_timers: saved.clone(),
+            })),
+            ..Default::default()
+        };
         let state = Arc::new(Mutex::new(app));
 
         let mut motion = MotionTimerState::new();
@@ -5264,10 +5357,12 @@ mod tests {
     #[test]
     fn motion_persistence_waits_for_coalesce_interval() {
         let saved = Arc::new(Mutex::new(Vec::new()));
-        let mut app = crate::state::AppState::default();
-        app.storage = Some(Box::new(MotionTimerTestStorage {
-            saved_motion_timers: saved.clone(),
-        }));
+        let app = crate::state::AppState {
+            storage: Some(Box::new(MotionTimerTestStorage {
+                saved_motion_timers: saved.clone(),
+            })),
+            ..Default::default()
+        };
         let state = Arc::new(Mutex::new(app));
 
         let mut motion = MotionTimerState::new();

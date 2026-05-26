@@ -118,10 +118,12 @@ impl From<&Room> for BackupConfigurationRoom {
 }
 
 /// Backed-up lighting and room behavior stored with installation restores.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BackupConfiguration {
     #[serde(default)]
     pub power_save: bool,
+    #[serde(default = "default_light_breaker_enabled")]
+    pub light_breaker_enabled: bool,
     #[serde(default)]
     pub active_mode: RhythmMode,
     #[serde(default)]
@@ -132,6 +134,24 @@ pub struct BackupConfiguration {
     pub mode_transitions: Vec<ModeTransitionConfig>,
     #[serde(default)]
     pub rooms: Vec<BackupConfigurationRoom>,
+}
+
+fn default_light_breaker_enabled() -> bool {
+    true
+}
+
+impl Default for BackupConfiguration {
+    fn default() -> Self {
+        Self {
+            power_save: false,
+            light_breaker_enabled: default_light_breaker_enabled(),
+            active_mode: RhythmMode::default(),
+            profiles: Vec::new(),
+            mode_configs: Vec::new(),
+            mode_transitions: Vec::new(),
+            rooms: Vec::new(),
+        }
+    }
 }
 
 /// Backup copy of per-hub credentials.
