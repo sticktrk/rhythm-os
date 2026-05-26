@@ -47,6 +47,31 @@ class RhythmOwnerClaim {
   final String token;
 }
 
+class RhythmAuthSettingsUpdate extends RhythmAuthStatus {
+  const RhythmAuthSettingsUpdate({
+    required super.requiresAuth,
+    required super.ownerConfigured,
+    required super.tokenCount,
+    required super.claimAvailable,
+    this.tokenId,
+    this.token,
+  });
+
+  factory RhythmAuthSettingsUpdate.fromJson(Map<String, dynamic> json) {
+    return RhythmAuthSettingsUpdate(
+      requiresAuth: json['requires_auth'] == true,
+      ownerConfigured: json['owner_configured'] == true,
+      tokenCount: (json['token_count'] as num?)?.toInt() ?? 0,
+      claimAvailable: json['claim_available'] == true,
+      tokenId: json['token_id']?.toString(),
+      token: json['token']?.toString(),
+    );
+  }
+
+  final String? tokenId;
+  final String? token;
+}
+
 class RhythmAuthApi {
   static final _log = Logger('rhythm_sdk.api');
 
@@ -105,6 +130,35 @@ class RhythmAuthApi {
     } on DioException catch (error) {
       throw RhythmApiException(
         'Failed to claim owner token',
+        statusCode: error.response?.statusCode,
+        cause: error,
+      );
+    }
+  }
+
+  Future<RhythmAuthSettingsUpdate> setSettings({
+    required bool requireApiAuth,
+    String label = 'Rhythm app',
+  }) async {
+    final trimmedLabel = label.trim();
+    try {
+      final response = await _dio.put<Map<String, dynamic>>(
+        'api/auth/settings',
+        data: {
+          'require_api_auth': requireApiAuth,
+          if (trimmedLabel.isNotEmpty) 'label': trimmedLabel,
+        },
+      );
+      final data = response.data;
+      if (data == null) {
+        throw StateError('Server returned an empty auth settings response.');
+      }
+      return RhythmAuthSettingsUpdate.fromJson(
+        Map<String, dynamic>.from(data),
+      );
+    } on DioException catch (error) {
+      throw RhythmApiException(
+        'Failed to update auth settings',
         statusCode: error.response?.statusCode,
         cause: error,
       );
