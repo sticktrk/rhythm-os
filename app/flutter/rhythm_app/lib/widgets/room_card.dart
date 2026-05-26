@@ -172,6 +172,7 @@ class _RoomCardState extends State<RoomCard> {
           int?,
           int?,
           (int, int, int)?,
+          bool,
           bool
         )>(
       selector: (_, p) => (
@@ -183,6 +184,7 @@ class _RoomCardState extends State<RoomCard> {
         p.getKelvin(widget.roomId),
         p.getRoomColor(widget.roomId),
         p.hasMotionSensor(widget.roomId),
+        p.isRoomTransitioning(widget.roomId),
       ),
       builder: (context, data, _) {
         final (
@@ -193,7 +195,8 @@ class _RoomCardState extends State<RoomCard> {
           serverBrightness,
           serverKelvin,
           serverColor,
-          hasSensor
+          hasSensor,
+          isTransitioning
         ) = data;
         if (room == null) return const SizedBox.shrink();
 
@@ -267,13 +270,13 @@ class _RoomCardState extends State<RoomCard> {
         final offCurve = mode == RoomMode.on &&
             (room.brightnessOffset != 0 || room.timeOffsetMinutes != 0);
 
-        final sliderActive = mode == RoomMode.on || mode == RoomMode.idle;
+        final sliderActive =
+            !isTransitioning && (mode == RoomMode.on || mode == RoomMode.idle);
         final rhythmGlowActive = mode == RoomMode.on && room.rhythmEnabled;
         final glowColor = cctColor;
         final sliderActiveTrackColor =
             Color.lerp(cctColor, Colors.white, 0.15)!.withValues(alpha: 0.85);
-        final sliderInactiveTrackColor =
-            Colors.black.withValues(alpha: 0.20);
+        final sliderInactiveTrackColor = Colors.black.withValues(alpha: 0.20);
         final sliderThumbColor = Colors.white;
         final sliderOverlayColor = cctColor.withValues(alpha: 0.15);
         final titleIcon = switch (room.kind) {
@@ -406,6 +409,26 @@ class _RoomCardState extends State<RoomCard> {
                                   ),
                                 ),
                               ),
+                              const SizedBox(width: 8),
+                              SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: AnimatedSwitcher(
+                                  duration: const Duration(milliseconds: 160),
+                                  child: isTransitioning
+                                      ? _RoomTransitionSpinner(
+                                          key: const ValueKey(
+                                            'room_transition_spinner',
+                                          ),
+                                          color: iconColor,
+                                        )
+                                      : const SizedBox.shrink(
+                                          key: ValueKey(
+                                            'room_transition_idle',
+                                          ),
+                                        ),
+                                ),
+                              ),
                             ],
                           ),
                         ),
@@ -418,6 +441,7 @@ class _RoomCardState extends State<RoomCard> {
                             powerSave: widget.powerSave,
                             offCurve: offCurve,
                             cctColor: cctColor,
+                            enabled: !isTransitioning,
                           ),
                         ),
                         // Chunky brightness slider — easy to grab. Hidden
@@ -503,6 +527,29 @@ class _RoomCardState extends State<RoomCard> {
 // ---------------------------------------------------------------------------
 // Sub-widgets
 // ---------------------------------------------------------------------------
+
+class _RoomTransitionSpinner extends StatelessWidget {
+  const _RoomTransitionSpinner({super.key, required this.color});
+
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: 'Room updating',
+      liveRegion: true,
+      child: Padding(
+        padding: const EdgeInsets.all(1),
+        child: CircularProgressIndicator(
+          strokeWidth: 1.8,
+          valueColor: AlwaysStoppedAnimation<Color>(
+            color.withValues(alpha: 0.78),
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 class _SunSliderThumbShape extends SliderComponentShape {
   const _SunSliderThumbShape();
@@ -591,6 +638,7 @@ class _SegmentedToggle extends StatefulWidget {
   final bool powerSave;
   final bool offCurve;
   final Color cctColor;
+  final bool enabled;
 
   const _SegmentedToggle({
     required this.mode,
@@ -598,6 +646,7 @@ class _SegmentedToggle extends StatefulWidget {
     required this.cctColor,
     this.powerSave = false,
     this.offCurve = false,
+    this.enabled = true,
   });
 
   @override
@@ -644,6 +693,7 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
   }
 
   void _select(int i) {
+    if (!widget.enabled) return;
     final target = _segments[i].mode;
     if (target != widget.mode) widget.onModeChanged(target);
   }
@@ -666,17 +716,20 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
           onHorizontalDragStart: (details) {
+            if (!widget.enabled) return;
             setState(() {
               _dragIndex = _indexAtX(details.localPosition.dx, trackWidth);
             });
           },
           onHorizontalDragUpdate: (details) {
+            if (!widget.enabled) return;
             final idx = _indexAtX(details.localPosition.dx, trackWidth);
             if (idx != _dragIndex) {
               setState(() => _dragIndex = idx);
             }
           },
           onHorizontalDragEnd: (_) {
+            if (!widget.enabled) return;
             final idx = _dragIndex;
             if (idx == null) return;
             setState(() => _dragIndex = null);
@@ -686,84 +739,90 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
             if (_dragIndex == null) return;
             setState(() => _dragIndex = null);
           },
-          child: Container(
-            height: _height,
-            clipBehavior: Clip.antiAlias,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(_height / 2),
-              gradient: const LinearGradient(
-                colors: [Color(0xFF161B22), Color(0xFF1C222B)],
+          child: AnimatedOpacity(
+            duration: const Duration(milliseconds: 160),
+            opacity: widget.enabled ? 1.0 : 0.58,
+            child: Container(
+              height: _height,
+              clipBehavior: Clip.antiAlias,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(_height / 2),
+                gradient: const LinearGradient(
+                  colors: [Color(0xFF161B22), Color(0xFF1C222B)],
+                ),
               ),
-            ),
-            padding: const EdgeInsets.all(_padding),
-            child: Stack(
-              children: [
-                // Sliding highlight pill behind the active segment.
-                AnimatedPositioned(
-                  duration: _dragIndex != null
-                      ? const Duration(milliseconds: 120)
-                      : const Duration(milliseconds: 280),
-                  curve: Curves.easeOutCubic,
-                  left: activeIndex * segWidth,
-                  top: 0,
-                  bottom: 0,
-                  width: segWidth,
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 280),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(
-                        (_height - _padding * 2) / 2,
+              padding: const EdgeInsets.all(_padding),
+              child: Stack(
+                children: [
+                  // Sliding highlight pill behind the active segment.
+                  AnimatedPositioned(
+                    duration: _dragIndex != null
+                        ? const Duration(milliseconds: 120)
+                        : const Duration(milliseconds: 280),
+                    curve: Curves.easeOutCubic,
+                    left: activeIndex * segWidth,
+                    top: 0,
+                    bottom: 0,
+                    width: segWidth,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 280),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(
+                          (_height - _padding * 2) / 2,
+                        ),
+                        gradient: _highlightGradient(activeMode),
+                        boxShadow: widget.enabled
+                            ? _highlightShadow(activeMode)
+                            : const [],
                       ),
-                      gradient: _highlightGradient(activeMode),
-                      boxShadow: _highlightShadow(activeMode),
                     ),
                   ),
-                ),
-                // Tap targets + icon/label stacks.
-                Row(
-                  children: [
-                    for (var i = 0; i < segments.length; i++)
-                      Expanded(
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onTap: () => _select(i),
-                          child: Center(
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                AnimatedSwitcher(
-                                  duration: const Duration(milliseconds: 200),
-                                  child: Icon(
-                                    segments[i].icon,
-                                    key: ValueKey(
-                                        '${segments[i].label}-${i == activeIndex}'),
-                                    size: 21,
-                                    color: i == activeIndex
-                                        ? activeText
-                                        : inactiveText,
+                  // Tap targets + icon/label stacks.
+                  Row(
+                    children: [
+                      for (var i = 0; i < segments.length; i++)
+                        Expanded(
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () => _select(i),
+                            child: Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  AnimatedSwitcher(
+                                    duration: const Duration(milliseconds: 200),
+                                    child: Icon(
+                                      segments[i].icon,
+                                      key: ValueKey(
+                                          '${segments[i].label}-${i == activeIndex}'),
+                                      size: 21,
+                                      color: i == activeIndex
+                                          ? activeText
+                                          : inactiveText,
+                                    ),
                                   ),
-                                ),
-                                const SizedBox(height: 3),
-                                AnimatedDefaultTextStyle(
-                                  duration: const Duration(milliseconds: 220),
-                                  style: TextStyle(
-                                    color: i == activeIndex
-                                        ? activeText
-                                        : inactiveText,
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                    letterSpacing: 0.3,
+                                  const SizedBox(height: 3),
+                                  AnimatedDefaultTextStyle(
+                                    duration: const Duration(milliseconds: 220),
+                                    style: TextStyle(
+                                      color: i == activeIndex
+                                          ? activeText
+                                          : inactiveText,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                      letterSpacing: 0.3,
+                                    ),
+                                    child: Text(segments[i].label),
                                   ),
-                                  child: Text(segments[i].label),
-                                ),
-                              ],
+                                ],
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                  ],
-                ),
-              ],
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         );

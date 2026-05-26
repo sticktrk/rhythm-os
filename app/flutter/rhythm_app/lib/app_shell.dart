@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -47,6 +49,8 @@ class AppShell extends StatefulWidget {
 }
 
 class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
+  static const _modeActionSseHandoffGrace = Duration(seconds: 3);
+
   static const _tabs = [
     MainNavTab.home,
     MainNavTab.day,
@@ -69,6 +73,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   final PageController _roomPageController = PageController();
   bool _hadServerHub = false;
   bool _serverRemovalCleanupPending = false;
+  RhythmMode? _pendingModeAction;
+  Timer? _pendingModeActionClearTimer;
+  RoomProvider? _pendingModeActionRoomProvider;
+  VoidCallback? _pendingModeActionRoomListener;
 
   /// Sticky flag governing the [ServerDisconnectedScreen]. Set true when we
   /// can't reach the server *and* have never completed a hello with it (so
@@ -88,6 +96,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _cancelPendingModeActionHandoff();
     WidgetsBinding.instance.removeObserver(this);
     _roomPageController.dispose();
     super.dispose();
@@ -235,8 +244,53 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     );
   }
 
+  void _cancelPendingModeActionHandoff() {
+    _pendingModeActionClearTimer?.cancel();
+    _pendingModeActionClearTimer = null;
+    final provider = _pendingModeActionRoomProvider;
+    final listener = _pendingModeActionRoomListener;
+    if (provider != null && listener != null) {
+      provider.removeListener(listener);
+    }
+    _pendingModeActionRoomProvider = null;
+    _pendingModeActionRoomListener = null;
+  }
+
+  void _clearPendingModeAction(RhythmMode mode) {
+    _cancelPendingModeActionHandoff();
+    if (!mounted || _pendingModeAction != mode) return;
+    setState(() => _pendingModeAction = null);
+  }
+
+  void _handoffPendingModeActionToRoomTransition(RhythmMode mode) {
+    if (!mounted || _pendingModeAction != mode) return;
+    _cancelPendingModeActionHandoff();
+
+    final roomProvider = context.read<RoomProvider>();
+    late VoidCallback listener;
+    listener = () {
+      if (!mounted || _pendingModeAction != mode) {
+        _cancelPendingModeActionHandoff();
+        return;
+      }
+      if (roomProvider.anyRoomTransitioning) {
+        _clearPendingModeAction(mode);
+      }
+    };
+
+    _pendingModeActionRoomProvider = roomProvider;
+    _pendingModeActionRoomListener = listener;
+    roomProvider.addListener(listener);
+    _pendingModeActionClearTimer = Timer(
+      _modeActionSseHandoffGrace,
+      () => _clearPendingModeAction(mode),
+    );
+    listener();
+  }
+
   /// Flip the global mode from the All Rooms toggle.
   Future<void> _setActiveMode(RhythmMode mode) async {
+    if (_pendingModeAction != null) return;
     HapticFeedback.mediumImpact();
     final roomProvider = context.read<RoomProvider>();
     if (roomProvider.anyRoomTransitioning) return;
@@ -244,26 +298,38 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     final currentMode = serverSync.activeMode;
     if (currentMode == mode) return;
 
-    final transitionId =
-        currentMode == null ? null : _defaultTransitionIdForMode(mode);
-    if (transitionId == null) {
-      await serverSync.dispatchSetActiveMode(mode);
+    setState(() => _pendingModeAction = mode);
+    var handoffToRoomTransition = false;
+    try {
+      final transitionId =
+          currentMode == null ? null : _defaultTransitionIdForMode(mode);
+      if (transitionId == null) {
+        await serverSync.dispatchSetActiveMode(mode);
+        AnalyticsService().logGlobalModeChanged(
+          mode.name,
+          source: 'all_rooms_toggle',
+        );
+        return;
+      }
+
+      final success = await serverSync.dispatchRunTransition(transitionId);
+      if (!success) return;
+      handoffToRoomTransition = true;
       AnalyticsService().logGlobalModeChanged(
         mode.name,
         source: 'all_rooms_toggle',
       );
-      return;
+    } finally {
+      if (handoffToRoomTransition) {
+        _handoffPendingModeActionToRoomTransition(mode);
+      } else {
+        _clearPendingModeAction(mode);
+      }
     }
-
-    final success = await serverSync.dispatchRunTransition(transitionId);
-    if (!success) return;
-    AnalyticsService().logGlobalModeChanged(
-      mode.name,
-      source: 'all_rooms_toggle',
-    );
   }
 
   Future<void> _confirmReapplyActiveMode(RhythmMode mode) async {
+    if (_pendingModeAction != null) return;
     final roomProvider = context.read<RoomProvider>();
     if (roomProvider.anyRoomTransitioning) return;
 
@@ -293,6 +359,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   }
 
   Future<void> _reapplyActiveMode(RhythmMode mode) async {
+    if (_pendingModeAction != null) return;
     final roomProvider = context.read<RoomProvider>();
     if (roomProvider.anyRoomTransitioning) return;
 
@@ -306,14 +373,25 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
     HapticFeedback.mediumImpact();
 
-    final ranTransition = await serverSync
-        .dispatchRunTransition(_defaultTransitionIdForMode(mode));
-    if (ranTransition) {
-      if (mounted) HapticFeedback.heavyImpact();
-      return;
-    }
+    setState(() => _pendingModeAction = mode);
+    var handoffToRoomTransition = false;
+    try {
+      final ranTransition = await serverSync
+          .dispatchRunTransition(_defaultTransitionIdForMode(mode));
+      if (ranTransition) {
+        handoffToRoomTransition = true;
+        if (mounted) HapticFeedback.heavyImpact();
+        return;
+      }
 
-    _showModeActionError('Could not reapply $modeLabel settings.');
+      _showModeActionError('Could not reapply $modeLabel settings.');
+    } finally {
+      if (handoffToRoomTransition) {
+        _handoffPendingModeActionToRoomTransition(mode);
+      } else {
+        _clearPendingModeAction(mode);
+      }
+    }
   }
 
   @override
@@ -578,8 +656,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           curveData: _curveData,
           pageController: _roomPageController,
           activeMode: serverSync.activeMode,
-          pendingMode:
-              roomProvider.anyRoomTransitioning ? serverSync.activeMode : null,
+          pendingMode: _pendingModeAction ??
+              (roomProvider.anyRoomTransitioning
+                  ? serverSync.activeMode
+                  : null),
           onModeSelected: _setActiveMode,
           onActiveModeDoubleTap: _confirmReapplyActiveMode,
         );

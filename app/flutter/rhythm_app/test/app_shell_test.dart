@@ -14,6 +14,7 @@ import 'package:rhythm_app/providers/room_page_provider.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/providers/subscription_provider.dart';
+import 'package:rhythm_app/screens/all_rooms_screen.dart';
 import 'package:rhythm_app/services/hue/hue_service_locator.dart';
 import 'package:rhythm_app/widgets/main_bottom_nav.dart';
 import 'package:rhythm_core/rhythm_core.dart';
@@ -86,6 +87,10 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   int getProfilesCallCount = 0;
   int getConfigCallCount = 0;
   int getCurveDataCallCount = 0;
+  int triggerTransitionCallCount = 0;
+  String? lastTriggeredTransitionId;
+  List<RhythmModeTransitionConfig> transitions = const [];
+  Completer<bool>? triggerTransitionCompleter;
 
   @override
   Future<Map<String, dynamic>?> getTriageCount() async => null;
@@ -145,6 +150,36 @@ class _FakeRhythmServerApi extends RhythmServerApi {
         dayLength: 14,
       ),
     );
+  }
+
+  @override
+  Future<bool> modeSet({
+    RhythmMode? active,
+    List<RhythmModeConfig>? configs,
+  }) async {
+    return true;
+  }
+
+  @override
+  Future<bool> setTransitions(
+    List<RhythmModeTransitionConfig> transitions,
+  ) async {
+    this.transitions = List<RhythmModeTransitionConfig>.unmodifiable(
+      transitions,
+    );
+    return true;
+  }
+
+  @override
+  Future<List<RhythmModeTransitionConfig>> getTransitions() async {
+    return transitions;
+  }
+
+  @override
+  Future<bool> triggerTransition(String id) {
+    triggerTransitionCallCount++;
+    lastTriggeredTransitionId = id;
+    return triggerTransitionCompleter?.future ?? Future.value(true);
   }
 }
 
@@ -681,5 +716,136 @@ void main() {
     expect(api.getModeCallCount, 2);
     expect(api.getProfilesCallCount, 2);
     expect(find.text('Sleep Profile'), findsOneWidget);
+  });
+
+  testWidgets('mode toggle disables immediately while transition is pending',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await _seedRoom(roomProvider);
+    final homeProvider = _FakeHomeProvider([_serverHub()]);
+    final api = _FakeRhythmServerApi();
+    final transitionCompleter = Completer<bool>();
+    api.triggerTransitionCompleter = transitionCompleter;
+    final connection = _TestRhythmConnection(
+      initialState: RhythmConnectionState.connected,
+      api: api,
+    );
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await serverSync.dispatchSetTransitions(const [
+      RhythmModeTransitionConfig(
+        id: 'sleep_to_day',
+        label: 'Sleep to Day',
+        fromMode: RhythmMode.sleep,
+        toMode: RhythmMode.day,
+        trigger: RhythmTransitionTrigger.solar('sunrise'),
+        duration: TransitionDuration.auto(),
+        preserveHardOff: true,
+      ),
+      RhythmModeTransitionConfig(
+        id: 'day_to_sleep',
+        label: 'Day to Sleep',
+        fromMode: RhythmMode.day,
+        toMode: RhythmMode.sleep,
+        trigger: RhythmTransitionTrigger.solar('sunset'),
+        duration: TransitionDuration.auto(),
+        preserveHardOff: true,
+      ),
+    ]);
+    await serverSync.dispatchSetActiveMode(RhythmMode.day);
+
+    await _pumpAppShell(
+      tester,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+      serverSync: serverSync,
+    );
+
+    final roomGrid = find.byType(AllRoomsScreen);
+    final sleepPill = find.descendant(
+      of: roomGrid,
+      matching: find.text('Sleep'),
+    );
+    final dayPill = find.descendant(
+      of: roomGrid,
+      matching: find.text('Day'),
+    );
+
+    await tester.tap(sleepPill);
+    await tester.pump();
+
+    expect(api.triggerTransitionCallCount, 1);
+    expect(api.lastTriggeredTransitionId, 'day_to_sleep');
+    expect(
+      find.descendant(
+        of: roomGrid,
+        matching: find.byType(CircularProgressIndicator),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(dayPill, warnIfMissed: false);
+    await tester.tap(sleepPill, warnIfMissed: false);
+    await tester.pump();
+
+    expect(api.triggerTransitionCallCount, 1);
+
+    transitionCompleter.complete(true);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(
+      find.descendant(
+        of: roomGrid,
+        matching: find.byType(CircularProgressIndicator),
+      ),
+      findsOneWidget,
+    );
+
+    await roomProvider.applyServerNodeState(
+      'room-1',
+      rhythmEnabled: true,
+      timeOffset: 0,
+      brightnessOffset: 0,
+      state: RoomModeState.active,
+      transitioning: true,
+      lightsOn: true,
+    );
+    await tester.pump();
+
+    expect(
+      find.descendant(
+        of: roomGrid,
+        matching: find.byType(CircularProgressIndicator),
+      ),
+      findsWidgets,
+    );
+
+    await roomProvider.applyServerNodeState(
+      'room-1',
+      rhythmEnabled: true,
+      timeOffset: 0,
+      brightnessOffset: 0,
+      state: RoomModeState.active,
+      transitioning: false,
+      lightsOn: true,
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.descendant(
+        of: roomGrid,
+        matching: find.byType(CircularProgressIndicator),
+      ),
+      findsNothing,
+    );
   });
 }
