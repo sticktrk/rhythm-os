@@ -6,6 +6,8 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
     show
+        RhythmAuthApi,
+        RhythmAuthStatus,
         RhythmConnection,
         RhythmConnectionState,
         RhythmDevice,
@@ -368,7 +370,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                       const SizedBox(height: 8),
                       _buildHeroSection(http),
                       const SizedBox(height: 24),
-                      _buildLightControlSection(),
+                      _buildSettingsNavigationSection(),
                       const SizedBox(height: 16),
                       _buildVersionSection(),
                       if (_supportsDebugBundle) ...[
@@ -652,100 +654,82 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
   // ─── Sections ──────────────────────────────────────────────
 
-  Widget _buildLightControlSection() {
-    final syncProvider = context.watch<ServerSyncProvider>();
-    final connected =
-        syncProvider.connectionState == RhythmConnectionState.connected;
-    final enabled = syncProvider.lightBreakerEnabled;
-    final statusText = connected ? (enabled ? 'Active' : 'Paused') : 'Offline';
-    final statusColor = !connected
-        ? CelestialColors.textSecondary.withValues(alpha: 0.6)
-        : enabled
-            ? const Color(0xFF22C55E)
-            : const Color(0xFFE8A54B);
-
+  Widget _buildSettingsNavigationSection() {
     return _buildSection(
-      title: 'LIGHT CONTROL',
+      title: 'SETTINGS',
       children: [
-        Container(
-          decoration: BoxDecoration(
-            color: CelestialColors.backgroundCard,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+        GestureDetector(
+          onTap: _showServerSettings,
+          behavior: HitTestBehavior.opaque,
+          child: Container(
+            decoration: BoxDecoration(
+              color: CelestialColors.backgroundCard,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+              ),
             ),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: Row(
-              children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: statusColor.withValues(alpha: 0.16),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              child: Row(
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _teal.withValues(alpha: 0.16),
+                    ),
+                    child: const Icon(
+                      Icons.settings_outlined,
+                      color: _teal,
+                      size: 20,
+                    ),
                   ),
-                  child: Icon(
-                    Icons.power_settings_new_rounded,
-                    color: statusColor,
-                    size: 20,
-                  ),
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          const Flexible(
-                            child: Text(
-                              'Global Light Control',
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: CelestialColors.textPrimary,
-                                fontSize: 15,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
+                  const SizedBox(width: 14),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Settings',
+                          style: TextStyle(
+                            color: CelestialColors.textPrimary,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
                           ),
-                          const SizedBox(width: 4),
-                          InfoTooltip(
-                            message:
-                                'Pauses any automatic behavior from this LightHub until enabled again.',
-                            iconSize: 13,
-                            accentColor: statusColor,
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        statusText,
-                        style: TextStyle(
-                          color: statusColor,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w500,
                         ),
-                      ),
-                    ],
+                        SizedBox(height: 4),
+                        Text(
+                          'Security and server controls',
+                          style: TextStyle(
+                            color: CelestialColors.textSecondary,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                const SizedBox(width: 12),
-                Switch.adaptive(
-                  value: enabled,
-                  activeTrackColor: const Color(0xFF22C55E),
-                  onChanged: connected
-                      ? (next) => unawaited(
-                            syncProvider.setLightBreakerEnabled(next),
-                          )
-                      : null,
-                ),
-              ],
+                  const SizedBox(width: 12),
+                  Icon(
+                    Icons.chevron_right,
+                    color: CelestialColors.textSecondary.withValues(alpha: 0.5),
+                    size: 22,
+                  ),
+                ],
+              ),
             ),
           ),
         ),
       ],
+    );
+  }
+
+  Future<void> _showServerSettings() {
+    return Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => _RhythmServerAdvancedSettingsScreen(hub: widget.hub),
+      ),
     );
   }
 
@@ -2044,6 +2028,412 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   }
 
   // ─── Shared UI ─────────────────────────────────────────────
+
+  Widget _buildSection({
+    required String title,
+    required List<Widget> children,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 4, bottom: 10),
+          child: Text(
+            title,
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+              letterSpacing: 0.8,
+            ),
+          ),
+        ),
+        ...children,
+      ],
+    );
+  }
+}
+
+class _RhythmServerAdvancedSettingsScreen extends StatefulWidget {
+  final Hub hub;
+
+  const _RhythmServerAdvancedSettingsScreen({
+    required this.hub,
+  });
+
+  @override
+  State<_RhythmServerAdvancedSettingsScreen> createState() =>
+      _RhythmServerAdvancedSettingsScreenState();
+}
+
+class _RhythmServerAdvancedSettingsScreenState
+    extends State<_RhythmServerAdvancedSettingsScreen> {
+  static const _teal = Color(0xFF00BCD4);
+  static const _enabledGreen = Color(0xFF22C55E);
+  static const _warningAmber = Color(0xFFE8A54B);
+  static const _disabledRed = Color(0xFFEF4444);
+
+  RhythmAuthStatus? _authStatus;
+  String? _authToken;
+  bool _isAuthLoading = true;
+  bool _isAuthUpdating = false;
+
+  bool get _hasAuthToken {
+    final token = _authToken?.trim();
+    return token != null && token.isNotEmpty;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _authToken = widget.hub.token;
+    unawaited(_loadAuthStatus());
+  }
+
+  RhythmAuthApi _authApi() {
+    return RhythmAuthApi(
+      baseUrl: widget.hub.endpoint.baseUrl,
+      authToken: _authToken,
+    );
+  }
+
+  Future<void> _loadAuthStatus() async {
+    setState(() => _isAuthLoading = true);
+    try {
+      final status = await _authApi().getStatus();
+      if (!mounted) return;
+      setState(() {
+        _authStatus = status;
+        _isAuthLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _authStatus = null;
+        _isAuthLoading = false;
+      });
+    }
+  }
+
+  Future<void> _setApiAuthRequired(bool requireApiAuth) async {
+    if (_isAuthUpdating) return;
+
+    final currentStatus = _authStatus;
+    if (requireApiAuth &&
+        !_hasAuthToken &&
+        (currentStatus?.ownerConfigured ?? false)) {
+      _showSnackBar(
+        'This server already has an owner token. Reconnect with that token before enabling API auth.',
+      );
+      return;
+    }
+
+    final homeProvider = context.read<HomeProvider>();
+    final syncProvider = context.read<ServerSyncProvider>();
+
+    setState(() => _isAuthUpdating = true);
+    try {
+      final update = await _authApi().setSettings(
+        requireApiAuth: requireApiAuth,
+        label: 'Rhythm app',
+      );
+
+      final issuedToken = update.token?.trim();
+      if (issuedToken != null && issuedToken.isNotEmpty) {
+        _authToken = issuedToken;
+        final updatedHub = widget.hub.copyWith(token: issuedToken);
+        final saved = await homeProvider.updateHub(updatedHub);
+        unawaited(
+          syncProvider.connection.connect(
+            widget.hub.endpoint.host,
+            port: widget.hub.endpoint.port,
+            authToken: issuedToken,
+          ),
+        );
+        if (!saved && mounted) {
+          _showSnackBar(
+            'API auth enabled, but the owner token could not be saved.',
+          );
+        }
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _authStatus = update;
+        _isAuthUpdating = false;
+      });
+
+      if (requireApiAuth && issuedToken != null && issuedToken.isNotEmpty) {
+        _showSnackBar('API auth enabled and owner token saved.');
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isAuthUpdating = false);
+      _showSnackBar('Could not update API auth settings.');
+    }
+  }
+
+  void _showSnackBar(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: CelestialColors.backgroundDark,
+      body: SafeArea(
+        child: Column(
+          children: [
+            _buildHeader(),
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const SizedBox(height: 8),
+                    _buildApiAuthSection(),
+                    const SizedBox(height: 16),
+                    _buildDisableServerSection(),
+                    const SizedBox(height: 40),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Row(
+        children: [
+          GestureDetector(
+            onTap: () => Navigator.of(context).pop(),
+            child: Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: _teal.withValues(alpha: 0.15),
+                border: Border.all(
+                  color: _teal.withValues(alpha: 0.3),
+                  width: 1,
+                ),
+              ),
+              child: const Icon(
+                Icons.chevron_left,
+                color: _teal,
+                size: 24,
+              ),
+            ),
+          ),
+          const Expanded(
+            child: Text(
+              'Settings',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: CelestialColors.textPrimary,
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.3,
+              ),
+            ),
+          ),
+          const SizedBox(width: 40),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildApiAuthSection() {
+    final authRequired = _authStatus?.requiresAuth ?? false;
+    final canToggle = !_isAuthLoading &&
+        !_isAuthUpdating &&
+        _authStatus != null &&
+        (!authRequired || _hasAuthToken);
+
+    final statusText = _isAuthUpdating
+        ? 'Saving'
+        : _isAuthLoading
+            ? 'Loading'
+            : _authStatus == null
+                ? 'Unavailable'
+                : authRequired && !_hasAuthToken
+                    ? 'On, token missing'
+                    : authRequired
+                        ? 'On'
+                        : 'Off';
+    final statusColor = _isAuthLoading || _authStatus == null
+        ? CelestialColors.textSecondary.withValues(alpha: 0.6)
+        : authRequired
+            ? _enabledGreen
+            : _warningAmber;
+
+    return _buildSection(
+      title: 'SECURITY',
+      children: [
+        _buildSwitchRow(
+          icon: Icons.lock_outline_rounded,
+          iconColor: statusColor,
+          label: 'Require API Auth',
+          tooltip:
+              'Requires a saved bearer token before apps can control this server.',
+          statusText: statusText,
+          statusColor: statusColor,
+          value: authRequired,
+          activeTrackColor: _teal,
+          busy: _isAuthLoading || _isAuthUpdating,
+          onChanged:
+              canToggle ? (next) => unawaited(_setApiAuthRequired(next)) : null,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildDisableServerSection() {
+    final syncProvider = context.watch<ServerSyncProvider>();
+    final connected =
+        syncProvider.connectionState == RhythmConnectionState.connected;
+    final disabled = !syncProvider.lightBreakerEnabled;
+    final statusText =
+        connected ? (disabled ? 'Disabled' : 'Enabled') : 'Offline';
+    final statusColor = !connected
+        ? CelestialColors.textSecondary.withValues(alpha: 0.6)
+        : disabled
+            ? _disabledRed
+            : _enabledGreen;
+
+    return _buildSection(
+      title: 'SERVER',
+      children: [
+        _buildSwitchRow(
+          icon: Icons.power_settings_new_rounded,
+          iconColor: statusColor,
+          label: 'Disable Rhythm Server',
+          tooltip:
+              'Stops automatic Rhythm light changes until this switch is turned off.',
+          statusText: statusText,
+          statusColor: statusColor,
+          value: disabled,
+          activeTrackColor: _disabledRed,
+          onChanged: connected
+              ? (nextDisabled) => unawaited(
+                    syncProvider.setLightBreakerEnabled(!nextDisabled),
+                  )
+              : null,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSwitchRow({
+    required IconData icon,
+    required Color iconColor,
+    required String label,
+    required String statusText,
+    required Color statusColor,
+    required bool value,
+    required Color activeTrackColor,
+    required ValueChanged<bool>? onChanged,
+    String? tooltip,
+    bool busy = false,
+  }) {
+    return Container(
+      decoration: BoxDecoration(
+        color: CelestialColors.backgroundCard,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: iconColor.withValues(alpha: 0.16),
+              ),
+              child: Icon(
+                icon,
+                color: iconColor,
+                size: 20,
+              ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          label,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: CelestialColors.textPrimary,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      if (tooltip != null) ...[
+                        const SizedBox(width: 4),
+                        InfoTooltip(
+                          message: tooltip,
+                          iconSize: 13,
+                          accentColor: statusColor,
+                        ),
+                      ],
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    statusText,
+                    style: TextStyle(
+                      color: statusColor,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            if (busy)
+              SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation(statusColor),
+                ),
+              )
+            else
+              Switch.adaptive(
+                value: value,
+                activeTrackColor: activeTrackColor,
+                onChanged: onChanged,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
 
   Widget _buildSection({
     required String title,
