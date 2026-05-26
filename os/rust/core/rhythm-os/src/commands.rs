@@ -4324,6 +4324,7 @@ fn apply_active_mode_outputs(
     transition: Option<ModeTransitionConfig>,
     apply_scope: ModeOutputApplyScope,
     dispatch_generation: u64,
+    force_observed_off_outputs: bool,
 ) {
     let (
         runtime,
@@ -4444,6 +4445,11 @@ fn apply_active_mode_outputs(
         let is_visible = match room_state {
             RoomModeState::Idle => true,
             RoomModeState::HardOff => false,
+            RoomModeState::Active | RoomModeState::Wake | RoomModeState::Warning
+                if force_observed_off_outputs =>
+            {
+                true
+            }
             RoomModeState::Active | RoomModeState::Wake | RoomModeState::Warning => {
                 state.lock().ok().is_some_and(|s| {
                     observed_lights_on_from_cache(
@@ -4617,6 +4623,7 @@ fn apply_pending_mode_outputs_if_ready(state: &SharedState) {
         transition,
         ModeOutputApplyScope::all_visible(),
         dispatch_generation,
+        false,
     );
     persist_state(state);
 }
@@ -4862,6 +4869,8 @@ fn do_settings_set_internal(
             ));
         }
         if !reapply_scope.is_empty() {
+            let force_observed_off_outputs =
+                force_reapply_outputs && transition_for_apply.is_some();
             apply_active_mode_outputs(
                 state,
                 previous_mode,
@@ -4869,6 +4878,7 @@ fn do_settings_set_internal(
                 transition_for_apply,
                 reapply_scope,
                 dispatch_generation,
+                force_observed_off_outputs,
             );
         } else {
             debug!(
@@ -6574,6 +6584,7 @@ pub fn do_config_set_with_options(
             None,
             ModeOutputApplyScope::all_visible(),
             dispatch_generation,
+            false,
         );
     }
 
@@ -14359,6 +14370,39 @@ mod tests {
         assert_eq!(
             s.last_active_mode_transition_id.as_deref(),
             Some(transition_id.as_str())
+        );
+    }
+
+    #[test]
+    fn triggering_transition_by_id_reapplies_active_room_even_when_observed_off() {
+        let (state, runtime) = setup_state(vec![make_snapshot("kitchen", false, false)]);
+        let transition_id = {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Day;
+            set_observed_lights_on_in_app(&mut s, "kitchen", false);
+            s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
+                RhythmMode::Sleep,
+                RhythmMode::Day,
+                4_000,
+            )
+            .with_trigger(ModeTransitionTrigger::Sunrise)
+            .with_trigger_enabled(false)]);
+            s.mode_transition_configs()[0].id.clone()
+        };
+
+        let json = do_trigger_transition(&state, &transition_id).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["active"], "day");
+        assert_eq!(parsed["last_change"]["cause"], "manual");
+        assert_eq!(parsed["last_change"]["transition_id"], transition_id);
+
+        let applied = runtime.applied_commands();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].0, "kitchen");
+        assert_eq!(applied[0].1.transition_ms, Some(4_000));
+        assert_eq!(
+            observed_lights_on(&state.lock().unwrap(), "kitchen"),
+            Some(true)
         );
     }
 
