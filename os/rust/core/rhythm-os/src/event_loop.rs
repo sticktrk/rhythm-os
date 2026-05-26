@@ -261,7 +261,8 @@ impl MotionTimerState {
                 .unwrap_or(default_timeout);
             let owned = self.motion_owned.contains(*target_node_id);
 
-            let remaining_secs = if any_active {
+            let warning_active = self.warning_active.contains(*target_node_id);
+            let remaining_secs = if any_active || (!owned && !warning_active) {
                 None
             } else {
                 let elapsed = sources
@@ -280,7 +281,7 @@ impl MotionTimerState {
                     motion_owned: owned,
                     remaining_secs,
                     timeout_secs,
-                    warning_active: self.warning_active.contains(*target_node_id),
+                    warning_active,
                 },
             );
         }
@@ -2656,7 +2657,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_stopped_sensor() {
+    fn snapshot_stopped_unowned_sensor_does_not_publish_countdown() {
         let mut state = MotionTimerState::new();
         let stopped_at = Instant::now() - Duration::from_secs(10);
         state.sensors.insert(
@@ -2669,13 +2670,8 @@ mod tests {
 
         let snap = snaps.get("room_a").expect("room_a should have a snapshot");
         assert!(!snap.motion_active);
-        // remaining should be approximately 300 - 10 = 290, allow some tolerance
-        let remaining = snap.remaining_secs.expect("should have remaining_secs");
-        assert!(
-            (288..=291).contains(&remaining),
-            "remaining_secs should be ~290, got {}",
-            remaining
-        );
+        assert!(!snap.motion_owned);
+        assert_eq!(snap.remaining_secs, None);
         assert_eq!(snap.timeout_secs, 300);
     }
 
@@ -5604,6 +5600,11 @@ mod tests {
         assert!(
             !motion.motion_owned.contains("room_a"),
             "dark rooms must not be claimed at boot — no lights to turn off"
+        );
+        let snapshots = motion.snapshots(&HashMap::from([("room_a".to_string(), 120)]), 300);
+        assert_eq!(
+            snapshots["room_a"].remaining_secs, None,
+            "inactive unowned startup seeds should not publish a countdown"
         );
     }
 
